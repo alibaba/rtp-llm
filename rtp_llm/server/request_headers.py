@@ -9,6 +9,7 @@ REQUEST_HEADER_NAMES = (
     "x-dashscope-request-id",
     "x-dashscope-requestid",
     "x-request-id",
+    "x-awi-request-id",
     "dashscope-request-id",
     "trace-id",
     "traceparent",

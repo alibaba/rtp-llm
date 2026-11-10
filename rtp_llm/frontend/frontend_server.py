@@ -766,6 +766,55 @@ class FrontendServer(object):
         )
         return ORJSONResponse(content=complete_response)
 
+    async def awi_generate(self, req: Dict[str, Any], raw_request: RawRequest):
+        import zlib
+
+        from rtp_llm.awi_telemetry import get_telemetry
+
+        headers = extract_request_headers(getattr(raw_request, "headers", None))
+        ids = req.get("input_ids")
+        if isinstance(ids, list) and ids and isinstance(ids[0], list):
+            ids = ids[0]
+        if not isinstance(ids, list) or not ids:
+            return ORJSONResponse(
+                {"error": "input_ids must be a non-empty list"}, status_code=400
+            )
+        external_id = headers.get("x-awi-request-id") or req.get("request_id") or "awi"
+        request_id = zlib.crc32(str(external_id).encode()) & 0x7FFFFFFF
+        result = await self._frontend_worker.awi_generate(
+            [int(token) for token in ids],
+            int(req.get("max_tokens", 256)),
+            dict(req.get("extra_configs") or {}),
+            request_id,
+            headers,
+        )
+        return ORJSONResponse(result)
+
+    def awi_barrier(self, req: Dict[str, Any]):
+        from rtp_llm.awi_telemetry import get_telemetry
+
+        operation_id = str(req.get("operation_id", ""))
+        request_ids = req.get("request_ids") or []
+        context_tokens = int(req.get("context_tokens", 0))
+        if not operation_id or not request_ids:
+            return ORJSONResponse(
+                {"error": "operation_id and request_ids are required"}, status_code=400
+            )
+        get_telemetry().arm_operation(operation_id, request_ids, context_tokens)
+        return ORJSONResponse(
+            {
+                "operation_id": operation_id,
+                "request_ids": [str(r) for r in request_ids],
+                "context_tokens": context_tokens,
+                "armed": True,
+            }
+        )
+
+    def awi_observations(self, operation_id: str | None = None):
+        from rtp_llm.awi_telemetry import get_telemetry
+
+        return ORJSONResponse(get_telemetry().observations(operation_id))
+
     def tokenize(self, req: str | Dict[str, Any]):
         try:
             if isinstance(req, str):

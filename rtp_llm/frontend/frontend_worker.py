@@ -336,6 +336,115 @@ class FrontendWorker:
 
         return response
 
+    async def awi_generate(
+        self,
+        input_ids: List[int],
+        max_tokens: int,
+        extra_configs: Dict[str, Any],
+        request_id: int,
+        headers: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """Pretokenized benchmark generation with per-step timing capture."""
+        import time
+
+        from rtp_llm.awi_telemetry import get_telemetry
+
+        telemetry = get_telemetry()
+        external_id = headers.get("x-awi-request-id") or str(request_id)
+        generate_config = {
+            "max_new_tokens": int(max_tokens),
+            "min_new_tokens": int(extra_configs.get("min_new_tokens", 0) or 0),
+            "ignore_eos": bool(extra_configs.get("ignore_eos", False)),
+            "is_streaming": True,
+            "return_incremental": False,
+            "aux_info": True,
+        }
+        start_ns = time.monotonic_ns()
+        first_yield_ns = None
+        last_yield_ns = start_ns
+        step = 0
+        last_response = None
+        text_parts: List[str] = []
+        stream = self.pipeline.pipeline_async(
+            prompt="",
+            request_id=request_id,
+            urls=None,
+            input_ids=input_ids,
+            generate_config=generate_config,
+            headers=headers,
+        )
+        async for response in stream:
+            now_ns = time.monotonic_ns()
+            if first_yield_ns is None:
+                first_yield_ns = now_ns
+                telemetry.record(
+                    "prefill",
+                    {
+                        "request_id": external_id,
+                        "input_tokens": len(input_ids),
+                        "start_ns": start_ns,
+                        "end_ns": now_ns,
+                    },
+                )
+                aux = response.generate_outputs.generate_outputs[0].aux_info
+                telemetry.record(
+                    "reuse",
+                    {
+                        "request_id": external_id,
+                        "hit_tokens": int(getattr(aux, "reuse_len", 0) or 0),
+                    },
+                )
+            else:
+                step += 1
+                telemetry.record(
+                    "decode",
+                    {
+                        "request_id": external_id,
+                        "step": step,
+                        "backend": "cuda",
+                        "graph_replay": bool(
+                            getattr(
+                                response.generate_outputs.generate_outputs[0].aux_info,
+                                "decode_graph_replay",
+                                False,
+                            )
+                        ),
+                        "elapsed_ms": (now_ns - last_yield_ns) / 1e6,
+                    },
+                )
+            last_yield_ns = now_ns
+            if response.generate_texts:
+                text_parts.append(response.generate_texts[0])
+            last_response = response
+        if last_response is None:
+            raise RuntimeError("awi generate produced no response")
+        output = last_response.generate_outputs.generate_outputs[0]
+        raw_output_ids = getattr(output, "output_ids", None)
+        if raw_output_ids is None:
+            output_ids = []
+        elif hasattr(raw_output_ids, "reshape"):
+            output_ids = raw_output_ids.reshape(-1).tolist()
+        else:
+            output_ids = list(raw_output_ids)
+        text = last_response.generate_texts[0] if last_response.generate_texts else "".join(text_parts)
+        return {
+            "id": external_id,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": text},
+                    "finish_reason": "length" if len(output_ids) >= int(max_tokens) else "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": len(input_ids),
+                "completion_tokens": len(output_ids),
+                "total_tokens": len(input_ids) + len(output_ids),
+            },
+            "output_ids": output_ids,
+            "aux_info": asdict(output.aux_info) if getattr(output, "aux_info", None) else {},
+        }
+
     def _format_response_new(
         self,
         gen_responses: GenerateResponse,

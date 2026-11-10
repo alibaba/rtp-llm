@@ -946,6 +946,21 @@ class FrontendApp(object):
             check_not_draining(request)
             return self.frontend_server.tokenize(req)
 
+        @app.post("/awi/generate")
+        async def awi_generate(req: Dict[Any, Any], raw_request: RawRequest):
+            check_not_draining(raw_request)
+            return await self.frontend_server.awi_generate(req, raw_request)
+
+        @app.post("/awi/barrier")
+        async def awi_barrier(req: Dict[Any, Any], raw_request: RawRequest):
+            check_not_draining(raw_request)
+            return self.frontend_server.awi_barrier(req)
+
+        @app.get("/awi/observations")
+        async def awi_observations(raw_request: RawRequest, operation_id: str = ""):
+            check_not_draining(raw_request)
+            return self.frontend_server.awi_observations(operation_id or None)
+
         if self.frontend_server.is_embedding:
             # embedding
             @app.post("/v1/embeddings/similarity")
