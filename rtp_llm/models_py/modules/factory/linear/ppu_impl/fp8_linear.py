@@ -311,6 +311,9 @@ class PpuFp8Linear(nn.Module):
         self.register_buffer("weight_scale", weight_scale, persistent=False)
         self._gemm = _resolve_deep_gemm_symbol(_DENSE_SYMBOL)
         self._decode_attention_gemm = False
+        self._attn_gemm_ep_size = None
+        self._attn_gemm_tp_size = None
+        self._attn_gemm_profile = "auto"
 
         self._share_input_quantization = share_input_quantization
 
@@ -420,7 +423,14 @@ class PpuFp8Linear(nn.Module):
                 decode_attention_gemm_config,
             )
 
-            config = decode_attention_gemm_config(x_fp8.shape[0], self.n, self.k)
+            config = decode_attention_gemm_config(
+                x_fp8.shape[0],
+                self.n,
+                self.k,
+                ep_size=self._attn_gemm_ep_size,
+                tp_size=self._attn_gemm_tp_size,
+                profile=self._attn_gemm_profile,
+            )
             if config is not None:
                 from deep_gemm.jit_kernels.gemm_fp8 import gemm_fp8_fp8_bf16_nt
 

@@ -59,11 +59,8 @@ class PpuHCUnit(TileLangHCUnit):
             from rtp_llm.models_py.modules.dsv4.ppu.hc.ppu_hc_prenorm import tf32_hc_prenorm_partials
 
             self._prenorm_partials = tf32_hc_prenorm_partials
-        if (
-            options.get("DSV4_MHC_POST_BACKEND", "tilelang") != "tilelang"
-            or options.get("DSV4_MHC_POST_PDL", "0") != "0"
-        ):
-            raise ValueError("PPU module HC requires TileLang POST with PDL disabled")
+        if options.get("DSV4_MHC_POST_BACKEND", "tilelang") != "tilelang":
+            raise ValueError("PPU module HC requires TileLang POST")
         # Prepare the vendored runtime before importing its JIT kernels.
         from rtp_llm.models_py.modules.dsv4 import tilelang_kernels  # noqa: F401
 

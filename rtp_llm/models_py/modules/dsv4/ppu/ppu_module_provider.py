@@ -39,6 +39,7 @@ class PpuModuleProvider:
         self.execution_options = MappingProxyType(
             dict(os.environ if execution_options is None else execution_options)
         )
+        self._hca_split = False
 
     def _bool(self, name, default=False):
         raw = self.execution_options.get(name)
@@ -92,10 +93,10 @@ class PpuModuleProvider:
             "transformer", PpuV4Transformer, *args, **kwargs
         )
 
-    @staticmethod
-    def run_compress_kv_write(*args, **kwargs):
+    def run_compress_kv_write(self, *args, **kwargs):
         from rtp_llm.models_py.kernels.ppu.attention.compressor import run_fused_compress_kv_write
 
+        kwargs.setdefault("hca_split", self._hca_split)
         return run_fused_compress_kv_write(*args, **kwargs)
 
     def _build_with_provider(

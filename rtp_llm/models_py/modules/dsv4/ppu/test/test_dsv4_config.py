@@ -16,7 +16,9 @@ class Dsv4ConfigTest(unittest.TestCase):
             name, Path(__file__).parents[6] / "rtp_llm/models_py/modules/dsv4/ppu/manifest.py")
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)
-        self.provider = Mock(side_effect=lambda options: NS(execution_options=options))
+        self.provider = Mock(
+            side_effect=lambda options, **kwargs: NS(execution_options=options, **kwargs)
+        )
         self.modules = patch.dict(sys.modules, {
             "rtp_llm.ops": NS(KvCacheDataType=NS(FP8="fp8")),
             name.rsplit(".", 1)[0] + ".ppu_module_provider": NS(PpuModuleProvider=self.provider),
@@ -105,11 +107,49 @@ class Dsv4ConfigTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "prefix reuse"):
                     self.module.validate_cache_config(NS(reuse_cache=True))
 
-    def test_unsupported_execution_option(self):
+    def test_pdl_is_not_an_execution_option(self):
+        # PDL is fixed off inside the HC module; a stale env entry is inert
+        # instead of contradicting the manifest.
+        for options in (self.module.PREFILL_EXECUTION_OPTIONS,
+                        self.module.DECODE_EXECUTION_OPTIONS):
+            self.assertNotIn("DSV4_MHC_POST_PDL", options)
         os.environ["DSV4_MHC_POST_PDL"] = "1"
-        with self.assertRaisesRegex(ValueError, "DSV4_MHC_POST_PDL=0"):
-            self.build()
+        self.build()
+
+    def test_removed_attention_switches_fail_closed(self):
+        self.parallel.role_type.name = "DECODE"
+        self.parallel.tp_size = 1
+        self.parallel.dp_size = self.parallel.world_size = self.parallel.ep_size = 16
+        self.moe.use_deepep_low_latency = True
+        for removed in ("DSV4_PPU_HCA_SPLIT", "DSV4_PPU_WOA_SMALL_TILE"):
+            with self.subTest(removed=removed):
+                with patch.dict(os.environ, {removed: "1"}):
+                    with self.assertRaisesRegex(ValueError, "was removed"):
+                        self.build()
         self.provider.assert_not_called()
+
+    def test_decode_attn_profile_is_validated_against_topology(self):
+        self.parallel.role_type.name = "DECODE"
+        self.parallel.tp_size = 1
+        self.parallel.dp_size = self.parallel.world_size = self.parallel.ep_size = 16
+        self.moe.use_deepep_low_latency = True
+        with patch.dict(os.environ, {"DSV4_PPU_DECODE_ATTN_PROFILE": "large_ep_full"}):
+            provider = self.build()
+        self.assertEqual(provider.attn_profile, "large_ep_full")
+        self.assertEqual(provider.ep_size, 16)
+        self.assertEqual(provider.tp_size, 1)
+
+        self.parallel.ep_size = self.parallel.world_size = 8
+        self.parallel.dp_size = 8
+        with patch.dict(os.environ, {"DSV4_PPU_DECODE_ATTN_PROFILE": "large_ep_full"}):
+            with self.assertRaisesRegex(ValueError, "requires EP16/32 with TP1"):
+                self.build()
+
+        self.parallel.ep_size = self.parallel.world_size = 16
+        self.parallel.dp_size = 16
+        with patch.dict(os.environ, {"DSV4_PPU_DECODE_ATTN_PROFILE": "large_ep"}):
+            with self.assertRaisesRegex(ValueError, "must be one of"):
+                self.build()
 
 
 if __name__ == "__main__":
