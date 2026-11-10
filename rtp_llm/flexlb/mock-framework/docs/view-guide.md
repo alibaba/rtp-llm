@@ -1,41 +1,31 @@
-# 实验结果与 View
+# 启动实验 View
 
-[返回使用说明](../README.md)
+在 `rtp_llm/flexlb/mock-framework/` 目录执行。View 用于回看已结束的 Case。
 
-下面的命令均在框架目录执行。View 读取已完成实验；默认大盘及指标覆盖另见 [大盘说明](../views/README.md)。
+## 1. 准备结果和依赖
 
-## 实验结束后查看基础 view
+- `RESULT_DIR` 指向完整的 Case 结果目录，即包含 `result.json` 的目录。要看指标曲线，保留其中的 `view.json` 和 `prometheus/`。
+- `PROMETHEUS_BIN` 指向 Prometheus 可执行文件，`GRAFANA_HOME` 指向包含 `bin/grafana`、`conf/` 和 `public/` 的 Grafana 安装目录。
+- 初次使用时按 [框架使用说明](../README.md#准备环境) 安装 Python 依赖。
 
-默认大盘的分区、聚合、地址筛选、标签来源和未实现观测见 [views/README.md](../views/README.md)。
-
-Case 省略 `view` 时默认使用框架自带的 `views/default.json`，与 Case 所在目录无关；需要自定义大盘时，显式配置 `view: <路径>` 覆盖默认值。执行时把这份原生 Grafana JSON 保存为结果目录下的 view.json，避免以后修改源文件改变已完成实验的展示。View 用于实验结束后的复盘，不参与发压、调度、Prometheus 采集或门禁判定，也不会自动启动查看服务。运行准备阶段会读取并校验大盘文件，文件缺失或格式错误会使启动报错；未保存 view.json 的旧结果不会被自动补写。
+## 2. 启动
 
 ```sh
-uv run --locked mock-view /tmp/basic-result \
-  --output /tmp/basic-view \
+RESULT_DIR=/path/to/result
+VIEW_DIR="$(mktemp -d /tmp/mock-view.XXXXXX)/session"
+
+uv run --locked mock-view "$RESULT_DIR" \
+  --output "$VIEW_DIR" \
   --prometheus "$PROMETHEUS_BIN" \
   --grafana-home "$GRAFANA_HOME"
 ```
 
-`GRAFANA_HOME` 是包含 bin/grafana、conf 和 public 的 Grafana 安装目录；输出目录必须是新的、位于实验目录之外的目录。命令先在回环地址提供回看页面并打印 URL，再启动独立的 Prometheus 与 Grafana。页面显示指标服务的启动状态，启动失败仍可查看配置和门禁。Ctrl+C 或 SIGTERM 统一回收页面服务和所拥有的子进程；页面关闭不等于停止服务。端口冲突直接报错，不连接其他查看会话或已有服务。
+`--output` 必须是结果目录之外、尚未创建的路径。需要固定页面端口时加 `--port <端口>`。
 
-查看服务复制已完成实验的 TSDB，原始结果与数据不被重新打开写入；它不启动任何 Engine/Master/Client、不重新执行检查。多个查看会话使用不同输出目录和端口，可以独立查看同一份实验。
+## 3. 打开页面
 
-角色运行结果区展示实例进程的启动、就绪和退出记录、Client 回放结果，以及 Case 实际采到的 Master 状态。
+打开终端打印的本机 URL。先看 Case 结果和门禁，再等指标服务就绪后查看曲线。需要定位到某个步骤时，点击门禁卡片跳到保存的查询时间。
 
-一个页面展示原始 Case、完整配置/启动配方、组件生效配置、代码版本/工作区差异、Phase/Step 时间线、保存的门禁，以及 Grafana 在线曲线。默认大盘所有 row 折叠，Prefill/Decode 分区并显式过滤各自 role；唯一线上参考是 RTP-LLM 大盘（包括其中的 FlexLB 分区）。当前已上报的 Mock 观测与 real 待埋点面板分开说明，未采集的 ViT 与进程资源指标保持缺失。Client 的 TTFT/请求耗时不能冒充 Engine 延迟。完整来源与覆盖见 [指标覆盖](../views/coverage.md)。每实例曲线保留 instance/role 等原有标签，支持 Grafana 自己的缩放与曲线选择。
+曲线加载失败时，先看页面给出的原因，再检查结果里的 `view.json`、`prometheus/` 和查看目录里的指标进程日志。修复后换一个新的 `--output` 重启。看完在启动终端按 Ctrl+C 停止。
 
-点击门禁卡片定位其保存的指标窗口；执行侧 metric_window 事件记录真正使用的起止时间，展示层不根据当前实现重新计算。原始 PromQL 与非指标检查只标记查询点，图表显示附近上下文，不解析表达式推导窗口。每个 Step 只导入一个图表标注：普通操作标在开始时刻；有门禁时使用查询点或已记录的查询窗口，并在注释中展示接口、判定、预期条件、实际值（含单位）和错误。Phase 和 Step 的完整开始/结束记录仍保留在执行时间线。
-
-事件线默认全部显示。在 Case 引用的 View JSON 顶层可加 `"annotation_steps": ["traffic", "kill_a", "kill_b"]` 指定默认选中的 Step，空数组表示默认全部隐藏；省略表示全选。它只属于展示配置，不扩展 Step，也不改变门禁卡片或执行记录。查看时校验重复和未知 ID；错误只影响指标展示，不改变实验结果。页面“事件线”可以逐项勾选、全部显示或全部隐藏，独立 Grafana 页面也有对应的 Step 多选变量。筛选只改变查询标签，所有标注仍然保留，不重启指标进程、不重跑实验。曲线在线查询保留的 TSDB，不固化进 HTML。
-
-实验判定、产物完整性和查看服务状态分别展示：
-
-- result.json 是核心记录，必须含有效的 status、带时区的 started_at/finished_at；缺失或损坏时命令报告文件和字段，拒绝猜测实验结果。只查看已完成实验。
-- 配置、代码版本、接口元数据、采集记录和事件/门禁日志属于附加记录。缺失或损坏时显示具体文件；JSONL 中损坏的行标出行号，保留其他有效行。页面说明记录不完整，不把缺失门禁当作通过。没有配置也能按保存的 step 名展示门禁。
-- TSDB、view.json 或依赖程序不可用，或指标进程启动失败/运行中退出时，指标区域说明原因，配置、门禁和时间线仍可读。已启动的指标进程统一回收，不自动重试。完整异常和进程 stdout/stderr 留在查看目录；修复后重新运行查看命令，使用新输出目录。
-- ERROR/FAIL/CANCELLED、清理错误、采集不完整以及缺失指标均如实显示，缺失数据不补零。即使查看服务故障，也不改写实验的 PASS/FAIL/ERROR/CANCELLED。
-
-实现分为 CLI（view/__main__.py）、服务生命周期与固定只读 HTTP 路由（view/service.py）、产物读取（view/records.py）、Grafana 配置与事件导入（view/grafana.py）、页面（view/page.html）。进程生命周期直接复用现有 ProcessSupervisor，不复制进程管理实现；Runner 只保存实验事实和 view 快照，不依赖展示层。
-
-查看只读取指定的一次实验，不增加实验索引、实例历史台账或运行中控制。页面只轮询查看服务自身的指标服务状态，不轮询 Case 接口或重新判定门禁。自定义 view 继续使用原生 Grafana JSON；复用线上大盘时，需要把查询和标签改为本地实际存在的指标，不自动兼容线上 VIP 或 KMonitor。
+大盘分区、指标口径和筛选方式见 [默认大盘说明](../views/README.md)。

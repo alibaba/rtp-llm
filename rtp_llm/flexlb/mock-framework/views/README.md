@@ -45,7 +45,7 @@ PromQL 中地址变量使用 `${prefill_instance}` / `${decode_instance}` / `${v
 
 标签沿用物理来源 HIPPO_APP/HIPPO_ROLE/HIPPO_SERVICE_NAME/HIPPO_SLAVE_IP/RequestedIP；本地不冒充 Pod IP。Engine 只支持 DP rank 0。业务指标与 Mock 专有指标保留原名，Prometheus 与线上 KMonitor 查询协议仍需分别适配，不能承诺直接导入同一查询 JSON。
 
-View 的 `annotation_steps` 只配置默认选择，省略则全部显示，空数组则全部隐藏；页面可随时全选、清空或逐项选择。Grafana 的“Step / 门禁”总开关隐藏，标注保持启用，仅由 Step 选择控制是否显示。每个 Step 一个标注，完整执行记录与门禁卡片不被筛掉。门禁判定来自已保存结果，筛选、展开 row 和切换窗口都不重新发压或判定。
+页面上的“事件线”可全选、清空或逐项选择 Step。筛选控制图表标注的显示，完整时间线和门禁结果仍可查看。
 
 ## 2026-10-30 Engine 埋点边界复核
 
