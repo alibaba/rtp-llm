@@ -257,6 +257,15 @@ def try_project_quantized_qkv(attn, x, quantized_input=None, *, pdl: bool = Fals
     """Decode-only projection with an explicit, forward-local quantized Q."""
     if os.environ.get("DSV41_FUSED_QUERY_QUANT", "1") != "1":
         return None
+    from rtp_llm.models_py.modules.dsv41.sm80_support import (
+        use_reference_gemm_paths,
+    )
+
+    if use_reference_gemm_paths():
+        # query_norm_quant emits fp8e4nv-typed triton kernels (no sm80
+        # lowering) and the consumer expects the SM100 MXFP8 GEMM chain.
+        # Callers fall back to the plain torch norm+linear path on None.
+        return None
     linear = getattr(attn, "wq_a_wkv", None)
     if not isinstance(attn.wq_b, V41MXFP8Linear):
         return None

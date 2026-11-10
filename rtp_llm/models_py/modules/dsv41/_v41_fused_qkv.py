@@ -79,6 +79,15 @@ def try_project_qr_kv(linear, x, q_norm, q_rank: int, eps: float, quantized_inpu
     """Return normalized Q LoRA and raw KV, or None for the old path."""
     if not is_supported(linear, x, q_norm, q_rank):
         return None
+    from rtp_llm.models_py.modules.dsv41.sm80_support import (
+        use_reference_gemm_paths,
+    )
+
+    if use_reference_gemm_paths():
+        # The quantized-input branch ends in the SM100 forward_quantized;
+        # keep the whole fusion off on reference GPUs so the caller takes the
+        # plain torch rmsnorm+linear path (identical math, BF16 GEMMs).
+        return None
     if quantized_input is None:
         projected = linear(x)
     else:
