@@ -1533,11 +1533,13 @@ class _EngramCPULookupSlot:
             self.copied.record(self.stream)
 
     def close(self):
-        # Synchronizing a side stream is illegal while the main stream is
-        # being captured by HIP graphs.  The copy events still order replay.
-        if torch.cuda.is_current_stream_capturing():
-            return
-        self.stream.synchronize()
+        # Synchronizing a side stream is illegal while any stream is being
+        # captured by HIP graphs.  The copy events still order replay.
+        try:
+            self.stream.synchronize()
+        except RuntimeError as exc:
+            if "captur" not in str(exc).lower():
+                raise
 
 
 def _close_cpu_lookup(executor, slots):
