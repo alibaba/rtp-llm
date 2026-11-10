@@ -3,7 +3,7 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
-import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.CapacityNotifier;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -45,7 +45,7 @@ import static org.mockito.Mockito.verify;
 /**
  * Phase 4 tests for the decode admission state of {@link DecodeEndpoint}:
  * priority-carrying reservations, the admission version, the atomic
- * release-victims-and-reserve-incoming commit (all-or-nothing, design doc
+ * release-requests selected for preemption-and-reserve-incoming commit (all-or-nothing, design doc
  * 11.5/17.2), and the reserved-only view after calibrate (10.1).
  */
 class DecodeEndpointAdmissionTest {
@@ -126,7 +126,7 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void everyExactReservationReleaseSignalsPlacementCapacity() {
-        PlacementAvailability availability = mock(PlacementAvailability.class);
+        CapacityNotifier availability = mock(CapacityNotifier.class);
         DecodeEndpoint exactEndpoint =
                 new DecodeEndpoint(
                         status,
@@ -145,7 +145,7 @@ class DecodeEndpointAdmissionTest {
                             .value();
         }
         exactEndpoint.release(speculative, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
-        verify(availability).changed(exactEndpoint);
+        verify(availability).notifyChanged(exactEndpoint);
 
         DecodeResources.RequestReservation published;
         {
@@ -158,7 +158,7 @@ class DecodeEndpointAdmissionTest {
                             .value();
         }
         exactEndpoint.release(published, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
-        verify(availability, times(2)).changed(exactEndpoint);
+        verify(availability, times(2)).notifyChanged(exactEndpoint);
     }
 
     @Test
@@ -298,7 +298,8 @@ class DecodeEndpointAdmissionTest {
         assertFalse(releaseLocalShadow(2L));
         assertTrue(reserved().containsKey(2L));
 
-        // A provisional preemption arrival cannot dispatch before the victim is resolved.
+        // A provisional preemption arrival cannot dispatch before the request selected for
+        // preemption is resolved.
         assertEquals(
                 DecodeResources.PreemptionBeginResult.SUCCESS,
                 endpoint.beginPreemption(
@@ -372,7 +373,8 @@ class DecodeEndpointAdmissionTest {
         assertEquals(TRANSFERRED, acquirePermit(1L, 0).dispatch().status());
         assertEquals(TRANSFERRED, acquirePermit(2L, 0).dispatch().status());
 
-        // An incoming preemption reservation is provisional until its victims are resolved.
+        // An incoming preemption reservation is provisional until its requests selected for
+        // preemption are resolved.
         assertEquals(
                 DecodeResources.PreemptionBeginResult.SUCCESS,
                 endpoint.beginPreemption(
@@ -1430,14 +1432,14 @@ class DecodeEndpointAdmissionTest {
 
     private DecodeResources.PreemptionBeginResult beginPreemption(
             long attemptToken,
-            List<Long> victimIds,
+            List<Long> requestIdsToPreempt,
             long incomingRequestId,
             long hardKv,
             long expectedKv,
             int priority) {
         return endpoint.beginPreemption(
                 attemptToken,
-                victimIds.stream().map(reservations::get).toList(),
+                requestIdsToPreempt.stream().map(reservations::get).toList(),
                 String.valueOf(incomingRequestId),
                 hardKv,
                 expectedKv,

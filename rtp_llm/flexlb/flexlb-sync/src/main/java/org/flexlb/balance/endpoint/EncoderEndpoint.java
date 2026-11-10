@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.scheduler.CapacityNotifier;
 import org.flexlb.balance.scheduler.ContextResult;
-import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.balance.strategy.EncoderSelectionStrategy;
 import org.flexlb.dao.master.WorkerStatus;
@@ -20,11 +20,11 @@ public final class EncoderEndpoint extends WorkerEndpoint
         implements EncoderSelectionStrategy.Candidate {
     private Map<String, Tracked> requests = new HashMap<>();
 
-    private final PlacementAvailability availability;
+    private final CapacityNotifier capacityNotifier;
 
-    public EncoderEndpoint(WorkerStatus status, PlacementAvailability availability) {
+    public EncoderEndpoint(WorkerStatus status, CapacityNotifier capacityNotifier) {
         super(status);
-        this.availability = availability;
+        this.capacityNotifier = capacityNotifier;
     }
 
     @Override
@@ -77,13 +77,10 @@ public final class EncoderEndpoint extends WorkerEndpoint
         return total;
     }
 
-    public boolean commit(RouteResult route, int requestLimit) {
-        var request = route.ctx().data().getRequest();
-        long hit =
-                request.getEncoderCacheHitLen() == null
-                        ? 0
-                        : Math.max(0, request.getEncoderCacheHitLen());
-        var tracked = new Tracked(route, false, Math.max(0, request.getSeqLen() - hit));
+    public boolean commit(RouteResult route, int requestLimit, long uncachedTokens) {
+        com.google.common.base.Preconditions.checkArgument(
+                uncachedTokens >= 0L, "uncached Encoder tokens must be nonnegative");
+        var tracked = new Tracked(route, false, uncachedTokens);
         stateLock().lock();
         try {
             if (!acceptsNewRequests()) return false;
@@ -108,7 +105,7 @@ public final class EncoderEndpoint extends WorkerEndpoint
         } finally {
             stateLock().unlock();
         }
-        if (removed) availability.changed(this);
+        if (removed) capacityNotifier.notifyChanged(this);
     }
 
     @Override
@@ -143,7 +140,7 @@ public final class EncoderEndpoint extends WorkerEndpoint
         Throwable failure = null;
         for (var request : observed.requests())
             failure = Failures.run(failure, () -> publish(request));
-        failure = Failures.run(failure, () -> availability.changed(this));
+        failure = Failures.run(failure, () -> capacityNotifier.notifyChanged(this));
         Failures.rethrow(failure, "Encoder status publication failed");
     }
 
@@ -178,7 +175,7 @@ public final class EncoderEndpoint extends WorkerEndpoint
                                                             "Encoder endpoint retired: " + ipPort(),
                                                             System.currentTimeMillis())));
         }
-        failure = Failures.run(failure, () -> availability.changed(this));
+        failure = Failures.run(failure, () -> capacityNotifier.notifyChanged(this));
         Failures.rethrow(failure, "Encoder retirement publication failed");
     }
 

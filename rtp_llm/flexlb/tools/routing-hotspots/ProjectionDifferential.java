@@ -99,8 +99,7 @@ public class ProjectionDifferential {
                             org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                             order,
                             limits,
-                            items,
-                            null);
+                            items);
             var probe =
                     new RequestTimeEstimationTestSupport.Probe(
                             trial % 50 == 0 ? 1 : 999999,

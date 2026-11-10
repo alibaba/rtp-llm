@@ -1,10 +1,10 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.DefaultDecodePreemption;
-import org.flexlb.balance.eviction.PriorityDecodePreemptionPolicy;
+import org.flexlb.balance.preemption.DefaultDecodePreemption;
+import org.flexlb.balance.preemption.PriorityDecodePreemptionPolicy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -35,7 +35,7 @@ import java.util.concurrent.CompletableFuture;
  */
 public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private final RequestRepository requests = new RequestRepository();
-    private final PlacementAvailability placementAvailability = new PlacementAvailability();
+    private final CapacityNotifier capacityNotifier = new CapacityNotifier();
     private final EndpointRegistry registry;
     private final AbstractRequestScheduler scheduler;
     private final AbstractRequestScheduler entry;
@@ -50,15 +50,14 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             RequestSchedulerReporter requestReporter) {
         this(
                 configService,
-                new DeliveryDispatcher(
+                new DeliveryCoordinator(
+                        new org.flexlb.balance.scheduler.RequestRepository(),
                         grpcClient,
                         configService,
                         deliveryReporter,
-                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                        new org.flexlb.balance.scheduler.SchedulerConfiguration()
                                 .decodeAdmissionCapacity(configService),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class)),
+                        org.mockito.Mockito.mock(DeliveryExecution.class)),
                 deliveryReporter,
                 requestReporter,
                 grpcClient,
@@ -67,7 +66,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     public RequestSchedulerTestRuntime(
             ConfigService configService,
-            DeliveryDispatcher deliveryStrategy,
+            DeliveryCoordinator deliveryStrategy,
             DeliveryMetricsReporter deliveryReporter,
             RequestSchedulerReporter requestReporter,
             EngineGrpcClient engineClient) {
@@ -82,26 +81,24 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     private RequestSchedulerTestRuntime(
             ConfigService configService,
-            DeliveryDispatcher deliveryStrategy,
+            DeliveryCoordinator deliveryStrategy,
             DeliveryMetricsReporter deliveryReporter,
             RequestSchedulerReporter requestReporter,
             EngineGrpcClient engineClient,
             Runnable preparationBarrier) {
         ConfigService runtimeConfig =
                 DeliveryDispatcherTestFactory.runtimeConfigFor(deliveryStrategy, configService);
-        var capacity = new PlacementConfiguration().decodeAdmissionCapacity(configService);
+        var capacity = new SchedulerConfiguration().decodeAdmissionCapacity(configService);
         this.registry =
                 new EndpointRegistry(
                         configService,
                         requests,
                         deliveryReporter,
                         deliveryStrategy,
-                        placementAvailability,
+                        capacityNotifier,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                 configService.loadBalanceConfig()),
-                        order ->
-                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
-                                        16, order));
+                        () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
         this.router = new BindingRouter(registry, configService, capacity);
         var assembledRuntime =
                 new SchedulerTestServices(
@@ -117,10 +114,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         this.runtime = assembledRuntime;
         if (preparationBarrier != null) {
             var deliveryExecution = org.mockito.Mockito.spy(runtime.deliveries());
-            org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
-                    runtime, "deliveries", deliveryExecution);
-            org.springframework.test.util.ReflectionTestUtils.setField(
-                    deliveryStrategy, "execution", deliveryExecution);
+            SchedulerTestServices.setDependency(runtime, "deliveries", deliveryExecution);
             org.mockito.Mockito.doAnswer(
                             invocation -> {
                                 preparationBarrier.run();
@@ -148,7 +142,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         configService.loadBalanceConfig(),
                         router,
                         eviction,
-                        placementAvailability,
+                        capacityNotifier,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                 configService.loadBalanceConfig()),
                         new OrderedRequestQueue(
@@ -174,8 +168,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         return registry;
     }
 
-    public PlacementAvailability placementAvailability() {
-        return placementAvailability;
+    public CapacityNotifier capacityNotifier() {
+        return capacityNotifier;
     }
 
     /** Return the canonical request future retained by the exact test context. */
@@ -255,7 +249,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
      * Convert a fixture's successful route metadata into the exact pinned
      * queue-admission capability consumed by {@link AbstractRequestScheduler}.
      */
-    public PlacementResult<RouteResult, PlacementKey> routeResult(
+    public RoutingResult<RouteResult, CapacityKey> routeResult(
             RequestContext context, Response response) {
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(response, "response");
@@ -327,18 +321,18 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
 
         @Override
-        public PlacementResult<RouteResult, PlacementKey> select(
+        public RoutingResult<RouteResult, CapacityKey> select(
                 RequestContext context, String policyGroup) {
             return requireBound().select(context, policyGroup);
         }
 
         @Override
-        WorkerEndpoint blockedEndpoint(PlacementKey key) {
+        WorkerEndpoint blockedEndpoint(CapacityKey key) {
             return requireBound().blockedEndpoint(key);
         }
 
         @Override
-        PlacementResult<RouteResult, PlacementKey> select(
+        RoutingResult<RouteResult, CapacityKey> select(
                 RequestContext context,
                 String group,
                 org.flexlb.balance.endpoint.DecodeEndpoint endpoint,

@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.scheduler.RequestProtocolTestSupport.Registered;
@@ -69,12 +69,11 @@ class RequestAdmissionResourceLeakTest {
     @Test
     void declinedPublicationLeavesNoCanonicalItem() {
         Registered registered = registerItem(1L);
-        PlacementOperation admission =
-                SchedulerTestSupport.claim(lifecycle, "1", registered.future());
+        RoutingContext admission = SchedulerTestSupport.claim(lifecycle, "1", registered.future());
         try (var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(
-                    PlacementResult.Status.BLOCKED,
+                    RoutingResult.Status.BLOCKED,
                     RequestProtocolTestSupport.commitRoute(
                             lifecycle,
                             registered.item(),
@@ -90,8 +89,7 @@ class RequestAdmissionResourceLeakTest {
     @Test
     void throwingPublicationLeavesTheExactRegistrationRetryable() {
         Registered registered = registerItem(2L);
-        PlacementOperation admission =
-                SchedulerTestSupport.claim(lifecycle, "2", registered.future());
+        RoutingContext admission = SchedulerTestSupport.claim(lifecycle, "2", registered.future());
         try (var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertThrows(
@@ -116,7 +114,7 @@ class RequestAdmissionResourceLeakTest {
         Registered registered = registerItem(3L);
         RequestProtocolTestSupport.beginRoutePublication(lifecycle, registered);
         assertEquals(
-                PlacementResult.Status.CLOSED,
+                RoutingResult.Status.CLOSED,
                 RequestProtocolTestSupport.commitRoute(
                         lifecycle,
                         registered.item(),
@@ -139,12 +137,11 @@ class RequestAdmissionResourceLeakTest {
     @Test
     void cancellationWaitsForPublicationMutationBeforeReleasingReservation() {
         Registered registered = registerItem(4L);
-        PlacementOperation admission =
-                SchedulerTestSupport.claim(lifecycle, "4", registered.future());
+        RoutingContext admission = SchedulerTestSupport.claim(lifecycle, "4", registered.future());
         assertNotNull(admission);
         try {
             assertEquals(
-                    PlacementResult.Status.SUCCESS,
+                    RoutingResult.Status.SUCCESS,
                     RequestProtocolTestSupport.commitRoute(
                             lifecycle,
                             registered.item(),
@@ -155,7 +152,7 @@ class RequestAdmissionResourceLeakTest {
             verify(registered.item().decodeEndpoint(), never())
                     .release(any(), eq(DecodeResources.ReleaseReason.COUNTERPART_FINISHED));
         } finally {
-            AbstractRequestScheduler.finishPlacement(admission);
+            AbstractRequestScheduler.finishRouting(admission);
         }
         registered.future().join();
         SchedulerTestSupport.awaitRequestWork(
@@ -228,20 +225,20 @@ class RequestAdmissionResourceLeakTest {
 
     @Test
     void queueRejectionReleasesDecodeOnceWithoutAffectingOtherRequests() throws Exception {
-        Registered victim = registerItem(61L);
+        Registered requestToPreempt = registerItem(61L);
         Registered incoming = registerItem(62L);
-        RequestProtocolTestSupport.beginRoutePublication(lifecycle, victim);
-        lifecycle.rejectRoute(victim.item(), null);
-        Response response = victim.future().get(5, TimeUnit.SECONDS);
+        RequestProtocolTestSupport.beginRoutePublication(lifecycle, requestToPreempt);
+        lifecycle.rejectRoute(requestToPreempt.item(), null);
+        Response response = requestToPreempt.future().get(5, TimeUnit.SECONDS);
         assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), response.getCode());
         assertEquals(
                 "Worker scheduling queue rejected request: endpoint publication failed",
                 response.getErrorMessage());
-        lifecycle.rejectRoute(victim.item(), null);
+        lifecycle.rejectRoute(requestToPreempt.item(), null);
         lifecycle.cancel("61", 0L, CancelReason.CLIENT_CANCELLED);
-        verify(victim.item().decodeEndpoint(), times(1))
+        verify(requestToPreempt.item().decodeEndpoint(), times(1))
                 .release(
-                        victim.item().decodeReservation(),
+                        requestToPreempt.item().decodeReservation(),
                         DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
         assertTrue(lifecycle.isAdmissionOpen(incoming.item().ctx()));
     }
@@ -253,8 +250,7 @@ class RequestAdmissionResourceLeakTest {
             throws Exception {
         Registered registered = registerItem(71L);
         var context = registered.item().ctx();
-        PlacementOperation admission =
-                SchedulerTestSupport.claim(lifecycle, "71", registered.future());
+        RoutingContext admission = SchedulerTestSupport.claim(lifecycle, "71", registered.future());
         assertNotNull(admission);
         try {
             var publication =
@@ -289,18 +285,18 @@ class RequestAdmissionResourceLeakTest {
                                         lifecycle, registered.item(), publication));
             } else {
                 assertEquals(
-                        PlacementResult.Status.CLOSED,
+                        RoutingResult.Status.CLOSED,
                         RequestProtocolTestSupport.commitRoute(
                                 lifecycle, registered.item(), publication));
             }
         } finally {
-            AbstractRequestScheduler.finishPlacement(admission);
+            AbstractRequestScheduler.finishRouting(admission);
         }
         var response = registered.future().get(5, TimeUnit.SECONDS);
         org.junit.jupiter.api.Assertions.assertFalse(response.isSuccess());
         assertEquals(
                 reason == CancelReason.DEADLINE_EXCEEDED
-                        ? StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode()
+                        ? StrategyErrorType.QUEUE_TIMEOUT.getErrorCode()
                         : StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 response.getCode());
         SchedulerTestSupport.awaitRequestWork(
@@ -338,7 +334,7 @@ class RequestAdmissionResourceLeakTest {
                                                         true))));
     }
 
-    private void rollbackUnpublished(PlacementOperation admission, Registered registered) {
+    private void rollbackUnpublished(RoutingContext admission, Registered registered) {
         var released =
                 registered
                         .item()

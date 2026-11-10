@@ -143,10 +143,6 @@ public record CacheHitFeedback(
         return workerIdentity.getLogicalIpPort();
     }
 
-    public int workerPort() {
-        return workerIdentity.getPort();
-    }
-
     public int engineIndex() {
         return workerIdentity.getEngineIndex();
     }

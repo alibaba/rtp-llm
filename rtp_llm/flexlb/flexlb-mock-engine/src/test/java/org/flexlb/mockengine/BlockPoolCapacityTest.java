@@ -122,7 +122,8 @@ class BlockPoolCapacityTest {
         assertEquals(1, cache.availableBlocks(), "5 blocks - 4 held");
         assertEquals(4, cache.heldBlocks());
 
-        // The eldest parked keys were the victims (LinkedHashMap eviction order).
+        // The eldest parked keys were the requests selected for preemption (LinkedHashMap eviction
+        // order).
         assertTrue(cache.snapshotKeys().size() <= 5);
     }
 

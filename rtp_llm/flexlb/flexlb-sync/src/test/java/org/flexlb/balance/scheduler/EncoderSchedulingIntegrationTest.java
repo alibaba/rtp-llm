@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.preemption.DecodePreemption;
 import org.flexlb.balance.strategy.DecodeSelectionStrategy;
 import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.PrefillSelectionStrategy;
@@ -10,6 +10,8 @@ import org.flexlb.balance.strategy.VitSelectionStrategy;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DecisionPolicyConfig;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.TrafficPolicyConfig;
@@ -56,7 +58,7 @@ class EncoderSchedulingIntegrationTest {
     private final ConfigService configService = mock(ConfigService.class);
     private final EndpointRegistry endpoints = mock(EndpointRegistry.class);
     private final List<EncoderEndpoint> workers = new CopyOnWriteArrayList<>();
-    private final PlacementAvailability availability = new PlacementAvailability();
+    private final CapacityNotifier availability = new CapacityNotifier();
 
     private AbstractRequestScheduler lifecycle;
     private RequestRepository requests;
@@ -82,7 +84,10 @@ class EncoderSchedulingIntegrationTest {
                             return beforeCommit ? call.callRealMethod() : committed;
                         })
                 .when(endpoint)
-                .commit(any(), org.mockito.ArgumentMatchers.anyInt());
+                .commit(
+                        any(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.anyLong());
         try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
             try {
                 var context = context("9900", 100, 0L);
@@ -98,7 +103,7 @@ class EncoderSchedulingIntegrationTest {
                                                 RequestPhase.ENCODER))
                         .get(2, TimeUnit.SECONDS);
                 assertNotNull(context.snapshot().cancellation());
-                assertNotNull(context.snapshot().placement());
+                assertNotNull(context.snapshot().routingContext());
                 assertEquals(beforeCommit ? 0L : 1L, endpoint.requestCount());
                 resume.countDown();
                 assertEquals(
@@ -133,7 +138,10 @@ class EncoderSchedulingIntegrationTest {
                             return beforeCommit ? call.callRealMethod() : committed;
                         })
                 .when(first)
-                .commit(any(), org.mockito.ArgumentMatchers.anyInt());
+                .commit(
+                        any(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.anyLong());
         try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
             try {
                 var submitted = executor.submit(() -> submit(9901, 100, 0L));
@@ -175,7 +183,7 @@ class EncoderSchedulingIntegrationTest {
                                 return call.callRealMethod();
                             })
                     .when(lifecycle)
-                    .placementFor(any());
+                    .currentRoutingContext(any());
         } else {
             org.mockito.Mockito.doAnswer(
                             call -> {
@@ -230,6 +238,31 @@ class EncoderSchedulingIntegrationTest {
         assertNotNull(requests.getRequestState("1", 0, RequestPhase.ENCODER));
     }
 
+    @ParameterizedTest
+    @CsvSource({"false", "true"})
+    void encoderPublishesOnlyItsRouteWithoutGenerationInput(boolean queued) throws Exception {
+        configure(queued, 1, List.of(RoleType.ENCODER));
+        var encoder = worker("encoder", 8001, true, "group", Map.of(), 0, 0);
+        var context = context("encoder-route", 100, 0L);
+        assertFalse(context.data().hasGenerateInput());
+
+        var response = lifecycle.submit(context).get(2, TimeUnit.SECONDS);
+
+        assertTrue(response.isSuccess(), response.getErrorMessage());
+        assertEquals(1, response.getServerStatus().size());
+        assertEquals("encoder", response.getServerStatus().getFirst().getServerIp());
+        var delivery = context.snapshot().delivery();
+        assertNotNull(delivery);
+        assertEquals(Delivery.SendMode.ROUTE_DECISION, delivery.identity().kind());
+        assertNull(delivery.identity().route().prefillEndpoint());
+        assertNull(delivery.identity().route().decodeEndpoint());
+        assertEquals(1, encoder.requestCount());
+
+        publish(encoder, Map.of(), Map.of("encoder-route", task("encoder-route", 100)), 0, 0);
+        SchedulerTestSupport.awaitRequestWork(SchedulerTestServices.forOwner(lifecycle));
+        assertEquals(0, encoder.requestCount());
+    }
+
     @Test
     void queueUsesRunningAndWaitingCountsAndCancelsWaitingRequest() throws Exception {
         configure(true, 2, List.of(RoleType.ENCODER));
@@ -242,6 +275,97 @@ class EncoderSchedulingIntegrationTest {
         assertEquals(
                 StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 waiting.get(2, TimeUnit.SECONDS).getCode());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"SINGLE,NON_BATCH", "SINGLE,BATCH", "FIXED_WINDOW,NON_BATCH", "FIXED_WINDOW,BATCH"})
+    void generationDecisionAndTransportDoNotDelayEncoderRoute(
+            DecisionPolicyConfig.Type decision, DispatcherConfig.Type transport) throws Exception {
+        configure(
+                true,
+                1,
+                List.of(RoleType.ENCODER, RoleType.PREFILL, RoleType.DECODE),
+                true,
+                configuration -> {
+                    configuration.getDispatcher().setType(transport);
+                    configuration.getScheduler().getDecision().setType(decision);
+                    if (decision == DecisionPolicyConfig.Type.FIXED_WINDOW) {
+                        configuration.getScheduler().getDecision().setMaxRequests(8);
+                        configuration.getScheduler().getDecision().setMaxCollectionWaitMs(60_000L);
+                    }
+                });
+        var encoder = worker("encoder", 8001, true, "group", Map.of(), 0, 0);
+        var request = context("encoder-policy", 100, 0L);
+
+        var response = lifecycle.submit(request).get(2, TimeUnit.SECONDS);
+
+        assertTrue(response.isSuccess(), response.getErrorMessage());
+        assertFalse(request.data().hasGenerateInput());
+        assertEquals(1, response.getServerStatus().size());
+        assertEquals("encoder", response.getServerStatus().getFirst().getServerIp());
+        assertEquals(
+                Delivery.SendMode.ROUTE_DECISION, request.snapshot().delivery().identity().kind());
+        assertEquals(1, encoder.requestCount());
+        org.mockito.Mockito.verify(
+                        SchedulerTestSupport.engineClient(lifecycle), org.mockito.Mockito.never())
+                .batchEnqueueAsync(anyString(), org.mockito.ArgumentMatchers.anyInt(), any());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false", "true"})
+    void encoderPhaseDefaultsToEncoderEvenWhenModelAlsoHasPrefillAndDecode(boolean queued)
+            throws Exception {
+        configure(queued, 1, List.of(RoleType.ENCODER, RoleType.PREFILL, RoleType.DECODE));
+        worker("encoder", 8001, true, "group", Map.of(), 0, 0);
+        var request = context("implicit-encoder", 100, 0L);
+        request.data().setRequestedRoles(List.of());
+
+        var response = lifecycle.submit(request).get(2, TimeUnit.SECONDS);
+
+        assertTrue(response.isSuccess(), response.getErrorMessage());
+        var route = request.snapshot().delivery().identity().route();
+        assertEquals(1, route.roles().size());
+        assertNotNull(route.encoderEndpoint());
+        assertNull(route.prefillEndpoint());
+        assertNull(route.decodeEndpoint());
+        assertNull(requests.findActive("implicit-encoder", RequestPhase.GENERATION));
+    }
+
+    @Test
+    void cancelledWaiterAndRepeatedFinishedReportDoNotConsumeOrReleaseAnotherAdmission()
+            throws Exception {
+        configure(true, 1, List.of(RoleType.ENCODER));
+        var encoder = worker("encoder", 8001, true, "group", Map.of(), 0, 0);
+        assertEquals("encoder", selected(submit(101, 100, 0L)));
+        var cancelled = context("102", 100, 0L);
+        var cancelledResponse = lifecycle.submit(cancelled);
+        var next = submit(103, 100, 0L);
+        assertFalse(cancelledResponse.isDone());
+        assertFalse(next.isDone());
+        RequestProtocolTestSupport.awaitGlobalCapacityWaiters(lifecycle, 2);
+
+        lifecycle.cancel("102", 0, CancelReason.CLIENT_CANCELLED, RequestPhase.ENCODER);
+        assertEquals(
+                StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+                cancelledResponse.get(2, TimeUnit.SECONDS).getCode());
+        SchedulerTestSupport.awaitRequestWork(SchedulerTestServices.forOwner(lifecycle));
+        assertNull(cancelled.snapshot().delivery());
+        assertNull(requests.findActive("102", RequestPhase.ENCODER));
+        assertEquals(1, encoder.requestCount());
+        RequestProtocolTestSupport.awaitGlobalCapacityWaiters(lifecycle, 1);
+
+        publish(encoder, Map.of(), Map.of("101", task("101", 100)), 0, 0);
+        assertEquals("encoder", selected(next));
+        publish(encoder, Map.of(), Map.of("101", task("101", 100)), 0, 0);
+        SchedulerTestSupport.awaitRequestWork(SchedulerTestServices.forOwner(lifecycle));
+        assertEquals(1, encoder.requestCount());
+        assertNotNull(requests.findActive("103", RequestPhase.ENCODER));
+
+        publish(encoder, Map.of(), Map.of("103", task("103", 100)), 0, 0);
+        SchedulerTestSupport.awaitRequestWork(SchedulerTestServices.forOwner(lifecycle));
+        assertEquals(0, encoder.requestCount());
+        assertEquals(0, encoder.uncachedTokens());
+        assertNull(requests.findActive("103", RequestPhase.ENCODER));
     }
 
     @Test
@@ -263,7 +387,7 @@ class EncoderSchedulingIntegrationTest {
                 .setSchedulingMetadata(
                         SchedulingMetadata.explicit(50, System.currentTimeMillis() + 300));
         var response = lifecycle.submit(context).get(2, TimeUnit.SECONDS);
-        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        assertEquals(StrategyErrorType.QUEUE_TIMEOUT.getErrorCode(), response.getCode());
         publish(worker, Map.of(), Map.of(), 0, 0);
         assertEquals("busy", selected(submit(8, 100, 0L)));
         assertEquals(1, worker.requestCount());
@@ -362,12 +486,22 @@ class EncoderSchedulingIntegrationTest {
     }
 
     private void configure(boolean queue, int limit, List<RoleType> roles, boolean start) {
+        configure(queue, limit, roles, start, configuration -> {});
+    }
+
+    private void configure(
+            boolean queue,
+            int limit,
+            List<RoleType> roles,
+            boolean start,
+            java.util.function.Consumer<FlexlbConfig> customize) {
         if (lifecycle != null) stop();
         config = SchedulingTestConfig.batchConfig();
         if (queue) SchedulingTestConfig.useFifoQueue(config);
         else config.setScheduler(org.flexlb.config.ConfigTestSupport.direct());
         SchedulingTestConfig.useNonBatchDispatcher(config);
         config.getDispatcher().setMaxInflightPerEncoderWorker(limit);
+        customize.accept(config);
         when(configService.loadBalanceConfig()).thenReturn(config);
         var model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(roles);

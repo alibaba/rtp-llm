@@ -21,7 +21,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Public transitions acquire the monitor themselves; observations cannot partially bypass it. */
+/**
+ * Public transitions acquire the monitor themselves; observations cannot partially bypass it.
+ */
 class RequestEngineObservationTest {
     @Test
     void prefillObservationCannotChangeActivityOrVisibilityOutsideItsAtomicTransition()
@@ -173,7 +175,7 @@ class RequestEngineObservationTest {
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.recordDeliveryResult(
+                        observedRequest.recordDeliveryPrediction(
                                 new Prediction(fixture.delivery(), 3000L, 1002L)));
         var before = context.snapshot();
         var visibility = before.deadlines().visibility();

@@ -1,6 +1,7 @@
 package org.flexlb.mock.grpc;
 
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.mock.FlexLBMockTestBase;
@@ -16,7 +17,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Missing remote cleanup proof keeps accounting visible and prevents a successful shutdown. */
+/**
+ * Missing remote cleanup proof keeps accounting visible and prevents a successful shutdown.
+ */
 class WorkerOfflineTest extends FlexLBMockTestBase {
 
     @Override
@@ -46,7 +49,8 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
 
         Response expired = offline.get(5, TimeUnit.SECONDS);
         assertFalse(expired.isSuccess());
-        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), expired.getCode());
+        assertEquals(StrategyErrorType.QUEUE_TIMEOUT.getErrorCode(), expired.getCode());
+        assertEquals(AdmissionRejectReason.UNSPECIFIED, expired.getAdmissionRejectReason());
         assertTrue(expired.getErrorMessage().contains("REQUEST_INACTIVE"));
         assertTrue(requestRegistry().liveRequestCount() > 0);
         assertTrue(getPrefillEndpoint().stats().locallyOwnedRequests() > 0);

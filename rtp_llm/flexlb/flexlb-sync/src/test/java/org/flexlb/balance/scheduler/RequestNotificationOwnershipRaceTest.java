@@ -87,14 +87,17 @@ class RequestNotificationOwnershipRaceTest {
         org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(runtime, "timer", timer);
         var workStarted = new CountDownLatch(1);
         var finishWork = new CountDownLatch(1);
-        try (var work = runtime.tasks.registerRequestWork(context)) {
-            work.submitClose(
+        {
+            SchedulerTestSupport.submitClose(
+                    runtime.tasks,
+                    context,
                     () -> {
                         workStarted.countDown();
                         RequestProtocolTestSupport.await(finishWork);
                     },
                     false,
-                    null);
+                    null,
+                    false);
         }
         SchedulerTestSupport.startScheduling(owner);
         try {
@@ -134,7 +137,7 @@ class RequestNotificationOwnershipRaceTest {
             assertTrue(publications(runtime) == 0);
             assertEquals(
                     0L,
-                    ((Number) ReflectionTestUtils.getField(runtime.tasks(), "pendingWork"))
+                    ((Number) ReflectionTestUtils.getField(runtime.tasks(), "submittedTasks"))
                             .longValue());
             assertNull(SchedulerTestSupport.failure(owner));
         } finally {

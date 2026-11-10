@@ -26,6 +26,62 @@ import static org.mockito.Mockito.when;
  * Exercises cancellation and preemption replies, including late proof, deduplication, and stop-task draining.
  */
 class DeliveryStopTest {
+    @Test
+    void competingStopRegistrationsRetainOnlyTheSharedTask() throws Exception {
+        var runtime = runtime();
+        var claim = sentClaim(runtime);
+        var dispatcher = runtime.dispatcher;
+        var rendezvous = new java.util.concurrent.CyclicBarrier(2);
+        @SuppressWarnings("unchecked")
+        var records =
+                (java.util.concurrent.ConcurrentMap<Object, Object>)
+                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                DeliveryTestSupport.cancellations(dispatcher), "sessions");
+        @SuppressWarnings("unchecked")
+        var controlled =
+                (java.util.concurrent.ConcurrentMap<Object, Object>)
+                        mock(
+                                java.util.concurrent.ConcurrentMap.class,
+                                org.mockito.AdditionalAnswers.delegatesTo(records));
+        doAnswer(
+                        call -> {
+                            rendezvous.await(2, TimeUnit.SECONDS);
+                            return records.putIfAbsent(call.getArgument(0), call.getArgument(1));
+                        })
+                .when(controlled)
+                .putIfAbsent(any(), any());
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                DeliveryTestSupport.cancellations(dispatcher), "sessions", controlled);
+        var queued = new java.util.concurrent.CopyOnWriteArrayList<Runnable>();
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                DeliveryTestSupport.cancellations(dispatcher),
+                "stopWorkers",
+                (java.util.concurrent.Executor) queued::add);
+        try (var callers = java.util.concurrent.Executors.newFixedThreadPool(2)) {
+            var first = callers.submit(() -> dispatcher.stop(claim));
+            var second = callers.submit(() -> dispatcher.stop(claim));
+            assertSame(first.get(3, TimeUnit.SECONDS), second.get(3, TimeUnit.SECONDS));
+            assertEquals(1, records.size());
+            assertEquals(1, queued.size());
+            var active =
+                    (java.util.Set<?>)
+                            org.springframework.test.util.ReflectionTestUtils.getField(
+                                    DeliveryTestSupport.cancellations(dispatcher), "activeStops");
+            assertEquals(
+                    1, active.size(), "losing registration must not retain a second stop task");
+        } finally {
+            claim.complete();
+            queued.forEach(Runnable::run);
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
+        }
+        assertTrue(
+                ((java.util.Set<?>)
+                                org.springframework.test.util.ReflectionTestUtils.getField(
+                                        DeliveryTestSupport.cancellations(dispatcher),
+                                        "activeStops"))
+                        .isEmpty());
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.EnumSource(EngineGrpcClient.CancelReply.class)
     void cancelAndPreemptionApplyTheSameRemoteEvidence(EngineGrpcClient.CancelReply reply)
@@ -43,17 +99,19 @@ class DeliveryStopTest {
                                 return null;
                             })
                     .when(lifecycle)
-                    .onDeliveryResult(any(ContextResult.CleanupAcknowledgement.class));
+                    .recordRemoteCleanup(any(ContextResult.CleanupAcknowledgement.class));
             doAnswer(
                             call -> {
                                 var event =
                                         call.getArgument(
-                                                1, AbstractRequestScheduler.PreemptionEvent.class);
+                                                1,
+                                                org.flexlb.balance.preemption.PreemptionCompletion
+                                                        .PreemptionEvent.class);
                                 applied.complete(event.cleanup());
                                 return true;
                             })
-                    .when(lifecycle)
-                    .onPreemption(any(), any());
+                    .when(org.flexlb.balance.scheduler.SchedulerTestSupport.preemption(lifecycle))
+                    .applyEvent(any(), any());
             when(runtime.engineClient.cancelAsync(
                             any(),
                             org.mockito.ArgumentMatchers.anyInt(),
@@ -62,18 +120,24 @@ class DeliveryStopTest {
                     .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(reply));
             var config = DeliveryTestSupport.service(SchedulingTestConfig.batchConfig());
             var dispatcher =
-                    new DeliveryDispatcher(
-                            runtime.engineClient,
-                            config,
-                            new DeliveryMetricsReporter(null),
-                            runtime.taskTimer(),
-                            new PlacementConfiguration().decodeAdmissionCapacity(config),
-                            mock(DeliveryExecution.class));
+                    withStopExecutor(
+                            runtime,
+                            new DeliveryCoordinator(
+                                    new org.flexlb.balance.scheduler.RequestRepository(),
+                                    runtime.engineClient,
+                                    config,
+                                    new DeliveryMetricsReporter(null),
+                                    new SchedulerConfiguration().decodeAdmissionCapacity(config),
+                                    mock(DeliveryExecution.class)));
             try {
                 if (preempt) {
                     var answer =
-                            dispatcher.preempt(
-                                    preemption(claim, 1L), null, "cancel evidence", 5_000L);
+                            RequestProtocolTestSupport.cancelForPreemption(
+                                    dispatcher,
+                                    preemption(claim, 1L),
+                                    null,
+                                    "cancel evidence",
+                                    5_000L);
                     assertEquals(
                             reply == EngineGrpcClient.CancelReply.NOT_FOUND
                                     ? PreemptionRegistration.Reply.NOT_FOUND
@@ -104,7 +168,7 @@ class DeliveryStopTest {
     }
 
     @Test
-    void transportTimeoutUsesTheDispatcherTimer() throws Exception {
+    void transportTimeoutUsesThePreemptionTimer() throws Exception {
         var runtime = runtime();
         var claim = sentClaim(runtime);
         var rpc = new java.util.concurrent.CompletableFuture<EngineGrpcClient.CancelReply>();
@@ -123,19 +187,29 @@ class DeliveryStopTest {
                     return cancellation;
                 };
         var dispatcher =
-                new DeliveryDispatcher(
-                        runtime.engineClient,
-                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                        new DeliveryMetricsReporter(null),
-                        timer,
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(
-                                        DeliveryTestSupport.service(
-                                                SchedulingTestConfig.batchConfig())),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                withStopExecutor(
+                        runtime,
+                        new DeliveryCoordinator(
+                                new org.flexlb.balance.scheduler.RequestRepository(),
+                                runtime.engineClient,
+                                DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                new DeliveryMetricsReporter(null),
+                                new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                        .decodeAdmissionCapacity(
+                                                DeliveryTestSupport.service(
+                                                        SchedulingTestConfig.batchConfig())),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         try {
-            var answer = dispatcher.preempt(preemption(claim, 1L), null, "timeout", 5_000L);
+            var answer =
+                    SchedulerTestSupport.preemption(claim.owner().data().getRequestScheduler())
+                            .cancelRequest(
+                                    dispatcher,
+                                    timer,
+                                    preemption(claim, 1L),
+                                    null,
+                                    "timeout",
+                                    5_000L);
             assertFalse(answer.isDone());
 
             due.get().run();
@@ -162,25 +236,33 @@ class DeliveryStopTest {
                         org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(firstRpc, secondRpc);
         var scheduler = claim.owner().data().getRequestScheduler();
-        when(scheduler.onPreemption(any(), any())).thenReturn(true);
+        when(org.flexlb.balance.scheduler.SchedulerTestSupport.preemption(scheduler)
+                        .applyEvent(any(), any()))
+                .thenReturn(true);
         var dispatcher =
-                new DeliveryDispatcher(
-                        runtime.engineClient,
-                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                        new DeliveryMetricsReporter(null),
-                        runtime.taskTimer(),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(
-                                        DeliveryTestSupport.service(
-                                                SchedulingTestConfig.batchConfig())),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                withStopExecutor(
+                        runtime,
+                        new DeliveryCoordinator(
+                                new org.flexlb.balance.scheduler.RequestRepository(),
+                                runtime.engineClient,
+                                DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                new DeliveryMetricsReporter(null),
+                                new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                        .decodeAdmissionCapacity(
+                                                DeliveryTestSupport.service(
+                                                        SchedulingTestConfig.batchConfig())),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         var first = preemption(claim, 1L);
         var second = preemption(claim, 2L);
         try {
-            var firstAnswer = dispatcher.preempt(first, null, "first", 5_000L);
+            var firstAnswer =
+                    RequestProtocolTestSupport.cancelForPreemption(
+                            dispatcher, first, null, "first", 5_000L);
             RequestProtocolTestSupport.awaitCondition(() -> firstRpc.getNumberOfDependents() != 0);
-            var secondAnswer = dispatcher.preempt(second, null, "second", 5_000L);
+            var secondAnswer =
+                    RequestProtocolTestSupport.cancelForPreemption(
+                            dispatcher, second, null, "second", 5_000L);
 
             firstRpc.complete(EngineGrpcClient.CancelReply.NOT_FOUND);
             assertEquals(
@@ -211,25 +293,31 @@ class DeliveryStopTest {
                 .thenReturn(rpc);
         var scheduler = claim.owner().data().getRequestScheduler();
         var dispatcher =
-                new DeliveryDispatcher(
-                        runtime.engineClient,
-                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                        new DeliveryMetricsReporter(null),
-                        runtime.taskTimer(),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(
-                                        DeliveryTestSupport.service(
-                                                SchedulingTestConfig.batchConfig())),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                withStopExecutor(
+                        runtime,
+                        new DeliveryCoordinator(
+                                new org.flexlb.balance.scheduler.RequestRepository(),
+                                runtime.engineClient,
+                                DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                new DeliveryMetricsReporter(null),
+                                new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                        .decodeAdmissionCapacity(
+                                                DeliveryTestSupport.service(
+                                                        SchedulingTestConfig.batchConfig())),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         try {
-            var answer = dispatcher.preempt(preemption(claim, 1L), null, "deadline", 25L);
+            var answer =
+                    RequestProtocolTestSupport.cancelForPreemption(
+                            dispatcher, preemption(claim, 1L), null, "deadline", 25L);
             RequestProtocolTestSupport.awaitCondition(() -> rpc.getNumberOfDependents() != 0);
             assertEquals(PreemptionRegistration.Reply.UNKNOWN, answer.get(2, TimeUnit.SECONDS));
 
             rpc.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
-            org.mockito.Mockito.verify(scheduler, org.mockito.Mockito.timeout(2_000L))
-                    .onPreemption(any(), any());
+            org.mockito.Mockito.verify(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.preemption(scheduler),
+                            org.mockito.Mockito.timeout(2_000L))
+                    .applyEvent(any(), any());
         } finally {
             claim.complete();
             runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
@@ -248,29 +336,36 @@ class DeliveryStopTest {
                         org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(firstRpc);
         var scheduler = claim.owner().data().getRequestScheduler();
-        org.mockito.Mockito.doReturn(false).when(scheduler).onPreemption(any(), any());
+        org.mockito.Mockito.doReturn(false)
+                .when(org.flexlb.balance.scheduler.SchedulerTestSupport.preemption(scheduler))
+                .applyEvent(any(), any());
         var dispatcher =
-                new DeliveryDispatcher(
-                        runtime.engineClient,
-                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                        new DeliveryMetricsReporter(null),
-                        runtime.taskTimer(),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(
-                                        DeliveryTestSupport.service(
-                                                SchedulingTestConfig.batchConfig())),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                withStopExecutor(
+                        runtime,
+                        new DeliveryCoordinator(
+                                new org.flexlb.balance.scheduler.RequestRepository(),
+                                runtime.engineClient,
+                                DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                new DeliveryMetricsReporter(null),
+                                new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                        .decodeAdmissionCapacity(
+                                                DeliveryTestSupport.service(
+                                                        SchedulingTestConfig.batchConfig())),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         try {
-            var first = dispatcher.preempt(preemption(claim, 1L), null, "first", 5_000L);
+            var first =
+                    RequestProtocolTestSupport.cancelForPreemption(
+                            dispatcher, preemption(claim, 1L), null, "first", 5_000L);
             RequestProtocolTestSupport.awaitCondition(() -> firstRpc.getNumberOfDependents() != 0);
             var stop = dispatcher.stop(claim);
-            var rejected = dispatcher.preempt(preemption(claim, 2L), null, "rejected", 5_000L);
+            var rejected =
+                    RequestProtocolTestSupport.cancelForPreemption(
+                            dispatcher, preemption(claim, 2L), null, "rejected", 5_000L);
 
             assertEquals(PreemptionRegistration.Reply.UNKNOWN, rejected.get(2, TimeUnit.SECONDS));
             firstRpc.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
-            assertEquals(
-                    DeliveryDispatcher.StopResult.REMOTE_CLEANED, stop.get(2, TimeUnit.SECONDS));
+            stop.get(2, TimeUnit.SECONDS);
             assertEquals(PreemptionRegistration.Reply.UNKNOWN, first.get(2, TimeUnit.SECONDS));
         } finally {
             firstRpc.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
@@ -286,20 +381,21 @@ class DeliveryStopTest {
         when(claim.owner().snapshot().delivery().send())
                 .thenReturn(ContextResult.SendState.NOT_SENT);
         var dispatcher =
-                new DeliveryDispatcher(
-                        runtime.engineClient,
-                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                        new DeliveryMetricsReporter(null),
-                        runtime.taskTimer(),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(
-                                        DeliveryTestSupport.service(
-                                                SchedulingTestConfig.batchConfig())),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                withStopExecutor(
+                        runtime,
+                        new DeliveryCoordinator(
+                                new org.flexlb.balance.scheduler.RequestRepository(),
+                                runtime.engineClient,
+                                DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                new DeliveryMetricsReporter(null),
+                                new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                        .decodeAdmissionCapacity(
+                                                DeliveryTestSupport.service(
+                                                        SchedulingTestConfig.batchConfig())),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         try {
-            var result = dispatcher.stop(claim).get(2, TimeUnit.SECONDS);
-            assertEquals(DeliveryDispatcher.StopResult.NOT_SENT, result);
+            dispatcher.stop(claim).get(2, TimeUnit.SECONDS);
             verifyNoInteractions(runtime.engineClient);
             assertFalse(claim.completion().toCompletableFuture().isDone());
         } finally {
@@ -321,21 +417,21 @@ class DeliveryStopTest {
                         java.util.concurrent.CompletableFuture.completedFuture(
                                 EngineGrpcClient.CancelReply.REQUEST_CLEANED));
         var dispatcher =
-                new DeliveryDispatcher(
-                        runtime.engineClient,
-                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                        new DeliveryMetricsReporter(null),
-                        runtime.taskTimer(),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(
-                                        DeliveryTestSupport.service(
-                                                SchedulingTestConfig.batchConfig())),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                withStopExecutor(
+                        runtime,
+                        new DeliveryCoordinator(
+                                new org.flexlb.balance.scheduler.RequestRepository(),
+                                runtime.engineClient,
+                                DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                new DeliveryMetricsReporter(null),
+                                new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                        .decodeAdmissionCapacity(
+                                                DeliveryTestSupport.service(
+                                                        SchedulingTestConfig.batchConfig())),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         try {
-            assertEquals(
-                    DeliveryDispatcher.StopResult.REMOTE_CLEANED,
-                    dispatcher.stop(claim).get(2, TimeUnit.SECONDS));
+            dispatcher.stop(claim).get(2, TimeUnit.SECONDS);
             assertFalse(
                     claim.completion().toCompletableFuture().isDone(),
                     "remote proof must not fabricate local settlement");
@@ -353,17 +449,19 @@ class DeliveryStopTest {
         var claim = claim(runtime);
         var equalValue = DeliveryTestSupport.member(claim.route(), claim.kind(), claim.batchId());
         var dispatcher =
-                new DeliveryDispatcher(
-                        runtime.engineClient,
-                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                        new DeliveryMetricsReporter(null),
-                        runtime.taskTimer(),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(
-                                        DeliveryTestSupport.service(
-                                                SchedulingTestConfig.batchConfig())),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                withStopExecutor(
+                        runtime,
+                        new DeliveryCoordinator(
+                                new org.flexlb.balance.scheduler.RequestRepository(),
+                                runtime.engineClient,
+                                DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                new DeliveryMetricsReporter(null),
+                                new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                        .decodeAdmissionCapacity(
+                                                DeliveryTestSupport.service(
+                                                        SchedulingTestConfig.batchConfig())),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         try {
             when(runtime.engineClient.cancelAsync(
                             any(),
@@ -375,9 +473,7 @@ class DeliveryStopTest {
                                     EngineGrpcClient.CancelReply.ACCEPTED));
             var first = dispatcher.stop(claim);
             assertSame(first, dispatcher.stop(claim));
-            assertEquals(
-                    DeliveryDispatcher.StopResult.STALE,
-                    dispatcher.stop(equalValue).get(2, TimeUnit.SECONDS));
+            dispatcher.stop(equalValue).get(2, TimeUnit.SECONDS);
             org.mockito.Mockito.verify(
                             runtime.engineClient, org.mockito.Mockito.timeout(2000).times(1))
                     .cancelAsync(
@@ -413,17 +509,19 @@ class DeliveryStopTest {
                         org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(reply);
         var dispatcher =
-                new DeliveryDispatcher(
-                        runtime.engineClient,
-                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                        new DeliveryMetricsReporter(null),
-                        runtime.taskTimer(),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(
-                                        DeliveryTestSupport.service(
-                                                SchedulingTestConfig.batchConfig())),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                withStopExecutor(
+                        runtime,
+                        new DeliveryCoordinator(
+                                new org.flexlb.balance.scheduler.RequestRepository(),
+                                runtime.engineClient,
+                                DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                new DeliveryMetricsReporter(null),
+                                new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                        .decodeAdmissionCapacity(
+                                                DeliveryTestSupport.service(
+                                                        SchedulingTestConfig.batchConfig())),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         var registration =
                 new PreemptionRegistration(
                         claim.owner(),
@@ -434,14 +532,16 @@ class DeliveryStopTest {
         var closed = new java.util.concurrent.CompletableFuture<Void>();
         Thread closer = null;
         try {
-            var preemption = dispatcher.preempt(registration, null, "priority preemption", 5_000L);
+            var preemption =
+                    RequestProtocolTestSupport.cancelForPreemption(
+                            dispatcher, registration, null, "priority preemption", 5_000L);
             RequestProtocolTestSupport.awaitCondition(() -> reply.getNumberOfDependents() != 0);
             preemption.cancel(false);
             dispatcher.stop(claim);
             var sessions =
                     (java.util.Map<?, ?>)
                             org.springframework.test.util.ReflectionTestUtils.getField(
-                                    dispatcher, "sessions");
+                                    DeliveryTestSupport.cancellations(dispatcher), "sessions");
             var task = sessions.get(claim);
             RequestProtocolTestSupport.awaitCondition(
                     () -> {
@@ -504,27 +604,28 @@ class DeliveryStopTest {
                             return null;
                         })
                 .when(scheduler)
-                .onDeliveryResult(any(ContextResult.DeliveryEvidence.class));
+                .recordRemoteCleanup(any(ContextResult.CleanupAcknowledgement.class));
         var dispatcher =
-                new DeliveryDispatcher(
-                        runtime.engineClient,
-                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                        new DeliveryMetricsReporter(null),
-                        runtime.taskTimer(),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(
-                                        DeliveryTestSupport.service(
-                                                SchedulingTestConfig.batchConfig())),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                withStopExecutor(
+                        runtime,
+                        new DeliveryCoordinator(
+                                new org.flexlb.balance.scheduler.RequestRepository(),
+                                runtime.engineClient,
+                                DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                new DeliveryMetricsReporter(null),
+                                new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                        .decodeAdmissionCapacity(
+                                                DeliveryTestSupport.service(
+                                                        SchedulingTestConfig.batchConfig())),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         try {
             var stop = dispatcher.stop(claim);
             assertTrue(sender.get(2, TimeUnit.SECONDS).isVirtual());
             RequestProtocolTestSupport.awaitCondition(() -> reply.getNumberOfDependents() != 0);
             reply.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             assertSame(Thread.currentThread(), applied.get(2, TimeUnit.SECONDS));
-            assertEquals(
-                    DeliveryDispatcher.StopResult.REMOTE_CLEANED, stop.get(2, TimeUnit.SECONDS));
+            stop.get(2, TimeUnit.SECONDS);
             assertSame(stop, dispatcher.stop(claim));
             assertFalse(claim.completion().toCompletableFuture().isDone());
         } finally {
@@ -564,24 +665,26 @@ class DeliveryStopTest {
                             return null;
                         })
                 .when(scheduler)
-                .onDeliveryResult(any(ContextResult.DeliveryEvidence.class));
+                .recordRemoteCleanup(any(ContextResult.CleanupAcknowledgement.class));
         var dispatcher =
-                new DeliveryDispatcher(
-                        runtime.engineClient,
-                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                        new DeliveryMetricsReporter(null),
-                        runtime.taskTimer(),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(
-                                        DeliveryTestSupport.service(
-                                                SchedulingTestConfig.batchConfig())),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                withStopExecutor(
+                        runtime,
+                        new DeliveryCoordinator(
+                                new org.flexlb.balance.scheduler.RequestRepository(),
+                                runtime.engineClient,
+                                DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                new DeliveryMetricsReporter(null),
+                                new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                        .decodeAdmissionCapacity(
+                                                DeliveryTestSupport.service(
+                                                        SchedulingTestConfig.batchConfig())),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         var drained = new java.util.concurrent.CompletableFuture<Void>();
         Thread closer = null;
         try {
             var stop = dispatcher.stop(claim);
-            assertEquals(DeliveryDispatcher.StopResult.UNRESOLVED, stop.get(8, TimeUnit.SECONDS));
+            stop.get(8, TimeUnit.SECONDS);
             assertEquals(8, calls.get());
             assertSame(stop, dispatcher.stop(claim));
             closer =
@@ -632,17 +735,19 @@ class DeliveryStopTest {
                         java.util.concurrent.CompletableFuture.completedFuture(
                                 EngineGrpcClient.CancelReply.REQUEST_CLEANED));
         var dispatcher =
-                new DeliveryDispatcher(
-                        runtime.engineClient,
-                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                        new DeliveryMetricsReporter(null),
-                        runtime.taskTimer(),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(
-                                        DeliveryTestSupport.service(
-                                                SchedulingTestConfig.batchConfig())),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                withStopExecutor(
+                        runtime,
+                        new DeliveryCoordinator(
+                                new org.flexlb.balance.scheduler.RequestRepository(),
+                                runtime.engineClient,
+                                DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                new DeliveryMetricsReporter(null),
+                                new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                        .decodeAdmissionCapacity(
+                                                DeliveryTestSupport.service(
+                                                        SchedulingTestConfig.batchConfig())),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         try {
             var waiting = dispatcher.stop(first);
             org.mockito.Mockito.verify(channel, org.mockito.Mockito.timeout(2000).times(1))
@@ -652,13 +757,10 @@ class DeliveryStopTest {
                             any(),
                             org.mockito.ArgumentMatchers.anyLong());
             var other = dispatcher.stop(second);
-            assertEquals(
-                    DeliveryDispatcher.StopResult.REMOTE_CLEANED, other.get(2, TimeUnit.SECONDS));
+            other.get(2, TimeUnit.SECONDS);
             assertFalse(waiting.isDone());
             first.complete();
-            assertEquals(
-                    DeliveryDispatcher.StopResult.ALREADY_SETTLED,
-                    waiting.get(2, TimeUnit.SECONDS));
+            waiting.get(2, TimeUnit.SECONDS);
         } finally {
             first.complete();
             second.complete();
@@ -680,17 +782,19 @@ class DeliveryStopTest {
                         org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(reply);
         var dispatcher =
-                new DeliveryDispatcher(
-                        runtime.engineClient,
-                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                        new DeliveryMetricsReporter(null),
-                        runtime.taskTimer(),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(
-                                        DeliveryTestSupport.service(
-                                                SchedulingTestConfig.batchConfig())),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                withStopExecutor(
+                        runtime,
+                        new DeliveryCoordinator(
+                                new org.flexlb.balance.scheduler.RequestRepository(),
+                                runtime.engineClient,
+                                DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                new DeliveryMetricsReporter(null),
+                                new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                        .decodeAdmissionCapacity(
+                                                DeliveryTestSupport.service(
+                                                        SchedulingTestConfig.batchConfig())),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         var replacement = DeliveryTestSupport.member(claim.route(), claim.kind(), claim.batchId());
         try {
             var stop = dispatcher.stop(claim);
@@ -699,10 +803,10 @@ class DeliveryStopTest {
             var sessions =
                     (java.util.Map<?, ?>)
                             org.springframework.test.util.ReflectionTestUtils.getField(
-                                    dispatcher, "sessions");
+                                    DeliveryTestSupport.cancellations(dispatcher), "sessions");
             org.springframework.test.util.ReflectionTestUtils.invokeMethod(
                     sessions.get(claim), "signal");
-            assertEquals(DeliveryDispatcher.StopResult.STALE, stop.get(2, TimeUnit.SECONDS));
+            stop.get(2, TimeUnit.SECONDS);
             assertTrue(sessions.isEmpty(), "stale identity no longer owns cleanup");
             reply.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             dispatcher.awaitStops();
@@ -754,7 +858,7 @@ class DeliveryStopTest {
                             return null;
                         })
                 .when(scheduler)
-                .onDeliveryResult(any(ContextResult.DeliveryEvidence.class));
+                .recordRemoteCleanup(any(ContextResult.CleanupAcknowledgement.class));
         var client = runtime.engineClient;
         when(client.cancelAsync(
                         any(),
@@ -765,21 +869,21 @@ class DeliveryStopTest {
                         java.util.concurrent.CompletableFuture.completedFuture(
                                 EngineGrpcClient.CancelReply.REQUEST_CLEANED));
         var dispatcher =
-                new DeliveryDispatcher(
-                        runtime.engineClient,
-                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                        new DeliveryMetricsReporter(null),
-                        runtime.taskTimer(),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(
-                                        DeliveryTestSupport.service(
-                                                SchedulingTestConfig.batchConfig())),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                withStopExecutor(
+                        runtime,
+                        new DeliveryCoordinator(
+                                new org.flexlb.balance.scheduler.RequestRepository(),
+                                runtime.engineClient,
+                                DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                new DeliveryMetricsReporter(null),
+                                new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                        .decodeAdmissionCapacity(
+                                                DeliveryTestSupport.service(
+                                                        SchedulingTestConfig.batchConfig())),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         try {
-            assertEquals(
-                    DeliveryDispatcher.StopResult.REMOTE_CLEANED,
-                    dispatcher.stop(claim).get(2, TimeUnit.SECONDS));
+            dispatcher.stop(claim).get(2, TimeUnit.SECONDS);
             assertEquals(failures + 1, applications.get());
             org.mockito.Mockito.verify(client, org.mockito.Mockito.times(failures + 1))
                     .cancelAsync(
@@ -790,8 +894,10 @@ class DeliveryStopTest {
             assertFalse(claim.completion().toCompletableFuture().isDone());
             claim.complete();
             SchedulerTestSupport.awaitRequestWork(runtime);
-            org.mockito.Mockito.verify(scheduler, org.mockito.Mockito.never())
-                    .onPreemption(any(), any());
+            org.mockito.Mockito.verify(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.preemption(scheduler),
+                            org.mockito.Mockito.never())
+                    .applyEvent(any(), any());
         } finally {
             claim.complete();
             var reported =
@@ -819,7 +925,7 @@ class DeliveryStopTest {
                 .when(paused)
                 .execute(any(Runnable.class));
         org.springframework.test.util.ReflectionTestUtils.setField(
-                runtime.tasks(), "stopWorkers", paused);
+                DeliveryTestSupport.cancellations(runtime.dispatcher), "stopWorkers", paused);
         var claim = claim(runtime);
         when(claim.owner().snapshot().delivery().send())
                 .thenReturn(ContextResult.SendState.DELIVERED);
@@ -838,17 +944,19 @@ class DeliveryStopTest {
                         java.util.concurrent.CompletableFuture.completedFuture(
                                 EngineGrpcClient.CancelReply.REQUEST_CLEANED));
         var dispatcher =
-                new DeliveryDispatcher(
-                        runtime.engineClient,
-                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                        new DeliveryMetricsReporter(null),
-                        runtime.taskTimer(),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(
-                                        DeliveryTestSupport.service(
-                                                SchedulingTestConfig.batchConfig())),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                withStopExecutor(
+                        runtime,
+                        new DeliveryCoordinator(
+                                new org.flexlb.balance.scheduler.RequestRepository(),
+                                runtime.engineClient,
+                                DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                new DeliveryMetricsReporter(null),
+                                new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                        .decodeAdmissionCapacity(
+                                                DeliveryTestSupport.service(
+                                                        SchedulingTestConfig.batchConfig())),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         var registration =
                 new PreemptionRegistration(
                         claim.owner(),
@@ -857,15 +965,16 @@ class DeliveryStopTest {
                                 1L, String.valueOf(41L), 1L),
                         new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
         try {
-            var preemption = dispatcher.preempt(registration, null, "priority preemption", 25L);
+            var preemption =
+                    RequestProtocolTestSupport.cancelForPreemption(
+                            dispatcher, registration, null, "priority preemption", 25L);
             var stop = dispatcher.stop(claim);
             assertEquals(PreemptionRegistration.Reply.UNKNOWN, preemption.get(2, TimeUnit.SECONDS));
             Runnable task;
             while ((task = queued.poll()) != null) {
                 task.run();
             }
-            assertEquals(
-                    DeliveryDispatcher.StopResult.REMOTE_CLEANED, stop.get(2, TimeUnit.SECONDS));
+            stop.get(2, TimeUnit.SECONDS);
             org.mockito.Mockito.verify(client)
                     .cancelAsync(
                             any(),
@@ -875,7 +984,7 @@ class DeliveryStopTest {
         } finally {
             claim.complete();
             org.springframework.test.util.ReflectionTestUtils.setField(
-                    runtime.tasks(), "stopWorkers", original);
+                    DeliveryTestSupport.cancellations(runtime.dispatcher), "stopWorkers", original);
             Runnable task;
             while ((task = queued.poll()) != null) {
                 task.run();
@@ -893,7 +1002,10 @@ class DeliveryStopTest {
         when(claim.owner().snapshot().delivery()).thenReturn(null);
         var scheduler = claim.owner().data().getRequestScheduler();
         var rejectedFact = new IllegalStateException("transient fact application failure");
-        when(scheduler.onPreemption(any(), any())).thenThrow(rejectedFact);
+        when(org.flexlb.balance.scheduler.SchedulerTestSupport.preemption(scheduler)
+                        .applyEvent(any(), any()))
+                .thenThrow(rejectedFact);
+        org.mockito.Mockito.doCallRealMethod().when(scheduler).recordRequestFailure(any());
         var taskExecutor = org.mockito.Mockito.spy(runtime.tasks());
         org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                 runtime, "tasks", taskExecutor);
@@ -905,17 +1017,19 @@ class DeliveryStopTest {
                     .execute(any(), any());
         }
         var dispatcher =
-                new DeliveryDispatcher(
-                        runtime.engineClient,
-                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                        new DeliveryMetricsReporter(null),
-                        runtime.taskTimer(),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(
-                                        DeliveryTestSupport.service(
-                                                SchedulingTestConfig.batchConfig())),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                withStopExecutor(
+                        runtime,
+                        new DeliveryCoordinator(
+                                new org.flexlb.balance.scheduler.RequestRepository(),
+                                runtime.engineClient,
+                                DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                new DeliveryMetricsReporter(null),
+                                new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                        .decodeAdmissionCapacity(
+                                                DeliveryTestSupport.service(
+                                                        SchedulingTestConfig.batchConfig())),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         var client = runtime.engineClient;
         when(client.cancelAsync(
                         any(),
@@ -935,11 +1049,13 @@ class DeliveryStopTest {
         try {
             assertEquals(
                     PreemptionRegistration.Reply.UNKNOWN,
-                    dispatcher
-                            .preempt(registration, null, "priority preemption", 1000L)
+                    RequestProtocolTestSupport.cancelForPreemption(
+                                    dispatcher, registration, null, "priority preemption", 1000L)
                             .get(2, TimeUnit.SECONDS));
             SchedulerTestSupport.awaitRequestWork(runtime);
-            org.mockito.Mockito.verify(scheduler).onPreemption(any(), any());
+            org.mockito.Mockito.verify(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.preemption(scheduler))
+                    .applyEvent(any(), any());
             org.mockito.Mockito.verify(client)
                     .cancelAsync(
                             any(),
@@ -949,7 +1065,8 @@ class DeliveryStopTest {
             assertTrue(
                     ((java.util.Map<?, ?>)
                                     org.springframework.test.util.ReflectionTestUtils.getField(
-                                            dispatcher, "sessions"))
+                                            DeliveryTestSupport.cancellations(dispatcher),
+                                            "sessions"))
                             .isEmpty());
             assertFalse(registration.completion().toCompletableFuture().isDone());
         } finally {
@@ -979,7 +1096,7 @@ class DeliveryStopTest {
                 .when(paused)
                 .execute(any(Runnable.class));
         org.springframework.test.util.ReflectionTestUtils.setField(
-                runtime.tasks(), "stopWorkers", paused);
+                DeliveryTestSupport.cancellations(runtime.dispatcher), "stopWorkers", paused);
         var claim = claim(runtime);
         if (!hasDelivery) {
             when(claim.owner().snapshot().delivery()).thenReturn(null);
@@ -994,18 +1111,22 @@ class DeliveryStopTest {
                                     1L, String.valueOf(41L), 1L),
                             new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
             var dispatcher =
-                    new DeliveryDispatcher(
-                            runtime.engineClient,
-                            DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                            new DeliveryMetricsReporter(null),
-                            runtime.taskTimer(),
-                            new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                    .decodeAdmissionCapacity(
-                                            DeliveryTestSupport.service(
-                                                    SchedulingTestConfig.batchConfig())),
-                            org.mockito.Mockito.mock(
-                                    org.flexlb.balance.scheduler.DeliveryExecution.class));
-            var answer = dispatcher.preempt(registration, null, "priority preemption", 25L);
+                    withStopExecutor(
+                            runtime,
+                            new DeliveryCoordinator(
+                                    new org.flexlb.balance.scheduler.RequestRepository(),
+                                    runtime.engineClient,
+                                    DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                    new DeliveryMetricsReporter(null),
+                                    new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                            .decodeAdmissionCapacity(
+                                                    DeliveryTestSupport.service(
+                                                            SchedulingTestConfig.batchConfig())),
+                                    org.mockito.Mockito.mock(
+                                            org.flexlb.balance.scheduler.DeliveryExecution.class)));
+            var answer =
+                    RequestProtocolTestSupport.cancelForPreemption(
+                            dispatcher, registration, null, "priority preemption", 25L);
             assertEquals(PreemptionRegistration.Reply.UNKNOWN, answer.get(2, TimeUnit.SECONDS));
             Runnable task;
             while ((task = queued.poll()) != null) {
@@ -1015,13 +1136,14 @@ class DeliveryStopTest {
             assertTrue(
                     ((java.util.Map<?, ?>)
                                     org.springframework.test.util.ReflectionTestUtils.getField(
-                                            dispatcher, "sessions"))
+                                            DeliveryTestSupport.cancellations(dispatcher),
+                                            "sessions"))
                             .isEmpty());
             assertFalse(claim.completion().toCompletableFuture().isDone());
         } finally {
             claim.complete();
             org.springframework.test.util.ReflectionTestUtils.setField(
-                    runtime.tasks(), "stopWorkers", original);
+                    DeliveryTestSupport.cancellations(runtime.dispatcher), "stopWorkers", original);
             Runnable task;
             while ((task = queued.poll()) != null) {
                 task.run();
@@ -1037,7 +1159,7 @@ class DeliveryStopTest {
             var claim = claim(runtime);
             claim.complete();
             org.springframework.test.util.ReflectionTestUtils.setField(
-                    runtime.tasks(),
+                    DeliveryTestSupport.cancellations(runtime.dispatcher),
                     "stopWorkers",
                     (java.util.concurrent.Executor)
                             work -> {
@@ -1046,17 +1168,19 @@ class DeliveryStopTest {
             when(claim.owner().snapshot().delivery().send())
                     .thenReturn(ContextResult.SendState.NOT_SENT);
             var cleanup =
-                    new DeliveryDispatcher(
-                            runtime.engineClient,
-                            DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                            new DeliveryMetricsReporter(null),
-                            runtime.taskTimer(),
-                            new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                    .decodeAdmissionCapacity(
-                                            DeliveryTestSupport.service(
-                                                    SchedulingTestConfig.batchConfig())),
-                            org.mockito.Mockito.mock(
-                                    org.flexlb.balance.scheduler.DeliveryExecution.class));
+                    withStopExecutor(
+                            runtime,
+                            new DeliveryCoordinator(
+                                    new org.flexlb.balance.scheduler.RequestRepository(),
+                                    runtime.engineClient,
+                                    DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                    new DeliveryMetricsReporter(null),
+                                    new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                            .decodeAdmissionCapacity(
+                                                    DeliveryTestSupport.service(
+                                                            SchedulingTestConfig.batchConfig())),
+                                    org.mockito.Mockito.mock(
+                                            org.flexlb.balance.scheduler.DeliveryExecution.class)));
             assertDoesNotThrow(() -> cleanup.stop(claim).join());
             assertDoesNotThrow(() -> cleanup.stop(claim).join());
         } finally {
@@ -1080,30 +1204,35 @@ class DeliveryStopTest {
                     .when(rejecting)
                     .execute(any(Runnable.class));
             org.springframework.test.util.ReflectionTestUtils.setField(
-                    runtime.tasks(), "stopWorkers", rejecting);
+                    DeliveryTestSupport.cancellations(runtime.dispatcher),
+                    "stopWorkers",
+                    rejecting);
             assertDoesNotThrow(
                     () ->
-                            new DeliveryDispatcher(
-                                            runtime.engineClient,
-                                            DeliveryTestSupport.service(
-                                                    SchedulingTestConfig.batchConfig()),
-                                            new DeliveryMetricsReporter(null),
-                                            runtime.taskTimer(),
-                                            new org.flexlb.balance.scheduler
-                                                            .PlacementConfiguration()
-                                                    .decodeAdmissionCapacity(
-                                                            DeliveryTestSupport.service(
-                                                                    SchedulingTestConfig
-                                                                            .batchConfig())),
-                                            org.mockito.Mockito.mock(
-                                                    org.flexlb.balance.scheduler.DeliveryExecution
-                                                            .class))
+                            withStopExecutor(
+                                            runtime,
+                                            new DeliveryCoordinator(
+                                                    new org.flexlb.balance.scheduler
+                                                            .RequestRepository(),
+                                                    runtime.engineClient,
+                                                    DeliveryTestSupport.service(
+                                                            SchedulingTestConfig.batchConfig()),
+                                                    new DeliveryMetricsReporter(null),
+                                                    new org.flexlb.balance.scheduler
+                                                                    .SchedulerConfiguration()
+                                                            .decodeAdmissionCapacity(
+                                                                    DeliveryTestSupport.service(
+                                                                            SchedulingTestConfig
+                                                                                    .batchConfig())),
+                                                    org.mockito.Mockito.mock(
+                                                            org.flexlb.balance.scheduler
+                                                                    .DeliveryExecution.class)))
                                     .stop(claim)
                                     .join());
             assertTrue(claim.completion().toCompletableFuture().isDone());
         } finally {
             org.springframework.test.util.ReflectionTestUtils.setField(
-                    runtime.tasks(), "stopWorkers", original);
+                    DeliveryTestSupport.cancellations(runtime.dispatcher), "stopWorkers", original);
             // Real shutdown rethrows any recorded facility failure, so this checks the entire
             // lifecycle.
             assertThrows(
@@ -1121,17 +1250,19 @@ class DeliveryStopTest {
             var equalValue =
                     DeliveryTestSupport.member(claim.route(), claim.kind(), claim.batchId());
             var cleanup =
-                    new DeliveryDispatcher(
-                            runtime.engineClient,
-                            DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                            new DeliveryMetricsReporter(null),
-                            runtime.taskTimer(),
-                            new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                    .decodeAdmissionCapacity(
-                                            DeliveryTestSupport.service(
-                                                    SchedulingTestConfig.batchConfig())),
-                            org.mockito.Mockito.mock(
-                                    org.flexlb.balance.scheduler.DeliveryExecution.class));
+                    withStopExecutor(
+                            runtime,
+                            new DeliveryCoordinator(
+                                    new org.flexlb.balance.scheduler.RequestRepository(),
+                                    runtime.engineClient,
+                                    DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                    new DeliveryMetricsReporter(null),
+                                    new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                            .decodeAdmissionCapacity(
+                                                    DeliveryTestSupport.service(
+                                                            SchedulingTestConfig.batchConfig())),
+                                    org.mockito.Mockito.mock(
+                                            org.flexlb.balance.scheduler.DeliveryExecution.class)));
             when(runtime.engineClient.cancelAsync(
                             any(),
                             org.mockito.ArgumentMatchers.anyInt(),
@@ -1142,9 +1273,7 @@ class DeliveryStopTest {
                                     EngineGrpcClient.CancelReply.ACCEPTED));
             var first = cleanup.stop(claim);
             assertSame(first, cleanup.stop(claim));
-            assertEquals(
-                    DeliveryDispatcher.StopResult.STALE,
-                    cleanup.stop(equalValue).get(2, TimeUnit.SECONDS));
+            cleanup.stop(equalValue).get(2, TimeUnit.SECONDS);
             assertFalse(first.isDone(), "rejecting a stale claim must not finish the current stop");
             assertFalse(claim.completion().toCompletableFuture().isDone());
             org.mockito.Mockito.verify(
@@ -1178,7 +1307,7 @@ class DeliveryStopTest {
         var claim = claim(runtime);
         try {
             org.springframework.test.util.ReflectionTestUtils.setField(
-                    runtime.tasks(),
+                    DeliveryTestSupport.cancellations(runtime.dispatcher),
                     "stopWorkers",
                     (java.util.concurrent.Executor)
                             work -> {
@@ -1187,19 +1316,28 @@ class DeliveryStopTest {
             when(claim.owner().snapshot().delivery().send())
                     .thenReturn(ContextResult.SendState.NOT_SENT);
             var cleanup =
-                    new DeliveryDispatcher(
-                            runtime.engineClient,
-                            DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                            new DeliveryMetricsReporter(null),
-                            runtime.taskTimer(),
-                            new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                    .decodeAdmissionCapacity(
-                                            DeliveryTestSupport.service(
-                                                    SchedulingTestConfig.batchConfig())),
-                            org.mockito.Mockito.mock(
-                                    org.flexlb.balance.scheduler.DeliveryExecution.class));
+                    withStopExecutor(
+                            runtime,
+                            new DeliveryCoordinator(
+                                    new org.flexlb.balance.scheduler.RequestRepository(),
+                                    runtime.engineClient,
+                                    DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                    new DeliveryMetricsReporter(null),
+                                    new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                            .decodeAdmissionCapacity(
+                                                    DeliveryTestSupport.service(
+                                                            SchedulingTestConfig.batchConfig())),
+                                    org.mockito.Mockito.mock(
+                                            org.flexlb.balance.scheduler.DeliveryExecution.class)));
             var rejected = cleanup.stop(claim);
             assertThrows(java.util.concurrent.CompletionException.class, rejected::join);
+            assertTrue(
+                    ((java.util.Set<?>)
+                                    org.springframework.test.util.ReflectionTestUtils.getField(
+                                            DeliveryTestSupport.cancellations(cleanup),
+                                            "activeStops"))
+                            .isEmpty(),
+                    "rejected task must leave the drain index");
             assertFalse(claim.completion().toCompletableFuture().isDone());
             claim.complete();
             assertDoesNotThrow(() -> claim.completion().toCompletableFuture().join());
@@ -1224,22 +1362,24 @@ class DeliveryStopTest {
                 .when(paused)
                 .execute(any(Runnable.class));
         org.springframework.test.util.ReflectionTestUtils.setField(
-                runtime.tasks(), "stopWorkers", paused);
+                DeliveryTestSupport.cancellations(runtime.dispatcher), "stopWorkers", paused);
         try {
             var claim = claim(runtime);
             var client = runtime.engineClient;
             var cleanup =
-                    new DeliveryDispatcher(
-                            runtime.engineClient,
-                            DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                            new DeliveryMetricsReporter(null),
-                            runtime.taskTimer(),
-                            new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                    .decodeAdmissionCapacity(
-                                            DeliveryTestSupport.service(
-                                                    SchedulingTestConfig.batchConfig())),
-                            org.mockito.Mockito.mock(
-                                    org.flexlb.balance.scheduler.DeliveryExecution.class));
+                    withStopExecutor(
+                            runtime,
+                            new DeliveryCoordinator(
+                                    new org.flexlb.balance.scheduler.RequestRepository(),
+                                    runtime.engineClient,
+                                    DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                                    new DeliveryMetricsReporter(null),
+                                    new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                            .decodeAdmissionCapacity(
+                                                    DeliveryTestSupport.service(
+                                                            SchedulingTestConfig.batchConfig())),
+                                    org.mockito.Mockito.mock(
+                                            org.flexlb.balance.scheduler.DeliveryExecution.class)));
             cleanup.stop(claim);
             claim.complete();
             var registration =
@@ -1249,7 +1389,9 @@ class DeliveryStopTest {
                             new org.flexlb.balance.endpoint.DecodeResources.RequestReservation(
                                     1L, String.valueOf(41L), 1L),
                             new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
-            var answer = cleanup.preempt(registration, null, "priority preemption", 500L);
+            var answer =
+                    RequestProtocolTestSupport.cancelForPreemption(
+                            cleanup, registration, null, "priority preemption", 500L);
             Runnable task;
             while ((task = queued.poll()) != null) {
                 task.run();
@@ -1258,7 +1400,7 @@ class DeliveryStopTest {
             verifyNoInteractions(client);
         } finally {
             org.springframework.test.util.ReflectionTestUtils.setField(
-                    runtime.tasks(), "stopWorkers", original);
+                    DeliveryTestSupport.cancellations(runtime.dispatcher), "stopWorkers", original);
             runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
@@ -1279,7 +1421,9 @@ class DeliveryStopTest {
         var context = mock(RequestContext.class, RETURNS_DEEP_STUBS);
         when(context.data().getRequestId()).thenReturn("41");
         var scheduler = context.data().getRequestScheduler();
-        when(scheduler.onPreemption(any(), any())).thenReturn(true);
+        when(org.flexlb.balance.scheduler.SchedulerTestSupport.preemption(scheduler)
+                        .applyEvent(any(), any()))
+                .thenReturn(true);
         org.flexlb.balance.scheduler.SchedulerTestServices.bind(scheduler, runtime);
         var route = mock(RouteResult.class);
         when(route.ctx()).thenReturn(context);
@@ -1304,10 +1448,17 @@ class DeliveryStopTest {
                 new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
     }
 
+    private static DeliveryCoordinator withStopExecutor(
+            SchedulerTestServices runtime, DeliveryCoordinator dispatcher) {
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                DeliveryTestSupport.cancellations(dispatcher), "stopWorkers", stopWorkers(runtime));
+        return dispatcher;
+    }
+
     private static java.util.concurrent.Executor stopWorkers(SchedulerTestServices runtime) {
         return (java.util.concurrent.Executor)
                 org.springframework.test.util.ReflectionTestUtils.getField(
-                        runtime.tasks(), "stopWorkers");
+                        DeliveryTestSupport.cancellations(runtime.dispatcher), "stopWorkers");
     }
 
     private static SchedulerTestServices runtime() {
@@ -1317,12 +1468,12 @@ class DeliveryStopTest {
                 mock(EndpointRegistry.class),
                 mock(DeliveryMetricsReporter.class),
                 mock(RequestSchedulerReporter.class),
-                new DeliveryDispatcher(
+                new DeliveryCoordinator(
+                        new org.flexlb.balance.scheduler.RequestRepository(),
                         null,
                         config,
                         new DeliveryMetricsReporter(null),
-                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                        new org.flexlb.balance.scheduler.SchedulerConfiguration()
                                 .decodeAdmissionCapacity(config),
                         org.mockito.Mockito.mock(
                                 org.flexlb.balance.scheduler.DeliveryExecution.class)),

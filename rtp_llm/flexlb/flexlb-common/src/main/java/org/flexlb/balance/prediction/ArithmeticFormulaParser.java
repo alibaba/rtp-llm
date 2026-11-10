@@ -3,7 +3,6 @@ package org.flexlb.balance.prediction;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -39,11 +38,8 @@ final class ArithmeticFormulaParser {
             Set<String> aggregateExcludedVariables,
             boolean allowAggregates) {
         this.input = input;
-        this.variables = Map.copyOf(Objects.requireNonNull(variables, "variables"));
-        this.aggregateExcludedVariables =
-                Set.copyOf(
-                        Objects.requireNonNull(
-                                aggregateExcludedVariables, "aggregateExcludedVariables"));
+        this.variables = variables;
+        this.aggregateExcludedVariables = aggregateExcludedVariables;
         this.allowAggregates = allowAggregates;
         int count = 0;
         for (int index : this.variables.values()) {

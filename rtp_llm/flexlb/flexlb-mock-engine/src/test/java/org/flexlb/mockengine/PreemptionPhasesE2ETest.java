@@ -3,7 +3,7 @@ package org.flexlb.mockengine;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.config.ConfigTestSupport;
-import org.flexlb.config.VictimStage;
+import org.flexlb.config.PreemptionStage;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -31,9 +31,9 @@ import static org.mockito.Mockito.verify;
  * <ul>
  *   <li>A1 Prefill 优先级插队 — 保留低优请求，不再为 token 配额驱逐；</li>
  *   <li>A2 Decode queued reservation 撤回 — 低优请求重新排队，容量先交给高优请求；</li>
- *   <li>A3 accepted 让位 — 真实 MockEngineClients，victim 8429，
+ *   <li>A3 accepted 让位 — 真实 MockEngineClients，request selected for preemption 8429，
  *       cancel→确认→派发顺序 + cancel 超时不泄漏（铁律4）；</li>
- *   <li>A5 同优不抢占 — 同优请求满载时绝不驱逐同优 victim。</li>
+ *   <li>A5 同优不抢占 — 同优请求满载时绝不驱逐同优 request selected for preemption。</li>
  * </ul>
  */
 class PreemptionPhasesE2ETest {
@@ -56,17 +56,17 @@ class PreemptionPhasesE2ETest {
             CompletableFuture<Response> low1 = h.scheduler.submit(h.context(101, 30));
             CompletableFuture<Response> low2 = h.scheduler.submit(h.context(102, 40));
             AutoTpmE2EHarness.await(
-                    () -> h.prefillEndpoint(0).progress().queueDepth() == 2,
+                    () -> h.prefillEndpoint(0).queueDepth() == 2,
                     5_000,
                     "two low-priority requests must reach the Prefill queue");
-            assertEquals(2, h.prefillEndpoint(0).progress().queueDepth());
+            assertEquals(2, h.prefillEndpoint(0).queueDepth());
             assertFalse(low1.isDone());
             assertFalse(low2.isDone());
 
             CompletableFuture<Response> high = h.scheduler.submit(h.context(103, 70));
 
             AutoTpmE2EHarness.await(
-                    () -> h.prefillEndpoint(0).progress().queueDepth() == 3,
+                    () -> h.prefillEndpoint(0).queueDepth() == 3,
                     5_000,
                     "higher priority work must join the ordered queue without evicting existing work");
             assertFalse(high.isDone());
@@ -89,7 +89,7 @@ class PreemptionPhasesE2ETest {
         startupConfig
                 .priorityOrdering()
                 .getPreemption()
-                .setAllowedVictimStages(java.util.EnumSet.of(VictimStage.DECODE_RESERVED));
+                .setAllowedPreemptionStages(java.util.EnumSet.of(PreemptionStage.DECODE_RESERVED));
         try (AutoTpmE2EHarness h =
                 new AutoTpmE2EHarness(
                         BASE_PORT + 10,
@@ -115,7 +115,8 @@ class PreemptionPhasesE2ETest {
                     "low-priority request must publish its Decode reservation");
             assertFalse(low.isDone());
             assertTrue(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 201L));
-            // victim 仍由 Master 排队持有，因此走本地 queued eviction，无需 Engine Cancel。
+            // request selected for preemption 仍由 Master 排队持有，因此走本地 queued eviction，无需 Engine
+            // Cancel。
             long hardKvBefore = decodeEp.routingView().inflightHardKv();
             assertTrue(hardKvBefore > 0);
 
@@ -131,7 +132,7 @@ class PreemptionPhasesE2ETest {
             assertTrue(h.engineArrivalOrder.isEmpty());
             assertEquals(0, MockEngineTestSupport.getCancelledCount(h.decodeEngines.get(0)));
 
-            // 账目正确：victim 影子预留释放，高优恰好占据一份
+            // 账目正确：request selected for preemption 影子预留释放，高优恰好占据一份
             assertFalse(
                     high.isDone(), "high-priority request should sit in the queue after eviction");
             assertFalse(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 201L));
@@ -196,7 +197,8 @@ class PreemptionPhasesE2ETest {
                 assertEquals(1, decodeEp.resourceSnapshot().runningCount());
                 assertFalse(low.isDone(), "victim frontend future must still await its ACK");
 
-                // Hold subsequent traffic in the queue after the victim is canonical.
+                // Hold subsequent traffic in the queue after the request selected for preemption is
+                // canonical.
                 h.pauseDelivery();
 
                 // 高优提交放到后台线程：commit 会同步等待 cancel 释放确认
@@ -246,7 +248,8 @@ class PreemptionPhasesE2ETest {
 
                 // Decode's cancelled counter advances before Prefill publishes
                 // its authoritative terminal. Poll as production does until
-                // that terminal settles the victim, without releasing its ACK.
+                // that terminal settles the request selected for preemption, without releasing its
+                // ACK.
                 AutoTpmE2EHarness.await(
                         () -> {
                             h.pumpPrefillOnce(0);
@@ -259,17 +262,19 @@ class PreemptionPhasesE2ETest {
                 high = highRef.get();
                 assertNotNull(high);
 
-                Response victim = low.get(2, TimeUnit.SECONDS);
-                assertFalse(victim.isSuccess());
+                Response requestToPreempt = low.get(2, TimeUnit.SECONDS);
+                assertFalse(requestToPreempt.isSuccess());
                 assertEquals(
                         StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
-                        victim.getCode(),
+                        requestToPreempt.getCode(),
                         "accepted victim cancelled via engine must be 8429: "
-                                + victim.getErrorMessage());
+                                + requestToPreempt.getErrorMessage());
                 assertTrue(
-                        victim.getErrorMessage().contains("priority victim canceled by worker"),
+                        requestToPreempt
+                                .getErrorMessage()
+                                .contains("priority victim canceled by worker"),
                         "worker terminal must preserve the typed preemption detail: "
-                                + victim.getErrorMessage());
+                                + requestToPreempt.getErrorMessage());
 
                 // 顺序断言第 2 段：确认后高优才拿到容量（reserve 成功、进入队列待派发）
                 assertTrue(
@@ -341,11 +346,9 @@ class PreemptionPhasesE2ETest {
                 // 铁律4：cancel 超时绝不乐观派发 —— incoming 明确失败
                 Response highResp = high.get(5, TimeUnit.SECONDS);
                 assertFalse(highResp.isSuccess());
+                assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), highResp.getCode());
                 assertEquals(
-                        StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), highResp.getCode());
-                assertEquals(
-                        AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                        highResp.getAdmissionRejectReason());
+                        AdmissionRejectReason.UNSPECIFIED, highResp.getAdmissionRejectReason());
                 assertTrue(
                         highResp.getErrorMessage().contains("cancel_terminal_unknown"),
                         "timeout must be explicit: " + highResp.getErrorMessage());
@@ -353,13 +356,14 @@ class PreemptionPhasesE2ETest {
                         MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 312L),
                         "incoming must NOT take capacity on cancel timeout");
 
-                // victim 保持 CANCEL_REQUESTED，等 WorkerStatus 迟到确认 → 8429 late confirm
+                // request selected for preemption 保持 CANCEL_REQUESTED，等 WorkerStatus 迟到确认 → 8429
+                // late confirm
                 assertFalse(low.isDone());
                 h.pumpPrefillOnce(0);
-                Response victim = low.get(2, TimeUnit.SECONDS);
+                Response requestToPreempt = low.get(2, TimeUnit.SECONDS);
                 assertEquals(
                         StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
-                        victim.getCode(),
+                        requestToPreempt.getCode(),
                         "late CANCELLED confirm still attributes 8429");
 
                 h.pumpDecodeOnce(0);
@@ -388,7 +392,7 @@ class PreemptionPhasesE2ETest {
         decision.setMaxRequests(100);
         try (AutoTpmE2EHarness h =
                 new AutoTpmE2EHarness(BASE_PORT + 50, 1, 1, "50", 1.0, false, decision)) {
-            h.allowPreemption(VictimStage.DECODE_RESERVED);
+            h.allowPreemption(PreemptionStage.DECODE_RESERVED);
             h.config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
 
             DecodeEndpoint decodeEp = h.decodeEndpoint(0);
@@ -410,12 +414,12 @@ class PreemptionPhasesE2ETest {
             CompletableFuture<Response> equal = h.scheduler.submit(h.context(502, 50));
             assertFalse(equal.isDone());
 
-            // victim 完全不受影响
+            // request selected for preemption 完全不受影响
             assertFalse(holder.isDone());
             assertTrue(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 501L));
-            assertEquals(1, h.prefillEndpoint(0).progress().queueDepth());
+            assertEquals(1, h.prefillEndpoint(0).queueDepth());
             verify(h.requestReporter, never())
-                    .reportVictim(anyInt(), anyInt(), anyString(), anyString());
+                    .reportPreemptedRequest(anyInt(), anyInt(), anyString(), anyString());
         }
     }
 
@@ -427,8 +431,9 @@ class PreemptionPhasesE2ETest {
         config.setDispatcher(new org.flexlb.config.DispatcherConfig());
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
         var preemption = config.priorityOrdering().getPreemption();
-        preemption.setAllowedVictimStages(
-                java.util.EnumSet.of(VictimStage.DECODE_RESERVED, VictimStage.DECODE_ENGINE_OWNED));
+        preemption.setAllowedPreemptionStages(
+                java.util.EnumSet.of(
+                        PreemptionStage.DECODE_RESERVED, PreemptionStage.DECODE_ENGINE_OWNED));
         preemption.setTimeoutMs(timeoutMs);
         return config;
     }

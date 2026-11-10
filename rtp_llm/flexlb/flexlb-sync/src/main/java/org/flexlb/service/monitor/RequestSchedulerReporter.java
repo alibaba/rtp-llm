@@ -121,25 +121,28 @@ public class RequestSchedulerReporter {
     }
 
     /** Report one snapshot: local reservations, accepted/running Engine tasks and Engine-facing load. */
-    /** Read committed victim facts; neither publication nor metric failure changes the attempt. */
-    public void reportPreemptionVictims(
+    /** Read committed requestToPreempt facts; neither publication nor metric failure changes the attempt. */
+    public void reportPreemptedRequests(
             String requestId,
             int incomingPriority,
             String endpoint,
-            String evictionCase,
-            List<DecodeRequestView> victims,
+            String preemptionReason,
+            List<DecodeRequestView> requestsToPreempt,
             boolean cancelled) {
-        for (var victim : victims) {
+        for (var requestToPreempt : requestsToPreempt) {
             String stage =
                     !cancelled
                             ? "decode_reserved"
-                            : victim.phase() == DecodeTaskPhase.RUNNING
+                            : requestToPreempt.phase() == DecodeTaskPhase.RUNNING
                                     ? "decode_running"
                                     : "decode_cancel";
             try {
-                reportVictim(victim.priority(), incomingPriority, stage, evictionCase);
-                reportVictimKvTokens(victim.priority(), stage, victim.kvTokens());
-                if (cancelled) reportEngineCancel(CancelEvent.CONFIRM, endpoint, victim.priority());
+                reportPreemptedRequest(
+                        requestToPreempt.priority(), incomingPriority, stage, preemptionReason);
+                reportPreemptedKvTokens(
+                        requestToPreempt.priority(), stage, requestToPreempt.kvTokens());
+                if (cancelled)
+                    reportEngineCancel(CancelEvent.CONFIRM, endpoint, requestToPreempt.priority());
             } catch (Throwable failure) {
                 Logger.warn(
                         "[decode-capacity] failed to report victim: request_id={}",
@@ -150,27 +153,27 @@ public class RequestSchedulerReporter {
                 Logger.debug(
                         "[decode-capacity] decode victim preempted: victim_id={} victim_priority={}"
                                 + " stage={} outcome={} kv_tokens={} incoming_id={} incoming_priority={} worker={}",
-                        victim.requestId(),
-                        victim.priority(),
+                        requestToPreempt.requestId(),
+                        requestToPreempt.priority(),
                         stage,
                         "requeued",
-                        victim.kvTokens(),
+                        requestToPreempt.kvTokens(),
                         requestId,
                         incomingPriority,
                         endpoint);
             }
         }
-        reportEviction(EvictionEvent.COMMIT, incomingPriority, evictionCase, "success");
+        reportPreemption(PreemptionEvent.COMMIT, incomingPriority, preemptionReason, "success");
     }
 
-    /** Report the victim and its priority-preemption event. */
-    public void reportVictim(
-            int victimPriority, int incomingPriority, String stage, String evCase) {
+    /** Report the requestToPreempt and its priority-preemption event. */
+    public void reportPreemptedRequest(
+            int requestToPreemptPriority, int incomingPriority, String stage, String evCase) {
         monitor.report(
                 AUTO_TPM_VICTIM_COUNT,
                 FlexMetricTags.of(
                         "victim_priority",
-                        String.valueOf(victimPriority),
+                        String.valueOf(requestToPreemptPriority),
                         "incoming_priority",
                         String.valueOf(incomingPriority),
                         "stage",
@@ -181,12 +184,15 @@ public class RequestSchedulerReporter {
         monitor.report(AUTO_TPM_PRIORITY_PREEMPT_COUNT, FlexMetricTags.of("stage", stage), 1.0);
     }
 
-    /** Hard KV tokens actually released by one victim. */
-    public void reportVictimKvTokens(int victimPriority, String stage, long kvTokens) {
+    /** Hard KV tokens actually released by one requestToPreempt. */
+    public void reportPreemptedKvTokens(int requestToPreemptPriority, String stage, long kvTokens) {
         monitor.report(
                 AUTO_TPM_VICTIM_KV_TOKENS,
                 FlexMetricTags.of(
-                        "victim_priority", String.valueOf(victimPriority), "stage", stage),
+                        "victim_priority",
+                        String.valueOf(requestToPreemptPriority),
+                        "stage",
+                        stage),
                 kvTokens);
     }
 
@@ -198,7 +204,8 @@ public class RequestSchedulerReporter {
     }
 
     /** Planning and commit outcomes share incoming priority, eviction case and result tags. */
-    public void reportEviction(EvictionEvent event, int priority, String evCase, String result) {
+    public void reportPreemption(
+            PreemptionEvent event, int priority, String evCase, String result) {
         monitor.report(
                 event.metric,
                 FlexMetricTags.of(
@@ -206,14 +213,15 @@ public class RequestSchedulerReporter {
                 1.0);
     }
 
-    public void reportPreemptionCancelRequests(String endpoint, List<DecodeRequestView> victims) {
-        for (var victim : victims) {
-            reportEngineCancel(CancelEvent.REQUEST, endpoint, victim.priority());
-            reportCancel(victim.priority(), "PRIORITY_PREEMPTED");
+    public void reportPreemptionCancelRequests(
+            String endpoint, List<DecodeRequestView> requestsToPreempt) {
+        for (var requestToPreempt : requestsToPreempt) {
+            reportEngineCancel(CancelEvent.REQUEST, endpoint, requestToPreempt.priority());
+            reportCancel(requestToPreempt.priority(), "PRIORITY_PREEMPTED");
         }
     }
 
-    /** Count one Engine Cancel intent by victim priority and cancellation reason. */
+    /** Count one Engine Cancel intent by requestToPreempt priority and cancellation reason. */
     public void reportCancel(int priority, String reason) {
         monitor.report(
                 AUTO_TPM_CANCEL_QPS,
@@ -237,9 +245,21 @@ public class RequestSchedulerReporter {
             String endpoint,
             int depth,
             int[] counts,
+            String failureDetail,
             Map<String, Object> decision) {
         Map<String, Object> details = new LinkedHashMap<>();
-        details.put("cause", role + " placement unavailable");
+        details.put(
+                "cause",
+                role
+                        + " placement unavailable; "
+                        + (failureDetail != null
+                                ? failureDetail
+                                : decision == null
+                                        ? "no detailed decision evidence recorded"
+                                        : decision.getOrDefault(
+                                                "cause",
+                                                decision.getOrDefault(
+                                                        "reason", "no failure detail recorded"))));
         details.put("role", role);
         if (group != null) details.put("group", group);
         if (endpoint != null) details.put("endpoint", endpoint);
@@ -275,13 +295,13 @@ public class RequestSchedulerReporter {
     /**
      * Maps eviction planning and commit events to their exported counters.
      */
-    public enum EvictionEvent {
+    public enum PreemptionEvent {
         PLAN(AUTO_TPM_EVICTION_PLAN_COUNT),
         COMMIT(AUTO_TPM_EVICTION_COMMIT_COUNT);
 
         private final String metric;
 
-        EvictionEvent(String metric) {
+        PreemptionEvent(String metric) {
             this.metric = metric;
         }
     }
@@ -290,11 +310,11 @@ public class RequestSchedulerReporter {
      * Maps cancellation requests, confirmations and timeouts to their exported counters.
      */
     public enum CancelEvent {
-        /** One issued cancel, tagged with the victim's priority. */
+        /** One issued cancel, tagged with the requestToPreempt's priority. */
         REQUEST(AUTO_TPM_CANCEL_REQUEST_COUNT),
-        /** Release confirmation, including after a timed-out wait; uses victim priority. */
+        /** Release confirmation, including after a timed-out wait; uses requestToPreempt priority. */
         CONFIRM(AUTO_TPM_CANCEL_CONFIRM_COUNT),
-        /** Failed plan wait; uses incoming priority and does not release the victim. */
+        /** Failed plan wait; uses incoming priority and does not release the requestToPreempt. */
         TIMEOUT(AUTO_TPM_CANCEL_TIMEOUT_COUNT);
 
         private final String metric;
@@ -311,6 +331,8 @@ public class RequestSchedulerReporter {
     public static final class QueueWaitSnapshot {
         private final String endpoint;
         private final String cause;
+        private final String headRequestId;
+        private final long headEnqueueSeq;
         private final long capturedAtMs = System.currentTimeMillis();
         private final EndpointStats.QueueCounts counters;
         private final DecodeRoutingView decode;
@@ -325,6 +347,8 @@ public class RequestSchedulerReporter {
             int depth = java.util.Arrays.stream(requestCountsByPriority).sum();
             Map<String, Object> details = new LinkedHashMap<>();
             details.put("cause", cause);
+            details.put("headRequestId", headRequestId);
+            details.put("headEnqueueSeq", headEnqueueSeq);
             details.put("capturedAtMs", capturedAtMs);
             details.put("endpoint", endpoint);
             details.put("queueDepth", depth);

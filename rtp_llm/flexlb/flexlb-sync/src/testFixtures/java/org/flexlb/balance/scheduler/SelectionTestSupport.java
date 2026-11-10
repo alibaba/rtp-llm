@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
@@ -44,26 +44,25 @@ public final class SelectionTestSupport {
     /**
      * Complete a deterministic strategy answer through the production registration callback.
      */
-    public static <T> PlacementResult<T, PlacementKey> registerResult(
-            org.mockito.invocation.InvocationOnMock call,
-            PlacementResult<T, PlacementKey> selected) {
-        if (selected.status() != PlacementResult.Status.SUCCESS) return selected;
-        Function<T, PlacementResult.Registration> registration =
+    public static <T> RoutingResult<T, CapacityKey> registerResult(
+            org.mockito.invocation.InvocationOnMock call, RoutingResult<T, CapacityKey> selected) {
+        if (selected.status() != RoutingResult.Status.SUCCESS) return selected;
+        Function<T, RoutingResult.Registration> registration =
                 call.getArgument(call.getArguments().length - 1);
         return switch (registration.apply(selected.value())) {
             case REGISTERED -> selected;
-            case CONFLICT, UNAVAILABLE -> PlacementResult.retry();
+            case CONFLICT, UNAVAILABLE -> RoutingResult.retry();
             case BLOCKED -> {
-                PlacementKey key;
+                CapacityKey key;
                 if (selected.value() instanceof PrefillSelectionStrategy.Selection<?> prefill)
                     key =
-                            new PlacementKey(
+                            new CapacityKey(
                                     call.getArgument(2), call.getArgument(3), prefill.address());
                 else {
                     var decode = (DecodeResources.DecodeRoutingView) selected.value();
-                    key = new PlacementKey(RoleType.DECODE, call.getArgument(2), decode.address());
+                    key = new CapacityKey(RoleType.DECODE, call.getArgument(2), decode.address());
                 }
-                yield PlacementResult.blocked(
+                yield RoutingResult.blocked(
                         key, Response.error(StrategyErrorType.RESOURCE_EXHAUSTED), null);
             }
         };
@@ -109,13 +108,15 @@ public final class SelectionTestSupport {
             PrefillEndpoint endpoint, RouteResult route, long workMs, boolean queued) {
         java.util.Map<?, ?> requests =
                 (java.util.Map<?, ?>)
-                        org.springframework.test.util.ReflectionTestUtils.getField(
+                        org.flexlb.balance.scheduler.DeliveryTestSupport.getField(
                                 endpoint, "requests");
         if (route.prefillReservation() != null
                 && requests.get(route.requestId()) == route.prefillReservation())
             return queued
                     ? CapacityBoundary.Attempt.accepted(route.prefillReservation())
                     : CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST);
+        if (requests.containsKey(route.requestId()))
+            return CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST);
         if (!org.mockito.Mockito.mockingDetails(route).isMock())
             throw new IllegalArgumentException("Register before constructing a real RouteResult");
         var input =
@@ -135,10 +136,10 @@ public final class SelectionTestSupport {
             registered =
                     endpoint.tryRegisterSelection(
                             input, endpoint.captureRouteProjectionInputs(), workMs, queued);
-        } while (registered.status() == PlacementResult.Registration.CONFLICT);
-        if (registered.status() != PlacementResult.Registration.REGISTERED)
+        } while (registered.status() == RoutingResult.Registration.CONFLICT);
+        if (registered.status() != RoutingResult.Registration.REGISTERED)
             return CapacityBoundary.Attempt.rejected(
-                    registered.status() == PlacementResult.Registration.UNAVAILABLE
+                    registered.status() == RoutingResult.Registration.UNAVAILABLE
                             ? CapacityBoundary.OWNERSHIP_LOST
                             : CapacityBoundary.unavailable(
                                     CapacityBoundary.Resource.PREFILL_REQUEST));

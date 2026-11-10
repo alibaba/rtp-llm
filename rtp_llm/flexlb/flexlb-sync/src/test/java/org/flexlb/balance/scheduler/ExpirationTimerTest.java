@@ -94,12 +94,16 @@ class ExpirationTimerTest {
                 RequestProtocolTestSupport.bind(
                         owner, new RequestProtocolTestSupport.Registered(route, future));
                 var claim =
-                        owner.commitDelivery(
-                                new org.flexlb.balance.scheduler.Delivery.Member(route, null),
-                                Delivery.SendMode.ROUTE_DECISION,
-                                0L);
+                        org.flexlb.balance.scheduler.DeliveryTestSupport.transport(owner.dispatcher)
+                                .commit(
+                                        new org.flexlb.balance.scheduler.Delivery.Member(
+                                                route, null),
+                                        Delivery.SendMode.ROUTE_DECISION,
+                                        0L,
+                                        null);
                 assertNotNull(claim);
-                owner.onDeliveryResult(new ContextResult.Prediction(claim, nowMs + 20_000L, nowMs));
+                owner.recordDeliveryPrediction(
+                        new ContextResult.Prediction(claim, nowMs + 20_000L, nowMs));
             }
             var before = context.snapshot();
             var exact = before.deadlines().token(kind);
@@ -143,7 +147,7 @@ class ExpirationTimerTest {
             assertEquals(ContextResult.Phase.CLOSED, context.snapshot().phase());
             assertEquals(0, runtime.requests().liveRequestCount());
             assertEquals(0, ReflectionTestUtils.getField(timer, "registrations"));
-            assertEquals(0L, ReflectionTestUtils.getField(runtime.tasks(), "pendingWork"));
+            assertEquals(0L, ReflectionTestUtils.getField(runtime.tasks(), "submittedTasks"));
         } finally {
             SchedulerTestSupport.shutdown(runtime);
         }

@@ -1,6 +1,6 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.planner.BuiltinGroupPlanner;
@@ -8,7 +8,7 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
-import org.flexlb.balance.scheduler.PlacementKey;
+import org.flexlb.balance.scheduler.CapacityKey;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
@@ -90,75 +90,6 @@ class PrefillSelectionContractTest {
     }
 
     @Test
-    void policyReturnsObservedAdmissionBlockWithoutCallerInterpretation() {
-        var endpoint = publish(registry, RoleType.PREFILL);
-        var queue =
-                new ProjectionQueueSnapshot(
-                        1000L,
-                        true,
-                        BuiltinGroupPlanner.SINGLE,
-                        Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
-                        new GroupPlanner.Constraints(1, 10000L, 10000L, 0L, 0L),
-                        List.of(
-                                new GroupPlanner.Item(
-                                        String.valueOf(1L),
-                                        50,
-                                        1L,
-                                        1000L,
-                                        Long.MAX_VALUE,
-                                        10L,
-                                        0L)),
-                        new ProjectionQueueSnapshot.AdmissionBlock(
-                                String.valueOf(1L),
-                                1L,
-                                new RequestTimeEstimation.AdmissionBlockSemantics(
-                                        "PREFILL_CAPACITY",
-                                        RequestTimeEstimation.State.BLOCKED,
-                                        "PREFILL_CAPACITY")));
-        var input = mock(PrefillSelectionStrategy.CandidateInput.class);
-        when(input.requestCapacityAvailable()).thenReturn(true);
-        when(input.address()).thenReturn(endpoint.ipPort());
-        when(input.group()).thenReturn("g");
-        when(input.projectionInputs())
-                .thenReturn(
-                        new RequestTimeEstimation.Inputs(
-                                queue,
-                                new WorkSnapshot(1000L, List.of(), List.of(), 0L),
-                                0L,
-                                endpoint.predictor.evaluator(),
-                                endpoint.deliveryMode));
-
-        var result =
-                new CostBasedPrefillStrategy(cache, service)
-                        .selectAndRegister(
-                                request,
-                                metadata,
-                                RoleType.PREFILL,
-                                "g",
-                                List.of(input),
-                                () -> 1000L,
-                                ignored -> PlacementResult.Registration.REGISTERED);
-
-        assertEquals(PlacementResult.Status.BLOCKED, result.status());
-        assertEquals(
-                PlacementKey.exact(RoleType.PREFILL, "g", endpoint.ipPort()), result.blocker());
-        assertEquals(
-                StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), result.failure().getCode());
-        assertEquals(
-                Map.of(
-                        "reason",
-                        "PREFILL_CAPACITY",
-                        "selectedEndpoint",
-                        endpoint.ipPort(),
-                        "cacheHitTokens",
-                        0L,
-                        "affinityReason",
-                        ""),
-                result.diagnostics().get("details"));
-        assertNull(result.value());
-    }
-
-    @Test
     void conflictRecalculatesOnlyTheChangedPrefillAndReusesCacheLookup() {
         var endpoint = publish(registry, RoleType.PREFILL);
         var baseline = endpoint.captureRouteProjectionInputs();
@@ -187,7 +118,7 @@ class PrefillSelectionContractTest {
                                 selected -> {
                                     attempts.add(selected.input());
                                     if (attempts.size() != 1)
-                                        return PlacementResult.Registration.REGISTERED;
+                                        return RoutingResult.Registration.REGISTERED;
                                     snapshots.set(
                                             inputs.indexOf(selected.input()),
                                             new RequestTimeEstimation.Inputs(
@@ -205,9 +136,9 @@ class PrefillSelectionContractTest {
                                                     baseline.ownershipVersion() + 1,
                                                     baseline.evaluator(),
                                                     baseline.deliveryMode()));
-                                    return PlacementResult.Registration.CONFLICT;
+                                    return RoutingResult.Registration.CONFLICT;
                                 });
-        assertEquals(PlacementResult.Status.SUCCESS, result.status());
+        assertEquals(RoutingResult.Status.SUCCESS, result.status());
         assertEquals(2, attempts.size());
         assertNotSame(attempts.getFirst(), result.value().input());
         for (var input : inputs)
@@ -257,9 +188,9 @@ class PrefillSelectionContractTest {
                                 System::currentTimeMillis,
                                 selected -> {
                                     attempted.add(selected.input());
-                                    return PlacementResult.Registration.BLOCKED;
+                                    return RoutingResult.Registration.BLOCKED;
                                 });
-        assertEquals(PlacementResult.Status.BLOCKED, result.status());
+        assertEquals(RoutingResult.Status.BLOCKED, result.status());
         assertEquals("best", result.blocker().endpoint());
         assertEquals(List.of(best), attempted);
     }
@@ -277,8 +208,7 @@ class PrefillSelectionContractTest {
                         new GroupPlanner.Constraints(1, 1000L, 1000L, 0L, 0L),
                         List.of(
                                 new GroupPlanner.Item(
-                                        String.valueOf(1L), 50, 1L, 1000L, 1500L, 10L, 0L)),
-                        null);
+                                        String.valueOf(1L), 50, 1L, 1000L, 1500L, 10L, 0L)));
         var snapshot =
                 new RequestTimeEstimation.Inputs(
                         queue,
@@ -307,7 +237,7 @@ class PrefillSelectionContractTest {
                                 null,
                                 inputs,
                                 clock::get,
-                                ignored -> PlacementResult.Registration.REGISTERED)
+                                ignored -> RoutingResult.Registration.REGISTERED)
                         .value();
 
         assertEquals(20L, selected.projectedTtftMs());
@@ -347,9 +277,9 @@ class PrefillSelectionContractTest {
                         "g",
                         inputs,
                         () -> 1000L,
-                        ignored -> PlacementResult.Registration.REGISTERED);
+                        ignored -> RoutingResult.Registration.REGISTERED);
 
-        assertEquals(PlacementResult.Status.SUCCESS, result.status());
+        assertEquals(RoutingResult.Status.SUCCESS, result.status());
         var selected = result.value();
         int winner = inputs.indexOf(selected.input());
         assertTrue(winner >= 2);
@@ -380,7 +310,7 @@ class PrefillSelectionContractTest {
                                 null,
                                 List.of(entry),
                                 () -> 1000L,
-                                ignored -> PlacementResult.Registration.REGISTERED)
+                                ignored -> RoutingResult.Registration.REGISTERED)
                         .value();
         var second =
                 policy.selectAndRegister(
@@ -390,7 +320,7 @@ class PrefillSelectionContractTest {
                                 null,
                                 List.of(synthetic),
                                 () -> 1000L,
-                                ignored -> PlacementResult.Registration.REGISTERED)
+                                ignored -> RoutingResult.Registration.REGISTERED)
                         .value();
         var third =
                 policy.selectAndRegister(
@@ -400,7 +330,7 @@ class PrefillSelectionContractTest {
                                 null,
                                 List.of(entry),
                                 () -> 1000L,
-                                ignored -> PlacementResult.Registration.REGISTERED)
+                                ignored -> RoutingResult.Registration.REGISTERED)
                         .value();
 
         assertSame(endpoint, first.input().endpoint());
@@ -434,7 +364,7 @@ class PrefillSelectionContractTest {
                                 "g",
                                 inputs,
                                 () -> 1000L,
-                                ignored -> PlacementResult.Registration.REGISTERED)
+                                ignored -> RoutingResult.Registration.REGISTERED)
                         .value();
         var second =
                 policy.selectAndRegister(
@@ -444,7 +374,7 @@ class PrefillSelectionContractTest {
                                 "g",
                                 inputs,
                                 () -> 2000L,
-                                ignored -> PlacementResult.Registration.REGISTERED)
+                                ignored -> RoutingResult.Registration.REGISTERED)
                         .value();
         assertEquals(100L, first.cacheHitTokens());
         assertEquals(900L, first.prefillWorkMs());
@@ -484,7 +414,7 @@ class PrefillSelectionContractTest {
 
         try (var route = StrategyTestSupport.scope(request)) {
             var result = strategy.select(request, metadata, RoleType.PREFILL, "g", route);
-            assertEquals(PlacementResult.Status.SUCCESS, result.status());
+            assertEquals(RoutingResult.Status.SUCCESS, result.status());
             assertEquals(effectiveHit, route.prefill().getDebugInfo().getHitCacheLen());
             assertEquals(Math.max(0L, tokens - effectiveHit), route.prefillWorkMs());
         }
@@ -502,7 +432,7 @@ class PrefillSelectionContractTest {
                 .thenReturn(localMatches(nullResults ? null : Map.of()));
         try (var route = StrategyTestSupport.scope(request)) {
             var result = strategy.select(request, metadata, RoleType.PREFILL, "g", route);
-            assertEquals(PlacementResult.Status.SUCCESS, result.status());
+            assertEquals(RoutingResult.Status.SUCCESS, result.status());
             assertEquals(0L, route.prefill().getDebugInfo().getHitCacheLen());
             assertEquals(1000L, route.prefillWorkMs());
         }
@@ -523,12 +453,9 @@ class PrefillSelectionContractTest {
         long started = System.currentTimeMillis();
         try (var route = StrategyTestSupport.scope(request)) {
             var result = strategy.select(request, metadata, role, "g", route);
-            assertEquals(PlacementResult.Status.BLOCKED, result.status());
-            assertEquals(new PlacementKey(role, "g", null), result.blocker());
-            assertEquals(
-                    (workers == 0 ? role.getErrorType() : StrategyErrorType.RESOURCE_EXHAUSTED)
-                            .getErrorCode(),
-                    result.failure().getCode());
+            assertEquals(RoutingResult.Status.BLOCKED, result.status());
+            assertEquals(new CapacityKey(role, "g", null), result.blocker());
+            assertEquals(role.getErrorType().getErrorCode(), result.failure().getCode());
             assertEquals(role.name(), result.diagnostics().get("role"));
             assertEquals(workers, result.diagnostics().get("workers"));
             long observed = (long) result.diagnostics().get("observedAtMs");
@@ -584,17 +511,17 @@ class PrefillSelectionContractTest {
         {
             try (var route = StrategyTestSupport.scope(request)) {
                 var result = strategy.select(request, metadata, RoleType.PREFILL, "g", route);
-                assertEquals(PlacementResult.Status.BLOCKED, result.status());
+                assertEquals(RoutingResult.Status.BLOCKED, result.status());
                 assertEquals(error.getErrorCode(), result.failure().getCode());
                 assertEquals(reason, result.failure().getAdmissionRejectReason());
                 assertEquals(
-                        PlacementKey.exact(RoleType.PREFILL, "g", endpoint.ipPort()),
+                        CapacityKey.exact(RoleType.PREFILL, "g", endpoint.ipPort()),
                         result.blocker());
                 assertEquals(1, result.diagnostics().get("workers"));
                 assertEquals(
                         Map.of(
                                 "reason",
-                                "PREFILL_CAPACITY",
+                                "PREFILL_REQUEST_CAPACITY",
                                 "selectedEndpoint",
                                 endpoint.ipPort(),
                                 "cacheHitTokens",
@@ -626,9 +553,14 @@ class PrefillSelectionContractTest {
             {
                 try (var route = StrategyTestSupport.scope(request)) {
                     var result = strategy.select(request, metadata, RoleType.PREFILL, "g", route);
-                    assertEquals(PlacementResult.Status.BLOCKED, result.status());
-                    assertEquals(new PlacementKey(RoleType.PREFILL, "g", null), result.blocker());
-                    assertNull(result.failure());
+                    assertEquals(RoutingResult.Status.BLOCKED, result.status());
+                    assertEquals(new CapacityKey(RoleType.PREFILL, "g", null), result.blocker());
+                    assertEquals(
+                            RoleType.PREFILL.getErrorType().getErrorCode(),
+                            result.failure().getCode());
+                    assertEquals(
+                            Map.of("reason", "CANDIDATES_UNAVAILABLE"),
+                            result.diagnostics().get("details"));
                     assertNull(route.prefill());
                     assertFalse(selectedEndpoint.isRetired());
                 }

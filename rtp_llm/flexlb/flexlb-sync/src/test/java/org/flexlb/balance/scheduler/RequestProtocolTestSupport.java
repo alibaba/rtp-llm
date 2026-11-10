@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -43,13 +43,13 @@ final class RequestProtocolTestSupport {
         return new SelectedRoute(context, routing, admissionHandle(context));
     }
 
-    static PlacementOperation admissionHandle(RequestContext context) {
+    static RoutingContext admissionHandle(RequestContext context) {
         var scheduler = context.data().getRequestScheduler();
         if (scheduler != null
                 && scheduler.repository != null
                 && scheduler.repository.isCurrent(context)
-                && context.snapshot().placement() != null) {
-            return context.snapshot().placement();
+                && context.snapshot().routingContext() != null) {
+            return context.snapshot().routingContext();
         }
         if (scheduler == null) {
             scheduler = schedulerMock();
@@ -64,18 +64,18 @@ final class RequestProtocolTestSupport {
                 Long.MAX_VALUE,
                 60_000L,
                 org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
-        if (context.snapshot().placement() == null) context.beginPlacement(null);
-        var operation = context.snapshot().placement();
+        if (context.snapshot().routingContext() == null) context.beginRouteSelection();
+        var operation = context.snapshot().routingContext();
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            if (context.beginPlacementCompletion(operation)) {
-                                context.completePlacement(
+                            if (context.beginRoutingCompletion(operation)) {
+                                context.completeRouting(
                                         operation, call.getArgument(1), System.currentTimeMillis());
                             }
                             return null;
                         })
                 .when(scheduler)
-                .completePlacement(
+                .completeRouting(
                         org.mockito.ArgumentMatchers.same(operation),
                         org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.nullable(Response.class));
@@ -103,13 +103,9 @@ final class RequestProtocolTestSupport {
         return scheduler;
     }
 
-    static AbstractRequestScheduler placementScheduler(PlacementOperation operation) {
-        var data = ReflectionTestUtils.getField(operation.owner(), "data");
+    static AbstractRequestScheduler placementScheduler(RoutingContext operation) {
+        var data = ReflectionTestUtils.getField(operation.requestContext(), "data");
         return (AbstractRequestScheduler) ReflectionTestUtils.getField(data, "requestScheduler");
-    }
-
-    static RequestContext planContext(SelectedRoute plan) {
-        return plan.context;
     }
 
     static RouteResult planRouting(SelectedRoute plan) {
@@ -153,27 +149,23 @@ final class RequestProtocolTestSupport {
                         org.mockito.Mockito.withSettings()
                                 .useConstructor(context, registered)
                                 .defaultAnswer(org.mockito.Mockito.CALLS_REAL_METHODS));
-        if (route.prefillReservation() != null
-                && org.mockito.Mockito.mockingDetails(route.prefillReservation()).isMock())
-            org.mockito.Mockito.when(route.prefillReservation().belongsTo(route)).thenReturn(true);
-        org.mockito.Mockito.when(route.validateEndpoints(org.mockito.ArgumentMatchers.any()))
-                .thenAnswer(call -> call.getArgument(0));
+        org.mockito.Mockito.doAnswer(call -> call.getArgument(0))
+                .when(route)
+                .validateEndpoints(org.mockito.ArgumentMatchers.any());
         return route;
     }
 
-    static PlacementResult<RouteResult, PlacementKey> published(
+    static RoutingResult<RouteResult, CapacityKey> published(
             RouteResult selected, RouteResult route) {
         recordPrefillReservation(selected);
         var context = selected.ctx();
-        var operation = context.snapshot().placement();
+        var operation = context.snapshot().routingContext();
         context.publishRoute(operation, selected);
-        return PlacementResult.success(route);
+        return RoutingResult.success(route);
     }
 
     static boolean recordPrefillReservation(RouteResult route) {
         org.junit.jupiter.api.Assertions.assertNotNull(route.prefillReservation());
-        if (org.mockito.Mockito.mockingDetails(route.prefillEndpoint()).isMock())
-            org.mockito.Mockito.when(route.prefillEndpoint().isQueued(route)).thenReturn(true);
         return true;
     }
 
@@ -227,10 +219,10 @@ final class RequestProtocolTestSupport {
         return endpoint;
     }
 
-    static AdmissionCompletion finishOnExit(PlacementOperation handle) {
+    static AdmissionCompletion finishOnExit(RoutingContext handle) {
         return () -> {
             if (handle != null) {
-                AbstractRequestScheduler.finishPlacement(handle);
+                AbstractRequestScheduler.finishRouting(handle);
             }
         };
     }
@@ -278,7 +270,7 @@ final class RequestProtocolTestSupport {
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler));
     }
 
-    static PlacementOperation beginAdmission(
+    static RoutingContext beginAdmission(
             AbstractRequestScheduler scheduler, RequestContext context) {
         return SchedulerTestSupport.claim(
                 scheduler, context.data().getRequestId(), context.data().getFuture());
@@ -342,8 +334,8 @@ final class RequestProtocolTestSupport {
         }
     }
 
-    static AbstractRequestScheduler publication(AbstractRequestScheduler requests) {
-        return requests;
+    static QueuedRequestScheduler publication(AbstractRequestScheduler requests) {
+        return (QueuedRequestScheduler) requests;
     }
 
     /**
@@ -354,8 +346,8 @@ final class RequestProtocolTestSupport {
             org.flexlb.config.ConfigService service,
             RequestRouteSelector router,
             org.flexlb.service.monitor.DeliveryMetricsReporter reporter,
-            org.flexlb.balance.eviction.DecodePreemption eviction,
-            PlacementAvailability availability) {
+            org.flexlb.balance.preemption.DecodePreemption eviction,
+            CapacityNotifier availability) {
         var config = service.loadBalanceConfig();
         ReflectionTestUtils.setField(
                 org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(owner),
@@ -364,7 +356,9 @@ final class RequestProtocolTestSupport {
         if (org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(owner)
                 instanceof QueuedRequestScheduler queue) {
             ReflectionTestUtils.setField(queue, "decodePreemption", eviction);
-            ReflectionTestUtils.setField(owner.dispatcher, "telemetry", reporter);
+            ReflectionTestUtils.setField(queue, "priorityOrdering", config.isPriorityOrdering());
+            org.flexlb.balance.scheduler.DeliveryTestSupport.setField(
+                    owner.dispatcher, "reporter", reporter);
             ReflectionTestUtils.setField(
                     queue,
                     "plannerCount",
@@ -374,23 +368,23 @@ final class RequestProtocolTestSupport {
                     "queueSettings",
                     QueueExecutionSettings.capture(
                             config, org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)));
-            var placementQueue = new OrderedRequestQueue(config.isPriorityOrdering());
-            ReflectionTestUtils.setField(queue, "orderedQueue", placementQueue);
+            var schedulingQueue = new OrderedRequestQueue(config.isPriorityOrdering());
+            ReflectionTestUtils.setField(queue, "orderedQueue", schedulingQueue);
             ReflectionTestUtils.setField(
                     queue,
                     "scanBudgetMultiplier",
                     config.queueScheduler().getScanBudgetMultiplier());
             var oldAvailability =
-                    (PlacementAvailability) ReflectionTestUtils.getField(queue, "availability");
+                    (CapacityNotifier) ReflectionTestUtils.getField(queue, "capacityNotifier");
             var listener =
-                    (PlacementAvailability.Listener)
-                            ReflectionTestUtils.getField(queue, "availabilityListener");
+                    (CapacityNotifier.Listener)
+                            ReflectionTestUtils.getField(queue, "capacityListener");
             oldAvailability.removeListener(listener);
-            ReflectionTestUtils.setField(queue, "availability", availability);
+            ReflectionTestUtils.setField(queue, "capacityNotifier", availability);
             ReflectionTestUtils.setField(
                     queue,
                     "waitingRequests",
-                    new PlacementCapacityWaitQueue(placementQueue.order(), availability));
+                    new CapacityWaitQueue(schedulingQueue.order(), availability));
             availability.addListener(listener);
             org.mockito.Mockito.doCallRealMethod()
                     .when(queue)
@@ -462,7 +456,7 @@ final class RequestProtocolTestSupport {
             AbstractRequestScheduler owner, RequestContext context) {
         // Protocol fixtures provide the initial route themselves. Later retries use the policy.
         if (org.mockito.Mockito.mockingDetails(owner).isMock()) {
-            org.mockito.Mockito.doNothing().doCallRealMethod().when(owner).onRequest(context);
+            org.mockito.Mockito.doNothing().doCallRealMethod().when(owner).scheduleRequest(context);
         }
         return owner.submit(context, () -> {});
     }
@@ -585,10 +579,10 @@ final class RequestProtocolTestSupport {
                 now + 60_000L,
                 60_000L,
                 org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
-        var admission = ctx.beginPlacement(null);
+        var admission = ctx.beginRouteSelection();
         org.junit.jupiter.api.Assertions.assertNotNull(admission);
         org.junit.jupiter.api.Assertions.assertTrue(ctx.publishRoute(admission, route));
-        ctx.completePlacement(admission, ContextResult.PublicationResult.PUBLISHED, now);
+        ctx.completeRouting(admission, ContextResult.RoutingCompletion.FINISHED, now);
         ctx.beginClose(
                 ContextResult.EndEvidence.failure(
                         route,
@@ -614,7 +608,7 @@ final class RequestProtocolTestSupport {
     }
 
     static void bind(AbstractRequestScheduler lifecycle, Registered registered) {
-        PlacementOperation admission =
+        RoutingContext admission =
                 SchedulerTestSupport.claim(
                         lifecycle, registered.item().requestId(), registered.future());
         try (var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
@@ -624,18 +618,18 @@ final class RequestProtocolTestSupport {
                                     lifecycle,
                                     registered.item(),
                                     RequestProtocolTestSupport.publication(() -> true))
-                            == org.flexlb.balance.PlacementResult.Status.SUCCESS));
+                            == org.flexlb.balance.RoutingResult.Status.SUCCESS));
         }
     }
 
     static void beginRoutePublication(AbstractRequestScheduler lifecycle, Registered registered) {
-        assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
+        assertEquals(RoutingResult.Status.SUCCESS, commitRoute(lifecycle, registered));
     }
 
-    static PlacementResult.Status commitRoute(
+    static RoutingResult.Status commitRoute(
             AbstractRequestScheduler lifecycle, RouteResult route, Publication action) {
-        var admission = lifecycle.placementFor(route);
-        if (admission == null) return PlacementResult.Status.CLOSED;
+        var admission = lifecycle.currentRoutingContext(route);
+        if (admission == null) return RoutingResult.Status.CLOSED;
         Throwable failure = org.flexlb.util.Failures.run(null, action::publish);
         boolean published = action.published();
         boolean recorded = published && route.ctx().publishRoute(admission, route);
@@ -647,18 +641,18 @@ final class RequestProtocolTestSupport {
         if (!recorded)
             failure =
                     org.flexlb.util.Failures.append(
-                            failure, AbstractRequestScheduler.finishPlacement(route, null));
+                            failure, AbstractRequestScheduler.finishUnpublishedRoute(route, null));
         org.flexlb.util.Failures.rethrow(failure, "test publication failed");
         return recorded
-                ? PlacementResult.Status.SUCCESS
+                ? RoutingResult.Status.SUCCESS
                 : route.ctx().canPublishRoute(admission)
-                        ? PlacementResult.Status.BLOCKED
-                        : PlacementResult.Status.CLOSED;
+                        ? RoutingResult.Status.BLOCKED
+                        : RoutingResult.Status.CLOSED;
     }
 
-    static PlacementResult.Status commitRoute(
+    static RoutingResult.Status commitRoute(
             AbstractRequestScheduler lifecycle, Registered registered) {
-        PlacementOperation admission =
+        RoutingContext admission =
                 SchedulerTestSupport.claim(
                         lifecycle, registered.item().requestId(), registered.future());
         try (var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
@@ -674,7 +668,7 @@ final class RequestProtocolTestSupport {
             AbstractRequestScheduler registry, RouteResult item, BooleanSupplier handoff) {
         Delivery.Member claim = claimRouteWithoutPrediction(registry, item, handoff);
         if (claim != null) {
-            registry.onDeliveryResult(
+            registry.recordDeliveryPrediction(
                     new Prediction(
                             claim,
                             System.currentTimeMillis() + 30_000L,
@@ -685,11 +679,13 @@ final class RequestProtocolTestSupport {
 
     static Delivery.Member claimRouteWithoutPrediction(
             AbstractRequestScheduler registry, RouteResult item, BooleanSupplier handoff) {
-        return registry.commitDelivery(
-                new org.flexlb.balance.scheduler.Delivery.Member(
-                        item, RequestProtocolTestSupport.handoff(handoff)),
-                Delivery.SendMode.ROUTE_DECISION,
-                0L);
+        return org.flexlb.balance.scheduler.DeliveryTestSupport.transport(registry.dispatcher)
+                .commit(
+                        new org.flexlb.balance.scheduler.Delivery.Member(
+                                item, RequestProtocolTestSupport.handoff(handoff)),
+                        Delivery.SendMode.ROUTE_DECISION,
+                        0L,
+                        null);
     }
 
     static Delivery.Member claimBatch(
@@ -699,7 +695,7 @@ final class RequestProtocolTestSupport {
             BooleanSupplier handoff) {
         Delivery.Member claim = claimBatchWithoutPrediction(registry, item, batchId, handoff);
         if (claim != null) {
-            registry.onDeliveryResult(
+            registry.recordDeliveryPrediction(
                     new Prediction(
                             claim,
                             System.currentTimeMillis() + 30_000L,
@@ -713,21 +709,13 @@ final class RequestProtocolTestSupport {
             RouteResult item,
             long batchId,
             BooleanSupplier handoff) {
-        return registry.commitDelivery(
-                new org.flexlb.balance.scheduler.Delivery.Member(
-                        item, RequestProtocolTestSupport.handoff(handoff)),
-                Delivery.SendMode.BATCH_ENQUEUE,
-                batchId);
-    }
-
-    // State-only fixtures deliberately seed a phase without executing publication or timers.
-    static void startRouteDelivery(AbstractRequestScheduler scheduler, RequestContext context) {
-        assertNotNull(
-                scheduler.commitDelivery(
+        return org.flexlb.balance.scheduler.DeliveryTestSupport.transport(registry.dispatcher)
+                .commit(
                         new org.flexlb.balance.scheduler.Delivery.Member(
-                                context.snapshot().route(), handoff(() -> true)),
-                        Delivery.SendMode.ROUTE_DECISION,
-                        0L));
+                                item, RequestProtocolTestSupport.handoff(handoff)),
+                        Delivery.SendMode.BATCH_ENQUEUE,
+                        batchId,
+                        null);
     }
 
     static org.flexlb.balance.endpoint.DecodeEndpoint.EngineDispatchPermit handoff(
@@ -751,34 +739,6 @@ final class RequestProtocolTestSupport {
                                                         .OWNERSHIP_LOST,
                                         false));
         return permit;
-    }
-
-    static void startBatchDelivery(
-            AbstractRequestScheduler scheduler, RequestContext context, long batchId) {
-        assertNotNull(
-                scheduler.commitDelivery(
-                        new org.flexlb.balance.scheduler.Delivery.Member(
-                                context.snapshot().route(), handoff(() -> true)),
-                        Delivery.SendMode.BATCH_ENQUEUE,
-                        batchId));
-    }
-
-    static ExpirationTimer.Token markDecodeAccepted(RequestContext context) {
-        var previous = context.snapshot().deadlines().visibility();
-        var route = context.snapshot().route();
-        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
-                context,
-                observedRequest ->
-                        observedRequest.recordWorkerRequestEvent(
-                                new WorkerRequestEvent(
-                                        route,
-                                        route.decodeReservation(),
-                                        RoleType.DECODE,
-                                        WorkerRequestEventType.ACTIVE,
-                                        0L,
-                                        null,
-                                        System.currentTimeMillis())));
-        return previous;
     }
 
     static Runnable acknowledge(AbstractRequestScheduler scheduler, RequestContext context) {
@@ -812,8 +772,7 @@ final class RequestProtocolTestSupport {
             throws InterruptedException {
         var queue = (QueuedRequestScheduler) scheduler;
         var lock = (ReentrantLock) ReflectionTestUtils.getField(queue, "lock");
-        var waiting =
-                (PlacementCapacityWaitQueue) ReflectionTestUtils.getField(queue, "waitingRequests");
+        var waiting = (CapacityWaitQueue) ReflectionTestUtils.getField(queue, "waitingRequests");
         var membership = (Map<?, ?>) ReflectionTestUtils.getField(waiting, "membership");
         awaitCondition(
                 () -> {
@@ -843,8 +802,7 @@ final class RequestProtocolTestSupport {
                 org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(scheduler);
         var lock = (ReentrantLock) ReflectionTestUtils.getField(coordinator, "lock");
         var waitQueue =
-                (PlacementCapacityWaitQueue)
-                        ReflectionTestUtils.getField(coordinator, "waitingRequests");
+                (CapacityWaitQueue) ReflectionTestUtils.getField(coordinator, "waitingRequests");
         var waiting = (Map<?, ?>) ReflectionTestUtils.getField(waitQueue, "membership");
         // A route's close callback runs before park. Observe actual wait registration
         // under the coordinator lock, rather than treating that callback as a barrier.
@@ -900,7 +858,7 @@ final class RequestProtocolTestSupport {
                                 .getDecision()
                                 .getLifetime(),
                         now);
-        scheduler.onDeliveryResult(new Prediction(claim, deadline, now));
+        scheduler.recordDeliveryPrediction(new Prediction(claim, deadline, now));
     }
 
     static void routeDelivered(
@@ -923,29 +881,58 @@ final class RequestProtocolTestSupport {
         scheduler.onDeliveryResult(new RouteDelivered(claim, deadline, now));
     }
 
+    static java.util.concurrent.CompletableFuture<PreemptionRegistration.Reply> cancelForPreemption(
+            DeliveryCoordinator dispatcher,
+            PreemptionRegistration registration,
+            org.flexlb.balance.endpoint.DecodeEndpoint endpoint,
+            String detail,
+            long timeoutMs) {
+        return SchedulerTestSupport.preemption(registration.owner().data().getRequestScheduler())
+                .cancelRequest(
+                        dispatcher,
+                        SchedulerTestSupport.runtime(
+                                        registration.owner().data().getRequestScheduler())
+                                .taskTimer(),
+                        registration,
+                        endpoint,
+                        detail,
+                        timeoutMs);
+    }
+
     static boolean preemptionPhase(
             AbstractRequestScheduler scheduler,
             PreemptionRegistration claim,
             org.flexlb.balance.preemption.PreemptionCancelPhase phase) {
-        return scheduler.onPreemption(
-                claim,
-                new AbstractRequestScheduler.PreemptionEvent(phase, false, null, null, null));
+        return org.flexlb.balance.scheduler.SchedulerTestSupport.preemption(scheduler)
+                .applyEvent(
+                        claim,
+                        new org.flexlb.balance.preemption.PreemptionCompletion.PreemptionEvent(
+                                phase, false, null, null, null));
     }
 
     static boolean releasePreemption(
             AbstractRequestScheduler scheduler, PreemptionRegistration claim) {
-        return scheduler.onPreemption(
-                claim, new AbstractRequestScheduler.PreemptionEvent(null, true, null, null, null));
+        return org.flexlb.balance.scheduler.SchedulerTestSupport.preemption(scheduler)
+                .applyEvent(
+                        claim,
+                        new org.flexlb.balance.preemption.PreemptionCompletion.PreemptionEvent(
+                                null, true, null, null, null));
     }
 
     static boolean finishPreemption(
             AbstractRequestScheduler scheduler, PreemptionRegistration claim, String detail) {
         var route = claim.owner().snapshot().route();
         return route != null
-                && scheduler.onPreemption(
-                        claim,
-                        new AbstractRequestScheduler.PreemptionEvent(
-                                null, false, route.decodeEndpoint(), claim.reservation(), detail));
+                && org.flexlb.balance.scheduler.SchedulerTestSupport.preemption(scheduler)
+                        .applyEvent(
+                                claim,
+                                new org.flexlb.balance.preemption.PreemptionCompletion
+                                        .PreemptionEvent(
+                                        null,
+                                        false,
+                                        route.decodeEndpoint(),
+                                        claim.reservation(),
+                                        detail));
     }
 
     static void decodeRetired(
@@ -979,11 +966,12 @@ final class RequestProtocolTestSupport {
         return facts != null && facts.identity() == claim && facts.finished()
                 || result != null
                         && result.outcome()
-                                == org.flexlb.balance.preemption.VictimResolution.Outcome
+                                == org.flexlb.balance.preemption.PreemptionRequestResult.Outcome
                                         .REQUEST_END;
     }
 
-    static org.flexlb.balance.preemption.VictimResolution resolved(PreemptionRegistration claim) {
+    static org.flexlb.balance.preemption.PreemptionRequestResult resolved(
+            PreemptionRegistration claim) {
         return claim.result();
     }
 
@@ -1019,9 +1007,9 @@ final class RequestProtocolTestSupport {
     static final class SelectedRoute implements AutoCloseable {
         final RequestContext context;
         final RouteResult route;
-        private PlacementOperation operation;
+        private RoutingContext operation;
 
-        SelectedRoute(RequestContext context, RouteResult route, PlacementOperation operation) {
+        SelectedRoute(RequestContext context, RouteResult route, RoutingContext operation) {
             this.context = context;
             this.route = route;
             this.operation = operation;
@@ -1032,8 +1020,10 @@ final class RequestProtocolTestSupport {
             var finishing = operation;
             operation = null;
             if (finishing == null) return;
-            var failure = AbstractRequestScheduler.finishPlacement(route, finishing);
-            if (failure != null) placementScheduler(finishing).taskPool.recordFailure(failure);
+            var failure =
+                    AbstractRequestScheduler.finishUnpublishedRoute(
+                            context.snapshot().route() == route ? null : route, finishing);
+            if (failure != null) placementScheduler(finishing).recordRequestFailure(failure);
         }
     }
 

@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.CapacityNotifier;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -33,7 +33,7 @@ import static org.mockito.Mockito.mock;
  */
 class EndpointRegistryRoleTest {
     private EndpointRegistry registry;
-    private PlacementAvailability availability;
+    private CapacityNotifier availability;
 
     @Test
     void vitSelectionSkipsRetiringEndpointsBeforeTheirRegistryEntriesAreRemoved() {
@@ -85,7 +85,7 @@ class EndpointRegistryRoleTest {
                 .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointTestSupport.TestRequestRuntime requestRuntime =
                 EndpointTestSupport.requestRuntime();
-        availability = Mockito.spy(new PlacementAvailability());
+        availability = Mockito.spy(new CapacityNotifier());
         registry =
                 new EndpointRegistry(
                         configService,
@@ -95,9 +95,7 @@ class EndpointRegistryRoleTest {
                         availability,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                 configService.loadBalanceConfig()),
-                        order ->
-                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
-                                        16, order));
+                        () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
     }
 
     @AfterEach
@@ -141,7 +139,7 @@ class EndpointRegistryRoleTest {
                             throw failure;
                         })
                 .when(availability)
-                .changed(Mockito.argThat(endpoint -> endpoint.ipPort().equals(address)));
+                .notifyChanged(Mockito.argThat(endpoint -> endpoint.ipPort().equals(address)));
 
         assertSame(
                 failure,

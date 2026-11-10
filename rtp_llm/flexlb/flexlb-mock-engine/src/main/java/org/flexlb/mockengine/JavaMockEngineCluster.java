@@ -79,7 +79,7 @@ public final class JavaMockEngineCluster {
      * Engine-side KV admission failure code (production C++ ErrorCode::MALLOC_FAILED
      * = 602; the master's own 8431 RESOURCE_EXHAUSTED is NOT valid from an engine).
      * Surfaced synchronously in the EnqueueBatch error list so the master's
-     * DeliveryDispatcher raises EngineRejectedException on the dispatch path.
+     * DeliveryCoordinator raises EngineRejectedException on the dispatch path.
      */
     static final long LACK_MEM_ERROR_CODE = 602L;
 
@@ -771,7 +771,9 @@ public final class JavaMockEngineCluster {
         /** Safety-net TTL for cancelled markers never consumed by a completion callback. */
         private static final long CANCELLED_MARKER_TTL_SECONDS = 600;
 
-        /** Public error contract for a victim canceled by priority preemption. */
+        /**
+         * Public error contract for a request canceled by priority preemption.
+         */
         private static final long PRIORITY_PREEMPTED_ERROR_CODE = 8429;
 
         private final String engineName;
@@ -2754,11 +2756,11 @@ public final class JavaMockEngineCluster {
             lastEnqueueTime.set(System.nanoTime());
             // Kill the port (captured reference: a racing /start_engine that
             // already rebuilt a new server must keep it; re-shutting the dead
-            // victim is a harmless no-op).
-            Server victim = this.grpcServer;
-            if (victim != null) {
+            // request selected for preemption is a harmless no-op).
+            Server serverToStop = this.grpcServer;
+            if (serverToStop != null) {
                 scheduler.schedule(
-                        victim::shutdownNow, CRASH_PORT_KILL_DELAY_MS, TimeUnit.MILLISECONDS);
+                        serverToStop::shutdownNow, CRASH_PORT_KILL_DELAY_MS, TimeUnit.MILLISECONDS);
             }
         }
 
@@ -2841,9 +2843,9 @@ public final class JavaMockEngineCluster {
          * GRACEFUL removal may tear the gRPC server down: running tasks, both
          * prefill wait queues (master-composed batches + direct-path parks),
          * the decode pending queue, running batch/decode counters, and
-         * cross-engine P→D ownership in BOTH directions (a prefill victim must
+         * cross-engine P→D ownership in BOTH directions (a prefill request selected for preemption must
          * outlive requests it already handed to a decode engine; a decode
-         * victim must outlive streams an upstream prefill parked on it).
+         * request selected for preemption must outlive streams an upstream prefill parked on it).
          *
          * <p>Deliberately NOT included: the un-acked completion backlog
          * ({@code completions}) — its consumer is the master's status poll, and
@@ -6189,6 +6191,9 @@ public final class JavaMockEngineCluster {
         }
     }
 
+    /**
+     * Parses cluster startup options for engine topology, capacity and runtime output files.
+     */
     static final class Config {
         // Package-private for direct assertions in ClusterConfigParamTest.
         int nPrefill = 2;
@@ -6330,7 +6335,8 @@ public final class JavaMockEngineCluster {
                                 .resolveSibling("discovery.json")
                                 .toString();
             }
-            // Single-role clusters are allowed (e.g. engine_kill_restart_test victim JVMs
+            // Single-role clusters are allowed (e.g. engine_kill_restart_test request selected for
+            // preemption JVMs
             // hosting only prefill or only decode engines), but at least one engine is required.
             checkArgument(
                     config.nPrefill >= 0

@@ -335,6 +335,54 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             [c["request_pb"].generate_input for c in client.calls], [b"", b""]
         )
 
+    async def test_scheduler_shutdown_retries_other_node_with_same_request(self):
+        client = _CaptureMasterClient(
+            _FakeHostServiceWithSlave(),
+            [
+                FlexlbScheduleResponsePB(code=ExceptionType.SCHEDULER_UNAVAILABLE),
+                FlexlbScheduleResponsePB(code=200, success=True),
+            ],
+        )
+        result = await client.get_backend_role_addrs([1], 1024, _FakeInput(), 99)
+        self.assertTrue(result.is_ok)
+        self.assertEqual(
+            [c["addr"] for c in client.calls], ["master:1234", "slave:1234"]
+        )
+        self.assertEqual(client.calls[0]["request_pb"], client.calls[1]["request_pb"])
+
+    async def test_shutdown_retry_does_not_hide_rejection_when_slave_is_unreachable(
+        self,
+    ):
+        client = _CaptureMasterClient(
+            _FakeHostServiceWithSlave(),
+            [FlexlbScheduleResponsePB(code=ExceptionType.SCHEDULER_UNAVAILABLE), None],
+        )
+        with self.assertRaises(FtRuntimeException) as raised:
+            await client.get_backend_role_addrs([1], 1024, _FakeInput(), 99)
+        self.assertEqual(
+            raised.exception.exception_type, ExceptionType.SCHEDULER_UNAVAILABLE
+        )
+        self.assertEqual(len(client.calls), 2)
+
+    async def test_shutdown_code_with_admission_evidence_is_not_replayed(self):
+        for evidence in ("enqueued", "lifecycle", "server", "reason"):
+            with self.subTest(evidence=evidence):
+                response = FlexlbScheduleResponsePB(
+                    code=ExceptionType.SCHEDULER_UNAVAILABLE
+                )
+                if evidence == "enqueued":
+                    response.enqueued_by_master = True
+                elif evidence == "lifecycle":
+                    response.lifecycle.SetInParent()
+                elif evidence == "server":
+                    response.server_status.add(role="PREFILL")
+                else:
+                    response.admission_reject_reason = RESOURCE_EXHAUSTED
+                client = _CaptureMasterClient(_FakeHostServiceWithSlave(), [response])
+                with self.assertRaises(FtRuntimeException):
+                    await client.get_backend_role_addrs([1], 1024, _FakeInput(), 99)
+                self.assertEqual(len(client.calls), 1)
+
     async def test_provided_input_is_serialized_once_across_slave_fallback(self):
         client = _CaptureMasterClient(
             _FakeHostServiceWithSlave(),

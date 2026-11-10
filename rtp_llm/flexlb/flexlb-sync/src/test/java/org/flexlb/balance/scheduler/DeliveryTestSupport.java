@@ -3,9 +3,10 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
-import org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler;
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.mockito.Mockito;
+import org.springframework.util.ReflectionUtils;
 
 import java.util.List;
 import java.util.OptionalLong;
@@ -31,59 +32,71 @@ public final class DeliveryTestSupport {
 
     private DeliveryTestSupport() {}
 
-    public static Delivery queued(
-            List<RouteResult> items,
-            org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput batchInput,
-            long[] predictions,
-            RouteResult failed,
-            long now) {
-        return queued(items, batchInput, predictions, failed, now, null);
-    }
-
-    public static Delivery queued(
-            List<RouteResult> items,
-            org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput batchInput,
-            long[] predictions,
-            RouteResult failed,
-            long now,
-            RouteResult bypassed) {
-        var delivery =
-                new Delivery(
-                        items.isEmpty() ? null : items.getFirst().prefillEndpoint(),
-                        batchInput != null,
-                        items.size(),
-                        null,
-                        "test");
-        for (var item : items) delivery.members.add(new Delivery.Member(item, null));
-        if (batchInput != null) {
-            delivery.batchId = batchInput.batchId();
-            delivery.maxInflightBatches = batchInput.maximumInflight();
+    public static void setField(Object target, String name, Object value) {
+        if (target instanceof DeliveryCoordinator coordinator) {
+            if (name.equals("grpcClient")) {
+                target = getField(coordinator, "engine");
+                if (target == null) {
+                    org.springframework.test.util.ReflectionTestUtils.setField(
+                            coordinator,
+                            "engine",
+                            new EngineDelivery((org.flexlb.engine.grpc.EngineGrpcClient) value));
+                    return;
+                }
+            } else if (name.equals("requests")
+                    || name.equals("reporter")
+                    || name.equals("decodeAdmissionCapacity")) {
+                target = transport(coordinator);
+                if (name.equals("decodeAdmissionCapacity")) name = "capacity";
+            }
         }
-        if (batchInput != null) {
-            delivery.predictedMs = predictions[0];
-            delivery.features =
-                    PrefillBatchFeatures.from(items, RouteResult::seqLen, RouteResult::hitCache);
-        } else System.arraycopy(predictions, 0, delivery.predictions, 0, predictions.length);
-        delivery.blocked = failed;
-        delivery.boundary =
-                failed == null
-                        ? null
-                        : CapacityBoundary.failed(
-                                new IllegalStateException("test preparation failure"));
-        delivery.selectionTimeMs = now;
-        delivery.bypassedHead = bypassed;
-        return delivery;
+        org.springframework.test.util.ReflectionTestUtils.setField(target, name, value);
     }
 
-    public static DeliveryDispatcher route(DeliveryMetricsReporter reporter) {
+    public static Object getField(Object target, String name) {
+        if (target instanceof DeliveryCoordinator coordinator) {
+            if (name.equals("grpcClient"))
+                target =
+                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                coordinator, "engine");
+            else if (name.equals("requests")
+                    || name.equals("reporter")
+                    || name.equals("decodeAdmissionCapacity")) {
+                target =
+                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                coordinator, "dispatcher");
+                if (name.equals("decodeAdmissionCapacity")) name = "capacity";
+            }
+        }
+        return target == null
+                ? null
+                : org.springframework.test.util.ReflectionTestUtils.getField(target, name);
+    }
+
+    public static org.flexlb.balance.endpoint.PrefillEndpoint.DeliverySelection queued(
+            List<RouteResult> items, BatchInput batchInput, long[] predictions) {
+        return new org.flexlb.balance.endpoint.PrefillEndpoint.DeliverySelection(
+                items,
+                batchInput != null,
+                batchInput == null ? 0L : batchInput.batchId(),
+                batchInput == null ? 0 : batchInput.maximumInflight(),
+                batchInput == null ? 0L : predictions[0],
+                batchInput == null
+                        ? null
+                        : PrefillBatchFeatures.from(
+                                items, RouteResult::seqLen, RouteResult::hitCache),
+                batchInput == null ? predictions : null);
+    }
+
+    public static DeliveryCoordinator route(DeliveryMetricsReporter reporter) {
         var config = SchedulingTestConfig.newConfig();
         config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
-        return new DeliveryDispatcher(
+        return new DeliveryCoordinator(
+                new org.flexlb.balance.scheduler.RequestRepository(),
                 null,
                 service(config),
                 reporter,
-                org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
-                new org.flexlb.balance.scheduler.PlacementConfiguration()
+                new org.flexlb.balance.scheduler.SchedulerConfiguration()
                         .decodeAdmissionCapacity(service(config)),
                 org.mockito.Mockito.mock(org.flexlb.balance.scheduler.DeliveryExecution.class));
     }
@@ -94,7 +107,7 @@ public final class DeliveryTestSupport {
         return service;
     }
 
-    public static DeliveryDispatcher parked(CapacityBoundary boundary) {
+    public static DeliveryCoordinator parked(CapacityBoundary boundary) {
         return new StubDispatcher() {
             @Override
             CapacityBoundary selectBoundary(
@@ -107,12 +120,12 @@ public final class DeliveryTestSupport {
     }
 
     public static org.flexlb.config.DispatcherConfig.Type projection(
-            DeliveryDispatcher dispatcher) {
+            DeliveryCoordinator dispatcher) {
         return dispatcher.mode();
     }
 
     public static void installQueueFixture(
-            PrefillQueueScheduler worker, DeliveryDispatcher dispatcher) {
+            PrefillQueueScheduler worker, DeliveryCoordinator dispatcher) {
         if (!(dispatcher instanceof StubDispatcher stub)) {
             return;
         }
@@ -123,14 +136,7 @@ public final class DeliveryTestSupport {
                                         call.getArgument(2),
                                         call.getArgument(3)))
                 .when(worker)
-                .processSelection(
-                        Mockito.any(),
-                        Mockito.any(),
-                        Mockito.any(),
-                        Mockito.any(),
-                        Mockito.any(),
-                        org.mockito.ArgumentMatchers.any(),
-                        org.mockito.ArgumentMatchers.any());
+                .processSelection(Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any());
         Mockito.doAnswer(call -> stub.capacityAvailable(call.getArgument(0), call.getArgument(1)))
                 .when(worker)
                 .capacityAvailable(Mockito.any(), Mockito.any());
@@ -150,14 +156,7 @@ public final class DeliveryTestSupport {
             String reason,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong prediction) {
-        return worker.processSelection(
-                items,
-                reason,
-                evaluator,
-                prediction,
-                null,
-                Delivery.PrefixPolicy.ORDERED_PREFIX,
-                () -> true);
+        return worker.processSelection(items, reason, evaluator, prediction);
     }
 
     public static void afterSelection(
@@ -168,14 +167,7 @@ public final class DeliveryTestSupport {
                             return call.callRealMethod();
                         })
                 .when(worker)
-                .processSelection(
-                        Mockito.any(),
-                        Mockito.any(),
-                        Mockito.any(),
-                        Mockito.any(),
-                        Mockito.any(),
-                        org.mockito.ArgumentMatchers.any(),
-                        org.mockito.ArgumentMatchers.any());
+                .processSelection(Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any());
     }
 
     public static void selectWith(PrefillQueueScheduler worker, Selection selection) {
@@ -195,17 +187,11 @@ public final class DeliveryTestSupport {
                                             }
                                         }))
                 .when(worker)
-                .processSelection(
-                        Mockito.any(),
-                        Mockito.any(),
-                        Mockito.any(),
-                        Mockito.any(),
-                        Mockito.any(),
-                        org.mockito.ArgumentMatchers.any(),
-                        org.mockito.ArgumentMatchers.any());
+                .processSelection(Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any());
     }
 
     public static void stubRouteDelivery(
+            DeliveryCoordinator dispatcher,
             AbstractRequestScheduler requests,
             java.util.function.BiConsumer<Delivery.Member, Delivery.Result> completed) {
         Mockito.doAnswer(
@@ -223,11 +209,31 @@ public final class DeliveryTestSupport {
                                             Mockito.isA(ContextResult.RouteDelivered.class));
                             return claim;
                         })
-                .when(requests)
-                .commitDelivery(
+                .when(org.flexlb.balance.scheduler.DeliveryTestSupport.transport(dispatcher))
+                .commit(
                         Mockito.any(Delivery.Member.class),
                         Mockito.eq(Delivery.SendMode.ROUTE_DECISION),
-                        Mockito.eq(0L));
+                        Mockito.eq(0L),
+                        org.mockito.ArgumentMatchers.isNull());
+    }
+
+    static DeliveryDispatcher transport(DeliveryCoordinator coordinator) {
+        var field = ReflectionUtils.findField(DeliveryCoordinator.class, "dispatcher");
+        ReflectionUtils.makeAccessible(field);
+        var transport = (DeliveryDispatcher) ReflectionUtils.getField(field, coordinator);
+        if (transport == null || !Mockito.mockingDetails(transport).isMock()) {
+            transport =
+                    transport == null
+                            ? Mockito.mock(DeliveryDispatcher.class)
+                            : Mockito.spy(transport);
+            ReflectionUtils.setField(field, coordinator, transport);
+        }
+        return transport;
+    }
+
+    static EngineDelivery cancellations(DeliveryCoordinator coordinator) {
+        return (EngineDelivery)
+                org.springframework.test.util.ReflectionTestUtils.getField(coordinator, "engine");
     }
 
     static Delivery.Member member(RouteResult route, Delivery.SendMode kind, long batchId) {
@@ -249,12 +255,10 @@ public final class DeliveryTestSupport {
     static Delivery committed(
             long batchId,
             List<Delivery.Member> members,
-            org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot precedingWork,
+            WorkSnapshot precedingWork,
             long predictedMs,
             PrefillTimePredictor.Evaluator evaluator,
             String reason,
-            int remainingQueueDepth,
-            org.flexlb.balance.scheduler.Delivery handoff,
             DeliveryExecution.DeliveryPermit permit) {
         var delivery =
                 new Delivery(
@@ -264,11 +268,9 @@ public final class DeliveryTestSupport {
                         evaluator,
                         reason);
         delivery.batchId = batchId;
-        delivery.members = List.copyOf(members);
+        delivery.members.addAll(members);
         delivery.precedingWork = precedingWork;
         delivery.predictedMs = predictedMs;
-        delivery.remainingQueueDepth = remainingQueueDepth;
-        if (handoff != null) delivery.committed(precedingWork, remainingQueueDepth, false);
         delivery.executionPermit = permit;
         return delivery;
     }
@@ -297,14 +299,14 @@ public final class DeliveryTestSupport {
     /**
      * Provides transport defaults while individual tests control queue preparation and capacity boundaries.
      */
-    static class StubDispatcher extends DeliveryDispatcher {
+    static class StubDispatcher extends DeliveryCoordinator {
         StubDispatcher() {
             super(
+                    new RequestRepository(),
                     null,
                     service(SchedulingTestConfig.newConfig()),
                     new DeliveryMetricsReporter(null),
-                    org.mockito.Mockito.mock(TaskTimer.class),
-                    new org.flexlb.balance.scheduler.PlacementConfiguration()
+                    new org.flexlb.balance.scheduler.SchedulerConfiguration()
                             .decodeAdmissionCapacity(service(SchedulingTestConfig.newConfig())),
                     org.mockito.Mockito.mock(DeliveryExecution.class));
         }

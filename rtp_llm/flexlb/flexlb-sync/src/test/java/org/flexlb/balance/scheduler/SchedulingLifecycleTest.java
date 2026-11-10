@@ -47,7 +47,7 @@ class SchedulingLifecycleTest {
         order.verify(f.dispatcher).awaitStops();
         order.verify(f.tasks).close();
         order.verify(f.completions).close();
-        order.verify(f.tasks).throwIfFailed();
+        order.verify(f.scheduler).throwIfRequestFailed();
         f.lifecycle.shutdown(System.nanoTime());
         verify(f.scheduler).close();
     }
@@ -66,7 +66,7 @@ class SchedulingLifecycleTest {
                         () -> f.lifecycle.shutdown(System.nanoTime())));
         assertArrayEquals(new Throwable[] {second}, first.getSuppressed());
         verify(f.tasks).close();
-        verify(f.tasks).throwIfFailed();
+        verify(f.scheduler).throwIfRequestFailed();
     }
 
     @Test
@@ -136,7 +136,7 @@ class SchedulingLifecycleTest {
         final RequestTaskPool tasks;
         final ExpirationTimer deadlines = mock(ExpirationTimer.class);
         final ResponseCompletionExecutor completions = mock(ResponseCompletionExecutor.class);
-        final DeliveryDispatcher dispatcher = mock(DeliveryDispatcher.class);
+        final DeliveryCoordinator dispatcher = mock(DeliveryCoordinator.class);
         final AbstractRequestScheduler lifecycle;
 
         Fixture(RequestTaskPool tasks) {

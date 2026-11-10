@@ -23,7 +23,7 @@ flexlb-sync is the core load balancing module of FlexLB. It handles:
 - `AbstractRequestScheduler` binds RequestLifecycle, shares its repository and validates the default scheduling mode. `RequestLifecycle` coordinates resource handoff, request effects and settlement; `RequestContext` owns atomic request facts and result precedence
 - `DirectRequestScheduler` owns immediate scheduling and selection; DeliveryDispatcher performs resource preparation and commit
 - `QueuedRequestScheduler` owns triggering, planning and capacity waits; queue interfaces own ordering and GroupPlanner owns batching rules
-- `PlacementConfiguration` constructs the fixed-mode scheduler at startup
+- `SchedulerConfiguration` constructs the fixed-mode scheduler at startup
 - `RequestRepository` owns shared registration, identity lookup, and archival; each request retains its original Scheduler
 - `PrefillEndpoint` directly owns the Prefill generation, resource records, status reconciliation and `PrefillRequestQueue` index. `PrefillState` and `PrefillObservation` have been deleted. Resource release and worker-selection cleanup no longer use a separate State-to-Endpoint release report; notifications run after unlocking. `GroupPlanner` is shared by scheduling and prediction. The merged class is still above budget.
 - `DecodeEndpoint` directly owns the Decode resource records and mutation lock; `DecodeState` has been deleted. Queue resource preparation is in `DeliveryDispatcher.enqueueRoute`, with unpublished preparation released by `finishPlacement`. The default scheduler retains retry and preemption timing. These changes do not yet satisfy all class budgets.
@@ -216,7 +216,7 @@ PlacementFacts holds the exact operation and publication status; acquired route 
 
 ExpirationTimer borrows TaskTimer and never creates or closes a pool. ScheduledTaskTimer owns the existing separate deadline and cleanup timer pools. ApplicationLifecycle closes deadline registrations, then their timer pool before draining request tasks; the cleanup timer stays available through delivery cleanup. TaskTimer returns the original JDK Future; cancel(false) must not interrupt an already running callback.
 
-PlacementConfiguration creates an unstarted scheduler. ApplicationLifecycle binds and starts both default and custom schedulers. Tests explicitly start their scheduler when background progress is needed; configuration factory methods do not start threads.
+SchedulerConfiguration creates an unstarted scheduler. ApplicationLifecycle binds and starts both default and custom schedulers. Tests explicitly start their scheduler when background progress is needed; configuration factory methods do not start threads.
 
 QueuedRequestScheduler, its PrefillQueueScheduler, and Delivery do not own DeliveryExecution. Scheduler constructs the selected delivery input; DeliveryDispatcher uses its injected execution component for capacity checks/subscriptions and resource preparation. Scheduling still chooses candidates and prefix policy. Route-submit telemetry is emitted at Dispatcher publication, not through a scheduler forwarding method.
 
@@ -228,7 +228,7 @@ Transport confirmation uses RequestContext.confirmDelivery directly; it never se
 
 Prefill status reduction directly returns WorkerEndpoint.StatusChange.Prefill. The redundant StatusReconciliation wrapper was removed; resource changes remain under the endpoint lock and notifications remain outside it.
 
-Direct and queued placement use `DeliveryDispatcher.finishPlacement(route, admission)`: it releases unpublished resources and finishes admission. Both paths store the exact Prefill reservation on Route before publication callbacks. ROLLBACK_COMPLETED requires successful release of both endpoints; published routes remain owned by RequestLifecycle. PlacementPlan calls this same complete operation and does not implement rollback. The partial close and close(tasks) protocols are removed.
+Direct and queued placement use `AbstractRequestScheduler.publishPlacement` and `finishPlacement`: unpublished registrations are released before retry or wait. Context accepts the route after physical publication; cleanup failures retain the route with pendingEnd for cleanup. PlacementPlan is removed. Normal selection stays task-local; asynchronous preemption retains only its operation, Decode endpoint and future, then passes the reclaimed registration directly to the Selector.
 
 CloseProgress.notificationsDone includes successful deadline registration updates and owner notifications. Context does not duplicate ExpirationTimer state in a timersDone field. Failed or blocked timer updates must keep the request unarchived; RequestTerminalSettlementTest and RequestNotificationOwnershipRaceTest cover those boundaries.
 
@@ -242,4 +242,4 @@ Confirmation eligibility is shared through ContextResult.Snapshot.canConfirmDeli
 
 Blocked-head bypass belongs to PrefillRequestQueue: custom queues default to strict order; OrderedPrefillRequestQueue retains the existing same-priority, different-Decode, once-per-head rule. PrefillEndpoint records successful dispatch under its existing lock. QueuedRequestScheduler never replaces GroupPlanner.dispatchReason for bypass candidates and retains the planner deadline alongside the blocked head capacity subscription. Queue decisions never settle requests.
 
-PlacementResult.ENDPOINT_CHANGED distinguishes successful Prefill/Decode selection from failure to capture its exact generation. Its selection field retains the original SUCCESS result; RequestWorkerSelector no longer reselects Decode internally. Default schedulers retain their own retry/rejection behavior. Strategy failures are forwarded unchanged.
+PlacementResult.RETRY covers stale endpoint selections; BLOCKED carries a capacity wait condition. No nested old selection is retained. The optional failure on RETRY preserves the role-specific response when DIRECT exhausts its retry budget.

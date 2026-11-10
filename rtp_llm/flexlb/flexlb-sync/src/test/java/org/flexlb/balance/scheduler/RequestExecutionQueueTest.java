@@ -1,10 +1,9 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
@@ -63,7 +62,7 @@ class RequestExecutionQueueTest {
     @AfterEach
     void stopRuntimes() {
         for (PrefillQueueScheduler runtime : runtimes) {
-            assertNull(runtime.stopAndAwait());
+            assertNull(RequestExecutionTestSupport.stopAndAwait(runtime));
         }
     }
 
@@ -116,9 +115,6 @@ class RequestExecutionQueueTest {
                             org.mockito.ArgumentMatchers.any(),
                             org.mockito.ArgumentMatchers.any(),
                             org.mockito.ArgumentMatchers.any(),
-                            org.mockito.ArgumentMatchers.any(),
-                            org.mockito.ArgumentMatchers.any(),
-                            org.mockito.ArgumentMatchers.any(),
                             org.mockito.ArgumentMatchers.any());
             doAnswer(
                             call -> {
@@ -130,8 +126,9 @@ class RequestExecutionQueueTest {
                                 throw observerFailure;
                             })
                     .when(owner)
-                    .onDeliveryResult(
-                            org.mockito.ArgumentMatchers.any(ContextResult.DeliveryEvidence.class));
+                    .recordPreparationFailure(
+                            org.mockito.ArgumentMatchers.any(
+                                    ContextResult.PreparationFailure.class));
             RequestExecutionTestSupport.start(worker);
             for (long id : new long[] {930L, 931L}) {
                 var context = RequestProtocolTestSupport.context(config, id);
@@ -155,12 +152,12 @@ class RequestExecutionQueueTest {
                                         decode,
                                         reservation,
                                         System.currentTimeMillis()));
-                PlacementOperation admission =
+                RoutingContext admission =
                         SchedulerTestSupport.claim(owner, String.valueOf(id), future);
                 try (var completed = RequestProtocolTestSupport.finishOnExit(admission)) {
                     assertNotNull(admission);
                     assertEquals(
-                            PlacementResult.Status.SUCCESS,
+                            RoutingResult.Status.SUCCESS,
                             RequestProtocolTestSupport.commitRoute(
                                     owner,
                                     route,
@@ -195,7 +192,7 @@ class RequestExecutionQueueTest {
             }
         } finally {
             if (worker != null) {
-                assertNull(worker.stopAndAwait());
+                assertNull(RequestExecutionTestSupport.stopAndAwait(worker));
             }
             if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(owner)) {
                 owner.closeOutstandingAndTerminalize();
@@ -209,18 +206,18 @@ class RequestExecutionQueueTest {
     }
 
     @Test
-    void batchModeKeepsPriorityQueueWithoutAnExtraRequestCountLimit() {
+    void batchModeKeepsAcceptanceOrderWithoutAnExtraRequestCountLimit() {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
         PrefillQueueScheduler runtime = runningRuntime();
         RouteResult low = item(901L, 10, Long.MAX_VALUE, 1, 128);
         RouteResult high = item(902L, 90, Long.MAX_VALUE, 2, 128);
         assertTrue(RequestExecutionTestSupport.offer(runtime, low));
         assertTrue(RequestExecutionTestSupport.offer(runtime, high));
-        assertEquals(List.of(high, low), RequestExecutionTestSupport.capture(runtime).items());
+        assertEquals(List.of(low, high), RequestExecutionTestSupport.capture(runtime).items());
     }
 
     @Test
-    void priorityOrderIsPriorityDescendingThenActualOfferFifo() {
+    void acceptedRequestsKeepOfferOrderRegardlessOfPriority() {
         PrefillQueueScheduler runtime = runningRuntime();
         long now = System.currentTimeMillis();
 
@@ -236,7 +233,7 @@ class RequestExecutionQueueTest {
                         runtime, item(4, 50, now + 5_000, now - 100, 128)));
 
         var snapshot = RequestExecutionTestSupport.capture(runtime);
-        assertEquals(List.of(2L, 1L, 3L, 4L), requestIds(snapshot.items()));
+        assertEquals(List.of(1L, 2L, 3L, 4L), requestIds(snapshot.items()));
         assertEquals(4, snapshot.items().size());
     }
 
@@ -287,7 +284,7 @@ class RequestExecutionQueueTest {
                 List.of(1001L, 1002L, 1003L),
                 requestIds(RequestExecutionTestSupport.capture(runtime).items()));
 
-        assertTrue(runtime.prefillEndpoint().removeQueued(requests.get(0)));
+        assertTrue(runtime.prefillEndpoint().releaseQueuedRequest(requests.get(0)));
         assertEquals(
                 List.of(1002L, 1003L),
                 requestIds(RequestExecutionTestSupport.capture(runtime).items()));
@@ -301,7 +298,7 @@ class RequestExecutionQueueTest {
     }
 
     @Test
-    void sched001PriorityAndSamePriorityFairnessContract() {
+    void prefillQueueDoesNotReapplyGlobalPriorityOrdering() {
         PrefillQueueScheduler runtime = runningRuntime();
         long now = System.currentTimeMillis();
         assertTrue(
@@ -318,9 +315,9 @@ class RequestExecutionQueueTest {
                         runtime, item(1104L, 50, Long.MAX_VALUE, now + 3, 1024)));
 
         assertEquals(
-                List.of(1103L, 1102L, 1104L, 1101L),
+                List.of(1101L, 1102L, 1103L, 1104L),
                 requestIds(RequestExecutionTestSupport.capture(runtime).items()),
-                "priority must dominate length while equal priority remains FIFO");
+                "accepted order is preserved regardless of request priority or length");
     }
 
     @Test
@@ -342,13 +339,13 @@ class RequestExecutionQueueTest {
         assertTrue(empty.items().isEmpty());
         assertSame(first, offered.items().get(0));
         assertSame(second, offered.items().get(1));
-        assertEquals(2, RequestExecutionTestSupport.state(runtime).progress().queueDepth());
+        assertEquals(2, RequestExecutionTestSupport.state(runtime).queueDepth());
         int[] counts = RequestExecutionTestSupport.state(runtime).queueCounters().byPriority();
         int[] expectedCounts = new int[counts.length];
         expectedCounts[70] = expectedCounts[50] = 1;
         org.junit.jupiter.api.Assertions.assertArrayEquals(expectedCounts, counts);
 
-        assertTrue(runtime.prefillEndpoint().removeQueued(first));
+        assertTrue(runtime.prefillEndpoint().releaseQueuedRequest(first));
         var removed = RequestExecutionTestSupport.capture(runtime);
         assertTrue(
                 RequestExecutionTestSupport.state(runtime).captureQueue(1).queueVersion()
@@ -364,9 +361,9 @@ class RequestExecutionQueueTest {
         RouteResult lookalike = item(21, 50, Long.MAX_VALUE, 1, 128);
         assertTrue(RequestExecutionTestSupport.offer(runtime, canonical));
 
-        assertFalse(runtime.prefillEndpoint().removeQueued(lookalike));
+        assertFalse(runtime.prefillEndpoint().releaseQueuedRequest(lookalike));
         assertEquals(List.of(canonical), RequestExecutionTestSupport.capture(runtime).items());
-        assertTrue(runtime.prefillEndpoint().removeQueued(canonical));
+        assertTrue(runtime.prefillEndpoint().releaseQueuedRequest(canonical));
     }
 
     @Test
@@ -387,7 +384,7 @@ class RequestExecutionQueueTest {
         var after = prefillEndpoint.captureRouteProjectionInputs();
         assertTrue(after.ownershipVersion() > before.ownershipVersion());
         assertSame(before.work(), after.work());
-        assertTrue(runtime.prefillEndpoint().removeQueued(queued));
+        assertTrue(runtime.prefillEndpoint().releaseQueuedRequest(queued));
         assertSame(before.work(), prefillEndpoint.captureRouteProjectionInputs().work());
     }
 
@@ -408,7 +405,6 @@ class RequestExecutionQueueTest {
                     RequestExecutionTestSupport.create(
                             "test-worker", prefillEndpoint, config, deliveryStrategy, registry);
             runtimes.add(runtime);
-            RequestExecutionTestSupport.start(runtime);
             RequestContext context = RequestProtocolTestSupport.context(config, 907L);
             CompletableFuture<Response> future =
                     RequestProtocolTestSupport.submitForManualPlacement(registry, context);
@@ -424,13 +420,6 @@ class RequestExecutionQueueTest {
                                     null,
                                     null,
                                     System.currentTimeMillis()));
-            doAnswer(
-                            call -> {
-                                runtime.signal(false);
-                                return null;
-                            })
-                    .when(prefillEndpoint)
-                    .signal(PrefillEndpoint.Signal.INPUT);
             AtomicReference<Thread> cleanupThread = new AtomicReference<>();
             AtomicInteger releases = new AtomicInteger();
             when(prefillEndpoint.releaseRequest(queued))
@@ -456,34 +445,34 @@ class RequestExecutionQueueTest {
                                                     .stateLock(state)
                                                     .isHeldByCurrentThread(),
                                             "capacity and queue notifications must run after resource release unlocks");
-                                    runtime.signal(false);
                                     runtime.capacityAvailableSignal.run();
                                 }
                                 return released;
                             });
-            PlacementOperation admission = SchedulerTestSupport.claim(registry, "907", future);
+            RoutingContext admission = SchedulerTestSupport.claim(registry, "907", future);
             try (var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertEquals(
-                        PlacementResult.Status.SUCCESS,
+                        RoutingResult.Status.SUCCESS,
                         RequestProtocolTestSupport.commitRoute(
                                 registry,
                                 queued,
                                 RequestProtocolTestSupport.publication(
                                         () -> {
                                             assertTrue(
-                                                    RequestExecutionTestSupport.offer(
-                                                            runtime, queued));
-                                            org.junit.jupiter.api.Assertions.assertDoesNotThrow(
-                                                    () ->
-                                                            RequestProtocolTestSupport
-                                                                    .awaitCondition(
-                                                                            () ->
-                                                                                    runtime.getLatestQueueWaitSnapshot()
-                                                                                            .containsValue(
-                                                                                                    "Route commit in progress")));
+                                                    SelectionTestSupport.registerPrefill(
+                                                                    RequestExecutionTestSupport
+                                                                            .state(runtime),
+                                                                    queued,
+                                                                    queued.prefillWorkMs(),
+                                                                    true)
+                                                            .accepted());
+                                            assertTrue(prefillEndpoint.tryEnqueueRoute(queued));
                                             return true;
                                         })));
             }
+            RequestExecutionTestSupport.start(runtime);
+            RequestExecutionTestSupport.endpointChanged(
+                    prefillEndpoint, PrefillEndpoint.Signal.INPUT);
             assertEquals(List.of(queued), RequestExecutionTestSupport.capture(runtime).items());
             RequestProtocolTestSupport.awaitCondition(
                     () -> {
@@ -519,11 +508,9 @@ class RequestExecutionQueueTest {
                                                     .getRequestState("907", 0L)
                                                     .state()
                                             == RequestState.Phase.CANCELLED
-                                    && RequestExecutionTestSupport.state(runtime)
-                                                    .progress()
-                                                    .queueDepth()
+                                    && RequestExecutionTestSupport.state(runtime).queueDepth()
                                             == 0);
-            assertEquals(0, RequestExecutionTestSupport.state(runtime).progress().queueDepth());
+            assertEquals(0, RequestExecutionTestSupport.state(runtime).queueDepth());
             assertEquals(
                     0L,
                     RequestExecutionTestSupport.state(runtime)
@@ -556,40 +543,34 @@ class RequestExecutionQueueTest {
         "true,true"
     })
     @org.junit.jupiter.api.Timeout(15)
-    void concurrentStopSharesDrainAndPreservesInterruptedWaiter(
-            boolean batch, boolean callbackFails) throws Exception {
-        if (batch) {
-            SchedulingTestConfig.useBatchDispatcher(config);
-        } else {
-            config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
-        }
-        AbstractRequestScheduler events = mock(AbstractRequestScheduler.class);
-        PrefillQueueScheduler runtime =
+    void failedQueueRejectsEveryRequestOutsideEndpointLock(boolean batch, boolean callbackFails) {
+        if (batch) SchedulingTestConfig.useBatchDispatcher(config);
+        else config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+        var events = mock(AbstractRequestScheduler.class);
+        var runtime =
                 RequestExecutionTestSupport.create(
-                        "stop-test", prefillEndpoint, config, deliveryStrategy, events);
-        if (!callbackFails) {
-            runtimes.add(runtime);
-        }
+                        "failed-queue", prefillEndpoint, config, deliveryStrategy, events);
+        runtimes.add(runtime);
+        var cause = new IllegalStateException("scheduling failed");
         RuntimeException cleanupFailure =
-                callbackFails ? new IllegalStateException("stop callback failed") : null;
-        CountDownLatch callbackEntered = new CountDownLatch(1);
-        CountDownLatch releaseCallback = new CountDownLatch(1);
-        AtomicInteger callbacks = new AtomicInteger();
-        RouteResult queued = item(920L, 50, Long.MAX_VALUE, System.currentTimeMillis(), 128L);
+                callbackFails ? new IllegalStateException("rejection callback failed") : null;
+        var callbacks = new AtomicInteger();
+        var queued = item(920L, 50, Long.MAX_VALUE, System.currentTimeMillis(), 128L);
         doAnswer(
-                        invocation -> {
+                        call -> {
                             callbacks.incrementAndGet();
-                            org.junit.jupiter.api.Assertions.assertThrows(
-                                    IllegalStateException.class, runtime::stopAndAwait);
-                            if (invocation.getArgument(0) == queued) {
-                                callbackEntered.countDown();
-                                RequestProtocolTestSupport.await(releaseCallback);
-                                if (cleanupFailure != null) {
-                                    throw cleanupFailure;
-                                }
-                            }
+                            assertSame(cause, call.getArgument(1));
+                            assertTrue(runtime.stopping());
+                            assertFalse(
+                                    org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(
+                                                    prefillEndpoint)
+                                            .isHeldByCurrentThread());
+                            assertTrue(
+                                    RequestExecutionTestSupport.capture(runtime).items().isEmpty());
+                            if (call.getArgument(0) == queued && cleanupFailure != null)
+                                throw cleanupFailure;
                             RequestExecutionTestSupport.state(runtime)
-                                    .releaseRequest(invocation.getArgument(0));
+                                    .releaseRequest(call.getArgument(0));
                             return null;
                         })
                 .when(events)
@@ -600,51 +581,18 @@ class RequestExecutionQueueTest {
         assertTrue(
                 RequestExecutionTestSupport.offer(
                         runtime, item(922L, 50, Long.MAX_VALUE, System.currentTimeMillis(), 128L)));
-        var stops = java.util.concurrent.Executors.newFixedThreadPool(2);
-        AtomicReference<Thread> waiter = new AtomicReference<>();
-        var interruptPreserved = new java.util.concurrent.atomic.AtomicBoolean();
-        try {
-            var first = stops.submit(runtime::stopAndAwait);
-            assertTrue(callbackEntered.await(5L, TimeUnit.SECONDS));
-            var second =
-                    stops.submit(
-                            () -> {
-                                waiter.set(Thread.currentThread());
-                                Thread.currentThread().interrupt();
-                                Throwable result = runtime.stopAndAwait();
-                                interruptPreserved.set(Thread.currentThread().isInterrupted());
-                                return result;
-                            });
-            RequestProtocolTestSupport.awaitCondition(
-                    () -> waiter.get() != null && waiter.get().getState() == Thread.State.WAITING);
-            assertFalse(second.isDone());
-            assertFalse(
-                    RequestExecutionTestSupport.offer(
-                            runtime,
-                            item(921L, 50, Long.MAX_VALUE, System.currentTimeMillis(), 128L)));
-            releaseCallback.countDown();
-            assertSame(cleanupFailure, first.get(5L, TimeUnit.SECONDS));
-            assertSame(cleanupFailure, second.get(5L, TimeUnit.SECONDS));
-            assertTrue(interruptPreserved.get());
-            assertEquals(2, callbacks.get(), "later items must drain even after a callback fails");
-            assertEquals(0, RequestExecutionTestSupport.state(runtime).progress().queueDepth());
-            assertSame(cleanupFailure, runtime.stopAndAwait());
-            if (callbackFails) {
-                var retirement =
-                        org.flexlb.balance.endpoint.EndpointTestSupport.retireResources(
-                                RequestExecutionTestSupport.state(runtime));
-
-                assertEquals(
-                        List.of(queued),
-                        retirement.ownedItems(),
-                        "failed stop callback must retain the exact owner for generation retirement");
-            }
-        } finally {
-            releaseCallback.countDown();
-            stops.shutdownNow();
-            assertTrue(stops.awaitTermination(5L, TimeUnit.SECONDS));
-            assertSame(cleanupFailure, runtime.stopAndAwait());
-        }
+        assertSame(cleanupFailure, runtime.failQueuedRequests(cause));
+        assertEquals(2, callbacks.get(), "a failed callback must not skip later requests");
+        assertFalse(
+                RequestExecutionTestSupport.offer(
+                        runtime, item(921L, 50, Long.MAX_VALUE, System.currentTimeMillis(), 128L)));
+        var retirement =
+                org.flexlb.balance.endpoint.EndpointTestSupport.retireResources(
+                        RequestExecutionTestSupport.state(runtime));
+        assertEquals(
+                callbackFails ? List.of(queued) : List.of(),
+                retirement.ownedItems(),
+                "failed rejection retains its resource for endpoint retirement");
     }
 
     @ParameterizedTest
@@ -673,13 +621,13 @@ class RequestExecutionQueueTest {
             assertTrue(
                     RequestExecutionTestSupport.offer(
                             runtime, item(999L, 50, Long.MAX_VALUE, 1L, 128L)));
-            if (fails) runtime.stopAndDrain(failure);
-            else runtime.stopAndAwait();
+            if (fails) runtime.failQueuedRequests(failure);
+            else RequestExecutionTestSupport.stopAndAwait(runtime);
             assertTrue(rejected.await(5, TimeUnit.SECONDS));
             assertTrue(runtime.stopping());
             if (fails) assertSame(failure, observed.get());
             else assertTrue(observed.get() instanceof java.util.concurrent.CancellationException);
-            assertNull(runtime.stopAndAwait());
+            assertNull(RequestExecutionTestSupport.stopAndAwait(runtime));
             assertTrue(RequestExecutionTestSupport.capture(runtime).items().isEmpty());
             assertFalse(
                     RequestExecutionTestSupport.offer(
@@ -695,10 +643,9 @@ class RequestExecutionQueueTest {
         var state =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                         new java.util.concurrent.locks.ReentrantLock(),
-                        org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
-                                4, QueueExecutionSettings.queueOrder(config.isPriorityOrdering())),
+                        org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(4),
                         System::currentTimeMillis);
-        var dispatcher = mock(DeliveryDispatcher.class);
+        var dispatcher = mock(DeliveryCoordinator.class);
         var execution =
                 org.flexlb.balance.endpoint.EndpointTestSupport.attach(
                         org.flexlb.balance.endpoint.EndpointTestSupport.worker(
@@ -712,13 +659,15 @@ class RequestExecutionQueueTest {
                                 state,
                                 SchedulerTestSupport.queueDependencies(owner, config)));
         var delivered = new CountDownLatch(1);
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                dispatcher, "dispatcher", mock(DeliveryDispatcher.class));
         doAnswer(
                         call -> {
                             delivered.countDown();
                             return null;
                         })
-                .when(dispatcher)
-                .deliverBatch(org.mockito.ArgumentMatchers.any());
+                .when(org.flexlb.balance.scheduler.DeliveryTestSupport.transport(dispatcher))
+                .dispatch(org.mockito.ArgumentMatchers.any());
         try {
             var route = item(9999L, 50, Long.MAX_VALUE, 1L, 128L);
             SchedulerTestSupport.bindOwner(route.ctx(), owner);
@@ -729,7 +678,7 @@ class RequestExecutionQueueTest {
             assertFalse(delivered.await(100, TimeUnit.MILLISECONDS));
             assertEquals(List.of(route), execution.captureQueue(10).items());
         } finally {
-            execution.stopAndAwait();
+            RequestExecutionTestSupport.stopAndAwait(execution);
         }
     }
 

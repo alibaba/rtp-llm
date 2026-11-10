@@ -4,6 +4,7 @@ import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.config.ConfigTestSupport;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -358,8 +359,9 @@ class FaultInjectionE2ETest {
             StrategyErrorType expectedError =
                     clientCancellation
                             ? StrategyErrorType.REQUEST_CANCELLED
-                            : StrategyErrorType.RESOURCE_EXHAUSTED;
+                            : StrategyErrorType.QUEUE_TIMEOUT;
             assertEquals(expectedError.getErrorCode(), expired.getCode());
+            assertEquals(AdmissionRejectReason.UNSPECIFIED, expired.getAdmissionRejectReason());
             // Cleanup may wait for inactivity, but it cannot replace an earlier client
             // cancellation.
             assertTrue(

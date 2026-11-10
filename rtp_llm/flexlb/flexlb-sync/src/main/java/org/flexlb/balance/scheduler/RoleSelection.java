@@ -24,9 +24,6 @@ public abstract sealed class RoleSelection {
     private RoleSelection(WorkerEndpoint endpoint, ServerStatus status) {
         this.endpoint = Objects.requireNonNull(endpoint, "endpoint");
         checkArgument(status.isSuccess(), "route requires successful Worker metadata");
-        checkArgument(
-                status.getRole() != null && status.getRole() != RoleType.FRONTEND,
-                "unsupported Worker role");
         this.status = ServerStatus.copyOf(status);
     }
 
@@ -42,8 +39,8 @@ public abstract sealed class RoleSelection {
         return status.getDebugInfo() == null ? 0L : status.getDebugInfo().getHitCacheLen();
     }
 
-    public final PlacementKey placementKey() {
-        return PlacementKey.exact(role(), group(), status.getLogicalIpPort());
+    public final CapacityKey capacityKey() {
+        return CapacityKey.exact(role(), group(), status.getLogicalIpPort());
     }
 
     public final RoleType role() {
@@ -92,7 +89,9 @@ public abstract sealed class RoleSelection {
                 long workMs,
                 PrefillEndpoint.RequestRecord registration) {
             super(endpoint, status);
-            checkArgument(status.getRole().supportsPrefill(), "Prefill role required");
+            checkArgument(
+                    status.getRole() != null && status.getRole().supportsPrefill(),
+                    "Prefill role required");
             checkArgument(workMs >= 0L, "Prefill work must be non-negative");
             this.workMs = workMs;
             this.registration = registration;

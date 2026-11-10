@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
@@ -94,7 +95,11 @@ class WorkerEndpointTest {
         registerBatch(1L, 100, item);
         assertTrue(endpoint.releaseRequest(item));
         assertTrue(!endpoint.releaseRequest(item));
-        assertEquals(0, endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow());
+        assertEquals(
+                0,
+                org.flexlb.balance.endpoint.EndpointTestSupport.committedWork(endpoint)
+                        .totalRemainingWorkMs()
+                        .orElseThrow());
     }
 
     @Test
@@ -105,7 +110,11 @@ class WorkerEndpointTest {
         finished.setErrorCode(0);
         calibrate(Map.of("100", finished), null);
 
-        assertEquals(0, endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow());
+        assertEquals(
+                0,
+                org.flexlb.balance.endpoint.EndpointTestSupport.committedWork(endpoint)
+                        .totalRemainingWorkMs()
+                        .orElseThrow());
         assertEquals(0, endpoint.stats().batchCount());
     }
 
@@ -119,7 +128,11 @@ class WorkerEndpointTest {
         t2.setErrorCode(0);
         calibrate(Map.of("100", t1, "101", t2), null);
 
-        assertEquals(0, endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow());
+        assertEquals(
+                0,
+                org.flexlb.balance.endpoint.EndpointTestSupport.committedWork(endpoint)
+                        .totalRemainingWorkMs()
+                        .orElseThrow());
         assertEquals(0, endpoint.stats().batchCount());
     }
 
@@ -135,7 +148,11 @@ class WorkerEndpointTest {
         calibrate(Map.of("100", failed, "101", success), null);
 
         assertEquals(0, endpoint.stats().batchCount());
-        assertEquals(0, endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow());
+        assertEquals(
+                0,
+                org.flexlb.balance.endpoint.EndpointTestSupport.committedWork(endpoint)
+                        .totalRemainingWorkMs()
+                        .orElseThrow());
     }
 
     @Test
@@ -150,10 +167,17 @@ class WorkerEndpointTest {
         assertEquals(1, endpoint.stats().batchCount());
         // Remaining work is predicted duration minus elapsed running time.
         assertTrue(
-                Math.abs(endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow() - 2000)
+                Math.abs(
+                                org.flexlb.balance.endpoint.EndpointTestSupport.committedWork(
+                                                        endpoint)
+                                                .totalRemainingWorkMs()
+                                                .orElseThrow()
+                                        - 2000)
                         < 50,
                 "Expected ~2000ms but got "
-                        + endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow());
+                        + org.flexlb.balance.endpoint.EndpointTestSupport.committedWork(endpoint)
+                                .totalRemainingWorkMs()
+                                .orElseThrow());
     }
 
     @Test
@@ -174,7 +198,11 @@ class WorkerEndpointTest {
         assertTrue(endpoint.releaseRequest(item));
 
         assertEquals(0, endpoint.stats().batchCount());
-        assertEquals(0, endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow());
+        assertEquals(
+                0,
+                org.flexlb.balance.endpoint.EndpointTestSupport.committedWork(endpoint)
+                        .totalRemainingWorkMs()
+                        .orElseThrow());
     }
 
     @Test
@@ -322,7 +350,10 @@ class WorkerEndpointTest {
     }
 
     private void assertCommittedWorkNear(long expectedMs) {
-        long actualMs = endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow();
+        long actualMs =
+                org.flexlb.balance.endpoint.EndpointTestSupport.committedWork(endpoint)
+                        .totalRemainingWorkMs()
+                        .orElseThrow();
         assertTrue(
                 actualMs <= expectedMs && actualMs >= expectedMs - 50,
                 "Expected committed work near " + expectedMs + "ms but got " + actualMs + "ms");
@@ -341,8 +372,9 @@ class WorkerEndpointTest {
                 throw new IllegalStateException("test item could not be offered to endpoint queue");
             }
         }
-        try (org.flexlb.balance.scheduler.Delivery ignored =
-                EndpointTestSupport.commitBatch(endpoint, batchId, predictedMs, List.of(items))) {
+        {
+            WorkSnapshot ignored =
+                    EndpointTestSupport.commitBatch(endpoint, batchId, predictedMs, List.of(items));
             // Closing transfers only the generation handoff. The ledger keeps
             // the exact committed item identities until status/terminal facts.
         }

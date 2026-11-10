@@ -6,7 +6,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 
 /**
  * Materialized result of crossing one delivery-admission boundary.
- * The boundary carries only the resource fact; queue projection interprets it.
+ * The boundary carries the resource fact; the scheduler decides whether to wait or fail.
  */
 public record CapacityBoundary(Status status, Resource resource, Throwable cause) {
 
@@ -25,11 +25,11 @@ public record CapacityBoundary(Status status, Resource resource, Throwable cause
     }
 
     public static CapacityBoundary unavailable(Resource resource) {
-        return new CapacityBoundary(Status.UNAVAILABLE, Objects.requireNonNull(resource), null);
+        return new CapacityBoundary(Status.UNAVAILABLE, resource, null);
     }
 
     public static CapacityBoundary failed(Throwable cause) {
-        return new CapacityBoundary(Status.FAILED, null, Objects.requireNonNull(cause, "cause"));
+        return new CapacityBoundary(Status.FAILED, null, cause);
     }
 
     public boolean unavailable() {
@@ -66,11 +66,11 @@ public record CapacityBoundary(Status status, Resource resource, Throwable cause
         }
 
         public static <T> Attempt<T> accepted(T value) {
-            return new Attempt<>(Objects.requireNonNull(value, "value"), null);
+            return new Attempt<>(value, null);
         }
 
         public static <T> Attempt<T> rejected(CapacityBoundary boundary) {
-            return new Attempt<>(null, Objects.requireNonNull(boundary, "boundary"));
+            return new Attempt<>(null, boundary);
         }
 
         public boolean accepted() {

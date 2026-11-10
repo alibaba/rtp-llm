@@ -39,7 +39,7 @@ class StrategyErrorTypeTest {
     }
 
     @Test
-    void priorityMessagesCannotBeOverwrittenByRetryDiagnostics() {
+    void priorityMessagesPreserveClassificationAndAppendRetryDiagnostics() {
         for (AdmissionRejectReason reason :
                 new AdmissionRejectReason[] {
                     AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
@@ -50,13 +50,13 @@ class StrategyErrorTypeTest {
                             StrategyErrorType.PRIORITY_ADMISSION_REJECTED, reason, "retry detail");
             assertEquals(
                     reason == AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
-                            ? "higher-priority requests are ahead"
-                            : "same-priority requests are ahead",
+                            ? "higher-priority requests are ahead; retry detail"
+                            : "same-priority requests are ahead; retry detail",
                     response.getErrorMessage());
             assertEquals(reason, response.getAdmissionRejectReason());
         }
         assertEquals(
-                "admission unavailable; blocker priority attribution is unavailable",
+                "admission unavailable; blocker priority attribution is unavailable; retry detail",
                 Response.error(
                                 StrategyErrorType.ADMISSION_UNAVAILABLE,
                                 AdmissionRejectReason.UNSPECIFIED,

@@ -20,7 +20,7 @@ import static com.google.common.base.Preconditions.checkState;
  * in O(1) without leaving a removed entry behind a blocked head. Ready retries use
  * a separate ordered index and share the scan budget with forward progress.</p>
  */
-public final class OrderedRequestQueue implements PlacementQueue {
+public final class OrderedRequestQueue implements SchedulingQueue {
     private static final int PRIORITY_LEVELS = PriorityNormalizer.MAX_PRIORITY + 1;
 
     private final boolean priorityOrdering;
@@ -59,9 +59,7 @@ public final class OrderedRequestQueue implements PlacementQueue {
 
     /** Rare route withdrawal: restore the original position without issuing a new sequence. */
     public void restore(GlobalQueueEntry entry) {
-        checkState(
-                entry.removed && entry.sequence > 0L,
-                "only a previously removed entry can be restored");
+        checkState(entry.sequence > 0L, "only a previously removed entry can be restored");
         insert(entry, true);
     }
 

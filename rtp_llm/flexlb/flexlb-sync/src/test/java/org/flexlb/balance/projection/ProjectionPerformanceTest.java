@@ -17,6 +17,9 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks repeated candidate projections reuse frozen queue inputs within the allocation budget.
+ */
 @Tag("performance-regression")
 class ProjectionPerformanceTest {
     @Test
@@ -45,8 +48,7 @@ class ProjectionPerformanceTest {
                         new GroupPlanner.Constraints(4, 1000, 1000, 0, 30),
                         List.of(
                                 new GroupPlanner.Item(
-                                        String.valueOf(1), 50, 1, 1000, Long.MAX_VALUE, 10, 0)),
-                        null);
+                                        String.valueOf(1), 50, 1, 1000, Long.MAX_VALUE, 10, 0)));
         var inputs =
                 new RequestTimeEstimation.Inputs(
                         queue,

@@ -1,23 +1,19 @@
 package org.flexlb.extension;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.Delivery;
-import org.flexlb.balance.scheduler.DeliveryDispatcher;
+import org.flexlb.balance.scheduler.DeliveryCoordinator;
 import org.flexlb.balance.scheduler.DeliveryExecution;
 import org.flexlb.balance.scheduler.ExpirationTimer;
 import org.flexlb.balance.scheduler.GlobalQueueEntry;
 import org.flexlb.balance.scheduler.OrderedRequestQueue;
-import org.flexlb.balance.scheduler.PlacementConfiguration;
-import org.flexlb.balance.scheduler.PlacementQueue;
-import org.flexlb.balance.scheduler.QueueExecutionSettings;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.scheduler.RequestRouteSelector;
@@ -26,13 +22,14 @@ import org.flexlb.balance.scheduler.ResponseCompletionExecutor;
 import org.flexlb.balance.scheduler.RoleSelection;
 import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.balance.scheduler.ScheduledTaskTimer;
+import org.flexlb.balance.scheduler.SchedulerConfiguration;
+import org.flexlb.balance.scheduler.SchedulingQueue;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.balance.scheduler.SelectionTestSupport;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
@@ -74,25 +71,19 @@ class ExternalRequestSchedulerTest {
             var second = fixture.request(98104L);
             var firstResponse = fixture.scheduler.submit(first);
             var secondResponse = fixture.scheduler.submit(second);
-            fixture.scheduler.schedule();
-            fixture.scheduler.schedule();
+            fixture.advance();
+            fixture.advance();
             assertFalse(firstResponse.isDone());
             assertFalse(secondResponse.isDone());
             var selected = fixture.endpoint.captureQueue(2).items();
             assertEquals(List.of(first, second), selected.stream().map(RouteResult::ctx).toList());
             assertNull(
                     fixture.dispatcher.submit(
-                            new Delivery(
-                                    fixture.endpoint,
-                                    true,
-                                    selected.size(),
-                                    fixture.endpoint.predictor.evaluator(),
-                                    "manual_batch"),
                             selected,
+                            "manual_batch",
+                            fixture.endpoint.predictor.evaluator(),
                             OptionalLong.of(1L),
-                            null,
-                            Delivery.PrefixPolicy.ALL_SELECTED,
-                            () -> true));
+                            Delivery.PrefixPolicy.ALL_SELECTED));
             assertTrue(firstResponse.get(2, TimeUnit.SECONDS).isSuccess());
             assertTrue(secondResponse.get(2, TimeUnit.SECONDS).isSuccess());
             assertEquals(
@@ -121,7 +112,7 @@ class ExternalRequestSchedulerTest {
             assertFalse(response.isDone());
             assertEquals(0, fixture.endpoint.stats().locallyOwnedRequests());
             verifyNoInteractions(fixture.selector);
-            fixture.scheduler.schedule();
+            fixture.advance();
             assertTrue(response.get(2, TimeUnit.SECONDS).isSuccess());
             assertEquals(1, fixture.endpoint.stats().locallyOwnedRequests());
             assertNotNull(request.snapshot().delivery());
@@ -134,7 +125,7 @@ class ExternalRequestSchedulerTest {
             var request = fixture.request(98102L);
             var response = fixture.scheduler.submit(request);
             fixture.scheduler.cancel("98102", 0L, CancelReason.CLIENT_CANCELLED);
-            fixture.scheduler.schedule();
+            fixture.advance();
             assertFalse(response.get(2, TimeUnit.SECONDS).isSuccess());
             verifyNoInteractions(fixture.selector);
             assertEquals(0, fixture.endpoint.stats().locallyOwnedRequests());
@@ -142,92 +133,123 @@ class ExternalRequestSchedulerTest {
     }
 
     /**
-     * Queues requests until the test explicitly schedules them, then uses shared placement publication and cleanup.
+     * Holds requests until an extension explicitly runs a scheduling turn.
      */
-    private static final class ManualScheduler extends AbstractRequestScheduler {
-        private final PlacementQueue queue = new OrderedRequestQueue(false);
-        private final RequestRouteSelector selector;
-        private final QueueExecutionSettings queued;
+    private static final class ManualRequests {
+        private final SchedulingQueue queue = new OrderedRequestQueue(false);
 
-        ManualScheduler(
-                RequestRepository requests,
-                RequestTaskPool tasks,
-                ExpirationTimer expiration,
-                DeliveryDispatcher dispatcher,
-                ResponseCompletionExecutor responses,
-                DeliveryMetricsReporter reporter,
-                TheoryCacheHitReporter trace,
-                RequestRouteSelector selector,
-                QueueExecutionSettings queued,
-                EndpointRegistry endpoints) {
-            super(requests, tasks, expiration, dispatcher, responses, reporter, trace, endpoints);
-            this.selector = selector;
-            this.queued = queued;
-        }
-
-        public void start() {}
-
-        public boolean awaitStopped(long deadlineNanos) {
-            return true;
-        }
-
-        public void close() {
-            stop();
-        }
-
-        public void stop() {}
-
-        public void onEndpointChanged(WorkerEndpoint endpoint) {}
-
-        public synchronized void onRequest(RequestContext context) {
+        synchronized void add(RequestContext context) {
             queue.add(new GlobalQueueEntry(context, null));
         }
 
-        public synchronized void removeRequest(RequestContext context) {
+        synchronized void remove(RequestContext context) {
             for (var entry : queue.drain()) if (entry.context() != context) queue.restore(entry);
         }
 
-        public synchronized void schedule() {
+        synchronized void schedule(java.util.function.Consumer<RequestContext> publish) {
             for (var entry : queue.scanForPlanningCandidates(1, 1, candidate -> true)) {
                 queue.remove(entry);
-                var context = entry.context();
-                var admission = claimPlacement(context);
-                if (admission == null) continue;
-                try {
-                    var selection = selector.select(context, entry.routingGroup());
-                    assertEquals(PlacementResult.Status.SUCCESS, selection.status());
-                    if (queued != null) {
-                        {
-                            var route = selection.value();
-                            try {
-                                assertEquals(
-                                        PlacementResult.Status.SUCCESS,
-                                        publishPlacement(route, admission, queued).status());
-                            } finally {
-                                org.flexlb.util.Failures.rethrow(
-                                        AbstractRequestScheduler.finishPlacement(route, admission),
-                                        "placement cleanup failed");
-                            }
-                        }
-                        continue;
-                    }
-                    var committed = publishPlacement(selection.value(), admission, null);
-                    assertEquals(PlacementResult.Status.SUCCESS, committed.status());
-                    assertEquals(
-                            null,
-                            context.snapshot().placement(),
-                            "the complete submission must finish admission before returning");
-                } finally {
-                    AbstractRequestScheduler.finishPlacement(admission);
-                }
+                publish.accept(entry.context());
             }
+        }
+    }
+
+    /**
+     * Changes DIRECT scheduling triggers while retaining its immediate publication policy.
+     */
+    private static final class ManualDirectScheduler
+            extends org.flexlb.balance.scheduler.DirectRequestScheduler {
+        private final ManualRequests pending = new ManualRequests();
+        private final RequestRouteSelector selector;
+
+        ManualDirectScheduler(Fixture fixture, DeliveryMetricsReporter reporter) {
+            super(
+                    fixture.selector,
+                    fixture.requests,
+                    fixture.tasks,
+                    fixture.expiration,
+                    fixture.dispatcher,
+                    fixture.responses,
+                    reporter,
+                    mock(TheoryCacheHitReporter.class),
+                    fixture.endpoints);
+            selector = fixture.selector;
         }
 
         @Override
-        protected StrategyErrorType schedulingTimeoutError() {
-            return queued != null
-                    ? StrategyErrorType.RESOURCE_EXHAUSTED
-                    : StrategyErrorType.BATCH_SLO_EXPIRED;
+        public void start() {}
+
+        @Override
+        public void scheduleRequest(RequestContext context) {
+            pending.add(context);
+        }
+
+        @Override
+        protected void removeRequest(RequestContext context) {
+            pending.remove(context);
+        }
+
+        void advance() {
+            pending.schedule(
+                    context ->
+                            assertEquals(
+                                    RoutingResult.Status.SUCCESS,
+                                    selectAndPublish(context, () -> selector.select(context, null))
+                                            .status()));
+        }
+    }
+
+    /**
+     * Changes QUEUE scheduling triggers while retaining Worker queue publication and cleanup.
+     */
+    private static final class ManualQueuedScheduler
+            extends org.flexlb.balance.scheduler.QueuedRequestScheduler {
+        private final ManualRequests pending = new ManualRequests();
+        private final RequestRouteSelector selector;
+
+        ManualQueuedScheduler(Fixture fixture, DeliveryMetricsReporter reporter) {
+            super(
+                    fixture.config,
+                    fixture.selector,
+                    mock(org.flexlb.balance.preemption.DecodePreemption.class),
+                    fixture.requests,
+                    fixture.tasks,
+                    fixture.expiration,
+                    fixture.dispatcher,
+                    fixture.responses,
+                    reporter,
+                    mock(TheoryCacheHitReporter.class),
+                    new org.flexlb.balance.scheduler.CapacityNotifier(),
+                    new OrderedRequestQueue(false),
+                    BuiltinGroupPlanner.from(fixture.config),
+                    fixture.endpoints);
+            selector = fixture.selector;
+        }
+
+        @Override
+        public void start() {}
+
+        @Override
+        public void scheduleRequest(RequestContext context) {
+            pending.add(context);
+        }
+
+        @Override
+        protected void removeRequest(RequestContext context) {
+            pending.remove(context);
+        }
+
+        void advance() {
+            pending.schedule(
+                    context -> {
+                        assertEquals(
+                                RoutingResult.Status.SUCCESS,
+                                selectAndPublish(context, () -> selector.select(context, null))
+                                        .status());
+                        assertNull(
+                                context.snapshot().routingContext(),
+                                "routing must finish before returning to the extension");
+                    });
         }
     }
 
@@ -236,7 +258,7 @@ class ExternalRequestSchedulerTest {
      */
     private static final class Fixture implements AutoCloseable {
         final org.flexlb.config.FlexlbConfig config = SchedulingTestConfig.newConfig();
-        final PlacementConfiguration assembly = new PlacementConfiguration();
+        final SchedulerConfiguration assembly = new SchedulerConfiguration();
         final RequestRepository requests = new RequestRepository();
         final RequestTaskPool tasks = assembly.requestTasks();
         final ScheduledTaskTimer deadlineTimer = assembly.deadlineTaskTimer();
@@ -246,8 +268,8 @@ class ExternalRequestSchedulerTest {
         final RequestRouteSelector selector = mock(RequestRouteSelector.class);
         final PrefillEndpoint endpoint;
         final DecodeEndpoint decode;
-        final ManualScheduler scheduler;
-        final DeliveryDispatcher dispatcher;
+        final AbstractRequestScheduler scheduler;
+        final DeliveryCoordinator dispatcher;
         final DeliveryExecution deliveries;
         final EndpointRegistry endpoints = mock(EndpointRegistry.class);
 
@@ -293,32 +315,21 @@ class ExternalRequestSchedulerTest {
                                 }
                                 return CompletableFuture.completedFuture(reply.build());
                             });
-            deliveries = assembly.deliveryExecution(service, tasks, reporter);
+            deliveries = assembly.deliveryExecution(service, reporter);
             dispatcher =
-                    new DeliveryDispatcher(
+                    new DeliveryCoordinator(
+                            requests,
                             client,
                             service,
                             reporter,
-                            timer,
-                            new org.flexlb.balance.scheduler.PlacementConfiguration()
+                            new org.flexlb.balance.scheduler.SchedulerConfiguration()
                                     .decodeAdmissionCapacity(service),
                             deliveries);
             responses = assembly.responseCompletions(service);
             scheduler =
-                    new ManualScheduler(
-                            requests,
-                            tasks,
-                            expiration,
-                            dispatcher,
-                            responses,
-                            reporter,
-                            mock(TheoryCacheHitReporter.class),
-                            selector,
-                            batch
-                                    ? QueueExecutionSettings.capture(
-                                            config, BuiltinGroupPlanner.from(config))
-                                    : null,
-                            endpoints);
+                    batch
+                            ? new ManualQueuedScheduler(this, reporter)
+                            : new ManualDirectScheduler(this, reporter);
             endpoint =
                     EndpointTestSupport.realPrefill(
                             WorkerStatus.createDiscovered(
@@ -393,6 +404,11 @@ class ExternalRequestSchedulerTest {
             failure = org.flexlb.util.Failures.run(failure, deadlineTimer::close);
             failure = org.flexlb.util.Failures.run(failure, timer::close);
             org.flexlb.util.Failures.rethrow(failure, "extension fixture failed to close");
+        }
+
+        void advance() {
+            if (scheduler instanceof ManualQueuedScheduler queued) queued.advance();
+            else ((ManualDirectScheduler) scheduler).advance();
         }
 
         RequestContext request(long id) {

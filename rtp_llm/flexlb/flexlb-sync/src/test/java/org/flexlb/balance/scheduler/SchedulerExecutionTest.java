@@ -23,6 +23,9 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks restored requests keep one ordered queue entry and their original sequence.
+ */
 class SchedulerExecutionTest {
     @Test
     void releasedRouteRestoresOneQueueEntryWithoutChangingItsOriginalSequence() {
@@ -34,11 +37,11 @@ class SchedulerExecutionTest {
         try {
             RequestProtocolTestSupport.submitForManualPlacement(lifecycle, first);
             RequestProtocolTestSupport.submitForManualPlacement(lifecycle, second);
-            scheduler.onRequest(first);
-            scheduler.onRequest(second);
+            scheduler.scheduleRequest(first);
+            scheduler.scheduleRequest(second);
             long originalSequence = first.data().getPlacementSequence();
             assertEquals(2, queue.size());
-            scheduler.onRequest(first);
+            scheduler.scheduleRequest(first);
             assertEquals(2, queue.size());
             assertEquals(originalSequence, first.data().getPlacementSequence());
             assertEquals(
@@ -56,7 +59,7 @@ class SchedulerExecutionTest {
     void changeDuringSchedulingRunsAgainWithoutAnotherExternalNotification() throws Exception {
         var lifecycle = owner();
         var scheduler = (QueuedRequestScheduler) SchedulerTestServices.scheduler(lifecycle);
-        var queue = mock(PlacementQueue.class);
+        var queue = mock(SchedulingQueue.class);
         when(queue.scanForPlanningCandidates(anyInt(), anyInt(), any())).thenReturn(List.of());
         when(queue.drain()).thenReturn(List.of());
         ReflectionTestUtils.setField(scheduler, "orderedQueue", queue);
@@ -88,7 +91,7 @@ class SchedulerExecutionTest {
     void stoppedSchedulerDoesNotAcceptLateWakeupsOrRestart() throws Exception {
         var lifecycle = owner();
         var scheduler = (QueuedRequestScheduler) SchedulerTestServices.scheduler(lifecycle);
-        var queue = mock(PlacementQueue.class);
+        var queue = mock(SchedulingQueue.class);
         var calls = new AtomicInteger();
         var ran = new CountDownLatch(1);
         when(queue.scanForPlanningCandidates(anyInt(), anyInt(), any()))
@@ -108,7 +111,6 @@ class SchedulerExecutionTest {
             int completed = calls.get();
             scheduler.onEndpointChanged(endpoint());
             scheduler.start();
-            scheduler.schedule();
             assertEquals(completed, calls.get());
         } finally {
             SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(lifecycle));
@@ -120,7 +122,7 @@ class SchedulerExecutionTest {
     void failedSchedulingClosesWithoutWaitingForItsOwnThread() {
         var lifecycle = owner();
         var scheduler = (QueuedRequestScheduler) SchedulerTestServices.scheduler(lifecycle);
-        var queue = mock(PlacementQueue.class);
+        var queue = mock(SchedulingQueue.class);
         var failure = new IllegalStateException("queue scan failed");
         when(queue.scanForPlanningCandidates(anyInt(), anyInt(), any())).thenThrow(failure);
         when(queue.drain()).thenReturn(List.of());

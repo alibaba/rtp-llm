@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.CapacityNotifier;
 import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.cache.match.CacheAwareService;
@@ -156,8 +156,8 @@ class ReviewLifecycleRegressionTest {
                 new RequestRepository(),
                 mock(DeliveryMetricsReporter.class),
                 EndpointTestSupport.routeStrategy(EndpointTestSupport.requestRuntime()),
-                new PlacementAvailability(),
+                new CapacityNotifier(),
                 org.flexlb.balance.planner.BuiltinGroupPlanner.from(config.loadBalanceConfig()),
-                order -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(16, order));
+                () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
     }
 }

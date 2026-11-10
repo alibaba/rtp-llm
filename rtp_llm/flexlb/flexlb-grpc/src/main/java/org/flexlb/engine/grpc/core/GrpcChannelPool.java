@@ -126,16 +126,11 @@ public class GrpcChannelPool<K> {
 
         private final String description;
         @Getter private final ManagedChannel channel;
-        private final long createTimeUs;
         private final AtomicBoolean shutdown = new AtomicBoolean();
-        @Getter private volatile long lastUsedTimeUs;
-        private volatile long expireTimeUs;
 
         private PooledChannel(String description, ManagedChannel channel) {
             this.description = description;
             this.channel = channel;
-            this.createTimeUs = System.nanoTime() / 1000;
-            this.lastUsedTimeUs = createTimeUs;
         }
 
         public boolean isUsable() {
@@ -145,19 +140,6 @@ public class GrpcChannelPool<K> {
             ConnectivityState state = channel.getState(true);
             return state != ConnectivityState.SHUTDOWN
                     && state != ConnectivityState.TRANSIENT_FAILURE;
-        }
-
-        public void markUsed() {
-            lastUsedTimeUs = System.nanoTime() / 1000;
-        }
-
-        public void markExpired() {
-            expireTimeUs = System.nanoTime() / 1000;
-        }
-
-        public long getConnectionDurationUs() {
-            long endTimeUs = expireTimeUs > 0 ? expireTimeUs : System.nanoTime() / 1000;
-            return endTimeUs - createTimeUs;
         }
 
         public void shutdown() {

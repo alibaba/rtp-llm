@@ -2,14 +2,14 @@ package org.flexlb.mock;
 
 import com.google.protobuf.ByteString;
 import io.netty.channel.nio.NioEventLoopGroup;
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
-import org.flexlb.balance.scheduler.DeliveryDispatcher;
-import org.flexlb.balance.scheduler.PlacementKey;
+import org.flexlb.balance.scheduler.CapacityKey;
+import org.flexlb.balance.scheduler.DeliveryCoordinator;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRouteSelector;
 import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
@@ -63,7 +63,7 @@ import static org.mockito.Mockito.withSettings;
  * <p>Architecture:
  * <pre>
  * Real AbstractRequestScheduler (test-only composition root)
- *   ├── Real DeliveryDispatcher
+ *   ├── Real DeliveryCoordinator
  *   │     └── Real EngineGrpcClient (real Netty channels)
  *   │           ↕  real gRPC (Netty)
  *   │     MockPrefillWorker (gRPC server, no model)
@@ -89,7 +89,7 @@ public abstract class FlexLBMockTestBase {
     protected ConfigService configService;
     protected RequestRouteSelector router;
     protected EngineGrpcClient grpcClient;
-    protected DeliveryDispatcher dispatcher;
+    protected DeliveryCoordinator dispatcher;
     protected DeliveryMetricsReporter reporter;
     protected EndpointRegistry engineWorkerStatus;
     protected RequestSchedulerTestRuntime schedulerRuntime;
@@ -276,10 +276,6 @@ public abstract class FlexLBMockTestBase {
     }
 
     // ==================== Override points ====================
-    protected final NioEventLoopGroup grpcClientEventLoopGroup() {
-        return eventLoopGroup;
-    }
-
     /**
      * Override to configure prefill worker behavior.
      * Default: immediate response, no failures.
@@ -311,7 +307,7 @@ public abstract class FlexLBMockTestBase {
     /**
      * Build the exact pinned queue admission for a fixture response.
      */
-    protected final PlacementResult<RouteResult, PlacementKey> routeResult(
+    protected final RoutingResult<RouteResult, CapacityKey> routeResult(
             RequestContext context, Response response) {
         return schedulerRuntime.routeResult(context, response);
     }
@@ -327,13 +323,13 @@ public abstract class FlexLBMockTestBase {
     /**
      * Override when an integration fixture needs deterministic dispatcher sizing.
      */
-    protected DeliveryDispatcher createDispatcher() {
-        return new DeliveryDispatcher(
+    protected DeliveryCoordinator createDispatcher() {
+        return new DeliveryCoordinator(
+                new org.flexlb.balance.scheduler.RequestRepository(),
                 grpcClient,
                 configService,
                 reporter,
-                org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
-                new org.flexlb.balance.scheduler.PlacementConfiguration()
+                new org.flexlb.balance.scheduler.SchedulerConfiguration()
                         .decodeAdmissionCapacity(configService),
                 org.mockito.Mockito.mock(org.flexlb.balance.scheduler.DeliveryExecution.class));
     }

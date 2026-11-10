@@ -1,9 +1,9 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.preemption.DecodePreemption;
 import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
@@ -48,7 +48,7 @@ class RequestSchedulerContractTest {
     void endingAWaitingRequestRemovesItFromScheduling(String ending) throws Exception {
         try (Fixture f = new Fixture(true)) {
             when(f.router.select(any(), any()))
-                    .thenReturn(PlacementResult.blocked(PlacementKey.anyGroup(RoleType.PREFILL)));
+                    .thenReturn(RoutingResult.blocked(CapacityKey.anyGroup(RoleType.PREFILL)));
             var context = f.context(944L);
             var future = f.scheduler.submit(context);
             RequestProtocolTestSupport.awaitCondition(() -> f.scheduler.blockedRequestCount() == 1);
@@ -94,7 +94,7 @@ class RequestSchedulerContractTest {
                                                     org.flexlb.service.TheoryCacheHitReporter
                                                             .class)));
             var ownContext = f.context(942L);
-            org.mockito.Mockito.doNothing().when(f.requests).onRequest(ownContext);
+            org.mockito.Mockito.doNothing().when(f.requests).scheduleRequest(ownContext);
             var ownFuture = f.requests.submit(ownContext, () -> {});
             var foreignConfig = SchedulingTestConfig.newConfig();
             foreignConfig.setScheduler(ConfigTestSupport.direct());
@@ -477,7 +477,7 @@ class RequestSchedulerContractTest {
                             f.config,
                             f.router,
                             mock(DecodePreemption.class),
-                            new PlacementAvailability(),
+                            new CapacityNotifier(),
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(f.config),
                             new OrderedRequestQueue(f.config.isPriorityOrdering())));
             try {
@@ -638,7 +638,7 @@ class RequestSchedulerContractTest {
         try (Fixture f = new Fixture(false)) {
             AbstractRequestScheduler api = f.scheduler;
             var request = f.context(40);
-            org.mockito.Mockito.doNothing().when(f.requests).onRequest(request);
+            org.mockito.Mockito.doNothing().when(f.requests).scheduleRequest(request);
             var future = f.requests.submit(request, () -> {});
             CompletableFuture<Response> callback =
                     future.whenComplete(
@@ -682,7 +682,7 @@ class RequestSchedulerContractTest {
         var release = new CountDownLatch(1);
         try (Fixture f = new Fixture(true, false)) {
             var context = f.context(950L);
-            org.mockito.Mockito.doNothing().when(f.requests).onRequest(context);
+            org.mockito.Mockito.doNothing().when(f.requests).scheduleRequest(context);
             var response = f.requests.submit(context);
             var endpoint = mock(PrefillEndpoint.class);
             var route =
@@ -695,16 +695,16 @@ class RequestSchedulerContractTest {
                             null,
                             null,
                             System.currentTimeMillis());
-            var operation = f.requests.claimPlacement(context);
+            var operation = f.requests.tryBeginRouteSelection(context);
             assertNotNull(operation);
             assertEquals(
-                    PlacementResult.Status.SUCCESS,
+                    RoutingResult.Status.SUCCESS,
                     RequestProtocolTestSupport.commitRoute(
                             f.requests, route, RequestProtocolTestSupport.publication(() -> true)));
-            AbstractRequestScheduler.finishPlacement(operation);
+            AbstractRequestScheduler.finishRouting(operation);
 
             var pendingDelivery = new Delivery(endpoint, false, 1, null, "pending send");
-            pendingDelivery.members().add(new Delivery.Member(route, null));
+            pendingDelivery.members.add(new Delivery.Member(route, null));
             var runtime = SchedulerTestSupport.runtime(f.requests);
             var endpoints =
                     (EndpointRegistry)
@@ -735,7 +735,7 @@ class RequestSchedulerContractTest {
                             "endpoint unavailable before send"),
                     () -> "withdrawal rejected: " + context.snapshot());
             assertNull(
-                    context.snapshot().placement(),
+                    context.snapshot().routingContext(),
                     "withdrawal must not wait for the pending delivery task");
             assertNull(context.snapshot().route());
             assertFalse(response.isDone(), "withdrawal returns the request for reselection");
@@ -757,7 +757,7 @@ class RequestSchedulerContractTest {
                 release.countDown();
                 shutdown.get(3, TimeUnit.SECONDS);
             }
-            assertNull(context.snapshot().placement());
+            assertNull(context.snapshot().routingContext());
             assertEquals(0, runtime.requests().liveRequestCount());
             assertFalse(response.get(3, TimeUnit.SECONDS).isSuccess());
             verify(endpoint, times(1)).releaseRequest(route);
@@ -772,7 +772,7 @@ class RequestSchedulerContractTest {
         try (Fixture f = new Fixture(false)) {
             AbstractRequestScheduler api = f.scheduler;
             var request = f.context(50);
-            org.mockito.Mockito.doNothing().when(f.requests).onRequest(request);
+            org.mockito.Mockito.doNothing().when(f.requests).scheduleRequest(request);
             var future = f.requests.submit(request, () -> {});
             var endpoint = mock(PrefillEndpoint.class);
             var route =
@@ -789,7 +789,7 @@ class RequestSchedulerContractTest {
             try (var admissionCompletion5 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertEquals(
-                        PlacementResult.Status.SUCCESS,
+                        RoutingResult.Status.SUCCESS,
                         RequestProtocolTestSupport.commitRoute(
                                 f.requests,
                                 route,
@@ -850,10 +850,10 @@ class RequestSchedulerContractTest {
                     "timer",
                     timer);
             try {
-                assertDoesNotThrow(() -> AbstractRequestScheduler.finishPlacement(handle));
+                assertDoesNotThrow(() -> AbstractRequestScheduler.finishRouting(handle));
                 assertSame(failure, SchedulerTestSupport.failure(f.requests));
-                assertNull(context.snapshot().placement());
-                assertDoesNotThrow(() -> AbstractRequestScheduler.finishPlacement(handle));
+                assertNull(context.snapshot().routingContext());
+                assertDoesNotThrow(() -> AbstractRequestScheduler.finishRouting(handle));
                 verify(timer, times(3)).update(org.mockito.ArgumentMatchers.eq(context), any());
             } finally {
                 org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
@@ -866,8 +866,8 @@ class RequestSchedulerContractTest {
         }
     }
 
-    private static <T> PlacementResult<T, PlacementKey> rejection() {
-        return PlacementResult.rejected(Response.error(StrategyErrorType.NO_PREFILL_WORKER));
+    private static <T> RoutingResult<T, CapacityKey> rejection() {
+        return RoutingResult.rejected(Response.error(StrategyErrorType.NO_PREFILL_WORKER));
     }
 
     /**
@@ -901,7 +901,7 @@ class RequestSchedulerContractTest {
                             mock(TheoryCacheHitReporter.class),
                             router,
                             mock(DecodePreemption.class),
-                            new PlacementAvailability(),
+                            new CapacityNotifier(),
                             startPlacement);
             scheduler =
                     ((AbstractRequestScheduler)

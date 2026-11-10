@@ -72,7 +72,7 @@ public final class RequestData {
     @Setter private String planType = "";
 
     @Setter private long planCost;
-    @Setter private int victimCount;
+    @Setter private int preemptedRequestCount;
 
     @Setter private Long requestMessageBytes;
     @Setter private Long requestBodyBytes;
@@ -169,7 +169,7 @@ public final class RequestData {
         generateInput =
                 inputBytes == null || inputBytes.isEmpty()
                         ? null
-                        : new FutureTask<>(() -> BatchEnqueueHelper.parseInput(inputBytes));
+                        : new FutureTask<>(() -> EngineDelivery.parseInput(inputBytes));
     }
 
     public synchronized void initializeExecutionOrder(long nowMs) {
@@ -249,10 +249,7 @@ public final class RequestData {
 
     /** Binding happens under the Repository -> Context lock; no callbacks execute here. */
     synchronized void register(AbstractRequestScheduler owner, RequestFuture response) {
-        checkState(requestScheduler == null, "request data already registered");
         Objects.requireNonNull(request, "request");
-        Objects.requireNonNull(owner, "requestScheduler");
-        Objects.requireNonNull(response, "response");
         Objects.requireNonNull(schedulingMetadata, "scheduling metadata required");
         requestScheduler = owner;
         future = response;

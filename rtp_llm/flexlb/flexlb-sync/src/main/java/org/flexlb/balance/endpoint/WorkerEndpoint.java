@@ -182,7 +182,7 @@ public class WorkerEndpoint {
      * Finalize registry and cache state after request cleanup and notifications succeed.
      */
     void onRetired(Runnable completion) {
-        retirementCompleted.thenRun(Objects.requireNonNull(completion, "completion"));
+        retirementCompleted.thenRun(completion);
     }
 
     void awaitRetirement(long timeoutMs) {

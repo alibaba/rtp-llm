@@ -39,6 +39,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @DisplayName("WorkerStatus status-commit contract")
 class WorkerStatusTest {
     @Test
+    void generationChangesStillRequireTheGenerationLock() {
+        var status = discovered();
+        assertThrows(IllegalStateException.class, () -> status.recordSuccessfulPoll(true));
+        assertThrows(
+                IllegalStateException.class, () -> status.updateDiscoveryLabels("s", "g", "d"));
+    }
+
+    @Test
+    void discoveredWorkersStillRejectMissingRoles() {
+        assertThrows(
+                NullPointerException.class,
+                () -> WorkerStatus.createDiscovered(null, "g", "127.0.0.1", 8080, 8090, "s"));
+    }
+
+    @Test
     void skippedDiscoveryTicksDoNotSkipTheNextDueCachePoll() {
         WorkerStatus status = discovered();
         assertFalse(status.shouldPollCache(1L, 5L));

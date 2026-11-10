@@ -18,7 +18,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
-import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -494,9 +493,8 @@ class RequestCompletionPublicationRaceTest {
             Response expired = future.get(2L, TimeUnit.SECONDS);
             callback.get(2L, TimeUnit.SECONDS);
             assertFalse(expired.isSuccess());
-            assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), expired.getCode());
-            assertEquals(
-                    AdmissionRejectReason.RESOURCE_EXHAUSTED, expired.getAdmissionRejectReason());
+            assertEquals(StrategyErrorType.QUEUE_TIMEOUT.getErrorCode(), expired.getCode());
+            assertEquals(AdmissionRejectReason.UNSPECIFIED, expired.getAdmissionRejectReason());
             assertEquals(
                     RequestState.Phase.TIMED_OUT,
                     RequestState.from(requestContext.snapshot()).state());
@@ -546,14 +544,9 @@ class RequestCompletionPublicationRaceTest {
                     .submit(() -> blockedFuture.completeOwned(new Response()));
             try {
                 assertTrue(entered.await(2, TimeUnit.SECONDS));
-                ReflectionTestUtils.invokeMethod(
-                        fixture.scheduler(),
-                        "publishResponse",
-                        fixture.publication(),
-                        fixture.candidate(),
-                        fixture.response(),
-                        null,
-                        false);
+                fixture.publication()
+                        .prepare(RequestFuture.Completion.RESPONSE, fixture.response(), null);
+                fixture.publication().publish(false);
                 assertNull(
                         fixture.requestContext().snapshot().selectedResponse(),
                         "queued ACK must remain unselected");
@@ -565,7 +558,9 @@ class RequestCompletionPublicationRaceTest {
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
                                                 fixture.scheduler())
                                         .responseCompletions(),
-                                fixture.requestContext());
+                                fixture.requestContext(),
+                                (RequestFuture) fixture.requestContext().data().getFuture(),
+                                () -> true);
                 ContextResult.End terminal;
                 RequestState settled;
                 synchronized (fixture.requestContext()) {
@@ -734,7 +729,9 @@ class RequestCompletionPublicationRaceTest {
                         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
                                         fixture.scheduler())
                                 .responseCompletions(),
-                        fixture.requestContext());
+                        fixture.requestContext(),
+                        (RequestFuture) fixture.requestContext().data().getFuture(),
+                        () -> true);
         RequestState settled;
         synchronized (fixture.requestContext()) {
             var terminal =
@@ -961,15 +958,17 @@ class RequestCompletionPublicationRaceTest {
         var admission = RequestProtocolTestSupport.beginAdmission(owner, context);
         assertNotNull(admission);
         assertEquals(
-                org.flexlb.balance.PlacementResult.Status.SUCCESS,
+                org.flexlb.balance.RoutingResult.Status.SUCCESS,
                 RequestProtocolTestSupport.commitRoute(
                         owner, item, RequestProtocolTestSupport.publication(() -> true)));
-        AbstractRequestScheduler.finishPlacement(admission);
+        AbstractRequestScheduler.finishRouting(admission);
         var claim =
-                owner.commitDelivery(
-                        new org.flexlb.balance.scheduler.Delivery.Member(item, null),
-                        Delivery.SendMode.BATCH_ENQUEUE,
-                        801L);
+                org.flexlb.balance.scheduler.DeliveryTestSupport.transport(owner.dispatcher)
+                        .commit(
+                                new org.flexlb.balance.scheduler.Delivery.Member(item, null),
+                                Delivery.SendMode.BATCH_ENQUEUE,
+                                801L,
+                                null);
         assertNotNull(claim);
         assertEquals(ContextResult.SendState.SENDING, claim.owner().snapshot().delivery().send());
         if (delivered) {
@@ -982,17 +981,19 @@ class RequestCompletionPublicationRaceTest {
                                             Delivery.Result.delivered(),
                                             System.currentTimeMillis())));
         }
+        var candidate =
+                new ContextResult.ResponseCandidate(
+                        context, ContextResult.ResponseKind.ACK, System.currentTimeMillis());
         var publication =
                 new Registration(
                         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner)
                                 .responseCompletions(),
-                        context);
+                        context,
+                        (RequestFuture) context.data().getFuture(),
+                        () -> context.selectResponse(candidate));
         if (delivered) {
             assertTrue(context.confirmDelivery(System.currentTimeMillis()));
         }
-        var candidate =
-                new ContextResult.ResponseCandidate(
-                        context, ContextResult.ResponseKind.ACK, System.currentTimeMillis());
         return new Fixture(
                 owner, context, claim, publication, candidate, item.successResponse(true));
     }

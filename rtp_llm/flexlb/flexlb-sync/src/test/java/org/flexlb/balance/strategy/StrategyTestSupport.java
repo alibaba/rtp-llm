@@ -1,12 +1,13 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.DeliveryDispatcher;
-import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
+import org.flexlb.balance.scheduler.CapacityNotifier;
+import org.flexlb.balance.scheduler.DeliveryCoordinator;
 import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -32,17 +33,17 @@ final class StrategyTestSupport {
 
     private StrategyTestSupport() {}
 
-    static <B> org.flexlb.balance.PlacementResult<Selection, B> select(
+    static <B> org.flexlb.balance.RoutingResult<Selection, B> select(
             org.flexlb.dao.loadbalance.Request request,
             java.util.function.Function<
                             Selection,
-                            org.flexlb.balance.PlacementResult<
+                            org.flexlb.balance.RoutingResult<
                                     org.flexlb.balance.scheduler.RoleSelection, B>>
                     action) {
         var route = scope(request);
         var result = action.apply(route);
-        return result.status() == PlacementResult.Status.SUCCESS
-                ? PlacementResult.success(route)
+        return result.status() == RoutingResult.Status.SUCCESS
+                ? RoutingResult.success(route)
                 : result.asFailure();
     }
 
@@ -62,7 +63,7 @@ final class StrategyTestSupport {
         return config;
     }
 
-    static org.flexlb.balance.PlacementResult<Selection, RoleType> select(
+    static org.flexlb.balance.RoutingResult<Selection, RoleType> select(
             DecodeRoutingFixture selector,
             org.flexlb.dao.loadbalance.Request request,
             org.flexlb.dao.SchedulingMetadata metadata,
@@ -70,7 +71,7 @@ final class StrategyTestSupport {
         return select(request, route -> selector.select(request, metadata, group, route));
     }
 
-    static org.flexlb.balance.PlacementResult<Selection, org.flexlb.balance.scheduler.PlacementKey>
+    static org.flexlb.balance.RoutingResult<Selection, org.flexlb.balance.scheduler.CapacityKey>
             select(
                     PrefillRoutingFixture selector,
                     org.flexlb.dao.loadbalance.Request request,
@@ -112,10 +113,10 @@ final class StrategyTestSupport {
                         Mockito.mock(org.flexlb.cache.telemetry.CacheMetricsReporter.class),
                         configService,
                         Mockito.mock(org.flexlb.config.ModelMetaConfig.class));
-        PlacementResult<?, ?> result =
+        RoutingResult<?, ?> result =
                 org.springframework.test.util.ReflectionTestUtils.invokeMethod(
                         router, "selectVit", String.valueOf(id), group, route.roles());
-        return result.status() == PlacementResult.Status.SUCCESS ? route : null;
+        return result.status() == RoutingResult.Status.SUCCESS ? route : null;
     }
 
     static org.flexlb.dao.loadbalance.ServerStatus vit(Selection route) {
@@ -129,22 +130,22 @@ final class StrategyTestSupport {
 
     static EndpointRegistry endpointRegistry(ConfigService configService) {
         var requests = new org.flexlb.balance.scheduler.RequestRepository();
-        DeliveryDispatcher delivery = parkedDelivery();
+        DeliveryCoordinator delivery = parkedDelivery();
         return new EndpointRegistry(
                 configService,
                 requests,
                 Mockito.mock(DeliveryMetricsReporter.class),
                 delivery,
-                new PlacementAvailability(),
+                new CapacityNotifier(),
                 org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                         configService.loadBalanceConfig()),
-                order -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(16, order));
+                () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
     }
 
     /**
      * Keep selection-owned queues parked without replacing admission internals.
      */
-    static DeliveryDispatcher parkedDelivery() {
+    static DeliveryCoordinator parkedDelivery() {
         return org.flexlb.balance.scheduler.DeliveryTestSupport.parked(PARKED_BOUNDARY);
     }
 
@@ -235,7 +236,7 @@ final class StrategyTestSupport {
         }
     }
 
-    static org.flexlb.balance.scheduler.Delivery commitBatch(
+    static WorkSnapshot commitBatch(
             PrefillEndpoint endpoint,
             long batchId,
             long predictedMs,
@@ -249,10 +250,8 @@ final class StrategyTestSupport {
                         items,
                         new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(
                                 batchId, Integer.MAX_VALUE),
-                        new long[] {predictedMs},
-                        null,
-                        System.currentTimeMillis());
-        return endpoint.commitDelivery(delivery);
+                        new long[] {predictedMs});
+        return endpoint.dequeueForDelivery(delivery).value();
     }
 
     static void setCacheStatus(WorkerStatus status, long blockSize, long availableKv) {
@@ -304,9 +303,9 @@ final class StrategyTestSupport {
                             model);
         }
 
-        org.flexlb.balance.PlacementResult<
+        org.flexlb.balance.RoutingResult<
                         org.flexlb.balance.scheduler.RoleSelection,
-                        org.flexlb.balance.scheduler.PlacementKey>
+                        org.flexlb.balance.scheduler.CapacityKey>
                 select(
                         org.flexlb.dao.loadbalance.Request request,
                         org.flexlb.dao.SchedulingMetadata metadata,
@@ -317,12 +316,12 @@ final class StrategyTestSupport {
             ctx.data().setSchedulingMetadata(metadata);
             ctx.data().setRequestedRoles(List.of(role));
             var result = routing.select(ctx, group);
-            if (result.status() != PlacementResult.Status.SUCCESS) return result.asFailure();
+            if (result.status() != RoutingResult.Status.SUCCESS) return result.asFailure();
             var execution = result.value();
             route.roles().addAll(execution.roles());
             route.cleanup.add(
                     () -> execution.prefillEndpoint().rollback(execution.prefillReservation()));
-            return PlacementResult.success(execution.role(role));
+            return RoutingResult.success(execution.role(role));
         }
 
         int selectBestCandidate(
@@ -352,7 +351,7 @@ final class StrategyTestSupport {
             policy = new DecodeSelector(config, capacity);
         }
 
-        org.flexlb.balance.PlacementResult<org.flexlb.balance.scheduler.RoleSelection, RoleType>
+        org.flexlb.balance.RoutingResult<org.flexlb.balance.scheduler.RoleSelection, RoleType>
                 select(
                         org.flexlb.dao.loadbalance.Request request,
                         org.flexlb.dao.SchedulingMetadata metadata,
@@ -386,8 +385,7 @@ final class StrategyTestSupport {
                                 var endpoint =
                                         (org.flexlb.balance.endpoint.DecodeEndpoint)
                                                 registry.selectDecodeEndpoint(view);
-                                if (endpoint == null)
-                                    return PlacementResult.Registration.UNAVAILABLE;
+                                if (endpoint == null) return RoutingResult.Registration.UNAVAILABLE;
                                 var acquired =
                                         endpoint.tryRegisterSelection(
                                                 view,
@@ -397,11 +395,10 @@ final class StrategyTestSupport {
                                                 metadata.priority(),
                                                 capacity);
                                 return switch (acquired.status()) {
-                                    case VERSION_CONFLICT -> PlacementResult.Registration.CONFLICT;
-                                    case ENDPOINT_RETIRED ->
-                                            PlacementResult.Registration.UNAVAILABLE;
-                                    case CAPACITY_FULL, ALREADY_OWNED ->
-                                            PlacementResult.Registration.BLOCKED;
+                                    case VERSION_CONFLICT, ALREADY_OWNED ->
+                                            RoutingResult.Registration.CONFLICT;
+                                    case ENDPOINT_RETIRED -> RoutingResult.Registration.UNAVAILABLE;
+                                    case CAPACITY_FULL -> RoutingResult.Registration.BLOCKED;
                                     case ACQUIRED -> {
                                         var status =
                                                 org.flexlb.dao.loadbalance.ServerStatus.forWorker(
@@ -425,13 +422,13 @@ final class StrategyTestSupport {
                                                                         .DecodeResources
                                                                         .ReleaseReason
                                                                         .LOCAL_ROLLBACK));
-                                        yield PlacementResult.Registration.REGISTERED;
+                                        yield RoutingResult.Registration.REGISTERED;
                                     }
                                 };
                             });
-            return new PlacementResult<>(
+            return new RoutingResult<>(
                     result.status(),
-                    result.status() == PlacementResult.Status.SUCCESS
+                    result.status() == RoutingResult.Status.SUCCESS
                             ? route.role(RoleType.DECODE)
                             : null,
                     result.failure(),

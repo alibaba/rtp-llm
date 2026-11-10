@@ -55,7 +55,7 @@ final class MockLruBlockCache {
     /**
      * cache key → reference count. ref == 0: pure LRU block (evictable);
      * ref > 0: referenced by in-flight requests (matchable, NOT evictable).
-     * Access-ordered so the eldest pure-LRU entry is the eviction victim
+     * Access-ordered so the eldest pure-LRU entry is the eviction request selected for preemption
      * (production evicts the least-recently-used chain tail).
      */
     private final LinkedHashMap<Long, Integer> blocks;
@@ -224,7 +224,7 @@ final class MockLruBlockCache {
      * </ul>
      *
      * <p>Hit keys are pinned (ref+1) BEFORE the free-first/LRU-tail eviction
-     * sweep for the net-new part, so an eviction victim can never be a block
+     * sweep for the net-new part, so an eviction request selected for preemption can never be a block
      * this request is about to reference.
      *
      * @param totalBlocksDemand the request's FULL block demand (ceil(inputLen/spb))

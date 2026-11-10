@@ -1,9 +1,7 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.OrderedPrefillRequestQueue;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler;
 import org.flexlb.config.FlexlbConfig;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -70,7 +68,7 @@ public final class RequestExecutionTestSupport {
                         workMs,
                         context.data().getConfig().isQueue());
         org.junit.jupiter.api.Assertions.assertEquals(
-                org.flexlb.balance.PlacementResult.Registration.REGISTERED, registered.status());
+                org.flexlb.balance.RoutingResult.Registration.REGISTERED, registered.status());
         var roles = new java.util.ArrayList<RoleSelection>();
         try {
             roles.add(
@@ -114,7 +112,7 @@ public final class RequestExecutionTestSupport {
             String key,
             PrefillEndpoint endpoint,
             FlexlbConfig config,
-            DeliveryDispatcher delivery,
+            DeliveryCoordinator delivery,
             AbstractRequestScheduler scheduler) {
         return create(
                 key,
@@ -129,7 +127,7 @@ public final class RequestExecutionTestSupport {
             String key,
             PrefillEndpoint endpoint,
             FlexlbConfig config,
-            DeliveryDispatcher delivery,
+            DeliveryCoordinator delivery,
             AbstractRequestScheduler scheduler,
             org.flexlb.balance.planner.GroupPlanner grouping) {
         return create(
@@ -146,15 +144,13 @@ public final class RequestExecutionTestSupport {
             String key,
             PrefillEndpoint endpoint,
             FlexlbConfig config,
-            DeliveryDispatcher delivery,
+            DeliveryCoordinator delivery,
             AbstractRequestScheduler scheduler,
             org.flexlb.balance.planner.GroupPlanner grouping,
             java.util.function.Function<PrefillQueueScheduler, PrefillQueueScheduler.Decision>
                     scheduling) {
         var dependencies = SchedulerTestSupport.queueDependencies(scheduler, config);
-        var index =
-                OrderedPrefillRequestQueue.ordered(
-                        16, QueueExecutionSettings.queueOrder(config.isPriorityOrdering()));
+        var index = OrderedPrefillRequestQueue.fifo(16);
         var state =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                         new ReentrantLock(), index, System::currentTimeMillis);
@@ -185,13 +181,12 @@ public final class RequestExecutionTestSupport {
         var controller = new Controller(worker, scheduling, owner);
         controllers.put(worker, controller);
         var availability =
-                (PlacementAvailability)
-                        ReflectionTestUtils.getField(
-                                worker.prefillEndpoint(), "placementAvailability");
+                (CapacityNotifier)
+                        ReflectionTestUtils.getField(worker.prefillEndpoint(), "capacityNotifier");
         if (availability != null)
             availability.addListener(
-                    new PlacementAvailability.Listener() {
-                        public void onAvailabilityChanged(PlacementKey key) {
+                    new CapacityNotifier.Listener() {
+                        public void onCapacityChanged(CapacityKey key) {
                             controller.wake();
                         }
 
@@ -200,24 +195,16 @@ public final class RequestExecutionTestSupport {
                             controller.wake();
                         }
                     });
+    }
 
-        org.mockito.Mockito.doAnswer(
-                        call -> {
-                            var result = call.callRealMethod();
-                            controller.wake();
-                            return result;
-                        })
-                .when(worker)
-                .signal(org.mockito.ArgumentMatchers.anyBoolean());
-        org.mockito.Mockito.doAnswer(
-                        call -> {
-                            controller.stop();
-                            controller.awaitStopped(Long.MAX_VALUE);
-                            controllers.remove(worker);
-                            return call.callRealMethod();
-                        })
-                .when(worker)
-                .stopAndAwait();
+    public static Throwable stopAndAwait(PrefillQueueScheduler worker) {
+        var controller = controllers.remove(worker);
+        if (controller != null) {
+            controller.stop();
+            controller.awaitStopped(Long.MAX_VALUE);
+        }
+        return worker.failQueuedRequests(
+                new java.util.concurrent.CancellationException("Test queue stopped"));
     }
 
     public static void start(PrefillQueueScheduler worker) {
@@ -251,14 +238,14 @@ public final class RequestExecutionTestSupport {
     public static void endpointChanged(PrefillEndpoint endpoint, PrefillEndpoint.Signal kind) {
         var work = org.flexlb.balance.endpoint.EndpointTestSupport.requestExecution(endpoint);
         if (work == null) return;
-        if (kind != PrefillEndpoint.Signal.PLACEMENT)
-            work.signal(kind == PrefillEndpoint.Signal.CAPACITY);
+        var ledger = org.flexlb.balance.endpoint.EndpointTestSupport.resources(endpoint);
+        if (ledger != endpoint && kind != PrefillEndpoint.Signal.PLACEMENT) ledger.signal(kind);
         var controller = controllers.get(work);
         if (controller != null) controller.wake();
     }
 
     public static PrefillQueueScheduler.Decision schedule(PrefillQueueScheduler work) {
-        return QueuedRequestScheduler.decideQueueScheduling(work);
+        return work.scheduleOnce();
     }
 
     public static PrefillEndpoint.QueueSnapshot capture(PrefillQueueScheduler runtime) {
@@ -269,12 +256,7 @@ public final class RequestExecutionTestSupport {
         return org.flexlb.balance.endpoint.EndpointTestSupport.resources(runtime.prefillEndpoint());
     }
 
-    static CapacityBoundary boundaryOnly(RouteResult item, CapacityBoundary boundary) {
-        return boundary;
-    }
-
-    static QueuedRequestScheduler.PrefillQueueScheduler schedulingState(
-            PrefillQueueScheduler execution) {
+    static PrefillQueueScheduler schedulingState(PrefillQueueScheduler execution) {
         var controller = controllers.get(execution);
         return controller == null ? null : controller.work;
     }
@@ -293,10 +275,13 @@ public final class RequestExecutionTestSupport {
         return status;
     }
 
+    /**
+     * Drives test Prefill scheduling decisions and resumes them on notifications or deadlines.
+     */
     private static final class Controller implements RequestScheduler {
         final PrefillQueueScheduler execution;
         final AbstractRequestScheduler owner;
-        final QueuedRequestScheduler.PrefillQueueScheduler work;
+        final PrefillQueueScheduler work;
         final java.util.function.Function<PrefillQueueScheduler, PrefillQueueScheduler.Decision>
                 policy;
         final Thread thread;
@@ -335,7 +320,7 @@ public final class RequestExecutionTestSupport {
             next = scheduleAt(System.nanoTime());
         }
 
-        public void onRequest(RequestContext request) {}
+        public void scheduleRequest(RequestContext request) {}
 
         public void onEndpointChanged(org.flexlb.balance.endpoint.WorkerEndpoint endpoint) {
             wake();
@@ -392,15 +377,12 @@ public final class RequestExecutionTestSupport {
             if (execution.stopping()) return Long.MAX_VALUE;
             long ms = System.currentTimeMillis();
             try {
-                if (waiting == null
-                        ? execution.waitCurrent(null, ms)
-                        : now < next && execution.waitCurrent(waiting, ms)) return next;
-                execution.observeWait(null);
                 waiting = policy.apply(execution);
                 if (waiting.waitReason() != null)
                     execution.recordQueueWait(waiting.request(), waiting.waitReason());
                 execution.observeWait(waiting);
-                if (!execution.waitCurrent(waiting, ms)) return next = now;
+                if (execution.needsImmediateScheduling(waiting, System.currentTimeMillis()))
+                    return next = now;
                 long at =
                         waiting.request() == null
                                 ? Long.MAX_VALUE
@@ -414,7 +396,7 @@ public final class RequestExecutionTestSupport {
                                         + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(
                                                 Math.max(0L, at - ms));
             } catch (Throwable failure) {
-                execution.stopAndDrain(failure);
+                execution.failQueuedRequests(failure);
                 stop();
                 return Long.MAX_VALUE;
             }

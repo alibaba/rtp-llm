@@ -6,34 +6,25 @@ import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.util.PriorityOrdering;
 
 import java.util.Comparator;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Immutable queue rules shared by routing projections and Prefill execution. */
+/**
+ * Immutable batch limits shared by routing projections and Prefill execution.
+ */
 public record QueueExecutionSettings(
-        boolean priorityOrdering,
         DispatcherConfig.Type dispatcherType,
         GroupPlanner grouping,
         int maxRequests,
         long collectionWaitMs,
         long executionBudgetMs) {
-    private static final Comparator<QueueItem> PRIORITY_QUEUE_ORDER =
-            (left, right) ->
-                    PriorityOrdering.compareWithRequestId(
-                            left.priority(),
-                            left.enqueueSeq(),
-                            left.requestId(),
-                            right.priority(),
-                            right.enqueueSeq(),
-                            right.requestId());
-    private static final Comparator<QueueItem> FIFO_QUEUE_ORDER =
-            Comparator.comparingLong(QueueItem::enqueueSeq).thenComparing(QueueItem::requestId);
-
-    public static Comparator<QueueItem> queueOrder(boolean priorityOrdering) {
-        return priorityOrdering ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
+    /**
+     * Stable equality preserves accepted order and puts projected arrivals at the tail.
+     */
+    public static Comparator<QueueItem> queueOrder() {
+        return (left, right) -> 0;
     }
 
     public static QueueExecutionSettings capture(FlexlbConfig config, GroupPlanner grouping) {
@@ -41,8 +32,7 @@ public record QueueExecutionSettings(
         var decision = config.decisionPolicy();
         boolean single = decision.getType() == DecisionPolicyConfig.Type.SINGLE;
         return new QueueExecutionSettings(
-                config.isPriorityOrdering(),
-                config.getDispatcher().getType(),
+                config.deliveryType(org.flexlb.dao.route.RequestPhase.GENERATION),
                 grouping,
                 single ? 1 : decision.resolveMaxRequests(),
                 single ? 0L : Math.max(0L, decision.getMaxCollectionWaitMs()),

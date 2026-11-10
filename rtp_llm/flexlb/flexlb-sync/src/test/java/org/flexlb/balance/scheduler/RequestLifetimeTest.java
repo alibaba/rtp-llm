@@ -29,7 +29,7 @@ import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
 import static org.flexlb.balance.scheduler.ContextResult.CancellationFacts;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.Prediction;
-import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
+import static org.flexlb.balance.scheduler.ContextResult.RoutingCompletion;
 import static org.flexlb.balance.scheduler.ContextResult.SendState;
 import static org.flexlb.balance.scheduler.ContextResult.TransportResult;
 import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEvent;
@@ -935,15 +935,13 @@ class RequestLifetimeTest {
                         decode,
                         reservation,
                         System.currentTimeMillis());
-        var placement = (PlacementOperation) context.beginPlacement(null);
+        var placement = (RoutingContext) context.beginRouteSelection();
         context.publishRoute(placement, item);
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.completePlacement(
-                                placement,
-                                PublicationResult.PUBLISHED,
-                                System.currentTimeMillis()));
+                        observedRequest.completeRouting(
+                                placement, RoutingCompletion.FINISHED, System.currentTimeMillis()));
         return new Fixture(owner, config, context, item);
     }
 
@@ -1005,7 +1003,7 @@ class RequestLifetimeTest {
         long now = context.snapshot().lastWorkerAtMs();
         synchronized (context) {
             var route = context.snapshot().route();
-            assertTrue(context.validateDelivery(route, now));
+            assertTrue(context.validateDelivery(route, null, now));
             var member = new Delivery.Member(route, null);
             member.initialize(Delivery.SendMode.BATCH_ENQUEUE, 1L);
             context.recordDeliveryStarted(member, now);
@@ -1037,7 +1035,7 @@ class RequestLifetimeTest {
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.recordDeliveryResult(
+                        observedRequest.recordDeliveryPrediction(
                                 new Prediction(
                                         context.snapshot().delivery().identity(), at, nowMs)));
     }

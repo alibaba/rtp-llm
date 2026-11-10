@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
@@ -10,7 +11,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -40,13 +40,7 @@ class PrefillRequestCapacityTest {
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillEndpoint state =
             org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
-                    lock,
-                    OrderedPrefillRequestQueue.ordered(
-                            16,
-                            Comparator.comparing(
-                                    org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
-                                            ::requestId)),
-                    System::currentTimeMillis);
+                    lock, OrderedPrefillRequestQueue.fifo(16), System::currentTimeMillis);
 
     @Test
     void duplicateDirectAdmissionDoesNotReplaceOrReleaseTheOriginalOwner() {
@@ -196,42 +190,20 @@ class PrefillRequestCapacityTest {
     }
 
     @Test
-    void progressReadersDoNotWaitForTheOwnershipLock() throws Exception {
+    void queueDepthReflectsRemovalAfterTheStateLockIsReleased() throws Exception {
         RouteResult queued = item(1);
         assertTrue(enqueue(queued, 2L));
+        assertEquals(1, state.queueDepth());
         try (var reader = Executors.newSingleThreadExecutor()) {
-            runWithStateLock(
-                    lock,
-                    () ->
-                            org.junit.jupiter.api.Assertions.assertDoesNotThrow(
-                                    () -> {
-                                        assertFalse(
-                                                reader.submit(
-                                                                () ->
-                                                                        state.progress()
-                                                                                        .queueDepth()
-                                                                                < 1L)
-                                                        .get(5, TimeUnit.SECONDS));
-                                        assertTrue(
-                                                reader.submit(
-                                                                () ->
-                                                                        state.progress()
-                                                                                        .queueDepth()
-                                                                                < 2L)
-                                                        .get(5, TimeUnit.SECONDS));
-                                        assertSame(
-                                                queued,
-                                                org.flexlb.balance.endpoint.EndpointTestSupport
-                                                        .removeQueued(state, queued));
-                                        assertTrue(
-                                                reader.submit(
-                                                                () ->
-                                                                        state.progress()
-                                                                                        .queueDepth()
-                                                                                < 1L)
-                                                        .get(5, TimeUnit.SECONDS),
-                                                "removal publishes queue progress before the ownership lock is released");
-                                    }));
+            Future<Integer> depth;
+            lock.lock();
+            try {
+                depth = reader.submit(state::queueDepth);
+                assertSame(queued, EndpointTestSupport.removeQueued(state, queued));
+            } finally {
+                lock.unlock();
+            }
+            assertEquals(0, depth.get(5, TimeUnit.SECONDS));
         }
     }
 
@@ -323,22 +295,20 @@ class PrefillRequestCapacityTest {
         when(second.priority()).thenReturn(50);
         when(incoming.priority()).thenReturn(90);
         AtomicBoolean failInsertion = new AtomicBoolean(true);
-        Comparator<org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem> ordering =
-                (left, right) -> {
-                    if (failInsertion.get() && (left == incoming || right == incoming)) {
-                        if (fatal) {
-                            throw new AssertionError("queue insertion failed");
-                        }
-                        throw new IllegalStateException("queue insertion failed");
-                    }
-                    return Long.compare(
-                            Long.parseLong(left.requestId()), Long.parseLong(right.requestId()));
-                };
+        var queue = org.mockito.Mockito.spy(OrderedPrefillRequestQueue.fifo(16));
+        org.mockito.Mockito.doAnswer(
+                        call -> {
+                            if (failInsertion.get()) {
+                                if (fatal) throw new AssertionError("queue insertion failed");
+                                throw new IllegalStateException("queue insertion failed");
+                            }
+                            return call.callRealMethod();
+                        })
+                .when(queue)
+                .add(incoming);
         PrefillEndpoint ledger =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
-                        lock,
-                        OrderedPrefillRequestQueue.ordered(16, ordering),
-                        System::currentTimeMillis);
+                        lock, queue, System::currentTimeMillis);
         runWithStateLock(
                 lock,
                 () -> {
@@ -430,8 +400,7 @@ class PrefillRequestCapacityTest {
                 state, item, 0L, limit);
     }
 
-    private org.flexlb.balance.scheduler.Delivery commit(
-            RouteResult item, PrefillEndpoint.RequestRecord registration) {
+    private WorkSnapshot commit(RouteResult item, PrefillEndpoint.RequestRecord registration) {
         return org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(state, item);
     }
 

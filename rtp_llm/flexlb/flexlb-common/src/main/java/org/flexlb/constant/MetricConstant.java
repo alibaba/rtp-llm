@@ -5,17 +5,6 @@ package org.flexlb.constant;
  * Use with standard monitoring libraries like Micrometer/Prometheus
  */
 public class MetricConstant {
-    public static final String ROUTING_QUEUE_ENTRY_QPS = "app.routing.queue.entry.qps";
-    public static final String ROUTING_QUEUE_TIMEOUT_QPS = "app.routing.queue.timeout.qps";
-    public static final String ROUTING_QUEUE_REJECTED_QPS = "app.routing.queue.rejected.qps";
-    public static final String ROUTING_ROUTE_EXECUTION_TIME_MS =
-            "app.routing.route.execution.time.ms";
-    public static final String ROUTING_SUCCESS_QPS = "app.routing.success.qps";
-    public static final String ROUTING_FAILURE_QPS = "app.routing.failure.qps";
-    public static final String ROUTING_RETRY_QPS = "app.routing.retry.qps";
-    public static final String WORKER_PERMIT_CAPACITY = "app.worker.permit.capacity";
-    public static final String AUTO_TPM_REQUEST_SLO_MS = "auto_tpm.request.slo_ms";
-    public static final String AUTO_TPM_DEADLINE_MISS_COUNT = "auto_tpm.deadline_miss.count";
     public static final String ENGINE_WORKER_NUMBER =
             "app.engine.health.check.engine.worker.number";
     public static final String ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT =
@@ -28,8 +17,6 @@ public class MetricConstant {
             "app.flexlb.decode.inflight.kv.reserved.tokens";
     public static final String DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS =
             "app.flexlb.decode.inflight.hard.kv.reserved.tokens";
-    public static final String CACHE_RECENT_KEY_HIT_COUNT = "app.cache.recent.key.hit.count";
-    public static final String CACHE_RECENT_KEY_TOTAL_COUNT = "app.cache.recent.key.total.count";
     public static final String DISPATCH_EXECUTOR_COMPLETED_TASKS =
             "dispatch.executor.completed.tasks";
     public static final String CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS =
@@ -92,8 +79,6 @@ public class MetricConstant {
     public static final String ENGINE_STATUS_CHECK_FAIL_TOTAL =
             "app.engine.health.check.fail.total";
 
-    public static final String STATUS_FAILURE_DETAIL = "app.status.failure.detail";
-
     /**
      * Master load balancing service total QPS
      */
@@ -131,12 +116,6 @@ public class MetricConstant {
     public static final String INFLIGHT_BATCH_COUNT = "app.flexlb.inflight.batch.count";
 
     /**
-     * Requests whose lifecycle is still tracked by the scheduler.
-     * Includes queued requests and requests awaiting lifecycle completion.
-     */
-    public static final String TRACKED_REQUEST_COUNT = "app.flexlb.tracked.request.count";
-
-    /**
      * Per-worker dispatched requests not yet confirmed by WorkerStatus.
      * Tagged by role and engineIp; excludes queued and confirmed requests.
      */
@@ -163,18 +142,6 @@ public class MetricConstant {
      * FlexLB scheduler total load per decode worker (confirmed running + scheduler inflight)
      */
     public static final String DECODE_TOTAL_LOAD = "app.flexlb.decode.total.load";
-
-    /**
-     * Sum of input tokens plus max_new_tokens for local Decode reservations, including queued requests.
-     */
-    public static final String DECODE_INPUT_AND_MAX_OUTPUT_KV_RESERVED_TOKENS =
-            "app.flexlb.decode.inflight.kv.reserved.tokens";
-
-    /**
-     * Sum of input tokens for local Decode reservations, including queued requests.
-     */
-    public static final String DECODE_INPUT_KV_RESERVED_TOKENS =
-            "app.flexlb.decode.inflight.hard.kv.reserved.tokens";
 
     /**
      * FlexLB scheduler inflight max age (ms) — age of the oldest inflight entry,
@@ -391,11 +358,6 @@ public class MetricConstant {
      * Accumulated cache-hit tokens for selected prefill requests.
      */
     public static final String CACHE_HIT_COUNT = "app.cache.hit.count";
-
-    /**
-     * Accumulated input tokens for the same selected prefill requests.
-     */
-    public static final String CACHE_INPUT_TOKENS = "app.cache.input.tokens";
 
     /**
      * Cache hit percentage
@@ -682,12 +644,6 @@ public class MetricConstant {
     public static final String GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE =
             "grpc.server.executor.max.pool.size";
 
-    /**
-     * gRPC server executor rejected task counter. Rejection uses AbortPolicy.
-     */
-    public static final String GRPC_SERVER_EXECUTOR_REJECTED_TASKS =
-            "grpc.server.executor.caller.runs";
-
     /* ------------------------ Dispatch Executor Monitoring ---------------------------- */
 
     /**
@@ -709,12 +665,6 @@ public class MetricConstant {
     /* ------------------------ Auto-TPM Request Scheduler ----------------------------- */
 
     /**
-     * Request registration or terminal cleanup failures, tagged by the failing stage.
-     */
-    public static final String REQUEST_LIFECYCLE_FAILURES_TOTAL =
-            "auto_tpm.request.lifecycle.failures.total";
-
-    /**
      * Auto-TPM request count by priority (QPS), tags: priority
      */
     public static final String AUTO_TPM_REQUEST_COUNT = "auto_tpm.request.count";
@@ -733,13 +683,13 @@ public class MetricConstant {
      * Auto-TPM eviction plan commit count (QPS), tags: priority, case, result.
      * Under {@code engineCancellation.mode=RETURN} a commit means the
      * instruction-bearing route was prepared, before it crosses its delivery
-     * boundary and before the victims' releases are proven, so the count is an
+     * boundary and before the requests selected for preemption' releases are proven, so the count is an
      * upper bound on completed Engine-owned preemptions.
      */
     public static final String AUTO_TPM_EVICTION_COMMIT_COUNT = "auto_tpm.eviction_commit.count";
 
     /**
-     * Auto-TPM evicted victim count (QPS), tags: victim_priority, incoming_priority, stage, case.
+     * Auto-TPM evicted request selected for preemption count (QPS), tags: victim_priority, incoming_priority, stage, case.
      * Subject to the same RETURN-mode upper bound as
      * {@link #AUTO_TPM_EVICTION_COMMIT_COUNT}.
      */
@@ -751,7 +701,7 @@ public class MetricConstant {
     public static final String AUTO_TPM_PREFILL_QUEUE_DEPTH = "auto_tpm.prefill.queue_depth";
 
     /**
-     * Auto-TPM evicted victim KV tokens released (timer), tags: victim_priority, stage
+     * Auto-TPM evicted request selected for preemption KV tokens released (timer), tags: victim_priority, stage
      */
     public static final String AUTO_TPM_VICTIM_KV_TOKENS = "auto_tpm.victim.kv_tokens";
 
@@ -794,16 +744,16 @@ public class MetricConstant {
 
     /**
      * Auto-TPM engine cancel requests issued (QPS), tags: endpoint,
-     * priority (victim's normalized priority).
+     * priority (request selected for preemption's normalized priority).
      * Counted when an accepted-eviction commit fires a Cancel RPC.
      */
     public static final String AUTO_TPM_CANCEL_REQUEST_COUNT = "auto_tpm.cancel.request.count";
 
     /**
      * Auto-TPM engine cancel release confirmations (QPS), tags: endpoint,
-     * priority (victim's normalized priority; "0" when the settled item
+     * priority (request selected for preemption's normalized priority; "0" when the settled item
      * carried no Auto-TPM budget).
-     * Counted when a cancelled victim's release is confirmed — either inside
+     * Counted when a cancelled request selected for preemption's release is confirmed — either inside
      * the commit wait window or later via the WorkerStatus settle path.
      */
     public static final String AUTO_TPM_CANCEL_CONFIRM_COUNT = "auto_tpm.cancel.confirm.count";
@@ -811,7 +761,7 @@ public class MetricConstant {
     /**
      * Auto-TPM engine cancel wait-window timeouts (QPS), tags: endpoint,
      * priority (the incoming request whose eviction plan failed).
-     * The plan failed; the victim stays CANCEL_REQUESTED until WorkerStatus
+     * The plan failed; the request selected for preemption stays CANCEL_REQUESTED until WorkerStatus
      * settles it.
      */
     public static final String AUTO_TPM_CANCEL_TIMEOUT_COUNT = "auto_tpm.cancel.timeout.count";
@@ -833,12 +783,4 @@ public class MetricConstant {
      * engine-facing load from Prefill-queued reservations.
      */
     public static final String AUTO_TPM_DECODE_ENGINE_LOAD = "auto_tpm.decode.engine_load";
-
-    /**
-     * Decode preemption attempts rejected during target validation (QPS).
-     * Count once per failed attempt, with mode (return/rpc) and a bounded
-     * reason describing the target check that failed.
-     */
-    public static final String AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT =
-            "auto_tpm.preemption.target_invalid.count";
 }

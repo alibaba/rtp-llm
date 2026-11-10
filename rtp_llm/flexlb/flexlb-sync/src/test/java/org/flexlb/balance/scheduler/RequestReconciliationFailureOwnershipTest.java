@@ -74,23 +74,28 @@ class RequestReconciliationFailureOwnershipTest {
         var admission = RequestProtocolTestSupport.beginAdmission(owner, context);
         assertNotNull(admission);
         assertEquals(
-                org.flexlb.balance.PlacementResult.Status.SUCCESS,
+                org.flexlb.balance.RoutingResult.Status.SUCCESS,
                 RequestProtocolTestSupport.commitRoute(
                         owner, route, RequestProtocolTestSupport.publication(() -> true)));
-        AbstractRequestScheduler.finishPlacement(admission);
+        AbstractRequestScheduler.finishRouting(admission);
         var delivery =
-                owner.commitDelivery(
-                        new org.flexlb.balance.scheduler.Delivery.Member(
-                                route, RequestProtocolTestSupport.handoff(() -> true)),
-                        Delivery.SendMode.BATCH_ENQUEUE,
-                        7L);
+                org.flexlb.balance.scheduler.DeliveryTestSupport.transport(owner.dispatcher)
+                        .commit(
+                                new org.flexlb.balance.scheduler.Delivery.Member(
+                                        route, RequestProtocolTestSupport.handoff(() -> true)),
+                                Delivery.SendMode.BATCH_ENQUEUE,
+                                7L,
+                                null);
         assertEquals(
                 ContextResult.SendState.SENDING, delivery.owner().snapshot().delivery().send());
         RequestProtocolTestSupport.transport(
                 owner,
                 delivery,
                 Delivery.Result.uncertain(new IllegalStateException("reply lost")));
-        var registration = owner.tryClaim(reservation, 4L).orElseThrow();
+        var registration =
+                SchedulerTestSupport.routePreemption(owner)
+                        .tryRegisterPreemption(reservation, 4L)
+                        .orElseThrow();
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         owner, registration, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -159,7 +164,7 @@ class RequestReconciliationFailureOwnershipTest {
                                             org.flexlb.balance.scheduler.SchedulerTestSupport
                                                     .runtime(owner)
                                                     .tasks(),
-                                            "pendingWork"))
+                                            "submittedTasks"))
                             .longValue());
         } finally {
             if (context.snapshot().phase() != Phase.CLOSED) {

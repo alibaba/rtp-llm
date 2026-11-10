@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
-import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.preemption.DecodePreemption;
 import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.config.ConfigService;
 import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
@@ -73,11 +73,11 @@ class GenerateInputPreparationTest {
         data.setGenerateInputPb(ByteString.copyFrom(new byte[] {(byte) 0xff}));
         assertTrue(data.hasGenerateInput());
         var dispatcher =
-                new DeliveryDispatcher(
+                new DeliveryCoordinator(
+                        new org.flexlb.balance.scheduler.RequestRepository(),
                         null,
                         DeliveryTestSupport.service(config),
                         mock(DeliveryMetricsReporter.class),
-                        mock(TaskTimer.class),
                         SchedulingTestConfig.capacity(config),
                         mock(DeliveryExecution.class));
         assertNull(dispatcher.validateRequestInput(data));
@@ -156,7 +156,7 @@ class GenerateInputPreparationTest {
                         mock(TheoryCacheHitReporter.class),
                         router,
                         mock(DecodePreemption.class),
-                        new PlacementAvailability());
+                        new CapacityNotifier());
         var queue = registry;
         try {
             var future =
@@ -177,7 +177,13 @@ class GenerateInputPreparationTest {
                         "input preparation owns no admission handle and cannot hold cancellation open");
             }
             release.countDown();
-            assertEquals(deadline ? 8431 : 8504, future.get(3, TimeUnit.SECONDS).getCode());
+            assertEquals(
+                    (deadline
+                                    ? org.flexlb.dao.loadbalance.StrategyErrorType.QUEUE_TIMEOUT
+                                    : org.flexlb.dao.loadbalance.StrategyErrorType
+                                            .REQUEST_CANCELLED)
+                            .getErrorCode(),
+                    future.get(3, TimeUnit.SECONDS).getCode());
             RequestProtocolTestSupport.close(queue);
             verify(router, never())
                     .select(any(), org.mockito.ArgumentMatchers.nullable(String.class));

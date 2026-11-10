@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
-import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.CapacityNotifier;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.route.RoleType;
@@ -42,10 +42,14 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Verifies registry shutdown rejects new publications and waits for admitted generation cleanup.
+ * Late worker feedback must not restore retired resource records.
+ */
 class EndpointRegistryCloseTest {
     @Test
     void asynchronousRetirementsDoNotOccupyThreadsNeededToDrainTheirWorkers() throws Exception {
-        PlacementAvailability availability = mock(PlacementAvailability.class);
+        CapacityNotifier availability = mock(CapacityNotifier.class);
         EndpointRegistry registry = registry(availability);
         CacheAwareService cache = mock(CacheAwareService.class);
         var selectedWorkers = new java.util.ArrayList<WorkerEndpoint>();
@@ -71,7 +75,7 @@ class EndpointRegistryCloseTest {
                                 return null;
                             })
                     .when(availability)
-                    .changed(any());
+                    .notifyChanged(any());
             for (var status : statuses) {
                 status.markRemovedFromDiscovery();
                 var retirement =
@@ -98,7 +102,7 @@ class EndpointRegistryCloseTest {
 
     @Test
     void closeWaitsForAcceptedPublicationAndRejectsNewPublications() throws Exception {
-        PlacementAvailability availability = mock(PlacementAvailability.class);
+        CapacityNotifier availability = mock(CapacityNotifier.class);
         EndpointRegistry registry = registry(availability);
         CountDownLatch publicationEntered = new CountDownLatch(1);
         CountDownLatch finishPublication = new CountDownLatch(1);
@@ -109,7 +113,7 @@ class EndpointRegistryCloseTest {
                             return null;
                         })
                 .when(availability)
-                .changed(any());
+                .notifyChanged(any());
         var status = EndpointTestSupport.workerStatus(RoleType.DECODE, "127.0.0.1", 8300, 8301);
         try (var executor = Executors.newFixedThreadPool(3)) {
             Future<WorkerEndpoint> publication =
@@ -583,7 +587,7 @@ class EndpointRegistryCloseTest {
 
     @Test
     void retirementNotificationFailureCannotHideItsCapabilityOrSkipDrain() {
-        PlacementAvailability availability = mock(PlacementAvailability.class);
+        CapacityNotifier availability = mock(CapacityNotifier.class);
         EndpointRegistry registry = registry(availability);
         var status = EndpointTestSupport.workerStatus(RoleType.VIT, "127.0.0.1", 8900, 8901);
         registry.currentOrDiscover(RoleType.VIT, status.getLogicalIpPort(), () -> status);
@@ -597,7 +601,7 @@ class EndpointRegistryCloseTest {
                             throw new IllegalStateException("notification unavailable");
                         })
                 .when(availability)
-                .changed(any());
+                .notifyChanged(any());
         EndpointRegistry.Retirement retirement;
         status.lock.lock();
         try {
@@ -680,10 +684,10 @@ class EndpointRegistryCloseTest {
     }
 
     private static EndpointRegistry registry() {
-        return registry(new PlacementAvailability());
+        return registry(new CapacityNotifier());
     }
 
-    private static EndpointRegistry registry(PlacementAvailability availability) {
+    private static EndpointRegistry registry(CapacityNotifier availability) {
         ConfigService config = mock(ConfigService.class);
         when(config.loadBalanceConfig())
                 .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
@@ -695,7 +699,7 @@ class EndpointRegistryCloseTest {
                 org.flexlb.balance.scheduler.SchedulerTestSupport.dispatcher(),
                 availability,
                 org.flexlb.balance.planner.BuiltinGroupPlanner.from(config.loadBalanceConfig()),
-                order -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(16, order));
+                () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
     }
 
     @SuppressWarnings("unchecked")

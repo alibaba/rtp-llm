@@ -1,7 +1,7 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.scheduler.PlacementKey;
+import org.flexlb.balance.RoutingResult;
+import org.flexlb.balance.scheduler.CapacityKey;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
 
@@ -39,8 +39,8 @@ class EncoderStrategyTest {
     @Test
     void returnsExactBlockerWhenNoLiveWorkerExists() {
         var result = strategy.select(List.of(candidate("dead", false, 0, 0)), "group", false, 10);
-        assertEquals(PlacementResult.Status.BLOCKED, result.status());
-        assertEquals(new PlacementKey(RoleType.ENCODER, "group", null), result.blocker());
+        assertEquals(RoutingResult.Status.BLOCKED, result.status());
+        assertEquals(new CapacityKey(RoleType.ENCODER, "group", null), result.blocker());
     }
 
     @Test
@@ -73,7 +73,7 @@ class EncoderStrategyTest {
                         "group",
                         false,
                         1);
-        assertEquals(PlacementResult.Status.BLOCKED, result.status());
+        assertEquals(RoutingResult.Status.BLOCKED, result.status());
     }
 
     @Test
@@ -88,7 +88,7 @@ class EncoderStrategyTest {
     void doesNotSelectAnotherGroup() {
         var other = new Candidate("other", "another-group", true, 0, 0);
         assertEquals(
-                PlacementResult.Status.BLOCKED,
+                RoutingResult.Status.BLOCKED,
                 strategy.select(List.of(other), "group", false, 10).status());
     }
 

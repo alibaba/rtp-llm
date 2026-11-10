@@ -13,14 +13,15 @@ import java.util.Set;
 @Setter
 public final class PreemptionConfig {
 
-    private Set<VictimStage> allowedVictimStages = EnumSet.allOf(VictimStage.class);
+    @com.fasterxml.jackson.annotation.JsonProperty("allowedVictimStages")
+    private Set<PreemptionStage> allowedPreemptionStages = EnumSet.allOf(PreemptionStage.class);
 
     /** Maximum wait for the Engine terminal after the cancellation ACK phase. */
     private long timeoutMs = 1000;
 
     private EngineCancellationConfig engineCancellation = new EngineCancellationConfig();
 
-    public boolean allows(VictimStage stage) {
-        return allowedVictimStages != null && allowedVictimStages.contains(stage);
+    public boolean allows(PreemptionStage stage) {
+        return allowedPreemptionStages != null && allowedPreemptionStages.contains(stage);
     }
 }

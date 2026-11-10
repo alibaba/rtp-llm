@@ -76,7 +76,7 @@ class DeliverySettlementTest {
                         mock(RequestSchedulerReporter.class),
                         mock(TheoryCacheHitReporter.class));
         EngineGrpcClient channel = mock(EngineGrpcClient.class);
-        org.springframework.test.util.ReflectionTestUtils.setField(
+        org.flexlb.balance.scheduler.DeliveryTestSupport.setField(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).dispatcher,
                 "grpcClient",
                 channel);
@@ -599,18 +599,27 @@ class DeliverySettlementTest {
         Member member = member(90L, 90L);
         ledger.commit(90L, List.of(member.item()));
         PreemptionRegistration preemption =
-                registry.tryClaim(member.item().decodeReservation(), 91L).orElseThrow();
+                SchedulerTestSupport.routePreemption(registry)
+                        .tryRegisterPreemption(member.item().decodeReservation(), 91L)
+                        .orElseThrow();
         assertTrue(
-                registry.onPreemption(
-                        preemption,
-                        new AbstractRequestScheduler.PreemptionEvent(
-                                PreemptionCancelPhase.CANCEL_IN_FLIGHT, false, null, null, null)));
+                org.flexlb.balance.scheduler.SchedulerTestSupport.preemption(registry)
+                        .applyEvent(
+                                preemption,
+                                new org.flexlb.balance.preemption.PreemptionCompletion
+                                        .PreemptionEvent(
+                                        PreemptionCancelPhase.CANCEL_IN_FLIGHT,
+                                        false,
+                                        null,
+                                        null,
+                                        null)));
         if (phase != PreemptionCancelPhase.CANCEL_IN_FLIGHT) {
             assertTrue(
-                    registry.onPreemption(
-                            preemption,
-                            new AbstractRequestScheduler.PreemptionEvent(
-                                    phase, false, null, null, null)));
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.preemption(registry)
+                            .applyEvent(
+                                    preemption,
+                                    new org.flexlb.balance.preemption.PreemptionCompletion
+                                            .PreemptionEvent(phase, false, null, null, null)));
         }
         reject(member);
         assertFalse(member.item().ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
@@ -944,7 +953,7 @@ class DeliverySettlementTest {
 
             assertTerminalsSettledAndArchived(member);
         } finally {
-            registry.onDeliveryResult(
+            registry.recordRemoteCleanup(
                     new ContextResult.CleanupAcknowledgement(
                             member.claim(),
                             ContextResult.CancelEvidenceKind.CLEANED,
@@ -1028,7 +1037,7 @@ class DeliverySettlementTest {
             assertFalse(
                     member.item().ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
         } finally {
-            registry.onDeliveryResult(
+            registry.recordRemoteCleanup(
                     new ContextResult.CleanupAcknowledgement(
                             member.claim(),
                             ContextResult.CancelEvidenceKind.CLEANED,
@@ -1184,7 +1193,7 @@ class DeliverySettlementTest {
 
             assertTerminalsSettledAndArchived(member);
         } finally {
-            registry.onDeliveryResult(
+            registry.recordRemoteCleanup(
                     new ContextResult.CleanupAcknowledgement(
                             member.claim(),
                             ContextResult.CancelEvidenceKind.CLEANED,

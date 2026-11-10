@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.CapacityNotifier;
 import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
@@ -42,12 +42,10 @@ class EndpointRetirementLinearizationTest {
                                 requestRuntime.events()),
                         mock(DeliveryMetricsReporter.class),
                         EndpointTestSupport.routeStrategy(requestRuntime),
-                        new PlacementAvailability(),
+                        new CapacityNotifier(),
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                 configService.loadBalanceConfig()),
-                        order ->
-                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
-                                        16, order));
+                        () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
         String prefillAddress = "127.0.0.1:8100@0";
         String decodeAddress = "127.0.0.1:8200@0";
         WorkerStatus prefillStatus = status(RoleType.PREFILL, 8100);
@@ -88,16 +86,24 @@ class EndpointRetirementLinearizationTest {
                                     WorkerEndpoint selectedEndpoint = prefill;
 
                                     prefillAdmissionAvailable =
-                                            prefill.commitDelivery(
-                                                            org.flexlb.balance.scheduler
-                                                                    .DeliveryTestSupport.queued(
-                                                                    java.util.List.of(lateRoute),
-                                                                    new org.flexlb.balance.scheduler
+                                            prefill.dequeueForDelivery(
+                                                                    org.flexlb.balance.scheduler
                                                                             .DeliveryTestSupport
-                                                                            .BatchInput(900L, 1),
-                                                                    new long[] {1L},
-                                                                    null,
-                                                                    System.currentTimeMillis()))
+                                                                            .queued(
+                                                                                    java.util.List
+                                                                                            .of(
+                                                                                                    lateRoute),
+                                                                                    new org.flexlb
+                                                                                            .balance
+                                                                                            .scheduler
+                                                                                            .DeliveryTestSupport
+                                                                                            .BatchInput(
+                                                                                            900L,
+                                                                                            1),
+                                                                                    new long[] {
+                                                                                        1L
+                                                                                    }))
+                                                            .value()
                                                     != null;
                                 }
                                 boolean decodeAdmissionAvailable;

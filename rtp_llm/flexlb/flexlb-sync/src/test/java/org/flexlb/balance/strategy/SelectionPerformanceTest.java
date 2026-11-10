@@ -1,6 +1,6 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.RequestContext;
@@ -92,7 +92,7 @@ class SelectionPerformanceTest {
                 long checksum = 0L;
                 for (int index = 0; index < operations; index++) {
                     var result = selector.select(context, null);
-                    assertEquals(PlacementResult.Status.SUCCESS, result.status());
+                    assertEquals(RoutingResult.Status.SUCCESS, result.status());
                     checksum +=
                             ((org.flexlb.balance.scheduler.RoleSelection.Prefill)
                                             result.value().role(RoleType.PREFILL))

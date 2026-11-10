@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Context;
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -64,7 +64,7 @@ class RequestLifecycleSubmissionTest {
         context.data().setTraceContext(Context.root().with(span));
         when(router.select(context, null))
                 .thenReturn(
-                        PlacementResult.rejected(
+                        RoutingResult.rejected(
                                 Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
         try {
             var result =
@@ -131,13 +131,13 @@ class RequestLifecycleSubmissionTest {
             var admission = SchedulerTestSupport.claim(owner, "702", pending);
             {
                 assertEquals(
-                        PlacementResult.Status.SUCCESS,
+                        RoutingResult.Status.SUCCESS,
                         RequestProtocolTestSupport.commitRoute(
                                 owner, route, RequestProtocolTestSupport.publication(() -> true)));
                 claim =
                         RequestProtocolTestSupport.claimRouteWithoutPrediction(
                                 owner, route, () -> true);
-                AbstractRequestScheduler.finishPlacement(admission);
+                AbstractRequestScheduler.finishRouting(admission);
             }
             owner.onDeliveryResult(
                     new ContextResult.RouteDelivered(claim, 0L, System.currentTimeMillis()));
@@ -214,8 +214,8 @@ class RequestLifecycleSubmissionTest {
                 mock(RequestSchedulerReporter.class),
                 trace,
                 router,
-                mock(org.flexlb.balance.eviction.DecodePreemption.class),
-                new PlacementAvailability());
+                mock(org.flexlb.balance.preemption.DecodePreemption.class),
+                new CapacityNotifier());
     }
 
     private static AbstractRequestScheduler owner(

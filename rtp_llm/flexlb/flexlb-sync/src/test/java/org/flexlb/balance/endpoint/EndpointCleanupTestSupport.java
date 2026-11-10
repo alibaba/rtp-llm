@@ -5,7 +5,6 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.enums.TaskPhase;
 
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
@@ -48,13 +47,7 @@ public final class EndpointCleanupTestSupport {
         private final ReentrantLock lock = new ReentrantLock();
         private final PrefillEndpoint state =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
-                        lock,
-                        OrderedPrefillRequestQueue.ordered(
-                                4,
-                                Comparator.comparing(
-                                        org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
-                                                ::requestId)),
-                        clock::get);
+                        lock, OrderedPrefillRequestQueue.fifo(4), clock::get);
         private final EndpointRetirementTestSupport generation =
                 new EndpointRetirementTestSupport(() -> {});
 
@@ -128,7 +121,7 @@ public final class EndpointCleanupTestSupport {
             assertEquals(1, stats.locallyOwnedRequests());
             assertEquals(batch ? 0 : 1, stats.individuallyOwnedRequests());
             assertEquals(batch ? 1 : 0, stats.batchCount());
-            var work = state.committedSnapshot();
+            var work = org.flexlb.balance.endpoint.EndpointTestSupport.committedWork(state);
             assertEquals(predictedMs, work.totalRemainingWorkMs().orElseThrow());
             assertFalse(work.hasUnknownWork());
             assertTrue(work.containsRequest(owner.item().requestId()));
@@ -158,8 +151,14 @@ public final class EndpointCleanupTestSupport {
             assertEquals(0, state.stats().individuallyOwnedRequests());
             assertEquals(0, state.stats().batchCount());
             assertEquals(0L, state.admissionSummary(0, 0L).occupiedRequests());
-            assertFalse(state.committedSnapshot().hasUnknownWork());
-            assertEquals(0L, state.committedSnapshot().totalRemainingWorkMs().orElseThrow());
+            assertFalse(
+                    org.flexlb.balance.endpoint.EndpointTestSupport.committedWork(state)
+                            .hasUnknownWork());
+            assertEquals(
+                    0L,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.committedWork(state)
+                            .totalRemainingWorkMs()
+                            .orElseThrow());
             assertTrue(state.batchCapacityAvailable(1));
         }
 

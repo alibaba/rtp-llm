@@ -17,7 +17,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.DeliveryDispatcher;
+import org.flexlb.balance.scheduler.DeliveryCoordinator;
 import org.flexlb.balance.scheduler.DeliveryDispatcherTestFactory;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRouteSelector;
@@ -283,7 +283,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     }
 
     @Override
-    protected DeliveryDispatcher createDispatcher() {
+    protected DeliveryCoordinator createDispatcher() {
         return DeliveryDispatcherTestFactory.create(
                 grpcClient, configService, reporter, DISPATCH_THREADS, DISPATCH_QUEUE_CAPACITY);
     }
@@ -335,7 +335,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 prefillSelector,
                 new DecodeSelector(
                         configService,
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                        new org.flexlb.balance.scheduler.SchedulerConfiguration()
                                 .decodeAdmissionCapacity(configService)),
                 new VitWorkerSelector(),
                 new org.flexlb.balance.strategy.EncoderStrategy(),
@@ -1063,7 +1063,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                     successful,
                     completed - successful,
                     requestRegistry().liveRequestCount(),
-                    requestRegistry().pendingDeliveryRequestCount(),
+                    org.flexlb.balance.scheduler.SchedulerTestServices.pendingDeliveryRequestCount(
+                            requestRegistry()),
                     receivedEngineRequestCount());
             for (int index = 0; index < futures.size(); index++) {
                 CompletableFuture<TimedResponse> future = futures.get(index);

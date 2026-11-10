@@ -242,7 +242,7 @@ class ExpirationTimerInstallationRecoveryTest {
             org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                     context,
                     observedRequest ->
-                            observedRequest.recordDeliveryResult(
+                            observedRequest.recordDeliveryPrediction(
                                     new ContextResult.Prediction(
                                             delivery.delivery(), 3000L, 1002L)));
             var request = mock(org.flexlb.dao.loadbalance.Request.class);

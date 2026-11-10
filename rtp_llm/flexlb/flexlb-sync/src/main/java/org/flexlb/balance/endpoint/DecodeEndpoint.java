@@ -20,8 +20,8 @@ import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
 import org.flexlb.balance.endpoint.DecodeResources.ReserveStatus;
 import org.flexlb.balance.endpoint.DecodeResources.ResourceChange;
 import org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot;
+import org.flexlb.balance.scheduler.CapacityNotifier;
 import org.flexlb.balance.scheduler.ContextResult;
-import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -57,12 +57,12 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                     .thenComparingLong(RequestReservation::reservationToken);
 
     private final RequestRepository requests;
-    private final PlacementAvailability placementAvailability;
+    private final CapacityNotifier capacityNotifier;
     private final Set<Runnable> engineDispatchCapacityListeners = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, RequestRecord> decodeRequests =
             new ConcurrentHashMap<>();
     private final Map<String, Long> settledHistory = new HashMap<>();
-    private final Map<String, PreemptionClaim> victimClaims = new HashMap<>();
+    private final Map<String, PreemptionClaim> preemptionRegistrations = new HashMap<>();
     private final Map<Long, PreemptionRecord> preemptionAttempts = new HashMap<>();
     private final ResourceUsage reservedUsage = new ResourceUsage();
     private final ResourceUsage queuedUsage = new ResourceUsage();
@@ -84,13 +84,11 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
     private boolean calibrating;
 
     DecodeEndpoint(
-            WorkerStatus status,
-            RequestRepository requests,
-            PlacementAvailability placementAvailability) {
+            WorkerStatus status, RequestRepository requests, CapacityNotifier capacityNotifier) {
         super(status);
         this.requests = java.util.Objects.requireNonNull(requests, "requests");
-        this.placementAvailability =
-                java.util.Objects.requireNonNull(placementAvailability, "placementAvailability");
+        this.capacityNotifier =
+                java.util.Objects.requireNonNull(capacityNotifier, "capacityNotifier");
     }
 
     @Override
@@ -129,7 +127,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
             }
         }
         if (edge != CapacityEdge.DISPATCH) {
-            placementAvailability.changed(this);
+            capacityNotifier.notifyChanged(this);
         }
     }
 
@@ -170,14 +168,15 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                     current == permit.reservation
                             && (current.confirmed()
                                     || current.phase == DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN)
-                            && !victimClaims.containsKey(current.requestId);
+                            && !preemptionRegistrations.containsKey(current.requestId);
             boolean owns = current == permit.reservation && current.dispatchPermit == permit;
             boolean accepted =
                     sending
                             ? alreadyOwned
                                     || owns
                                             && current.queued()
-                                            && !victimClaims.containsKey(current.requestId)
+                                            && !preemptionRegistrations.containsKey(
+                                                    current.requestId)
                             : owns || permit.retiredByEndpoint;
             if (owns && !alreadyOwned)
                 transition(
@@ -215,6 +214,21 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         var incoming = finishPreemption(attemptToken, true);
         if (incoming != null) publishCapacity(CapacityEdge.BOTH);
         return incoming;
+    }
+
+    /**
+     * Reports release of an exact reservation selected by this preemption, independently of request completion.
+     */
+    public boolean isPreemptionResourceReleased(long attemptToken, RequestReservation reservation) {
+        stateLock().lock();
+        try {
+            var attempt = preemptionAttempts.get(attemptToken);
+            return attempt != null
+                    && attempt.requestsToPreempt.contains(reservation)
+                    && !attempt.remainingRequestsToPreempt.contains(reservation);
+        } finally {
+            stateLock().unlock();
+        }
     }
 
     public boolean abortPreemption(long attemptToken) {
@@ -323,7 +337,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
             RequestRecord request = decodeRequests.get(exact.requestId());
             if (request == null
                     || !request.matches(exact)
-                    || victimClaims.containsKey(exact.requestId())) {
+                    || preemptionRegistrations.containsKey(exact.requestId())) {
                 return Acquisition.unavailable(EngineDispatchPermitAcquireStatus.NOT_OWNED);
             }
             if (request.confirmed() || request.phase == DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN) {
@@ -375,7 +389,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
     }
 
     public RequestReservation replaceQueuedRequests(
-            List<RequestReservation> victims,
+            List<RequestReservation> requestsToPreempt,
             String incomingId,
             long hardKv,
             long expectedKv,
@@ -385,27 +399,31 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         stateLock().lock();
         try {
             if (!acceptsNewRequests()) return null;
-            if (victims == null || victims.isEmpty() || !requestIdAvailable(incomingId)) {
+            if (requestsToPreempt == null
+                    || requestsToPreempt.isEmpty()
+                    || !requestIdAvailable(incomingId)) {
                 return null;
             }
-            Set<String> unique = new HashSet<>(victims.size());
+            Set<String> unique = new HashSet<>(requestsToPreempt.size());
             CapacityRelease released = CapacityRelease.NONE;
-            for (RequestReservation victim : victims) {
-                if (victim == null
-                        || java.util.Objects.equals(victim.requestId(), incomingId)
-                        || !unique.add(victim.requestId())
-                        || ownership(victim) != Ownership.WITHDRAWABLE) {
+            for (RequestReservation requestToPreempt : requestsToPreempt) {
+                if (requestToPreempt == null
+                        || java.util.Objects.equals(requestToPreempt.requestId(), incomingId)
+                        || !unique.add(requestToPreempt.requestId())
+                        || ownership(requestToPreempt) != Ownership.WITHDRAWABLE) {
                     return null;
                 }
-                released = released.plus(decodeRequests.get(victim.requestId()).capacityRelease());
+                released =
+                        released.plus(
+                                decodeRequests.get(requestToPreempt.requestId()).capacityRelease());
             }
             CapacityUsage usage = routingView().placementUsage();
             if (capacity.evaluate(usage, hardKv, expectedKv, CapacityRelease.NONE).fits()
                     || !capacity.evaluate(usage, hardKv, expectedKv, released).fits()) {
                 return null;
             }
-            for (RequestReservation victim : victims) {
-                settle(victim, Settlement.ROLLBACK);
+            for (RequestReservation requestToPreempt : requestsToPreempt) {
+                settle(requestToPreempt, Settlement.ROLLBACK);
             }
             replaced =
                     createReservation(
@@ -433,7 +451,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         try {
             RequestRecord request = decodeRequests.get(exact.requestId());
             if (request == null || !request.matches(exact)) {
-                PreemptionClaim claim = victimClaims.get(exact.requestId());
+                PreemptionClaim claim = preemptionRegistrations.get(exact.requestId());
                 return claim != null && claim.reservation.equals(exact)
                         ? Ownership.HELD
                         : Ownership.NONE;
@@ -444,7 +462,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
             return request.queued()
                             && request.dispatchPermit == null
                             && request.incomingAttemptToken == 0L
-                            && !victimClaims.containsKey(exact.requestId())
+                            && !preemptionRegistrations.containsKey(exact.requestId())
                     ? Ownership.WITHDRAWABLE
                     : Ownership.HELD;
         } finally {
@@ -454,14 +472,14 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
 
     public PreemptionBeginResult beginPreemption(
             long attemptToken,
-            List<RequestReservation> victims,
+            List<RequestReservation> requestsToPreempt,
             String incomingRequestId,
             long incomingKvTokens,
             long incomingExpectedKvTokens,
             int incomingPriority,
             AdmissionCapacity capacity) {
         checkArgument(
-                attemptToken > 0 && victims != null && !victims.isEmpty(),
+                attemptToken > 0 && requestsToPreempt != null && !requestsToPreempt.isEmpty(),
                 "attempt token and victims are required");
 
         stateLock().lock();
@@ -474,22 +492,22 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                 return PreemptionBeginResult.INCOMING_ALREADY_RESERVED;
             }
 
-            Set<RequestReservation> exactVictims = new HashSet<>();
+            Set<RequestReservation> exactRequestsToPreempt = new HashSet<>();
             CapacityRelease released = CapacityRelease.NONE;
-            for (RequestReservation victim : victims) {
-                if (victim == null
-                        || victim.endpointGenerationId() != getStatus().getGenerationId()
-                        || java.util.Objects.equals(victim.requestId(), incomingRequestId)
-                        || !exactVictims.add(victim)) {
+            for (RequestReservation requestToPreempt : requestsToPreempt) {
+                if (requestToPreempt == null
+                        || requestToPreempt.endpointGenerationId() != getStatus().getGenerationId()
+                        || java.util.Objects.equals(requestToPreempt.requestId(), incomingRequestId)
+                        || !exactRequestsToPreempt.add(requestToPreempt)) {
                     return PreemptionBeginResult.VICTIM_GONE;
                 }
-                String victimId = victim.requestId();
-                RequestRecord request = decodeRequests.get(victimId);
-                if (victimClaims.containsKey(victimId)
+                String requestToPreemptId = requestToPreempt.requestId();
+                RequestRecord request = decodeRequests.get(requestToPreemptId);
+                if (preemptionRegistrations.containsKey(requestToPreemptId)
                         || request != null && request.incomingAttemptToken != 0L) {
                     return PreemptionBeginResult.VICTIM_ALREADY_CLAIMED;
                 }
-                if (request == null || !request.matches(victim)) {
+                if (request == null || !request.matches(requestToPreempt)) {
                     return PreemptionBeginResult.VICTIM_GONE;
                 }
                 if (request.dispatchPermit != null || request.queued()) {
@@ -513,16 +531,20 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                 return PreemptionBeginResult.INFEASIBLE;
             }
 
-            // Allocate every victim claim before installing any incoming or
+            // Allocate every request selected for preemption claim before installing any incoming
+            // or
             // protocol ownership. The endpoint lock keeps these exact states
             // stable through the subsequent allocation-free installation.
             Map<String, PreemptionClaim> preparedClaims = new HashMap<>();
-            for (RequestReservation victim : victims) {
-                RequestRecord request = decodeRequests.get(victim.requestId());
+            for (RequestReservation requestToPreempt : requestsToPreempt) {
+                RequestRecord request = decodeRequests.get(requestToPreempt.requestId());
                 preparedClaims.put(
-                        victim.requestId(),
+                        requestToPreempt.requestId(),
                         new PreemptionClaim(
-                                attemptToken, victim, request.kvTokens, request.expectedKvTokens));
+                                attemptToken,
+                                requestToPreempt,
+                                request.kvTokens,
+                                request.expectedKvTokens));
             }
 
             // Provisional incoming ownership closes the free-pool race while
@@ -537,11 +559,11 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                             .value();
             PreemptionRecord preparedAttempt = null;
             try {
-                preparedAttempt = new PreemptionRecord(incomingReservation, exactVictims);
+                preparedAttempt = new PreemptionRecord(incomingReservation, exactRequestsToPreempt);
                 preemptionAttempts.put(attemptToken, preparedAttempt);
                 decodeRequests.get(incomingRequestId).incomingAttemptToken = attemptToken;
                 for (Map.Entry<String, PreemptionClaim> claim : preparedClaims.entrySet()) {
-                    victimClaims.put(claim.getKey(), claim.getValue());
+                    preemptionRegistrations.put(claim.getKey(), claim.getValue());
                 }
             } catch (RuntimeException | Error installationFailure) {
                 if (preparedAttempt != null) {
@@ -568,7 +590,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         java.util.Objects.requireNonNull(update, "update");
         stateLock().lock();
         try {
-            PreemptionClaim claim = victimClaims.get(update.reservation().requestId());
+            PreemptionClaim claim = preemptionRegistrations.get(update.reservation().requestId());
             if (claim == null
                     || claim.attemptToken != token
                     || !claim.reservation.equals(update.reservation())) {
@@ -607,8 +629,6 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
     public void initializeFromPreparedStatus(
             WorkerStatus ws, WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
-        checkArgument(
-                observation.owner() == getStatus(), "Status belongs to another Decode generation");
         stateLock().lock();
         try {
             checkState(
@@ -637,9 +657,6 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         long[] requests = new long[PriorityNormalizer.MAX_PRIORITY + 1];
         long[] hardKv = new long[PriorityNormalizer.MAX_PRIORITY + 1];
         long[] expectedKv = new long[PriorityNormalizer.MAX_PRIORITY + 1];
-        long[] engineRequests = new long[PriorityNormalizer.MAX_PRIORITY + 1];
-        long[] engineHardKv = new long[PriorityNormalizer.MAX_PRIORITY + 1];
-        long[] engineExpectedKv = new long[PriorityNormalizer.MAX_PRIORITY + 1];
         DecodeRoutingView routing;
         stateLock().lock();
         try {
@@ -654,12 +671,6 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                 long expected = task.confirmed() ? task.kvTokens : task.expectedKvTokens;
                 hardKv[priority] = saturatedAddNonNegative(hardKv[priority], hard);
                 expectedKv[priority] = saturatedAddNonNegative(expectedKv[priority], expected);
-                if (task.confirmed() || !task.queued() || task.dispatchPermit != null) {
-                    engineRequests[priority]++;
-                    engineHardKv[priority] = saturatedAddNonNegative(engineHardKv[priority], hard);
-                    engineExpectedKv[priority] =
-                            saturatedAddNonNegative(engineExpectedKv[priority], expected);
-                }
             }
             routing = capturedRouting;
         } finally {
@@ -667,24 +678,14 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         }
         CapacityRelease[] placementOccupancy =
                 new CapacityRelease[PriorityNormalizer.MAX_PRIORITY + 1];
-        CapacityRelease[] engineOccupancy =
-                new CapacityRelease[PriorityNormalizer.MAX_PRIORITY + 1];
         for (int priority = 0; priority < placementOccupancy.length; priority++) {
             placementOccupancy[priority] =
                     requests[priority] == 0
                             ? CapacityRelease.NONE
                             : new CapacityRelease(
                                     requests[priority], hardKv[priority], expectedKv[priority]);
-            engineOccupancy[priority] =
-                    engineRequests[priority] == 0
-                            ? CapacityRelease.NONE
-                            : new CapacityRelease(
-                                    engineRequests[priority],
-                                    engineHardKv[priority],
-                                    engineExpectedKv[priority]);
         }
-        var summary =
-                new DecodeResources.AdmissionSummary(routing, placementOccupancy, engineOccupancy);
+        var summary = new DecodeResources.AdmissionSummary(routing, placementOccupancy);
         stateLock().lock();
         try {
             // A concurrent admission may have changed the version during object
@@ -715,7 +716,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                                             task.phase,
                                             task.priorityKnown(),
                                             task.reservationToken,
-                                            victimClaims.containsKey(requestId))));
+                                            preemptionRegistrations.containsKey(requestId))));
             routing = routingView();
             queued = queuedUsage.requests;
             dispatching = dispatchUsage.requests;
@@ -723,10 +724,6 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
             stateLock().unlock();
         }
         return new ResourceSnapshot(routing, requests, queued, dispatching);
-    }
-
-    public long placementVersion() {
-        return admissionVersion;
     }
 
     public EndpointStats.DecodeCounts stats() {
@@ -804,7 +801,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                     return ResourceChange.of(ReservationReleaseResult.ENGINE_ACCEPTED, false);
                 }
                 if (matches
-                        && !victimClaims.containsKey(exact.requestId())
+                        && !preemptionRegistrations.containsKey(exact.requestId())
                         && request.incomingAttemptToken != 0L) {
                     return ResourceChange.of(ReservationReleaseResult.CONFLICT, false);
                 }
@@ -812,7 +809,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                     && (request.incomingAttemptToken != 0L
                             || request.confirmed()
                             || request.phase == DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN
-                            || victimClaims.containsKey(exact.requestId()))) {
+                            || preemptionRegistrations.containsKey(exact.requestId()))) {
                 checkState(
                         reason != ReleaseReason.LOCAL_ROLLBACK,
                         "Illegal Decode local release: exact ownership is held by Engine/protocol lifecycle: %s",
@@ -880,7 +877,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                     continue;
                 }
                 RequestRecord request = decodeRequests.get(id);
-                PreemptionClaim claim = victimClaims.get(id);
+                PreemptionClaim claim = preemptionRegistrations.get(id);
                 RequestReservation exact =
                         request != null && request.reservationToken > 0L
                                 ? request.reservation()
@@ -896,13 +893,14 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                 if (!request.confirmed()) {
                     continue;
                 }
-                PreemptionClaim claim = victimClaims.get(request.requestId);
+                PreemptionClaim claim = preemptionRegistrations.get(request.requestId);
                 if (claim != null) {
                     claim.hold(!allocated.contains(request.requestId));
                 } else if (!present.contains(request.requestId)) {
                     // FULL absence ends this Engine owner and invalidates its provisional
                     // admission.
-                    // Abort keeps already-outbound victim claims until their independent terminal
+                    // Abort keeps already-outbound request selected for preemption claims until
+                    // their independent terminal
                     // proof.
                     if (request.incomingAttemptToken != 0L) {
                         finishPreemption(request.incomingAttemptToken, false);
@@ -933,7 +931,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                             || incoming == null
                             || !incoming.matches(attempt.incoming)
                             || incoming.confirmed()
-                            || !attempt.remainingVictims.isEmpty())) {
+                            || !attempt.remainingRequestsToPreempt.isEmpty())) {
                 return null;
             }
             long version = admissionVersion;
@@ -945,11 +943,12 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                             incoming, DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED, null, 0L, 0L);
             }
             if (!commit) {
-                for (RequestReservation victim : attempt.remainingVictims) {
-                    PreemptionClaim claim = victimClaims.get(victim.requestId());
+                for (RequestReservation requestToPreempt : attempt.remainingRequestsToPreempt) {
+                    PreemptionClaim claim =
+                            preemptionRegistrations.get(requestToPreempt.requestId());
                     if (claim != null
                             && claim.attemptToken == token
-                            && claim.reservation.equals(victim)
+                            && claim.reservation.equals(requestToPreempt)
                             && !claim.cancellationHandedOff) {
                         claim.close();
                     }
@@ -978,7 +977,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
             List<DecodeRequestStatus> evidence = new ArrayList<>(observation.activeTasks().size());
             for (WorkerStatus.TaskObservation task : observation.activeTasks().values()) {
                 RequestRecord request = decodeRequests.get(task.requestId());
-                PreemptionClaim claim = victimClaims.get(task.requestId());
+                PreemptionClaim claim = preemptionRegistrations.get(task.requestId());
                 RequestReservation exact =
                         request != null && request.reservationToken > 0L
                                 ? request.reservation()
@@ -1000,7 +999,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
 
     List<RequestReservation> retire() {
         Set<RequestReservation> owners = new HashSet<>();
-        List<RequestReservation> foreignVictims = new ArrayList<>();
+        List<RequestReservation> foreignRequestsToPreempt = new ArrayList<>();
         long generationId = getStatus().getGenerationId();
         stateLock().lock();
         try {
@@ -1014,15 +1013,15 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                     });
             for (PreemptionRecord attempt : preemptionAttempts.values()) {
                 owners.add(attempt.incoming);
-                for (RequestReservation victim : attempt.remainingVictims) {
-                    if (victim.endpointGenerationId() != generationId) {
-                        foreignVictims.add(victim);
+                for (RequestReservation requestToPreempt : attempt.remainingRequestsToPreempt) {
+                    if (requestToPreempt.endpointGenerationId() != generationId) {
+                        foreignRequestsToPreempt.add(requestToPreempt);
                         continue;
                     }
-                    owners.add(victim);
+                    owners.add(requestToPreempt);
                 }
             }
-            victimClaims.values().forEach(claim -> owners.add(claim.reservation));
+            preemptionRegistrations.values().forEach(claim -> owners.add(claim.reservation));
             // Capture exact identities before clearing permits and accounting.
             for (RequestRecord reservation : decodeRequests.values()) {
                 EngineDispatchPermit permit = reservation.dispatchPermit;
@@ -1033,7 +1032,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
             }
             decodeRequests.clear();
             settledHistory.clear();
-            victimClaims.clear();
+            preemptionRegistrations.clear();
             dispatchUsage.reset();
             reservedUsage.reset();
             queuedUsage.reset();
@@ -1045,13 +1044,13 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         } finally {
             stateLock().unlock();
         }
-        for (var victim : foreignVictims) {
+        for (var requestToPreempt : foreignRequestsToPreempt) {
             logger.error(
                     "Decode retirement ignored a priority victim from another generation: "
                             + "request_id={} expected_generation={} actual_generation={}",
-                    victim.requestId(),
+                    requestToPreempt.requestId(),
                     generationId,
-                    victim.endpointGenerationId());
+                    requestToPreempt.endpointGenerationId());
         }
         List<RequestReservation> ordered = new ArrayList<>(owners);
         ordered.sort(RETIREMENT_ORDER);
@@ -1087,7 +1086,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                 String requestId = entry.getKey();
                 RequestRecord request = entry.getValue();
                 CleanupCandidate candidate = orphanCandidates.get(requestId);
-                if (victimClaims.containsKey(requestId)
+                if (preemptionRegistrations.containsKey(requestId)
                         || candidate == null
                         || candidate.reservationToken != request.reservationToken
                         || candidate.phase != request.phase
@@ -1103,7 +1102,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                     continue;
                 }
                 // An orphan incoming row must also surrender its attempt and local
-                // victim claims.
+                // request selected for preemption claims.
                 if (request.incomingAttemptToken != 0L) {
                     finishPreemption(request.incomingAttemptToken, false);
                 }
@@ -1212,7 +1211,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
     private boolean requestIdAvailable(String requestId) {
         // Every installed incoming attempt retains its exact request row until commit/abort/expiry.
         return !decodeRequests.containsKey(requestId)
-                && !victimClaims.containsKey(requestId)
+                && !preemptionRegistrations.containsKey(requestId)
                 && !settledHistory.containsKey(requestId);
     }
 
@@ -1222,7 +1221,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
     private boolean settle(RequestReservation exact, Settlement proof) {
         RequestRecord request = decodeRequests.get(exact.requestId());
         boolean matches = request != null && request.matches(exact);
-        PreemptionClaim claim = victimClaims.get(exact.requestId());
+        PreemptionClaim claim = preemptionRegistrations.get(exact.requestId());
         if (claim != null && !claim.reservation.equals(exact)) {
             claim = null;
         }
@@ -1240,7 +1239,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         if (claim != null) {
             PreemptionRecord attempt = preemptionAttempts.get(claim.attemptToken);
             if (attempt != null) {
-                attempt.remainingVictims.remove(exact);
+                attempt.remainingRequestsToPreempt.remove(exact);
             }
             claim.close();
         }
@@ -1342,7 +1341,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
     private void observeActive(WorkerStatus.TaskObservation task, boolean allocated, long now) {
         RequestRecord request = decodeRequests.get(task.requestId());
         if (allocated) {
-            PreemptionClaim claim = victimClaims.get(task.requestId());
+            PreemptionClaim claim = preemptionRegistrations.get(task.requestId());
             if (claim != null) {
                 claim.hold(false);
             }
@@ -1507,9 +1506,23 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         }
     }
 
+    /**
+     * Keeps the original exact reservations for release queries and removes released entries only
+     * from the remaining set. Both sets are discarded when this preemption commits or aborts.
+     */
     private record PreemptionRecord(
-            RequestReservation incoming, Set<RequestReservation> remainingVictims) {}
+            RequestReservation incoming,
+            Set<RequestReservation> requestsToPreempt,
+            Set<RequestReservation> remainingRequestsToPreempt) {
+        private PreemptionRecord(
+                RequestReservation incoming, Set<RequestReservation> requestsToPreempt) {
+            this(incoming, Set.copyOf(requestsToPreempt), requestsToPreempt);
+        }
+    }
 
+    /**
+     * Tracks one cancellation handoff and any KV held until its matching preemption completes.
+     */
     private final class PreemptionClaim {
         private final long attemptToken;
         private final RequestReservation reservation;
@@ -1529,11 +1542,11 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         }
 
         void close() {
-            if (victimClaims.get(reservation.requestId()) != this) {
+            if (preemptionRegistrations.get(reservation.requestId()) != this) {
                 return;
             }
             hold(false);
-            victimClaims.remove(reservation.requestId(), this);
+            preemptionRegistrations.remove(reservation.requestId(), this);
         }
 
         void hold(boolean held) {

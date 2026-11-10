@@ -148,7 +148,7 @@ classDiagram
 | `prepareDispatch`、`claimDelivery`                                    | 保留完整原子区；请求资格和 claim 更新归 Context，受约束的本地资源交接在同一原子区发生                |
 | `acceptDeliveryResult`、`acknowledgeDeliveryLocked`、端点事实处理     | Context 校验身份和更新事实；Scheduler 锁外执行指标、通知及发布                                       |
 | `recordCancellationLocked`                                            | Context 裁决首个原因；Scheduler 在同一请求临界区采集原有诊断并组装输入，不能提前采样再当作裁决时证据 |
-| `cancelQueuedExternal`、`completeExternal`                            | Scheduler 保留外部 Future 协议编排，Context 选择结果；publishNow 和用户回调仍在请求锁外              |
+| `cancelQueuedExternal`、`tryCompleteFromExternal`                     | Scheduler 保留外部 Future 协议编排，Context 选择结果；publishNow 和用户回调仍在请求锁外              |
 | `claimPublicationResultLocked`                                        | Context 维护唯一响应选择；不得提前合并到 ACK 处理                                                    |
 | deadline 安装、消费、期限判断和预测更新                               | Context 封装请求事实；Timer 仅安排注册和传递触发                                                     |
 | `claimFinalizationLocked`                                             | 请求资格、义务摘除和阶段推进归 Context；发布许可取得与外部执行仍由 Scheduler 协调，详见下一节        |

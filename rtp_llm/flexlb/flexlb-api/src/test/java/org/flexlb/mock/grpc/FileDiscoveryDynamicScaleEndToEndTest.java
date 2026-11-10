@@ -2,7 +2,7 @@ package org.flexlb.mock.grpc;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.tuple.Pair;
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRouteSelector;
 import org.flexlb.cache.match.CacheAwareService;
@@ -124,7 +124,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                             if (candidates.isEmpty()) {
                                 Response empty = new Response();
                                 empty.setSuccess(false);
-                                return PlacementResult.rejected(empty);
+                                return RoutingResult.rejected(empty);
                             }
                             Collections.sort(candidates);
                             String chosen =

@@ -27,6 +27,9 @@ import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks Spring schedules worker cleanup on the configured executor and owns its shutdown.
+ */
 class ScheduledTaskConfigurationTest {
 
     @ParameterizedTest
@@ -111,12 +114,15 @@ class ScheduledTaskConfigurationTest {
         assertTrue(scheduler.isShutdown(), "Spring owns the selected executor lifecycle");
     }
 
+    /**
+     * Provides the Spring scheduling configuration used by the executor lifecycle tests.
+     */
     @org.springframework.context.annotation.Configuration
     @org.springframework.scheduling.annotation.EnableScheduling
     static class Scheduling {
         @org.springframework.context.annotation.Bean(name = "taskScheduler")
         ScheduledThreadPoolExecutor taskScheduler() {
-            return new org.flexlb.balance.scheduler.PlacementConfiguration().taskScheduler();
+            return new org.flexlb.balance.scheduler.SchedulerConfiguration().taskScheduler();
         }
     }
 }

@@ -1,7 +1,8 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.preemption.DecodePreemption;
 import org.flexlb.balance.scheduler.ResponseCompletionExecutor.Registration;
 import org.flexlb.config.ConfigService;
 import org.flexlb.engine.grpc.EngineGrpcClient;
@@ -28,15 +29,21 @@ public final class SchedulerTestSupport {
             new WeakHashMap<>();
     private static final Map<org.flexlb.balance.endpoint.PrefillEndpoint, RequestRepository>
             endpointRepositories = java.util.Collections.synchronizedMap(new WeakHashMap<>());
+    private static final java.util.Map<
+                    AbstractRequestScheduler, org.flexlb.balance.preemption.PreemptionCompletion>
+            preemptionHandlers =
+                    java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+    private static final java.util.Map<RequestContext, RequestCloseQueue> testCloseQueues =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
 
     public static AbstractRequestScheduler createStartedScheduler(
             AbstractRequestScheduler lifecycle,
             org.flexlb.config.FlexlbConfig config,
             RequestRouteSelector router,
-            org.flexlb.balance.eviction.DecodePreemption preemption,
-            PlacementAvailability availability,
+            org.flexlb.balance.preemption.DecodePreemption preemption,
+            CapacityNotifier availability,
             org.flexlb.balance.planner.GroupPlanner grouping,
-            PlacementQueue queue) {
+            SchedulingQueue queue) {
         var scheduler =
                 SchedulerTestServices.create(
                         lifecycle, config, router, preemption, availability, grouping, queue);
@@ -70,30 +77,6 @@ public final class SchedulerTestSupport {
     /** Empty Decode ownership uses typed domain results, including in tests without a real ledger. */
     public static org.flexlb.balance.endpoint.DecodeEndpoint mockDecodeEndpoint() {
         return RequestProtocolTestSupport.decodeEndpoint();
-    }
-
-    public static DeliveryDispatcher dispatcher() {
-        return spy(
-                new DeliveryDispatcher(
-                        null,
-                        DeliveryTestSupport.service(SchedulingTestConfig.newConfig()),
-                        new DeliveryMetricsReporter(null),
-                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(
-                                        DeliveryTestSupport.service(
-                                                SchedulingTestConfig.newConfig())),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class)));
-    }
-
-    public static synchronized RequestRepository repository(AbstractRequestScheduler owner) {
-        if (owner == null) {
-            return null;
-        }
-        return owner.repository != null
-                ? owner.repository
-                : mockRepositories.computeIfAbsent(owner, SchedulerTestSupport::mockRepository);
     }
 
     public static void associateEndpoint(
@@ -139,13 +122,13 @@ public final class SchedulerTestSupport {
                                 .getRequest()
                                 .getTimeoutMs(),
                         org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
-                var placement = (PlacementOperation) context.beginPlacement(null);
+                var placement = (RoutingContext) context.beginRouteSelection();
                 context.publishRoute(placement, route);
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                         context,
                         observedRequest ->
-                                observedRequest.completePlacement(
-                                        placement, ContextResult.PublicationResult.PUBLISHED, now));
+                                observedRequest.completeRouting(
+                                        placement, ContextResult.RoutingCompletion.FINISHED, now));
             }
         }
     }
@@ -168,6 +151,31 @@ public final class SchedulerTestSupport {
         }
     }
 
+    public static org.flexlb.balance.preemption.PreemptionCompletion preemption(
+            AbstractRequestScheduler scheduler) {
+        return preemptionHandlers.computeIfAbsent(
+                scheduler,
+                ignored -> {
+                    var details = org.mockito.Mockito.mockingDetails(scheduler);
+                    if (!details.isMock() || details.isSpy())
+                        return org.mockito.Mockito.spy(
+                                new org.flexlb.balance.preemption.PreemptionCompletion());
+                    var handler =
+                            org.mockito.Mockito.mock(
+                                    org.flexlb.balance.preemption.PreemptionCompletion.class);
+                    org.mockito.Mockito.doCallRealMethod()
+                            .when(handler)
+                            .cancelRequest(
+                                    org.mockito.ArgumentMatchers.any(),
+                                            org.mockito.ArgumentMatchers.any(),
+                                    org.mockito.ArgumentMatchers.any(),
+                                            org.mockito.ArgumentMatchers.any(),
+                                    org.mockito.ArgumentMatchers.any(),
+                                            org.mockito.ArgumentMatchers.anyLong());
+                    return handler;
+                });
+    }
+
     public static void awaitRequestWork(SchedulerTestServices runtime) {
         var tasks = (RequestTaskPool) runtime.tasks();
         if (!tasks.isExecutingOnCurrentThread()) {
@@ -175,9 +183,9 @@ public final class SchedulerTestSupport {
             return;
         }
         // Race hooks run inside asynchronous DIRECT work. Drain the other tasks, not this hook.
-        var monitor = ReflectionTestUtils.getField(tasks, "workLifecycle");
+        var monitor = ReflectionTestUtils.getField(tasks, "tasksLock");
         try {
-            var pending = RequestTaskPool.class.getDeclaredField("pendingWork");
+            var pending = RequestTaskPool.class.getDeclaredField("submittedTasks");
             pending.setAccessible(true);
             long until = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
             while (System.nanoTime() < until) {
@@ -198,8 +206,50 @@ public final class SchedulerTestSupport {
                 ReflectionTestUtils.getField(runtime.taskTimer(), "executor");
     }
 
+    public static org.flexlb.balance.preemption.DefaultDecodePreemption routePreemption(
+            AbstractRequestScheduler owner) {
+        var runtime = runtime(owner);
+        var config = mock(ConfigService.class);
+        when(config.loadBalanceConfig()).thenReturn(SchedulingTestConfig.batchConfig());
+        return new org.flexlb.balance.preemption.DefaultDecodePreemption(
+                dispatcher(runtime),
+                repository(owner),
+                runtime.tasks(),
+                runtime.taskTimer(),
+                mock(RequestSchedulerReporter.class),
+                config,
+                (org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity)
+                        org.flexlb.balance.scheduler.DeliveryTestSupport.getField(
+                                owner.dispatcher, "decodeAdmissionCapacity"),
+                new org.flexlb.balance.preemption.PriorityDecodePreemptionPolicy());
+    }
+
     public static SchedulerTestServices runtime(Object owner) {
         return SchedulerTestServices.forOwner(owner);
+    }
+
+    public static DeliveryCoordinator dispatcher() {
+        return spy(
+                new DeliveryCoordinator(
+                        new org.flexlb.balance.scheduler.RequestRepository(),
+                        null,
+                        DeliveryTestSupport.service(SchedulingTestConfig.newConfig()),
+                        new DeliveryMetricsReporter(null),
+                        new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                .decodeAdmissionCapacity(
+                                        DeliveryTestSupport.service(
+                                                SchedulingTestConfig.newConfig())),
+                        org.mockito.Mockito.mock(
+                                org.flexlb.balance.scheduler.DeliveryExecution.class)));
+    }
+
+    public static synchronized RequestRepository repository(AbstractRequestScheduler owner) {
+        if (owner == null) {
+            return null;
+        }
+        return owner.repository != null
+                ? owner.repository
+                : mockRepositories.computeIfAbsent(owner, SchedulerTestSupport::mockRepository);
     }
 
     /** State/protocol fixtures have no running placement loop. */
@@ -215,7 +265,7 @@ public final class SchedulerTestSupport {
                 trace,
                 mock(RequestRouteSelector.class),
                 mock(DecodePreemption.class),
-                new PlacementAvailability(),
+                new CapacityNotifier(),
                 false);
     }
 
@@ -227,7 +277,7 @@ public final class SchedulerTestSupport {
             TheoryCacheHitReporter trace,
             RequestRouteSelector router,
             DecodePreemption eviction,
-            PlacementAvailability availability) {
+            CapacityNotifier availability) {
         return create(config, batches, requests, trace, router, eviction, availability, true);
     }
 
@@ -238,26 +288,69 @@ public final class SchedulerTestSupport {
             TheoryCacheHitReporter trace,
             RequestRouteSelector router,
             DecodePreemption eviction,
-            PlacementAvailability availability) {
+            CapacityNotifier availability) {
         return create(runtime, config, batches, trace, router, eviction, availability, true);
     }
 
-    public static PlacementOperation claim(
+    public static RoutingContext claim(
             AbstractRequestScheduler scheduler,
             String id,
             java.util.concurrent.CompletableFuture<?> future) {
         var context = scheduler.repository.findActive(id);
         return context != null && context.data().getFuture() == future
-                ? scheduler.claimPlacement(context)
+                ? scheduler.tryBeginRouteSelection(context)
                 : null;
     }
 
-    static org.flexlb.balance.PlacementResult<RouteResult, PlacementKey> enqueueRoute(
+    static void submitClose(
+            RequestTaskPool pool,
+            RequestContext context,
+            Runnable work,
+            boolean inline,
+            java.util.function.Consumer<Throwable> rejected,
+            boolean requiredResponse) {
+        closeQueue(context)
+                .submit(
+                        context,
+                        work,
+                        inline ? Runnable::run : task -> pool.execute(context, task),
+                        !requiredResponse,
+                        rejected);
+    }
+
+    static RequestCloseQueue closeQueue(RequestContext context) {
+        var scheduler = context.data().getRequestScheduler();
+        if (scheduler != null) {
+            var queue = (RequestCloseQueue) ReflectionTestUtils.getField(scheduler, "closeQueue");
+            if (queue != null) return queue;
+        }
+        return testCloseQueues.computeIfAbsent(context, ignored -> new RequestCloseQueue());
+    }
+
+    static org.flexlb.balance.RoutingResult<RouteResult, CapacityKey> enqueueRoute(
             QueuedRequestScheduler scheduler, RequestProtocolTestSupport.SelectedRoute plan) {
         var route = RequestProtocolTestSupport.planRouting(plan);
-        var settings =
-                (QueueExecutionSettings) ReflectionTestUtils.getField(scheduler, "queueSettings");
-        return lifecycle(scheduler).enqueueRoute(route, settings);
+        var result = scheduler.enqueueRoute(route);
+        if (result.status() == RoutingResult.Status.SUCCESS) scheduler.notifyQueuedRoute(route);
+        return result;
+    }
+
+    static RoutingResult<RouteResult, CapacityKey> selectAndPublish(
+            AbstractRequestScheduler scheduler,
+            RequestContext context,
+            java.util.function.Supplier<RoutingResult<RouteResult, CapacityKey>> selection) {
+        return scheduler instanceof DirectRequestScheduler direct
+                ? direct.selectAndPublish(context, selection)
+                : ((QueuedRequestScheduler) scheduler).selectAndPublish(context, selection);
+    }
+
+    static RoutingResult<RouteResult, CapacityKey> selectAndPublish(
+            AbstractRequestScheduler scheduler,
+            RoutingContext routing,
+            java.util.function.Supplier<RoutingResult<RouteResult, CapacityKey>> selection) {
+        return scheduler instanceof DirectRequestScheduler direct
+                ? direct.selectAndPublish(routing, selection)
+                : ((QueuedRequestScheduler) scheduler).selectAndPublish(routing, selection);
     }
 
     static void startScheduling(RequestScheduler scheduler) {
@@ -272,8 +365,8 @@ public final class SchedulerTestSupport {
         return runtime.shutdown(ShutdownMode.IMMEDIATE, Duration.ZERO);
     }
 
-    static DeliveryDispatcher dispatcher(SchedulerTestServices runtime) {
-        return (DeliveryDispatcher) ReflectionTestUtils.getField(runtime, "dispatcher");
+    static DeliveryCoordinator dispatcher(SchedulerTestServices runtime) {
+        return (DeliveryCoordinator) ReflectionTestUtils.getField(runtime, "dispatcher");
     }
 
     static AbstractRequestScheduler initializedScheduler(SchedulerTestServices runtime) {
@@ -283,6 +376,7 @@ public final class SchedulerTestSupport {
     }
 
     static void closeRequestWork(SchedulerTestServices runtime) {
+        ((RequestTaskPool) runtime.tasks()).awaitIdle();
         ReflectionTestUtils.invokeMethod(runtime.tasks(), "close");
     }
 
@@ -332,7 +426,7 @@ public final class SchedulerTestSupport {
             org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                     context,
                     observedRequest ->
-                            observedRequest.recordDeliveryResult(
+                            observedRequest.recordRemoteCleanup(
                                     new ContextResult.CleanupAcknowledgement(
                                             delivery.identity(),
                                             ContextResult.CancelEvidenceKind.CLEANED,
@@ -359,8 +453,8 @@ public final class SchedulerTestSupport {
                     ? Stage.RESULT_PENDING
                     : Stage.DELIVERING;
         }
-        if (state.placement() != null
-                && (state.route() == null || state.placement().withdrawingRoute() != null)) {
+        if (state.routingContext() != null
+                && (state.route() == null || state.routingContext().routeToWithdraw() != null)) {
             return Stage.ROUTING;
         }
         return state.route() == null ? Stage.QUEUED : Stage.READY_TO_DELIVER;
@@ -390,7 +484,8 @@ public final class SchedulerTestSupport {
 
     static EngineGrpcClient engineClient(Object owner) {
         return (EngineGrpcClient)
-                ReflectionTestUtils.getField(runtime(owner).dispatcher, "grpcClient");
+                org.flexlb.balance.scheduler.DeliveryTestSupport.getField(
+                        runtime(owner).dispatcher, "grpcClient");
     }
 
     static Throwable failure(Object owner) {
@@ -413,7 +508,7 @@ public final class SchedulerTestSupport {
             TheoryCacheHitReporter trace,
             RequestRouteSelector router,
             DecodePreemption eviction,
-            PlacementAvailability availability,
+            CapacityNotifier availability,
             boolean startPlacement) {
         var runtime =
                 spy(
@@ -430,10 +525,14 @@ public final class SchedulerTestSupport {
     }
 
     static Registration responsePublication(ResponseCompletionExecutor executor) {
-        return new Registration(executor, mock(RequestContext.class));
+        return new Registration(
+                executor,
+                new Object(),
+                new ResponseCompletionExecutor.RequestFuture((kind, response, failure) -> false),
+                () -> true);
     }
 
-    static DeliveryDispatcher createDispatcher(
+    static DeliveryCoordinator createDispatcher(
             EngineGrpcClient client,
             org.flexlb.config.ConfigService service,
             int threads,
@@ -448,12 +547,12 @@ public final class SchedulerTestSupport {
                         org.flexlb.config.ConfigService.class,
                         org.mockito.AdditionalAnswers.delegatesTo(service));
         org.mockito.Mockito.doReturn(config).when(dispatcherService).loadBalanceConfig();
-        return new DeliveryDispatcher(
+        return new DeliveryCoordinator(
+                new org.flexlb.balance.scheduler.RequestRepository(),
                 client,
                 dispatcherService,
                 new DeliveryMetricsReporter(null),
-                org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
-                new org.flexlb.balance.scheduler.PlacementConfiguration()
+                new org.flexlb.balance.scheduler.SchedulerConfiguration()
                         .decodeAdmissionCapacity(dispatcherService),
                 org.mockito.Mockito.mock(org.flexlb.balance.scheduler.DeliveryExecution.class));
     }
@@ -480,10 +579,10 @@ public final class SchedulerTestSupport {
             TheoryCacheHitReporter trace,
             RequestRouteSelector router,
             DecodePreemption eviction,
-            PlacementAvailability availability,
+            CapacityNotifier availability,
             boolean startPlacement) {
         var snapshot = config.loadBalanceConfig();
-        var capacity = new PlacementConfiguration().decodeAdmissionCapacity(config);
+        var capacity = new SchedulerConfiguration().decodeAdmissionCapacity(config);
         RequestScheduler owner =
                 snapshot.isQueue()
                         ? mock(

@@ -1,8 +1,8 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.preemption.DecodePreemption;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -79,7 +79,7 @@ class SubmissionShutdownDeadlockTest {
                                 if (!queued) {
                                     waitForExternalLock.run();
                                 }
-                                return PlacementResult.rejected(
+                                return RoutingResult.rejected(
                                         Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
                             });
             Thread active =
@@ -236,7 +236,7 @@ class SubmissionShutdownDeadlockTest {
                             config,
                             router,
                             mock(DecodePreemption.class),
-                            new PlacementAvailability(),
+                            new CapacityNotifier(),
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
                             new OrderedRequestQueue(config.isPriorityOrdering()));
             runtime.registerScheduler(scheduler);

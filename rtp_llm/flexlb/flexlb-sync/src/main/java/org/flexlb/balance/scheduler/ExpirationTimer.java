@@ -13,15 +13,9 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.function.LongSupplier;
 
 /**
- * Semantic owner of request deadlines and lifecycle-retention maintenance.
- *
- * <p>The timer never keeps a request map. Exact request generations remain in
- * the request registry; a slot stores the opaque registration returned
- * by this class.
- *
- * <p>Maintenance removes settled terminal records before sweeping endpoint orphans.
- * A request's inactivity deadline bounds local ownership independently of
- * Engine cancellation acknowledgements or terminal status delivery.
+ * Installs, replaces and cancels deadline tasks for exact request contexts.
+ * Each slot retains the current plan revision and timer handles; callbacks record facts through the request scheduler.
+ * Closing prevents new registrations, waits for ongoing installations and callbacks, then cancels remaining handles.
  */
 public final class ExpirationTimer implements AutoCloseable {
     private static final Kind[] KINDS = Kind.values();
@@ -79,7 +73,10 @@ public final class ExpirationTimer implements AutoCloseable {
         Failures.rethrow(failure, "expiration timer failed");
     }
 
-    /** Effect order may differ from fact order; only the greatest accepted revision installs handles. */
+    /**
+     * Reconcile a deadline plan, ignoring unchanged or superseded revisions. Successful return
+     * means this revision needs no further installation; failures retain retryable handles.
+     */
     void update(RequestContext context, Plan plan) {
         Objects.requireNonNull(plan);
         if (context.snapshot().key() == null || !needsUpdate(context, plan)) {

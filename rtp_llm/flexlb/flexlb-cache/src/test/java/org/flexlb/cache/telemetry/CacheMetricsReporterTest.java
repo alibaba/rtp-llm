@@ -19,7 +19,6 @@ import static org.flexlb.constant.MetricConstant.CACHE_AFFINITY_DECISION;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
-import static org.flexlb.constant.MetricConstant.CACHE_INPUT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_PREDICTED_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS;
@@ -29,6 +28,7 @@ import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_PREDICTED_R
 import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
@@ -118,18 +118,18 @@ class CacheMetricsReporterTest {
     }
 
     @Test
-    void should_report_cache_hit_and_input_tokens_as_counters_with_same_worker_tags() {
+    void should_report_cache_hit_and_input_tokens_with_same_role_tags() {
         reporter.init();
-        reporter.reportCacheHitMetrics(RoleType.PREFILL, "10.0.0.1:8080@0", 20L, 100L, 0.2);
-        reporter.reportCacheHitMetrics(RoleType.PREFILL, "10.0.0.1:8080@0", 0L, 200L, 0.0);
+        reporter.reportSelectionCache(RoleType.PREFILL, 100L, 20L, 20L, 20L);
+        reporter.reportSelectionCache(RoleType.PREFILL, 200L, 0L, 0L, 0L);
 
-        FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL", "engineIp", "10.0.0.1:8080@0");
+        FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL");
         verify(monitor).register(CACHE_HIT_COUNT, FlexMetricType.COUNTER);
-        verify(monitor).register(CACHE_INPUT_TOKENS, FlexMetricType.COUNTER);
+        verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.QPS);
         verify(monitor).report(CACHE_HIT_COUNT, tags, 20L);
         verify(monitor).report(CACHE_HIT_COUNT, tags, 0L);
-        verify(monitor).report(CACHE_INPUT_TOKENS, tags, 100L);
-        verify(monitor).report(CACHE_INPUT_TOKENS, tags, 200L);
+        verify(monitor).report(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, tags, 100L);
+        verify(monitor).report(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, tags, 200L);
     }
 
     @Test
@@ -163,17 +163,17 @@ class CacheMetricsReporterTest {
             monitorField.set(reporter, new MicrometerFlexMonitor(registry));
             reporter.init();
 
-            reporter.reportCacheHitMetrics(RoleType.PREFILL, "10.0.0.1:8080", 20L, 100L, 0.2);
-            reporter.reportCacheHitMetrics(RoleType.PREFILL, "10.0.0.1:8080", 0L, 200L, 0.0);
+            reporter.reportSelectionCache(RoleType.PREFILL, 100L, 20L, 20L, 20L);
+            reporter.reportSelectionCache(RoleType.PREFILL, 200L, 0L, 0L, 0L);
 
             double hitTokens =
                     registry.get("flexlb.app.cache.hit.count")
-                            .tags("role", "PREFILL", "engineIp", "10.0.0.1:8080")
+                            .tags("role", "PREFILL")
                             .counter()
                             .count();
             double inputTokens =
-                    registry.get("flexlb.app.cache.input.tokens")
-                            .tags("role", "PREFILL", "engineIp", "10.0.0.1:8080")
+                    registry.get("flexlb.app.cache.routing.selected.match.total.tokens")
+                            .tags("role", "PREFILL")
                             .counter()
                             .count();
             assertEquals(20.0, hitTokens);
@@ -226,8 +226,7 @@ class CacheMetricsReporterTest {
 
     @Test
     void should_report_routing_cache_match_token_metrics() {
-        reporter.reportRoutingSelectedCacheMatchMetrics(RoleType.PREFILL, 128L);
-        reporter.reportRoutingCandidateMaxCacheMatchMetrics(RoleType.PREFILL, 256L);
+        reporter.reportSelectionCache(RoleType.PREFILL, 512L, 128L, 128L, 256L);
 
         FlexMetricTags roleTags = FlexMetricTags.of("role", RoleType.PREFILL.name());
         verify(monitor).report(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, roleTags, 128L);

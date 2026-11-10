@@ -5,9 +5,9 @@ import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PreemptionConfig;
+import org.flexlb.config.PreemptionStage;
 import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.config.SchedulerConfig;
-import org.flexlb.config.VictimStage;
 
 import java.util.EnumSet;
 
@@ -112,7 +112,7 @@ public final class SchedulingTestConfig {
 
     public static org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity capacity(
             FlexlbConfig config) {
-        return new PlacementConfiguration().decodeAdmissionCapacity(configService(config));
+        return new SchedulerConfiguration().decodeAdmissionCapacity(configService(config));
     }
 
     public static org.flexlb.config.ConfigService configService(FlexlbConfig config) {
@@ -121,7 +121,7 @@ public final class SchedulingTestConfig {
         return service;
     }
 
-    public static org.flexlb.balance.eviction.DecodePreemptionPolicy.DecodeEvictionDecision
+    public static org.flexlb.balance.preemption.DecodePreemptionPolicy.DecodePreemptionDecision
             planDecode(
                     org.flexlb.dao.loadbalance.Request request,
                     int priority,
@@ -129,7 +129,7 @@ public final class SchedulingTestConfig {
                     org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot snapshot,
                     PreemptionConfig preemption,
                     java.util.Map<String, String> failures) {
-        return new org.flexlb.balance.eviction.PriorityDecodePreemptionPolicy()
+        return new org.flexlb.balance.preemption.PriorityDecodePreemptionPolicy()
                 .planDecode(request, priority, capacity, snapshot, preemption, failures);
     }
 
@@ -201,14 +201,14 @@ public final class SchedulingTestConfig {
         return nonBatch;
     }
 
-    public static void allowVictim(FlexlbConfig config, VictimStage stage) {
+    public static void allowVictim(FlexlbConfig config, PreemptionStage stage) {
         PreemptionConfig preemption = preemption(config);
-        EnumSet<VictimStage> stages =
-                preemption.getAllowedVictimStages().isEmpty()
-                        ? EnumSet.noneOf(VictimStage.class)
-                        : EnumSet.copyOf(preemption.getAllowedVictimStages());
+        EnumSet<PreemptionStage> stages =
+                preemption.getAllowedPreemptionStages().isEmpty()
+                        ? EnumSet.noneOf(PreemptionStage.class)
+                        : EnumSet.copyOf(preemption.getAllowedPreemptionStages());
         stages.add(stage);
-        preemption.setAllowedVictimStages(stages);
+        preemption.setAllowedPreemptionStages(stages);
     }
 
     public static PreemptionConfig preemption(FlexlbConfig config) {

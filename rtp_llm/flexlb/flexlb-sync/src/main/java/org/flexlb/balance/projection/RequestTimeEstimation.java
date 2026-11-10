@@ -20,7 +20,8 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.math.LongMath.saturatedAdd;
 
 /**
- * Frozen-work cost through the incoming request; collection waits are not predicted.
+ * Estimates known execution work through the incoming request from frozen queue and model inputs.
+ * The selecting strategy combines this estimate with independently observed delivery capacity.
  */
 public final class RequestTimeEstimation {
     private static final ThreadLocal<RequestTimeEstimation> ESTIMATORS =
@@ -89,10 +90,7 @@ public final class RequestTimeEstimation {
         predictions.routingCacheMatchTokens = routingCacheMatchTokens;
         inUse = true;
         try {
-            project(inputs, planningAtMs);
-            applyAdmissionPolicy(
-                    inputs.queue(), Math.max(inputs.queue().capturedAtMs(), planningAtMs));
-            return predictions;
+            return project(inputs, planningAtMs);
         } finally {
             predictions.evaluator = null;
             predictions.batchPrediction = null;
@@ -318,46 +316,6 @@ public final class RequestTimeEstimation {
         }
     }
 
-    /**
-     * Combine the captured capacity wait with the projection without changing its ranking cost.
-     */
-    private void applyAdmissionPolicy(ProjectionQueueSnapshot queue, long projectionAtMs) {
-        var candidate = predictions;
-        candidate.admissionState = candidate.state;
-        candidate.admissionDetail = candidate.detail;
-        var observation = queue.admissionBlock();
-        if (!queue.queueScheduling()
-                || observation == null
-                || observation.semantics() == null
-                || (candidate.state != State.MODELED && !candidate.engineWorkUnmodeled())) {
-            return;
-        }
-        var semantics = observation.semantics();
-        if (!candidate.engineWorkUnmodeled()) {
-            // Selected requests participate in prediction before joining the dispatch queue.
-            // Compare the blocked dispatch head itself, which may no longer be first here.
-            var blockedHead =
-                    queue.activeItems().stream()
-                            .filter(
-                                    item ->
-                                            java.util.Objects.equals(
-                                                            item.requestId(),
-                                                            observation.requestId())
-                                                    && item.enqueueSeq()
-                                                            == observation.enqueueSeq())
-                            .findFirst()
-                            .orElseThrow();
-            if (expiredAt(blockedHead, projectionAtMs)) return;
-            if (queue.ordering().compare(incoming, blockedHead) < 0) {
-                candidate.admissionState = semantics.afterProbe();
-                candidate.admissionDetail = semantics.afterProbeDetail();
-                return;
-            }
-        }
-        candidate.admissionState = State.BLOCKED;
-        candidate.admissionDetail = semantics.blockedDetail();
-    }
-
     private static boolean expiredAt(GroupPlanner.Item item, long nowMs) {
         return item.expiresAtMs() <= 0L || nowMs >= item.expiresAtMs();
     }
@@ -480,29 +438,9 @@ public final class RequestTimeEstimation {
     }
 
     /**
-     * Admission restriction imposed by the captured head, including after a probe overtakes it.
+     * Read-only projection result. Invocation-scoped views must not be retained.
      */
-    public record AdmissionBlockSemantics(
-            String blockedDetail, State afterProbe, String afterProbeDetail) {
-        public AdmissionBlockSemantics {
-            checkArgument(
-                    afterProbe == State.BLOCKED || afterProbe == State.UNAVAILABLE,
-                    "an admission block must remain blocked or unavailable after the probe");
-        }
-    }
-
-    /** Read-only projection result. Invocation-scoped views must not be retained. */
     public interface CandidateView {
-        default State admissionState() {
-            return state();
-        }
-
-        State state();
-
-        default String admissionDetail() {
-            return detail();
-        }
-
         String detail();
 
         long incomingPrefillMs();
@@ -513,13 +451,11 @@ public final class RequestTimeEstimation {
 
         long routingCacheMatchTokens();
 
-        default boolean engineWorkUnmodeled() {
-            return state() == State.UNMODELED_ENGINE_WORK;
-        }
-
         default boolean selectable() {
             return state() == State.MODELED && projectedTtftMsValue() != UNKNOWN;
         }
+
+        State state();
 
         /** Known execution cost through this request; excludes future collection waits. */
         long projectedTtftMsValue();
@@ -534,18 +470,36 @@ public final class RequestTimeEstimation {
 
     public enum State {
         MODELED,
-        UNMODELED_ENGINE_WORK,
         BLOCKED,
         UNAVAILABLE
     }
 
-    /** Queue/work captured under one ownership lock, with an immutable model for this projection. */
+    /**
+     * Queue/work captured under one ownership lock, with an immutable model and source revisions.
+     */
     public record Inputs(
             ProjectionQueueSnapshot queue,
             WorkSnapshot work,
-            long ownershipVersion,
+            SelectionVersion selectionVersion,
             PrefillTimePredictor.Evaluator evaluator,
             DispatcherConfig.Type deliveryMode) {
+
+        /**
+         * Builds projection-only inputs without an Endpoint registration identity.
+         */
+        public Inputs(
+                ProjectionQueueSnapshot queue,
+                WorkSnapshot work,
+                long ownershipVersion,
+                PrefillTimePredictor.Evaluator evaluator,
+                DispatcherConfig.Type deliveryMode) {
+            this(
+                    queue,
+                    work,
+                    new SelectionVersion(-1L, ownershipVersion, -1L),
+                    evaluator,
+                    deliveryMode);
+        }
 
         public Inputs {
             // Committed work may reuse an older clock base while its ownership
@@ -553,9 +507,23 @@ public final class RequestTimeEstimation {
             checkArgument(
                     queue.capturedAtMs() >= work.capturedAtMs(),
                     "work snapshot cannot be newer than its queue capture");
-            checkArgument(ownershipVersion >= 0L, "ownershipVersion must be non-negative");
+            java.util.Objects.requireNonNull(selectionVersion, "selectionVersion");
+            checkArgument(
+                    selectionVersion.ownershipVersion() >= 0L,
+                    "ownershipVersion must be non-negative");
+        }
+
+        public long ownershipVersion() {
+            return selectionVersion.ownershipVersion();
         }
     }
+
+    /**
+     * Endpoint generation and resource/scheduling revisions captured for atomic registration.
+     * Projection-only inputs use -1 for generation and scheduling revision and cannot register resources.
+     */
+    public record SelectionVersion(
+            long generationId, long ownershipVersion, long schedulingInputVersion) {}
 
     /**
      * The sole boundary between projection math and an external predictor.
@@ -565,8 +533,6 @@ public final class RequestTimeEstimation {
     private static final class Prediction
             implements GroupPlanner.PrefixPrediction<GroupPlanner.Item>, CandidateView {
         private State state;
-        private State admissionState;
-        private String admissionDetail;
 
         private long projectedTtftMsValue;
         private long incomingPrefillMs;
@@ -597,16 +563,6 @@ public final class RequestTimeEstimation {
         private long cachedHitCache = -1L;
         private long cachedSingleMs = -1L;
         private long cachedBatchMs = -1L;
-
-        @Override
-        public State admissionState() {
-            return admissionState;
-        }
-
-        @Override
-        public String admissionDetail() {
-            return admissionDetail;
-        }
 
         @Override
         public State state() {
@@ -958,36 +914,13 @@ public final class RequestTimeEstimation {
             GroupPlanner grouping,
             Comparator<? super GroupPlanner.Item> ordering,
             GroupPlanner.Constraints constraints,
-            List<GroupPlanner.Item> activeItems,
-            AdmissionBlock admissionBlock) {
+            List<GroupPlanner.Item> activeItems) {
 
         public ProjectionQueueSnapshot {
             if (queueScheduling) {
                 Objects.requireNonNull(grouping, "grouping");
             }
             activeItems = List.copyOf(activeItems);
-            if (admissionBlock != null) {
-                checkArgument(!activeItems.isEmpty(), "admission block requires an ACTIVE head");
-                checkArgument(
-                        activeItems.stream()
-                                .anyMatch(
-                                        item ->
-                                                java.util.Objects.equals(
-                                                                item.requestId(),
-                                                                admissionBlock.requestId())
-                                                        && item.enqueueSeq()
-                                                                == admissionBlock.enqueueSeq()),
-                        "admission block must identify a captured dispatch queue item");
-            }
         }
-
-        /**
-         * Exact ACTIVE head whose current capacity rejection parks the worker.
-         * Null semantics mean the wait only limits delivery, not queue publication.
-         */
-        public record AdmissionBlock(
-                String requestId,
-                long enqueueSeq,
-                RequestTimeEstimation.AdmissionBlockSemantics semantics) {}
     }
 }

@@ -1,6 +1,6 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -11,8 +11,8 @@ import org.flexlb.balance.strategy.StrategyTestSupport.Selection;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.PreemptionConfig;
+import org.flexlb.config.PreemptionStage;
 import org.flexlb.config.QueueOrderingConfig;
-import org.flexlb.config.VictimStage;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -81,8 +81,7 @@ class DecodeSelectorTest {
                 Assertions.assertEquals(
                         new DecodeResources.CapacityRelease(1L, 128L, 256L),
                         queued.placementOccupancy(70));
-                Assertions.assertEquals(
-                        DecodeResources.CapacityRelease.NONE, queued.engineOccupancy(70));
+                Assertions.assertEquals(0L, queued.routing().dispatchUsage().occupiedRequests());
 
                 var acquired =
                         endpoint.acquireDispatchPermit(
@@ -93,10 +92,10 @@ class DecodeSelectorTest {
                 var dispatching = endpoint.admissionSummary();
                 Assertions.assertNotSame(queued, dispatching);
                 Assertions.assertEquals(
-                        queued.placementOccupancy(70), dispatching.engineOccupancy(70));
+                        1L, dispatching.routing().dispatchUsage().occupiedRequests());
                 Assertions.assertEquals(
-                        DecodeResources.CapacityRelease.NONE,
-                        queued.engineOccupancy(70),
+                        0L,
+                        queued.routing().dispatchUsage().occupiedRequests(),
                         "a published summary must remain immutable after ownership changes");
                 Assertions.assertTrue(acquired.value().release());
                 endpoint.release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK)
@@ -161,13 +160,13 @@ class DecodeSelectorTest {
                         configService,
                         SchedulingTestConfig.capacity(configService.loadBalanceConfig()));
         var changed = StrategyTestSupport.select(selector, inputs, SCHEDULING, null);
-        Assertions.assertEquals(PlacementResult.Status.BLOCKED, changed.status());
+        Assertions.assertEquals(RoutingResult.Status.BLOCKED, changed.status());
         Assertions.assertEquals(1, captures.get());
         // Only a new scheduling attempt may choose the replacement generation.
-        PlacementResult<Selection, RoleType> result =
+        RoutingResult<Selection, RoleType> result =
                 StrategyTestSupport.select(selector, inputs, SCHEDULING, null);
 
-        Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
+        Assertions.assertEquals(RoutingResult.Status.SUCCESS, result.status());
         Selection selected = result.value();
         Assertions.assertEquals("127.0.0.2", selected.decode().getServerIp());
         Mockito.verify(replacementWorker, Mockito.never()).close();
@@ -604,7 +603,7 @@ class DecodeSelectorTest {
         var result =
                 StrategyTestSupport.select(
                         availableStrategy(registry), request(100L, 1_001L), SCHEDULING, null);
-        Assertions.assertEquals(PlacementResult.Status.BLOCKED, result.status());
+        Assertions.assertEquals(RoutingResult.Status.BLOCKED, result.status());
         Assertions.assertEquals(RoleType.DECODE, result.blocker());
     }
 
@@ -650,10 +649,10 @@ class DecodeSelectorTest {
         Request inputs = request(257L, 3_050L);
         inputs = inputs.toBuilder().maxNewTokens(1).build();
 
-        PlacementResult<Selection, RoleType> result =
+        RoutingResult<Selection, RoleType> result =
                 StrategyTestSupport.select(strategy, inputs, SCHEDULING, null);
 
-        Assertions.assertEquals(PlacementResult.Status.REJECTED, result.status());
+        Assertions.assertEquals(RoutingResult.Status.REJECTED, result.status());
         Assertions.assertTrue(result.failure().getErrorMessage().contains("demand=258"));
         Assertions.assertTrue(result.failure().getErrorMessage().contains("maximum=230"));
     }
@@ -663,10 +662,10 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.1", 0L, 0L);
         StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(decodeRegistry());
 
-        PlacementResult<Selection, RoleType> result =
+        RoutingResult<Selection, RoleType> result =
                 StrategyTestSupport.select(strategy, request(1_000_000L, 3_051L), SCHEDULING, null);
 
-        Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
+        Assertions.assertEquals(RoutingResult.Status.SUCCESS, result.status());
     }
 
     @ParameterizedTest
@@ -712,9 +711,9 @@ class DecodeSelectorTest {
 
         Request inputs = request(100, 3L);
 
-        PlacementResult<Selection, RoleType> fifoPlacement =
+        RoutingResult<Selection, RoleType> fifoPlacement =
                 StrategyTestSupport.select(strategy, inputs, SCHEDULING, null);
-        Assertions.assertEquals(PlacementResult.Status.BLOCKED, fifoPlacement.status());
+        Assertions.assertEquals(RoutingResult.Status.BLOCKED, fifoPlacement.status());
         Assertions.assertNull(fifoPlacement.value());
         Assertions.assertEquals(
                 "127.0.0.1:8080",
@@ -749,10 +748,30 @@ class DecodeSelectorTest {
                     StrategyTestSupport.select(
                             availableStrategy(registry), inputs, SCHEDULING, null);
 
-            Assertions.assertEquals(PlacementResult.Status.BLOCKED, result.status());
+            Assertions.assertEquals(RoutingResult.Status.BLOCKED, result.status());
             Assertions.assertEquals(RoleType.DECODE, result.blocker());
             Assertions.assertNotNull(result.failure());
-            Assertions.assertEquals("Decode capacity exhausted", result.diagnostics().get("cause"));
+            Assertions.assertEquals(
+                    org.flexlb.dao.loadbalance.AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+                    result.failure().getAdmissionRejectReason());
+            Assertions.assertEquals(
+                    result.failure().getErrorMessage(), result.diagnostics().get("cause"));
+            var evidence = (List<Map<String, Object>>) result.diagnostics().get("decode");
+            Assertions.assertEquals(
+                    java.util.Set.of("127.0.0.1:8080", "127.0.0.2:8080"),
+                    evidence.stream()
+                            .map(detail -> detail.get("endpoint"))
+                            .collect(java.util.stream.Collectors.toSet()));
+            for (var detail : evidence) {
+                var deficit = new DecodeResources.CapacityDeficit(1L, 0L, 0L);
+                Assertions.assertEquals(deficit, detail.get("deficit"));
+                Assertions.assertEquals(
+                        "higher-priority requests are ahead; endpoint="
+                                + detail.get("endpoint")
+                                + "; deficit="
+                                + deficit,
+                        detail.get("reason"));
+            }
         } finally {
             registry.close();
         }
@@ -790,10 +809,10 @@ class DecodeSelectorTest {
         Map<String, Integer> counts = new HashMap<>();
         for (int index = 0; index < 10; index++) {
             long requestId = 123L + index;
-            PlacementResult<Selection, RoleType> result =
+            RoutingResult<Selection, RoleType> result =
                     StrategyTestSupport.select(
                             strategy, request(100L, requestId), SCHEDULING, null);
-            Assertions.assertEquals(PlacementResult.Status.BLOCKED, result.status());
+            Assertions.assertEquals(RoutingResult.Status.BLOCKED, result.status());
             var selected =
                     (DecodeResources.DecodeRoutingView) result.diagnostics().get("decodeCandidate");
             counts.merge(selected.address(), 1, Integer::sum);
@@ -874,7 +893,7 @@ class DecodeSelectorTest {
         Request inputs = request(500L, 991L);
         inputs = inputs.toBuilder().maxNewTokens(10_000).build();
         Assertions.assertEquals(
-                PlacementResult.Status.REJECTED,
+                RoutingResult.Status.REJECTED,
                 StrategyTestSupport.select(
                                 availableStrategy(decodeRegistry()), inputs, SCHEDULING, null)
                         .status());
@@ -975,7 +994,7 @@ class DecodeSelectorTest {
 
     private static PreemptionConfig preemption() {
         PreemptionConfig config = new PreemptionConfig();
-        config.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_RESERVED));
+        config.setAllowedPreemptionStages(EnumSet.of(PreemptionStage.DECODE_RESERVED));
         return config;
     }
 
@@ -1015,7 +1034,7 @@ class DecodeSelectorTest {
     private static ServerStatus blockedStatus(
             StrategyTestSupport.DecodeRoutingFixture strategy, Request inputs, String group) {
         var result = StrategyTestSupport.select(strategy, inputs, SCHEDULING, group);
-        Assertions.assertEquals(PlacementResult.Status.BLOCKED, result.status());
+        Assertions.assertEquals(RoutingResult.Status.BLOCKED, result.status());
         Assertions.assertNull(result.value());
         var view = (DecodeResources.DecodeRoutingView) result.diagnostics().get("decodeCandidate");
         return ServerStatus.forWorker(
@@ -1027,9 +1046,9 @@ class DecodeSelectorTest {
 
     private static ServerStatus selectStatus(
             StrategyTestSupport.DecodeRoutingFixture strategy, Request inputs, String group) {
-        PlacementResult<Selection, RoleType> result =
+        RoutingResult<Selection, RoleType> result =
                 StrategyTestSupport.select(strategy, inputs, SCHEDULING, group);
-        if (result.status() != PlacementResult.Status.SUCCESS) {
+        if (result.status() != RoutingResult.Status.SUCCESS) {
             return null;
         }
         try (Selection selected = result.value()) {

@@ -12,8 +12,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 import static com.google.common.base.Preconditions.checkState;
-import static org.flexlb.balance.scheduler.ContextResult.Phase;
-import static org.flexlb.util.Failures.recover;
 
 /**
  * Runs asynchronous frontend completion tasks on dedicated workers. External Future
@@ -147,15 +145,27 @@ public final class ResponseCompletionExecutor implements AutoCloseable {
     }
 
     /**
-     * One response execution owner, registered before Context freezes the selected outcome.
+     * Reserves response execution before Context freezes an outcome. Scheduler supplies the
+     * response selection callback. After preparation, this task carries its response through handoff,
+     * submission, rejection and release without requiring another completion owner.
      */
     static final class Registration implements AutoCloseable {
         private final AtomicReference<Phase> phase = new AtomicReference<>(Phase.RESERVED);
         private final ResponseCompletionExecutor executor;
-        final RequestContext owner;
+        private final Object requestLock;
+        private final RequestFuture response;
+        private final BooleanSupplier selectResponse;
 
-        Registration(ResponseCompletionExecutor executor, RequestContext owner) {
-            this.owner = Objects.requireNonNull(owner);
+        private BooleanSupplier preparedResponse;
+
+        Registration(
+                ResponseCompletionExecutor executor,
+                Object requestLock,
+                RequestFuture response,
+                BooleanSupplier selectResponse) {
+            this.requestLock = Objects.requireNonNull(requestLock);
+            this.response = Objects.requireNonNull(response);
+            this.selectResponse = Objects.requireNonNull(selectResponse);
             this.executor = executor;
             checkState(executor.register(), "frontend publication is closed");
         }
@@ -167,25 +177,58 @@ public final class ResponseCompletionExecutor implements AutoCloseable {
             }
         }
 
-        static Registration reserve(
-                ResponseCompletionExecutor executor,
-                RequestContext ctx,
-                java.util.function.Consumer<Throwable> failures) {
-            var publication = recover(failures, () -> new Registration(executor, ctx));
-            if (publication == null)
-                throw new IllegalStateException("frontend publication is closed");
-            return publication;
+        void reject(Throwable failure) {
+            if (phase.compareAndSet(Phase.SUBMITTED, Phase.CLOSED)) {
+                try {
+                    response.completeExceptionallyOwned(failure);
+                } finally {
+                    executor.release();
+                }
+            }
         }
 
-        boolean hasCompletionOwner() {
-            return switch (phase.get()) {
-                case SUBMITTED, RUNNING, COMPLETED -> true;
-                default -> false;
+        void prepare(RequestFuture.Completion kind, Response value, Throwable failure) {
+            checkState(isUnsubmitted() && preparedResponse == null, "response is already prepared");
+            preparedResponse = () -> complete(kind, value, failure);
+        }
+
+        boolean isUnsubmitted() {
+            return phase.get() == Phase.RESERVED;
+        }
+
+        boolean complete(RequestFuture.Completion kind, Response response, Throwable failure) {
+            checkState(
+                    !Thread.holdsLock(requestLock),
+                    "response callbacks require the Context lock to be released");
+            if (!selectResponse.getAsBoolean()) return false;
+            return switch (kind) {
+                case RESPONSE -> this.response.completeOwned(response);
+                case FAILURE -> this.response.completeExceptionallyOwned(failure);
+                case CANCELLATION -> this.response.cancelOwned();
             };
         }
 
+        boolean publish(boolean synchronous) {
+            try {
+                checkState(preparedResponse != null, "response is not prepared");
+                if (synchronous) return completeNow(preparedResponse);
+                submit(preparedResponse);
+                return true;
+            } finally {
+                close();
+            }
+        }
+
+        boolean completeNow(BooleanSupplier completion) {
+            if (Thread.holdsLock(requestLock)) {
+                close();
+                throw new IllegalStateException("response completion under Context lock");
+            }
+            return run(Phase.RESERVED, completion);
+        }
+
         void submit(BooleanSupplier completion) {
-            if (Thread.holdsLock(owner)) {
+            if (Thread.holdsLock(requestLock)) {
                 close();
                 throw new IllegalStateException("response submission under Context lock");
             }
@@ -195,37 +238,21 @@ public final class ResponseCompletionExecutor implements AutoCloseable {
             executor.submit(this, () -> run(Phase.SUBMITTED, completion));
         }
 
-        boolean completeNow(BooleanSupplier completion) {
-            if (Thread.holdsLock(owner)) {
+        void failIfUnsubmitted(Throwable failure) {
+            try {
+                if (isUnsubmitted())
+                    Failures.run(
+                            failure,
+                            () ->
+                                    submit(
+                                            () ->
+                                                    complete(
+                                                            RequestFuture.Completion.FAILURE,
+                                                            null,
+                                                            failure)));
+            } finally {
                 close();
-                throw new IllegalStateException("response completion under Context lock");
             }
-            return run(Phase.RESERVED, completion);
-        }
-
-        void reject(Throwable failure) {
-            if (phase.compareAndSet(Phase.SUBMITTED, Phase.CLOSED)) {
-                try {
-                    var data = owner.data();
-                    if (data != null && data.getFuture() instanceof RequestFuture future) {
-                        future.completeExceptionallyOwned(failure);
-                    }
-                } finally {
-                    executor.release();
-                }
-            }
-        }
-
-        boolean complete(RequestFuture.Completion kind, Response response, Throwable failure) {
-            checkState(
-                    !Thread.holdsLock(owner),
-                    "response callbacks require the Context lock to be released");
-            RequestFuture future = (RequestFuture) owner.data().getFuture();
-            return switch (kind) {
-                case RESPONSE -> future.completeOwned(response);
-                case FAILURE -> future.completeExceptionallyOwned(failure);
-                case CANCELLATION -> future.cancelOwned();
-            };
         }
 
         private boolean run(Phase expected, BooleanSupplier completion) {

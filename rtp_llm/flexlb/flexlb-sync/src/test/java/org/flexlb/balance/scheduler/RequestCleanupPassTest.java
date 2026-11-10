@@ -11,7 +11,7 @@ import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
-import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
+import static org.flexlb.balance.scheduler.ContextResult.RoutingCompletion;
 import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEvent;
 import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEventType;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -90,13 +90,13 @@ class RequestCleanupPassTest {
         when(route.decodeEndpoint()).thenReturn(decode);
         when(route.decodeReservation())
                 .thenReturn(new DecodeResources.RequestReservation(1L, String.valueOf(id), 1L));
-        var placement = requireValue(context.beginPlacement(null));
+        var placement = requireValue(context.beginRouteSelection());
         org.junit.jupiter.api.Assertions.assertTrue(context.publishRoute(placement, route));
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.completePlacement(
-                                placement, PublicationResult.PUBLISHED, 1000L));
+                        observedRequest.completeRouting(
+                                placement, RoutingCompletion.FINISHED, 1000L));
         return context;
     }
 
@@ -119,14 +119,14 @@ class RequestCleanupPassTest {
                 100_000L,
                 10_000L,
                 org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
-        var operation = requireValue(context.beginPlacement(null));
+        var operation = requireValue(context.beginRouteSelection());
         var first = route(context, 990L);
         var alternate = route(context, 990L);
         assertNull(context.snapshot().route());
         assertTrue(context.canPublishRoute(operation));
         assertTrue(context.publishRoute(operation, alternate));
         assertFalse(context.publishRoute(operation, first));
-        context.completePlacement(operation, PublicationResult.PUBLISHED, 1002L);
+        context.completeRouting(operation, RoutingCompletion.FINISHED, 1002L);
         assertSame(alternate, context.snapshot().route());
         assertTrue(context.snapshot().preparedDelivery());
         assertFalse(context.snapshot().close().prefillSettled());
@@ -153,7 +153,7 @@ class RequestCleanupPassTest {
                 100_000L,
                 10_000L,
                 org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
-        var operation = requireValue(context.beginPlacement(null));
+        var operation = requireValue(context.beginRouteSelection());
         var candidate = route(context, 991L);
         context.requestCancel(
                 new Cancellation(
@@ -166,7 +166,7 @@ class RequestCleanupPassTest {
         assertFalse(context.publishRoute(operation, candidate));
         assertNull(context.snapshot().route());
         assertNull(context.snapshot().pendingEnd().route());
-        context.completePlacement(operation, PublicationResult.FAILED, 1003L);
+        context.completeRouting(operation, RoutingCompletion.FAILED, 1003L);
         assertEquals("original cancellation", context.snapshot().pendingEnd().detail());
         ended(context.beginClose(context.snapshot().pendingEnd(), 1004L));
         assertEquals(RequestState.Phase.CANCELLED, context.snapshot().outcome().phase());
@@ -195,7 +195,7 @@ class RequestCleanupPassTest {
         assertNotNull(context.snapshot().pendingEnd());
         assertFalse(context.snapshot().preparedDelivery());
         synchronized (context) {
-            assertFalse(context.validateDelivery(route, 1002L));
+            assertFalse(context.validateDelivery(route, null, 1002L));
         }
         assertNull(context.snapshot().delivery());
     }
@@ -209,7 +209,7 @@ class RequestCleanupPassTest {
                 100_000L,
                 10_000L,
                 org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
-        var placement = requireValue(context.beginPlacement(null));
+        var placement = requireValue(context.beginRouteSelection());
         var route = route(context, 993L);
         org.junit.jupiter.api.Assertions.assertTrue(context.publishRoute(placement, route));
         assertNull(
@@ -230,8 +230,8 @@ class RequestCleanupPassTest {
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.completePlacement(
-                                placement, PublicationResult.FAILED, 1002L));
+                        observedRequest.completeRouting(
+                                placement, RoutingCompletion.FAILED, 1002L));
         assertNull(context.snapshot().pendingEnd());
         ended(
                 context.beginClose(
@@ -261,7 +261,7 @@ class RequestCleanupPassTest {
                 100_000L,
                 10_000L,
                 org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
-        var placement = requireValue(context.beginPlacement(null));
+        var placement = requireValue(context.beginRouteSelection());
         var originalRoute = route(context, 994L);
         assertTrue(context.publishRoute(placement, originalRoute));
         ended(
@@ -284,7 +284,7 @@ class RequestCleanupPassTest {
         assertSame(before, context.snapshot());
         assertSame(originalRoute, context.snapshot().route());
         assertNull(context.releaseReason());
-        context.completePlacement(placement, PublicationResult.FAILED, 1003L);
+        context.completeRouting(placement, RoutingCompletion.FAILED, 1003L);
         if (!notificationsFinished) {
             assertSame(outcome, context.beginClose(null, 1004L).outcome());
             context.recordCloseNotifications(true, true, 1004L);
@@ -304,7 +304,7 @@ class RequestCleanupPassTest {
                 100_000L,
                 10_000L,
                 org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
-        var placement = requireValue(context.beginPlacement(null));
+        var placement = requireValue(context.beginRouteSelection());
         var route = route(context, 995L);
         assertTrue(context.publishRoute(placement, route));
         Runnable worker =
@@ -320,7 +320,7 @@ class RequestCleanupPassTest {
                                         1001L));
         Runnable failed =
                 () ->
-                        context.recordDeliveryResult(
+                        context.recordPreparationFailure(
                                 new ContextResult.PreparationFailure(
                                         null, route, "preparation failed", 1002L));
         if (workerFirst) worker.run();
@@ -329,7 +329,7 @@ class RequestCleanupPassTest {
         var outcome = ended(context.beginClose(null, 1003L));
         assertEquals(EndKind.DELIVERY_FAILURE, outcome.kind());
         assertEquals(RequestState.Phase.FAILED, outcome.phase());
-        context.completePlacement(placement, PublicationResult.FAILED, 1004L);
+        context.completeRouting(placement, RoutingCompletion.FAILED, 1004L);
         assertSame(outcome, context.snapshot().outcome());
     }
 }

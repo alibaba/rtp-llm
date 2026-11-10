@@ -11,7 +11,6 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
-import org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler;
 import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -49,8 +48,8 @@ import java.util.function.Consumer;
 import static org.flexlb.balance.scheduler.ContextResult.DeliveryEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.Prediction;
 import static org.flexlb.balance.scheduler.ContextResult.PreparationFailure;
-import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
 import static org.flexlb.balance.scheduler.ContextResult.RouteDelivered;
+import static org.flexlb.balance.scheduler.ContextResult.RoutingCompletion;
 import static org.flexlb.balance.scheduler.ContextResult.TransportResult;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -89,16 +88,117 @@ import static org.mockito.Mockito.when;
  */
 @Timeout(15)
 class BatchDeliveryTest {
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void queueSignalFailureAfterHandoffDoesNotRepeatCleanupOrFailDeliveredRequests(boolean batch) {
+        try (var f = new LinearDeliveryFixture(batch)) {
+            var first = f.item(1L, 10L);
+            var second = f.item(2L, 20L);
+            doThrow(new IllegalStateException("queue signal failed"))
+                    .when(f.prefill)
+                    .signal(PrefillEndpoint.Signal.PLACEMENT);
+            assertDoesNotThrow(() -> f.process(List.of(first, second), OptionalLong.of(30L)));
+            f.drain();
+            assertEquals(List.of(1L, 2L), f.claimIds());
+            if (batch) {
+                assertEquals(Delivery.Result.Status.DELIVERED, f.result(1L).status());
+                assertEquals(Delivery.Result.Status.DELIVERED, f.result(2L).status());
+            } else {
+                verify(f.owner, times(2)).onDeliveryResult(isA(RouteDelivered.class));
+                verifyNoInteractions(f.grpc);
+            }
+            assertTrue(f.preparationFailures.isEmpty());
+            verify(f.permits.get(1L), times(1)).release();
+            verify(f.permits.get(2L), times(1)).release();
+        }
+    }
+
+    @Test
+    void failedResourceCommitReportsPreparationOnceAndDoesNotSend() {
+        try (var f =
+                new LinearDeliveryFixture(
+                        true,
+                        config ->
+                                config.decisionPolicy()
+                                        .setType(
+                                                org.flexlb.config.DecisionPolicyConfig.Type
+                                                        .SINGLE))) {
+            f.item(1L, 10L);
+            var failure = new IllegalStateException("Decode transfer failed");
+            doThrow(failure).when(f.permits.get(1L)).dispatch();
+            RequestExecutionTestSupport.schedule(f.worker);
+            f.drain();
+            assertEquals(Set.of(1L), f.preparationFailures.keySet());
+            verify(f.owner, times(1)).recordPreparationFailure(any(PreparationFailure.class));
+            verify(f.owner, never()).onDeliveryResult(any(DeliveryEvidence.class));
+            verify(f.permits.get(1L), times(1)).release();
+            verifyNoInteractions(f.grpc);
+        }
+    }
+
+    @Test
+    void predictionIsAvailableBeforeRpcAndOnlyRpcCompletionReportsAResult() {
+        try (var f =
+                new LinearDeliveryFixture(
+                        true,
+                        config ->
+                                config.decisionPolicy()
+                                        .setType(
+                                                org.flexlb.config.DecisionPolicyConfig.Type
+                                                        .SINGLE))) {
+            f.item(1L, 10L);
+            doAnswer(
+                            call -> {
+                                assertTrue(f.predictions.containsKey(1L));
+                                verify(f.owner, never())
+                                        .onDeliveryResult(any(DeliveryEvidence.class));
+                                return CompletableFuture.completedFuture(
+                                        LinearDeliveryFixture.ack(call.getArgument(2)));
+                            })
+                    .when(f.grpc)
+                    .batchEnqueueAsync(anyString(), anyInt(), any());
+            RequestExecutionTestSupport.schedule(f.worker);
+            f.drain();
+            assertEquals(Delivery.Result.Status.DELIVERED, f.result(1L).status());
+            assertEquals(1, f.completionCounts.get(1L));
+            verify(f.owner, times(1)).onDeliveryResult(isA(TransportResult.class));
+            verify(f.owner, never()).recordPreparationFailure(any());
+        }
+    }
+
+    @Test
+    void rpcInvocationFailureReportsOneUncertainResultWithoutPreparationFailure() {
+        try (var f =
+                new LinearDeliveryFixture(
+                        true,
+                        config ->
+                                config.decisionPolicy()
+                                        .setType(
+                                                org.flexlb.config.DecisionPolicyConfig.Type
+                                                        .SINGLE))) {
+            f.item(1L, 10L);
+            doThrow(new IllegalStateException("RPC invocation failed"))
+                    .when(f.grpc)
+                    .batchEnqueueAsync(anyString(), anyInt(), any());
+            RequestExecutionTestSupport.schedule(f.worker);
+            f.drain();
+            assertEquals(Delivery.Result.Status.UNCERTAIN, f.result(1L).status());
+            assertEquals(1, f.completionCounts.get(1L));
+            verify(f.owner, times(1)).onDeliveryResult(isA(TransportResult.class));
+            verify(f.owner, never()).recordPreparationFailure(any());
+        }
+    }
+
     @Test
     void deliveryTelemetrySaturatesTotalsAndDoesNotNeedACopiedRouteList() {
         var reporter = mock(DeliveryMetricsReporter.class);
         var dispatcher =
-                new DeliveryDispatcher(
+                new DeliveryCoordinator(
+                        new org.flexlb.balance.scheduler.RequestRepository(),
                         null,
                         DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
                         reporter,
-                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                        new org.flexlb.balance.scheduler.SchedulerConfiguration()
                                 .decodeAdmissionCapacity(
                                         DeliveryTestSupport.service(
                                                 SchedulingTestConfig.batchConfig())),
@@ -115,11 +215,15 @@ class BatchDeliveryTest {
         var claim = mock(Delivery.Member.class);
         when(claim.route()).thenReturn(item);
         var batch = mock(Delivery.class);
-        when(batch.batchId()).thenReturn(71L);
-        when(batch.reason()).thenReturn("batch_full");
-        when(batch.remainingQueueDepth()).thenReturn(3);
+        batch.batchId = 71L;
+        batch.reason = "batch_full";
+        when(endpoint.queueDepth()).thenReturn(3);
         ReflectionTestUtils.invokeMethod(
-                dispatcher, "reportDelivery", batch, List.of(claim, claim), 7L);
+                new DeliveryDispatcher(mock(RequestRepository.class), null, null, null, reporter),
+                "reportDelivery",
+                batch,
+                List.of(claim, claim),
+                7L);
         verify(reporter, org.mockito.Mockito.times(2))
                 .reportBatchWaitTimeMs("PREFILL", "127.0.0.1", 0L, 17);
         verify(reporter)
@@ -527,18 +631,20 @@ class BatchDeliveryTest {
     @Test
     void transportCompletionDoesNotStartAnotherStopOperation() {
         try (var f = new LinearDeliveryFixture(true)) {
-            var dispatcher = spy(f.dispatcher);
+            var dispatcher = f.dispatcher;
             ReflectionTestUtils.setField(f.worker, "dispatcher", dispatcher);
             f.beforeCompletion =
                     claim ->
-                            org.flexlb.balance.scheduler.RequestChangeAssertions.record(
-                                    claim.owner(),
-                                    observedRequest ->
-                                            observedRequest.recordDeliveryResult(
-                                                    new ContextResult.Abandonment(
-                                                            claim,
-                                                            CancelReason.CLIENT_CANCELLED,
-                                                            System.currentTimeMillis())));
+                            claim.owner()
+                                    .requestCancel(
+                                            new ContextResult.Cancellation(
+                                                    0L,
+                                                    CancelReason.CLIENT_CANCELLED,
+                                                    false,
+                                                    System.currentTimeMillis(),
+                                                    org.flexlb.dao.loadbalance.StrategyErrorType
+                                                            .REQUEST_CANCELLED,
+                                                    "client cancelled"));
             f.process(List.of(f.item(1L, 10L)), OptionalLong.of(10L));
             f.drain();
             assertEquals(Map.of(1L, 1), f.completionCounts);
@@ -577,13 +683,13 @@ class BatchDeliveryTest {
             assertEquals(Set.of(1L, 2L), f.preparationFailures.keySet());
             assertTrue(f.results.isEmpty());
             verify(f.owner, times(1))
-                    .onDeliveryResult(
+                    .recordPreparationFailure(
                             argThat(
                                     e ->
                                             e instanceof PreparationFailure failure
                                                     && failure.route() == first));
             verify(f.owner, times(1))
-                    .onDeliveryResult(
+                    .recordPreparationFailure(
                             argThat(
                                     e ->
                                             e instanceof PreparationFailure failure
@@ -611,11 +717,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
     final ReentrantLock queueLock = new ReentrantLock();
     final PrefillEndpoint queueOwnership =
             org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
-                    queueLock,
-                    OrderedPrefillRequestQueue.ordered(16, QueueExecutionSettings.queueOrder(true)),
-                    System::currentTimeMillis);
-
-    boolean removedFailedMember;
+                    queueLock, OrderedPrefillRequestQueue.fifo(16), System::currentTimeMillis);
 
     final List<String> events = new CopyOnWriteArrayList<>();
     final List<Delivery.Member> claims = new CopyOnWriteArrayList<>();
@@ -628,7 +730,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
     final Set<Long> lostClaims = ConcurrentHashMap.newKeySet();
     final Set<Long> blockedDecode = ConcurrentHashMap.newKeySet();
     final SchedulerTestServices runtime;
-    final DeliveryDispatcher dispatcher;
+    final DeliveryCoordinator dispatcher;
     final PrefillQueueScheduler worker;
     final PrefillTimePredictor.Evaluator evaluator =
             spy(
@@ -679,15 +781,16 @@ final class LinearDeliveryFixture implements AutoCloseable {
         doReturn(sizing).when(config).getInternalRuntime();
         var service = SchedulingTestConfig.configService(config);
         dispatcher =
-                new DeliveryDispatcher(
-                        grpc,
-                        service,
-                        reporter,
-                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(service),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                spy(
+                        new DeliveryCoordinator(
+                                new org.flexlb.balance.scheduler.RequestRepository(),
+                                grpc,
+                                service,
+                                reporter,
+                                new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                        .decodeAdmissionCapacity(service),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         runtime =
                 spy(
                         new SchedulerTestServices(
@@ -730,13 +833,12 @@ final class LinearDeliveryFixture implements AutoCloseable {
         when(prefill.getIp()).thenReturn("127.0.0.1");
         when(prefill.getGrpcPort()).thenReturn(8090);
         doReturn(true).when(prefill).batchCapacityAvailable(anyInt());
-        when(prefill.commitDelivery(any(org.flexlb.balance.scheduler.Delivery.class)))
+        when(prefill.dequeueForDelivery(
+                        any(org.flexlb.balance.endpoint.PrefillEndpoint.DeliverySelection.class)))
                 .thenAnswer(
                         call -> {
                             assertFalse(queueLock.isHeldByCurrentThread());
-                            var plan =
-                                    call.getArgument(
-                                            0, org.flexlb.balance.scheduler.Delivery.class);
+                            var plan = call.getArgument(0, PrefillEndpoint.DeliverySelection.class);
                             committedItems = List.copyOf(plan.items());
                             if (plan.batch()) {
                                 committedPrediction = plan.predictedMs();
@@ -744,8 +846,11 @@ final class LinearDeliveryFixture implements AutoCloseable {
                                 committedRoutePredictions =
                                         Arrays.copyOf(plan.predictions(), committedItems.size());
                             }
-                            plan.committed(work, 0, removedFailedMember);
-                            return plan;
+                            for (var member : committedItems) {
+                                assertTrue(queueOwnership.releaseQueuedRequest(member));
+                            }
+                            return org.flexlb.balance.delivery.CapacityBoundary.Attempt.accepted(
+                                    work);
                         });
         when(work.calculate())
                 .thenAnswer(
@@ -765,40 +870,46 @@ final class LinearDeliveryFixture implements AutoCloseable {
                             if (accepted != null) claims.add(accepted);
                             return accepted;
                         })
-                .when(owner)
-                .commitDelivery(any(Delivery.Member.class), any(), anyLong());
-        doAnswer(
-                        call -> {
-                            DeliveryEvidence evidence = call.getArgument(0);
-                            if (evidence instanceof Prediction prediction) {
-                                predictions.put(
-                                        Long.parseLong(prediction.delivery().route().requestId()),
-                                        duration(prediction.predictedAtMs(), prediction.nowMs()));
-                            } else if (evidence instanceof RouteDelivered delivered) {
-                                predictions.put(
-                                        Long.parseLong(delivered.delivery().route().requestId()),
-                                        duration(delivered.predictedAtMs(), delivered.nowMs()));
-                            } else if (evidence instanceof TransportResult result) {
-                                var claim = result.delivery();
-                                beforeCompletion.accept(claim);
-                                results.put(
-                                        Long.parseLong(claim.route().requestId()), result.result());
-                                completionCounts.merge(
-                                        Long.parseLong(claim.route().requestId()), 1, Integer::sum);
-                                events.add("complete-" + Long.parseLong(claim.route().requestId()));
-                                if (Long.parseLong(claim.route().requestId())
-                                        == throwCompletionFor) {
-                                    throw expectedShutdownFailure;
-                                }
-                            } else if (evidence instanceof PreparationFailure failed) {
-                                preparationFailures.put(
-                                        Long.parseLong(failed.route().requestId()),
-                                        failed.detail());
-                            }
-                            return null;
-                        })
+                .when(org.flexlb.balance.scheduler.DeliveryTestSupport.transport(owner.dispatcher))
+                .commit(
+                        any(Delivery.Member.class),
+                        any(),
+                        anyLong(),
+                        org.mockito.ArgumentMatchers.isNull());
+        org.mockito.stubbing.Answer<Object> deliveryObservation =
+                call -> {
+                    DeliveryEvidence evidence = call.getArgument(0);
+                    if (evidence instanceof Prediction prediction) {
+                        predictions.put(
+                                Long.parseLong(prediction.delivery().route().requestId()),
+                                duration(prediction.predictedAtMs(), prediction.nowMs()));
+                    } else if (evidence instanceof RouteDelivered delivered) {
+                        predictions.put(
+                                Long.parseLong(delivered.delivery().route().requestId()),
+                                duration(delivered.predictedAtMs(), delivered.nowMs()));
+                    } else if (evidence instanceof TransportResult result) {
+                        var claim = result.delivery();
+                        beforeCompletion.accept(claim);
+                        results.put(Long.parseLong(claim.route().requestId()), result.result());
+                        completionCounts.merge(
+                                Long.parseLong(claim.route().requestId()), 1, Integer::sum);
+                        events.add("complete-" + Long.parseLong(claim.route().requestId()));
+                        if (Long.parseLong(claim.route().requestId()) == throwCompletionFor) {
+                            throw expectedShutdownFailure;
+                        }
+                    } else if (evidence instanceof PreparationFailure failed) {
+                        preparationFailures.put(
+                                Long.parseLong(failed.route().requestId()), failed.detail());
+                    }
+                    return null;
+                };
+        doAnswer(deliveryObservation)
                 .when(owner)
                 .onDeliveryResult(any(ContextResult.DeliveryEvidence.class));
+        doAnswer(deliveryObservation).when(owner).recordDeliveryPrediction(any(Prediction.class));
+        doAnswer(deliveryObservation)
+                .when(owner)
+                .recordPreparationFailure(any(PreparationFailure.class));
         when(decode.acquireDispatchPermit(any(), any()))
                 .thenAnswer(
                         call -> {
@@ -949,13 +1060,13 @@ final class LinearDeliveryFixture implements AutoCloseable {
         var route =
                 RequestExecutionTestSupport.registerPrefillRoute(
                         context, prefill, endpoint, handle, 0L, now);
-        var placement = (PlacementOperation) context.beginPlacement(null);
+        var placement = (RoutingContext) context.beginRouteSelection();
         context.publishRoute(placement, route);
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.completePlacement(
-                                placement, PublicationResult.PUBLISHED, now));
+                        observedRequest.completeRouting(
+                                placement, RoutingCompletion.FINISHED, now));
         assertSame(
                 route,
                 org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(queueOwnership, route),
@@ -968,14 +1079,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
     }
 
     CapacityBoundary process(List<RouteResult> items, OptionalLong prediction) {
-        return worker.processSelection(
-                items,
-                "contract",
-                evaluator,
-                prediction,
-                null,
-                Delivery.PrefixPolicy.ORDERED_PREFIX,
-                () -> true);
+        return worker.processSelection(items, "contract", evaluator, prediction);
     }
 
     void drain() {

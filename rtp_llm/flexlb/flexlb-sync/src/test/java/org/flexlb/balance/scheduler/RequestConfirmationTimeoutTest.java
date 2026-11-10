@@ -66,19 +66,17 @@ class RequestConfirmationTimeoutTest {
                         SchedulerTestSupport.repository(projector),
                         reporter,
                         DeliveryTestSupport.route(reporter),
-                        new PlacementAvailability(),
+                        new CapacityNotifier(),
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                 service.loadBalanceConfig()),
-                        order ->
-                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
-                                        16, order));
+                        () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
         var runtime =
                 new SchedulerTestServices(
                         SchedulerTestSupport.repository(requests),
                         endpoints,
                         reporter,
                         requestReporter,
-                        org.mockito.Mockito.mock(DeliveryDispatcher.class),
+                        org.mockito.Mockito.mock(DeliveryCoordinator.class),
                         service,
                         org.mockito.Mockito.mock(EngineGrpcClient.class));
         DecodeEndpoint decode = null;
@@ -163,7 +161,7 @@ class RequestConfirmationTimeoutTest {
                                                                 item.prefillReservation());
                                                         return true;
                                                     }))
-                                    == org.flexlb.balance.PlacementResult.Status.SUCCESS));
+                                    == org.flexlb.balance.RoutingResult.Status.SUCCESS));
                 }
             }
             Delivery.Member claim;
@@ -185,7 +183,7 @@ class RequestConfirmationTimeoutTest {
                                 : RequestProtocolTestSupport.claimRouteWithoutPrediction(
                                         requests, item, commitPrefill);
                 assertNotNull(claim);
-                requests.onDeliveryResult(
+                requests.recordDeliveryPrediction(
                         new ContextResult.Prediction(
                                 claim,
                                 org.flexlb.balance.prediction.PrefillTimePredictor

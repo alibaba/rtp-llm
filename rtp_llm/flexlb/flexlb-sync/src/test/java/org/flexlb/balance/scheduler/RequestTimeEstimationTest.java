@@ -301,7 +301,7 @@ class RequestTimeEstimationTest {
 
         Candidate result =
                 project(
-                        queue(false, false, constraints(1, 0L), List.of(), null),
+                        queue(false, false, constraints(1, 0L), List.of()),
                         committed,
                         TOKEN_EVALUATOR,
                         probe(99L, 50, 20L, 0L),

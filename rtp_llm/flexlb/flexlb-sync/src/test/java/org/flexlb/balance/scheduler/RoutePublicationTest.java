@@ -44,6 +44,27 @@ import static org.mockito.Mockito.when;
  */
 @Timeout(15)
 class RoutePublicationTest {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void dequeueRejectionKeepsItsCapacityReasonAndReleasesPreparedPermits(boolean batch) {
+        try (var f = new LinearDeliveryFixture(batch)) {
+            var endpoint = f.realDecode();
+            var first = f.realItem(endpoint, 1, 10);
+            var second = f.realItem(endpoint, 2, 20);
+            var boundary =
+                    CapacityBoundary.unavailable(
+                            batch
+                                    ? CapacityBoundary.Resource.PREFILL_BATCH
+                                    : CapacityBoundary.Resource.PREFILL_REQUEST);
+            when(f.prefill.dequeueForDelivery(any()))
+                    .thenReturn(CapacityBoundary.Attempt.rejected(boundary));
+            assertSame(boundary, f.process(List.of(first, second), OptionalLong.empty()));
+            assertEquals(0, endpoint.resourceSnapshot().activeDispatchPermits());
+            assertEquals(2, endpoint.resourceSnapshot().queuedCount());
+            assertTrue(f.claimIds().isEmpty());
+        }
+    }
+
     @Test
     void nonBatchBudgetUsesTheSumOfIndividualPredictions() {
         try (var f =
@@ -81,7 +102,7 @@ class RoutePublicationTest {
             var first = f.item(1L, 10L);
             var second = f.item(2L, 20L);
             org.mockito.Mockito.doReturn(-1L).when(f.evaluator).estimateMs(20L, 0L);
-            f.removedFailedMember = budget == 0L;
+
             RequestExecutionTestSupport.schedule(f.worker);
             if (budget > 0L) {
                 assertEquals(List.of(first), f.queueOwnership.captureQueue(10).items());
@@ -89,9 +110,39 @@ class RoutePublicationTest {
             }
             assertEquals(List.of(1L), f.claimIds());
             assertEquals(java.util.Set.of(2L), f.preparationFailures.keySet());
-            verify(f.owner, times(1)).onDeliveryResult(isA(PreparationFailure.class));
+            verify(f.owner, times(1)).recordPreparationFailure(isA(PreparationFailure.class));
             verify(f.decode, never()).acquireDispatchPermit(eq(second.decodeReservation()), any());
             verify(f.permits.get(1L)).release();
+        }
+    }
+
+    @Test
+    void successfulPrefixIsPublishedBeforeHandlingAnUnrelatedPreparationFailure() {
+        try (var f = new LinearDeliveryFixture(false)) {
+            var first = f.item(1, 10);
+            var failed = f.item(2, 20);
+            doThrow(new IllegalStateException("Decode preparation failed"))
+                    .when(f.decode)
+                    .acquireDispatchPermit(eq(failed.decodeReservation()), any());
+
+            f.expectedShutdownFailure = new IllegalStateException("failed member observer failed");
+            var prefixPublished = new java.util.concurrent.atomic.AtomicBoolean();
+            doAnswer(
+                            call -> {
+                                prefixPublished.set(f.claimIds().equals(List.of(1L)));
+                                throw f.expectedShutdownFailure;
+                            })
+                    .when(f.owner)
+                    .recordPreparationFailure(isA(PreparationFailure.class));
+
+            f.process(List.of(first, failed), OptionalLong.empty());
+
+            assertTrue(prefixPublished.get());
+            assertEquals(List.of(1L), f.claimIds());
+            verify(f.permits.get(1L)).release();
+            assertFalse(
+                    org.flexlb.balance.endpoint.EndpointTestSupport.isQueued(
+                            f.queueOwnership, failed));
         }
     }
 
@@ -125,7 +176,7 @@ class RoutePublicationTest {
     }
 
     @Test
-    void removingFailedSuffixPublishesCapacityChangeOnceAndStillDeliversPrefix() {
+    void prefixDeliveryPublishesAndFailedSuffixReleasesItsQueueEntry() {
         try (var f = new LinearDeliveryFixture(false)) {
             var first = f.item(1, 10);
             var failed = f.item(2, 20);
@@ -133,11 +184,11 @@ class RoutePublicationTest {
             doThrow(failure)
                     .when(f.decode)
                     .acquireDispatchPermit(eq(failed.decodeReservation()), any());
-            f.removedFailedMember = true;
+
             assertNull(f.process(List.of(first, failed), OptionalLong.empty()));
             assertEquals(List.of(first), f.committedItems);
             verify(f.owner)
-                    .onDeliveryResult(
+                    .recordPreparationFailure(
                             argThat(
                                     e ->
                                             e instanceof PreparationFailure evidence
@@ -153,8 +204,9 @@ class RoutePublicationTest {
                                                                     delivered.predictedAtMs(),
                                                                     delivered.nowMs())
                                                             == 10L));
-            verify(f.prefill, times(1))
-                    .signal(org.flexlb.balance.endpoint.PrefillEndpoint.Signal.PLACEMENT);
+            verify(f.prefill).signal(org.flexlb.balance.endpoint.PrefillEndpoint.Signal.PLACEMENT);
+            verify(f.prefill).releaseQueuedRequest(failed);
+            assertEquals(0, f.queueOwnership.queueDepth());
             verify(f.prefill, never()).close();
         }
     }
@@ -245,7 +297,15 @@ class RoutePublicationTest {
             assertEquals(CapacityBoundary.Status.UNAVAILABLE, boundary.status());
             assertEquals(CapacityBoundary.Resource.DECODE_ENGINE, boundary.resource());
             assertTrue(f.committedItems.isEmpty());
-            verify(f.owner, never()).commitDelivery(any(Delivery.Member.class), any(), anyLong());
+            verify(
+                            org.flexlb.balance.scheduler.DeliveryTestSupport.transport(
+                                    f.owner.dispatcher),
+                            never())
+                    .commit(
+                            any(Delivery.Member.class),
+                            any(),
+                            anyLong(),
+                            org.mockito.ArgumentMatchers.isNull());
             verify(f.owner, never()).onDeliveryResult(isA(RouteDelivered.class));
         }
     }
@@ -406,15 +466,28 @@ class RoutePublicationTest {
             var endpoint = f.realDecode();
             var first = f.realItem(endpoint, 1, 10);
             var second = f.realItem(endpoint, 2, 20);
-            when(f.prefill.commitDelivery(any(org.flexlb.balance.scheduler.Delivery.class)))
-                    .thenReturn(null);
+            when(f.prefill.dequeueForDelivery(
+                            any(
+                                    org.flexlb.balance.endpoint.PrefillEndpoint.DeliverySelection
+                                            .class)))
+                    .thenReturn(
+                            org.flexlb.balance.delivery.CapacityBoundary.Attempt.rejected(
+                                    org.flexlb.balance.delivery.CapacityBoundary.OWNERSHIP_LOST));
             f.process(List.of(first, second), OptionalLong.empty());
             var snapshot = endpoint.resourceSnapshot();
             assertEquals(0, snapshot.activeDispatchPermits());
             assertEquals(2, snapshot.queuedCount());
             assertEquals(0, endpoint.routingView().engineCapacityUsed());
             assertEquals(2, snapshot.requests().size());
-            verify(f.owner, never()).commitDelivery(any(Delivery.Member.class), any(), anyLong());
+            verify(
+                            org.flexlb.balance.scheduler.DeliveryTestSupport.transport(
+                                    f.owner.dispatcher),
+                            never())
+                    .commit(
+                            any(Delivery.Member.class),
+                            any(),
+                            anyLong(),
+                            org.mockito.ArgumentMatchers.isNull());
             verify(f.owner, never()).onDeliveryResult(isA(RouteDelivered.class));
             verify(f.prefill, never()).close();
         }

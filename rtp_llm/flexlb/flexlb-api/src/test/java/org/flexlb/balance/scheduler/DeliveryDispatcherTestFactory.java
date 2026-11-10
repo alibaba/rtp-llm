@@ -4,12 +4,14 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 
-/** Creates a bounded dispatcher through its production configuration. */
+/**
+ * Creates a bounded dispatcher through its production configuration.
+ */
 public final class DeliveryDispatcherTestFactory {
 
     private DeliveryDispatcherTestFactory() {}
 
-    public static DeliveryDispatcher create(
+    public static DeliveryCoordinator create(
             EngineGrpcClient grpcClient,
             ConfigService configService,
             DeliveryMetricsReporter reporter,
@@ -28,22 +30,27 @@ public final class DeliveryDispatcherTestFactory {
         return new RuntimeSizedDispatcher(grpcClient, dispatcherService, reporter);
     }
 
-    /** Executor sizing belongs to Runtime, so carry the same test configuration into composition. */
-    static ConfigService runtimeConfigFor(DeliveryDispatcher dispatcher, ConfigService fallback) {
+    /**
+     * Executor sizing belongs to Runtime, so carry the same test configuration into composition.
+     */
+    static ConfigService runtimeConfigFor(DeliveryCoordinator dispatcher, ConfigService fallback) {
         return dispatcher instanceof RuntimeSizedDispatcher sized ? sized.config : fallback;
     }
 
-    private static final class RuntimeSizedDispatcher extends DeliveryDispatcher {
+    /**
+     * Retains the executor sizing configuration used by the test dispatcher.
+     */
+    private static final class RuntimeSizedDispatcher extends DeliveryCoordinator {
         private final ConfigService config;
 
         private RuntimeSizedDispatcher(
                 EngineGrpcClient client, ConfigService config, DeliveryMetricsReporter reporter) {
             super(
+                    new RequestRepository(),
                     client,
                     config,
                     reporter,
-                    org.mockito.Mockito.mock(TaskTimer.class),
-                    new org.flexlb.balance.scheduler.PlacementConfiguration()
+                    new org.flexlb.balance.scheduler.SchedulerConfiguration()
                             .decodeAdmissionCapacity(config),
                     org.mockito.Mockito.mock(DeliveryExecution.class));
             this.config = config;

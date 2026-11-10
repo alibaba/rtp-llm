@@ -19,89 +19,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Exercises accepted request work and exact-request continuations while shutdown drains their owners.
  */
 class SchedulerRequestWorkTest {
-    @Test
-    void inlineOwnerCanHandOffCleanupAfterCloseStopsNewSources() throws Exception {
-        var runtime = runtime();
-        var context = requestContext(993011L);
-        var registration = runtime.tasks.registerRequestWork(context);
-        var entered = new CountDownLatch(1);
-        var release = new CountDownLatch(1);
-        var closed = new java.util.concurrent.CompletableFuture<Void>();
-        var closer =
-                new Thread(
-                        () -> {
-                            try {
-                                SchedulerTestSupport.closeRequestWork(runtime);
-                                closed.complete(null);
-                            } catch (Throwable failure) {
-                                closed.completeExceptionally(failure);
-                            }
-                        });
-        try {
-            closer.start();
-            RequestProtocolTestSupport.awaitCondition(
-                    () -> closer.getState() == Thread.State.WAITING);
-            assertStoppedSource(runtime, context);
-            var caller = Thread.currentThread();
-            registration.runInline(
-                    () -> {
-                        org.junit.jupiter.api.Assertions.assertSame(caller, Thread.currentThread());
-                        assertStoppedSource(runtime, requestContext(993012L));
-                        assertThrows(
-                                IllegalStateException.class,
-                                () ->
-                                        runtime.shutdown(
-                                                ShutdownMode.IMMEDIATE, java.time.Duration.ZERO));
-                        runtime.tasks()
-                                .execute(
-                                        context,
-                                        () -> {
-                                            entered.countDown();
-                                            RequestProtocolTestSupport.await(release);
-                                        });
-                    });
-            registration.close();
-            assertStoppedSource(runtime, context);
-            assertTrue(entered.await(5, TimeUnit.SECONDS));
-            assertFalse(
-                    closed.isDone(),
-                    "drain includes the exact cleanup handed off by the inline owner");
-            release.countDown();
-            closed.get(5, TimeUnit.SECONDS);
-            assertEquals(0L, ReflectionTestUtils.getField(runtime.tasks(), "pendingWork"));
-        } finally {
-            registration.close();
-            release.countDown();
-            closer.join(5_000);
-            close(runtime);
-        }
-    }
-
-    @Test
-    void inlineFailureReleasesItsOwnerAndRestoresTheCaller() {
-        var runtime = runtime();
-        var failure = new IllegalStateException("inline failure");
-        try {
-            try (var registration = runtime.tasks.registerRequestWork(requestContext(993013L))) {
-                org.junit.jupiter.api.Assertions.assertSame(
-                        failure,
-                        assertThrows(
-                                IllegalStateException.class,
-                                () ->
-                                        registration.runInline(
-                                                () -> {
-                                                    throw failure;
-                                                })));
-            }
-            assertEquals(0L, ReflectionTestUtils.getField(runtime.tasks(), "pendingWork"));
-            var executing =
-                    (ThreadLocal<?>)
-                            ReflectionTestUtils.getField(runtime.tasks(), "executingRequest");
-            org.junit.jupiter.api.Assertions.assertNull(executing.get());
-        } finally {
-            close(runtime);
-        }
-    }
 
     @Test
     void workerRetainsPlatformDaemonNameAndInheritedContext() throws Exception {
@@ -192,10 +109,8 @@ class SchedulerRequestWorkTest {
             executor.tasks().execute(requestContext, later::countDown);
             assertTrue(later.await(5, TimeUnit.SECONDS));
             SchedulerTestSupport.closeRequestWork(executor);
-            assertEquals(
-                    "isolated fact",
-                    assertThrows(IllegalStateException.class, executor.tasks::throwIfFailed)
-                            .getMessage());
+            org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                    () -> SchedulerTestServices.throwIfFailed(executor.tasks));
         } finally {
             close(executor);
         }
@@ -268,7 +183,7 @@ class SchedulerRequestWorkTest {
                                                 executor.tasks(), "requestWorkers"))
                                 .isTerminated());
                 org.junit.jupiter.api.Assertions.assertThrows(
-                        IllegalStateException.class,
+                        java.util.concurrent.RejectedExecutionException.class,
                         () -> executor.tasks().execute(context, () -> {}));
             } else {
                 CountDownLatch reopened = new CountDownLatch(1);
@@ -331,33 +246,6 @@ class SchedulerRequestWorkTest {
     }
 
     @Test
-    void closeWaitsForRegistrationBeforeSubmissionAndForSourceAfterTaskFinishes() throws Exception {
-        var runtime = runtime();
-        var context = requestContext(993007L);
-        var registration = runtime.tasks.registerRequestWork(context);
-        var ran = new CountDownLatch(1);
-        var closer = new Thread(() -> SchedulerTestSupport.closeRequestWork(runtime));
-        try {
-            closer.start();
-            RequestProtocolTestSupport.awaitCondition(
-                    () -> closer.getState() == Thread.State.WAITING);
-            assertTrue(closer.isAlive(), "accepted but not yet submitted work is included");
-            registration.submit(ran::countDown);
-            assertTrue(ran.await(5, TimeUnit.SECONDS));
-            assertTrue(
-                    closer.isAlive(),
-                    "the source still owns its handoff even after the worker returns");
-            registration.close();
-            closer.join(5_000);
-            assertFalse(closer.isAlive());
-        } finally {
-            registration.close();
-            closer.join(5_000);
-            close(runtime);
-        }
-    }
-
-    @Test
     void rejectedRequestPoolIsReportedToTheCaller() {
         var runtime = runtime();
         SchedulerTestSupport.requestWorkers(runtime).shutdown();
@@ -370,77 +258,6 @@ class SchedulerRequestWorkTest {
         }
     }
 
-    @Test
-    void acceptedOwnerMayHandOffExactRequestCleanupDuringCloseButForeignSourcesCannot()
-            throws Exception {
-        var runtime = runtime();
-        var context = requestContext(993009L);
-        var foreign = requestContext(993010L);
-        var entered = new CountDownLatch(1);
-        var handoff = new CountDownLatch(1);
-        var childEntered = new CountDownLatch(1);
-        var releaseChild = new CountDownLatch(1);
-        var parentDone = new CountDownLatch(1);
-        var failure = new AtomicReference<Throwable>();
-        var closer = new Thread(() -> SchedulerTestSupport.closeRequestWork(runtime));
-        try {
-            runtime.tasks()
-                    .execute(
-                            context,
-                            () -> {
-                                entered.countDown();
-                                RequestProtocolTestSupport.await(handoff);
-                                try {
-                                    assertStoppedSource(runtime, foreign);
-                                    runtime.tasks()
-                                            .execute(
-                                                    context,
-                                                    () -> {
-                                                        childEntered.countDown();
-                                                        RequestProtocolTestSupport.await(
-                                                                releaseChild);
-                                                    });
-                                } catch (Throwable problem) {
-                                    failure.set(problem);
-                                } finally {
-                                    parentDone.countDown();
-                                }
-                            });
-            assertTrue(entered.await(5, TimeUnit.SECONDS));
-            closer.start();
-            RequestProtocolTestSupport.awaitCondition(
-                    () -> closer.getState() == Thread.State.WAITING);
-            assertStoppedSource(runtime, context);
-            assertStoppedSource(runtime, foreign);
-            handoff.countDown();
-            assertTrue(parentDone.await(5, TimeUnit.SECONDS));
-            org.junit.jupiter.api.Assertions.assertNull(failure.get());
-            assertTrue(childEntered.await(5, TimeUnit.SECONDS));
-            assertTrue(
-                    closer.isAlive(),
-                    "close retains the handed-off cleanup after its parent returns");
-            releaseChild.countDown();
-            closer.join(5_000);
-            assertFalse(closer.isAlive());
-        } finally {
-            handoff.countDown();
-            releaseChild.countDown();
-            closer.join(5_000);
-            close(runtime);
-        }
-    }
-
-    private static void assertStoppedSource(SchedulerTestServices runtime, RequestContext context) {
-        var registration = runtime.tasks.tryRegisterRequestWork(context);
-        try {
-            org.junit.jupiter.api.Assertions.assertNull(registration);
-        } finally {
-            if (registration != null) {
-                registration.close();
-            }
-        }
-    }
-
     private static SchedulerTestServices runtime() {
         var service = org.mockito.Mockito.mock(org.flexlb.config.ConfigService.class);
         org.mockito.Mockito.when(service.loadBalanceConfig())
@@ -450,7 +267,7 @@ class SchedulerRequestWorkTest {
                 org.mockito.Mockito.mock(org.flexlb.balance.endpoint.EndpointRegistry.class),
                 org.mockito.Mockito.mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                 org.mockito.Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                org.mockito.Mockito.mock(DeliveryDispatcher.class),
+                org.mockito.Mockito.mock(DeliveryCoordinator.class),
                 service,
                 org.mockito.Mockito.mock(EngineGrpcClient.class));
     }

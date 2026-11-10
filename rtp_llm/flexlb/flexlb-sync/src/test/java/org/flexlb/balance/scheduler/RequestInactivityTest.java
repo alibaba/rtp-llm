@@ -87,7 +87,7 @@ class RequestInactivityTest {
                         org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(cleanup);
-        org.springframework.test.util.ReflectionTestUtils.setField(
+        org.flexlb.balance.scheduler.DeliveryTestSupport.setField(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).dispatcher,
                 "grpcClient",
                 channel);

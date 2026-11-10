@@ -32,6 +32,268 @@ import static org.mockito.Mockito.mock;
 @Timeout(15)
 class ResponseCompletionExecutorTest {
     @Test
+    void preparedResponseCarriesItsValueAndArbitratesOnlyWhenExecuted() {
+        try (var f = new Fixture()) {
+            var queued = new AtomicReference<Runnable>();
+            var workers = mock(ThreadPoolExecutor.class);
+            doAnswer(
+                            call -> {
+                                queued.set(call.getArgument(0));
+                                return null;
+                            })
+                    .when(workers)
+                    .execute(any());
+            ReflectionTestUtils.setField(f.executor, "completionWorkers", workers);
+            var selected = new AtomicInteger();
+            var future =
+                    new ResponseCompletionExecutor.RequestFuture((kind, value, failure) -> false);
+            var registration =
+                    new ResponseCompletionExecutor.Registration(
+                            f.executor,
+                            new Object(),
+                            future,
+                            () -> {
+                                selected.incrementAndGet();
+                                return true;
+                            });
+            var value = mock(org.flexlb.dao.loadbalance.Response.class);
+            registration.prepare(
+                    ResponseCompletionExecutor.RequestFuture.Completion.RESPONSE, value, null);
+            assertThrows(
+                    IllegalStateException.class,
+                    () ->
+                            registration.prepare(
+                                    ResponseCompletionExecutor.RequestFuture.Completion
+                                            .CANCELLATION,
+                                    null,
+                                    null));
+            registration.publish(false);
+            assertEquals(0, selected.get());
+            assertFalse(future.isDone());
+            assertEquals(1, registrations(f.executor));
+            queued.get().run();
+            assertSame(value, future.join());
+            assertEquals(1, selected.get());
+            assertEquals(0, registrations(f.executor));
+        }
+    }
+
+    @Test
+    void synchronousPreparedResponseReturnsLostArbitrationWithoutLeaking() {
+        try (var f = new Fixture()) {
+            var future =
+                    new ResponseCompletionExecutor.RequestFuture((kind, value, failure) -> false);
+            var registration =
+                    new ResponseCompletionExecutor.Registration(
+                            f.executor, new Object(), future, () -> false);
+            registration.prepare(
+                    ResponseCompletionExecutor.RequestFuture.Completion.RESPONSE,
+                    mock(org.flexlb.dao.loadbalance.Response.class),
+                    null);
+            assertFalse(registration.publish(true));
+            assertFalse(future.isDone());
+            assertEquals(0, registrations(f.executor));
+        }
+    }
+
+    @Test
+    void rejectedPreparedResponseNeedsNoCallerCleanup() {
+        try (var f = new Fixture()) {
+            var workers = mock(ThreadPoolExecutor.class);
+            var failure = new RejectedExecutionException("response rejected");
+            doThrow(failure).when(workers).execute(any());
+            ReflectionTestUtils.setField(f.executor, "completionWorkers", workers);
+            var future =
+                    new ResponseCompletionExecutor.RequestFuture((kind, value, error) -> false);
+            var registration =
+                    new ResponseCompletionExecutor.Registration(
+                            f.executor, new Object(), future, () -> true);
+            registration.prepare(
+                    ResponseCompletionExecutor.RequestFuture.Completion.RESPONSE,
+                    mock(org.flexlb.dao.loadbalance.Response.class),
+                    null);
+            assertSame(
+                    failure,
+                    assertThrows(
+                            RejectedExecutionException.class, () -> registration.publish(false)));
+            assertSame(
+                    failure,
+                    assertThrows(java.util.concurrent.CompletionException.class, future::join)
+                            .getCause());
+            assertEquals(0, registrations(f.executor));
+        }
+    }
+
+    @Test
+    void rejectedFailureRecoveryCompletesFutureAndReleasesTheReservation() {
+        try (var f = new Fixture()) {
+            var workers = mock(ThreadPoolExecutor.class);
+            var rejected = new RejectedExecutionException("response executor rejected");
+            doThrow(rejected).when(workers).execute(any());
+            ReflectionTestUtils.setField(f.executor, "completionWorkers", workers);
+            var future =
+                    new ResponseCompletionExecutor.RequestFuture((kind, value, failure) -> false);
+            var registration =
+                    new ResponseCompletionExecutor.Registration(
+                            f.executor, new Object(), future, () -> true);
+            var original = new IllegalStateException("response preparation failed");
+            registration.failIfUnsubmitted(original);
+            registration.close();
+            registration.failIfUnsubmitted(original);
+            assertSame(
+                    rejected,
+                    assertThrows(java.util.concurrent.CompletionException.class, future::join)
+                            .getCause());
+            assertEquals(0, registrations(f.executor));
+            assertEquals(1, original.getSuppressed().length);
+            assertSame(rejected, original.getSuppressed()[0]);
+        }
+    }
+
+    @Test
+    void unsubmittedFailureUsesBoundArbitrationOutsideTheRequestLock() throws Exception {
+        try (var f = new Fixture()) {
+            var lock = new Object();
+            var future =
+                    new ResponseCompletionExecutor.RequestFuture((kind, value, failure) -> false);
+            var selections = new AtomicInteger();
+            var registration =
+                    new ResponseCompletionExecutor.Registration(
+                            f.executor,
+                            lock,
+                            future,
+                            () -> {
+                                assertFalse(Thread.holdsLock(lock));
+                                selections.incrementAndGet();
+                                return true;
+                            });
+            var failure = new IllegalStateException("response preparation failed");
+            registration.failIfUnsubmitted(failure);
+            registration.close();
+            assertSame(
+                    failure,
+                    assertThrows(java.util.concurrent.CompletionException.class, future::join)
+                            .getCause());
+            RequestProtocolTestSupport.awaitCondition(() -> registrations(f.executor) == 0);
+            assertEquals(1, selections.get());
+        }
+    }
+
+    @Test
+    void failedPreparationCannotReplaceAnAlreadySubmittedResponse() {
+        try (var f = new Fixture()) {
+            var queued = new AtomicReference<Runnable>();
+            var workers = mock(ThreadPoolExecutor.class);
+            doAnswer(
+                            call -> {
+                                queued.set(call.getArgument(0));
+                                return null;
+                            })
+                    .when(workers)
+                    .execute(any());
+            ReflectionTestUtils.setField(f.executor, "completionWorkers", workers);
+            var future =
+                    new ResponseCompletionExecutor.RequestFuture((kind, value, failure) -> false);
+            var registration =
+                    new ResponseCompletionExecutor.Registration(
+                            f.executor, new Object(), future, () -> true);
+            var response = mock(org.flexlb.dao.loadbalance.Response.class);
+            registration.submit(
+                    () ->
+                            registration.complete(
+                                    ResponseCompletionExecutor.RequestFuture.Completion.RESPONSE,
+                                    response,
+                                    null));
+            registration.failIfUnsubmitted(new IllegalStateException("late failure"));
+            assertFalse(future.isDone());
+            assertEquals(1, registrations(f.executor));
+            queued.get().run();
+            assertSame(response, future.join());
+            assertEquals(0, registrations(f.executor));
+        }
+    }
+
+    @Test
+    void losingFailureCandidateReleasesRegistrationWithoutWritingTheFuture() throws Exception {
+        try (var f = new Fixture()) {
+            var future =
+                    new ResponseCompletionExecutor.RequestFuture((kind, value, failure) -> false);
+            var registration =
+                    new ResponseCompletionExecutor.Registration(
+                            f.executor, new Object(), future, () -> false);
+            registration.failIfUnsubmitted(new IllegalStateException("obsolete response"));
+            RequestProtocolTestSupport.awaitCondition(() -> registrations(f.executor) == 0);
+            assertFalse(future.isDone());
+        }
+    }
+
+    @Test
+    void closingAfterHandoffDoesNotReleaseOrRunTheQueuedResponse() {
+        try (var f = new Fixture()) {
+            var queued = new AtomicReference<Runnable>();
+            var executions = new AtomicInteger();
+            var workers = mock(ThreadPoolExecutor.class);
+            doAnswer(
+                            call -> {
+                                queued.set(call.getArgument(0));
+                                return null;
+                            })
+                    .when(workers)
+                    .execute(any());
+            ReflectionTestUtils.setField(f.executor, "completionWorkers", workers);
+            var registration = SchedulerTestSupport.responsePublication(f.executor);
+            registration.submit(
+                    () -> {
+                        executions.incrementAndGet();
+                        return true;
+                    });
+            registration.close();
+            registration.close();
+            assertEquals(1, registrations(f.executor));
+            assertEquals(0, executions.get());
+            queued.get().run();
+            queued.get().run();
+            assertEquals(1, executions.get());
+            assertEquals(0, registrations(f.executor));
+        }
+    }
+
+    @Test
+    void failingResponseActionReleasesItsRegistrationOnce() {
+        try (var f = new Fixture()) {
+            var registration = SchedulerTestSupport.responsePublication(f.executor);
+            var failure = new IllegalStateException("response construction failed");
+            assertSame(
+                    failure,
+                    assertThrows(
+                            IllegalStateException.class,
+                            () ->
+                                    registration.completeNow(
+                                            () -> {
+                                                throw failure;
+                                            })));
+            registration.close();
+            assertEquals(0, registrations(f.executor));
+            assertFalse(
+                    registration.completeNow(
+                            () -> {
+                                throw new AssertionError("replayed");
+                            }));
+        }
+    }
+
+    @Test
+    void closedExecutorCannotAcceptAnotherRegistration() {
+        var executor = new ResponseCompletionExecutor(1);
+        executor.close();
+        assertThrows(
+                IllegalStateException.class,
+                () -> SchedulerTestSupport.responsePublication(executor));
+        assertFalse(executor.register());
+        assertEquals(0, registrations(executor));
+    }
+
+    @Test
     void synchronousCompletionCannotStealAnAcceptedAsynchronousTask() {
         try (var f = new Fixture()) {
             var queued = new AtomicReference<Runnable>();
@@ -85,7 +347,7 @@ class ResponseCompletionExecutorTest {
                                         executions.incrementAndGet();
                                         return true;
                                     }));
-            assertFalse(registration.hasCompletionOwner());
+            assertFalse(registration.isUnsubmitted());
             assertEquals(0, executions.get());
             assertTrue(registrations(f.executor) == 0);
         }
@@ -117,7 +379,7 @@ class ResponseCompletionExecutorTest {
                                                 executions.incrementAndGet();
                                                 return true;
                                             })));
-            assertTrue(registration.hasCompletionOwner());
+            assertFalse(registration.isUnsubmitted());
             assertEquals(1, executions.get());
             assertTrue(registrations(f.executor) == 0);
             assertFalse(
@@ -157,7 +419,7 @@ class ResponseCompletionExecutorTest {
                                                 executions.incrementAndGet();
                                                 return true;
                                             })));
-            assertFalse(abandoned.hasCompletionOwner());
+            assertFalse(abandoned.isUnsubmitted());
             assertTrue(registrations(f.executor) == 0);
             assertNotNull(queued.get());
             queued.get().run();

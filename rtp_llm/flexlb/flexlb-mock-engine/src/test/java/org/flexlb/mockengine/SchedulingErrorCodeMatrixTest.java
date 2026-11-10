@@ -37,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Only cache/metrics/config lookup and gRPC transport are stand-ins. Values are
  * FlexLB codes, not HTTP or gRPC statuses. Schema v3 keeps blocked placement in
  * its global queue, and stops the request deadline once delivery is claimed.
- * Engine-owned victim settlement is covered by PreemptionPhasesE2ETest.
+ * Engine-owned request selected for preemption settlement is covered by PreemptionPhasesE2ETest.
  */
 @Timeout(15)
 class SchedulingErrorCodeMatrixTest {
@@ -91,11 +91,11 @@ class SchedulingErrorCodeMatrixTest {
             context.data()
                     .setSchedulingMetadata(
                             SchedulingMetadata.explicit(50, System.currentTimeMillis() - 1));
-            // DIRECT retains 8511; QUEUE reports 8431 and never sends an Engine RPC.
+            // Expired requests report the scheduler timeout without sending an Engine RPC.
             assertFailure(
                     fixture.schedule(context),
-                    fixture.harness.config.isDirect() ? 8511 : 8431,
-                    fixture.harness.config.isDirect() ? UNSPECIFIED : RESOURCE_EXHAUSTED,
+                    fixture.harness.config.isDirect() ? 8511 : 8503,
+                    UNSPECIFIED,
                     "expired");
             assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
             assertEquals(0, fixture.harness.decodeEndpoint(0).resourceSnapshot().reservedCount());
@@ -138,7 +138,7 @@ class SchedulingErrorCodeMatrixTest {
                         .data()
                         .setSchedulingMetadata(
                                 SchedulingMetadata.explicit(50, System.currentTimeMillis() - 1));
-                assertFailure(fixture.schedule(malformed), 8431, RESOURCE_EXHAUSTED, "expired");
+                assertFailure(fixture.schedule(malformed), 8503, UNSPECIFIED, "expired");
             } else {
                 assertTrue(fixture.schedule(malformed).isSuccess());
             }
@@ -194,7 +194,7 @@ class SchedulingErrorCodeMatrixTest {
         }
     }
 
-    @ParameterizedTest(name = "{0}: blocked Decode queue expires -> 8431")
+    @ParameterizedTest(name = "{0}: blocked Decode queue expires -> 8503")
     @MethodSource("queuedModes")
     void queueExpiryReadsRecordedWait(String mode) throws Exception {
         try (Fixture fixture = new Fixture(mode)) {
@@ -203,17 +203,16 @@ class SchedulingErrorCodeMatrixTest {
             context.data()
                     .setSchedulingMetadata(
                             SchedulingMetadata.explicit(50, System.currentTimeMillis() + 500));
-            // Once QUEUE owns the request, SLO uses the queue cause (8431), not
-            // a second admission classification (8430) or generic timeout (8511).
+            // Queue expiry retains the blocked role for diagnosis while reporting a timeout.
             Response failure = fixture.schedule(context);
-            assertFailure(failure, 8431, RESOURCE_EXHAUSTED, "DECODE");
+            assertFailure(failure, 8503, UNSPECIFIED, "DECODE");
             assertQueueWaitPv(context, failure, "DECODE");
             assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
             assertEquals(1, fixture.harness.decodeEndpoint(0).resourceSnapshot().reservedCount());
         }
     }
 
-    @ParameterizedTest(name = "{0}: healthy Prefill has no KV -> queue expiry 8431")
+    @ParameterizedTest(name = "{0}: healthy Prefill has no KV -> queue expiry 8503")
     @MethodSource("queuedModes")
     void queueExpiryRetainsPrefillPressure(String mode) throws Exception {
         try (Fixture fixture = new Fixture(mode)) {
@@ -230,11 +229,8 @@ class SchedulingErrorCodeMatrixTest {
                     .setSchedulingMetadata(
                             SchedulingMetadata.explicit(50, System.currentTimeMillis() + 500));
             Response failure = fixture.schedule(context);
-            assertFailure(
-                    failure,
-                    8431,
-                    RESOURCE_EXHAUSTED,
-                    "admission capacity is temporarily exhausted");
+            assertFailure(failure, 8503, UNSPECIFIED, "request deadline exceeded");
+            assertTrue(failure.getErrorMessage().contains("Prefill KV capacity exhausted"));
             assertQueueWaitPv(context, failure, "PREFILL");
             assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
         }
@@ -316,7 +312,7 @@ class SchedulingErrorCodeMatrixTest {
                         failure.isSuccess(),
                         failure.getErrorMessage(),
                         failure.getCode(),
-                        RESOURCE_EXHAUSTED.name(),
+                        failure.getAdmissionRejectReason().name(),
                         "MASTER",
                         0L,
                         "TIMED_OUT",

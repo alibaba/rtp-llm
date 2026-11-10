@@ -8,6 +8,7 @@ import io.micrometer.core.instrument.config.MeterFilter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.DeliveryExecution.DeliveryPermit;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -35,7 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 
 import static org.flexlb.balance.scheduler.ContextResult.PreparationFailure;
-import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
+import static org.flexlb.balance.scheduler.ContextResult.RoutingCompletion;
 import static org.flexlb.balance.scheduler.ContextResult.TransportResult;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -62,7 +63,7 @@ class DeliveryDispatcherTest {
     private ConfigService configService;
     private EngineGrpcClient grpcClient;
     private FlexlbConfig config;
-    private DeliveryDispatcher dispatcher;
+    private DeliveryCoordinator dispatcher;
     private SchedulerTestServices runtime;
     private TestCallback callback;
 
@@ -1248,8 +1249,12 @@ class DeliveryDispatcherTest {
         var cancelled = createRequestRoute(701L, 20L, 0L, endpoint);
         var admitted = createRequestRoute(702L, 20L, 0L, endpoint);
         doReturn(null)
-                .when(cancelled.ctx().data().getRequestScheduler())
-                .commitDelivery(any(Delivery.Member.class), any(), anyLong());
+                .when(org.flexlb.balance.scheduler.DeliveryTestSupport.transport(dispatcher))
+                .commit(
+                        memberFor(cancelled),
+                        any(),
+                        anyLong(),
+                        org.mockito.ArgumentMatchers.isNull());
         var admittedSpan = mock(io.opentelemetry.api.trace.Span.class);
         var cancelledSpan = mock(io.opentelemetry.api.trace.Span.class);
         when(admittedSpan.storeInContext(any(io.opentelemetry.context.Context.class)))
@@ -1315,8 +1320,14 @@ class DeliveryDispatcherTest {
             boolean accepted = (refusedMask & (1 << index)) == 0;
             if (!accepted) {
                 doReturn(null)
-                        .when(items.get(index).ctx().data().getRequestScheduler())
-                        .commitDelivery(any(Delivery.Member.class), any(), anyLong());
+                        .when(
+                                org.flexlb.balance.scheduler.DeliveryTestSupport.transport(
+                                        dispatcher))
+                        .commit(
+                                memberFor(items.get(index)),
+                                any(),
+                                anyLong(),
+                                org.mockito.ArgumentMatchers.isNull());
             }
             if (accepted) {
                 acceptedIds.add(Long.parseLong(items.get(index).requestId()));
@@ -1354,11 +1365,12 @@ class DeliveryDispatcherTest {
                 assertFalse(results.containsKey(Long.parseLong(items.get(index).requestId())));
                 assertNull(items.get(index).ctx().snapshot().delivery());
             }
-            verify(items.get(index).ctx().data().getRequestScheduler())
-                    .commitDelivery(
-                            any(Delivery.Member.class),
+            verify(org.flexlb.balance.scheduler.DeliveryTestSupport.transport(dispatcher))
+                    .commit(
+                            memberFor(items.get(index)),
                             org.mockito.ArgumentMatchers.eq(Delivery.SendMode.BATCH_ENQUEUE),
-                            org.mockito.ArgumentMatchers.eq(73L));
+                            org.mockito.ArgumentMatchers.eq(73L),
+                            org.mockito.ArgumentMatchers.isNull());
         }
         if (acceptedIds.isEmpty()) {
             verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
@@ -1376,8 +1388,8 @@ class DeliveryDispatcherTest {
     void sendBoundarySkipsRpcWhenEveryMemberWasCancelled() throws Exception {
         var item = createRequestRoute(703L, 20L, 0L, createPrefillEndpoint());
         doReturn(null)
-                .when(item.ctx().data().getRequestScheduler())
-                .commitDelivery(any(Delivery.Member.class), any(), anyLong());
+                .when(org.flexlb.balance.scheduler.DeliveryTestSupport.transport(dispatcher))
+                .commit(memberFor(item), any(), anyLong(), org.mockito.ArgumentMatchers.isNull());
         var completed = new CompletableFuture<Delivery.Result>();
         submit(
                 List.of(item),
@@ -1911,13 +1923,13 @@ class DeliveryDispatcherTest {
                                 : mock(org.flexlb.balance.endpoint.DecodeEndpoint.class),
                         null,
                         now);
-        var placement = (PlacementOperation) ctx.beginPlacement(null);
+        var placement = (RoutingContext) ctx.beginRouteSelection();
         ctx.publishRoute(placement, route);
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 ctx,
                 observedRequest ->
-                        observedRequest.completePlacement(
-                                placement, PublicationResult.PUBLISHED, now));
+                        observedRequest.completeRouting(
+                                placement, RoutingCompletion.FINISHED, now));
         org.mockito.Mockito.doAnswer(
                         call -> {
                             var member = call.getArgument(0, Delivery.Member.class);
@@ -1927,9 +1939,14 @@ class DeliveryDispatcherTest {
                             }
                             return member;
                         })
-                .when(ctx.data().getRequestScheduler())
-                .commitDelivery(any(Delivery.Member.class), any(), anyLong());
+                .when(org.flexlb.balance.scheduler.DeliveryTestSupport.transport(dispatcher))
+                .commit(memberFor(route), any(), anyLong(), org.mockito.ArgumentMatchers.isNull());
         return route;
+    }
+
+    private static Delivery.Member memberFor(RouteResult route) {
+        return org.mockito.ArgumentMatchers.argThat(
+                member -> member != null && member.route() == route);
     }
 
     private static EngineRpcService.GenerateInputPB generateInputWithTraceContext(
@@ -2012,11 +2029,8 @@ class DeliveryDispatcherTest {
                                 return null;
                             })
                     .when(requestScheduler)
-                    .onDeliveryResult(
-                            argThat(
-                                    (ContextResult.DeliveryEvidence e) ->
-                                            e instanceof PreparationFailure failed
-                                                    && failed.route() == item));
+                    .recordPreparationFailure(
+                            argThat((PreparationFailure failed) -> failed.route() == item));
         }
         Delivery batch;
         try {
@@ -2024,19 +2038,16 @@ class DeliveryDispatcherTest {
                     DeliveryTestSupport.committed(
                             batchId,
                             items.stream().map(item -> new Delivery.Member(item, null)).toList(),
-                            new org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot(
-                                    0L, List.of(), List.of(), 0L),
+                            new WorkSnapshot(0L, List.of(), List.of(), 0L),
                             prediction,
                             DeliveryTestSupport.EVALUATOR,
                             reason,
-                            0,
-                            null,
                             permit);
         } catch (RuntimeException failure) {
             permit.close();
             throw failure;
         }
-        dispatcher.deliverBatch(batch);
+        org.flexlb.balance.scheduler.DeliveryTestSupport.transport(dispatcher).dispatch(batch);
     }
 
     // ---- helpers ----
@@ -2154,7 +2165,7 @@ class DeliveryDispatcherTest {
         return rejected.boundary();
     }
 
-    private DeliveryDispatcher createDispatcher(
+    private DeliveryCoordinator createDispatcher(
             int threads, int queueCapacity, SimpleMeterRegistry meters) {
         return createDispatcher(
                 threads,
@@ -2166,7 +2177,7 @@ class DeliveryDispatcherTest {
                         .getBatchDispatchMaxInflightBytes());
     }
 
-    private DeliveryDispatcher createDispatcher(
+    private DeliveryCoordinator createDispatcher(
             int threads, int queueCapacity, SimpleMeterRegistry meters, long byteBudget) {
         var snapshot = org.mockito.Mockito.spy(configService.loadBalanceConfig());
         var sizing = org.mockito.Mockito.spy(snapshot.getInternalRuntime());
@@ -2177,12 +2188,12 @@ class DeliveryDispatcherTest {
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(snapshot);
         var delivery =
-                new DeliveryDispatcher(
+                new DeliveryCoordinator(
+                        new org.flexlb.balance.scheduler.RequestRepository(),
                         grpcClient,
                         configService,
                         new org.flexlb.service.monitor.DeliveryMetricsReporter(null),
-                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                        new org.flexlb.balance.scheduler.SchedulerConfiguration()
                                 .decodeAdmissionCapacity(configService),
                         org.mockito.Mockito.mock(
                                 org.flexlb.balance.scheduler.DeliveryExecution.class));
@@ -2201,7 +2212,7 @@ class DeliveryDispatcherTest {
                             new org.flexlb.metric.MicrometerFlexMonitor(meters));
             reporter.registerExecutor(runtime.deliveries());
         }
-        return delivery;
+        return org.mockito.Mockito.spy(delivery);
     }
 
     private static void awaitAvailable(

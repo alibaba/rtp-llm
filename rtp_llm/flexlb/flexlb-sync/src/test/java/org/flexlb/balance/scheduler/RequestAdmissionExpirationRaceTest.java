@@ -84,7 +84,7 @@ class RequestAdmissionExpirationRaceTest {
                 try (var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
                     assertNotNull(admission);
                     assertEquals(
-                            org.flexlb.balance.PlacementResult.Status.SUCCESS,
+                            org.flexlb.balance.RoutingResult.Status.SUCCESS,
                             RequestProtocolTestSupport.commitRoute(
                                     registry,
                                     item,
@@ -167,7 +167,7 @@ class RequestAdmissionExpirationRaceTest {
             try (var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertEquals(
-                        org.flexlb.balance.PlacementResult.Status.SUCCESS,
+                        org.flexlb.balance.RoutingResult.Status.SUCCESS,
                         RequestProtocolTestSupport.commitRoute(
                                 registry,
                                 item,
@@ -249,8 +249,8 @@ class RequestAdmissionExpirationRaceTest {
                                         registry,
                                         item,
                                         RequestProtocolTestSupport.publication(() -> true))
-                                == org.flexlb.balance.PlacementResult.Status.SUCCESS));
-                registry.onDeliveryResult(
+                                == org.flexlb.balance.RoutingResult.Status.SUCCESS));
+                registry.recordPreparationFailure(
                         new ContextResult.PreparationFailure(
                                 null, item, "preparation failed", System.currentTimeMillis()));
                 assertSame(
@@ -259,11 +259,11 @@ class RequestAdmissionExpirationRaceTest {
                                 IllegalStateException.class,
                                 () -> {
                                     if (abort) {
-                                        AbstractRequestScheduler.failPlacement(
+                                        AbstractRequestScheduler.failRouting(
                                                 admission,
                                                 Response.error(StrategyErrorType.DISPATCH_FAILED));
                                     } else {
-                                        AbstractRequestScheduler.finishPlacement(admission);
+                                        AbstractRequestScheduler.finishRouting(admission);
                                     }
                                 }));
             }
@@ -344,11 +344,11 @@ class RequestAdmissionExpirationRaceTest {
                                         registry,
                                         item,
                                         RequestProtocolTestSupport.publication(() -> true))
-                                == org.flexlb.balance.PlacementResult.Status.SUCCESS));
+                                == org.flexlb.balance.RoutingResult.Status.SUCCESS));
                 if (clientCancellation) {
                     registry.cancel(String.valueOf(requestId), 0L, CancelReason.CLIENT_CANCELLED);
                 }
-                registry.onDeliveryResult(
+                registry.recordPreparationFailure(
                         new ContextResult.PreparationFailure(
                                 null, item, "preparation failed", System.currentTimeMillis()));
                 if (clientCancellation) {
@@ -384,7 +384,7 @@ class RequestAdmissionExpirationRaceTest {
                     assertTrue(
                             requestContext.snapshot().close().expired(),
                             "accepted inactivity expiry remains a cleanup requirement");
-                    assertNotNull(requestContext.snapshot().placement());
+                    assertNotNull(requestContext.snapshot().routingContext());
                     if (clientCancellation) {
                         assertNull(requestContext.snapshot().outcome());
                         assertEquals(

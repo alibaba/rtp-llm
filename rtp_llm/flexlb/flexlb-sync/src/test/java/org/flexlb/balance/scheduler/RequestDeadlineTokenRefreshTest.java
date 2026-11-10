@@ -32,7 +32,7 @@ class RequestDeadlineTokenRefreshTest {
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.recordDeliveryResult(
+                        observedRequest.recordDeliveryPrediction(
                                 new Prediction(fixture.delivery(), 3000L, 1002L)));
         var before = context.snapshot();
         var previous = before.deadlines().token(kind);
@@ -40,7 +40,7 @@ class RequestDeadlineTokenRefreshTest {
         var diagnosis =
                 new CancellationFacts(
                         CancelReason.DEADLINE_EXCEEDED,
-                        StrategyErrorType.RESOURCE_EXHAUSTED,
+                        StrategyErrorType.QUEUE_TIMEOUT,
                         "diagnosis must not be used early");
         var update =
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
@@ -120,7 +120,7 @@ class RequestDeadlineTokenRefreshTest {
                     context.snapshot().delivery().send(),
                     "a refreshed scheduling deadline cannot revoke an already committed send");
             assertFalse(
-                    context.validateDelivery(fixture.route(), current.atMs()),
+                    context.validateDelivery(fixture.route(), null, current.atMs()),
                     "the committed delivery still forbids duplicate submission");
             assertFalse(context.snapshot().deliveryReleasable());
         } else if (kind == ExpirationTimer.Kind.VISIBILITY) {

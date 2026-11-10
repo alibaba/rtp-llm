@@ -1,4 +1,5 @@
 import com.sun.management.ThreadMXBean;
+import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.projection.RequestTimeEstimation;
@@ -50,11 +51,10 @@ public class PlanningBench {
                                 new ProjectionQueueSnapshot(
                                         1000,
                                         true,
-                                        org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
+                                        BuiltinGroupPlanner.FIXED_WINDOW,
                                         ORDER,
                                         constraints(64),
-                                        items(depth, i),
-                                        null),
+                                        items(depth, i)),
                                 new WorkSnapshot(1000, List.of(), List.of(), 0),
                                 0L,
                                 model,
@@ -86,7 +86,9 @@ public class PlanningBench {
         var items = new ArrayList<GroupPlanner.Item>();
         for (int i = 0; i < count; i++) {
             long compute = 100 + random.nextInt(4096), hit = random.nextInt(4096);
-            items.add(new GroupPlanner.Item(i, 0, i, 1000, 61_000, compute + hit, hit));
+            items.add(
+                    new GroupPlanner.Item(
+                            String.valueOf(i), 0, i, 1000, 61_000, compute + hit, hit));
         }
         return items;
     }
@@ -95,7 +97,7 @@ public class PlanningBench {
         // INCREMENTAL_BEGIN
         var batch = model.newBatchPrediction();
         var selected =
-                GroupPlanner.FIXED_WINDOW.select(
+                BuiltinGroupPlanner.FIXED_WINDOW.select(
                         items,
                         constraints(size),
                         (added, prefix) -> batch.append(added.seqLen(), added.hitCache()));

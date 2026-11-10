@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.loadbalance.DebugInfo;
@@ -41,7 +41,7 @@ class RequestRouteTest {
         metadata.setDebugInfo(debug);
         try {
             var result =
-                    PlacementResult.success(
+                    RoutingResult.success(
                             new RouteResult(
                                     context,
                                     List.of(
@@ -157,7 +157,7 @@ class RequestRouteTest {
                                 org.flexlb.balance.endpoint.EndpointTestSupport.realPrefill(
                                         status,
                                         SchedulingTestConfig.newConfig(),
-                                        mock(DeliveryDispatcher.class),
+                                        mock(DeliveryCoordinator.class),
                                         new RequestRepository(),
                                         mock(DeliveryMetricsReporter.class));
                         case DECODE ->
@@ -165,7 +165,7 @@ class RequestRouteTest {
                                         status, new RequestRepository());
                         case ENCODER ->
                                 new org.flexlb.balance.endpoint.EncoderEndpoint(
-                                        status, new PlacementAvailability());
+                                        status, new CapacityNotifier());
                         case VIT -> new WorkerEndpoint(status);
                         default -> throw new AssertionError(role);
                     };
@@ -179,8 +179,8 @@ class RequestRouteTest {
                 route.add(SelectionTestSupport.metadata(worker, metadata, 1L));
                 if (!retireBeforeAdd) worker.close();
                 var selected = new RouteResult(context(), route);
-                var result = selected.validateEndpoints(PlacementResult.success(selected));
-                assertEquals(PlacementResult.Status.RETRY, result.status());
+                var result = selected.validateEndpoints(RoutingResult.success(selected));
+                assertEquals(RoutingResult.Status.RETRY, result.status());
                 assertNull(result.blocker());
                 assertNull(result.value());
             } finally {
@@ -288,7 +288,7 @@ class RequestRouteTest {
         return org.flexlb.balance.endpoint.EndpointTestSupport.realPrefill(
                 status,
                 SchedulingTestConfig.newConfig(),
-                mock(DeliveryDispatcher.class),
+                mock(DeliveryCoordinator.class),
                 new RequestRepository(),
                 mock(DeliveryMetricsReporter.class));
     }

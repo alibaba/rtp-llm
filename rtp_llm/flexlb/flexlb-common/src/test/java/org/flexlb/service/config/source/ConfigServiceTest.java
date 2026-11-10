@@ -7,8 +7,8 @@ import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.KvcmCacheMatchingConfig;
 import org.flexlb.config.LocalSyncCacheMatchingConfig;
+import org.flexlb.config.PreemptionStage;
 import org.flexlb.config.QueueOrderingConfig;
-import org.flexlb.config.VictimStage;
 import org.flexlb.enums.LogLevel;
 import org.flexlb.service.config.ConfigSource;
 import org.flexlb.service.config.merger.FlexlbConfigMerger;
@@ -110,7 +110,10 @@ class ConfigServiceTest {
         ConfigService service = createService(List.of(environmentSource(Map.of()), source));
 
         assertThat(service.loadBalanceConfig().isDirect()).isTrue();
-        assertThat(service.loadBalanceConfig().isBatchDispatch()).isFalse();
+        assertThat(
+                        service.loadBalanceConfig()
+                                .deliveryType(org.flexlb.dao.route.RequestPhase.GENERATION))
+                .isEqualTo(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
     }
 
     @Test
@@ -288,7 +291,8 @@ class ConfigServiceTest {
         FlexlbConfig merged =
                 FlexlbConfigMerger.merge(base, "{\"dispatcher\":{\"type\":\"NON_BATCH\"}}", "test");
 
-        assertThat(merged.isBatchDispatch()).isFalse();
+        assertThat(merged.deliveryType(org.flexlb.dao.route.RequestPhase.GENERATION))
+                .isEqualTo(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
         assertThat(merged.getDispatcher().getMaxInflightPerPrefillWorker()).isEqualTo(7);
         assertThat(merged.getDispatcher().getFetchAttachTimeoutMs()).isEqualTo(1500);
     }
@@ -375,7 +379,10 @@ class ConfigServiceTest {
                 """);
 
         assertThat(service.loadBalanceConfig().isQueue()).isTrue();
-        assertThat(service.loadBalanceConfig().isBatchDispatch()).isTrue();
+        assertThat(
+                        service.loadBalanceConfig()
+                                .deliveryType(org.flexlb.dao.route.RequestPhase.GENERATION))
+                .isEqualTo(org.flexlb.config.DispatcherConfig.Type.BATCH);
         assertThat(service.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker())
                 .isEqualTo(9);
         assertThat(service.loadBalanceConfig().getDispatcher().getFetchAttachTimeoutMs())
@@ -383,6 +390,36 @@ class ConfigServiceTest {
         FlexlbConfig previous = service.loadBalanceConfig();
         source.emit("{\"schemaVersion\":3,\"dispatcher\":{\"type\":\"INVALID\"}}");
         assertThat(service.loadBalanceConfig()).isSameAs(previous);
+    }
+
+    @Test
+    void firstPhaseUpdateKeepsInheritedStartupModes() {
+        FakeConfigSource source =
+                new FakeConfigSource(
+                        "Nacos",
+                        200,
+                        """
+                {"schemaVersion":3,"scheduler":{"type":"QUEUE","decision":{"type":"SINGLE"}},
+                 "dispatcher":{"type":"BATCH"}}
+                """);
+        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
+
+        source.emit(
+                """
+                {"schemaVersion":3,"phases":{"generation":{
+                 "decision":{"type":"FIXED_WINDOW","maxRequests":32},
+                 "delivery":{"type":"ROUTE"}}},
+                 "dispatcher":{"maxInflightPerPrefillWorker":9}}
+                """);
+
+        assertThat(
+                        service.loadBalanceConfig()
+                                .deliveryType(org.flexlb.dao.route.RequestPhase.GENERATION))
+                .isEqualTo(org.flexlb.config.DispatcherConfig.Type.BATCH);
+        assertThat(service.loadBalanceConfig().decisionPolicy().getType())
+                .isEqualTo(DecisionPolicyConfig.Type.SINGLE);
+        assertThat(service.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker())
+                .isEqualTo(9);
     }
 
     @Test
@@ -428,8 +465,8 @@ class ConfigServiceTest {
                         service.loadBalanceConfig()
                                 .priorityOrdering()
                                 .getPreemption()
-                                .getAllowedVictimStages())
-                .containsExactly(VictimStage.PREFILL_QUEUED);
+                                .getAllowedPreemptionStages())
+                .containsExactly(PreemptionStage.PREFILL_QUEUED);
 
         FlexlbConfig lastKnownGood = service.loadBalanceConfig();
         source.emit("{\"schemaVersion\":3,\"router\":null}");

@@ -3,7 +3,6 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
@@ -95,7 +94,7 @@ class RequestExecutionPerformanceTest {
                             "capture allocation must be bounded by priority levels, not request count");
                 }
             } finally {
-                runtime.stopAndAwait();
+                RequestExecutionTestSupport.stopAndAwait(runtime);
             }
         }
     }
@@ -162,7 +161,7 @@ class RequestExecutionPerformanceTest {
                             "timeout reads must reuse the queue's published snapshot");
                 }
             } finally {
-                runtime.stopAndAwait();
+                RequestExecutionTestSupport.stopAndAwait(runtime);
             }
         }
     }
@@ -256,7 +255,7 @@ class RequestExecutionPerformanceTest {
                     }
                 }
             } finally {
-                runtime.stopAndAwait();
+                RequestExecutionTestSupport.stopAndAwait(runtime);
             }
         }
     }
@@ -269,16 +268,15 @@ class RequestExecutionPerformanceTest {
                 WorkerStatus.createDiscovered(
                         RoleType.PREFILL, "perf", "127.0.0.1", 8080, 8090, "perf-site");
         config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.BATCH);
-        DeliveryDispatcher delivery =
-                new DeliveryDispatcher(
+        DeliveryCoordinator delivery =
+                new DeliveryCoordinator(
+                        new org.flexlb.balance.scheduler.RequestRepository(),
                         null,
                         DeliveryTestSupport.service(config),
                         new org.flexlb.service.monitor.DeliveryMetricsReporter(null),
-                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                        new org.flexlb.balance.scheduler.SchedulerConfiguration()
                                 .decodeAdmissionCapacity(DeliveryTestSupport.service(config)),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                        org.mockito.Mockito.mock(DeliveryExecution.class));
         AbstractRequestScheduler scheduler = mock(AbstractRequestScheduler.class);
         var facilities = mock(SchedulerTestServices.class);
         org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
@@ -305,7 +303,6 @@ class RequestExecutionPerformanceTest {
         PrefillQueueScheduler runtime =
                 org.flexlb.balance.endpoint.EndpointTestSupport.worker(
                         endpoint.ipPort(), endpoint, settings, delivery, endpoint, execution);
-        endpoint.observeQueueWait(runtime::admissionBlock, runtime::getLatestQueueWaitSnapshot);
         RequestExecutionTestSupport.start(runtime);
         assertTrue(
                 !org.mockito.Mockito.mockingDetails(runtime).isMock(),
@@ -331,21 +328,21 @@ class RequestExecutionPerformanceTest {
                     Long.MAX_VALUE,
                     60_000L,
                     org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
-            var placement = (PlacementOperation) context.beginPlacement(null);
+            var placement = (RoutingContext) context.beginRouteSelection();
             context.publishRoute(placement, item);
             org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                     context,
                     observedRequest ->
-                            observedRequest.completePlacement(
-                                    placement, ContextResult.PublicationResult.PUBLISHED, now));
+                            observedRequest.completeRouting(
+                                    placement, ContextResult.RoutingCompletion.FINISHED, now));
             assertTrue(RequestExecutionTestSupport.offer(runtime, item));
         }
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (RequestExecutionTestSupport.state(runtime).progress().queueDepth() != depth
+        while (RequestExecutionTestSupport.state(runtime).queueDepth() != depth
                 && System.nanoTime() < deadline) {
             TimeUnit.MILLISECONDS.sleep(1L);
         }
-        assertEquals(depth, RequestExecutionTestSupport.state(runtime).progress().queueDepth());
+        assertEquals(depth, RequestExecutionTestSupport.state(runtime).queueDepth());
         return runtime;
     }
 
@@ -380,7 +377,7 @@ class RequestExecutionPerformanceTest {
                 endpoint.tryRegisterSelection(
                         input, endpoint.captureRouteProjectionInputs(), 0L, true);
         assertEquals(
-                org.flexlb.balance.PlacementResult.Registration.REGISTERED, registration.status());
+                org.flexlb.balance.RoutingResult.Registration.REGISTERED, registration.status());
         var metadata =
                 org.flexlb.dao.loadbalance.ServerStatus.forWorker(
                         RoleType.PREFILL,

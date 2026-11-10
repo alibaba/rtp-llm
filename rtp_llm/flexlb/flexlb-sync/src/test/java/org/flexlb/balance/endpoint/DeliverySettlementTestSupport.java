@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -7,7 +8,6 @@ import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.locks.ReentrantLock;
@@ -27,18 +27,9 @@ public final class DeliverySettlementTestSupport {
             new EndpointRetirementTestSupport(() -> {});
 
     public DeliverySettlementTestSupport() {
-        this(
-                Comparator.comparing(
-                        org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem::requestId));
-    }
-
-    public DeliverySettlementTestSupport(
-            Comparator<org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem> ordering) {
         prefill =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
-                        lock,
-                        OrderedPrefillRequestQueue.ordered(4, ordering),
-                        System::currentTimeMillis);
+                        lock, OrderedPrefillRequestQueue.fifo(4), System::currentTimeMillis);
     }
 
     public void enqueue(RouteResult item) {
@@ -51,9 +42,9 @@ public final class DeliverySettlementTestSupport {
                 });
     }
 
-    public org.flexlb.balance.scheduler.Delivery commit(
-            org.flexlb.balance.scheduler.Delivery plan) {
-        return prefill.commitDelivery(plan);
+    public org.flexlb.balance.delivery.CapacityBoundary.Attempt<WorkSnapshot> commit(
+            PrefillEndpoint.DeliverySelection plan) {
+        return prefill.dequeueForDelivery(plan);
     }
 
     public void commit(long batchId, List<RouteResult> items) {

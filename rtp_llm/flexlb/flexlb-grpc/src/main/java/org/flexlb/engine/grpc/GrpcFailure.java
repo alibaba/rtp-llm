@@ -92,10 +92,6 @@ public final class GrpcFailure {
         return new Analysis(resolveKind(observedKinds, code), code, root);
     }
 
-    public static boolean isRetryableTransportFailure(Throwable failure) {
-        return analyze(failure).retryableTransportFailure();
-    }
-
     private static Kind classifyCause(Throwable cause) {
         // Subclasses precede their broader exception types.
         return switch (cause) {

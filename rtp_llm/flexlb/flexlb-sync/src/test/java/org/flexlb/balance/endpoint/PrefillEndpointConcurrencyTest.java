@@ -177,7 +177,8 @@ class PrefillEndpointConcurrencyTest {
     private static void commit(
             PrefillEndpoint endpoint, long id, long ms, List<RouteResult> routes) {
         for (var route : routes) assertTrue(EndpointTestSupport.offer(endpoint, route));
-        try (var ignored = EndpointTestSupport.commitBatch(endpoint, id, ms, routes)) {
+        {
+            var ignored = EndpointTestSupport.commitBatch(endpoint, id, ms, routes);
             // Close the temporary Worker selection; leave real resource ownership for the
             // concurrent actors.
         }

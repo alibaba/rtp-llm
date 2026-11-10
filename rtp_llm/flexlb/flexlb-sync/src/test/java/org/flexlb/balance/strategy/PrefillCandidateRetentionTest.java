@@ -1,6 +1,6 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
@@ -65,7 +65,7 @@ class PrefillCandidateRetentionTest {
                                     "g",
                                     List.of(first, second),
                                     () -> 1000L,
-                                    ignored -> PlacementResult.Registration.REGISTERED));
+                                    ignored -> RoutingResult.Registration.REGISTERED));
             var retained = (PrefillCandidateSet) scratch.get();
             assertTrue(
                     java.util.Arrays.stream(retained.capturedSources)

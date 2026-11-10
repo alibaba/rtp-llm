@@ -65,15 +65,16 @@ class RejectedDeliveryWithdrawalRaceTest {
                         mock(TheoryCacheHitReporter.class));
         var grpc = mock(EngineGrpcClient.class);
         var dispatcher =
-                new DeliveryDispatcher(
-                        grpc,
-                        service,
-                        reporter,
-                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(service),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                org.mockito.Mockito.spy(
+                        new DeliveryCoordinator(
+                                new org.flexlb.balance.scheduler.RequestRepository(),
+                                grpc,
+                                service,
+                                reporter,
+                                new org.flexlb.balance.scheduler.SchedulerConfiguration()
+                                        .decodeAdmissionCapacity(service),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner),
                 "dispatcher",
@@ -100,8 +101,8 @@ class RejectedDeliveryWithdrawalRaceTest {
                         call ->
                                 EndpointTestSupport.releaseRequest(
                                         ledger.prefill, call.getArgument(0)));
-        when(prefill.commitDelivery(any()))
-                .thenAnswer(call -> ledger.prefill.commitDelivery(call.getArgument(0)));
+        when(prefill.dequeueForDelivery(any()))
+                .thenAnswer(call -> ledger.prefill.dequeueForDelivery(call.getArgument(0)));
 
         DecodeEndpoint decode =
                 EndpointTestSupport.decode(
@@ -151,13 +152,15 @@ class RejectedDeliveryWithdrawalRaceTest {
         ledger.enqueue(item);
 
         var attempts = new AtomicInteger();
-        var invalidWithdrawal = new AtomicReference<PlacementOperation>();
+        var invalidWithdrawal = new AtomicReference<RoutingContext>();
         Runnable preemptionContender =
                 () -> {
                     attempts.incrementAndGet();
                     // This is synchronous on the permit/resource release path, so no timing or
                     // sleeps are needed.
-                    var withdrawal = owner.beginPreemption(decode, handle, Integer.MAX_VALUE);
+                    var withdrawal =
+                            SchedulerTestSupport.routePreemption(owner)
+                                    .beginRoutePreemption(decode, handle, Integer.MAX_VALUE);
                     if (withdrawal != null) {
                         invalidWithdrawal.compareAndSet(null, withdrawal);
                     }
@@ -183,10 +186,7 @@ class RejectedDeliveryWithdrawalRaceTest {
                                 List.of(item),
                                 "withdrawal-race",
                                 new FormulaPredictor("100"),
-                                OptionalLong.empty(),
-                                null,
-                                Delivery.PrefixPolicy.ORDERED_PREFIX,
-                                () -> true));
+                                OptionalLong.empty()));
             } finally {
                 ReflectionTestUtils.setField(
                         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner)
@@ -214,7 +214,7 @@ class RejectedDeliveryWithdrawalRaceTest {
             assertEquals(0, decode.routingView().inflightHardKv());
             assertEquals(0, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
             verify(owner, times(1))
-                    .onDeliveryResult(
+                    .recordPreparationFailure(
                             org.mockito.ArgumentMatchers.argThat(
                                     evidence ->
                                             evidence
@@ -223,7 +223,15 @@ class RejectedDeliveryWithdrawalRaceTest {
                                                     && failure.route() == item
                                                     && failure.detail()
                                                             .contains(rejection.getMessage())));
-            verify(owner, never()).commitDelivery(any(Delivery.Member.class), any(), anyLong());
+            verify(
+                            org.flexlb.balance.scheduler.DeliveryTestSupport.transport(
+                                    owner.dispatcher),
+                            never())
+                    .commit(
+                            any(Delivery.Member.class),
+                            any(),
+                            anyLong(),
+                            org.mockito.ArgumentMatchers.isNull());
             verifyNoInteractions(grpc);
         } finally {
             ReflectionTestUtils.setField(
@@ -233,7 +241,7 @@ class RejectedDeliveryWithdrawalRaceTest {
             stopWatching.run();
             var outstanding = invalidWithdrawal.get();
             if (outstanding != null) {
-                AbstractRequestScheduler.finishPlacement(outstanding);
+                AbstractRequestScheduler.finishRouting(outstanding);
             }
             SchedulerTestSupport.shutdown(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));

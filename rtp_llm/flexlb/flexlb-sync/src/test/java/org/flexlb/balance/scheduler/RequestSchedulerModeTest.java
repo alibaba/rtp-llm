@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.RoutingResult;
+import org.flexlb.balance.preemption.DecodePreemption;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -138,7 +138,7 @@ class RequestSchedulerModeTest {
             var laterDirect = RequestProtocolTestSupport.context(directConfig, 8763L);
             when(queued.router.select(laterDirect, null))
                     .thenReturn(
-                            PlacementResult.rejected(
+                            RoutingResult.rejected(
                                     Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
             try (var directScheduler =
                     SchedulerTestServices.direct(
@@ -170,7 +170,7 @@ class RequestSchedulerModeTest {
         try (Fixture f = new Fixture(queued, priority, fixedWindow, batch)) {
             when(f.router.select(f.context, null))
                     .thenReturn(
-                            PlacementResult.rejected(
+                            RoutingResult.rejected(
                                     Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
             if (outcome.equals("THROW")) {
                 when(f.router.select(f.context, null))
@@ -194,7 +194,7 @@ class RequestSchedulerModeTest {
                         case "STOPPED" -> StrategyErrorType.SCHEDULER_UNAVAILABLE;
                         case "EXPIRED" ->
                                 queued
-                                        ? StrategyErrorType.RESOURCE_EXHAUSTED
+                                        ? StrategyErrorType.QUEUE_TIMEOUT
                                         : StrategyErrorType.BATCH_SLO_EXPIRED;
                         default -> throw new AssertionError(outcome);
                     };
@@ -288,7 +288,7 @@ class RequestSchedulerModeTest {
                             mock(TheoryCacheHitReporter.class),
                             router,
                             mock(DecodePreemption.class),
-                            new PlacementAvailability());
+                            new CapacityNotifier());
             scheduler =
                     ((AbstractRequestScheduler)
                             org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(requests));

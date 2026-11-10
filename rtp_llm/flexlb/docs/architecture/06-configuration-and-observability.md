@@ -130,7 +130,28 @@ Java 还可能等待接近 30 秒才发现新内容。因此两段等待叠加�
 
 ### 凑批窗口热更新
 
-`scheduler.decision.maxCollectionWaitMs` 在每次固定窗口决策时从配置服务的当前内存快照读取。
+阶段可通过 `phases.encoder`、`phases.generation` 显式配置 `decision` 和 `delivery`。
+`decision` 使用现有 `SINGLE` / `FIXED_WINDOW` 参数，`delivery.type` 为 `ROUTE` 或
+`ENQUEUE_BATCH`。Encoder 当前支持 `SINGLE` + `ROUTE`，配置校验拒绝尚未支持的能力；
+Generation 省略的字段沿用 `scheduler.decision` 和 `dispatcher.type`。
+显式阶段配置优先于旧字段，输入校验、队列规则和实际发送均读取这一有效配置。
+DIRECT 模式只允许 ROUTE，且不接受 Generation 的队列决策配置。
+阶段的交付类型和 Generation 决策类型也在启动时固定。
+
+例如，Generation 可配置固定窗口后逐条返回路由：
+
+```json
+{
+  "phases": {
+    "generation": {
+      "decision": { "type": "FIXED_WINDOW", "maxRequests": 8 },
+      "delivery": { "type": "ROUTE" }
+    }
+  }
+}
+```
+
+有效决策配置中的 `maxCollectionWaitMs` 在每次固定窗口决策时从配置服务的当前内存快照读取。
 同一次决策的预检查与最终组选择共用一个窗口值。路由预估缓存将窗口值作为有效性条件，
 窗口变化时重新生成预估输入。读取不会触发 UniConfig 或 Nacos 网络请求。
 

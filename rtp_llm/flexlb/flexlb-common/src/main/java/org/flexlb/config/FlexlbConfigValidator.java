@@ -14,8 +14,6 @@ import org.flexlb.util.PriorityNormalizer;
  * Cross-field validation for the public configuration contract.
  */
 public final class FlexlbConfigValidator {
-    private static final int MIN_STALE_TIMEOUT_TO_RPC_TIMEOUT_RATIO = 2;
-
     private FlexlbConfigValidator() {}
 
     public static void validateDocumentShape(JsonNode document) {
@@ -85,7 +83,11 @@ public final class FlexlbConfigValidator {
         if (!config.isDirect()) {
             validateQueue(config.queueScheduler());
         }
-        config.getDispatcher().validateFor(config.getScheduler());
+        validatePhasePolicies(config);
+        config.getDispatcher()
+                .validateFor(
+                        config.getScheduler(),
+                        config.deliveryType(org.flexlb.dao.route.RequestPhase.GENERATION));
         validateRequestLifecycle(config.getRequestLifecycle());
         validateRouting(config.getRouter());
         validateWorkerRegistry(config.getWorkerRegistry());
@@ -157,7 +159,7 @@ public final class FlexlbConfigValidator {
             return;
         }
         for (JsonNode stage : preemption.path("allowedVictimStages")) {
-            if (VictimStage.DECODE_ENGINE_OWNED.name().equals(stage.asText())) {
+            if (PreemptionStage.DECODE_ENGINE_OWNED.name().equals(stage.asText())) {
                 return;
             }
         }
@@ -211,6 +213,51 @@ public final class FlexlbConfigValidator {
         require(value > 0, field, "must be greater than zero");
     }
 
+    private static void validatePhasePolicies(FlexlbConfig config) {
+        var phases = config.getPhases();
+        require(phases != null, "phases", "is required");
+        require(phases.getEncoder() != null, "phases.encoder", "is required");
+        require(phases.getGeneration() != null, "phases.generation", "is required");
+        for (var phase : org.flexlb.dao.route.RequestPhase.values()) {
+            var policy =
+                    phase == org.flexlb.dao.route.RequestPhase.ENCODER
+                            ? phases.getEncoder()
+                            : phases.getGeneration();
+            String path = "phases." + phase.name().toLowerCase(java.util.Locale.ROOT);
+            if (policy.getDelivery() != null)
+                require(
+                        policy.getDelivery().getType() != null,
+                        path + ".delivery.type",
+                        "is required");
+            if (policy.getDecision() != null) {
+                var queue = new SchedulerConfig();
+                queue.setDecision(policy.getDecision());
+                validateQueue(queue);
+            }
+            if (config.isDirect())
+                require(
+                        config.deliveryType(phase) == DispatcherConfig.Type.NON_BATCH,
+                        path + ".delivery.type",
+                        "DIRECT requires ROUTE");
+        }
+        require(
+                phases.getEncoder().getDecision() != null
+                        && phases.getEncoder().getDecision().getType()
+                                == DecisionPolicyConfig.Type.SINGLE,
+                "phases.encoder.decision.type",
+                "Encoder supports SINGLE decisions");
+        require(
+                phases.getEncoder().getDelivery() != null
+                        && phases.getEncoder().getDelivery().getType()
+                                == PhasePoliciesConfig.DeliveryType.ROUTE,
+                "phases.encoder.delivery.type",
+                "Encoder supports ROUTE delivery");
+        require(
+                !config.isDirect() || phases.getGeneration().getDecision() == null,
+                "phases.generation.decision",
+                "requires QUEUE scheduling");
+    }
+
     private static void validateQueue(SchedulerConfig queue) {
         positive(queue.getQueueTimeoutMs(), "scheduler.queueTimeoutMs");
         require(
@@ -251,8 +298,8 @@ public final class FlexlbConfigValidator {
             PreemptionConfig preemption = ordering.getPreemption();
             if (preemption != null) {
                 require(
-                        preemption.getAllowedVictimStages() != null
-                                && !preemption.getAllowedVictimStages().isEmpty(),
+                        preemption.getAllowedPreemptionStages() != null
+                                && !preemption.getAllowedPreemptionStages().isEmpty(),
                         "scheduler.ordering.preemption.allowedVictimStages",
                         "must contain at least one stage when preemption is configured");
                 positive(preemption.getTimeoutMs(), "scheduler.ordering.preemption.timeoutMs");

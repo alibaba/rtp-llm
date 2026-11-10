@@ -1,13 +1,13 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.VictimStage;
+import org.flexlb.config.PreemptionStage;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
@@ -32,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -46,6 +47,49 @@ import static org.mockito.Mockito.when;
 @Timeout(15)
 class QueuedPublicationNotificationFailureTest {
     @Test
+    void cancellationAndArchiveDuringNotificationCannotReclaimTransferredResources()
+            throws Exception {
+        try (var fixture = new Fixture()) {
+            var context = fixture.context(9342L, 50);
+            var lifecycle = SchedulerTestServices.lifecycle(fixture.queue);
+            var failure = new IllegalStateException("notification failed after cancellation");
+            doAnswer(
+                            call -> {
+                                assertNull(context.snapshot().routingContext());
+                                assertNotNull(context.snapshot().route());
+                                lifecycle.cancel(context, 0L, CancelReason.CLIENT_CANCELLED);
+                                context.data()
+                                        .getFuture()
+                                        .get(2, java.util.concurrent.TimeUnit.SECONDS);
+                                SchedulerTestSupport.awaitRequestWork(
+                                        SchedulerTestSupport.runtime(lifecycle));
+                                assertNull(context.snapshot().route());
+                                assertEquals(0, lifecycle.repository.liveRequestCount());
+                                throw failure;
+                            })
+                    .when(fixture.prefill)
+                    .signal(PrefillEndpoint.Signal.INPUT);
+            assertSame(
+                    failure,
+                    assertThrows(
+                            IllegalStateException.class,
+                            () ->
+                                    ((QueuedRequestScheduler) lifecycle)
+                                            .selectAndPublish(
+                                                    context,
+                                                    () ->
+                                                            RoutingResult.success(
+                                                                    fixture.select(context)))));
+
+            verify(fixture.decode, org.mockito.Mockito.never())
+                    .release(any(), eq(DecodeResources.ReleaseReason.LOCAL_ROLLBACK));
+            verify(fixture.decode).release(any(), any());
+            assertEquals(0, fixture.decode.resourceSnapshot().reservedCount());
+            assertEquals(0L, fixture.prefill.queueDepth());
+        }
+    }
+
+    @Test
     void vitFailureReleasesOtherRolesAndOldCallbacksCannotReleaseReplacementRoute()
             throws Exception {
         try (var fixture = new Fixture()) {
@@ -53,21 +97,21 @@ class QueuedPublicationNotificationFailureTest {
                     new org.flexlb.balance.endpoint.EncoderEndpoint(
                             WorkerStatus.createDiscovered(
                                     RoleType.ENCODER, null, "127.0.0.1", 18300, 18301, null),
-                            new PlacementAvailability());
+                            new CapacityNotifier());
             fixture.vit =
                     new org.flexlb.balance.endpoint.WorkerEndpoint(
                             WorkerStatus.createDiscovered(
                                     RoleType.VIT, null, "127.0.0.1", 18400, 18401, null));
             var context = fixture.context(9403L, 80);
             var oldRoute = fixture.publish(context);
-            assertTrue(fixture.encoder.commit(oldRoute, 10));
+            assertTrue(fixture.encoder.commit(oldRoute, 10, 16L));
             var requeues = new java.util.concurrent.atomic.AtomicInteger();
             doAnswer(
                             call -> {
                                 assertNull(context.snapshot().route());
                                 assertEquals(0L, fixture.encoder.requestCount());
                                 assertEquals(0, fixture.decode.resourceSnapshot().reservedCount());
-                                assertEquals(0L, fixture.prefill.progress().queueDepth());
+                                assertEquals(0L, fixture.prefill.queueDepth());
                                 requeues.incrementAndGet();
                                 return true;
                             })
@@ -84,13 +128,13 @@ class QueuedPublicationNotificationFailureTest {
             var reported = org.mockito.ArgumentCaptor.forClass(ContextResult.RouteFailure.class);
             verify(fixture.queue).shouldRetryRouteFailure(reported.capture());
             assertSame(fixture.vit, reported.getValue().failedEndpoint());
-            assertEquals(RoleType.VIT, reported.getValue().failedRole());
+            assertEquals(RoleType.VIT, reported.getValue().failedEndpoint().getStatus().getRole());
             fixture.vit =
                     new org.flexlb.balance.endpoint.WorkerEndpoint(
                             WorkerStatus.createDiscovered(
                                     RoleType.VIT, null, "127.0.0.1", 18400, 18401, null));
             var replacement = fixture.publish(context);
-            assertTrue(fixture.encoder.commit(replacement, 10));
+            assertTrue(fixture.encoder.commit(replacement, 10, 16L));
             lifecycle.onEndpointRetired(
                     context,
                     new ContextResult.EndpointRetirement(
@@ -108,7 +152,7 @@ class QueuedPublicationNotificationFailureTest {
             assertSame(replacement, context.snapshot().route());
             assertTrue(fixture.decode.ownership(replacement.decodeReservation()).owned());
             assertEquals(1L, fixture.encoder.requestCount());
-            assertEquals(1L, fixture.prefill.progress().queueDepth());
+            assertEquals(1L, fixture.prefill.queueDepth());
             assertFalse(context.data().getFuture().isDone());
             assertEquals(1, requeues.get());
         }
@@ -133,8 +177,8 @@ class QueuedPublicationNotificationFailureTest {
                             call -> {
                                 assertSame(context, call.getArgument(0));
                                 assertNull(context.snapshot().route());
-                                assertNull(context.snapshot().placement());
-                                assertEquals(0L, fixture.prefill.progress().queueDepth());
+                                assertNull(context.snapshot().routingContext());
+                                assertEquals(0L, fixture.prefill.queueDepth());
                                 assertEquals(
                                         0L,
                                         fixture.prefill.admissionSummary(0, 0).occupiedRequests());
@@ -155,7 +199,7 @@ class QueuedPublicationNotificationFailureTest {
             else {
                 failed.getStatus().markRemovedFromDiscovery();
                 fixture.queue.onEndpointChanged(failed);
-                fixture.queue.schedule();
+                fixture.queue.start();
                 RequestProtocolTestSupport.awaitCondition(() -> requeues.get() == 1);
             }
             assertEquals(1, requeues.get());
@@ -186,7 +230,7 @@ class QueuedPublicationNotificationFailureTest {
                                             ContextResult.RouteFailureReason.ENDPOINT_UNAVAILABLE,
                                             "Worker unavailable"));
             verify(fixture.queue, never()).enqueue(any());
-            assertEquals(0L, fixture.prefill.progress().queueDepth());
+            assertEquals(0L, fixture.prefill.queueDepth());
             assertFalse(
                     context.data()
                             .getFuture()
@@ -228,7 +272,7 @@ class QueuedPublicationNotificationFailureTest {
                                 .owned());
             }
             verify(fixture.reporter, never())
-                    .reportVictim(anyInt(), anyInt(), anyString(), anyString());
+                    .reportPreemptedRequest(anyInt(), anyInt(), anyString(), anyString());
             assertEquals(3, fixture.decode.resourceSnapshot().queuedCount());
             assertEquals(0, fixture.decode.resourceSnapshot().activeDispatchPermits());
         }
@@ -264,7 +308,7 @@ class QueuedPublicationNotificationFailureTest {
                         List.of(oldRoute), fixture.prefill.captureQueue(Integer.MAX_VALUE).items());
                 assertTrue(fixture.decode.ownership(oldRoute.decodeReservation()).owned());
             } finally {
-                AbstractRequestScheduler.finishPlacement(handle);
+                AbstractRequestScheduler.finishRouting(handle);
                 fixture.physicalFailure = null;
             }
         }
@@ -295,7 +339,7 @@ class QueuedPublicationNotificationFailureTest {
                 assertTrue(fixture.decode.ownership(route.decodeReservation()).owned());
                 assertEquals(List.of(route), fixture.prefill.captureQueue(2).items());
             } finally {
-                AbstractRequestScheduler.finishPlacement(admission);
+                AbstractRequestScheduler.finishRouting(admission);
             }
             lifecycle.cancel(context, 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(
@@ -332,7 +376,7 @@ class QueuedPublicationNotificationFailureTest {
         Fixture(int limit) {
             SchedulingTestConfig.useNonBatchDispatcher(config)
                     .setMaxInflightPerPrefillWorker(limit);
-            SchedulingTestConfig.allowVictim(config, VictimStage.PREFILL_QUEUED);
+            SchedulingTestConfig.allowVictim(config, PreemptionStage.PREFILL_QUEUED);
             SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(60_000L);
             config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(10L);
             var service = mock(ConfigService.class);
@@ -382,7 +426,7 @@ class QueuedPublicationNotificationFailureTest {
                                 return null;
                             })
                     .when(reporter)
-                    .reportVictim(anyInt(), anyInt(), anyString(), anyString());
+                    .reportPreemptedRequest(anyInt(), anyInt(), anyString(), anyString());
             doAnswer(
                             call -> {
                                 var exact =
@@ -455,13 +499,11 @@ class QueuedPublicationNotificationFailureTest {
                 assertNotNull(handle);
                 var publication = SchedulerTestSupport.enqueueRoute(queue, plan);
                 assertEquals(
-                        PlacementResult.Status.SUCCESS,
-                        publication.status(),
-                        publication::toString);
+                        RoutingResult.Status.SUCCESS, publication.status(), publication::toString);
                 return publication.value();
             } finally {
                 if (handle != null) {
-                    AbstractRequestScheduler.finishPlacement(handle);
+                    AbstractRequestScheduler.finishRouting(handle);
                 }
             }
         }

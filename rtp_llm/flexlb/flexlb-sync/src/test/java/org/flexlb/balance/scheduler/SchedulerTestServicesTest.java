@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.preemption.DecodePreemption;
 import org.flexlb.balance.scheduler.ResponseCompletionExecutor.Registration;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
@@ -84,15 +84,17 @@ class SchedulerTestServicesTest {
                         .execute(
                                 context,
                                 () -> {
-                                    try (var accepted =
-                                            f.runtime.tasks.registerRequestWork(context)) {
-                                        accepted.submitClose(
+                                    {
+                                        SchedulerTestSupport.submitClose(
+                                                f.runtime.tasks,
+                                                context,
                                                 () -> {
                                                     entered.countDown();
                                                     RequestProtocolTestSupport.await(release);
                                                 },
                                                 false,
-                                                null);
+                                                null,
+                                                false);
                                     }
                                     sourceReturned.complete(null);
                                 });
@@ -133,19 +135,14 @@ class SchedulerTestServicesTest {
         } finally {
             org.springframework.test.util.ReflectionTestUtils.setField(
                     f.runtime.tasks(), "requestWorkers", workers);
-            assertSame(
-                    error,
-                    assertThrows(
-                            AssertionError.class,
-                            () ->
-                                    f.runtime.shutdown(
-                                            ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
+            assertDoesNotThrow(
+                    () -> f.runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO));
         }
     }
 
     @Test
     @org.junit.jupiter.api.Timeout(15)
-    void externalFutureCancellationRemainsSynchronousAndItsSourceBlocksWorkClose()
+    void externalFutureCancellationRemainsSynchronousAndBlocksResponseExecutorClose()
             throws Exception {
         try (var f = new Fixture(false, false)) {
             var scheduler =
@@ -172,7 +169,8 @@ class SchedulerTestServicesTest {
                                     cancelled.completeExceptionally(failure);
                                 }
                             });
-            var closer = new Thread(() -> SchedulerTestSupport.closeRequestWork(f.runtime));
+            var closer =
+                    new Thread(() -> SchedulerTestSupport.responseCompletions(f.runtime).close());
             try {
                 source.start();
                 assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS));
@@ -185,7 +183,8 @@ class SchedulerTestServicesTest {
                 closer.start();
                 RequestProtocolTestSupport.awaitCondition(
                         () -> closer.getState() == Thread.State.WAITING);
-                assertTrue(closer.isAlive(), "drain includes the registered cancellation source");
+                assertTrue(
+                        closer.isAlive(), "response executor waits for the synchronous callback");
             } finally {
                 release.countDown();
                 source.join(5_000);
@@ -669,10 +668,16 @@ class SchedulerTestServicesTest {
             try {
                 synchronized (f.runtime) {
                     if (responseCallback) {
-                        var response = new java.util.concurrent.CompletableFuture<Void>();
+                        var response =
+                                new ResponseCompletionExecutor.RequestFuture(
+                                        (kind, value, failure) -> false);
                         response.thenRun(reenterShutdown);
-                        new Registration(f.runtime.responseCompletions(), context)
-                                .submit(() -> response.complete(null));
+                        new Registration(
+                                        f.runtime.responseCompletions(),
+                                        context,
+                                        response,
+                                        () -> true)
+                                .submit(() -> response.completeOwned(null));
                     } else {
                         f.runtime.tasks().execute(context, reenterShutdown);
                     }
@@ -686,6 +691,9 @@ class SchedulerTestServicesTest {
         }
     }
 
+    /**
+     * Assembles the shared scheduler test runtime and closes it after each scenario.
+     */
     private static final class Fixture implements AutoCloseable {
         final FlexlbConfig config = SchedulingTestConfig.newConfig();
         final EndpointRegistry endpoints = mock(EndpointRegistry.class);
@@ -732,7 +740,7 @@ class SchedulerTestServicesTest {
                             config,
                             mock(RequestRouteSelector.class),
                             mock(DecodePreemption.class),
-                            new PlacementAvailability(),
+                            new CapacityNotifier(),
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
                             new OrderedRequestQueue(config.isPriorityOrdering())));
         }

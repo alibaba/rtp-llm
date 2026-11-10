@@ -3,7 +3,6 @@ package org.flexlb.dao.route;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.discovery.ServiceDiscoveryType;
 import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -198,36 +197,5 @@ class ServiceRouteTest {
         decodeEndpoint.setPath("/");
         decodeEndpoint.setGroup("ea119_PPU_ZW810E_16TP_decode64");
         Assertions.assertEquals(decodeEndpoint, roleEndpoint.getDecodeEndpoint());
-    }
-
-    private void assertServiceRoute(ServiceRoute serviceRoute) {
-        Assertions.assertEquals(1, serviceRoute.getRoleEndpoints().size());
-        Assertions.assertEquals(
-                "ea119_PPU_ZW810E_16TP_decode64",
-                serviceRoute.getRoleEndpoints().getFirst().getGroup());
-        Assertions.assertEquals(
-                vipServerEndpoint("com.aicheng.whale.pre.deepseek_dp_tp_test"),
-                serviceRoute.getRoleEndpoints().getFirst().getPrefillEndpoint());
-        Assertions.assertEquals(
-                vipServerEndpoint("com.aicheng.whale.pre.test_pd_gang2.decode"),
-                serviceRoute.getRoleEndpoints().getFirst().getDecodeEndpoint());
-        Assertions.assertEquals(
-                "ea119_PPU_ZW810E_16TP_decode64",
-                serviceRoute.getRoleEndpoints().getFirst().getPrefillEndpoint().getGroup());
-        Assertions.assertEquals(
-                "ea119_PPU_ZW810E_16TP_decode64",
-                serviceRoute.getRoleEndpoints().getFirst().getDecodeEndpoint().getGroup());
-    }
-
-    private Endpoint vipServerEndpoint(String address) {
-        DiscoveryConfig discovery = new DiscoveryConfig();
-        discovery.setType(ServiceDiscoveryType.VIPSERVER);
-        Endpoint endpoint = new Endpoint();
-        endpoint.setAddress(address);
-        endpoint.setProtocol("http");
-        endpoint.setPath("/");
-        endpoint.setDiscovery(discovery);
-        endpoint.setGroup("ea119_PPU_ZW810E_16TP_decode64");
-        return endpoint;
     }
 }

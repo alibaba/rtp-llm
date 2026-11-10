@@ -1,6 +1,7 @@
 package org.flexlb.mock.grpc;
 
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.mock.FlexLBMockTestBase;
@@ -59,7 +60,8 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
 
         Response expired = future.get(5, TimeUnit.SECONDS);
         assertFalse(expired.isSuccess());
-        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), expired.getCode());
+        assertEquals(StrategyErrorType.QUEUE_TIMEOUT.getErrorCode(), expired.getCode());
+        assertEquals(AdmissionRejectReason.UNSPECIFIED, expired.getAdmissionRejectReason());
         assertTrue(expired.getErrorMessage().contains("REQUEST_INACTIVE"));
         org.flexlb.mock.InflightAssertions.assertResourcesReleasedWithin(
                 getPrefillEndpoint(), getDecodeEndpoint(), 3_000L);

@@ -1,6 +1,6 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.projection.RequestTimeEstimation;
@@ -15,9 +15,9 @@ import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PreemptionConfig;
+import org.flexlb.config.PreemptionStage;
 import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.config.RoutingConfig;
-import org.flexlb.config.VictimStage;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.TaskInfo;
@@ -209,7 +209,7 @@ class CostBasedPrefillSelectionMetricTest {
                         RoleType.PREFILL,
                         null);
 
-        assertEquals(PlacementResult.Status.BLOCKED, result.status());
+        assertEquals(RoutingResult.Status.BLOCKED, result.status());
         assertReleased(workspace);
     }
 
@@ -501,7 +501,7 @@ class CostBasedPrefillSelectionMetricTest {
             int incomingPriority,
             int requestLimit,
             boolean preemptQueued,
-            PlacementResult.Status expectedStatus) {
+            RoutingResult.Status expectedStatus) {
         registry.close();
         config.queueScheduler().getDecision().setMaxRequests(2);
         config.getDispatcher().setMaxInflightPerPrefillWorker(requestLimit);
@@ -510,7 +510,7 @@ class CostBasedPrefillSelectionMetricTest {
         ordering.setPreemption(null);
         if (preemptQueued) {
             PreemptionConfig preemption = new PreemptionConfig();
-            preemption.setAllowedVictimStages(Set.of(VictimStage.PREFILL_QUEUED));
+            preemption.setAllowedPreemptionStages(Set.of(PreemptionStage.PREFILL_QUEUED));
             ordering.setPreemption(preemption);
         }
         config.queueScheduler().setOrdering(ordering);
@@ -558,7 +558,7 @@ class CostBasedPrefillSelectionMetricTest {
                         SchedulingMetadata.explicit(
                                 incomingPriority, System.currentTimeMillis() + 120_000L));
 
-        PlacementResult<Selection, org.flexlb.balance.scheduler.PlacementKey> result =
+        RoutingResult<Selection, org.flexlb.balance.scheduler.CapacityKey> result =
                 StrategyTestSupport.select(
                         strategy,
                         context.data().getRequest(),
@@ -568,7 +568,7 @@ class CostBasedPrefillSelectionMetricTest {
 
         assertEquals(expectedStatus, result.status());
         verify(cache).findMatchingEngines(any());
-        if (result.status() == PlacementResult.Status.SUCCESS) {
+        if (result.status() == RoutingResult.Status.SUCCESS) {
             try (Selection selected = result.value()) {
                 assertEquals("10.0.0.1", selected.prefill().getServerIp());
                 assertTrue(selected.prefillWorkMs() > 0L);
@@ -739,13 +739,13 @@ class CostBasedPrefillSelectionMetricTest {
                         RoleType.PREFILL,
                         null);
         if (direct) {
-            assertEquals(PlacementResult.Status.BLOCKED, result.status());
+            assertEquals(RoutingResult.Status.BLOCKED, result.status());
             assertEquals(
-                    org.flexlb.balance.scheduler.PlacementKey.exact(
+                    org.flexlb.balance.scheduler.CapacityKey.exact(
                             RoleType.PREFILL, null, "10.0.0.2:8080"),
                     result.blocker());
         } else {
-            assertEquals(PlacementResult.Status.SUCCESS, result.status());
+            assertEquals(RoutingResult.Status.SUCCESS, result.status());
             try (Selection selected = result.value()) {
                 assertEquals("10.0.0.2", selected.prefill().getServerIp());
             }
@@ -895,7 +895,7 @@ class CostBasedPrefillSelectionMetricTest {
                         context.data().getSchedulingMetadata(),
                         RoleType.PREFILL,
                         null);
-        assertEquals(PlacementResult.Status.SUCCESS, result.status());
+        assertEquals(RoutingResult.Status.SUCCESS, result.status());
         try (Selection selected = result.value()) {
             assertEquals("10.0.0.1", selected.prefill().getServerIp());
         }
@@ -926,23 +926,26 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
-    void saturatedAffinityTiesExcludeUnknownWorkWithTheSameRank() {
+    void saturatedAffinityTiesRejectUnavailableProjectionBeforeRanking() {
         configureFocusedAffinity();
         PrefillCandidateSet candidates =
                 candidates(
                         new long[] {Long.MAX_VALUE - 5L, Long.MAX_VALUE}, new long[] {100L, 600L});
-        candidates.addCandidate(
-                "unknown:8080",
-                null,
-                new Candidate(
-                        RequestTimeEstimation.State.UNMODELED_ENGINE_WORK,
-                        RequestTimeEstimation.UNKNOWN,
-                        1L,
-                        RequestTimeEstimation.InitialHeadDisposition.NONE,
-                        "",
-                        600L,
-                        600L),
-                3L);
+        org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        candidates.addCandidate(
+                                "unknown:8080",
+                                null,
+                                new Candidate(
+                                        RequestTimeEstimation.State.UNAVAILABLE,
+                                        RequestTimeEstimation.UNKNOWN,
+                                        1L,
+                                        RequestTimeEstimation.InitialHeadDisposition.NONE,
+                                        "",
+                                        600L,
+                                        600L),
+                                3L));
 
         for (int i = 0; i < 4; i++) {
             assertEquals(
@@ -955,24 +958,29 @@ class CostBasedPrefillSelectionMetricTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void knownSaturatedTtftWinsOverUnknownRegardlessOfCaptureOrder(boolean unknownFirst) {
+    void unavailableProjectionCannotEnterSaturatedRankingInEitherCaptureOrder(
+            boolean unknownFirst) {
         var candidates = new PrefillCandidateSet();
         for (int i = 0; i < 2; i++) {
             boolean unknown = (i == 0) == unknownFirst;
-            candidates.addCandidate(
-                    unknown ? "unknown:8080" : "known:8080",
-                    null,
+            var candidate =
                     new Candidate(
                             unknown
-                                    ? RequestTimeEstimation.State.UNMODELED_ENGINE_WORK
+                                    ? RequestTimeEstimation.State.UNAVAILABLE
                                     : RequestTimeEstimation.State.MODELED,
                             unknown ? RequestTimeEstimation.UNKNOWN : Long.MAX_VALUE,
                             1L,
                             RequestTimeEstimation.InitialHeadDisposition.NONE,
                             "",
                             0L,
-                            0L),
-                    i + 1L);
+                            0L);
+            if (unknown) {
+                org.junit.jupiter.api.Assertions.assertThrows(
+                        IllegalArgumentException.class,
+                        () -> candidates.addCandidate("unknown:8080", null, candidate, 1L));
+            } else {
+                candidates.addCandidate("known:8080", null, candidate, i + 1L);
+            }
         }
         for (int i = 0; i < 4; i++) {
             int selected =
@@ -1000,19 +1008,18 @@ class CostBasedPrefillSelectionMetricTest {
         for (int index = 0; index < workspace.capturedSources.length; index++) {
             assertNull(workspace.capturedSources[index]);
             assertNull(workspace.endpointAddresses[index]);
-            assertNull(workspace.admissionBlocks[index]);
         }
     }
 
     private Selection select() {
-        PlacementResult<Selection, org.flexlb.balance.scheduler.PlacementKey> result =
+        RoutingResult<Selection, org.flexlb.balance.scheduler.CapacityKey> result =
                 StrategyTestSupport.select(
                         strategy,
                         context.data().getRequest(),
                         context.data().getSchedulingMetadata(),
                         RoleType.PREFILL,
                         null);
-        assertEquals(PlacementResult.Status.SUCCESS, result.status());
+        assertEquals(RoutingResult.Status.SUCCESS, result.status());
         return result.value();
     }
 

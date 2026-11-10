@@ -26,7 +26,7 @@ import static org.flexlb.balance.scheduler.ContextResult.EndKind;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.PreemptionReport;
 import static org.flexlb.balance.scheduler.ContextResult.PreparationFailure;
-import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
+import static org.flexlb.balance.scheduler.ContextResult.RoutingCompletion;
 import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEvent;
 import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEventType;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -56,7 +56,7 @@ class RequestCancellationFailureOrderingTest {
                 100_000L,
                 10_000L,
                 org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
-        var scope = RequestCleanupPassTest.requireValue(context.beginPlacement(null));
+        var scope = RequestCleanupPassTest.requireValue(context.beginRouteSelection());
         var route = RequestCleanupPassTest.route(context, 9501L);
         org.junit.jupiter.api.Assertions.assertTrue(context.publishRoute(scope, route));
         if (cancelFirst) {
@@ -65,7 +65,7 @@ class RequestCancellationFailureOrderingTest {
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.recordDeliveryResult(
+                        observedRequest.recordPreparationFailure(
                                 new PreparationFailure(
                                         null, route, "late delivery failure", 1002L)));
         var failure =
@@ -81,15 +81,15 @@ class RequestCancellationFailureOrderingTest {
                         false);
         var end = context.beginClose(failure, 1003L);
         if (cancelFirst) {
-            assertNotNull(end.placement());
+            assertNotNull(end.routingContext());
             assertEquals(Phase.OPEN, context.snapshot().phase());
             assertNull(context.snapshot().outcome());
             assertEquals(EndKind.FRONTEND, context.snapshot().pendingEnd().kind());
             org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                     context,
                     observedRequest ->
-                            observedRequest.completePlacement(
-                                    scope, PublicationResult.PUBLISHED, 1004L));
+                            observedRequest.completeRouting(
+                                    scope, RoutingCompletion.FINISHED, 1004L));
             RequestCleanupPassTest.ended(
                     context.beginClose(context.snapshot().pendingEnd(), 1005L));
             assertFirstCause(context);
@@ -97,7 +97,7 @@ class RequestCancellationFailureOrderingTest {
             RequestCleanupPassTest.ended(end);
             assertEquals(RequestState.Phase.FAILED, context.snapshot().outcome().phase());
             assertNotNull(
-                    context.snapshot().placement(),
+                    context.snapshot().routingContext(),
                     "definite failure still publishes independently of physical placement cleanup");
         }
     }
@@ -119,7 +119,7 @@ class RequestCancellationFailureOrderingTest {
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.recordDeliveryResult(
+                        observedRequest.recordPreparationFailure(
                                 new PreparationFailure(
                                         null, route, "late delivery failure", 1002L)));
         var failure =
@@ -207,13 +207,13 @@ class RequestCancellationFailureOrderingTest {
                 assertNotNull(admission);
                 try {
                     assertEquals(
-                            org.flexlb.balance.PlacementResult.Status.SUCCESS,
+                            org.flexlb.balance.RoutingResult.Status.SUCCESS,
                             RequestProtocolTestSupport.commitRoute(
                                     owner,
                                     route,
                                     RequestProtocolTestSupport.publication(() -> true)));
                     owner.cancel(context, 0L, CancelReason.CLIENT_CANCELLED);
-                    owner.onDeliveryResult(
+                    owner.recordPreparationFailure(
                             new PreparationFailure(
                                     null, route, "late failure", System.currentTimeMillis()));
                     assertEquals(
@@ -235,7 +235,7 @@ class RequestCancellationFailureOrderingTest {
                                     null,
                                     inactivity.atMs() + TimeUnit.HOURS.toMillis(1L)));
                     assertTrue(context.snapshot().close().expired());
-                    assertNotNull(context.snapshot().placement());
+                    assertNotNull(context.snapshot().routingContext());
                     assertEquals(EndKind.FRONTEND, context.snapshot().pendingEnd().kind());
                     assertEquals(
                             CancelReason.CLIENT_CANCELLED,
@@ -244,7 +244,7 @@ class RequestCancellationFailureOrderingTest {
                     assertEquals(0, publications.get());
                     assertFalse(future.isDone());
                 } finally {
-                    AbstractRequestScheduler.finishPlacement(admission);
+                    AbstractRequestScheduler.finishRouting(admission);
                 }
             }
             assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());

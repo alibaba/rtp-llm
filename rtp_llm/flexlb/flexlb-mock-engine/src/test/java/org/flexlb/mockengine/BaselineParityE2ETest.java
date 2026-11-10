@@ -92,7 +92,7 @@ class BaselineParityE2ETest {
                     "engine arrivals must contain every measured request and no unexpected request");
 
             // RequestSchedulerTestRuntime supplies incrementing batch IDs. This
-            // fixture has one Prefill and one PrefillQueueScheduler, so DeliveryDispatcher
+            // fixture has one Prefill and one PrefillQueueScheduler, so DeliveryCoordinator
             // assigns them in decision order before committing and submitting to
             // the asynchronous dispatcher. Preserve request order within each batch;
             // ordering RPC batches by ID removes only dispatch-thread arrival races.
@@ -115,7 +115,7 @@ class BaselineParityE2ETest {
 
             // 无任何抢占痕迹
             verify(h.requestReporter, never())
-                    .reportVictim(anyInt(), anyInt(), anyString(), anyString());
+                    .reportPreemptedRequest(anyInt(), anyInt(), anyString(), anyString());
 
             // 对照数据：三档平均调度延迟应该同量级（仅输出，不做脆断言）
             Map<Integer, Double> avgLatencyMs = new HashMap<>();

@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.preemption.DecodePreemption;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -81,23 +81,22 @@ class PdfusionSchedulingTest {
         DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
         RequestSchedulerReporter requestReporter = mock(RequestSchedulerReporter.class);
         var repository = new RequestRepository();
-        PlacementAvailability availability = new PlacementAvailability();
+        CapacityNotifier availability = new CapacityNotifier();
         var grpc = mock(EngineGrpcClient.class);
         when(grpc.batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenAnswer(
                         call ->
                                 java.util.concurrent.CompletableFuture.completedFuture(
                                         LinearDeliveryFixture.ack(call.getArgument(2))));
-        DeliveryDispatcher delivery =
-                new DeliveryDispatcher(
+        DeliveryCoordinator delivery =
+                new DeliveryCoordinator(
+                        new org.flexlb.balance.scheduler.RequestRepository(),
                         grpc,
                         service,
                         reporter,
-                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                        new org.flexlb.balance.scheduler.SchedulerConfiguration()
                                 .decodeAdmissionCapacity(service),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+                        org.mockito.Mockito.mock(DeliveryExecution.class));
         EndpointRegistry endpoints =
                 new EndpointRegistry(
                         service,
@@ -107,9 +106,7 @@ class PdfusionSchedulingTest {
                         availability,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                 service.loadBalanceConfig()),
-                        order ->
-                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
-                                        16, order));
+                        () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
         WorkerStatus worker =
                 WorkerStatus.createDiscovered(
                         RoleType.PDFUSION, "g1", "127.0.0.1", 8080, 8081, "test");

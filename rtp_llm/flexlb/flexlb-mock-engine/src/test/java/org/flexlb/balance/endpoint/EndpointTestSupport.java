@@ -1,9 +1,12 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.CapacityNotifier;
 import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.dao.master.WorkerStatus;
 
+/**
+ * Creates test Decode endpoints and exposes their package-scoped state lock.
+ */
 public final class EndpointTestSupport {
     private EndpointTestSupport() {}
 
@@ -12,6 +15,6 @@ public final class EndpointTestSupport {
     }
 
     public static DecodeEndpoint decode(WorkerStatus status, RequestRepository repository) {
-        return new DecodeEndpoint(status, repository, new PlacementAvailability());
+        return new DecodeEndpoint(status, repository, new CapacityNotifier());
     }
 }

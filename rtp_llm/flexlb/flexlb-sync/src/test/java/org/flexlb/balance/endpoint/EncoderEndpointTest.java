@@ -1,8 +1,8 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.CapacityNotifier;
 import org.flexlb.balance.scheduler.ContextResult;
-import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestData;
 import org.flexlb.balance.scheduler.RouteResult;
@@ -29,7 +29,7 @@ import static org.mockito.Mockito.when;
  */
 class EncoderEndpointTest {
     private final AbstractRequestScheduler lifecycle = mock(AbstractRequestScheduler.class);
-    private final PlacementAvailability availability = mock(PlacementAvailability.class);
+    private final CapacityNotifier availability = mock(CapacityNotifier.class);
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
@@ -37,13 +37,13 @@ class EncoderEndpointTest {
         var endpoint = endpoint();
         var prepared = route("prepared", 20);
         try {
-            assertTrue(endpoint.commit(prepared, 10));
+            assertTrue(endpoint.commit(prepared, 10, 20L));
             if (retired) endpoint.beginRetirement();
             else endpoint.getStatus().markRemovedFromDiscovery();
             assertEquals(retired, endpoint.isRetired());
             assertEquals(retired, endpoint.getStatus().isAvailableForScheduling());
             assertFalse(endpoint.acceptsNewRequests());
-            assertFalse(endpoint.commit(route("late", 20), 10));
+            assertFalse(endpoint.commit(route("late", 20), 10, 20L));
             endpoint.release(prepared);
             assertEquals(0L, endpoint.requestCount());
         } finally {
@@ -79,8 +79,8 @@ class EncoderEndpointTest {
                 .when(request)
                 .getSeqLen();
         try {
-            assertTrue(endpoint.commit(route("running", 10), 4));
-            assertTrue(endpoint.commit(pending, 4));
+            assertTrue(endpoint.commit(route("running", 10), 4, 10L));
+            assertTrue(endpoint.commit(pending, 4, 20L));
             assertEquals(120L, endpoint.uncachedTokens());
             endpoint.release(pending);
             assertEquals(100L, endpoint.uncachedTokens());
@@ -108,9 +108,9 @@ class EncoderEndpointTest {
         runWithStateLock(
                 endpoint.stateLock(),
                 () -> {
-                    assertTrue(endpoint.commit(route, 2));
+                    assertTrue(endpoint.commit(route, 2, 10L));
                     endpoint.close();
-                    assertFalse(endpoint.commit(route("late", 10), 2));
+                    assertFalse(endpoint.commit(route("late", 10), 2, 10L));
                 });
         endpoint.awaitRetirement(2000L);
         assertEquals(0, endpoint.requestCount());
@@ -123,15 +123,15 @@ class EncoderEndpointTest {
         {
             var selectedEndpoint = endpoint;
 
-            assertTrue(endpoint.commit(route("request-1", 10), 2));
-            assertTrue(endpoint.commit(route("request-2", 20), 2));
-            assertFalse(endpoint.commit(route("request-1", 10), 2));
+            assertTrue(endpoint.commit(route("request-1", 10), 2, 10L));
+            assertTrue(endpoint.commit(route("request-2", 20), 2, 20L));
+            assertFalse(endpoint.commit(route("request-1", 10), 2, 10L));
         }
         assertEquals(2, endpoint.requestCount());
         endpoint.close();
         endpoint.awaitRetirement(2000L);
         assertEquals(0, endpoint.requestCount());
-        verify(availability).changed(endpoint);
+        verify(availability).notifyChanged(endpoint);
         verify(lifecycle, times(2)).onEndpointRetired(any(), any());
     }
 
@@ -143,13 +143,16 @@ class EncoderEndpointTest {
         try {
             var selectedEndpoint = endpoint;
 
-            assertTrue(endpoint.commit(original, 1));
+            assertTrue(endpoint.commit(original, 1, 10L));
             endpoint.release(original);
-            assertTrue(endpoint.commit(replacement, 1));
+            assertTrue(endpoint.commit(replacement, 1, 20L));
             endpoint.release(original);
+            verify(availability, times(1)).notifyChanged(endpoint);
             assertEquals(1, endpoint.requestCount());
             assertEquals(20, endpoint.uncachedTokens());
             endpoint.release(replacement);
+            endpoint.release(replacement);
+            verify(availability, times(2)).notifyChanged(endpoint);
         } finally {
             endpoint.close();
             endpoint.awaitRetirement(2000L);

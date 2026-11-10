@@ -141,17 +141,19 @@ class RequestPreemptionRegressionTest {
         try (var finished = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(
-                    org.flexlb.balance.PlacementResult.Status.SUCCESS,
+                    org.flexlb.balance.RoutingResult.Status.SUCCESS,
                     RequestProtocolTestSupport.commitRoute(
                             scheduler, route, RequestProtocolTestSupport.publication(() -> true)));
         }
         var permit = decode.acquireDispatchPermit(reservation, CAPACITY).value();
         assertNotNull(permit);
         delivery =
-                scheduler.commitDelivery(
-                        new org.flexlb.balance.scheduler.Delivery.Member(route, permit),
-                        Delivery.SendMode.BATCH_ENQUEUE,
-                        BATCH_ID);
+                org.flexlb.balance.scheduler.DeliveryTestSupport.transport(scheduler.dispatcher)
+                        .commit(
+                                new org.flexlb.balance.scheduler.Delivery.Member(route, permit),
+                                Delivery.SendMode.BATCH_ENQUEUE,
+                                BATCH_ID,
+                                null);
         assertNotNull(delivery);
         assertEquals(
                 ContextResult.SendState.SENDING, delivery.owner().snapshot().delivery().send());
@@ -229,7 +231,7 @@ class RequestPreemptionRegressionTest {
                                 "unproven remote ownership stays registered"),
                 () ->
                         assertTrue(
-                                victimClaimed(),
+                                preemptionRegistered(),
                                 "ordinary cancellation cannot fabricate victim release proof"),
                 () -> assertNotEquals(Phase.CLOSED, context.snapshot().phase()),
                 () -> assertFalse(delivery.completion().toCompletableFuture().isDone()));
@@ -248,10 +250,11 @@ class RequestPreemptionRegressionTest {
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         scheduler, preemption, PreemptionCancelPhase.NOT_FOUND_STALE));
-        boolean claimedAfterNotFound = victimClaimed();
+        boolean claimedAfterNotFound = preemptionRegistered();
         reportDecode(TaskPhase.RECEIVED, false);
         var snapshot = decode.resourceSnapshot();
-        // Exclude the incoming request's separate provisional charge from the victim's conservative
+        // Exclude the incoming request's separate provisional charge from the request selected for
+        // preemption's conservative
         // hold.
         long incomingKv = snapshot.requests().get(String.valueOf(INCOMING_ID)).expectedKvTokens();
         long victimKv = snapshot.routing().realKvUsed() - incomingKv;
@@ -264,7 +267,7 @@ class RequestPreemptionRegressionTest {
                                 "NOT_FOUND alone must preserve the exact victim claim"),
                 () ->
                         assertTrue(
-                                victimClaimed(),
+                                preemptionRegistered(),
                                 "RECEIVED without new allocation proof must preserve the victim claim"),
                 () ->
                         assertEquals(
@@ -284,13 +287,13 @@ class RequestPreemptionRegressionTest {
                 RequestProtocolTestSupport.preemptionPhase(
                         scheduler, preemption, PreemptionCancelPhase.NOT_FOUND_STALE));
         assertTrue(
-                victimClaimed(),
+                preemptionRegistered(),
                 "without earlier acceptance, NOT_FOUND must wait for new evidence");
 
         reportDecode(TaskPhase.KV_ALLOCATED, false);
 
         assertFalse(
-                victimClaimed(),
+                preemptionRegistered(),
                 "new allocation restores real Worker accounting and resolves the claim");
         assertNull(context.snapshot().preemption());
         assertEquals(
@@ -310,7 +313,10 @@ class RequestPreemptionRegressionTest {
                         KV_TOKENS,
                         70,
                         CAPACITY));
-        var registration = scheduler.tryClaim(route.decodeReservation(), ATTEMPT).orElseThrow();
+        var registration =
+                SchedulerTestSupport.routePreemption(scheduler)
+                        .tryRegisterPreemption(route.decodeReservation(), ATTEMPT)
+                        .orElseThrow();
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         scheduler, registration, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -321,13 +327,13 @@ class RequestPreemptionRegressionTest {
                                         route.decodeReservation()))
                         .status()
                         .applied());
-        assertTrue(victimClaimed());
+        assertTrue(preemptionRegistered());
         return registration;
     }
 
-    private boolean victimClaimed() {
-        var victim = decode.resourceSnapshot().requests().get(String.valueOf(REQUEST_ID));
-        return victim != null && victim.claimedForPreemption();
+    private boolean preemptionRegistered() {
+        var requestToPreempt = decode.resourceSnapshot().requests().get(String.valueOf(REQUEST_ID));
+        return requestToPreempt != null && requestToPreempt.claimedForPreemption();
     }
 
     private void reportDecode(TaskPhase phase, boolean terminal) {

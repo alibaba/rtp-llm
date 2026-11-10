@@ -152,6 +152,7 @@ class ExceptionType(IntEnum):
     WORKER_EXECUTION_FAILED = 8513, ExceptionCategory.CAPACITY
     BATCH_TOKEN_CAPACITY_EXCEEDED = 8514, ExceptionCategory.CAPACITY
     SCHEDULER_PLAN_CONFLICT = 8515, ExceptionCategory.CAPACITY
+    SCHEDULER_UNAVAILABLE = 8518, ExceptionCategory.CAPACITY
 
     # multimodal error
     MM_LONG_PROMPT_ERROR = 901, ExceptionCategory.TOO_LONG

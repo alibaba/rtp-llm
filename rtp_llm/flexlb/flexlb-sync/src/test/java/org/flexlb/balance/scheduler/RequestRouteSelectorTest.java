@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -120,7 +120,7 @@ class RequestRouteSelectorTest {
                                 RequestProtocolTestSupport.admissionHandle(
                                         call.getArgument(0, RequestContext.class)))
                 .when(requests)
-                .claimPlacement(any(RequestContext.class));
+                .tryBeginRouteSelection(any(RequestContext.class));
         org.mockito.Mockito.doAnswer(
                         call -> {
                             var context = call.getArgument(0, RequestContext.class);
@@ -135,7 +135,7 @@ class RequestRouteSelectorTest {
                                             future,
                                             60_000L,
                                             StrategyErrorType.BATCH_SLO_EXPIRED));
-                            requests.onRequest(context);
+                            requests.scheduleRequest(context);
                             return future;
                         })
                 .when(requests)
@@ -147,7 +147,7 @@ class RequestRouteSelectorTest {
                             return handle;
                         })
                 .when(requests)
-                .placementFor(any());
+                .currentRoutingContext(any());
         org.mockito.Mockito.doAnswer(
                         call -> {
                             var claim = call.getArgument(0, Delivery.Member.class);
@@ -165,9 +165,14 @@ class RequestRouteSelectorTest {
                                     .onDeliveryResult(any(ContextResult.RouteDelivered.class));
                             return accepted;
                         })
-                .when(requests)
-                .commitDelivery(
-                        any(Delivery.Member.class), eq(Delivery.SendMode.ROUTE_DECISION), eq(0L));
+                .when(
+                        org.flexlb.balance.scheduler.DeliveryTestSupport.transport(
+                                requests.dispatcher))
+                .commit(
+                        any(Delivery.Member.class),
+                        eq(Delivery.SendMode.ROUTE_DECISION),
+                        eq(0L),
+                        org.mockito.ArgumentMatchers.isNull());
         org.mockito.Mockito.doAnswer(
                         call ->
                                 ((ResponseCompletionExecutor.RequestFuture)
@@ -185,10 +190,10 @@ class RequestRouteSelectorTest {
         RequestRouteSelector router = router();
         org.mockito.Mockito.clearInvocations(configService);
 
-        PlacementResult<RouteResult, PlacementKey> result =
+        RoutingResult<RouteResult, CapacityKey> result =
                 router.select(new RequestContext(SchedulingTestConfig.newConfig()), null);
 
-        assertEquals(PlacementResult.Status.REJECTED, result.status());
+        assertEquals(RoutingResult.Status.REJECTED, result.status());
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), result.failure().getCode());
         verify(configService, never()).loadBalanceConfig();
         verifyNoInteractions(prefillSelector, decodeSelector, vitSelector);
@@ -328,8 +333,7 @@ class RequestRouteSelectorTest {
                                 reservation));
         stubDecodePermit((DecodeEndpoint) decode.endpoint, reservation);
         org.mockito.Mockito.doReturn(
-                        new PrefillEndpoint.Registration(
-                                PlacementResult.Registration.BLOCKED, null))
+                        new PrefillEndpoint.Registration(RoutingResult.Registration.BLOCKED, null))
                 .when((PrefillEndpoint) prefill.endpoint)
                 .tryRegisterSelection(
                         any(), any(), anyLong(), org.mockito.ArgumentMatchers.anyBoolean());
@@ -528,7 +532,11 @@ class RequestRouteSelectorTest {
             assertEquals(context.data().getFuture(), returned);
             Response response = context.data().getFuture().get(2L, TimeUnit.SECONDS);
             assertEquals(8510, response.getCode());
-            assertEquals("DISPATCH_FAILED", response.getErrorMessage());
+            assertEquals(
+                    fatal
+                            ? "DISPATCH_FAILED"
+                            : "Selection or publication failed: IllegalStateException: selection failed",
+                    response.getErrorMessage());
             assertEquals(
                     RequestState.Phase.FAILED,
                     SchedulerTestSupport.repository(requests).getRequestState("10", 0L).state());
@@ -600,7 +608,7 @@ class RequestRouteSelectorTest {
                                 .build());
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(73, Long.MAX_VALUE));
         var scheduler = queueScheduler(context);
-        org.springframework.test.util.ReflectionTestUtils.setField(
+        org.flexlb.balance.scheduler.DeliveryTestSupport.setField(
                 scheduler.dispatcher, "decodeAdmissionCapacity", capacity);
         var prefill = selection(RoleType.PREFILL, 701L, "10.0.0.1", 8080, "g1");
         var selectedDecode = selection(RoleType.DECODE, 701L, "10.0.0.2", 8080, "g1");
@@ -629,11 +637,15 @@ class RequestRouteSelectorTest {
         assertEquals(
                 "2 * running_size / max_running_size + 3 * kvcache_used_ratio",
                 formula.expression());
-        when(((PrefillEndpoint) prefill.endpoint()).enqueueRoute(any(), any()))
+        when(((PrefillEndpoint) prefill.endpoint()).acceptQueuedRoute(any(), any(), any()))
                 .thenAnswer(
                         call ->
                                 RequestProtocolTestSupport.recordPrefillReservation(
-                                        call.getArgument(0)));
+                                                call.getArgument(0))
+                                        && call.<RouteResult>getArgument(0)
+                                                .ctx()
+                                                .publishRoute(
+                                                        call.getArgument(2), call.getArgument(0)));
         {
             var route =
                     selectedRoute(
@@ -643,7 +655,7 @@ class RequestRouteSelectorTest {
                             selectedDecode);
             try (var plan = RequestProtocolTestSupport.plan(context, route)) {
                 var placement = SchedulerTestSupport.enqueueRoute(scheduler, plan);
-                assertEquals(PlacementResult.Status.SUCCESS, placement.status());
+                assertEquals(RoutingResult.Status.SUCCESS, placement.status());
                 var item = placement.value();
                 assertSame(reservation, item.decodeReservation());
                 {
@@ -726,20 +738,26 @@ class RequestRouteSelectorTest {
         var route = selectedRoute(context, reservation, prefill, decode);
         var scheduler = queueScheduler(context);
         var plan = RequestProtocolTestSupport.plan(context, route);
-        when(route.prefillEndpoint().enqueueRoute(any(), any()))
+        when(route.prefillEndpoint().acceptQueuedRoute(any(), any(), any()))
                 .thenAnswer(
                         call ->
                                 RequestProtocolTestSupport.recordPrefillReservation(
-                                        call.getArgument(0)));
+                                                call.getArgument(0))
+                                        && call.<RouteResult>getArgument(0)
+                                                .ctx()
+                                                .publishRoute(
+                                                        call.getArgument(2), call.getArgument(0)));
         doThrow(cleanupFailure).when(prefill.selectedEndpoint()).close();
         assertEquals(
-                PlacementResult.Status.SUCCESS,
+                RoutingResult.Status.SUCCESS,
                 SchedulerTestSupport.enqueueRoute(scheduler, plan).status());
         verify(prefill.selectedEndpoint(), never()).close();
         verify(decode.selectedEndpoint(), never()).close();
         plan.close();
         org.junit.jupiter.api.Assertions.assertDoesNotThrow(
-                context.data().getRequestScheduler().taskPool::throwIfFailed);
+                () ->
+                        SchedulerTestServices.throwIfFailed(
+                                context.data().getRequestScheduler().taskPool));
         plan.close();
         verify(prefill.selectedEndpoint(), never()).close();
         verify(decode.selectedEndpoint(), never()).close();
@@ -855,7 +873,7 @@ class RequestRouteSelectorTest {
             assertEquals("Decode reservation belongs to another request", actual.getMessage());
             assertEquals(
                     cleanupFails ? List.of(cleanup) : List.of(), List.of(actual.getSuppressed()));
-            verify(requests, never()).placementFor(any());
+            verify(requests, never()).currentRoutingContext(any());
             verify(endpoint).release(foreign, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
             verify((PrefillEndpoint) prefill.endpoint())
                     .rollback(any(PrefillEndpoint.RequestRecord.class));
@@ -917,34 +935,36 @@ class RequestRouteSelectorTest {
                         () -> {
                             if (direct) {
                                 SchedulerTestSupport.bindOwner(context, requests);
-                                doThrow(primary).when(requests).placementFor(any());
+                                doThrow(primary).when(requests).currentRoutingContext(any());
                                 var admission = RequestProtocolTestSupport.admissionHandle(context);
                                 org.mockito.Mockito.doNothing()
                                         .when(
                                                 RequestProtocolTestSupport.placementScheduler(
                                                         admission))
-                                        .completePlacement(
+                                        .completeRouting(
                                                 org.mockito.ArgumentMatchers.same(admission),
                                                 org.mockito.ArgumentMatchers.eq(
-                                                        ContextResult.PublicationResult.FAILED),
+                                                        ContextResult.RoutingCompletion.FAILED),
                                                 any());
-                                requests.publishPlacement(routing, admission, null);
+                                ((DirectRequestScheduler) requests)
+                                        .selectAndPublish(
+                                                admission, () -> RoutingResult.success(routing));
                             } else {
                                 var queued = queueScheduler(context);
                                 doThrow(primary)
                                         .when(SchedulerTestSupport.lifecycle(queued))
-                                        .placementFor(any());
+                                        .currentRoutingContext(any());
                                 try (var plan = RequestProtocolTestSupport.plan(context, routing)) {
                                     // This selector fixture owns no Lifecycle admission counter.
-                                    var admission = context.snapshot().placement();
+                                    var admission = context.snapshot().routingContext();
                                     org.mockito.Mockito.doNothing()
                                             .when(
                                                     RequestProtocolTestSupport.placementScheduler(
                                                             admission))
-                                            .completePlacement(
+                                            .completeRouting(
                                                     org.mockito.ArgumentMatchers.same(admission),
                                                     org.mockito.ArgumentMatchers.eq(
-                                                            ContextResult.PublicationResult.FAILED),
+                                                            ContextResult.RoutingCompletion.FAILED),
                                                     any());
                                     SchedulerTestSupport.enqueueRoute(queued, plan);
                                 }
@@ -958,7 +978,7 @@ class RequestRouteSelectorTest {
                     cleanup,
                     assertThrows(
                             IllegalStateException.class,
-                            context.data().getRequestScheduler().taskPool::throwIfFailed));
+                            () -> context.data().getRequestScheduler().throwIfRequestFailed()));
         }
         verify(endpoint).release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         verify(prefill.selectedEndpoint(), never()).close();
@@ -974,11 +994,11 @@ class RequestRouteSelectorTest {
         when(endpoint.ownership(reservation)).thenReturn(DecodeResources.Ownership.WITHDRAWABLE);
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
         stubQueueSelection(
-                context, RoleType.PREFILL, "g1", PlacementResult.blocked(RoleType.PREFILL));
+                context, RoleType.PREFILL, "g1", RoutingResult.blocked(RoleType.PREFILL));
 
         var result = router().select(context, null, endpoint, reservation);
 
-        assertEquals(PlacementResult.Status.BLOCKED, result.status());
+        assertEquals(RoutingResult.Status.BLOCKED, result.status());
         verify(endpoint).release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         verifyNoInteractions(decodeSelector);
     }
@@ -993,13 +1013,13 @@ class RequestRouteSelectorTest {
         when(modelMeta.requiredRoles()).thenReturn(List.of(role));
         RequestRouteSelector router = router();
         RequestContext context = context(11L);
-        stubQueueSelection(context, role, null, PlacementResult.blocked(role));
+        stubQueueSelection(context, role, null, RoutingResult.blocked(role));
 
-        PlacementResult<RouteResult, PlacementKey> blocked =
+        RoutingResult<RouteResult, CapacityKey> blocked =
                 router.select(context, router.resolvePolicyGroup(context));
-        assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
+        assertEquals(RoutingResult.Status.BLOCKED, blocked.status());
 
-        assertEquals(new PlacementKey(role, null, null), blocked.blocker());
+        assertEquals(new CapacityKey(role, null, null), blocked.blocker());
     }
 
     @Test
@@ -1038,7 +1058,7 @@ class RequestRouteSelectorTest {
             org.mockito.Mockito.doAnswer(
                             call ->
                                     SelectionTestSupport.registerResult(
-                                            call, PlacementResult.success(decode.routingView())))
+                                            call, RoutingResult.success(decode.routingView())))
                     .when(decodeSelector)
                     .selectAndRegister(
                             any(),
@@ -1066,9 +1086,7 @@ class RequestRouteSelectorTest {
         }
         var result = router().select(context, null);
         assertEquals(
-                role.supportsPrefill()
-                        ? PlacementResult.Status.RETRY
-                        : PlacementResult.Status.RETRY,
+                role.supportsPrefill() ? RoutingResult.Status.RETRY : RoutingResult.Status.RETRY,
                 result.status());
         if (!role.supportsPrefill()) assertNull(result.blocker());
         verify(chosen.endpoint(), never()).close();
@@ -1079,8 +1097,8 @@ class RequestRouteSelectorTest {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.DECODE));
         var context = context(110L);
         var failure =
-                PlacementResult.<DecodeResources.DecodeRoutingView, PlacementKey>blocked(
-                        PlacementKey.exact(RoleType.DECODE, "chosen-group", "worker:8000"),
+                RoutingResult.<DecodeResources.DecodeRoutingView, CapacityKey>blocked(
+                        CapacityKey.exact(RoleType.DECODE, "chosen-group", "worker:8000"),
                         Response.error(StrategyErrorType.RESOURCE_EXHAUSTED),
                         java.util.Map.of("custom_reason", "reserved for another batch"));
         decodeSelector =
@@ -1104,12 +1122,12 @@ class RequestRouteSelectorTest {
         decodeSelector =
                 (request, metadata, group, candidates, capacity, refresh, register) -> {
                     calls.incrementAndGet();
-                    assertEquals(PlacementResult.Registration.UNAVAILABLE, register.apply(view));
-                    return PlacementResult.retry();
+                    assertEquals(RoutingResult.Registration.UNAVAILABLE, register.apply(view));
+                    return RoutingResult.retry();
                 };
         when(endpoints.selectDecodeEndpoint(view)).thenReturn(null);
         var result = router().select(context, null);
-        assertEquals(PlacementResult.Status.RETRY, result.status());
+        assertEquals(RoutingResult.Status.RETRY, result.status());
         org.junit.jupiter.api.Assertions.assertNull(result.value());
         org.junit.jupiter.api.Assertions.assertNull(result.blocker());
         assertEquals(1, calls.get(), "the scheduler owns retry timing");
@@ -1125,8 +1143,8 @@ class RequestRouteSelectorTest {
                         call ->
                                 SelectionTestSupport.registerResult(
                                         call,
-                                        PlacementResult.blocked(
-                                                PlacementKey.anyGroup(RoleType.DECODE))))
+                                        RoutingResult.blocked(
+                                                CapacityKey.anyGroup(RoleType.DECODE))))
                 .when(prefillSelector)
                 .selectAndRegister(
                         org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
@@ -1137,11 +1155,11 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.any(java.util.function.LongSupplier.class),
                         org.mockito.ArgumentMatchers.any());
 
-        PlacementResult<RouteResult, PlacementKey> blocked =
+        RoutingResult<RouteResult, CapacityKey> blocked =
                 router.select(context, router.resolvePolicyGroup(context));
-        assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
+        assertEquals(RoutingResult.Status.BLOCKED, blocked.status());
 
-        assertEquals(new PlacementKey(RoleType.DECODE, null, null), blocked.blocker());
+        assertEquals(new CapacityKey(RoleType.DECODE, null, null), blocked.blocker());
     }
 
     @Test
@@ -1165,7 +1183,7 @@ class RequestRouteSelectorTest {
                         call ->
                                 SelectionTestSupport.registerResult(
                                         call,
-                                        PlacementResult.rejected(
+                                        RoutingResult.rejected(
                                                 Response.error(
                                                         StrategyErrorType.RESOURCE_EXHAUSTED))))
                 .when(decodeSelector)
@@ -1178,9 +1196,9 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.any());
 
-        PlacementResult<RouteResult, PlacementKey> rejected =
+        RoutingResult<RouteResult, CapacityKey> rejected =
                 router.select(context, router.resolvePolicyGroup(context));
-        assertEquals(PlacementResult.Status.REJECTED, rejected.status());
+        assertEquals(RoutingResult.Status.REJECTED, rejected.status());
 
         assertEquals(
                 StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), rejected.failure().getCode());
@@ -1258,9 +1276,9 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.any(java.util.function.LongSupplier.class),
                         org.mockito.ArgumentMatchers.any());
 
-        PlacementResult<RouteResult, PlacementKey> admitted =
+        RoutingResult<RouteResult, CapacityKey> admitted =
                 router.select(context, router.resolvePolicyGroup(context));
-        assertEquals(PlacementResult.Status.SUCCESS, admitted.status());
+        assertEquals(RoutingResult.Status.SUCCESS, admitted.status());
 
         assertTrue(admitted.value().successResponse(false).isSuccess());
         assertEquals(
@@ -1292,7 +1310,7 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.any());
 
         var result = router().select(context, null);
-        assertEquals(PlacementResult.Status.SUCCESS, result.status());
+        assertEquals(RoutingResult.Status.SUCCESS, result.status());
         {
             var route = result.value();
             assertSame(inputs, route.ctx().data().getRequest());
@@ -1330,9 +1348,9 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.any());
         when(vitSelector.selectIndex(org.mockito.ArgumentMatchers.anyList())).thenReturn(0);
 
-        PlacementResult<RouteResult, PlacementKey> admitted =
+        RoutingResult<RouteResult, CapacityKey> admitted =
                 router.select(context, router.resolvePolicyGroup(context));
-        assertEquals(PlacementResult.Status.SUCCESS, admitted.status());
+        assertEquals(RoutingResult.Status.SUCCESS, admitted.status());
 
         verify(prefillSelector)
                 .selectAndRegister(
@@ -1375,9 +1393,9 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.any());
         when(vitSelector.selectIndex(org.mockito.ArgumentMatchers.anyList())).thenReturn(0);
 
-        PlacementResult<RouteResult, PlacementKey> admitted =
+        RoutingResult<RouteResult, CapacityKey> admitted =
                 router.select(context, router.resolvePolicyGroup(context));
-        assertEquals(PlacementResult.Status.SUCCESS, admitted.status());
+        assertEquals(RoutingResult.Status.SUCCESS, admitted.status());
 
         verify(prefillSelector)
                 .selectAndRegister(
@@ -1411,11 +1429,11 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.any());
         when(vitSelector.selectIndex(org.mockito.ArgumentMatchers.anyList())).thenReturn(0);
 
-        PlacementResult<RouteResult, PlacementKey> blocked =
+        RoutingResult<RouteResult, CapacityKey> blocked =
                 router.select(context, router.resolvePolicyGroup(context));
-        assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
+        assertEquals(RoutingResult.Status.BLOCKED, blocked.status());
 
-        assertEquals(new PlacementKey(RoleType.VIT, "g1", null), blocked.blocker());
+        assertEquals(new CapacityKey(RoleType.VIT, "g1", null), blocked.blocker());
         verify(prefill.selectedEndpoint, never()).close();
     }
 
@@ -1440,8 +1458,8 @@ class RequestRouteSelectorTest {
                         call ->
                                 SelectionTestSupport.registerResult(
                                         call,
-                                        PlacementResult.blocked(
-                                                new PlacementKey(RoleType.DECODE, "g1", null))))
+                                        RoutingResult.blocked(
+                                                new CapacityKey(RoleType.DECODE, "g1", null))))
                 .when(decodeSelector)
                 .selectAndRegister(
                         org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
@@ -1452,11 +1470,11 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.any());
 
-        PlacementResult<RouteResult, PlacementKey> blocked =
+        RoutingResult<RouteResult, CapacityKey> blocked =
                 router.select(context, router.resolvePolicyGroup(context));
-        assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
+        assertEquals(RoutingResult.Status.BLOCKED, blocked.status());
 
-        assertEquals(new PlacementKey(RoleType.DECODE, "g1", null), blocked.blocker());
+        assertEquals(new CapacityKey(RoleType.DECODE, "g1", null), blocked.blocker());
         verify(prefill.selectedEndpoint, never()).close();
     }
 
@@ -1470,7 +1488,7 @@ class RequestRouteSelectorTest {
                         call ->
                                 SelectionTestSupport.registerResult(
                                         call,
-                                        PlacementResult.success(
+                                        RoutingResult.success(
                                                 new PrefillSelectionStrategy.Selection<>(
                                                         "p:8001",
                                                         foreign.selectedEndpoint()
@@ -1506,7 +1524,7 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.any());
 
         var handoff = router.select(context, router.resolvePolicyGroup(context));
-        assertEquals(PlacementResult.Status.RETRY, handoff.status());
+        assertEquals(RoutingResult.Status.RETRY, handoff.status());
         org.junit.jupiter.api.Assertions.assertNull(handoff.value());
         verify(foreign.selectedEndpoint, never()).close();
     }
@@ -1526,7 +1544,7 @@ class RequestRouteSelectorTest {
                     .when(reporter)
                     .reportCacheAffinityDecision(RoleType.PREFILL, "p", "NO_CACHE_LEAD");
         }
-        var key = PlacementKey.exact(RoleType.PREFILL, "g1", "p:8001");
+        var key = CapacityKey.exact(RoleType.PREFILL, "g1", "p:8001");
         var failure = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
         var diagnostics =
                 java.util.Map.<String, Object>of(
@@ -1541,7 +1559,7 @@ class RequestRouteSelectorTest {
         org.mockito.Mockito.doAnswer(
                         call ->
                                 SelectionTestSupport.registerResult(
-                                        call, PlacementResult.blocked(key, failure, diagnostics)))
+                                        call, RoutingResult.blocked(key, failure, diagnostics)))
                 .when(prefillSelector)
                 .selectAndRegister(
                         any(),
@@ -1554,7 +1572,7 @@ class RequestRouteSelectorTest {
 
         var result = router.select(context, null);
 
-        assertEquals(PlacementResult.Status.BLOCKED, result.status());
+        assertEquals(RoutingResult.Status.BLOCKED, result.status());
         assertSame(key, result.blocker());
         assertSame(failure, result.failure());
         assertEquals(diagnostics, result.diagnostics());
@@ -1588,7 +1606,7 @@ class RequestRouteSelectorTest {
 
         var result = router.select(context, null);
 
-        assertEquals(PlacementResult.Status.SUCCESS, result.status());
+        assertEquals(RoutingResult.Status.SUCCESS, result.status());
         {
             var route = result.value();
             assertSame(endpoint, route.prefillEndpoint());
@@ -1618,9 +1636,9 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.any(java.util.function.LongSupplier.class),
                         org.mockito.ArgumentMatchers.any());
 
-        PlacementResult<RouteResult, PlacementKey> admitted =
+        RoutingResult<RouteResult, CapacityKey> admitted =
                 router.select(context, router.resolvePolicyGroup(context));
-        assertEquals(PlacementResult.Status.SUCCESS, admitted.status());
+        assertEquals(RoutingResult.Status.SUCCESS, admitted.status());
 
         verify(prefillSelector)
                 .selectAndRegister(
@@ -1645,8 +1663,8 @@ class RequestRouteSelectorTest {
                                                 config,
                                                 mock(RequestRouteSelector.class),
                                                 mock(
-                                                        org.flexlb.balance.eviction.DecodePreemption
-                                                                .class),
+                                                        org.flexlb.balance.preemption
+                                                                .DecodePreemption.class),
                                                 SchedulerTestSupport.runtime(requests)
                                                         .newLifecycle(
                                                                 config,
@@ -1656,7 +1674,7 @@ class RequestRouteSelectorTest {
                                                                         org.flexlb.service
                                                                                 .TheoryCacheHitReporter
                                                                                 .class)),
-                                                new PlacementAvailability(),
+                                                new CapacityNotifier(),
                                                 new OrderedRequestQueue(
                                                         config.isPriorityOrdering()),
                                                 org.flexlb.balance.planner.BuiltinGroupPlanner.from(
@@ -1680,7 +1698,7 @@ class RequestRouteSelectorTest {
                             return handle;
                         })
                 .when(lifecycle)
-                .placementFor(any());
+                .currentRoutingContext(any());
         return scheduler;
     }
 
@@ -1702,7 +1720,7 @@ class RequestRouteSelectorTest {
                         call -> {
                             RouteResult route = call.getArgument(0);
                             PrefillEndpoint.RequestRecord reservation = route.prefillReservation();
-                            when(reservation.belongsTo(route)).thenReturn(true);
+
                             return capture;
                         });
         return capture;
@@ -1734,8 +1752,8 @@ class RequestRouteSelectorTest {
                 configService,
                 router,
                 mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
-                mock(org.flexlb.balance.eviction.DecodePreemption.class),
-                new PlacementAvailability());
+                mock(org.flexlb.balance.preemption.DecodePreemption.class),
+                new CapacityNotifier());
     }
 
     private RequestRouteSelector router() {
@@ -1758,20 +1776,20 @@ class RequestRouteSelectorTest {
             RequestContext context,
             RoleType role,
             String group,
-            PlacementResult<ServerStatus, RoleType> result) {
+            RoutingResult<ServerStatus, RoleType> result) {
         switch (role) {
             case PREFILL, PDFUSION ->
                     org.mockito.Mockito.doAnswer(
                                     call ->
                                             SelectionTestSupport.registerResult(
                                                     call,
-                                                    new PlacementResult<>(
+                                                    new RoutingResult<>(
                                                             result.status(),
                                                             null,
                                                             result.failure(),
                                                             result.blocker() == null
                                                                     ? null
-                                                                    : new PlacementKey(
+                                                                    : new CapacityKey(
                                                                             result.blocker(),
                                                                             group,
                                                                             null),
@@ -1792,13 +1810,13 @@ class RequestRouteSelectorTest {
                                     call ->
                                             SelectionTestSupport.registerResult(
                                                     call,
-                                                    new PlacementResult<>(
+                                                    new RoutingResult<>(
                                                             result.status(),
                                                             null,
                                                             result.failure(),
                                                             result.blocker() == null
                                                                     ? null
-                                                                    : new PlacementKey(
+                                                                    : new CapacityKey(
                                                                             result.blocker(),
                                                                             group,
                                                                             null),
@@ -1861,7 +1879,7 @@ class RequestRouteSelectorTest {
                 endpoint, new java.util.concurrent.locks.ReentrantLock());
         if (endpoint instanceof PrefillEndpoint prefill) {
             var ledger = prefill;
-            when(ledger.progress()).thenReturn(new PrefillEndpoint.Progress(0L, 0L, 0L, 0));
+
             when(ledger.requestCapacityAvailable(anyLong(), anyInt())).thenReturn(true);
             org.flexlb.balance.endpoint.EndpointTestSupport.stubResources(prefill, ledger);
             when(prefill.tryRegisterSelection(
@@ -1873,8 +1891,8 @@ class RequestRouteSelectorTest {
                             call ->
                                     new PrefillEndpoint.Registration(
                                             prefill.acceptsNewRequests()
-                                                    ? PlacementResult.Registration.REGISTERED
-                                                    : PlacementResult.Registration.UNAVAILABLE,
+                                                    ? RoutingResult.Registration.REGISTERED
+                                                    : RoutingResult.Registration.UNAVAILABLE,
                                             prefill.acceptsNewRequests()
                                                     ? mock(PrefillEndpoint.RequestRecord.class)
                                                     : null));
@@ -1930,16 +1948,16 @@ class RequestRouteSelectorTest {
         return new SelectionFixture(selectedEndpoint, endpoint, status);
     }
 
-    private static PlacementResult<?, PlacementKey> selected(
+    private static RoutingResult<?, CapacityKey> selected(
             org.mockito.invocation.InvocationOnMock call, SelectionFixture selected) {
         if (selected.endpoint() instanceof PrefillEndpoint endpoint) {
             String address =
                     selected.status().getServerIp() + ":" + selected.status().getHttpPort();
-            return PlacementResult.success(
+            return RoutingResult.success(
                     new PrefillSelectionStrategy.Selection<>(
                             address,
                             selected.selectedEndpoint().getStatus().getGenerationId(),
-                            endpoint.progress().ownershipVersion(),
+                            0L,
                             selected.status().getPrefillTime(),
                             selected.status().getPrefillTime(),
                             0L,
@@ -1953,7 +1971,7 @@ class RequestRouteSelectorTest {
                                     .projectionInputs()));
         }
         if (selected.endpoint() instanceof DecodeEndpoint endpoint) {
-            return PlacementResult.success(endpoint.routingView());
+            return RoutingResult.success(endpoint.routingView());
         }
         throw new AssertionError("P/D strategy fixture expected");
     }
@@ -1983,8 +2001,6 @@ class RequestRouteSelectorTest {
             }
         }
         var route = new RouteResult(context, roles);
-        if (route.prefillReservation() != null)
-            when(route.prefillReservation().belongsTo(route)).thenReturn(true);
         return route;
     }
 

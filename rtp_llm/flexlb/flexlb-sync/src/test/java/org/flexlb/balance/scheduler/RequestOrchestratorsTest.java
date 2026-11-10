@@ -208,7 +208,7 @@ class RequestOrchestratorsTest {
                         registry,
                         reporter,
                         admissionReporter,
-                        org.mockito.Mockito.mock(DeliveryDispatcher.class),
+                        org.mockito.Mockito.mock(DeliveryCoordinator.class),
                         configuration(),
                         org.mockito.Mockito.mock(EngineGrpcClient.class))
                 .report();
@@ -225,13 +225,6 @@ class RequestOrchestratorsTest {
         RequestSchedulerReporter admissionReporter = mock(RequestSchedulerReporter.class);
         PrefillEndpoint failingPrefill = mock(PrefillEndpoint.class);
         PrefillEndpoint healthyPrefill = mock(PrefillEndpoint.class);
-        for (var endpoint : List.of(failingPrefill, healthyPrefill)) {
-            var state = endpoint;
-            org.flexlb.balance.endpoint.EndpointTestSupport.stubResources(endpoint, state);
-            when(state.progress())
-                    .thenReturn(
-                            new org.flexlb.balance.endpoint.PrefillEndpoint.Progress(0, 0, 0, 0));
-        }
         DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
         Map<String, PrefillEndpoint> prefill = new LinkedHashMap<>();
         prefill.put("p1", failingPrefill);
@@ -248,7 +241,7 @@ class RequestOrchestratorsTest {
                         registry,
                         reporter,
                         admissionReporter,
-                        org.mockito.Mockito.mock(DeliveryDispatcher.class),
+                        org.mockito.Mockito.mock(DeliveryCoordinator.class),
                         configuration(),
                         org.mockito.Mockito.mock(EngineGrpcClient.class))
                 .report();
@@ -403,7 +396,7 @@ class RequestOrchestratorsTest {
                 endpoints,
                 mock(DeliveryMetricsReporter.class),
                 mock(RequestSchedulerReporter.class),
-                org.mockito.Mockito.mock(DeliveryDispatcher.class),
+                org.mockito.Mockito.mock(DeliveryCoordinator.class),
                 configuration(),
                 org.mockito.Mockito.mock(EngineGrpcClient.class));
     }

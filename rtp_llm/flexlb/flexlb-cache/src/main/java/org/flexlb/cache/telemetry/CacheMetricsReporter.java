@@ -25,7 +25,6 @@ import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
-import static org.flexlb.constant.MetricConstant.CACHE_INPUT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_PREDICTED_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS;
@@ -215,31 +214,6 @@ public class CacheMetricsReporter {
                 + totalMappings * stringSize;
     }
 
-    /**
-     * Report cache hit rate metrics
-     *
-     * @param roleType    Role type
-     * @param ipIndex     logical engine address in {@code ip:port@engineIndex} format
-     * @param hitTokens   Number of hit tokens
-     * @param inputTokens Number of input tokens
-     * @param hitRatio    Hit fraction for this request
-     */
-    public void reportCacheHitMetrics(
-            RoleType roleType, String ipIndex, long hitTokens, long inputTokens, double hitRatio) {
-        if (roleType == null) {
-            return;
-        }
-        FlexMetricTags baseTags = FlexMetricTags.of("role", roleType.name(), "engineIp", ipIndex);
-
-        // Report hit token count and hit percentage
-        monitor.report(CACHE_HIT_RATIO, baseTags, hitRatio);
-        if (inputTokens > 0L) {
-            monitor.report(CACHE_HIT_COUNT, baseTags, hitTokens);
-            monitor.report(CACHE_INPUT_TOKENS, baseTags, inputTokens);
-        }
-        monitor.report(CACHE_REQUEST_TOTAL, baseTags, 1.0);
-    }
-
     public void reportKvcmPrediction(
             RoleType roleType, String ipIndex, long hitTokens, long inputTokens) {
         if (roleType == null) {
@@ -331,34 +305,6 @@ public class CacheMetricsReporter {
 
     public void reportStandbyFallback(String reason) {
         monitor.report(CACHE_MATCH_STANDBY_FALLBACK_QPS, FlexMetricTags.of("reason", reason), 1.0);
-    }
-
-    /**
-     * Report request-level routing cache-match token metrics for the selected worker pool.
-     */
-    public void reportRoutingSelectedCacheMatchMetrics(RoleType roleType, long hitTokens) {
-        if (roleType == null) {
-            return;
-        }
-        monitor.report(
-                CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS,
-                FlexMetricTags.of("role", roleType.name()),
-                hitTokens);
-    }
-
-    /**
-     * Report the request-level maximum cache match across available candidates.
-     *
-     */
-    public void reportRoutingCandidateMaxCacheMatchMetrics(RoleType roleType, long hitTokens) {
-        if (roleType == null) {
-            return;
-        }
-
-        monitor.report(
-                CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS,
-                FlexMetricTags.of("role", roleType.name()),
-                hitTokens);
     }
 
     /** Effective hits and routing matches belong to the same successfully selected request. */
@@ -491,7 +437,6 @@ public class CacheMetricsReporter {
                 CACHE_LOCAL_STANDBY_PREDICTED_RATIO,
                 FlexMetricType.GAUGE,
                 FlexPriorityType.PRECISE);
-        monitor.register(CACHE_INPUT_TOKENS, FlexMetricType.COUNTER);
         monitor.register(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, FlexMetricType.COUNTER);
         monitor.register(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, FlexMetricType.COUNTER);
         monitor.register(CACHE_KVCM_SELECTED_INPUT_TOKENS, FlexMetricType.COUNTER);

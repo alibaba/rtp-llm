@@ -73,7 +73,10 @@ class ResponseCopyTest {
         Response source = new Response();
         source.setCode(503);
         source.setReady(false);
-        Response success = Response.buildSuccessResponse(source, true);
+        Response success = Response.copyOf(source);
+        success.setSuccess(true);
+        success.setCode(200);
+        success.setEnqueuedByMaster(true);
         assertTrue(success.isSuccess());
         assertEquals(200, success.getCode());
         assertTrue(success.isEnqueuedByMaster());
@@ -81,7 +84,6 @@ class ResponseCopyTest {
         assertFalse(source.isSuccess());
         assertEquals(503, source.getCode());
         assertFalse(source.isEnqueuedByMaster());
-        assertFalse(Response.buildSuccessResponse(source, false).isEnqueuedByMaster());
 
         StrategyErrorType type = StrategyErrorType.DISPATCH_FAILED;
         Response failure = Response.buildErrorResponse(type, "delivery failed");

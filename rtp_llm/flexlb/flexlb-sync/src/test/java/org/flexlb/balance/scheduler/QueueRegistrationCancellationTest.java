@@ -1,8 +1,8 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.preemption.DecodePreemption;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -45,8 +45,8 @@ class QueueRegistrationCancellationTest {
                     .thenAnswer(
                             call -> {
                                 selected.countDown();
-                                return PlacementResult.blocked(
-                                        PlacementKey.anyGroup(
+                                return RoutingResult.blocked(
+                                        CapacityKey.anyGroup(
                                                 org.flexlb.dao.route.RoleType.PREFILL));
                             });
             var request = f.context(907L);
@@ -63,11 +63,11 @@ class QueueRegistrationCancellationTest {
 
     @Test
     void alternateQueueUsesTheDefaultSchedulerCancellationAndShutdown() throws Exception {
-        try (Fixture f = new Fixture(true, new ListPlacementQueue())) {
+        try (Fixture f = new Fixture(true, new ListSchedulingQueue())) {
             when(f.router.select(any(), nullable(String.class)))
                     .thenReturn(
-                            PlacementResult.blocked(
-                                    PlacementKey.anyGroup(org.flexlb.dao.route.RoleType.PREFILL)));
+                            RoutingResult.blocked(
+                                    CapacityKey.anyGroup(org.flexlb.dao.route.RoleType.PREFILL)));
             var context = f.context(909L);
             var future = SchedulerTestServices.entry(f.queue).submit(context);
             RequestProtocolTestSupport.awaitGlobalCapacityWaiters(f.queue, 1);
@@ -152,8 +152,8 @@ class QueueRegistrationCancellationTest {
         try (Fixture f = new Fixture()) {
             when(f.router.select(any(), nullable(String.class)))
                     .thenReturn(
-                            PlacementResult.blocked(
-                                    new PlacementKey(
+                            RoutingResult.blocked(
+                                    new CapacityKey(
                                             org.flexlb.dao.route.RoleType.DECODE, "g", null)));
             var future = SchedulerTestServices.entry(f.queue).submit(f.context(907L));
             RequestProtocolTestSupport.awaitGlobalCapacityWaiters(f.queue, 1);
@@ -177,7 +177,7 @@ class QueueRegistrationCancellationTest {
                                 assertTrue(
                                         listening.get(),
                                         "selection cannot precede listener installation");
-                                return PlacementResult.rejected(
+                                return RoutingResult.rejected(
                                         Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
                             });
             RequestContext context = f.context(901L);
@@ -307,7 +307,7 @@ class QueueRegistrationCancellationTest {
             this(start, new OrderedRequestQueue(false));
         }
 
-        Fixture(boolean start, PlacementQueue placementQueue) {
+        Fixture(boolean start, SchedulingQueue schedulingQueue) {
             SchedulingTestConfig.useFifoQueue(config);
             var service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
@@ -331,9 +331,9 @@ class QueueRegistrationCancellationTest {
                                     config,
                                     router,
                                     mock(DecodePreemption.class),
-                                    new PlacementAvailability(),
+                                    new CapacityNotifier(),
                                     org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
-                                    placementQueue);
+                                    schedulingQueue);
             runtime.registerScheduler(queue);
             if (start) {
                 SchedulerTestSupport.startScheduling(queue);

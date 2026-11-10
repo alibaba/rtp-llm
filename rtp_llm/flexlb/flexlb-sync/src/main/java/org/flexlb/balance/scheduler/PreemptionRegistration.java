@@ -2,12 +2,12 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.preemption.CancelTarget;
-import org.flexlb.balance.preemption.VictimResolution;
+import org.flexlb.balance.preemption.PreemptionRequestResult;
 
 import java.util.Objects;
 
 /**
- * Exact victim and attempt identity, including its read-only completion.
+ * Exact request selected for preemption and attempt identity, including its read-only completion.
  */
 public final class PreemptionRegistration {
     @SuppressWarnings("rawtypes")
@@ -35,7 +35,7 @@ public final class PreemptionRegistration {
     @lombok.experimental.Accessors(fluent = true)
     private final CancelTarget cancelTarget;
 
-    private volatile java.util.concurrent.CompletableFuture<VictimResolution> completion;
+    private volatile java.util.concurrent.CompletableFuture<PreemptionRequestResult> completion;
 
     public PreemptionRegistration(
             RequestContext owner,
@@ -55,23 +55,23 @@ public final class PreemptionRegistration {
         }
     }
 
-    public java.util.concurrent.CompletionStage<VictimResolution> completion() {
+    public java.util.concurrent.CompletionStage<PreemptionRequestResult> completion() {
         return completionFuture().minimalCompletionStage();
     }
 
-    public VictimResolution result() {
+    public PreemptionRequestResult result() {
         var current = completion;
         return current == null ? null : current.getNow(null);
     }
 
-    public void complete(VictimResolution result) {
+    public void complete(PreemptionRequestResult result) {
         completionFuture().complete(Objects.requireNonNull(result));
     }
 
-    private java.util.concurrent.CompletableFuture<VictimResolution> completionFuture() {
+    private java.util.concurrent.CompletableFuture<PreemptionRequestResult> completionFuture() {
         var current = completion;
         if (current != null) return current;
-        var created = new java.util.concurrent.CompletableFuture<VictimResolution>();
+        var created = new java.util.concurrent.CompletableFuture<PreemptionRequestResult>();
         return COMPLETION.compareAndSet(this, null, created) ? created : completion;
     }
 

@@ -5,17 +5,16 @@ import org.flexlb.util.PriorityNormalizer;
 
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
-import java.util.TreeSet;
 
 import static com.google.common.base.Preconditions.checkState;
 
 /**
- * Ordered request queue for one Prefill generation.
+ * Stores routes in acceptance order for one Prefill generation; exact removal preserves the remaining order.
  *
  * <p>The scheduler type selects queue storage at construction time.
  * DIRECT has no backing queue and cannot accept ACTIVE queue work; QUEUE owns
@@ -23,52 +22,35 @@ import static com.google.common.base.Preconditions.checkState;
  */
 public final class OrderedPrefillRequestQueue implements PrefillRequestQueue {
     private static final OrderedPrefillRequestQueue DISABLED = new OrderedPrefillRequestQueue();
-    private static final Snapshot EMPTY = new Snapshot(List.of(), (left, right) -> 0);
+    private static final Snapshot EMPTY = new Snapshot(List.of());
 
-    private final TreeSet<Entry> queue;
+    private final LinkedHashSet<Entry> queue;
     // Identity lookup is part of this index, not a second ownership ledger.
     private final IdentityHashMap<RouteResult, Entry> identities;
     private final int[] priorityCounts;
-
-    private long nextSequence;
-
-    private RouteResult bypassedHead;
 
     private volatile long version;
 
     private Snapshot capture;
 
-    private final Comparator<QueueItem> ordering;
-
     private OrderedPrefillRequestQueue() {
         queue = null;
         identities = null;
         priorityCounts = null;
-        ordering = null;
     }
 
-    private OrderedPrefillRequestQueue(int initialCapacity, Comparator<QueueItem> ordering) {
-        this.ordering = Objects.requireNonNull(ordering, "ordering");
+    private OrderedPrefillRequestQueue(int initialCapacity) {
         priorityCounts = new int[PriorityNormalizer.MAX_PRIORITY + 1];
         identities = new IdentityHashMap<>(initialCapacity);
-        queue =
-                new TreeSet<>(
-                        (left, right) -> {
-                            int compared = ordering.compare(left.request, right.request);
-                            // Preserve distinct identities even with an equal scheduling key.
-                            return compared != 0
-                                    ? compared
-                                    : Long.compare(left.sequence, right.sequence);
-                        });
+        queue = new LinkedHashSet<>(initialCapacity);
     }
 
     public static OrderedPrefillRequestQueue disabled() {
         return DISABLED;
     }
 
-    public static OrderedPrefillRequestQueue ordered(
-            int initialCapacity, Comparator<QueueItem> ordering) {
-        return new OrderedPrefillRequestQueue(initialCapacity, ordering);
+    public static OrderedPrefillRequestQueue fifo(int initialCapacity) {
+        return new OrderedPrefillRequestQueue(initialCapacity);
     }
 
     /** Membership revision; mutations hold the owning ledger lock. */
@@ -86,18 +68,18 @@ public final class OrderedPrefillRequestQueue implements PrefillRequestQueue {
         if (identities.containsKey(item)) {
             return false;
         }
-        Entry entry = new Entry(item, nextSequence++);
+        int priority = Objects.checkIndex(item.priority(), priorityCounts.length);
+        Entry entry = new Entry(item);
         queue.add(entry);
         identities.put(item, entry);
-        priorityCounts[item.priority()]++;
-        if (bypassedHead != null && bypassedHead != peek()) bypassedHead = null;
+        priorityCounts[priority]++;
         capture = null;
         version++;
         return true;
     }
 
     public RouteResult peek() {
-        return isEmpty() ? null : queue.first().request;
+        return isEmpty() ? null : queue.getFirst().request;
     }
 
     public boolean isEmpty() {
@@ -112,7 +94,6 @@ public final class OrderedPrefillRequestQueue implements PrefillRequestQueue {
         queue.remove(entry);
         identities.remove(item);
         priorityCounts[item.priority()]--;
-        if (bypassedHead != null && bypassedHead != peek()) bypassedHead = null;
         capture = null;
         version++;
         return true;
@@ -137,7 +118,6 @@ public final class OrderedPrefillRequestQueue implements PrefillRequestQueue {
         Arrays.fill(priorityCounts, 0);
         queue.clear();
         identities.clear();
-        bypassedHead = null;
         capture = null;
         version++;
     }
@@ -148,33 +128,9 @@ public final class OrderedPrefillRequestQueue implements PrefillRequestQueue {
             return EMPTY;
         }
         if (capture == null) {
-            capture = new Snapshot(queue.stream().map(entry -> entry.request).toList(), ordering);
+            capture = new Snapshot(queue.stream().map(entry -> entry.request).toList());
         }
         return capture;
-    }
-
-    @Override
-    public List<RouteResult> candidatesAfterBlockedHead(
-            List<RouteResult> ordered, boolean priorityOrdering, long nowMs) {
-        if (!priorityOrdering || ordered.isEmpty()) return List.of();
-        var head = ordered.getFirst();
-        if (head != peek() || head == bypassedHead || head.requestExpired(nowMs)) return List.of();
-        int end = 1;
-        while (end < ordered.size()) {
-            var candidate = ordered.get(end);
-            if (head.priority() != candidate.priority()
-                    || candidate.requestExpired(nowMs)
-                    || head.decodeEndpoint() == null
-                    || candidate.decodeEndpoint() == null
-                    || head.decodeEndpoint() == candidate.decodeEndpoint()) break;
-            end++;
-        }
-        return ordered.subList(1, end);
-    }
-
-    @Override
-    public void recordDispatch(RouteResult skippedHead) {
-        bypassedHead = skippedHead;
     }
 
     @Override
@@ -197,15 +153,13 @@ public final class OrderedPrefillRequestQueue implements PrefillRequestQueue {
     }
 
     /**
-     * Keeps one exact route and its FIFO sequence in the ordered Prefill queue.
+     * Keeps an exact route identity in the insertion-ordered queue.
      */
     private static final class Entry {
         private final RouteResult request;
-        private final long sequence;
 
-        private Entry(RouteResult request, long sequence) {
+        private Entry(RouteResult request) {
             this.request = request;
-            this.sequence = sequence;
         }
     }
 }

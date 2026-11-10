@@ -52,7 +52,7 @@ KVCM 客户端通过 `isWarmupFinished()` 读取状态。该状态类不依赖 g
 
 `ApplicationLifecycle` 在入口排空后调用 `AbstractRequestScheduler.shutdown(deadlineNanos)`，
 等待截止时间由调用方传入，调度器不制定宽限期或计算 deadline。
-不持有投递执行器、请求任务池、Endpoint 或调度计时器。`PlacementConfiguration` 组装
+不持有投递执行器、请求任务池、Endpoint 或调度计时器。`SchedulerConfiguration` 组装
 调度器并启动调度；EndpointRegistry 等关闭依赖在构造时传入，不依赖事后注入的 shutdown 配置。
 生产与测试共用其停机顺序。
 
@@ -65,6 +65,11 @@ KVCM 客户端通过 `isWarmupFinished()` 读取状态。该状态类不依赖 g
 等待调度线程、planner 和剩余计划处理完成。接着等待投递及其准备资源释放回调、请求处理
 任务结束，再关闭 Endpoint。Endpoint 关闭产生的后续清理任务在关闭请求执行器前再次排空。
 这些等待复用各组件的执行状态，调度基类不另维护选路操作计数。
+
+请求任务池在改变接纳状态之前拒绝自身任务调用 close，避免任务等待自己完成。
+本地清理和远端 stop 使用不同排空条件；提交者尚未完成交接时也保留工作登记。
+执行器关闭期间仅允许正在执行的准确请求续接，防止丢失已接纳工作或重新开放无关请求。
+响应失败不重新建立发布登记，也不承担计时器安装恢复；deadline 在响应构造前通过 Timer.update 同步。
 
 停止接收后，尚未注册的新请求返回 `SCHEDULER_UNAVAILABLE`（8518）。Frontend 在响应
 不含入队标记、路由结果或生命周期记录时，以原请求重试不同的备用 FlexLB 节点。

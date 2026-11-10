@@ -2,8 +2,8 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.DeliveryDispatcher;
-import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.CapacityNotifier;
+import org.flexlb.balance.scheduler.DeliveryCoordinator;
 import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.TaskInfo;
@@ -35,18 +35,18 @@ public final class RunnerTestSupport {
     }
 
     public static EndpointRegistry endpointRegistry(ConfigService configService) {
-        DeliveryDispatcher delivery = Mockito.mock(DeliveryDispatcher.class);
+        DeliveryCoordinator delivery = Mockito.mock(DeliveryCoordinator.class);
         var config = configService.loadBalanceConfig();
         return new EndpointRegistry(
                 configService,
                 new RequestRepository(),
                 Mockito.mock(DeliveryMetricsReporter.class),
                 delivery,
-                new PlacementAvailability(),
+                new CapacityNotifier(),
                 config == null
                         ? org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE
                         : org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
-                order -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(16, order));
+                () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
     }
 
     public static WorkerStatus alive(

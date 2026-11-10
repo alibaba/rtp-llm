@@ -5,7 +5,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillRequestQueue;
 import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.prediction.FormulaPredictor;
-import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.CapacityNotifier;
 import org.flexlb.balance.scheduler.QueueExecutionSettings;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestExecutionTestSupport;
@@ -139,7 +139,7 @@ public class SnapshotBench {
                         FlexlbConfig.class,
                         DispatcherConfig.Type.class,
                         DeliveryMetricsReporter.class,
-                        PlacementAvailability.class,
+                        CapacityNotifier.class,
                         QueueExecutionSettings.class,
                         PrefillRequestQueue.Factory.class);
         constructor.setAccessible(true);
@@ -150,7 +150,7 @@ public class SnapshotBench {
                         config,
                         DispatcherConfig.Type.BATCH,
                         mock(DeliveryMetricsReporter.class),
-                        new PlacementAvailability(),
+                        new CapacityNotifier(),
                         QueueExecutionSettings.capture(config, BuiltinGroupPlanner.from(config)),
                         (PrefillRequestQueue.Factory)
                                 order -> OrderedPrefillRequestQueue.ordered(16, order));

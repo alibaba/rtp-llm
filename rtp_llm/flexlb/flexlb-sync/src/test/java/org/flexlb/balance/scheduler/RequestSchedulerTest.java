@@ -1,15 +1,15 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.DecodePreemption;
-import org.flexlb.balance.eviction.DecodePreemption.PreemptionResult;
+import org.flexlb.balance.preemption.DecodePreemption;
+import org.flexlb.balance.preemption.DecodePreemption.PreemptionResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.VictimStage;
+import org.flexlb.config.PreemptionStage;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -85,8 +85,8 @@ class RequestSchedulerTest {
                         service,
                         router,
                         mock(DeliveryMetricsReporter.class),
-                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
-                        new PlacementAvailability());
+                        org.flexlb.balance.preemption.DecodePreemptionTestSupport.mock(),
+                        new CapacityNotifier());
         try {
             CompletableFuture<Response> future =
                     SchedulerTestServices.entry(scheduler).submit(context);
@@ -138,7 +138,7 @@ class RequestSchedulerTest {
                         invocation -> {
                             planning.countDown();
                             assertTrue(releasePlan.await(5, TimeUnit.SECONDS));
-                            return PlacementResult.success(
+                            return RoutingResult.success(
                                     RequestProtocolTestSupport.selectionOf(route));
                         });
         doAnswer(
@@ -158,8 +158,8 @@ class RequestSchedulerTest {
                                 service,
                                 router,
                                 mock(DeliveryMetricsReporter.class),
-                                org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
-                                new PlacementAvailability());
+                                org.flexlb.balance.preemption.DecodePreemptionTestSupport.mock(),
+                                new CapacityNotifier());
         Thread closer = null;
         Thread secondCloser = null;
         try {
@@ -240,7 +240,7 @@ class RequestSchedulerTest {
                         invocation -> {
                             planning.countDown();
                             assertTrue(releasePlan.await(5, TimeUnit.SECONDS));
-                            return PlacementResult.success(
+                            return RoutingResult.success(
                                     RequestProtocolTestSupport.selectionOf(route));
                         });
         doAnswer(
@@ -252,7 +252,7 @@ class RequestSchedulerTest {
                             }
                         })
                 .when(lifecycle)
-                .completePlacement(any(), any(), any());
+                .completeRouting(any(), any(), any());
         QueuedRequestScheduler coordinator =
                 (QueuedRequestScheduler)
                         RequestProtocolTestSupport.injectPlacementDependencies(
@@ -260,8 +260,8 @@ class RequestSchedulerTest {
                                 service,
                                 router,
                                 mock(DeliveryMetricsReporter.class),
-                                org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
-                                new PlacementAvailability());
+                                org.flexlb.balance.preemption.DecodePreemptionTestSupport.mock(),
+                                new CapacityNotifier());
         CompletableFuture<Response> future = lifecycle.submit(context);
         try {
             assertTrue(planning.await(5, TimeUnit.SECONDS));
@@ -286,7 +286,7 @@ class RequestSchedulerTest {
             assertEquals(0, RequestProtocolTestSupport.queuedCount(coordinator));
             assertEquals(
                     (deadline
-                                    ? StrategyErrorType.RESOURCE_EXHAUSTED
+                                    ? StrategyErrorType.QUEUE_TIMEOUT
                                     : StrategyErrorType.REQUEST_CANCELLED)
                             .getErrorCode(),
                     future.get(5, TimeUnit.SECONDS).getCode());
@@ -347,7 +347,7 @@ class RequestSchedulerTest {
                             registered.data().setFuture(first);
                             if (!first.isDone())
                                 ((AbstractRequestScheduler) invocation.getMock())
-                                        .onRequest(invocation.getArgument(0));
+                                        .scheduleRequest(invocation.getArgument(0));
                             return first;
                         });
         when(lifecycle.submit(
@@ -359,14 +359,14 @@ class RequestSchedulerTest {
                             registered.data().setFuture(second);
                             if (!second.isDone())
                                 ((AbstractRequestScheduler) invocation.getMock())
-                                        .onRequest(invocation.getArgument(0));
+                                        .scheduleRequest(invocation.getArgument(0));
                             return second;
                         });
-        when(lifecycle.claimPlacement(
+        when(lifecycle.tryBeginRouteSelection(
                         org.mockito.ArgumentMatchers.argThat(
                                 request -> request != null && request.data().getFuture() == first)))
                 .thenAnswer(i -> RequestProtocolTestSupport.admissionHandle(i.getArgument(0)));
-        when(lifecycle.claimPlacement(
+        when(lifecycle.tryBeginRouteSelection(
                         org.mockito.ArgumentMatchers.argThat(
                                 request ->
                                         request != null && request.data().getFuture() == second)))
@@ -375,33 +375,33 @@ class RequestSchedulerTest {
         when(router.resolvePolicyGroup(healthy)).thenReturn(healthyGroup);
         when(router.select(unavailable, "unavailable-group"))
                 .thenReturn(
-                        PlacementResult.blocked(
-                                new PlacementKey(RoleType.DECODE, "unavailable-group", null)));
+                        RoutingResult.blocked(
+                                new CapacityKey(RoleType.DECODE, "unavailable-group", null)));
         RouteResult healthyRoute = RequestProtocolTestSupport.mockSelectedRoute(healthy);
         when(router.select(healthy, healthyGroup))
                 .thenReturn(
-                        PlacementResult.success(
+                        RoutingResult.success(
                                 RequestProtocolTestSupport.selectionOf(healthyRoute)));
         org.mockito.Mockito.doReturn(
-                        PlacementResult.success(
+                        RoutingResult.success(
                                 RequestProtocolTestSupport.mockSelectedRoute(healthy)))
                 .when(RequestProtocolTestSupport.publication(lifecycle))
-                .enqueueRoute(org.mockito.ArgumentMatchers.same(healthyRoute), any());
+                .enqueueRoute(org.mockito.ArgumentMatchers.same(healthyRoute));
         AbstractRequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
                         lifecycle,
                         service,
                         router,
                         mock(DeliveryMetricsReporter.class),
-                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
-                        new PlacementAvailability());
+                        org.flexlb.balance.preemption.DecodePreemptionTestSupport.mock(),
+                        new CapacityNotifier());
         try {
             SchedulerTestServices.entry(scheduler).submit(unavailable);
             verify(router, timeout(500)).select(unavailable, "unavailable-group");
             SchedulerTestServices.entry(scheduler).submit(healthy);
             verify(router, timeout(500)).select(healthy, healthyGroup);
             verify(RequestProtocolTestSupport.publication(lifecycle), timeout(500))
-                    .enqueueRoute(org.mockito.ArgumentMatchers.same(healthyRoute), any());
+                    .enqueueRoute(org.mockito.ArgumentMatchers.same(healthyRoute));
         } finally {
             first.complete(new Response());
             second.complete(new Response());
@@ -423,14 +423,15 @@ class RequestSchedulerTest {
     void priorityRescueCompletesSelectionWithTheExactRegistration(
             boolean synchronous, String outcome) throws Exception {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
-        SchedulingTestConfig.allowVictim(config, VictimStage.DECODE_RESERVED);
+        SchedulingTestConfig.allowVictim(config, PreemptionStage.DECODE_RESERVED);
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         RequestRouteSelector router = mockRouter();
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
-        DecodePreemption eviction = org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock();
-        PlacementAvailability availability = new PlacementAvailability();
+        DecodePreemption eviction =
+                org.flexlb.balance.preemption.DecodePreemptionTestSupport.mock();
+        CapacityNotifier availability = new CapacityNotifier();
         RequestContext context = context(config, 897L, 90);
         CompletableFuture<Response> future = new CompletableFuture<>();
         when(lifecycle.submit(
@@ -442,19 +443,19 @@ class RequestSchedulerTest {
                             registered.data().setFuture(future);
                             if (!future.isDone())
                                 ((AbstractRequestScheduler) invocation.getMock())
-                                        .onRequest(invocation.getArgument(0));
+                                        .scheduleRequest(invocation.getArgument(0));
                             return future;
                         });
-        PlacementOperation handle = RequestProtocolTestSupport.admissionHandle(context);
+        RoutingContext handle = RequestProtocolTestSupport.admissionHandle(context);
         org.mockito.Mockito.doNothing()
                 .when(RequestProtocolTestSupport.placementScheduler(handle))
-                .completePlacement(
+                .completeRouting(
                         org.mockito.ArgumentMatchers.same(handle),
-                        org.mockito.ArgumentMatchers.eq(ContextResult.PublicationResult.FAILED),
+                        org.mockito.ArgumentMatchers.eq(ContextResult.RoutingCompletion.FAILED),
                         any());
         org.mockito.Mockito.doReturn(handle)
                 .when(lifecycle)
-                .claimPlacement(
+                .tryBeginRouteSelection(
                         org.mockito.ArgumentMatchers.argThat(
                                 request ->
                                         request != null && request.data().getFuture() == future));
@@ -462,8 +463,8 @@ class RequestSchedulerTest {
         when(selectedEndpoint.ipPort()).thenReturn("selected-decode:8080");
         RouteResult selectedRoute = RequestProtocolTestSupport.mockSelectedRoute(context);
         when(selectedRoute.ctx()).thenReturn(context);
-        PlacementKey blocker = PlacementKey.exact(RoleType.DECODE, "g1", "selected-decode:8080");
-        when(router.select(context, null)).thenReturn(PlacementResult.blocked(blocker));
+        CapacityKey blocker = CapacityKey.exact(RoleType.DECODE, "g1", "selected-decode:8080");
+        when(router.select(context, null)).thenReturn(RoutingResult.blocked(blocker));
         when(router.blockedEndpoint(blocker)).thenReturn(selectedEndpoint);
         RouteResult submitted = RequestProtocolTestSupport.mockSelectedRoute(context);
         var publicationThreads = new CopyOnWriteArrayList<Thread>();
@@ -471,12 +472,12 @@ class RequestSchedulerTest {
                         invocation -> {
                             publicationThreads.add(Thread.currentThread());
                             return outcome.equals("placement_blocked")
-                                    ? PlacementResult.blocked(blocker)
+                                    ? RoutingResult.blocked(blocker)
                                     : RequestProtocolTestSupport.published(
                                             invocation.getArgument(0), submitted);
                         })
                 .when(RequestProtocolTestSupport.publication(lifecycle))
-                .enqueueRoute(org.mockito.ArgumentMatchers.same(selectedRoute), any());
+                .enqueueRoute(org.mockito.ArgumentMatchers.same(selectedRoute));
 
         when(selectedRoute.decodeEndpoint()).thenReturn(selectedEndpoint);
         when(selectedRoute.requestId()).thenReturn(String.valueOf(context.data().getRequestId()));
@@ -485,7 +486,7 @@ class RequestSchedulerTest {
                 .thenAnswer(
                         call -> {
                             when(selectedRoute.decodeReservation()).thenReturn(reservation);
-                            return PlacementResult.success(selectedRoute);
+                            return RoutingResult.success(selectedRoute);
                         });
         when(selectedEndpoint.ownership(org.mockito.ArgumentMatchers.eq(reservation)))
                 .thenReturn(
@@ -505,7 +506,7 @@ class RequestSchedulerTest {
         if (synchronous) {
             execution.complete(result);
         }
-        when(eviction.tryReclaim(context, selectedEndpoint)).thenReturn(execution);
+        when(eviction.tryPreempt(context, selectedEndpoint)).thenReturn(execution);
         AbstractRequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
                         lifecycle,
@@ -517,7 +518,7 @@ class RequestSchedulerTest {
         CompletableFuture<Void> closing = null;
         try {
             SchedulerTestServices.entry(scheduler).submit(context);
-            verify(eviction, timeout(1_000)).tryReclaim(context, selectedEndpoint);
+            verify(eviction, timeout(1_000)).tryPreempt(context, selectedEndpoint);
             if (outcome.equals("cancelled")) {
                 assertTrue(future.cancel(false));
             }
@@ -535,10 +536,10 @@ class RequestSchedulerTest {
             }
             if (!synchronous) {
                 verify(RequestProtocolTestSupport.placementScheduler(handle), never())
-                        .completePlacement(
+                        .completeRouting(
                                 org.mockito.ArgumentMatchers.same(handle),
                                 org.mockito.ArgumentMatchers.eq(
-                                        ContextResult.PublicationResult.PUBLISHED),
+                                        ContextResult.RoutingCompletion.FINISHED),
                                 org.mockito.ArgumentMatchers.isNull());
 
                 if (outcome.equals("error")) {
@@ -550,10 +551,10 @@ class RequestSchedulerTest {
             }
             if (!outcome.equals("rejected") && !outcome.equals("error"))
                 verify(RequestProtocolTestSupport.placementScheduler(handle), timeout(1_000))
-                        .completePlacement(
+                        .completeRouting(
                                 org.mockito.ArgumentMatchers.same(handle),
                                 org.mockito.ArgumentMatchers.eq(
-                                        ContextResult.PublicationResult.PUBLISHED),
+                                        ContextResult.RoutingCompletion.FINISHED),
                                 org.mockito.ArgumentMatchers.isNull());
             if (closing != null) {
                 closing.join();
@@ -567,25 +568,31 @@ class RequestSchedulerTest {
                     || outcome.startsWith("closed")
                     || outcome.equals("cancelled")) {
                 verify(RequestProtocolTestSupport.placementScheduler(handle), never())
-                        .completePlacement(
+                        .completeRouting(
                                 org.mockito.ArgumentMatchers.same(handle),
                                 org.mockito.ArgumentMatchers.eq(
-                                        ContextResult.PublicationResult.FAILED),
+                                        ContextResult.RoutingCompletion.FAILED),
                                 any());
             } else {
                 var rejection = org.mockito.ArgumentCaptor.forClass(Response.class);
                 verify(RequestProtocolTestSupport.placementScheduler(handle), timeout(1_000))
-                        .completePlacement(
+                        .completeRouting(
                                 org.mockito.ArgumentMatchers.same(handle),
                                 org.mockito.ArgumentMatchers.eq(
-                                        ContextResult.PublicationResult.FAILED),
+                                        ContextResult.RoutingCompletion.FAILED),
                                 rejection.capture());
                 assertEquals(
-                        StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+                        StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
                         rejection.getValue().getCode());
+                assertEquals(
+                        "Decode preemption did not commit: "
+                                + (outcome.equals("error")
+                                        ? "IllegalStateException: engine unavailable"
+                                        : "result"),
+                        rejection.getValue().getErrorMessage());
             }
             verify(lifecycle, times(1))
-                    .claimPlacement(
+                    .tryBeginRouteSelection(
                             org.mockito.ArgumentMatchers.argThat(
                                     request ->
                                             request != null
@@ -608,7 +615,7 @@ class RequestSchedulerTest {
             verify(
                             RequestProtocolTestSupport.publication(lifecycle),
                             times(hasReservation && !outcome.equals("adopt_failed") ? 1 : 0))
-                    .enqueueRoute(org.mockito.ArgumentMatchers.same(selectedRoute), any());
+                    .enqueueRoute(org.mockito.ArgumentMatchers.same(selectedRoute));
             verify(router, times(hasReservation ? 1 : 0))
                     .select(context, null, selectedEndpoint, reservation);
             if (outcome.equals("closed_rollback_failure")) {
@@ -652,10 +659,10 @@ class RequestSchedulerTest {
                             registered.data().setFuture(future);
                             if (!future.isDone())
                                 ((AbstractRequestScheduler) invocation.getMock())
-                                        .onRequest(invocation.getArgument(0));
+                                        .scheduleRequest(invocation.getArgument(0));
                             return future;
                         });
-        when(lifecycle.claimPlacement(
+        when(lifecycle.tryBeginRouteSelection(
                         org.mockito.ArgumentMatchers.argThat(
                                 request ->
                                         request != null && request.data().getFuture() == future)))
@@ -663,33 +670,33 @@ class RequestSchedulerTest {
         RouteResult route = RequestProtocolTestSupport.mockSelectedRoute(context);
         PrefillEndpoint endpoint = mockPrefillEndpoint("127.0.0.1", 8000);
         org.mockito.Mockito.doReturn(
-                        PlacementResult.blocked(
-                                PlacementKey.exact(RoleType.PREFILL, "g1", "127.0.0.1:8000")))
+                        RoutingResult.blocked(
+                                CapacityKey.exact(RoleType.PREFILL, "g1", "127.0.0.1:8000")))
                 .when(RequestProtocolTestSupport.publication(lifecycle))
-                .enqueueRoute(org.mockito.ArgumentMatchers.same(route), any());
+                .enqueueRoute(org.mockito.ArgumentMatchers.same(route));
         when(router.select(context, null))
                 .thenReturn(
-                        PlacementResult.success(RequestProtocolTestSupport.selectionOf(route)),
-                        PlacementResult.rejected(
+                        RoutingResult.success(RequestProtocolTestSupport.selectionOf(route)),
+                        RoutingResult.rejected(
                                 Response.buildErrorResponse(
                                         StrategyErrorType.NO_PREFILL_WORKER, null)));
-        PlacementAvailability availability = new PlacementAvailability();
+        CapacityNotifier availability = new CapacityNotifier();
         AbstractRequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
                         lifecycle,
                         configService,
                         router,
                         mock(DeliveryMetricsReporter.class),
-                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
+                        org.flexlb.balance.preemption.DecodePreemptionTestSupport.mock(),
                         availability);
         try {
             SchedulerTestServices.entry(scheduler).submit(context);
             verify(RequestProtocolTestSupport.publication(lifecycle), timeout(1_000))
-                    .enqueueRoute(org.mockito.ArgumentMatchers.same(route), any());
+                    .enqueueRoute(org.mockito.ArgumentMatchers.same(route));
             verify(router, after(100).times(1)).select(context, null);
             availableSlots.set(1);
-            PlacementAvailabilityTestSupport.changed(
-                    availability, PlacementKey.exact(RoleType.PREFILL, "g1", "127.0.0.1:8000"));
+            CapacityNotifierTestSupport.notifyChanged(
+                    availability, CapacityKey.exact(RoleType.PREFILL, "g1", "127.0.0.1:8000"));
             verify(router, timeout(1_000).times(2)).select(context, null);
         } finally {
             RequestProtocolTestSupport.close(scheduler);
@@ -719,17 +726,17 @@ class RequestSchedulerTest {
                             registered.data().setFuture(future);
                             if (!future.isDone())
                                 ((AbstractRequestScheduler) invocation.getMock())
-                                        .onRequest(invocation.getArgument(0));
+                                        .scheduleRequest(invocation.getArgument(0));
                             return future;
                         });
-        when(lifecycle.claimPlacement(
+        when(lifecycle.tryBeginRouteSelection(
                         org.mockito.ArgumentMatchers.argThat(
                                 request ->
                                         request != null && request.data().getFuture() == future)))
                 .thenAnswer(i -> RequestProtocolTestSupport.admissionHandle(i.getArgument(0)));
         when(router.select(context, null))
                 .thenReturn(
-                        PlacementResult.rejected(
+                        RoutingResult.rejected(
                                 Response.buildErrorResponse(
                                         StrategyErrorType.NO_PREFILL_WORKER, null)));
         AbstractRequestScheduler scheduler =
@@ -738,8 +745,8 @@ class RequestSchedulerTest {
                         configService,
                         router,
                         mock(DeliveryMetricsReporter.class),
-                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
-                        new PlacementAvailability());
+                        org.flexlb.balance.preemption.DecodePreemptionTestSupport.mock(),
+                        new CapacityNotifier());
         SchedulerTestServices.entry(scheduler).submit(context);
         verify(router, timeout(1_000)).select(context, null);
         RequestProtocolTestSupport.close(scheduler);
@@ -756,7 +763,7 @@ class RequestSchedulerTest {
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
         DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
-        PlacementAvailability availability = new PlacementAvailability();
+        CapacityNotifier availability = new CapacityNotifier();
         RequestContext gate = context(config, 900L);
         CompletableFuture<Response> gateFuture = new CompletableFuture<>();
         CountDownLatch gatePlanningStarted = new CountDownLatch(1);
@@ -770,10 +777,10 @@ class RequestSchedulerTest {
                             registered.data().setFuture(gateFuture);
                             if (!gateFuture.isDone())
                                 ((AbstractRequestScheduler) invocation.getMock())
-                                        .onRequest(invocation.getArgument(0));
+                                        .scheduleRequest(invocation.getArgument(0));
                             return gateFuture;
                         });
-        when(lifecycle.claimPlacement(
+        when(lifecycle.tryBeginRouteSelection(
                         org.mockito.ArgumentMatchers.argThat(
                                 request ->
                                         request != null
@@ -784,7 +791,7 @@ class RequestSchedulerTest {
                         invocation -> {
                             gatePlanningStarted.countDown();
                             releaseGatePlanning.await(5, TimeUnit.SECONDS);
-                            return PlacementResult.rejected(
+                            return RoutingResult.rejected(
                                     Response.buildErrorResponse(
                                             StrategyErrorType.NO_PREFILL_WORKER, null));
                         });
@@ -803,10 +810,10 @@ class RequestSchedulerTest {
                                 registered.data().setFuture(future);
                                 if (!future.isDone())
                                     ((AbstractRequestScheduler) invocation.getMock())
-                                            .onRequest(invocation.getArgument(0));
+                                            .scheduleRequest(invocation.getArgument(0));
                                 return future;
                             });
-            when(lifecycle.claimPlacement(
+            when(lifecycle.tryBeginRouteSelection(
                             org.mockito.ArgumentMatchers.argThat(
                                     request ->
                                             request != null
@@ -816,14 +823,14 @@ class RequestSchedulerTest {
                     .thenAnswer(
                             invocation -> {
                                 aggregatePlansStarted.countDown();
-                                return PlacementResult.success(
+                                return RoutingResult.success(
                                         RequestProtocolTestSupport.selectionOf(route));
                             });
             RouteResult published = RequestProtocolTestSupport.mockSelectedRoute(context);
             when(published.prefillEndpoint()).thenReturn(mock(PrefillEndpoint.class));
-            org.mockito.Mockito.doReturn(PlacementResult.success(published))
+            org.mockito.Mockito.doReturn(RoutingResult.success(published))
                     .when(RequestProtocolTestSupport.publication(lifecycle))
-                    .enqueueRoute(org.mockito.ArgumentMatchers.same(route), any());
+                    .enqueueRoute(org.mockito.ArgumentMatchers.same(route));
             contexts.add(context);
         }
         AbstractRequestScheduler scheduler =
@@ -832,7 +839,7 @@ class RequestSchedulerTest {
                         configService,
                         router,
                         reporter,
-                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
+                        org.flexlb.balance.preemption.DecodePreemptionTestSupport.mock(),
                         availability);
         try {
             SchedulerTestServices.entry(scheduler).submit(gate);
@@ -860,7 +867,7 @@ class RequestSchedulerTest {
         RequestRouteSelector router = mockRouter();
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
         DecodePreemption decodePreemption =
-                org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock();
+                org.flexlb.balance.preemption.DecodePreemptionTestSupport.mock();
         RequestContext lowPriority = context(config, 910L, 10);
         RequestContext highPriority = context(config, 911L, 90);
         CompletableFuture<Response> lowFuture = new CompletableFuture<>();
@@ -874,7 +881,7 @@ class RequestSchedulerTest {
                             registered.data().setFuture(lowFuture);
                             if (!lowFuture.isDone())
                                 ((AbstractRequestScheduler) invocation.getMock())
-                                        .onRequest(invocation.getArgument(0));
+                                        .scheduleRequest(invocation.getArgument(0));
                             return lowFuture;
                         });
         when(lifecycle.submit(
@@ -886,26 +893,26 @@ class RequestSchedulerTest {
                             registered.data().setFuture(highFuture);
                             if (!highFuture.isDone())
                                 ((AbstractRequestScheduler) invocation.getMock())
-                                        .onRequest(invocation.getArgument(0));
+                                        .scheduleRequest(invocation.getArgument(0));
                             return highFuture;
                         });
-        when(lifecycle.claimPlacement(
+        when(lifecycle.tryBeginRouteSelection(
                         org.mockito.ArgumentMatchers.argThat(
                                 request ->
                                         request != null
                                                 && request.data().getFuture() == lowFuture)))
                 .thenAnswer(i -> RequestProtocolTestSupport.admissionHandle(i.getArgument(0)));
-        when(lifecycle.claimPlacement(
+        when(lifecycle.tryBeginRouteSelection(
                         org.mockito.ArgumentMatchers.argThat(
                                 request ->
                                         request != null
                                                 && request.data().getFuture() == highFuture)))
                 .thenAnswer(i -> RequestProtocolTestSupport.admissionHandle(i.getArgument(0)));
         when(router.select(lowPriority, null))
-                .thenReturn(PlacementResult.blocked(PlacementKey.anyGroup(RoleType.PREFILL)));
+                .thenReturn(RoutingResult.blocked(CapacityKey.anyGroup(RoleType.PREFILL)));
         when(router.select(highPriority, null))
                 .thenReturn(
-                        PlacementResult.rejected(
+                        RoutingResult.rejected(
                                 Response.buildErrorResponse(
                                         StrategyErrorType.NO_PREFILL_WORKER, null)));
         AbstractRequestScheduler scheduler =
@@ -915,7 +922,7 @@ class RequestSchedulerTest {
                         router,
                         mock(DeliveryMetricsReporter.class),
                         decodePreemption,
-                        new PlacementAvailability());
+                        new CapacityNotifier());
         try {
             SchedulerTestServices.entry(scheduler).submit(lowPriority);
             verify(router, timeout(1_000)).select(lowPriority, null);
@@ -940,8 +947,8 @@ class RequestSchedulerTest {
         when(configService.loadBalanceConfig()).thenReturn(config);
         RequestRouteSelector router = mockRouter();
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
-        PlacementAvailability availability = new PlacementAvailability();
-        PlacementKey blocker = PlacementKey.anyGroup(RoleType.PREFILL);
+        CapacityNotifier availability = new CapacityNotifier();
+        CapacityKey blocker = CapacityKey.anyGroup(RoleType.PREFILL);
         RequestContext expired = context(config, 801L);
         RequestContext follower = context(config, 802L);
         CompletableFuture<Response> expiredFuture = new CompletableFuture<>();
@@ -955,7 +962,7 @@ class RequestSchedulerTest {
                             registered.data().setFuture(expiredFuture);
                             if (!expiredFuture.isDone())
                                 ((AbstractRequestScheduler) invocation.getMock())
-                                        .onRequest(invocation.getArgument(0));
+                                        .scheduleRequest(invocation.getArgument(0));
                             return expiredFuture;
                         });
         when(lifecycle.submit(
@@ -967,29 +974,29 @@ class RequestSchedulerTest {
                             registered.data().setFuture(followerFuture);
                             if (!followerFuture.isDone())
                                 ((AbstractRequestScheduler) invocation.getMock())
-                                        .onRequest(invocation.getArgument(0));
+                                        .scheduleRequest(invocation.getArgument(0));
                             return followerFuture;
                         });
-        when(lifecycle.claimPlacement(
+        when(lifecycle.tryBeginRouteSelection(
                         org.mockito.ArgumentMatchers.argThat(
                                 request ->
                                         request != null
                                                 && request.data().getFuture() == expiredFuture)))
                 .thenAnswer(i -> RequestProtocolTestSupport.admissionHandle(i.getArgument(0)));
-        when(lifecycle.claimPlacement(
+        when(lifecycle.tryBeginRouteSelection(
                         org.mockito.ArgumentMatchers.argThat(
                                 request ->
                                         request != null
                                                 && request.data().getFuture() == followerFuture)))
                 .thenAnswer(i -> RequestProtocolTestSupport.admissionHandle(i.getArgument(0)));
-        when(router.select(any(), any())).thenReturn(PlacementResult.blocked(blocker));
+        when(router.select(any(), any())).thenReturn(RoutingResult.blocked(blocker));
         AbstractRequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
                         lifecycle,
                         configService,
                         router,
                         mock(DeliveryMetricsReporter.class),
-                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
+                        org.flexlb.balance.preemption.DecodePreemptionTestSupport.mock(),
                         availability);
         SchedulerTestServices.entry(scheduler).submit(expired);
         SchedulerTestServices.entry(scheduler).submit(follower);
@@ -999,7 +1006,7 @@ class RequestSchedulerTest {
         expired.data()
                 .setSchedulingMetadata(
                         SchedulingMetadata.explicit(50, System.currentTimeMillis() - 1L));
-        PlacementAvailabilityTestSupport.changed(availability, blocker);
+        CapacityNotifierTestSupport.notifyChanged(availability, blocker);
         verify(router, timeout(1_000).times(2)).select(follower, null);
         verify(router, times(1)).select(expired, null);
         RequestProtocolTestSupport.close(scheduler);
@@ -1015,7 +1022,7 @@ class RequestSchedulerTest {
         when(configService.loadBalanceConfig()).thenReturn(config);
         RequestRouteSelector router = mockRouter();
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
-        PlacementAvailability availability = new PlacementAvailability();
+        CapacityNotifier availability = new CapacityNotifier();
         RequestContext blocked = context(config, 803L);
         RequestContext independent = context(config, 804L);
         CompletableFuture<Response> blockedFuture = new CompletableFuture<>();
@@ -1029,7 +1036,7 @@ class RequestSchedulerTest {
                             registered.data().setFuture(blockedFuture);
                             if (!blockedFuture.isDone())
                                 ((AbstractRequestScheduler) invocation.getMock())
-                                        .onRequest(invocation.getArgument(0));
+                                        .scheduleRequest(invocation.getArgument(0));
                             return blockedFuture;
                         });
         when(lifecycle.submit(
@@ -1041,16 +1048,16 @@ class RequestSchedulerTest {
                             registered.data().setFuture(independentFuture);
                             if (!independentFuture.isDone())
                                 ((AbstractRequestScheduler) invocation.getMock())
-                                        .onRequest(invocation.getArgument(0));
+                                        .scheduleRequest(invocation.getArgument(0));
                             return independentFuture;
                         });
-        when(lifecycle.claimPlacement(
+        when(lifecycle.tryBeginRouteSelection(
                         org.mockito.ArgumentMatchers.argThat(
                                 request ->
                                         request != null
                                                 && request.data().getFuture() == blockedFuture)))
                 .thenAnswer(i -> RequestProtocolTestSupport.admissionHandle(i.getArgument(0)));
-        when(lifecycle.claimPlacement(
+        when(lifecycle.tryBeginRouteSelection(
                         org.mockito.ArgumentMatchers.argThat(
                                 request ->
                                         request != null
@@ -1062,45 +1069,45 @@ class RequestSchedulerTest {
         RouteResult blockedRoute = RequestProtocolTestSupport.mockSelectedRoute(blocked);
         RouteResult independentRoute = RequestProtocolTestSupport.mockSelectedRoute(independent);
         RouteResult independentItem = RequestProtocolTestSupport.mockSelectedRoute(independent);
-        PlacementKey exactBlocker = PlacementKey.exact(RoleType.PREFILL, "g1", "full-prefill:8080");
+        CapacityKey exactBlocker = CapacityKey.exact(RoleType.PREFILL, "g1", "full-prefill:8080");
         CountDownLatch blockedRouteAttempts = new CountDownLatch(2);
         when(independentItem.prefillEndpoint()).thenReturn(availableEndpoint);
         when(router.select(blocked, null))
                 .thenAnswer(
                         invocation -> {
                             blockedRouteAttempts.countDown();
-                            return PlacementResult.success(
+                            return RoutingResult.success(
                                     RequestProtocolTestSupport.selectionOf(blockedRoute));
                         });
         when(router.select(independent, null))
                 .thenReturn(
-                        PlacementResult.success(
+                        RoutingResult.success(
                                 RequestProtocolTestSupport.selectionOf(independentRoute)));
-        org.mockito.Mockito.doReturn(PlacementResult.blocked(exactBlocker))
+        org.mockito.Mockito.doReturn(RoutingResult.blocked(exactBlocker))
                 .when(RequestProtocolTestSupport.publication(lifecycle))
-                .enqueueRoute(org.mockito.ArgumentMatchers.same(blockedRoute), any());
+                .enqueueRoute(org.mockito.ArgumentMatchers.same(blockedRoute));
         when(independentRoute.prefillEndpoint()).thenReturn(availableEndpoint);
-        org.mockito.Mockito.doReturn(PlacementResult.success(independentItem))
+        org.mockito.Mockito.doReturn(RoutingResult.success(independentItem))
                 .when(RequestProtocolTestSupport.publication(lifecycle))
-                .enqueueRoute(org.mockito.ArgumentMatchers.same(independentRoute), any());
+                .enqueueRoute(org.mockito.ArgumentMatchers.same(independentRoute));
         AbstractRequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
                         lifecycle,
                         configService,
                         router,
                         mock(DeliveryMetricsReporter.class),
-                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
+                        org.flexlb.balance.preemption.DecodePreemptionTestSupport.mock(),
                         availability);
         try {
             SchedulerTestServices.entry(scheduler).submit(blocked);
             SchedulerTestServices.entry(scheduler).submit(independent);
             verify(RequestProtocolTestSupport.publication(lifecycle), timeout(1_000).times(1))
-                    .enqueueRoute(org.mockito.ArgumentMatchers.same(blockedRoute), any());
+                    .enqueueRoute(org.mockito.ArgumentMatchers.same(blockedRoute));
             verify(RequestProtocolTestSupport.publication(lifecycle), timeout(1_000))
-                    .enqueueRoute(org.mockito.ArgumentMatchers.same(independentRoute), any());
+                    .enqueueRoute(org.mockito.ArgumentMatchers.same(independentRoute));
             assertFalse(blockedFuture.isDone());
-            PlacementAvailabilityTestSupport.changed(
-                    availability, new PlacementKey(RoleType.PREFILL, "g1", null));
+            CapacityNotifierTestSupport.notifyChanged(
+                    availability, new CapacityKey(RoleType.PREFILL, "g1", null));
             assertTrue(
                     blockedRouteAttempts.await(1, TimeUnit.SECONDS),
                     "group capacity changes must allow selection to consider another endpoint");
@@ -1166,7 +1173,7 @@ class RequestSchedulerTest {
 
             // Activate the head while the endpoint is still full. Its failed
             // admission publishes a release after reading capacity but before park.
-            PlacementAvailabilityTestSupport.changed(fixture.availability, fixture.key);
+            CapacityNotifierTestSupport.notifyChanged(fixture.availability, fixture.key);
             head.future.get(5, TimeUnit.SECONDS);
             assertTrue(fixture.requests.get(1).retryBlockedReturn.await(5, TimeUnit.SECONDS));
             fixture.awaitIndependentCommit();
@@ -1206,7 +1213,7 @@ class RequestSchedulerTest {
                                 List.of(SelectionTestSupport.metadata(other, status, 0L)));
                 request.alternative = new AlternativeRoute(route, item);
             }
-            PlacementAvailabilityTestSupport.changed(fixture.availability, fixture.key);
+            CapacityNotifierTestSupport.notifyChanged(fixture.availability, fixture.key);
             fixture.awaitAllPublished();
             assertEquals(List.of(820L, 821L, 822L), fixture.admitted);
             assertEquals(0, fixture.availableSlots.get(), "the original worker stayed full");
@@ -1285,7 +1292,7 @@ class RequestSchedulerTest {
                         "handoff must not rely on running completion callbacks");
                 // Even a subsequent edge must not be swallowed by an active request
                 // that was removed from the ordered queue during pruning.
-                PlacementAvailabilityTestSupport.changed(fixture.availability, fixture.key);
+                CapacityNotifierTestSupport.notifyChanged(fixture.availability, fixture.key);
                 fixture.requests.get(1).future.get(5, TimeUnit.SECONDS);
                 assertEquals(List.of(821L), fixture.admitted);
                 assertEquals(0, fixture.availableSlots.get());
@@ -1304,7 +1311,7 @@ class RequestSchedulerTest {
         when(configService.loadBalanceConfig()).thenReturn(config);
         RequestRouteSelector router = mockRouter();
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
-        PlacementAvailability availability = new PlacementAvailability();
+        CapacityNotifier availability = new CapacityNotifier();
         RequestContext context = context(config, 807L);
         CompletableFuture<Response> future = new CompletableFuture<>();
         when(lifecycle.submit(
@@ -1316,10 +1323,10 @@ class RequestSchedulerTest {
                             registered.data().setFuture(future);
                             if (!future.isDone())
                                 ((AbstractRequestScheduler) invocation.getMock())
-                                        .onRequest(invocation.getArgument(0));
+                                        .scheduleRequest(invocation.getArgument(0));
                             return future;
                         });
-        when(lifecycle.claimPlacement(
+        when(lifecycle.tryBeginRouteSelection(
                         org.mockito.ArgumentMatchers.argThat(
                                 request ->
                                         request != null && request.data().getFuture() == future)))
@@ -1329,31 +1336,29 @@ class RequestSchedulerTest {
         RouteResult freshRoute = RequestProtocolTestSupport.mockSelectedRoute(context);
         RouteResult committed = RequestProtocolTestSupport.mockSelectedRoute(context);
         when(committed.prefillEndpoint()).thenReturn(mock(PrefillEndpoint.class));
-        PlacementKey exactBlocker =
-                PlacementKey.exact(RoleType.PREFILL, "g1", "stale-prefill:8080");
+        CapacityKey exactBlocker = CapacityKey.exact(RoleType.PREFILL, "g1", "stale-prefill:8080");
         when(router.select(context, null))
                 .thenReturn(
-                        PlacementResult.success(RequestProtocolTestSupport.selectionOf(staleRoute)),
-                        PlacementResult.success(
-                                RequestProtocolTestSupport.selectionOf(freshRoute)));
-        org.mockito.Mockito.doReturn(PlacementResult.retry())
+                        RoutingResult.success(RequestProtocolTestSupport.selectionOf(staleRoute)),
+                        RoutingResult.success(RequestProtocolTestSupport.selectionOf(freshRoute)));
+        org.mockito.Mockito.doReturn(RoutingResult.retry())
                 .when(RequestProtocolTestSupport.publication(lifecycle))
-                .enqueueRoute(org.mockito.ArgumentMatchers.same(staleRoute), any());
-        org.mockito.Mockito.doReturn(PlacementResult.success(committed))
+                .enqueueRoute(org.mockito.ArgumentMatchers.same(staleRoute));
+        org.mockito.Mockito.doReturn(RoutingResult.success(committed))
                 .when(RequestProtocolTestSupport.publication(lifecycle))
-                .enqueueRoute(org.mockito.ArgumentMatchers.same(freshRoute), any());
+                .enqueueRoute(org.mockito.ArgumentMatchers.same(freshRoute));
         AbstractRequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
                         lifecycle,
                         configService,
                         router,
                         mock(DeliveryMetricsReporter.class),
-                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
+                        org.flexlb.balance.preemption.DecodePreemptionTestSupport.mock(),
                         availability);
         try {
             SchedulerTestServices.entry(scheduler).submit(context);
             verify(RequestProtocolTestSupport.publication(lifecycle), timeout(1_000))
-                    .enqueueRoute(org.mockito.ArgumentMatchers.same(freshRoute), any());
+                    .enqueueRoute(org.mockito.ArgumentMatchers.same(freshRoute));
             verify(router, times(2)).select(context, null);
         } finally {
             RequestProtocolTestSupport.close(scheduler);
@@ -1394,7 +1399,7 @@ class RequestSchedulerTest {
 
         assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode());
         verify(fixture.router, timeout(1_000)).select(fixture.context, null);
-        verify(fixture.lifecycle, never()).placementFor(any());
+        verify(fixture.lifecycle, never()).currentRoutingContext(any());
         RequestProtocolTestSupport.close(fixture.scheduler);
     }
 
@@ -1402,14 +1407,14 @@ class RequestSchedulerTest {
     void prioritySelectorMissWaitsWithoutInventingAnEvictionRoute() {
         Fixture fixture = new Fixture(true);
         when(fixture.router.select(fixture.context, null))
-                .thenReturn(PlacementResult.blocked(PlacementKey.anyGroup(RoleType.PREFILL)));
+                .thenReturn(RoutingResult.blocked(CapacityKey.anyGroup(RoleType.PREFILL)));
         CompletableFuture<Response> waiting =
                 SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context);
 
         verify(fixture.router, timeout(1_000)).select(fixture.context, null);
-        verify(fixture.decodePreemption, never()).tryReclaim(any(), any());
+        verify(fixture.decodePreemption, never()).tryPreempt(any(), any());
         assertFalse(waiting.isDone());
-        verify(fixture.lifecycle, never()).placementFor(any());
+        verify(fixture.lifecycle, never()).currentRoutingContext(any());
         RequestProtocolTestSupport.close(fixture.scheduler);
     }
 
@@ -1417,14 +1422,14 @@ class RequestSchedulerTest {
     void fifoTemporaryDecodeMissRemainsQueued() {
         Fixture fixture = new Fixture(false);
         when(fixture.router.select(fixture.context, null))
-                .thenReturn(PlacementResult.blocked(PlacementKey.anyGroup(RoleType.DECODE)));
+                .thenReturn(RoutingResult.blocked(CapacityKey.anyGroup(RoleType.DECODE)));
         CompletableFuture<Response> waiting =
                 SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context);
 
         verify(fixture.router, timeout(1_000)).select(fixture.context, null);
         assertFalse(waiting.isDone());
-        verify(fixture.decodePreemption, never()).tryReclaim(any(), any());
-        verify(fixture.lifecycle, never()).placementFor(any());
+        verify(fixture.decodePreemption, never()).tryPreempt(any(), any());
+        verify(fixture.lifecycle, never()).currentRoutingContext(any());
         RequestProtocolTestSupport.close(fixture.scheduler);
     }
 
@@ -1498,10 +1503,10 @@ class RequestSchedulerTest {
         private final RequestRouteSelector router = mockRouter();
         private final AbstractRequestScheduler lifecycle =
                 RequestProtocolTestSupport.schedulerMock();
-        private final PlacementAvailability availability = new PlacementAvailability();
+        private final CapacityNotifier availability = new CapacityNotifier();
         private final PrefillEndpoint endpoint = mockPrefillEndpoint("capacity-prefill", 8080);
-        private final PlacementKey key =
-                PlacementKey.exact(RoleType.PREFILL, "g1", "capacity-prefill:8080");
+        private final CapacityKey key =
+                CapacityKey.exact(RoleType.PREFILL, "g1", "capacity-prefill:8080");
         private final AtomicInteger availableSlots = new AtomicInteger();
         private final List<Long> admitted = new CopyOnWriteArrayList<>();
         private final List<CapacityRequest> requests = new ArrayList<>();
@@ -1561,10 +1566,10 @@ class RequestSchedulerTest {
                                 context.data().setFuture(future);
                                 if (!future.isDone())
                                     ((AbstractRequestScheduler) invocation.getMock())
-                                            .onRequest(invocation.getArgument(0));
+                                            .scheduleRequest(invocation.getArgument(0));
                                 return future;
                             });
-            when(lifecycle.claimPlacement(any(RequestContext.class)))
+            when(lifecycle.tryBeginRouteSelection(any(RequestContext.class)))
                     .thenAnswer(
                             invocation -> {
                                 var request =
@@ -1589,10 +1594,10 @@ class RequestSchedulerTest {
                                                     return null;
                                                 })
                                         .when(RequestProtocolTestSupport.placementScheduler(handle))
-                                        .completePlacement(
+                                        .completeRouting(
                                                 org.mockito.ArgumentMatchers.same(handle),
                                                 org.mockito.ArgumentMatchers.eq(
-                                                        ContextResult.PublicationResult.PUBLISHED),
+                                                        ContextResult.RoutingCompletion.FINISHED),
                                                 org.mockito.ArgumentMatchers.isNull());
                                 return handle;
                             });
@@ -1615,7 +1620,7 @@ class RequestSchedulerTest {
                                 var selected =
                                         alternative == null ? request.route : alternative.route();
                                 when(selected.ctx()).thenReturn(context);
-                                return PlacementResult.success(
+                                return RoutingResult.success(
                                         RequestProtocolTestSupport.selectionOf(selected));
                             });
             org.mockito.Mockito.doAnswer(
@@ -1647,7 +1652,7 @@ class RequestSchedulerTest {
                                         if (attempt > 1) {
                                             request.retryBlockedReturn.countDown();
                                         }
-                                        return PlacementResult.blocked(key);
+                                        return RoutingResult.blocked(key);
                                     }
                                     admitted.add(requestId);
                                     if (requestId == 820L && slotsReleasedDuringPublication > 0) {
@@ -1663,7 +1668,7 @@ class RequestSchedulerTest {
                                         selectedRoute, request.item);
                             })
                     .when(RequestProtocolTestSupport.publication(lifecycle))
-                    .enqueueRoute(any(RouteResult.class), any());
+                    .enqueueRoute(any(RouteResult.class));
             DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
             // The exact placement scope finishes after the coordinator retires the queue entry.
             // A delayed Future callback therefore cannot hide a lost capacity handoff.
@@ -1676,7 +1681,7 @@ class RequestSchedulerTest {
                             configService,
                             router,
                             reporter,
-                            org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
+                            org.flexlb.balance.preemption.DecodePreemptionTestSupport.mock(),
                             availability);
         }
 
@@ -1695,7 +1700,7 @@ class RequestSchedulerTest {
 
         private void releaseSlots(int count) {
             availableSlots.addAndGet(count);
-            PlacementAvailabilityTestSupport.changed(availability, key);
+            CapacityNotifierTestSupport.notifyChanged(availability, key);
         }
 
         private void awaitAllPublished() throws InterruptedException {
@@ -1777,6 +1782,9 @@ class RequestSchedulerTest {
         }
     }
 
+    /**
+     * Wires request scheduling with controllable role selection and Decode preemption.
+     */
     private static final class Fixture {
 
         private final long requestId = 701L;
@@ -1788,12 +1796,12 @@ class RequestSchedulerTest {
         private final RequestRouteSelector router = mockRouter();
 
         private final DecodePreemption decodePreemption =
-                org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock();
+                org.flexlb.balance.preemption.DecodePreemptionTestSupport.mock();
 
         private final AbstractRequestScheduler lifecycle =
                 RequestProtocolTestSupport.schedulerMock();
 
-        private final PlacementAvailability availability = new PlacementAvailability();
+        private final CapacityNotifier availability = new CapacityNotifier();
 
         private final RequestContext context = context(config, requestId);
 
@@ -1817,10 +1825,10 @@ class RequestSchedulerTest {
                                 registered.data().setFuture(future);
                                 if (!future.isDone())
                                     ((AbstractRequestScheduler) invocation.getMock())
-                                            .onRequest(invocation.getArgument(0));
+                                            .scheduleRequest(invocation.getArgument(0));
                                 return future;
                             });
-            when(lifecycle.claimPlacement(
+            when(lifecycle.tryBeginRouteSelection(
                             org.mockito.ArgumentMatchers.argThat(
                                     request ->
                                             request != null
@@ -1838,7 +1846,7 @@ class RequestSchedulerTest {
                     .publish(any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
             when(router.select(context, null))
                     .thenReturn(
-                            PlacementResult.rejected(
+                            RoutingResult.rejected(
                                     Response.buildErrorResponse(
                                             StrategyErrorType.NO_PREFILL_WORKER, null)));
             scheduler =

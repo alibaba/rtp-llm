@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.preemption.CancelTarget;
-import org.flexlb.balance.preemption.VictimResolution;
+import org.flexlb.balance.preemption.PreemptionRequestResult;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -61,13 +61,15 @@ class OperationCompletionTest {
                         mock(DecodeResources.RequestReservation.class),
                         new CancelTarget("127.0.0.1", 9000));
         var result =
-                new VictimResolution(String.valueOf(1L), VictimResolution.Outcome.DELIVERY_RESUMED);
+                new PreemptionRequestResult(
+                        String.valueOf(1L), PreemptionRequestResult.Outcome.DELIVERY_RESUMED);
         var callbacks = new AtomicInteger();
         var start = new CountDownLatch(1);
         try (var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var observed =
                     new ArrayList<
-                            java.util.concurrent.Future<CompletableFuture<VictimResolution>>>();
+                            java.util.concurrent.Future<
+                                    CompletableFuture<PreemptionRequestResult>>>();
             for (int i = 0; i < 16; i++) {
                 observed.add(
                         workers.submit(
@@ -89,12 +91,14 @@ class OperationCompletionTest {
                 assertSame(result, future.get(2, TimeUnit.SECONDS).get(2, TimeUnit.SECONDS));
         }
         operation.complete(
-                new VictimResolution(String.valueOf(1L), VictimResolution.Outcome.REQUEST_END));
+                new PreemptionRequestResult(
+                        String.valueOf(1L), PreemptionRequestResult.Outcome.REQUEST_END));
         assertSame(result, operation.result());
         assertEquals(16, callbacks.get());
         var forged = operation.completion().toCompletableFuture();
         forged.obtrudeValue(
-                new VictimResolution(String.valueOf(2L), VictimResolution.Outcome.REQUEST_END));
+                new PreemptionRequestResult(
+                        String.valueOf(2L), PreemptionRequestResult.Outcome.REQUEST_END));
         assertSame(result, operation.completion().toCompletableFuture().get(2, TimeUnit.SECONDS));
     }
 }

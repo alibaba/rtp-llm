@@ -81,15 +81,14 @@ public final class RequestTimeEstimationTestSupport {
             boolean priority,
             GroupPlanner.Constraints constraints,
             List<GroupPlanner.Item> activeItems) {
-        return queue(true, priority, constraints, activeItems, null);
+        return queue(true, priority, constraints, activeItems);
     }
 
     static ProjectionQueueSnapshot queue(
             boolean queueScheduling,
             boolean priority,
             GroupPlanner.Constraints constraints,
-            List<GroupPlanner.Item> activeItems,
-            ProjectionQueueSnapshot.AdmissionBlock admissionBlock) {
+            List<GroupPlanner.Item> activeItems) {
         Comparator<GroupPlanner.Item> ordering = priority ? PRIORITY : FIFO;
         List<GroupPlanner.Item> ordered = new ArrayList<>(activeItems);
         ordered.sort(ordering);
@@ -99,8 +98,7 @@ public final class RequestTimeEstimationTestSupport {
                 org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                 ordering,
                 constraints,
-                ordered,
-                admissionBlock);
+                ordered);
     }
 
     static GroupPlanner.Item item(
@@ -157,18 +155,18 @@ public final class RequestTimeEstimationTestSupport {
             Probe probe,
             org.flexlb.config.DispatcherConfig.Type deliveryMode) {
         return project(
-                new RequestTimeEstimation.Inputs(queue, work, 0L, evaluator, deliveryMode), probe);
+                new RequestTimeEstimation.Inputs(queue, work, 0L, evaluator, deliveryMode),
+                probe,
+                queue.capturedAtMs());
     }
 
     private static Candidate immutable(RequestTimeEstimation.CandidateView source) {
         return new Candidate(
-                source.admissionState(),
-                source.admissionState() == RequestTimeEstimation.State.MODELED
-                        ? source.projectedTtftMsValue()
-                        : RequestTimeEstimation.UNKNOWN,
+                source.state(),
+                source.projectedTtftMsValue(),
                 source.incomingPrefillMs(),
                 source.initialHeadDisposition(),
-                source.admissionDetail(),
+                source.detail(),
                 source.cacheHitTokens(),
                 source.routingCacheMatchTokens());
     }

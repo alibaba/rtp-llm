@@ -26,6 +26,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ArithmeticFormulaTest {
     @Test
+    void parsingRejectsMissingVariableBindingsBeforeCachingTheFormula() {
+        assertThrows(NullPointerException.class, () -> ArithmeticFormula.parse("1", null));
+        assertThrows(
+                NullPointerException.class,
+                () -> ArithmeticFormula.parse("1", Map.of(), null, true));
+    }
+
+    @Test
     void repeatedParsingKeepsBindingAndValidationInputsIsolated() {
         var variables = new java.util.HashMap<>(Map.of("signal", 0));
         var excluded = new java.util.HashSet<String>();

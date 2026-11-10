@@ -46,7 +46,7 @@ class GrpcFailureTest {
         assertEquals(GrpcFailure.Kind.RPC_FAILURE, analysis.kind());
         assertEquals(Status.Code.UNKNOWN, analysis.grpcCode());
         assertNull(analysis.rootCause());
-        assertFalse(GrpcFailure.isRetryableTransportFailure(null));
+        assertFalse(GrpcFailure.analyze(null).retryableTransportFailure());
     }
 
     @ParameterizedTest
@@ -64,7 +64,7 @@ class GrpcFailureTest {
                 assertEquals(status.getCode(), analysis.grpcCode());
                 assertSame(rpcFailure, analysis.rootCause());
                 assertFalse(analysis.confirmedLocalFailure());
-                assertFalse(GrpcFailure.isRetryableTransportFailure(failure));
+                assertFalse(GrpcFailure.analyze(failure).retryableTransportFailure());
             }
         }
     }
@@ -87,7 +87,7 @@ class GrpcFailureTest {
         assertEquals(Status.Code.INTERNAL, analysis.grpcCode());
         assertSame(oom, analysis.rootCause());
         assertTrue(analysis.confirmedLocalFailure());
-        assertFalse(GrpcFailure.isRetryableTransportFailure(error));
+        assertFalse(GrpcFailure.analyze(error).retryableTransportFailure());
     }
 
     @ParameterizedTest(name = "{0}")
@@ -105,8 +105,8 @@ class GrpcFailureTest {
 
         assertEquals(expectedKind, GrpcFailure.classify(otherWrapper));
         assertEquals(expectedKind, GrpcFailure.classify(preferredWrapper));
-        assertEquals(retryable, GrpcFailure.isRetryableTransportFailure(otherWrapper));
-        assertEquals(retryable, GrpcFailure.isRetryableTransportFailure(preferredWrapper));
+        assertEquals(retryable, GrpcFailure.analyze(otherWrapper).retryableTransportFailure());
+        assertEquals(retryable, GrpcFailure.analyze(preferredWrapper).retryableTransportFailure());
         assertSame(preferredRoot, GrpcFailure.analyze(otherWrapper).rootCause());
         assertSame(otherRoot, GrpcFailure.analyze(preferredWrapper).rootCause());
     }
@@ -135,7 +135,7 @@ class GrpcFailureTest {
             Throwable cancelled =
                     statusFailure(terminal.withCause(brokenConnection), checkedException);
             assertEquals(terminal.getCode(), GrpcFailure.analyze(cancelled).grpcCode());
-            assertFalse(GrpcFailure.isRetryableTransportFailure(cancelled));
+            assertFalse(GrpcFailure.analyze(cancelled).retryableTransportFailure());
 
             Throwable innerCancellation =
                     statusFailure(
@@ -144,7 +144,7 @@ class GrpcFailureTest {
                     statusFailure(
                             Status.UNAVAILABLE.withCause(innerCancellation), checkedException);
             assertEquals(Status.Code.UNAVAILABLE, GrpcFailure.analyze(unavailable).grpcCode());
-            assertTrue(GrpcFailure.isRetryableTransportFailure(unavailable));
+            assertTrue(GrpcFailure.analyze(unavailable).retryableTransportFailure());
         }
     }
 
@@ -154,7 +154,7 @@ class GrpcFailureTest {
                 new IllegalStateException(
                         "OutOfMemoryError DEADLINE_EXCEEDED Connection reset http2 exception");
         assertEquals(GrpcFailure.Kind.RPC_FAILURE, GrpcFailure.classify(failure));
-        assertFalse(GrpcFailure.isRetryableTransportFailure(failure));
+        assertFalse(GrpcFailure.analyze(failure).retryableTransportFailure());
         assertFalse(GrpcFailure.analyze(failure).confirmedLocalFailure());
     }
 
@@ -168,7 +168,7 @@ class GrpcFailureTest {
                     }
                 };
         assertEquals(GrpcFailure.Kind.LOCAL_EXECUTOR_REJECTED, GrpcFailure.classify(failure));
-        assertFalse(GrpcFailure.isRetryableTransportFailure(failure));
+        assertFalse(GrpcFailure.analyze(failure).retryableTransportFailure());
     }
 
     @Test
@@ -176,7 +176,7 @@ class GrpcFailureTest {
         var deadline = Status.DEADLINE_EXCEEDED.asException();
         assertEquals(GrpcFailure.Kind.DEADLINE_EXCEEDED, GrpcFailure.classify(deadline));
         assertFalse(GrpcFailure.analyze(deadline).confirmedLocalFailure());
-        assertFalse(GrpcFailure.isRetryableTransportFailure(deadline));
+        assertFalse(GrpcFailure.analyze(deadline).retryableTransportFailure());
         assertEquals(
                 GrpcFailure.Kind.RPC_FAILURE,
                 GrpcFailure.classify(Status.RESOURCE_EXHAUSTED.asRuntimeException()));
@@ -191,7 +191,7 @@ class GrpcFailureTest {
         assertEquals(GrpcFailure.Kind.CONNECT_FAILED, GrpcFailure.classify(new ConnectException()));
         var closed = Status.UNKNOWN.withCause(new ClosedChannelException()).asRuntimeException();
         assertEquals(GrpcFailure.Kind.CHANNEL_CLOSED, GrpcFailure.classify(closed));
-        assertTrue(GrpcFailure.isRetryableTransportFailure(closed));
+        assertTrue(GrpcFailure.analyze(closed).retryableTransportFailure());
         assertFalse(GrpcFailure.analyze(closed).confirmedLocalFailure());
     }
 
@@ -207,7 +207,7 @@ class GrpcFailureTest {
         assertSame(cause, analysis.rootCause());
         assertEquals(confirmedLocal, analysis.confirmedLocalFailure());
         assertEquals(retryable, analysis.retryableTransportFailure());
-        assertEquals(retryable, GrpcFailure.isRetryableTransportFailure(failure));
+        assertEquals(retryable, GrpcFailure.analyze(failure).retryableTransportFailure());
         for (Status terminal : new Status[] {Status.CANCELLED, Status.DEADLINE_EXCEEDED}) {
             assertFalse(
                     GrpcFailure.analyze(terminal.withCause(cause).asException())
@@ -286,8 +286,10 @@ class GrpcFailureTest {
     void cancellationAndDeadlineCannotRetryEvenWithAnIoCause() {
         for (Status status : new Status[] {Status.CANCELLED, Status.DEADLINE_EXCEEDED}) {
             assertFalse(
-                    GrpcFailure.isRetryableTransportFailure(
-                            status.withCause(new ClosedChannelException()).asRuntimeException()));
+                    GrpcFailure.analyze(
+                                    status.withCause(new ClosedChannelException())
+                                            .asRuntimeException())
+                            .retryableTransportFailure());
         }
     }
 
@@ -298,10 +300,10 @@ class GrpcFailureTest {
                         new InvalidProtocolBufferException("Connection reset"), new EOFException());
         var parsing = Status.INTERNAL.withCause(malformed).asRuntimeException();
         assertEquals(GrpcFailure.Kind.PROTOBUF_FAILURE, GrpcFailure.classify(parsing));
-        assertFalse(GrpcFailure.isRetryableTransportFailure(parsing));
+        assertFalse(GrpcFailure.analyze(parsing).retryableTransportFailure());
         var io = Status.UNKNOWN.withCause(new IOException()).asException();
         assertEquals(GrpcFailure.Kind.IO_FAILURE, GrpcFailure.classify(io));
-        assertFalse(GrpcFailure.isRetryableTransportFailure(io));
+        assertFalse(GrpcFailure.analyze(io).retryableTransportFailure());
     }
 
     @Test
@@ -313,7 +315,7 @@ class GrpcFailureTest {
                 Duration.ofSeconds(1),
                 () -> {
                     assertEquals(GrpcFailure.Kind.RPC_FAILURE, GrpcFailure.classify(first));
-                    assertFalse(GrpcFailure.isRetryableTransportFailure(first));
+                    assertFalse(GrpcFailure.analyze(first).retryableTransportFailure());
                 });
     }
 
@@ -337,7 +339,7 @@ class GrpcFailureTest {
                         assertSame(recognized, analysis.rootCause());
                         assertEquals(
                                 !localMemoryFailure,
-                                GrpcFailure.isRetryableTransportFailure(outer));
+                                GrpcFailure.analyze(outer).retryableTransportFailure());
                     });
         }
     }

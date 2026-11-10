@@ -4,12 +4,12 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.DecodePreemption;
-import org.flexlb.balance.eviction.DefaultDecodePreemption;
-import org.flexlb.balance.eviction.PriorityDecodePreemptionPolicy;
+import org.flexlb.balance.preemption.DecodePreemption;
+import org.flexlb.balance.preemption.DefaultDecodePreemption;
+import org.flexlb.balance.preemption.PriorityDecodePreemptionPolicy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.VictimStage;
+import org.flexlb.config.PreemptionStage;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -49,7 +49,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Exercises queued victim withdrawal, incoming capacity transfer, and rollback under concurrent cancellation.
+ * Exercises queued request selected for preemption withdrawal, incoming capacity transfer, and rollback under concurrent cancellation.
  */
 class QueuedDecodeWithdrawalTest {
     private FlexlbConfig config;
@@ -92,7 +92,9 @@ class QueuedDecodeWithdrawalTest {
                         SchedulerTestSupport.runtime(registry).taskTimer(),
                         mock(RequestSchedulerReporter.class),
                         service,
-                        registry.dispatcher.decodeAdmissionCapacity,
+                        (org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity)
+                                org.flexlb.balance.scheduler.DeliveryTestSupport.getField(
+                                        registry.dispatcher, "decodeAdmissionCapacity"),
                         new PriorityDecodePreemptionPolicy());
         org.mockito.Mockito.doReturn(true).when(queue).enqueue(any());
         decode =
@@ -132,9 +134,9 @@ class QueuedDecodeWithdrawalTest {
                         })
                 .when(decode)
                 .release(any(), eq(DecodeResources.ReleaseReason.LOCAL_ROLLBACK));
-        SchedulingTestConfig.allowVictim(config, VictimStage.DECODE_RESERVED);
+        SchedulingTestConfig.allowVictim(config, PreemptionStage.DECODE_RESERVED);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
-        var victim = queued(40);
+        var requestToPreempt = queued(40);
         var context = RequestProtocolTestSupport.context(config, 100);
         context.data()
                 .setSchedulingMetadata(
@@ -175,13 +177,20 @@ class QueuedDecodeWithdrawalTest {
                             return true;
                         })
                 .when(queue)
-                .enqueue(victim.ctx());
-        when(prefill.enqueueRoute(any(), org.mockito.ArgumentMatchers.any()))
+                .enqueue(requestToPreempt.ctx());
+        when(prefill.acceptQueuedRoute(
+                        any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any()))
                 .thenAnswer(
                         call ->
                                 accepted
                                         && RequestProtocolTestSupport.recordPrefillReservation(
-                                                call.getArgument(0)));
+                                                call.getArgument(0))
+                                        && call.<RouteResult>getArgument(0)
+                                                .ctx()
+                                                .publishRoute(
+                                                        call.getArgument(2), call.getArgument(0)));
         var manager =
                 new DefaultDecodePreemption(
                         SchedulerTestSupport.dispatcher(SchedulerTestSupport.runtime(registry)),
@@ -196,7 +205,7 @@ class QueuedDecodeWithdrawalTest {
         var handle = SchedulerTestSupport.claim(registry, "100", future);
         try (var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(handle)) {
             assertNotNull(handle);
-            var reservation = manager.tryReclaim(context, decode);
+            var reservation = manager.tryPreempt(context, decode);
             assertNotNull(reservation);
             var result = reservation.join();
             assertEquals(replacement.get(), result.reservation());
@@ -209,7 +218,7 @@ class QueuedDecodeWithdrawalTest {
                                             prefill, prefillStatus, 1L, prefillRecord),
                                     new RoleSelection.Decode(
                                             decode, decodeStatus, result.reservation())));
-            when(prefillRecord.belongsTo(completedSelection)).thenReturn(true);
+
             try (var plan = RequestProtocolTestSupport.plan(context, completedSelection)) {
                 var scheduler =
                         (QueuedRequestScheduler)
@@ -218,11 +227,15 @@ class QueuedDecodeWithdrawalTest {
                 assertTrue(result.committed());
                 var placement = SchedulerTestSupport.enqueueRoute(scheduler, plan);
                 var offered = org.mockito.ArgumentCaptor.forClass(RouteResult.class);
-                verify(prefill).enqueueRoute(offered.capture(), org.mockito.ArgumentMatchers.any());
+                verify(prefill)
+                        .acceptQueuedRoute(
+                                offered.capture(),
+                                org.mockito.ArgumentMatchers.any(),
+                                org.mockito.ArgumentMatchers.any());
                 assertEquals(
                         accepted
-                                ? org.flexlb.balance.PlacementResult.Status.SUCCESS
-                                : org.flexlb.balance.PlacementResult.Status.BLOCKED,
+                                ? org.flexlb.balance.RoutingResult.Status.SUCCESS
+                                : org.flexlb.balance.RoutingResult.Status.BLOCKED,
                         placement.status());
                 assertEquals(replacement.get(), offered.getValue().decodeReservation());
                 assertSame(future, offered.getValue().ctx().data().getFuture());
@@ -266,8 +279,8 @@ class QueuedDecodeWithdrawalTest {
                 assertNull(EndpointTestSupport.decodeReservation(decode, 100));
             }
             assertNull(EndpointTestSupport.decodeReservation(decode, 40));
-            assertFalse(victim.ctx().data().getFuture().isDone());
-            verify(queue).enqueue(victim.ctx());
+            assertFalse(requestToPreempt.ctx().data().getFuture().isDone());
+            verify(queue).enqueue(requestToPreempt.ctx());
             verify(selectedEndpoint, org.mockito.Mockito.never()).close();
         }
     }
@@ -343,7 +356,7 @@ class QueuedDecodeWithdrawalTest {
                                     registry,
                                     next,
                                     RequestProtocolTestSupport.publication(() -> true))
-                            == org.flexlb.balance.PlacementResult.Status.SUCCESS));
+                            == org.flexlb.balance.RoutingResult.Status.SUCCESS));
         }
         RequestProtocolTestSupport.applyDecodeStatus(
                 registry,
@@ -404,7 +417,7 @@ class QueuedDecodeWithdrawalTest {
                             return true;
                         })
                 .when(prefill)
-                .removeQueued(eq(item));
+                .releaseQueuedRequest(eq(item));
         assertTrue(replace(item));
         assertFalse(item.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
         assertNull(EndpointTestSupport.decodeReservation(decode, 4));
@@ -434,12 +447,12 @@ class QueuedDecodeWithdrawalTest {
                             assertEquals(ContextResult.Phase.ENDING, closing.phase());
                             assertNull(closing.cancellation());
                             assertNotNull(
-                                    closing.placement(),
+                                    closing.routingContext(),
                                     "physical withdrawal still owns its placement scope");
                             return true;
                         })
                 .when(prefill)
-                .removeQueued(eq(item));
+                .releaseQueuedRequest(eq(item));
 
         assertTrue(replace(item));
         var response = item.ctx().data().getFuture().get(2, TimeUnit.SECONDS);
@@ -454,7 +467,7 @@ class QueuedDecodeWithdrawalTest {
                 EndpointTestSupport.decodeReservation(decode, 100),
                 "closing the withdrawn victim must preserve the incoming reservation");
         verify(queue, never()).enqueue(item.ctx());
-        verify(prefill).removeQueued(eq(item));
+        verify(prefill).releaseQueuedRequest(eq(item));
     }
 
     @Test
@@ -469,7 +482,7 @@ class QueuedDecodeWithdrawalTest {
         assertSame(
                 item, SchedulerTestSupport.repository(registry).findActive("5").snapshot().route());
         assertTrue(RequestProtocolTestSupport.prepareMember(registry, item));
-        verify(item.prefillEndpoint(), never()).removeQueued(any());
+        verify(item.prefillEndpoint(), never()).releaseQueuedRequest(any());
     }
 
     @Test
@@ -530,7 +543,7 @@ class QueuedDecodeWithdrawalTest {
                 .release(any(), eq(DecodeResources.ReleaseReason.LOCAL_ROLLBACK));
         var first = queued(81);
         var second = queued(82);
-        when(first.prefillEndpoint().removeQueued(first))
+        when(first.prefillEndpoint().releaseQueuedRequest(first))
                 .thenThrow(new IllegalStateException("injected Prefill removal failure"));
         assertThrows(
                 IllegalStateException.class,
@@ -539,7 +552,7 @@ class QueuedDecodeWithdrawalTest {
         assertNull(EndpointTestSupport.decodeReservation(decode, 100));
         assertNull(EndpointTestSupport.decodeReservation(decode, 81));
         assertNull(EndpointTestSupport.decodeReservation(decode, 82));
-        assertNull(second.ctx().snapshot().placement());
+        assertNull(second.ctx().snapshot().routingContext());
         assertNull(second.ctx().snapshot().route());
         verify(queue).enqueue(second.ctx());
         verify(queue, never()).enqueue(first.ctx());
@@ -559,8 +572,8 @@ class QueuedDecodeWithdrawalTest {
         var firstFailure = new IllegalStateException("first withdrawal failed");
         var secondFailure = new IllegalStateException("second withdrawal failed");
         var cleanupFailure = new IllegalStateException("release notification failed");
-        when(first.prefillEndpoint().removeQueued(first)).thenThrow(firstFailure);
-        when(second.prefillEndpoint().removeQueued(second)).thenThrow(secondFailure);
+        when(first.prefillEndpoint().releaseQueuedRequest(first)).thenThrow(firstFailure);
+        when(second.prefillEndpoint().releaseQueuedRequest(second)).thenThrow(secondFailure);
         doAnswer(
                         call -> {
                             call.callRealMethod();
@@ -583,8 +596,8 @@ class QueuedDecodeWithdrawalTest {
         assertTrue(List.of(failure.getSuppressed()).contains(secondFailure));
         assertTrue(List.of(failure.getSuppressed()).contains(cleanupFailure));
         verify(decode).release(any(), eq(DecodeResources.ReleaseReason.LOCAL_ROLLBACK));
-        assertNull(first.ctx().snapshot().placement());
-        assertNull(second.ctx().snapshot().placement());
+        assertNull(first.ctx().snapshot().routingContext());
+        assertNull(second.ctx().snapshot().routingContext());
         assertNull(EndpointTestSupport.decodeReservation(decode, 100));
         assertFalse(first.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
         assertFalse(second.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
@@ -647,7 +660,7 @@ class QueuedDecodeWithdrawalTest {
                             return true;
                         })
                 .when(prefill)
-                .removeQueued(eq(item));
+                .releaseQueuedRequest(eq(item));
         try (var executor = Executors.newSingleThreadExecutor()) {
             var replacement = executor.submit(() -> replace(item));
             try {
@@ -706,7 +719,9 @@ class QueuedDecodeWithdrawalTest {
                 };
         int priority =
                 mismatch.equals("equalPriority") ? 30 : mismatch.equals("lowerPriority") ? 29 : 80;
-        assertNull(registry.beginPreemption(source, attempted, priority));
+        assertNull(
+                ((DefaultDecodePreemption) eviction)
+                        .beginRoutePreemption(source, attempted, priority));
         assertSame(item, item.ctx().snapshot().route());
         assertEquals(ContextResult.Phase.OPEN, item.ctx().snapshot().phase());
         assertNotNull(item.ctx().snapshot().route());
@@ -714,15 +729,16 @@ class QueuedDecodeWithdrawalTest {
         assertEquals(reservation, EndpointTestSupport.decodeReservation(decode, 91L));
         assertEquals(1, decode.routingView().totalLoad());
         assertFalse(item.ctx().data().getFuture().isDone());
-        verify(item.prefillEndpoint(), never()).removeQueued(any());
+        verify(item.prefillEndpoint(), never()).releaseQueuedRequest(any());
         verify(queue, never()).enqueue(any());
-        var valid = registry.beginPreemption(decode, reservation, 80);
+        var valid =
+                ((DefaultDecodePreemption) eviction).beginRoutePreemption(decode, reservation, 80);
         {
             assertNotNull(
                     valid,
                     "rejected attempts must leave the valid withdrawal qualification available");
-            AbstractRequestScheduler.completePlacement(
-                    valid, ContextResult.PublicationResult.RESTORED);
+            AbstractRequestScheduler.completeRouting(
+                    valid, ContextResult.RoutingCompletion.RESTORED);
         }
         assertEquals(ContextResult.Phase.OPEN, item.ctx().snapshot().phase());
         assertNotNull(item.ctx().snapshot().route());
@@ -752,7 +768,7 @@ class QueuedDecodeWithdrawalTest {
         when(prefillWorker.isAvailableForScheduling()).thenReturn(true);
         when(prefill.getStatus()).thenReturn(prefillWorker);
         when(prefill.acceptsNewRequests()).thenReturn(true);
-        when(prefill.removeQueued(any())).thenReturn(true);
+        when(prefill.releaseQueuedRequest(any())).thenReturn(true);
         var item =
                 SchedulingTestConfig.createRoute(
                         context,
@@ -771,16 +787,16 @@ class QueuedDecodeWithdrawalTest {
                                     registry,
                                     item,
                                     RequestProtocolTestSupport.publication(() -> true))
-                            == org.flexlb.balance.PlacementResult.Status.SUCCESS));
+                            == org.flexlb.balance.RoutingResult.Status.SUCCESS));
         }
         return item;
     }
 
     /**
-     * Inject exact victim identities to exercise withdrawal conflicts independently of planning.
+     * Inject exact request selected for preemption identities to exercise withdrawal conflicts independently of planning.
      */
     private DecodeResources.RequestReservation replace(
-            List<DecodeResources.RequestReservation> victims, int priority) {
+            List<DecodeResources.RequestReservation> requestsToPreempt, int priority) {
         var incoming =
                 org.flexlb.dao.loadbalance.Request.builder()
                         .requestId("100")
@@ -788,7 +804,12 @@ class QueuedDecodeWithdrawalTest {
                         .maxNewTokens(0)
                         .build();
         return org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                eviction, "replaceQueuedDecodeReservations", decode, victims, incoming, priority);
+                eviction,
+                "replaceQueuedDecodeReservations",
+                decode,
+                requestsToPreempt,
+                incoming,
+                priority);
     }
 
     private boolean replace(RouteResult item) {

@@ -135,16 +135,18 @@ class RequestAcknowledgementPreemptionRaceTest {
                         System.currentTimeMillis());
         var admission = RequestProtocolTestSupport.beginAdmission(owner, context);
         assertEquals(
-                org.flexlb.balance.PlacementResult.Status.SUCCESS,
+                org.flexlb.balance.RoutingResult.Status.SUCCESS,
                 RequestProtocolTestSupport.commitRoute(
                         owner, route, RequestProtocolTestSupport.publication(() -> true)));
-        AbstractRequestScheduler.finishPlacement(admission);
+        AbstractRequestScheduler.finishRouting(admission);
         var delivery =
-                owner.commitDelivery(
-                        new org.flexlb.balance.scheduler.Delivery.Member(
-                                route, RequestProtocolTestSupport.handoff(() -> true)),
-                        Delivery.SendMode.BATCH_ENQUEUE,
-                        7L);
+                org.flexlb.balance.scheduler.DeliveryTestSupport.transport(owner.dispatcher)
+                        .commit(
+                                new org.flexlb.balance.scheduler.Delivery.Member(
+                                        route, RequestProtocolTestSupport.handoff(() -> true)),
+                                Delivery.SendMode.BATCH_ENQUEUE,
+                                7L,
+                                null);
         assertEquals(ContextResult.SendState.SENDING, context.snapshot().delivery().send());
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
@@ -166,7 +168,10 @@ class RequestAcknowledgementPreemptionRaceTest {
             assertTrue(context.snapshot().delivery().acknowledged());
             assertNull(context.snapshot().selectedResponse());
             assertFalse(context.data().getFuture().isDone());
-            var registration = owner.tryClaim(reservation, 4L).orElseThrow();
+            var registration =
+                    SchedulerTestSupport.routePreemption(owner)
+                            .tryRegisterPreemption(reservation, 4L)
+                            .orElseThrow();
             assertTrue(
                     RequestProtocolTestSupport.preemptionPhase(
                             owner, registration, PreemptionCancelPhase.CANCEL_IN_FLIGHT));

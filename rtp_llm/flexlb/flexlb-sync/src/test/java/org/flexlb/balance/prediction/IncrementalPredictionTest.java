@@ -148,8 +148,7 @@ class IncrementalPredictionTest {
                             org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                             order,
                             new GroupPlanner.Constraints(64, 200_000, 300_000, 700, 700),
-                            items,
-                            null);
+                            items);
             var work = new WorkSnapshot(1000, List.of(), List.of(), 0);
             var probe =
                     new RequestTimeEstimationTestSupport.Probe(
@@ -304,8 +303,7 @@ class IncrementalPredictionTest {
                         org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                         Comparator.comparing(GroupPlanner.Item::requestId),
                         new GroupPlanner.Constraints(64, 100_000, 100_000, budget, 0),
-                        active,
-                        null);
+                        active);
         return RequestTimeEstimationTestSupport.project(
                 new RequestTimeEstimation.Inputs(
                         queue,

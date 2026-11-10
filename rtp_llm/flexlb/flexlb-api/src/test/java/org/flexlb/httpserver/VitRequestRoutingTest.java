@@ -1,7 +1,7 @@
 package org.flexlb.httpserver;
 
 import io.grpc.stub.StreamObserver;
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.scheduler.RequestRouteSelector;
 import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
 import org.flexlb.config.ConfigService;
@@ -31,7 +31,9 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** VIT routing precedes generation admission at the real API entry. */
+/**
+ * VIT routing precedes generation admission at the real API entry.
+ */
 class VitRequestRoutingTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -88,7 +90,7 @@ class VitRequestRoutingTest {
             assertEquals(0, runtime.requestRegistry().liveRequestCount());
             when(selector.select(any(), isNull()))
                     .thenReturn(
-                            PlacementResult.rejected(
+                            RoutingResult.rejected(
                                     Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
             var pd =
                     missing.toBuilder()

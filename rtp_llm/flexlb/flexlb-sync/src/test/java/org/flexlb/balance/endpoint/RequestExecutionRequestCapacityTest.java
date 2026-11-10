@@ -2,8 +2,8 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.scheduler.DeliveryDispatcher;
-import org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler;
+import org.flexlb.balance.scheduler.DeliveryCoordinator;
+import org.flexlb.balance.scheduler.PrefillQueueScheduler;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestExecutionTestSupport;
 import org.flexlb.balance.scheduler.RouteResult;
@@ -72,8 +72,8 @@ class RequestExecutionRequestCapacityTest {
                             org.mockito.Mockito.anyLong(),
                             org.mockito.ArgumentMatchers.eq(
                                     org.flexlb.balance.scheduler.CancelReason.DEADLINE_EXCEEDED));
-            assertFalse(fixture.endpoint.removeQueued(item(config, fixture.endpoint, 1L)));
-            assertTrue(fixture.endpoint.removeQueued(routes.getFirst()));
+            assertFalse(fixture.endpoint.releaseQueuedRequest(item(config, fixture.endpoint, 1L)));
+            assertTrue(fixture.endpoint.releaseQueuedRequest(routes.getFirst()));
             assertEquals(7, fixture.endpoint.captureQueue(20).items().size());
         }
     }
@@ -93,22 +93,28 @@ class RequestExecutionRequestCapacityTest {
                 assertTrue(EndpointTestSupport.offer(fixture.endpoint, route));
             }
             var futures = new ArrayList<java.util.concurrent.Future<RouteResult>>();
-            for (var route : routes) {
+            for (int writer = 0; writer < routes.size(); writer++) {
                 futures.add(
                         writers.submit(
                                 () -> {
-                                    try (var handoff =
-                                            EndpointTestSupport.commitQueued(
-                                                    fixture.endpoint,
-                                                    org.flexlb.balance.scheduler.DeliveryTestSupport
-                                                            .queued(
-                                                                    List.of(route),
+                                    while (fixture.endpoint.requestCapacityAvailable(4, 1)) {
+                                        var head = fixture.endpoint.captureQueue(1).head();
+                                        if (head == null) return null;
+                                        {
+                                            var handoff =
+                                                    EndpointTestSupport.commitQueued(
+                                                            fixture.endpoint,
+                                                            org.flexlb.balance.scheduler
+                                                                    .DeliveryTestSupport.queued(
+                                                                    List.of(head),
                                                                     null,
-                                                                    new long[] {100L},
-                                                                    null,
-                                                                    System.currentTimeMillis()))) {
-                                        return handoff == null ? null : route;
+                                                                    new long[] {100L}));
+                                            if (handoff != null) return head;
+                                        }
+                                        // Another writer committed this head; select the new
+                                        // prefix.
                                     }
+                                    return null;
                                 }));
             }
             var committed = new ArrayList<RouteResult>();
@@ -128,15 +134,12 @@ class RequestExecutionRequestCapacityTest {
             assertFalse(fixture.endpoint.releaseRequest(first));
             assertTrue(fixture.endpoint.requestCapacityAvailable(4, 1));
             var next = fixture.endpoint.captureQueue(1).head();
-            try (var handoff =
-                    EndpointTestSupport.commitQueued(
-                            fixture.endpoint,
-                            org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
-                                    List.of(next),
-                                    null,
-                                    new long[] {100L},
-                                    null,
-                                    System.currentTimeMillis()))) {
+            {
+                var handoff =
+                        EndpointTestSupport.commitQueued(
+                                fixture.endpoint,
+                                org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
+                                        List.of(next), null, new long[] {100L}));
                 org.junit.jupiter.api.Assertions.assertNotNull(handoff);
             }
             assertFalse(fixture.endpoint.requestCapacityAvailable(4, 1));
@@ -157,17 +160,13 @@ class RequestExecutionRequestCapacityTest {
                         "schedulingMetadata",
                         SchedulingMetadata.explicit(50, System.currentTimeMillis() - 1L));
             } else {
-                assertTrue(fixture.endpoint.removeQueued(route));
+                assertTrue(fixture.endpoint.releaseQueuedRequest(route));
             }
             org.junit.jupiter.api.Assertions.assertNull(
                     EndpointTestSupport.commitQueued(
                             fixture.endpoint,
                             org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
-                                    List.of(route),
-                                    null,
-                                    new long[] {100L},
-                                    null,
-                                    System.currentTimeMillis())));
+                                    List.of(route), null, new long[] {100L})));
             assertTrue(fixture.endpoint.requestCapacityAvailable(1, 1));
             assertEquals(0, fixture.endpoint.stats().batchCount());
         }
@@ -233,7 +232,8 @@ class RequestExecutionRequestCapacityTest {
                             .admissionSummary(0, 0L)
                             .occupiedRequests());
         } finally {
-            org.junit.jupiter.api.Assertions.assertNull(runtime.stopAndAwait());
+            org.junit.jupiter.api.Assertions.assertNull(
+                    org.flexlb.balance.scheduler.RequestExecutionTestSupport.stopAndAwait(runtime));
         }
     }
 
@@ -278,7 +278,8 @@ class RequestExecutionRequestCapacityTest {
             assertTrue(RequestExecutionTestSupport.capture(runtime).items().isEmpty());
             assertFalse(endpoint.releaseRequest(item));
         } finally {
-            org.junit.jupiter.api.Assertions.assertNull(runtime.stopAndAwait());
+            org.junit.jupiter.api.Assertions.assertNull(
+                    org.flexlb.balance.scheduler.RequestExecutionTestSupport.stopAndAwait(runtime));
         }
     }
 
@@ -412,8 +413,8 @@ class RequestExecutionRequestCapacityTest {
         response.setAlive(true);
         EndpointTestSupport.publishStatus(status, response);
         var runtime = EndpointTestSupport.requestRuntime();
-        DeliveryDispatcher parked = EndpointTestSupport.routeStrategy(runtime);
-        DeliveryDispatcher delivery = org.mockito.Mockito.spy(parked);
+        DeliveryCoordinator parked = EndpointTestSupport.routeStrategy(runtime);
+        DeliveryCoordinator delivery = org.mockito.Mockito.spy(parked);
         PrefillEndpoint endpoint =
                 EndpointTestSupport.prefill(
                         status,
@@ -425,10 +426,13 @@ class RequestExecutionRequestCapacityTest {
         return new Fixture(endpoint, delivery, parked, runtime);
     }
 
+    /**
+     * Creates the test runtime and closes its endpoint after each capacity check.
+     */
     private record Fixture(
             PrefillEndpoint endpoint,
-            DeliveryDispatcher delivery,
-            DeliveryDispatcher parked,
+            DeliveryCoordinator delivery,
+            DeliveryCoordinator parked,
             EndpointTestSupport.TestRequestRuntime runtime)
             implements AutoCloseable {
         public void close() {

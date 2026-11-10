@@ -255,7 +255,7 @@ class DynamicEngineScaleTest {
         assertTrue(
                 removed.path("running_at_removal").asInt() >= 1,
                 "abrupt removal still reports the in-flight counters");
-        // The victim stream dies (transport error) — the documented abrupt
+        // The request selected for preemption stream dies (transport error) — the documented abrupt
         // fallout the master-side failure machinery is exercised with.
         assertTrue(
                 collector.done.await(5, TimeUnit.SECONDS),
@@ -316,7 +316,8 @@ class DynamicEngineScaleTest {
             int successfulRemovals = 0;
             for (Future<HttpResponse<String>> outcome : outcomes) {
                 // An overlapping drain shares its result. If teardown finishes
-                // before the other handler resolves the victim, the documented
+                // before the other handler resolves the request selected for preemption, the
+                // documented
                 // "victim gone" response is 404; client start gates cannot
                 // impose ordering on those server-side lookups.
                 HttpResponse<String> response = outcome.get(30, TimeUnit.SECONDS);
@@ -341,7 +342,8 @@ class DynamicEngineScaleTest {
         assertFalse(services.containsKey(victimPort), "services map still holds removed port");
         assertFalse(
                 serversByPort.containsKey(victimPort), "serversByPort still holds removed port");
-        // The bootstrap decode-0 is STILL hosted — only the dynamic victim is
+        // The bootstrap decode-0 is STILL hosted — only the dynamic request selected for preemption
+        // is
         // gone.  The file must equal the live services map, role by role
         // (covers "no victim residue" without hard-coding the bootstrap set).
         JsonNode root = readDiscoveryFile();
@@ -372,7 +374,8 @@ class DynamicEngineScaleTest {
         try {
             removal = pool.submit(() -> postOk("/remove_engine", "{\"port\":" + victimPort + "}"));
             // Wait until the drain is provably in progress: the discovery file
-            // loses the victim immediately (phase 1) while the request (~1.5s)
+            // loses the request selected for preemption immediately (phase 1) while the request
+            // (~1.5s)
             // is still running.  (The lambda body wraps readDiscoveryFile's
             // checked IOException — a transiently unreadable file just keeps
             // the poll going.)
@@ -392,7 +395,7 @@ class DynamicEngineScaleTest {
                     "a draining engine stays hosted until the teardown");
 
             // Concurrent add mid-drain: its file rewrite must not resurrect
-            // the victim, and must include the new engine.
+            // the request selected for preemption, and must include the new engine.
             JsonNode added = postOk("/add_engine", "{\"role\":\"prefill\"}");
             int addedHttpPort = added.path("port").asInt() - 1;
             List<String> prefillHosts = hostList(readDiscoveryFile(), "mock.prefill.hosts.address");
@@ -461,7 +464,7 @@ class DynamicEngineScaleTest {
         startCluster(model("10", 1.0), 1, 1);
 
         // Seed a few dynamic engines first so the concurrent removes always have
-        // non-bootstrap victims to pick from.
+        // non-bootstrap requests selected for preemption to pick from.
         for (int i = 0; i < 4; i++) {
             postOk("/add_engine", "{\"role\":\"" + (i % 2 == 0 ? "prefill" : "decode") + "\"}");
         }
@@ -493,17 +496,18 @@ class DynamicEngineScaleTest {
                                     if (candidates.isEmpty()) {
                                         return 0; // nothing to remove this round — fine
                                     }
-                                    int victim =
+                                    int portToRemove =
                                             candidates.get(
                                                     ThreadLocalRandom.current()
                                                             .nextInt(candidates.size()));
-                                    return post("/remove_engine", "{\"port\":" + victim + "}")
+                                    return post("/remove_engine", "{\"port\":" + portToRemove + "}")
                                             .statusCode();
                                 }));
             }
             for (Future<Integer> outcome : outcomes) {
                 // Every mutation either succeeded or cleanly failed with a
-                // documented status (409 conflict / 404 victim gone); both leave
+                // documented status (409 conflict / 404 request selected for preemption gone); both
+                // leave
                 // the file consistent. Anything else fails here.
                 int code = outcome.get(60, TimeUnit.SECONDS);
                 assertTrue(

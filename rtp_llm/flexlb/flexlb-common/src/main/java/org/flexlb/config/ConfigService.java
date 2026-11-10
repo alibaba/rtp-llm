@@ -266,6 +266,31 @@ public class ConfigService {
                             startupDecisionTopology.dispatcherType().name(),
                             Set.of("BATCH", "NON_BATCH"));
         }
+        if (document.path("phases").get("generation") instanceof ObjectNode generation) {
+            if (generation.get("decision") instanceof ObjectNode decision) {
+                changed |= preserveWorkerDecisionType(decision);
+                if (!decision.has("type")) {
+                    decision.put("type", startupDecisionTopology.decisionType().name());
+                    changed = true;
+                }
+            }
+            if (generation.get("delivery") instanceof ObjectNode delivery) {
+                String activeDelivery =
+                        startupDecisionTopology.dispatcherType() == DispatcherConfig.Type.BATCH
+                                ? "ENQUEUE_BATCH"
+                                : "ROUTE";
+                changed |=
+                        preserveStartupMode(
+                                delivery,
+                                "phases.generation.delivery.type",
+                                activeDelivery,
+                                Set.of("ENQUEUE_BATCH", "ROUTE"));
+                if (!delivery.has("type")) {
+                    delivery.put("type", activeDelivery);
+                    changed = true;
+                }
+            }
+        }
         return changed ? JsonUtils.toStrictString(document) : content;
     }
 
@@ -403,8 +428,10 @@ public class ConfigService {
             SchedulerConfig scheduler = config.getScheduler();
             return new StartupDecisionTopology(
                     scheduler.getType(),
-                    config.getDispatcher().getType(),
-                    scheduler.getDecision().getType());
+                    config.deliveryType(org.flexlb.dao.route.RequestPhase.GENERATION),
+                    config.isQueue()
+                            ? config.decisionPolicy().getType()
+                            : DecisionPolicyConfig.Type.SINGLE);
         }
     }
 }

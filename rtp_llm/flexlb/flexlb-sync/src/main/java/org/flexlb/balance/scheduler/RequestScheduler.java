@@ -12,20 +12,22 @@ public interface RequestScheduler extends AutoCloseable {
     void start();
 
     /**
-     * Run available scheduling decisions. Implementations serialize concurrent invocations.
-     */
-    void schedule();
-
-    /**
      * Schedule a newly registered request or one whose previous route has been fully released.
      * The implementation decides when to run it and preserves its original ordering on retry.
      */
-    void onRequest(RequestContext request);
+    void scheduleRequest(RequestContext request);
 
     void onEndpointChanged(WorkerEndpoint endpoint);
 
     /**
-     * Select the failure policy. After successful withdrawal and cleanup, retry uses onRequest.
+     * Whether this scheduler allows an unstarted route to be preempted.
+     */
+    default boolean allowsRoutePreemption() {
+        return false;
+    }
+
+    /**
+     * Select the failure policy. After successful withdrawal and cleanup, retry uses scheduleRequest.
      */
     default boolean shouldRetryRouteFailure(ContextResult.RouteFailure failure) {
         return false;

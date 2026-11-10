@@ -1,15 +1,15 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry.PrefillRoutingEntry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.DecodePreemption;
-import org.flexlb.balance.eviction.DecodePreemption.PreemptionResult;
+import org.flexlb.balance.preemption.DecodePreemption;
+import org.flexlb.balance.preemption.DecodePreemption.PreemptionResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.VictimStage;
+import org.flexlb.config.PreemptionStage;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
@@ -57,6 +57,118 @@ import static org.mockito.Mockito.when;
  */
 class GlobalQueueProgressTest {
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void preemptionSlotReleaseCannotBeLostBeforeCapacityParking(boolean releaseBeforeParking)
+            throws Exception {
+        try (Fixture f = new Fixture(RoleType.DECODE, true)) {
+            var pending = new ConcurrentHashMap<Long, CompletableFuture<PreemptionResult>>();
+            var attempts = new ConcurrentHashMap<Long, AtomicInteger>();
+            var beforeParking = new CountDownLatch(1);
+            var allowParking = new CountDownLatch(1);
+            var decode = SchedulerTestSupport.mockDecodeEndpoint();
+            f.onAdmission =
+                    id -> {
+                        var route = f.routes.get(id);
+                        when(route.decodeEndpoint()).thenReturn(decode);
+                        when(decode.ownership(any()))
+                                .thenReturn(DecodeResources.Ownership.WITHDRAWABLE);
+                        when(route.requestId()).thenReturn(String.valueOf(id));
+                        if (attempts.computeIfAbsent(id, ignored -> new AtomicInteger())
+                                        .incrementAndGet()
+                                == 1) {
+                            f.admissionBlocked.add(id);
+                            if (id == 1003L && releaseBeforeParking) {
+                                var finishingScheduler =
+                                        RequestProtocolTestSupport.placementScheduler(
+                                                f.mutations.get(id));
+                                doAnswer(
+                                                call -> {
+                                                    beforeParking.countDown();
+                                                    await(allowParking);
+                                                    return null;
+                                                })
+                                        .when(finishingScheduler)
+                                        .completeRouting(
+                                                org.mockito.ArgumentMatchers.same(
+                                                        f.mutations.get(id)),
+                                                any(),
+                                                any());
+                            }
+                        } else {
+                            f.admissionBlocked.remove(id);
+                        }
+                    };
+            when(f.eviction.tryPreempt(any(), eq(decode)))
+                    .thenAnswer(
+                            call -> {
+                                RequestContext context = call.getArgument(0);
+                                var result = new CompletableFuture<PreemptionResult>();
+                                pending.put(Long.parseLong(context.data().getRequestId()), result);
+                                return result;
+                            });
+            try {
+                f.submit(1001L, "a");
+                awaitCondition(() -> pending.containsKey(1001L));
+                f.submit(1002L, "a");
+                awaitCondition(() -> pending.containsKey(1002L));
+                f.submit(1003L, "a");
+                if (releaseBeforeParking) {
+                    await(beforeParking);
+                } else {
+                    awaitCondition(() -> f.scheduler.blockedRequestCount() > 0);
+                    awaitCondition(
+                            () -> {
+                                var queueLock =
+                                        (ReentrantLock)
+                                                ReflectionTestUtils.getField(f.scheduler, "lock");
+                                queueLock.lock();
+                                try {
+                                    return ((Set<?>)
+                                                    ReflectionTestUtils.getField(
+                                                            f.scheduler, "inFlight"))
+                                            .isEmpty();
+                                } finally {
+                                    queueLock.unlock();
+                                }
+                            });
+                    assertEquals(
+                            1,
+                            f.scheduler.blockedRequestCount(),
+                            "one request can wait for either capacity or a preemption slot");
+                }
+                pending.get(1001L).complete(new PreemptionResult(null, false, "no victim"));
+                awaitCondition(
+                        () -> {
+                            var queueLock =
+                                    (ReentrantLock)
+                                            ReflectionTestUtils.getField(f.scheduler, "lock");
+                            queueLock.lock();
+                            try {
+                                return ((Map<?, ?>)
+                                                        ReflectionTestUtils.getField(
+                                                                f.scheduler, "pendingPreemptions"))
+                                                .size()
+                                        == 1;
+                            } finally {
+                                queueLock.unlock();
+                            }
+                        });
+                allowParking.countDown();
+                awaitCondition(() -> f.admitted.contains(1003L));
+                assertEquals(2, attempts.get(1003L).get());
+            } finally {
+                allowParking.countDown();
+                pending.values()
+                        .forEach(
+                                result ->
+                                        result.complete(
+                                                new PreemptionResult(
+                                                        null, false, "test finished")));
+            }
+        }
+    }
+
     @Test
     void releasingBlockedPlanPublishesCapacityBeforeParking() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
@@ -86,7 +198,7 @@ class GlobalQueueProgressTest {
                                     .when(
                                             RequestProtocolTestSupport.placementScheduler(
                                                     f.mutations.get(id)))
-                                    .completePlacement(
+                                    .completeRouting(
                                             org.mockito.ArgumentMatchers.same(f.mutations.get(id)),
                                             any(),
                                             any());
@@ -105,8 +217,8 @@ class GlobalQueueProgressTest {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
             Map<String, Object> diagnostics = Map.of("reason", "no eligible worker");
             doReturn(
-                            PlacementResult.blocked(
-                                    new PlacementKey(RoleType.PREFILL, "a", null),
+                            RoutingResult.blocked(
+                                    new CapacityKey(RoleType.PREFILL, "a", null),
                                     null,
                                     diagnostics))
                     .when(f.router)
@@ -118,10 +230,10 @@ class GlobalQueueProgressTest {
                         return saved != null && diagnostics.equals(saved.get("decision"));
                     });
             verify(RequestProtocolTestSupport.placementScheduler(f.mutations.get(994L)))
-                    .completePlacement(
+                    .completeRouting(
                             org.mockito.ArgumentMatchers.same(f.mutations.get(994L)),
                             org.mockito.ArgumentMatchers.eq(
-                                    ContextResult.PublicationResult.PUBLISHED),
+                                    ContextResult.RoutingCompletion.FINISHED),
                             org.mockito.ArgumentMatchers.isNull());
         }
     }
@@ -136,10 +248,10 @@ class GlobalQueueProgressTest {
                                     .when(
                                             RequestProtocolTestSupport.placementScheduler(
                                                     f.mutations.get(id)))
-                                    .completePlacement(
+                                    .completeRouting(
                                             org.mockito.ArgumentMatchers.same(f.mutations.get(id)),
                                             org.mockito.ArgumentMatchers.eq(
-                                                    ContextResult.PublicationResult.PUBLISHED),
+                                                    ContextResult.RoutingCompletion.FINISHED),
                                             org.mockito.ArgumentMatchers.isNull());
                         }
                     };
@@ -148,12 +260,13 @@ class GlobalQueueProgressTest {
             verify(f.lifecycle, timeout(5_000))
                     .publish(eq(f.contexts.get(995L)), response.capture(), eq(false));
             assertEquals(
-                    "Placement failed: handle close failed", response.getValue().getErrorMessage());
+                    "Placement failed: IllegalStateException: handle close failed",
+                    response.getValue().getErrorMessage());
             verify(RequestProtocolTestSupport.placementScheduler(f.mutations.get(995L)))
-                    .completePlacement(
+                    .completeRouting(
                             org.mockito.ArgumentMatchers.same(f.mutations.get(995L)),
                             org.mockito.ArgumentMatchers.eq(
-                                    ContextResult.PublicationResult.PUBLISHED),
+                                    ContextResult.RoutingCompletion.FINISHED),
                             org.mockito.ArgumentMatchers.isNull());
             f.submit(996L, "b");
             awaitCondition(() -> f.admitted.contains(996L));
@@ -189,9 +302,9 @@ class GlobalQueueProgressTest {
             verify(
                             RequestProtocolTestSupport.placementScheduler(f.mutations.get(997L)),
                             timeout(1_000))
-                    .completePlacement(
+                    .completeRouting(
                             org.mockito.ArgumentMatchers.same(f.mutations.get(997L)),
-                            org.mockito.ArgumentMatchers.eq(ContextResult.PublicationResult.FAILED),
+                            org.mockito.ArgumentMatchers.eq(ContextResult.RoutingCompletion.FAILED),
                             any());
             f.submit(998L, "b");
             awaitCondition(() -> f.admitted.contains(998L));
@@ -232,16 +345,49 @@ class GlobalQueueProgressTest {
     }
 
     @Test
+    void rejectedPlannerReturnsItsSlotEvenWhenQueueRemovalFails() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            var original =
+                    (java.util.concurrent.ExecutorService)
+                            ReflectionTestUtils.getField(f.scheduler, "planners");
+            var rejecting = mock(java.util.concurrent.ExecutorService.class);
+            when(rejecting.isTerminated()).thenReturn(true);
+            doThrow(new java.util.concurrent.RejectedExecutionException("rejected"))
+                    .when(rejecting)
+                    .execute(any(Runnable.class));
+            var queue =
+                    spy(
+                            (SchedulingQueue)
+                                    ReflectionTestUtils.getField(f.scheduler, "orderedQueue"));
+            doThrow(new IllegalStateException("queue removal failed"))
+                    .doCallRealMethod()
+                    .when(queue)
+                    .remove(any());
+            ReflectionTestUtils.setField(f.scheduler, "orderedQueue", queue);
+            ReflectionTestUtils.setField(f.scheduler, "planners", rejecting);
+            original.shutdown();
+
+            f.submit(996L, "b");
+            awaitCondition(() -> SchedulerTestSupport.failure(f.scheduler) != null);
+            assertTrue(f.scheduler.awaitStopped(System.nanoTime() + TimeUnit.SECONDS.toNanos(5)));
+            assertEquals(
+                    0, ((Set<?>) ReflectionTestUtils.getField(f.scheduler, "inFlight")).size());
+            assertEquals(0, RequestProtocolTestSupport.queuedCount(f.scheduler));
+            verify(f.router, never()).select(any(), nullable(String.class));
+        }
+    }
+
+    @Test
     void missingPlacementResultDoesNotStrandTheAdmissionOwner() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
             doReturn(null).when(f.router).select(any(), nullable(String.class));
             f.submit(999L, "a");
             verify(f.lifecycle, timeout(1_000)).publish(eq(f.contexts.get(999L)), any(), eq(false));
             verify(RequestProtocolTestSupport.placementScheduler(f.mutations.get(999L)))
-                    .completePlacement(
+                    .completeRouting(
                             org.mockito.ArgumentMatchers.same(f.mutations.get(999L)),
                             org.mockito.ArgumentMatchers.eq(
-                                    ContextResult.PublicationResult.PUBLISHED),
+                                    ContextResult.RoutingCompletion.FINISHED),
                             org.mockito.ArgumentMatchers.isNull());
         }
     }
@@ -255,10 +401,10 @@ class GlobalQueueProgressTest {
             var finishingThread = new java.util.concurrent.atomic.AtomicReference<Thread>();
             f.onSelection =
                     id -> {
-                        PlacementOperation handle = f.mutations.get(id);
+                        RoutingContext handle = f.mutations.get(id);
                         doThrow(primary)
-                                .when(handle.owner())
-                                .recordPlacementDiagnostics(
+                                .when(handle.requestContext())
+                                .recordRoutingDiagnostics(
                                         org.mockito.ArgumentMatchers.same(handle),
                                         nullable(Map.class));
                         doAnswer(
@@ -267,10 +413,10 @@ class GlobalQueueProgressTest {
                                             throw cleanup;
                                         })
                                 .when(RequestProtocolTestSupport.placementScheduler(handle))
-                                .completePlacement(
+                                .completeRouting(
                                         org.mockito.ArgumentMatchers.same(handle),
                                         org.mockito.ArgumentMatchers.eq(
-                                                ContextResult.PublicationResult.PUBLISHED),
+                                                ContextResult.RoutingCompletion.FINISHED),
                                         org.mockito.ArgumentMatchers.isNull());
                     };
             f.submit(992L, "a");
@@ -278,17 +424,18 @@ class GlobalQueueProgressTest {
             verify(f.lifecycle, timeout(5_000))
                     .publish(eq(f.contexts.get(992L)), response.capture(), eq(false));
             assertEquals(
-                    "Placement failed: diagnostics failed", response.getValue().getErrorMessage());
+                    "Placement failed: IllegalStateException: diagnostics failed",
+                    response.getValue().getErrorMessage());
             assertEquals(List.of(cleanup), List.of(primary.getSuppressed()));
             assertTrue(
                     finishingThread.get().getName().startsWith("flexlb-global-planner-"),
                     "the selecting task must finish admission cleanup");
 
             verify(RequestProtocolTestSupport.placementScheduler(f.mutations.get(992L)))
-                    .completePlacement(
+                    .completeRouting(
                             org.mockito.ArgumentMatchers.same(f.mutations.get(992L)),
                             org.mockito.ArgumentMatchers.eq(
-                                    ContextResult.PublicationResult.PUBLISHED),
+                                    ContextResult.RoutingCompletion.FINISHED),
                             org.mockito.ArgumentMatchers.isNull());
             assertFalse(f.admitted.contains(992L));
         }
@@ -492,10 +639,10 @@ class GlobalQueueProgressTest {
                 verify(
                                 RequestProtocolTestSupport.placementScheduler(f.mutations.get(1L)),
                                 timeout(1000))
-                        .completePlacement(
+                        .completeRouting(
                                 org.mockito.ArgumentMatchers.same(f.mutations.get(1L)),
                                 org.mockito.ArgumentMatchers.eq(
-                                        ContextResult.PublicationResult.PUBLISHED),
+                                        ContextResult.RoutingCompletion.FINISHED),
                                 org.mockito.ArgumentMatchers.isNull());
             } finally {
                 finish.countDown();
@@ -525,10 +672,10 @@ class GlobalQueueProgressTest {
                 verify(
                                 RequestProtocolTestSupport.placementScheduler(f.mutations.get(1L)),
                                 timeout(1000))
-                        .completePlacement(
+                        .completeRouting(
                                 org.mockito.ArgumentMatchers.same(f.mutations.get(1L)),
                                 org.mockito.ArgumentMatchers.eq(
-                                        ContextResult.PublicationResult.PUBLISHED),
+                                        ContextResult.RoutingCompletion.FINISHED),
                                 org.mockito.ArgumentMatchers.isNull());
                 assertTrue(f.admitted.isEmpty());
                 closer.join(2000);
@@ -614,7 +761,7 @@ class GlobalQueueProgressTest {
                     new ConcurrentHashMap<
                             Long,
                             CompletableFuture<
-                                    org.flexlb.balance.eviction.DecodePreemption
+                                    org.flexlb.balance.preemption.DecodePreemption
                                             .PreemptionResult>>();
             var attempts = new ConcurrentHashMap<Long, AtomicInteger>();
             var decode = org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
@@ -633,13 +780,13 @@ class GlobalQueueProgressTest {
                             f.admissionBlocked.remove(id);
                         }
                     };
-            when(f.eviction.tryReclaim(any(), eq(decode)))
+            when(f.eviction.tryPreempt(any(), eq(decode)))
                     .thenAnswer(
                             call -> {
                                 RequestContext context = call.getArgument(0);
                                 var operation =
                                         new CompletableFuture<
-                                                org.flexlb.balance.eviction.DecodePreemption
+                                                org.flexlb.balance.preemption.DecodePreemption
                                                         .PreemptionResult>();
                                 pending.put(
                                         Long.parseLong(context.data().getRequestId()), operation);
@@ -656,7 +803,7 @@ class GlobalQueueProgressTest {
                         pending.containsKey(1003L), "preemption operations must remain bounded");
                 pending.get(1001L)
                         .complete(
-                                new org.flexlb.balance.eviction.DecodePreemption.PreemptionResult(
+                                new org.flexlb.balance.preemption.DecodePreemption.PreemptionResult(
                                         null, false, "no victim"));
                 awaitCondition(() -> f.admitted.contains(1003L));
                 assertEquals(
@@ -668,7 +815,7 @@ class GlobalQueueProgressTest {
                         .forEach(
                                 operation ->
                                         operation.complete(
-                                                new org.flexlb.balance.eviction.DecodePreemption
+                                                new org.flexlb.balance.preemption.DecodePreemption
                                                         .PreemptionResult(
                                                         null, false, "test finished")));
             }
@@ -700,7 +847,7 @@ class GlobalQueueProgressTest {
                         commit.set(Thread.currentThread());
                         admission.accept(requestId);
                     };
-            when(f.eviction.tryReclaim(any(), eq(decode)))
+            when(f.eviction.tryPreempt(any(), eq(decode)))
                     .thenAnswer(
                             call -> {
                                 invoked.countDown();
@@ -728,10 +875,10 @@ class GlobalQueueProgressTest {
                 verify(
                                 RequestProtocolTestSupport.placementScheduler(f.mutations.get(id)),
                                 timeout(1000).times(1))
-                        .completePlacement(
+                        .completeRouting(
                                 org.mockito.ArgumentMatchers.same(f.mutations.get(id)),
                                 org.mockito.ArgumentMatchers.eq(
-                                        ContextResult.PublicationResult.PUBLISHED),
+                                        ContextResult.RoutingCompletion.FINISHED),
                                 org.mockito.ArgumentMatchers.isNull());
                 verify(f.router)
                         .select(eq(f.contexts.get(id)), eq("a"), eq(decode), eq(reservation));
@@ -751,7 +898,7 @@ class GlobalQueueProgressTest {
             DecodeEndpoint decode = f.blockDecodePreemption(id);
             var reply = new CompletableFuture<PreemptionResult>();
             CountDownLatch invoked = new CountDownLatch(1);
-            when(f.eviction.tryReclaim(any(), eq(decode)))
+            when(f.eviction.tryPreempt(any(), eq(decode)))
                     .thenAnswer(
                             call -> {
                                 invoked.countDown();
@@ -773,18 +920,18 @@ class GlobalQueueProgressTest {
                 verify(
                                 RequestProtocolTestSupport.placementScheduler(f.mutations.get(id)),
                                 timeout(1000))
-                        .completePlacement(
+                        .completeRouting(
                                 org.mockito.ArgumentMatchers.same(f.mutations.get(id)),
                                 org.mockito.ArgumentMatchers.eq(
-                                        ContextResult.PublicationResult.FAILED),
+                                        ContextResult.RoutingCompletion.FAILED),
                                 response.capture());
                 assertFalse(response.getValue().isSuccess());
 
                 verify(RequestProtocolTestSupport.placementScheduler(f.mutations.get(id)), never())
-                        .completePlacement(
+                        .completeRouting(
                                 org.mockito.ArgumentMatchers.same(f.mutations.get(id)),
                                 org.mockito.ArgumentMatchers.eq(
-                                        ContextResult.PublicationResult.PUBLISHED),
+                                        ContextResult.RoutingCompletion.FINISHED),
                                 org.mockito.ArgumentMatchers.isNull());
                 assertFalse(f.admitted.contains(id));
                 awaitCondition(() -> !f.hasPendingPreemptions());
@@ -809,7 +956,7 @@ class GlobalQueueProgressTest {
             var reservation = new DecodeResources.RequestReservation(3L, String.valueOf(id), 17L);
             var reply = new CompletableFuture<PreemptionResult>();
             CountDownLatch invoked = new CountDownLatch(1);
-            when(f.eviction.tryReclaim(any(), eq(decode)))
+            when(f.eviction.tryPreempt(any(), eq(decode)))
                     .thenAnswer(
                             call -> {
                                 invoked.countDown();
@@ -843,10 +990,10 @@ class GlobalQueueProgressTest {
                 verify(
                                 RequestProtocolTestSupport.placementScheduler(f.mutations.get(id)),
                                 timeout(1000).times(1))
-                        .completePlacement(
+                        .completeRouting(
                                 org.mockito.ArgumentMatchers.same(f.mutations.get(id)),
                                 org.mockito.ArgumentMatchers.eq(
-                                        ContextResult.PublicationResult.PUBLISHED),
+                                        ContextResult.RoutingCompletion.FINISHED),
                                 org.mockito.ArgumentMatchers.isNull());
                 verify(decode, never()).ownership(any());
                 assertFalse(f.admitted.contains(id));
@@ -864,6 +1011,64 @@ class GlobalQueueProgressTest {
     }
 
     @Test
+    void closeWaitsForLatePreemptionReservationReleaseAfterItsFutureCompletes() throws Exception {
+        try (Fixture f = new Fixture(RoleType.DECODE, true)) {
+            long id = 1106L;
+            DecodeEndpoint decode = f.blockDecodePreemption(id);
+            var reservation = new DecodeResources.RequestReservation(3L, String.valueOf(id), 19L);
+            var reply = new CompletableFuture<PreemptionResult>();
+            CountDownLatch invoked = new CountDownLatch(1);
+            CountDownLatch releasing = new CountDownLatch(1);
+            CountDownLatch allowRelease = new CountDownLatch(1);
+            when(f.eviction.tryPreempt(any(), eq(decode)))
+                    .thenAnswer(
+                            call -> {
+                                invoked.countDown();
+                                return reply;
+                            });
+            doAnswer(
+                            call -> {
+                                releasing.countDown();
+                                await(allowRelease);
+                                return null;
+                            })
+                    .when(decode)
+                    .release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+            Thread closer =
+                    new Thread(
+                            () -> RequestProtocolTestSupport.close(f.scheduler),
+                            "test-close-during-release");
+            Thread completer =
+                    new Thread(
+                            () ->
+                                    reply.complete(
+                                            new PreemptionResult(
+                                                    reservation, false, "late committed result")),
+                            "test-late-preemption-result");
+            try {
+                f.submit(id, "a");
+                await(invoked);
+                closer.start();
+                awaitCondition(() -> RequestProtocolTestSupport.queuedCount(f.scheduler) == 0);
+                completer.start();
+                await(releasing);
+                assertTrue(reply.isDone());
+                assertTrue(
+                        closer.isAlive(),
+                        "close must wait for resource release, not just the result Future");
+                assertFalse(f.admitted.contains(id));
+            } finally {
+                allowRelease.countDown();
+                reply.complete(new PreemptionResult(reservation, false, "test finished"));
+                closer.join(2_000);
+                completer.join(2_000);
+            }
+            assertFalse(closer.isAlive());
+            verify(decode).release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        }
+    }
+
+    @Test
     void selectorCapacityMissCannotStartPreemptionWithoutAnEndpoint() throws Exception {
         try (Fixture f = new Fixture(RoleType.DECODE, true)) {
             f.decodeBlocked.add(1106L);
@@ -871,7 +1076,7 @@ class GlobalQueueProgressTest {
             RequestProtocolTestSupport.awaitGlobalCapacityWaiters(f.scheduler, 1);
             f.submit(1107L, "b");
             awaitCondition(() -> f.admitted.contains(1107L));
-            verify(f.eviction, never()).tryReclaim(any(), any());
+            verify(f.eviction, never()).tryPreempt(any(), any());
             assertFalse(f.admitted.contains(1106L));
             f.decodeBlocked.remove(1106L);
             f.release("a");
@@ -900,7 +1105,7 @@ class GlobalQueueProgressTest {
             assertEquals(2, attempts.get());
             org.junit.jupiter.api.Assertions.assertNotSame(old.get(), f.routes.get(1201L));
 
-            verify(f.eviction, never()).tryReclaim(any(), any());
+            verify(f.eviction, never()).tryPreempt(any(), any());
         }
     }
 
@@ -928,8 +1133,8 @@ class GlobalQueueProgressTest {
             assertFalse(f.admitted.contains(1202L));
             f.decodeBlocked.remove(1202L);
             f.aSlots.set(1);
-            PlacementAvailabilityTestSupport.changed(
-                    f.availability, PlacementKey.exact(RoleType.DECODE, "a", "d:8000"));
+            CapacityNotifierTestSupport.notifyChanged(
+                    f.availability, CapacityKey.exact(RoleType.DECODE, "a", "d:8000"));
             awaitCondition(() -> f.admitted.contains(1202L));
             assertEquals(2, attempts.get());
         }
@@ -940,10 +1145,10 @@ class GlobalQueueProgressTest {
      */
     private static final class Fixture implements AutoCloseable {
         private final FlexlbConfig config = twoPlannerConfig();
-        private final PlacementAvailability availability = new PlacementAvailability();
+        private final CapacityNotifier availability = new CapacityNotifier();
         private final AtomicInteger aSlots = new AtomicInteger();
         private final Map<Long, RouteResult> routes = new ConcurrentHashMap<>();
-        private final Map<Long, PlacementOperation> mutations = new ConcurrentHashMap<>();
+        private final Map<Long, RoutingContext> mutations = new ConcurrentHashMap<>();
         private final Map<Long, String> groups = new ConcurrentHashMap<>();
         private final Map<Long, RequestContext> contexts = new ConcurrentHashMap<>();
         private final Map<Long, CompletableFuture<Response>> requests = new ConcurrentHashMap<>();
@@ -952,7 +1157,7 @@ class GlobalQueueProgressTest {
         private final List<Long> admissionOrder = new CopyOnWriteArrayList<>();
         private final Set<Long> admissionBlocked = ConcurrentHashMap.newKeySet();
         private final Set<Long> stalePublications = ConcurrentHashMap.newKeySet();
-        private final Map<PlacementKey, org.flexlb.balance.endpoint.WorkerEndpoint> blockers =
+        private final Map<CapacityKey, org.flexlb.balance.endpoint.WorkerEndpoint> blockers =
                 new ConcurrentHashMap<>();
         private final Set<Long> decodeBlocked = ConcurrentHashMap.newKeySet();
 
@@ -964,7 +1169,7 @@ class GlobalQueueProgressTest {
         private final RoleType role;
         private final RequestRouteSelector router = mock(RequestRouteSelector.class);
         private final DecodePreemption eviction =
-                org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock();
+                org.flexlb.balance.preemption.DecodePreemptionTestSupport.mock();
 
         private Fixture(RoleType role) {
             this(role, false);
@@ -975,7 +1180,7 @@ class GlobalQueueProgressTest {
             SchedulingTestConfig.useFifoQueue(config);
             if (preempt) {
                 SchedulingTestConfig.usePriorityQueue(config);
-                SchedulingTestConfig.allowVictim(config, VictimStage.PREFILL_QUEUED);
+                SchedulingTestConfig.allowVictim(config, PreemptionStage.PREFILL_QUEUED);
             }
             SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
             ConfigService service = mock(ConfigService.class);
@@ -1002,13 +1207,13 @@ class GlobalQueueProgressTest {
                                 context.data().setFuture(future);
                                 if (!future.isDone())
                                     ((AbstractRequestScheduler) i.getMock())
-                                            .onRequest(i.getArgument(0));
+                                            .scheduleRequest(i.getArgument(0));
                                 return future;
                             });
-            when(lifecycle.claimPlacement(any(RequestContext.class)))
+            when(lifecycle.tryBeginRouteSelection(any(RequestContext.class)))
                     .thenAnswer(
                             i -> {
-                                PlacementOperation mutation =
+                                RoutingContext mutation =
                                         RequestProtocolTestSupport.admissionHandle(
                                                 i.getArgument(0, RequestContext.class));
                                 mutations.put(
@@ -1025,10 +1230,10 @@ class GlobalQueueProgressTest {
                                 RequestContext context = selectedRoute.ctx();
                                 long id = Long.parseLong(context.data().getRequestId());
                                 if (!preempt || role != RoleType.DECODE) onAdmission.accept(id);
-                                if (stalePublications.remove(id)) return PlacementResult.retry();
+                                if (stalePublications.remove(id)) return RoutingResult.retry();
                                 if (admissionBlocked.contains(id)) {
-                                    return PlacementResult.blocked(
-                                            PlacementKey.exact(role, "a", "a:8000"));
+                                    return RoutingResult.blocked(
+                                            CapacityKey.exact(role, "a", "a:8000"));
                                 }
                                 admissionOrder.add(id);
                                 admitted.add(id);
@@ -1045,7 +1250,7 @@ class GlobalQueueProgressTest {
                                 return RequestProtocolTestSupport.published(selectedRoute, item);
                             })
                     .when(RequestProtocolTestSupport.publication(lifecycle))
-                    .enqueueRoute(any(), any());
+                    .enqueueRoute(any());
             when(router.select(any(), nullable(String.class)))
                     .thenAnswer(
                             i -> {
@@ -1054,13 +1259,11 @@ class GlobalQueueProgressTest {
                                 selected.add(id);
                                 onSelection.accept(id);
                                 if ("a".equals(groups.get(id)) && aSlots.get() == 0 && !preempt) {
-                                    return PlacementResult.blocked(
-                                            new PlacementKey(role, "a", null));
+                                    return RoutingResult.blocked(new CapacityKey(role, "a", null));
                                 }
                                 if (decodeBlocked.contains(id)) {
-                                    return PlacementResult.blocked(
-                                            new PlacementKey(
-                                                    RoleType.DECODE, groups.get(id), null));
+                                    return RoutingResult.blocked(
+                                            new CapacityKey(RoleType.DECODE, groups.get(id), null));
                                 }
                                 RouteResult route =
                                         RequestProtocolTestSupport.mockSelectedRoute(context);
@@ -1069,13 +1272,13 @@ class GlobalQueueProgressTest {
                                 if (preempt && role == RoleType.DECODE) {
                                     onAdmission.accept(id);
                                     if (admissionBlocked.contains(id)) {
-                                        var blocker = PlacementKey.exact(role, "a", "a:8000");
+                                        var blocker = CapacityKey.exact(role, "a", "a:8000");
                                         if (route.decodeEndpoint() != null)
                                             blockers.put(blocker, route.decodeEndpoint());
-                                        return PlacementResult.blocked(blocker);
+                                        return RoutingResult.blocked(blocker);
                                     }
                                 }
-                                return PlacementResult.success(route);
+                                return RoutingResult.success(route);
                             });
             when(router.blockedEndpoint(any()))
                     .thenAnswer(call -> blockers.get(call.getArgument(0)));
@@ -1092,7 +1295,7 @@ class GlobalQueueProgressTest {
                                 when(route.decodeReservation()).thenReturn(call.getArgument(3));
                                 routes.put(id, route);
                                 onAdmission.accept(id);
-                                return PlacementResult.success(route);
+                                return RoutingResult.success(route);
                             });
             scheduler =
                     RequestProtocolTestSupport.injectPlacementDependencies(
@@ -1168,8 +1371,8 @@ class GlobalQueueProgressTest {
         }
 
         private void release(String group) {
-            PlacementAvailabilityTestSupport.changed(
-                    availability, PlacementKey.exact(role, group, group + ":8000"));
+            CapacityNotifierTestSupport.notifyChanged(
+                    availability, CapacityKey.exact(role, group, group + ":8000"));
         }
 
         private static PrefillRoutingEntry endpoint(String group) {

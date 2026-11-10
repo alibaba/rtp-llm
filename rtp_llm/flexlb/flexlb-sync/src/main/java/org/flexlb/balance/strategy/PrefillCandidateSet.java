@@ -25,7 +25,6 @@ final class PrefillCandidateSet {
     long[] cacheHitTokens = new long[0];
     long[] routingCacheMatchTokens = new long[0];
     long[] ownershipVersions = new long[0];
-    String[] admissionBlocks = new String[0];
     RequestTimeEstimation.Inputs[] inputs = new RequestTimeEstimation.Inputs[0];
 
     int size;
@@ -67,7 +66,6 @@ final class PrefillCandidateSet {
         Arrays.fill(endpointAddresses, 0, retained, null);
         Arrays.fill(capturedSources, 0, registeredCount, null);
         affinityReason = null;
-        Arrays.fill(admissionBlocks, 0, size, null);
         Arrays.fill(inputs, 0, size, null);
         size = 0;
         registeredCount = 0;
@@ -82,9 +80,7 @@ final class PrefillCandidateSet {
             PrefillSelectionStrategy.CandidateInput input,
             RequestTimeEstimation.CandidateView candidate,
             long ownershipVersion) {
-        checkArgument(
-                candidate.selectable() || candidate.engineWorkUnmodeled(),
-                "candidate requires available capacity");
+        checkArgument(candidate.selectable(), "candidate requires a selectable projection");
         ensureCapacity(size + 1);
         endpointAddresses[size] = address;
         capturedSources[size] = input;
@@ -116,13 +112,11 @@ final class PrefillCandidateSet {
                     cacheHitTokens,
                     routingCacheMatchTokens,
                     ownershipVersions,
-                    admissionBlocks,
                     inputs
                 }) System.arraycopy(array, index + 1, array, index, remaining);
         size--;
         endpointAddresses[size] = null;
         capturedSources[size] = null;
-        admissionBlocks[size] = null;
         inputs[size] = null;
         minimumTtftRank = Long.MAX_VALUE;
         hasKnownTtft = false;
@@ -145,7 +139,6 @@ final class PrefillCandidateSet {
         endpointAddresses = Arrays.copyOf(endpointAddresses, capacity);
         capturedSources = Arrays.copyOf(capturedSources, capacity);
         tieIndexes = Arrays.copyOf(tieIndexes, capacity);
-        admissionBlocks = Arrays.copyOf(admissionBlocks, capacity);
         inputs = Arrays.copyOf(inputs, capacity);
         projectedTtftMs = Arrays.copyOf(projectedTtftMs, capacity);
         incomingPrefillMs = Arrays.copyOf(incomingPrefillMs, capacity);

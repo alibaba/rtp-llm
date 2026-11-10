@@ -144,7 +144,6 @@ public class WorkerStatus {
             String deploymentName,
             int engineIndex,
             int multiEngineNum) {
-        Objects.requireNonNull(role, "role");
         Objects.requireNonNull(ip, "ip");
         if (port <= 0 || grpcPort <= 0) {
             throw new IllegalArgumentException("worker ports must be positive");
@@ -167,7 +166,6 @@ public class WorkerStatus {
     }
 
     public static WorkerStatus createDiscovered(RoleType role, WorkerHost host) {
-        Objects.requireNonNull(role);
         return new WorkerStatus(
                 new TopologySnapshot(
                         host.getGroup(),
@@ -224,7 +222,6 @@ public class WorkerStatus {
 
     /** Bind a strictly newer frozen observation to the current commit holder. */
     public PreparedStatus prepareNewStatus(StatusObservation observation) {
-        requireGenerationLock();
         requireActiveGeneration();
         checkArgument(
                 observation.owner == this,
@@ -249,14 +246,14 @@ public class WorkerStatus {
                 current, observation, new CommittedWorkerStatus(observation.engine(), cursor));
     }
 
-    public void requireGenerationLock() {
-        checkState(lock.isHeldByCurrentThread(), "status transaction requires generation lock");
-    }
-
     /** Reject any new publication or ownership after retirement starts. */
     public void requireActiveGeneration() {
         requireGenerationLock();
         checkState(!retiring, "WorkerStatus generation is retiring: %s", generationId);
+    }
+
+    public void requireGenerationLock() {
+        checkState(lock.isHeldByCurrentThread(), "status transaction requires generation lock");
     }
 
     /**
@@ -265,7 +262,6 @@ public class WorkerStatus {
      */
     public void publishPreparedStatus(PreparedStatus prepared) {
         requireGenerationLock();
-        requireActiveGeneration();
         publishReducedStatus(prepared);
     }
 
@@ -296,7 +292,6 @@ public class WorkerStatus {
 
     /** Record a validated response for a status transaction. */
     public PollHealth recordSuccessfulPoll(boolean reportedAlive) {
-        requireGenerationLock();
         requireActiveGeneration();
         synchronized (healthGate) {
             return updatePollHealth(reportedAlive);
@@ -338,12 +333,6 @@ public class WorkerStatus {
         requirePollLease(lease, PollKind.STATUS, statusPollLease);
     }
 
-    /** Require an operation to target the one retiring generation. */
-    public void requireRetiringGeneration() {
-        requireGenerationLock();
-        checkState(retiring, "WorkerStatus generation is not retiring: %s", generationId);
-    }
-
     /**
      * Publish this generation as RETIRING after its exact endpoint admission
      * gate has closed. The status-map identity remains until endpoint drain
@@ -374,7 +363,6 @@ public class WorkerStatus {
     }
 
     public void updateDiscoveryLabels(String site, String group, String deploymentName) {
-        requireGenerationLock();
         requireActiveGeneration();
         topology.updateAndGet(
                 current ->

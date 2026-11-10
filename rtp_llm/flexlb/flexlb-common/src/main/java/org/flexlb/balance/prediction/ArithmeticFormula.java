@@ -54,10 +54,8 @@ public final class ArithmeticFormula {
         ParseKey key =
                 new ParseKey(
                         expression,
-                        Map.copyOf(java.util.Objects.requireNonNull(variables, "variables")),
-                        Set.copyOf(
-                                java.util.Objects.requireNonNull(
-                                        aggregateExcludedVariables, "aggregateExcludedVariables")),
+                        Map.copyOf(variables),
+                        Set.copyOf(aggregateExcludedVariables),
                         allowAggregates);
         synchronized (COMPILED) {
             ArithmeticFormula cached = COMPILED.get(key);

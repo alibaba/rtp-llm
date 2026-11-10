@@ -1,7 +1,7 @@
 package org.flexlb.balance.preemption;
 
 /**
- * Canonical progress of one exact victim through the Engine-Cancel protocol.
+ * Canonical progress of one exact request selected for preemption through the Engine-Cancel protocol.
  *
  * <p>This type deliberately excludes owner-specific terminal facts. A
  * scheduler registration and its endpoint claim can be settled by request

@@ -1,7 +1,7 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.scheduler.PlacementKey;
+import org.flexlb.balance.RoutingResult;
+import org.flexlb.balance.scheduler.CapacityKey;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
 
@@ -13,7 +13,7 @@ import java.util.List;
 @Component
 public final class EncoderStrategy implements EncoderSelectionStrategy {
     @Override
-    public PlacementResult<Candidate, PlacementKey> select(
+    public RoutingResult<Candidate, CapacityKey> select(
             List<? extends Candidate> candidates,
             String group,
             boolean weighted,
@@ -34,11 +34,11 @@ public final class EncoderStrategy implements EncoderSelectionStrategy {
             }
         }
         return winner == null
-                ? PlacementResult.blocked(
-                        new PlacementKey(RoleType.ENCODER, group, null),
+                ? RoutingResult.blocked(
+                        new CapacityKey(RoleType.ENCODER, group, null),
                         org.flexlb.dao.loadbalance.Response.error(
                                 org.flexlb.dao.loadbalance.StrategyErrorType.NO_ENCODER_WORKER),
                         null)
-                : PlacementResult.success(winner);
+                : RoutingResult.success(winner);
     }
 }

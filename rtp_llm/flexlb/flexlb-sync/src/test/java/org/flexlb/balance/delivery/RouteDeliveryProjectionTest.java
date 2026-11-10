@@ -203,8 +203,7 @@ class RouteDeliveryProjectionTest {
                         BuiltinGroupPlanner.FIXED_WINDOW,
                         Comparator.comparing(GroupPlanner.Item::requestId),
                         new GroupPlanner.Constraints(64, Long.MAX_VALUE, Long.MAX_VALUE, budget, 0),
-                        active,
-                        null);
+                        active);
         return RequestTimeEstimationTestSupport.project(
                 new RequestTimeEstimation.Inputs(
                         queue,

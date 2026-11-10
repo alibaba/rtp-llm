@@ -1,6 +1,6 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
@@ -14,8 +14,8 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PreemptionConfig;
+import org.flexlb.config.PreemptionStage;
 import org.flexlb.config.QueueOrderingConfig;
-import org.flexlb.config.VictimStage;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -55,13 +55,13 @@ class DecodeSelectionAdmissionContractTest {
 
             for (long requestId = 100L; requestId < 106L; requestId++) {
                 Request request = fixture.request(requestId);
-                PlacementResult<Selection, RoleType> result =
+                RoutingResult<Selection, RoleType> result =
                         StrategyTestSupport.select(
                                 fixture.strategy,
                                 request,
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
                                 null);
-                assertEquals(PlacementResult.Status.SUCCESS, result.status());
+                assertEquals(RoutingResult.Status.SUCCESS, result.status());
                 try (Selection selected = result.value()) {
                     assertEquals(
                             FREE_IP,
@@ -106,13 +106,13 @@ class DecodeSelectionAdmissionContractTest {
             Map<String, Integer> selectedCounts = new HashMap<>();
 
             for (long requestId = 200L; requestId < 206L; requestId++) {
-                PlacementResult<Selection, RoleType> result =
+                RoutingResult<Selection, RoleType> result =
                         StrategyTestSupport.select(
                                 fixture.strategy,
                                 fixture.request(requestId),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
                                 null);
-                assertEquals(PlacementResult.Status.SUCCESS, result.status());
+                assertEquals(RoutingResult.Status.SUCCESS, result.status());
                 try (Selection selected = result.value()) {
                     selectedCounts.merge(selected.decode().getServerIp(), 1, Integer::sum);
                     assertTrue(
@@ -184,7 +184,8 @@ class DecodeSelectionAdmissionContractTest {
                 }
                 if (policy == Policy.PREEMPTIVE) {
                     PreemptionConfig preemption = new PreemptionConfig();
-                    preemption.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_RESERVED));
+                    preemption.setAllowedPreemptionStages(
+                            EnumSet.of(PreemptionStage.DECODE_RESERVED));
                     ordering.setPreemption(preemption);
                 }
                 config.queueScheduler().setOrdering(ordering);
@@ -280,20 +281,6 @@ class DecodeSelectionAdmissionContractTest {
                                     EXPECTED_TOKENS,
                                     CapacityRelease.NONE)
                             .fits());
-        }
-
-        private void assertSelectionHasNoReservation(
-                long requestId,
-                DecodeResources.CapacityUsage queuedUsage,
-                DecodeResources.CapacityUsage freeUsage) {
-            assertEquals(queuedUsage, queued.routingView().placementUsage());
-            assertEquals(freeUsage, free.routingView().placementUsage());
-            assertFalse(
-                    EndpointTestSupport.isQueued(
-                            queued.resourceSnapshot(), String.valueOf(requestId)));
-            assertFalse(
-                    EndpointTestSupport.isQueued(
-                            free.resourceSnapshot(), String.valueOf(requestId)));
         }
     }
 }

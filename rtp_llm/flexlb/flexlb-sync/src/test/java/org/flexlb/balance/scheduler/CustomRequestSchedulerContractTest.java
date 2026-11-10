@@ -86,7 +86,7 @@ class CustomRequestSchedulerContractTest {
             var config = mock(ConfigService.class);
             when(config.loadBalanceConfig()).thenReturn(scheduler.config);
             new org.springframework.boot.test.context.runner.ApplicationContextRunner()
-                    .withUserConfiguration(PlacementConfiguration.class)
+                    .withUserConfiguration(SchedulerConfiguration.class)
                     .withBean(
                             "environmentConfigSource",
                             org.flexlb.service.config.ConfigSource.class,
@@ -125,7 +125,7 @@ class CustomRequestSchedulerContractTest {
                 assertFalse(scheduler.isAdmissionOpen(context));
                 assertFalse(scheduler.advance());
             } finally {
-                AbstractRequestScheduler.finishPlacement(admission);
+                AbstractRequestScheduler.finishRouting(admission);
             }
             assertFalse(result.get(2, TimeUnit.SECONDS).isSuccess());
             RequestProtocolTestSupport.awaitCondition(
@@ -136,8 +136,8 @@ class CustomRequestSchedulerContractTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void queuePreservesScanBudgetRetryAndExactRestore(boolean alternative) {
-        PlacementQueue queue =
-                alternative ? new ListPlacementQueue() : new OrderedRequestQueue(false);
+        SchedulingQueue queue =
+                alternative ? new ListSchedulingQueue() : new OrderedRequestQueue(false);
         var config = SchedulingTestConfig.batchConfig();
         var first = new GlobalQueueEntry(RequestProtocolTestSupport.context(config, 81005L), null);
         var second = new GlobalQueueEntry(RequestProtocolTestSupport.context(config, 81006L), null);
@@ -222,13 +222,12 @@ class CustomRequestSchedulerContractTest {
         try (var scheduler =
                 new ManualScheduler(true, queued) {
                     @Override
-                    public void onRequest(RequestContext request) {
-                        super.onRequest(request);
+                    public void scheduleRequest(RequestContext request) {
+                        super.scheduleRequest(request);
                         due.set(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(80));
                         runtime.taskTimer().schedule(this::schedule, 80L);
                     }
 
-                    @Override
                     public void schedule() {
                         long now = System.nanoTime();
                         if (now < due.get()) throw new AssertionError("timer ran before deadline");
@@ -249,12 +248,12 @@ class CustomRequestSchedulerContractTest {
 
     @Test
     void customSchedulerOwnsEndpointSubscriptions() throws Exception {
-        var availability = new PlacementAvailability();
+        var availability = new CapacityNotifier();
         var changed = new java.util.concurrent.atomic.AtomicBoolean();
         var scheduled = new java.util.concurrent.CountDownLatch(1);
         try (var scheduler =
                 new ManualScheduler(true) {
-                    private final PlacementAvailability.Listener listener =
+                    private final CapacityNotifier.Listener listener =
                             key -> {
                                 changed.set(true);
                                 schedule();
@@ -270,7 +269,6 @@ class CustomRequestSchedulerContractTest {
                         availability.removeListener(listener);
                     }
 
-                    @Override
                     public void schedule() {
                         if (changed.get()) scheduled.countDown();
                     }
@@ -287,7 +285,7 @@ class CustomRequestSchedulerContractTest {
                                     8101,
                                     null));
             when(endpoint.ipPort()).thenReturn("127.0.0.1:8100");
-            availability.changed(endpoint);
+            availability.notifyChanged(endpoint);
             assertTrue(scheduled.await(2, TimeUnit.SECONDS));
         }
     }
@@ -298,7 +296,7 @@ class CustomRequestSchedulerContractTest {
     private static class ManualScheduler extends AbstractRequestScheduler {
         final FlexlbConfig config;
         final SchedulerTestServices runtime;
-        final PlacementQueue queue;
+        final SchedulingQueue queue;
         final RequestRouteSelector selector = mock(RequestRouteSelector.class);
 
         ManualScheduler(boolean alternative) {
@@ -334,17 +332,14 @@ class CustomRequestSchedulerContractTest {
                     endpoints);
             this.config = config;
             this.runtime = runtime;
-            queue = alternative ? new ListPlacementQueue() : new OrderedRequestQueue(false);
+            queue = alternative ? new ListSchedulingQueue() : new OrderedRequestQueue(false);
             when(selector.select(any(), isNull()))
                     .thenReturn(
-                            org.flexlb.balance.PlacementResult.rejected(
+                            org.flexlb.balance.RoutingResult.rejected(
                                     Response.error(StrategyErrorType.RESOURCE_EXHAUSTED)));
             SchedulerTestServices.bind(this, runtime);
             runtime.registerScheduler(this);
         }
-
-        @Override
-        public void schedule() {}
 
         public void start() {}
 
@@ -358,7 +353,7 @@ class CustomRequestSchedulerContractTest {
         public void onEndpointChanged(org.flexlb.balance.endpoint.WorkerEndpoint endpoint) {}
 
         @Override
-        public void onRequest(RequestContext request) {
+        public void scheduleRequest(RequestContext request) {
             synchronized (queue) {
                 if (!request.data().getFuture().isDone()
                         && request.snapshot().cancellation() == null) {
@@ -384,7 +379,7 @@ class CustomRequestSchedulerContractTest {
         @Override
         protected StrategyErrorType schedulingTimeoutError() {
             return config.isQueue()
-                    ? StrategyErrorType.RESOURCE_EXHAUSTED
+                    ? StrategyErrorType.QUEUE_TIMEOUT
                     : StrategyErrorType.BATCH_SLO_EXPIRED;
         }
 
@@ -396,7 +391,14 @@ class CustomRequestSchedulerContractTest {
                 selected = candidates.getFirst();
                 queue.remove(selected);
             }
-            var result = selector.select(selected.context, selected.routingGroup);
+            var routing = tryBeginRouteSelection(selected.context);
+            if (routing == null) return true;
+            org.flexlb.balance.RoutingResult<RouteResult, CapacityKey> result;
+            try {
+                result = selector.select(selected.context, selected.routingGroup);
+            } finally {
+                finishRouting(routing);
+            }
             publish(selected.context, result.failure(), false);
             return true;
         }
@@ -423,7 +425,7 @@ class CustomRequestSchedulerContractTest {
                             SchedulerTestSupport.dispatcher(),
                             service,
                             mock(EngineGrpcClient.class));
-            org.springframework.test.util.ReflectionTestUtils.setField(
+            org.flexlb.balance.scheduler.DeliveryTestSupport.setField(
                     runtime.dispatcher,
                     "decodeAdmissionCapacity",
                     SchedulingTestConfig.capacity(config));

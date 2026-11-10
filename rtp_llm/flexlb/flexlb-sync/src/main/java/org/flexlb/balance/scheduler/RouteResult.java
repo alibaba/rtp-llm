@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
@@ -170,11 +170,25 @@ public final class RouteResult implements GroupPlanner.Input, PrefillRequestQueu
      * An unavailable endpoint invalidates the whole selection, regardless of its role.
      * Delivered routes must retain their delivery result instead of being validated again.
      */
-    <T> PlacementResult<T, PlacementKey> validateEndpoints(
-            PlacementResult<T, PlacementKey> result) {
-        for (var role : roles()) {
+    <T> RoutingResult<T, CapacityKey> validateEndpoints(RoutingResult<T, CapacityKey> result) {
+        return validateEndpoints(roles, result);
+    }
+
+    static <T> RoutingResult<T, CapacityKey> validateEndpoints(
+            List<RoleSelection> roles, RoutingResult<T, CapacityKey> result) {
+        for (var role : roles) {
             if (!role.endpoint().acceptsNewRequests())
-                return PlacementResult.retry(Response.error(role.role().getErrorType()));
+                return RoutingResult.retry(
+                        Response.buildErrorResponse(
+                                role.role().getErrorType(),
+                                "Selected "
+                                        + role.role()
+                                        + " endpoint became unavailable: "
+                                        + role.endpoint().getIp()
+                                        + (result.failure() == null
+                                                ? ""
+                                                : "; preceding failure: "
+                                                        + result.failure().getErrorMessage())));
         }
         return result;
     }
@@ -196,14 +210,14 @@ public final class RouteResult implements GroupPlanner.Input, PrefillRequestQueu
         return selected == null ? null : selected.endpoint();
     }
 
-    boolean usesEndpoint(WorkerEndpoint endpoint) {
+    boolean usesAnyEndpoint(java.util.Set<WorkerEndpoint> endpoints) {
         for (var selected : roles()) {
-            if (selected.endpoint() == endpoint) return true;
+            if (endpoints.contains(selected.endpoint())) return true;
         }
         return false;
     }
 
-    PlacementKey placementKey(RoleType role) {
-        return role(role).placementKey();
+    CapacityKey capacityKey(RoleType role) {
+        return role(role).capacityKey();
     }
 }

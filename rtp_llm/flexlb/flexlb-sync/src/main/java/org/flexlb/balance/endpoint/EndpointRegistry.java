@@ -2,8 +2,8 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.scheduler.DeliveryDispatcher;
-import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.CapacityNotifier;
+import org.flexlb.balance.scheduler.DeliveryCoordinator;
 import org.flexlb.balance.scheduler.QueueExecutionSettings;
 import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.strategy.PrefillSelectionStrategy;
@@ -74,7 +74,7 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
     private final RequestRepository requests;
     private final DeliveryMetricsReporter reporter;
     private final org.flexlb.config.DispatcherConfig.Type deliveryMode;
-    private final PlacementAvailability placementAvailability;
+    private final CapacityNotifier capacityNotifier;
     private final QueueExecutionSettings queueSettings;
     private final PrefillRequestQueue.Factory workerQueues;
     private final Object lifecycleGate = new Object();
@@ -95,8 +95,8 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
             ConfigService configService,
             RequestRepository requests,
             DeliveryMetricsReporter reporter,
-            DeliveryDispatcher dispatcher,
-            PlacementAvailability placementAvailability,
+            DeliveryCoordinator dispatcher,
+            CapacityNotifier capacityNotifier,
             GroupPlanner grouping,
             PrefillRequestQueue.Factory workerQueues) {
         checkArgument(retirementTimeoutMs > 0L, "endpoint retirement timeout must be positive");
@@ -110,8 +110,8 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
                         ? QueueExecutionSettings.capture(config, Objects.requireNonNull(grouping))
                         : null;
         this.workerQueues = Objects.requireNonNull(workerQueues);
-        this.placementAvailability =
-                java.util.Objects.requireNonNull(placementAvailability, "placementAvailability");
+        this.capacityNotifier =
+                java.util.Objects.requireNonNull(capacityNotifier, "capacityNotifier");
     }
 
     public List<EncoderEndpoint> encoderRoutingSnapshot() {
@@ -290,16 +290,12 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
                     address,
                     (ignored, current) -> {
                         checkState(
-                                current == null || current.getStatus() != status,
-                                "Endpoint generation is already published for %s",
-                                address);
-                        checkState(
                                 current == null,
                                 "Existing endpoint generation must be withdrawn before publication for %s",
                                 address);
                         return exact;
                     });
-            placementAvailability.changed(exact);
+            capacityNotifier.notifyChanged(exact);
             return candidate;
         } catch (Throwable publicationFailure) {
             failure = publicationFailure;
@@ -715,11 +711,11 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
                             configService.loadBalanceConfig(),
                             deliveryMode,
                             reporter,
-                            placementAvailability,
+                            capacityNotifier,
                             queueSettings,
                             workerQueues);
-            case DECODE -> new DecodeEndpoint(status, requests, placementAvailability);
-            case ENCODER -> new EncoderEndpoint(status, placementAvailability);
+            case DECODE -> new DecodeEndpoint(status, requests, capacityNotifier);
+            case ENCODER -> new EncoderEndpoint(status, capacityNotifier);
             case VIT -> new WorkerEndpoint(status);
             case FRONTEND -> throw new AssertionError("validated above");
         };
@@ -877,7 +873,7 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
                 return false;
             }
             status.trace().record(Stage.RETIREMENT_CLEANUP_END);
-            placementAvailability.clearRetired(status);
+            capacityNotifier.clearRetired(status);
             if (!statuses.remove(address, status)) {
                 logger.error(
                         "Exact status removal failed while its cache lock was held for {}#{}",
@@ -900,7 +896,7 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
     }
 
     /**
-     * One non-owning Prefill generation exposed to routing.
+     * One non-owning Prefill generation exposed to routing, with queue projections and Prefill request capacity reads.
      *
      * <p>The endpoint identity is advisory: a caller must selectEndpoint the address
      * and verify that the selected endpoint is still this exact instance before
@@ -1001,7 +997,7 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
             // The continuation owns the fence from this point onward. A bounded
             // wait failure cannot discard a still-draining generation.
             endpoint.onRetired(finalizeExact);
-            Throwable failure = Failures.run(null, () -> placementAvailability.changed(endpoint));
+            Throwable failure = Failures.run(null, () -> capacityNotifier.notifyChanged(endpoint));
             failure = Failures.run(failure, endpoint::close);
             // Completion callbacks finalize the registry after Endpoint cleanup.
             if (awaitDrain) {

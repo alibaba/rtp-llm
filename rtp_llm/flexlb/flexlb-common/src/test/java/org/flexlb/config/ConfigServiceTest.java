@@ -279,7 +279,9 @@ class ConfigServiceTest {
         assertTrue(config.isPriorityOrdering());
         assertEquals(60, config.priorityOrdering().getDefaultPriority());
         assertTrue(
-                config.priorityOrdering().getPreemption().allows(VictimStage.DECODE_ENGINE_OWNED));
+                config.priorityOrdering()
+                        .getPreemption()
+                        .allows(PreemptionStage.DECODE_ENGINE_OWNED));
         assertEquals(12, config.decisionPolicy().getMaxRequests());
         assertEquals(90L, config.decisionPolicy().getMaxPredictedExecutionMs());
         assertEquals(4, config.getDispatcher().getMaxInflightPerPrefillWorker());
@@ -447,10 +449,11 @@ class ConfigServiceTest {
 
     @Test
     void priority_defaults_to_all_preemption_stages_and_preserves_explicit_subsets() {
-        var allStages = java.util.EnumSet.allOf(VictimStage.class);
-        assertEquals(allStages, new PreemptionConfig().getAllowedVictimStages());
+        var allStages = java.util.EnumSet.allOf(PreemptionStage.class);
+        assertEquals(allStages, new PreemptionConfig().getAllowedPreemptionStages());
         assertEquals(
-                allStages, ConfigTestSupport.priority().getPreemption().getAllowedVictimStages());
+                allStages,
+                ConfigTestSupport.priority().getPreemption().getAllowedPreemptionStages());
         for (String ordering :
                 new String[] {
                     "{\"type\":\"PRIORITY\"}",
@@ -460,8 +463,9 @@ class ConfigServiceTest {
             FlexlbConfig config =
                     ConfigTestFixtures.parse("{\"scheduler\":{\"ordering\":" + ordering + "}}");
             assertEquals(
-                    allStages, config.priorityOrdering().getPreemption().getAllowedVictimStages());
-            for (VictimStage stage : allStages) {
+                    allStages,
+                    config.priorityOrdering().getPreemption().getAllowedPreemptionStages());
+            for (PreemptionStage stage : allStages) {
                 assertTrue(config.allowsPreemption(stage));
             }
         }
@@ -473,14 +477,14 @@ class ConfigServiceTest {
             FlexlbConfig config =
                     ConfigTestFixtures.parse("{\"scheduler\":{\"ordering\":" + ordering + "}}");
             assertEquals(
-                    java.util.Set.of(VictimStage.PREFILL_QUEUED),
-                    config.priorityOrdering().getPreemption().getAllowedVictimStages());
-            assertFalse(config.allowsPreemption(VictimStage.DECODE_ENGINE_OWNED));
+                    java.util.Set.of(PreemptionStage.PREFILL_QUEUED),
+                    config.priorityOrdering().getPreemption().getAllowedPreemptionStages());
+            assertFalse(config.allowsPreemption(PreemptionStage.DECODE_ENGINE_OWNED));
         }
         FlexlbConfig fifo = ConfigTestFixtures.parse("{}");
         assertTrue(
                 ConfigTestSupport.preemptionPolicy(fifo.queueScheduler().getOrdering()).isEmpty());
-        for (VictimStage stage : allStages) {
+        for (PreemptionStage stage : allStages) {
             assertFalse(fifo.allowsPreemption(stage));
         }
         assertInvalid(
@@ -522,7 +526,8 @@ class ConfigServiceTest {
                 {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
                   "allowedVictimStages":["DECODE_RESERVED"]}}}}
                 """);
-        assertTrue(config.priorityOrdering().getPreemption().allows(VictimStage.DECODE_RESERVED));
+        assertTrue(
+                config.priorityOrdering().getPreemption().allows(PreemptionStage.DECODE_RESERVED));
         assertInvalid(
                 """
                 {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
@@ -545,15 +550,15 @@ class ConfigServiceTest {
                 {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
                   "allowedVictimStages":["PREFILL_QUEUED"]}}}}
                 """);
-        assertTrue(config.allowsPreemption(VictimStage.PREFILL_QUEUED));
+        assertTrue(config.allowsPreemption(PreemptionStage.PREFILL_QUEUED));
         config =
                 ConfigTestFixtures.parse(
                         """
                 {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
                   "allowedVictimStages":["DECODE_RESERVED","PREFILL_QUEUED"]}}}}
                 """);
-        assertTrue(config.allowsPreemption(VictimStage.PREFILL_QUEUED));
-        assertTrue(config.allowsPreemption(VictimStage.DECODE_RESERVED));
+        assertTrue(config.allowsPreemption(PreemptionStage.PREFILL_QUEUED));
+        assertTrue(config.allowsPreemption(PreemptionStage.DECODE_RESERVED));
         assertInvalid(
                 """
                 {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{

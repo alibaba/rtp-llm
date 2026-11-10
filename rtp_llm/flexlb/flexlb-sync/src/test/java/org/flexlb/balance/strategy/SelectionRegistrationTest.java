@@ -1,18 +1,25 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.EndpointTestSupport;
+import org.flexlb.balance.planner.BuiltinGroupPlanner;
+import org.flexlb.balance.scheduler.QueueExecutionSettings;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRouteSelector;
 import org.flexlb.balance.scheduler.RouteResult;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -24,6 +31,8 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -53,14 +62,14 @@ class SelectionRegistrationTest {
             add(registry, RoleType.DECODE, "d1");
             var selector = selector(registry);
             var first = selector.select(context("a"), null);
-            assertEquals(PlacementResult.Status.SUCCESS, first.status());
+            assertEquals(RoutingResult.Status.SUCCESS, first.status());
             var a = first.value();
             assertNotNull(a.prefillReservation());
             assertNotNull(a.decodeReservation());
             assertTrue(a.prefillEndpoint().captureQueue(10).items().isEmpty());
             assertEquals(1, a.decodeEndpoint().routingView().totalLoad());
             var second = selector.select(context("b"), null);
-            assertEquals(PlacementResult.Status.SUCCESS, second.status());
+            assertEquals(RoutingResult.Status.SUCCESS, second.status());
             assertNotSame(a.prefillEndpoint(), second.value().prefillEndpoint());
             release(a);
             release(second.value());
@@ -79,7 +88,7 @@ class SelectionRegistrationTest {
             when(policy.selectAndRegister(any(), any(), any(), any(), any(), any(), any()))
                     .thenAnswer(
                             call ->
-                                    PlacementResult.success(
+                                    RoutingResult.success(
                                             ((java.util.List<?>) call.getArgument(3)).getFirst()));
             org.springframework.test.util.ReflectionTestUtils.setField(
                     routing, "decodeSelector", policy);
@@ -108,11 +117,11 @@ class SelectionRegistrationTest {
             long initial = endpoint.queueCounters().outstandingRequests();
             var selector = selector(registry);
             assertEquals(
-                    PlacementResult.Status.BLOCKED, selector.select(context("a"), null).status());
+                    RoutingResult.Status.BLOCKED, selector.select(context("a"), null).status());
             assertEquals(initial, endpoint.queueCounters().outstandingRequests());
             add(registry, RoleType.DECODE, "d1");
             var next = selector.select(context("a"), null);
-            assertEquals(PlacementResult.Status.SUCCESS, next.status());
+            assertEquals(RoutingResult.Status.SUCCESS, next.status());
             release(next.value());
         }
     }
@@ -132,11 +141,11 @@ class SelectionRegistrationTest {
             add(registry, RoleType.DECODE, "d1");
             var selector = selector(registry);
             var first = selector.select(context("first"), null);
-            assertEquals(PlacementResult.Status.SUCCESS, first.status());
+            assertEquals(RoutingResult.Status.SUCCESS, first.status());
             var route = first.value();
             try {
                 var blocked = selector.select(context("second"), null);
-                assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
+                assertEquals(RoutingResult.Status.BLOCKED, blocked.status());
                 assertEquals(RoleType.DECODE, blocked.blocker().role());
                 assertEquals(1, route.decodeEndpoint().routingView().totalLoad());
                 assertEquals(1, route.prefillEndpoint().queueCounters().outstandingRequests());
@@ -145,8 +154,107 @@ class SelectionRegistrationTest {
                 release(route);
             }
             var retry = selector.select(context("second"), null);
-            assertEquals(PlacementResult.Status.SUCCESS, retry.status());
+            assertEquals(RoutingResult.Status.SUCCESS, retry.status());
             release(retry.value());
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void queuedHeadsDecodePressureDoesNotDetermineTheNextRequestsPlacement(boolean spareDecode)
+            throws Exception {
+        var settings = config.loadBalanceConfig();
+        settings.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
+        var registry = StrategyTestSupport.endpointRegistry(config);
+        try (AutoCloseable cleanup = registry::close) {
+            add(registry, RoleType.PREFILL, "p1");
+            add(registry, RoleType.DECODE, "d1");
+            var selector = selector(registry);
+            var selected = selector.select(context("head"), null);
+            assertEquals(RoutingResult.Status.SUCCESS, selected.status());
+            var head = selected.value();
+            var prefill = head.prefillEndpoint();
+            var decode = head.decodeEndpoint();
+            var headDecode = head.decodeReservation();
+            try {
+                assertTrue(
+                        prefill.enqueueRoute(
+                                head,
+                                QueueExecutionSettings.capture(
+                                        settings, BuiltinGroupPlanner.from(settings))));
+                assertSame(head, prefill.captureQueue(10).items().getFirst());
+
+                // The engine consumes its KV after the queued head has registered D1.
+                var status = decode.getStatus();
+                var full = new WorkerStatusResponse();
+                full.setRole(RoleType.DECODE);
+                full.setAlive(true);
+                full.setStatusVersion(status.appliedStatusCursor().statusVersion() + 1L);
+                full.setLatestFinishedVersion(0L);
+                full.setTotalKvCacheTokens(1_000_000L);
+                full.setAvailableKvCacheTokens(0L);
+                org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange change;
+                status.lock.lock();
+                try {
+                    change =
+                            decode.applyPreparedStatus(
+                                    status,
+                                    status.prepareNewStatus(
+                                            WorkerStatusTestSupport.freezeStatusResponse(
+                                                    status, full)));
+                } finally {
+                    status.lock.unlock();
+                }
+                decode.publishStatus(change);
+                assertEquals(
+                        DecodeResources.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
+                        decode.acquireDispatchPermit(
+                                        headDecode, SchedulingTestConfig.capacity(settings))
+                                .status());
+                if (spareDecode) add(registry, RoleType.DECODE, "d2");
+
+                var result = selector.select(context("next"), null);
+                try {
+                    if (spareDecode) {
+                        assertEquals(RoutingResult.Status.SUCCESS, result.status());
+                        var next = result.value();
+                        assertSame(prefill, next.prefillEndpoint());
+                        assertEquals("d2", next.decodeEndpoint().getIp());
+                        assertNotSame(decode, next.decodeEndpoint());
+                        assertEquals(
+                                next.decodeReservation(),
+                                EndpointTestSupport.decodeReservation(
+                                        next.decodeEndpoint(), "next"));
+                        assertNotNull(next.prefillReservation());
+                        assertEquals(2, prefill.queueCounters().outstandingRequests());
+                        assertEquals(1, next.decodeEndpoint().routingView().totalLoad());
+                    } else {
+                        assertEquals(RoutingResult.Status.BLOCKED, result.status());
+                        assertEquals(RoleType.DECODE, result.blocker().role());
+                        assertEquals("g", result.blocker().group());
+                        assertEquals(decode.ipPort(), result.blocker().endpoint());
+                        assertEquals(
+                                StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+                                result.failure().getCode());
+                        assertNull(result.value());
+                        assertEquals(1, prefill.queueCounters().outstandingRequests());
+                    }
+                    assertSame(head, prefill.captureQueue(10).items().getFirst());
+                    assertEquals(1, prefill.captureQueue(10).items().size());
+                    assertEquals(headDecode, EndpointTestSupport.decodeReservation(decode, "head"));
+                    assertNull(EndpointTestSupport.decodeReservation(decode, "next"));
+                    assertEquals(1, decode.resourceSnapshot().queuedCount());
+                    assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
+                } finally {
+                    if (result.value() != null) release(result.value());
+                }
+                assertEquals(1, prefill.queueCounters().outstandingRequests());
+            } finally {
+                release(head);
+            }
+            assertEquals(0, prefill.queueCounters().outstandingRequests());
+            assertTrue(prefill.captureQueue(10).items().isEmpty());
+            assertNull(EndpointTestSupport.decodeReservation(decode, "head"));
         }
     }
 
@@ -173,7 +281,7 @@ class SelectionRegistrationTest {
                     .trackRoutingPrediction(
                             any(), any(), any(), any(), anyLong(), anyLong(), any());
             var result = selector.select(context, null);
-            assertEquals(PlacementResult.Status.CLOSED, result.status());
+            assertEquals(RoutingResult.Status.CLOSED, result.status());
             assertEquals(0, prefill.queueCounters().outstandingRequests());
             var decode =
                     (DecodeEndpoint)
@@ -291,8 +399,7 @@ class SelectionRegistrationTest {
                     .trackRoutingPrediction(
                             any(), any(), any(), any(), anyLong(), anyLong(), any());
             assertEquals(
-                    PlacementResult.Status.RETRY,
-                    selector.select(context("retired"), null).status());
+                    RoutingResult.Status.RETRY, selector.select(context("retired"), null).status());
             assertEquals(0, prefill.queueCounters().outstandingRequests());
             var decode =
                     (DecodeEndpoint)

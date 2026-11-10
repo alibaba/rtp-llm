@@ -1,7 +1,7 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.scheduler.PlacementKey;
+import org.flexlb.balance.RoutingResult;
+import org.flexlb.balance.scheduler.CapacityKey;
 
 import java.util.List;
 
@@ -10,7 +10,7 @@ import java.util.List;
  */
 @FunctionalInterface
 public interface EncoderSelectionStrategy {
-    PlacementResult<Candidate, PlacementKey> select(
+    RoutingResult<Candidate, CapacityKey> select(
             List<? extends Candidate> candidates, String group, boolean weighted, int requestLimit);
 
     /**

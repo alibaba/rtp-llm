@@ -20,6 +20,17 @@ public final class ContextResult {
         CLOSED
     }
 
+    /**
+     * Tracks selection, removal of an old route and completion of the current routing work.
+     */
+    public enum RoutingPhase {
+        NONE,
+        SELECTING,
+        FINISHING_SELECTION,
+        REMOVING_ROUTE,
+        FINISHING_ROUTE_REMOVAL
+    }
+
     public enum SendState {
         NOT_STARTED,
         SENDING,
@@ -58,15 +69,14 @@ public final class ContextResult {
             java.util.Objects.requireNonNull(reason, "reason");
             detail = detail == null ? "Route admission failed" : detail;
         }
-
-        public RoleType failedRole() {
-            return failedEndpoint == null ? null : failedEndpoint.getStatus().getRole();
-        }
     }
 
-    public enum PublicationResult {
+    /**
+     * Result of ending an operation; FINISHED does not assert that a route was published.
+     */
+    public enum RoutingCompletion {
         RESTORED,
-        PUBLISHED,
+        FINISHED,
         WITHDRAWN,
         FAILED
     }
@@ -286,17 +296,32 @@ public final class ContextResult {
 
     public record ResponseCandidate(RequestContext owner, ResponseKind kind, long nowMs) {}
 
+    /**
+     * Identifies the exact delivery and time of a transport, prediction or cleanup observation.
+     */
     public sealed interface DeliveryEvidence
             permits TransportResult,
                     Prediction,
                     RouteDelivered,
-                    Abandonment,
                     CleanupAcknowledgement,
-                    PreparationFailure {
+                    PreparationFailure,
+                    DeliveryNotStarted {
         Delivery.Member delivery();
 
         long nowMs();
     }
+
+    /**
+     * A rejected delivery start, reported after releasing the request lock. The exact selection
+     * or queued route identifies the request work; an expired deadline is handled by its lifecycle.
+     */
+    public record DeliveryNotStarted(
+            Delivery.Member delivery,
+            RoutingContext selecting,
+            ExpirationTimer.Token deadline,
+            boolean endpointUnavailable,
+            long nowMs)
+            implements DeliveryEvidence {}
 
     public record TransportResult(Delivery.Member delivery, Delivery.Result result, long nowMs)
             implements DeliveryEvidence {}
@@ -305,9 +330,6 @@ public final class ContextResult {
             implements DeliveryEvidence {}
 
     public record RouteDelivered(Delivery.Member delivery, long predictedAtMs, long nowMs)
-            implements DeliveryEvidence {}
-
-    public record Abandonment(Delivery.Member delivery, CancelReason reason, long nowMs)
             implements DeliveryEvidence {}
 
     public record CleanupAcknowledgement(
@@ -397,6 +419,9 @@ public final class ContextResult {
         }
     }
 
+    /**
+     * Records transport progress, frontend acknowledgement and separate resource cleanup evidence.
+     */
     public record DeliveryFacts(
             Delivery.Member identity,
             @lombok.With(lombok.AccessLevel.PACKAGE) SendState send,
@@ -408,42 +433,6 @@ public final class ContextResult {
             long startedAtMs) {
         public RequestContext owner() {
             return identity.owner();
-        }
-
-        DeliveryFacts record(DeliveryEvidence evidence, CancelReason reason) {
-            return switch (evidence) {
-                case TransportResult transport -> recordTransport(transport.result(), reason);
-                case RouteDelivered ignored -> {
-                    if (identity.kind() != Delivery.SendMode.ROUTE_DECISION) {
-                        throw new IllegalArgumentException(
-                                "route completion requires route delivery identity");
-                    }
-                    yield withSend(SendState.DELIVERED);
-                }
-                case Abandonment abandoned ->
-                        abandon(
-                                identity.kind() == Delivery.SendMode.ROUTE_DECISION
-                                                && send == SendState.NOT_STARTED
-                                        ? SendState.ROUTE_CLOSED
-                                        : send,
-                                abandonment == null && !releasable(this)
-                                        ? abandoned.reason()
-                                        : abandonment);
-                case CleanupAcknowledgement ack ->
-                        mergeReleaseProof(
-                                false,
-                                ack.kind() == CancelEvidenceKind.CLEANED
-                                        || ack.kind() == CancelEvidenceKind.FENCED,
-                                ack.kind() == CancelEvidenceKind.CLEANED);
-                case PreparationFailure ignored -> {
-                    if (send == SendState.SENDING) {
-                        throw new IllegalStateException(
-                                "preparation failure crossed send boundary");
-                    }
-                    yield send == SendState.NOT_STARTED ? withSend(SendState.NOT_SENT) : this;
-                }
-                case Prediction ignored -> this;
-            };
         }
 
         /**
@@ -613,7 +602,8 @@ public final class ContextResult {
             Identity key,
             long createdAtMs,
             RouteResult route,
-            PlacementOperation placement,
+            RoutingContext routingContext,
+            RoutingPhase routingPhase,
             DeliveryFacts delivery,
             EngineFacts engine,
             PreemptionFacts preemption,
@@ -663,7 +653,7 @@ public final class ContextResult {
                     || pendingEnd != null) {
                 return false;
             }
-            return placement == null || placement.withdrawingRoute() == null;
+            return routingContext == null || routingContext.routeToWithdraw() == null;
         }
     }
 }

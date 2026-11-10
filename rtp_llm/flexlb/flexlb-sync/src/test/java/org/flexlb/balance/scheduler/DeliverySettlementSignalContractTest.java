@@ -61,10 +61,7 @@ class DeliverySettlementSignalContractTest {
                     side == Side.PREFILL ? 1L : 0L,
                     fixture.prefill.admissionSummary(0, 0L).occupiedRequests());
             assertFalse(fixture.settled.isDone(), "a release still owns real resources");
-            assertEquals(
-                    DeliveryDispatcher.StopResult.REMOTE_CLEANED,
-                    fixture.session.get(2, TimeUnit.SECONDS),
-                    "remote stop completes independently of local settlement");
+            fixture.session.get(2, TimeUnit.SECONDS);
             assertSame(
                     fixture.session,
                     fixture.cleanupSession(),
@@ -92,9 +89,7 @@ class DeliverySettlementSignalContractTest {
             assertEquals(1, fixture.decode.routingView().totalLoad());
             assertTrue(fixture.scheduler.repository.isCurrent(fixture.context));
             assertFalse(fixture.settled.isDone(), "failed release is still an obligation");
-            assertEquals(
-                    DeliveryDispatcher.StopResult.REMOTE_CLEANED,
-                    fixture.session.get(2, TimeUnit.SECONDS));
+            fixture.session.get(2, TimeUnit.SECONDS);
             assertSame(fixture.session, fixture.cleanupSession());
             assertEquals(1, fixture.cleanupRegistry().size());
             assertSame(
@@ -128,7 +123,7 @@ class DeliverySettlementSignalContractTest {
 
         final AbstractRequestScheduler scheduler;
         final SchedulerTestServices runtime;
-        final DeliveryDispatcher dispatcher;
+        final DeliveryCoordinator dispatcher;
         final PrefillEndpoint prefill;
         final DecodeEndpoint decode;
         final RequestContext context;
@@ -147,7 +142,7 @@ class DeliverySettlementSignalContractTest {
 
         final boolean expectsFailure;
 
-        CompletableFuture<DeliveryDispatcher.StopResult> session;
+        CompletableFuture<Void> session;
 
         Fixture(Side side, boolean persistentFailure) {
             expectsFailure = persistentFailure;
@@ -173,7 +168,8 @@ class DeliverySettlementSignalContractTest {
                                 cancelCalls.incrementAndGet();
                                 return proof;
                             });
-            ReflectionTestUtils.setField(runtime.dispatcher, "grpcClient", channel);
+            org.flexlb.balance.scheduler.DeliveryTestSupport.setField(
+                    runtime.dispatcher, "grpcClient", channel);
             prefill =
                     spy(
                             EndpointTestSupport.unstartedPrefill(
@@ -235,7 +231,7 @@ class DeliverySettlementSignalContractTest {
             {
                 assertNotNull(admission);
                 assertEquals(
-                        org.flexlb.balance.PlacementResult.Status.SUCCESS,
+                        org.flexlb.balance.RoutingResult.Status.SUCCESS,
                         RequestProtocolTestSupport.commitRoute(
                                 scheduler,
                                 route,
@@ -244,20 +240,20 @@ class DeliverySettlementSignalContractTest {
                                                 org.flexlb.balance.endpoint.EndpointTestSupport
                                                                 .enqueue(state, route)
                                                         == route)));
-                AbstractRequestScheduler.finishPlacement(admission);
+                AbstractRequestScheduler.finishRouting(admission);
             }
             var prepared = new DeliveryTestSupport.BatchInput(BATCH, 2);
             var committed =
                     withStateLock(
                             org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(state),
                             () ->
-                                    prefill.commitDelivery(
-                                            org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
-                                                    List.of(route),
-                                                    prepared,
-                                                    new long[] {100L},
-                                                    null,
-                                                    System.currentTimeMillis())));
+                                    prefill.dequeueForDelivery(
+                                                    org.flexlb.balance.scheduler.DeliveryTestSupport
+                                                            .queued(
+                                                                    List.of(route),
+                                                                    prepared,
+                                                                    new long[] {100L}))
+                                            .value());
             assertNotNull(committed);
             var dispatch =
                     decode.acquireDispatchPermit(
@@ -265,16 +261,17 @@ class DeliverySettlementSignalContractTest {
             assertEquals(
                     DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, dispatch.status());
             claim =
-                    scheduler.commitDelivery(
-                            new org.flexlb.balance.scheduler.Delivery.Member(
-                                    route, dispatch.value()),
-                            Delivery.SendMode.BATCH_ENQUEUE,
-                            BATCH);
+                    org.flexlb.balance.scheduler.DeliveryTestSupport.transport(scheduler.dispatcher)
+                            .commit(
+                                    new org.flexlb.balance.scheduler.Delivery.Member(
+                                            route, dispatch.value()),
+                                    Delivery.SendMode.BATCH_ENQUEUE,
+                                    BATCH,
+                                    null);
             assertNotNull(claim);
             assertEquals(
                     ContextResult.SendState.SENDING, claim.owner().snapshot().delivery().send());
             dispatch.value().release();
-            committed.close();
             settled = claim.completion().toCompletableFuture();
             if (side == Side.PREFILL) {
                 doAnswer(
@@ -329,14 +326,14 @@ class DeliverySettlementSignalContractTest {
             proof.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
         }
 
-        CompletableFuture<DeliveryDispatcher.StopResult> cleanupSession() {
+        CompletableFuture<Void> cleanupSession() {
             return dispatcher.stop(claim);
         }
 
         long pendingWork() {
-            Object lifecycle = ReflectionTestUtils.getField(runtime.tasks(), "workLifecycle");
+            Object lifecycle = ReflectionTestUtils.getField(runtime.tasks(), "tasksLock");
             synchronized (lifecycle) {
-                return (Long) ReflectionTestUtils.getField(runtime.tasks(), "pendingWork");
+                return (Long) ReflectionTestUtils.getField(runtime.tasks(), "submittedTasks");
             }
         }
 
@@ -357,7 +354,9 @@ class DeliverySettlementSignalContractTest {
         }
 
         Map<?, ?> cleanupRegistry() {
-            return (Map<?, ?>) ReflectionTestUtils.getField(dispatcher, "sessions");
+            return (Map<?, ?>)
+                    ReflectionTestUtils.getField(
+                            DeliveryTestSupport.cancellations(dispatcher), "sessions");
         }
 
         private void awaitRelease() throws InterruptedException {

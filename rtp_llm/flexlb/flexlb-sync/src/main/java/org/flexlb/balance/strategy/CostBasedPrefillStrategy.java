@@ -1,8 +1,8 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.scheduler.PlacementKey;
+import org.flexlb.balance.scheduler.CapacityKey;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.RoutingConfig;
@@ -55,14 +55,14 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
     }
 
     @Override
-    public <I extends CandidateInput> PlacementResult<Selection<I>, PlacementKey> selectAndRegister(
+    public <I extends CandidateInput> RoutingResult<Selection<I>, CapacityKey> selectAndRegister(
             Request request,
             SchedulingMetadata metadata,
             RoleType roleType,
             String group,
             List<I> inputs,
             LongSupplier clock,
-            java.util.function.Function<Selection<I>, PlacementResult.Registration> register) {
+            java.util.function.Function<Selection<I>, RoutingResult.Registration> register) {
         PrefillCandidateSet cached = CANDIDATES.get();
         PrefillCandidateSet candidates = cached.inUse ? new PrefillCandidateSet() : cached;
         candidates.inUse = true;
@@ -86,11 +86,13 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
             if (candidates.size == 0) {
                 return observe(
                         blockedWithDiagnostics(
-                                Response.error(
+                                Response.buildErrorResponse(
+                                        roleType.getErrorType(),
                                         candidates.registeredCount == 0
-                                                ? roleType.getErrorType()
-                                                : StrategyErrorType.RESOURCE_EXHAUSTED),
-                                new PlacementKey(roleType, group, null),
+                                                ? "No Prefill candidate in the requested routing group"
+                                                : "No Prefill candidate could be scored: "
+                                                        + rejections),
+                                new CapacityKey(roleType, group, null),
                                 candidates.registeredCount,
                                 rejections),
                         candidates,
@@ -108,11 +110,23 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                                 roleType,
                                 group,
                                 request.getSeqLen());
-                PlacementResult<Selection<I>, PlacementKey> result =
+                RoutingResult<Selection<I>, CapacityKey> result =
                         selected < 0
-                                ? PlacementResult.blocked(new PlacementKey(roleType, group, null))
+                                ? blockedWithDiagnostics(
+                                        Response.buildErrorResponse(
+                                                roleType.getErrorType(),
+                                                candidates.size == 0
+                                                        ? "All captured Prefill candidates became unavailable before registration"
+                                                        : "No Prefill candidate satisfies the routing policy"),
+                                        new CapacityKey(roleType, group, null),
+                                        candidates.registeredCount,
+                                        Map.of(
+                                                "reason",
+                                                candidates.size == 0
+                                                        ? "CANDIDATES_UNAVAILABLE"
+                                                        : "NO_POLICY_MATCH"))
                                 : selection(candidates, selected, roleType, metadata, cacheMatches);
-                if (result.status() != PlacementResult.Status.SUCCESS)
+                if (result.status() != RoutingResult.Status.SUCCESS)
                     return observe(
                             result,
                             candidates,
@@ -122,7 +136,7 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                             rejections,
                             cacheMatches);
                 var registered = register.apply(result.value());
-                if (registered == PlacementResult.Registration.REGISTERED)
+                if (registered == RoutingResult.Registration.REGISTERED)
                     return observe(
                             result,
                             candidates,
@@ -131,15 +145,22 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                             group,
                             rejections,
                             cacheMatches);
-                if (registered == PlacementResult.Registration.BLOCKED)
+                if (registered == RoutingResult.Registration.BLOCKED)
                     return observe(
-                            PlacementResult.blocked(
-                                    PlacementKey.exact(
+                            RoutingResult.blocked(
+                                    CapacityKey.exact(
                                             roleType,
                                             result.value().input().group(),
                                             result.value().address()),
-                                    Response.error(StrategyErrorType.RESOURCE_EXHAUSTED),
-                                    null),
+                                    Response.buildErrorResponse(
+                                            StrategyErrorType.RESOURCE_EXHAUSTED,
+                                            "Prefill request capacity rejected registration at "
+                                                    + result.value().address()),
+                                    Map.of(
+                                            "cause",
+                                            "Prefill request capacity rejected registration",
+                                            "endpoint",
+                                            result.value().address())),
                             candidates,
                             selected,
                             roleType,
@@ -150,7 +171,7 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                 long hit = candidates.cacheHitTokens[selected];
                 long routingHit = candidates.routingCacheMatchTokens[selected];
                 candidates.remove(selected);
-                if (registered == PlacementResult.Registration.CONFLICT)
+                if (registered == RoutingResult.Registration.CONFLICT)
                     evaluateCandidate(
                             request,
                             metadata,
@@ -161,7 +182,10 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                             hit,
                             routingHit);
             }
-            return PlacementResult.retry();
+            return RoutingResult.retry(
+                    Response.buildErrorResponse(
+                            StrategyErrorType.SCHEDULER_PLAN_CONFLICT,
+                            "Prefill selection could not register a current candidate after 8 attempts"));
         } finally {
             candidates.clear();
             candidates.inUse = false;
@@ -197,7 +221,7 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
         return selected;
     }
 
-    private <I extends CandidateInput> PlacementResult<Selection<I>, PlacementKey> selection(
+    private <I extends CandidateInput> RoutingResult<Selection<I>, CapacityKey> selection(
             PrefillCandidateSet candidates,
             int selected,
             RoleType roleType,
@@ -205,28 +229,25 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
             org.flexlb.cache.domain.CacheMatchResult cacheMatches) {
         @SuppressWarnings("unchecked")
         I winner = (I) candidates.capturedSources[selected];
-        String block = candidates.admissionBlocks[selected];
-        StrategyErrorType error = StrategyErrorType.RESOURCE_EXHAUSTED;
-        AdmissionRejectReason reason = AdmissionRejectReason.RESOURCE_EXHAUSTED;
-        if (block == null && !queueScheduling && !winner.requestCapacityAvailable()) {
-            block = "PREFILL_CAPACITY";
-            reason = classifyWorkerCapacity(winner.admissionSummary(metadata.priority()));
-            error =
+        if (!queueScheduling && !winner.requestCapacityAvailable()) {
+            var reason = classifyWorkerCapacity(winner.admissionSummary(metadata.priority()));
+            var error =
                     switch (reason) {
                         case HIGHER_PRIORITY_AHEAD, SAME_PRIORITY_AHEAD ->
                                 StrategyErrorType.PRIORITY_ADMISSION_REJECTED;
                         case UNSPECIFIED -> StrategyErrorType.ADMISSION_UNAVAILABLE;
                         default -> StrategyErrorType.RESOURCE_EXHAUSTED;
                     };
-        }
-        if (block != null) {
             return blockedWithDiagnostics(
-                    Response.error(error, reason),
-                    PlacementKey.exact(roleType, winner.group(), winner.address()),
+                    Response.error(
+                            error,
+                            reason,
+                            "Prefill request capacity unavailable at " + winner.address()),
+                    CapacityKey.exact(roleType, winner.group(), winner.address()),
                     candidates.registeredCount,
                     Map.of(
                             "reason",
-                            block,
+                            "PREFILL_REQUEST_CAPACITY",
                             "selectedEndpoint",
                             winner.address(),
                             "cacheHitTokens",
@@ -234,7 +255,7 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                             "affinityReason",
                             candidates.affinityReason == null ? "" : candidates.affinityReason));
         }
-        return PlacementResult.success(
+        return RoutingResult.success(
                 new Selection<>(
                         candidates.endpointAddresses[selected],
                         winner.generationId(),
@@ -266,12 +287,14 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
     }
 
     private static <I extends CandidateInput>
-            PlacementResult<Selection<I>, PlacementKey> blockedWithDiagnostics(
-                    Response failure, PlacementKey key, int workerCount, Map<String, ?> details) {
-        return PlacementResult.blocked(
+            RoutingResult<Selection<I>, CapacityKey> blockedWithDiagnostics(
+                    Response failure, CapacityKey key, int workerCount, Map<String, ?> details) {
+        return RoutingResult.blocked(
                 key,
                 failure,
                 Map.of(
+                        "cause",
+                        failure.getErrorMessage(),
                         "role",
                         key.role().name(),
                         "workers",
@@ -282,8 +305,8 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                         Map.copyOf(details)));
     }
 
-    private static <I extends CandidateInput> PlacementResult<Selection<I>, PlacementKey> observe(
-            PlacementResult<Selection<I>, PlacementKey> result,
+    private static <I extends CandidateInput> RoutingResult<Selection<I>, CapacityKey> observe(
+            RoutingResult<Selection<I>, CapacityKey> result,
             PrefillCandidateSet candidates,
             int selected,
             RoleType role,
@@ -297,6 +320,7 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
         }
         var details = new java.util.HashMap<String, Object>();
         if (result.diagnostics() != null) details.putAll(result.diagnostics());
+        if (result.failure() != null) details.put("cause", result.failure().getErrorMessage());
         details.put(
                 "routingDecision",
                 new org.flexlb.dao.pv.RoutingDecision(
@@ -316,7 +340,7 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                         snapshot,
                         null));
         if (cacheMatches != null) details.put("cacheQuery", cacheMatches);
-        return new PlacementResult<>(
+        return new RoutingResult<>(
                 result.status(), result.value(), result.failure(), result.blocker(), details);
     }
 
@@ -335,7 +359,7 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                 null,
                 null,
                 null,
-                ttft < 0 ? "UNMODELED_ENGINE_WORK" : "MODELED",
+                "MODELED",
                 candidates.ownershipVersions[index]);
     }
 
@@ -500,7 +524,7 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                         cacheHit,
                         routingCacheMatchTokens,
                         planningAtMs);
-        if (!projection.selectable() && !projection.engineWorkUnmodeled()) {
+        if (!projection.selectable()) {
             rejections.merge(
                     "PROJECTION_" + projection.state().name() + "_" + projection.detail(),
                     1,
@@ -511,10 +535,6 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
         candidates.addCandidate(
                 endpointAddress, input, projection, projectionInputs.ownershipVersion());
         candidates.inputs[candidates.size - 1] = projectionInputs;
-        if (projection.admissionState() == RequestTimeEstimation.State.BLOCKED
-                || projection.admissionState() == RequestTimeEstimation.State.UNAVAILABLE) {
-            candidates.admissionBlocks[candidates.size - 1] = projection.admissionDetail();
-        }
         logProjection(endpointAddress, cacheHit, projection);
     }
 

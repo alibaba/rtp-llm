@@ -976,7 +976,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 ctx.data().getRequestExpiresAtMs(),
                 ctx.data().getPlanType(),
                 ctx.data().getPlanCost(),
-                ctx.data().getVictimCount(),
+                ctx.data().getPreemptedRequestCount(),
                 selectedPrefill,
                 selectedDecode,
                 success ? "" : response.getErrorMessage(),
@@ -1265,7 +1265,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             throw new InvalidScheduleRequestException("requested role is not configured");
         ctx.data().setRequestedRoles(effective);
         if (effective.equals(List.of(RoleType.ENCODER))) ctx.data().setPhase(RequestPhase.ENCODER);
-        if (config.getDispatcher().requiresGenerateInput()
+        if (config.deliveryType(ctx.data().getPhase())
+                        == org.flexlb.config.DispatcherConfig.Type.BATCH
                 && !pb.getVitRouteOnly()
                 && ctx.data().getPhase() == RequestPhase.GENERATION) {
             try {

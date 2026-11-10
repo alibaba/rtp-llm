@@ -25,7 +25,7 @@ public interface PrefillTimePredictor {
         if (unstartedMs < 0L || !Double.isFinite(lifetime) || lifetime < 1.0) {
             throw new IllegalArgumentException("invalid delivery prediction inputs");
         }
-        var preceding = java.util.Objects.requireNonNull(work).totalRemainingWorkMsAt(nowMs);
+        var preceding = work.totalRemainingWorkMsAt(nowMs);
         if (preceding.isEmpty()) {
             return 0L;
         }

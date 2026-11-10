@@ -52,15 +52,6 @@ public class Response {
     @JsonProperty("admission_reject_reason")
     private AdmissionRejectReason admissionRejectReason = AdmissionRejectReason.UNSPECIFIED;
 
-    /** Build a successful delivery response without mutating the original route response. */
-    public static Response buildSuccessResponse(Response routeResponse, boolean enqueuedByMaster) {
-        Response success = copyOf(java.util.Objects.requireNonNull(routeResponse, "routeResponse"));
-        success.success = true;
-        success.code = 200;
-        success.enqueuedByMaster = enqueuedByMaster;
-        return success;
-    }
-
     /** Deep-copy all response data, preserving null collections and entries. */
     public static Response copyOf(Response source) {
         if (source == null) {
@@ -128,6 +119,7 @@ public class Response {
         Response result = new Response();
         result.setSuccess(false);
         result.setCode(strategyErrorType.getErrorCode());
+        String suppliedDetail = detail;
         detail =
                 switch (strategyErrorType) {
                     case PRIORITY_ADMISSION_REJECTED ->
@@ -146,6 +138,12 @@ public class Response {
                     }
                     default -> detail;
                 };
+        if ((strategyErrorType == StrategyErrorType.PRIORITY_ADMISSION_REJECTED
+                        || strategyErrorType == StrategyErrorType.ADMISSION_UNAVAILABLE)
+                && suppliedDetail != null
+                && !suppliedDetail.isBlank()) {
+            detail += "; " + suppliedDetail;
+        }
         result.setErrorMessage(strategyErrorType.buildErrorMessage(detail));
         result.setAdmissionRejectReason(admissionRejectReason);
         return result;

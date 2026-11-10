@@ -9,13 +9,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import static org.flexlb.balance.scheduler.ContextResult.Abandonment;
 import static org.flexlb.balance.scheduler.ContextResult.CancelEvidenceKind;
 import static org.flexlb.balance.scheduler.ContextResult.CleanupAcknowledgement;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.PreparationFailure;
-import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
+import static org.flexlb.balance.scheduler.ContextResult.RoutingCompletion;
 import static org.flexlb.balance.scheduler.ContextResult.SendState;
 import static org.flexlb.balance.scheduler.ContextResult.TransportResult;
 import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEvent;
@@ -36,10 +35,94 @@ import static org.mockito.Mockito.when;
  * Checks delivery transitions against exact identities, sender exit, deadlines, and retained Worker evidence.
  */
 class RequestDeliveryClaimStateTest {
+    @Test
+    void predictionAndCleanupDoNotInventASenderResult() {
+        var f = fixture(Delivery.SendMode.BATCH_ENQUEUE, false);
+        var ctx = f.context();
+        var sending = ctx.snapshot().delivery().send();
+        ctx.recordDeliveryPrediction(new ContextResult.Prediction(f.delivery(), 5000L, 1002L));
+        assertEquals(sending, ctx.snapshot().delivery().send());
+        assertEquals(5000L, ctx.snapshot().engine().visibilityAtMs());
+        ctx.recordRemoteCleanup(
+                new CleanupAcknowledgement(f.delivery(), CancelEvidenceKind.CLEANED, 1003L));
+        assertEquals(sending, ctx.snapshot().delivery().send());
+        assertTrue(ctx.snapshot().delivery().prefillProof());
+        assertTrue(ctx.snapshot().delivery().decodeProof());
+        assertFalse(ctx.snapshot().deliveryReleasable());
+        assertEquals(5000L, ctx.snapshot().engine().visibilityAtMs());
+        assertNull(ctx.snapshot().pendingEnd());
+    }
+
+    static Fixture fixture(Delivery.SendMode kind, boolean fusion) {
+        var context = new RequestContext(mock(FlexlbConfig.class));
+        context.register(
+                "7502",
+                1000L,
+                100_000L,
+                10_000L,
+                org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
+        var prefill = mock(PrefillEndpoint.class);
+        var decode =
+                fusion
+                        ? null
+                        : org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
+        var reservation =
+                fusion
+                        ? null
+                        : new DecodeResources.RequestReservation(1L, String.valueOf(7502L), 1L);
+        var route = mock(RouteResult.class);
+        when(route.selectedEndpointsAvailable()).thenReturn(true);
+        when(route.requestId()).thenReturn(String.valueOf(7502L));
+        when(route.ctx()).thenReturn(context);
+        when(route.prefillEndpoint()).thenReturn(prefill);
+        when(route.decodeEndpoint()).thenReturn(decode);
+        when(route.decodeReservation()).thenReturn(reservation);
+        var placement = RequestCleanupPassTest.requireValue(context.beginRouteSelection());
+        org.junit.jupiter.api.Assertions.assertTrue(context.publishRoute(placement, route));
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.completeRouting(
+                                placement, RoutingCompletion.FINISHED, 1000L));
+        var member = new Delivery.Member(route, null);
+        synchronized (context) {
+            assertTrue(context.validateDelivery(route, null, 1001L));
+            member.initialize(kind, kind == Delivery.SendMode.BATCH_ENQUEUE ? 11L : 0L);
+            context.recordDeliveryStarted(member, 1001L);
+        }
+        assertEquals(
+                kind == Delivery.SendMode.BATCH_ENQUEUE ? SendState.SENDING : SendState.NOT_STARTED,
+                context.snapshot().delivery().send());
+        return new Fixture(context, route, prefill, decode, reservation, member);
+    }
+
+    @Test
+    void stalePredictionAndCleanupCannotChangeTheCurrentDelivery() {
+        var f = fixture(Delivery.SendMode.BATCH_ENQUEUE, false);
+        var foreign = new Delivery.Member(f.route(), null);
+        foreign.initialize(Delivery.SendMode.BATCH_ENQUEUE, 999L);
+        var before = f.context().snapshot();
+        assertNull(
+                f.context()
+                        .recordDeliveryPrediction(
+                                new ContextResult.Prediction(foreign, 5000L, 1002L)));
+        assertNull(
+                f.context()
+                        .recordRemoteCleanup(
+                                new CleanupAcknowledgement(
+                                        foreign, CancelEvidenceKind.CLEANED, 1003L)));
+        assertSame(before, f.context().snapshot());
+    }
+
     @ParameterizedTest
     @org.junit.jupiter.params.provider.EnumSource(
             value = org.flexlb.dao.loadbalance.StrategyErrorType.class,
-            names = {"BATCH_SLO_EXPIRED", "RESOURCE_EXHAUSTED", "ADMISSION_UNAVAILABLE"})
+            names = {
+                "BATCH_SLO_EXPIRED",
+                "QUEUE_TIMEOUT",
+                "RESOURCE_EXHAUSTED",
+                "ADMISSION_UNAVAILABLE"
+            })
     void deliveryExpiryUsesTheRegisteredSchedulerError(
             org.flexlb.dao.loadbalance.StrategyErrorType error) {
         for (boolean beforeSend : new boolean[] {true, false}) {
@@ -49,17 +132,17 @@ class RequestDeliveryClaimStateTest {
             when(route.selectedEndpointsAvailable()).thenReturn(true);
             when(route.ctx()).thenReturn(context);
             when(route.requestId()).thenReturn("7504");
-            var placement = RequestCleanupPassTest.requireValue(context.beginPlacement(null));
+            var placement = RequestCleanupPassTest.requireValue(context.beginRouteSelection());
             assertTrue(context.publishRoute(placement, route));
-            context.completePlacement(placement, PublicationResult.PUBLISHED, 1000L);
+            context.completeRouting(placement, RoutingCompletion.FINISHED, 1000L);
             var member = new Delivery.Member(route, null);
             if (beforeSend) {
                 synchronized (context) {
-                    assertFalse(context.validateDelivery(route, 11_001L));
+                    assertFalse(context.validateDelivery(route, null, 11_001L));
                 }
             } else {
                 synchronized (context) {
-                    assertTrue(context.validateDelivery(route, 1001L));
+                    assertTrue(context.validateDelivery(route, null, 1001L));
                     member.initialize(Delivery.SendMode.ROUTE_DECISION, 0L);
                     context.recordDeliveryStarted(member, 1001L);
                 }
@@ -86,17 +169,17 @@ class RequestDeliveryClaimStateTest {
         when(route.selectedEndpointsAvailable()).thenReturn(true);
         when(route.requestId()).thenReturn(String.valueOf(7503L));
         when(route.ctx()).thenReturn(context);
-        var placement = RequestCleanupPassTest.requireValue(context.beginPlacement(null));
+        var placement = RequestCleanupPassTest.requireValue(context.beginRouteSelection());
         org.junit.jupiter.api.Assertions.assertTrue(context.publishRoute(placement, route));
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.completePlacement(
-                                placement, PublicationResult.PUBLISHED, 1000L));
+                        observedRequest.completeRouting(
+                                placement, RoutingCompletion.FINISHED, 1000L));
         var before = context.snapshot();
         var member = new Delivery.Member(route, null);
         synchronized (context) {
-            assertTrue(context.validateDelivery(route, 1001L));
+            assertTrue(context.validateDelivery(route, null, 1001L));
             member.initialize(Delivery.SendMode.BATCH_ENQUEUE, 12L);
             assertSame(before, context.snapshot());
             assertNull(context.snapshot().delivery());
@@ -152,49 +235,6 @@ class RequestDeliveryClaimStateTest {
         }
     }
 
-    static Fixture fixture(Delivery.SendMode kind, boolean fusion) {
-        var context = new RequestContext(mock(FlexlbConfig.class));
-        context.register(
-                "7502",
-                1000L,
-                100_000L,
-                10_000L,
-                org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
-        var prefill = mock(PrefillEndpoint.class);
-        var decode =
-                fusion
-                        ? null
-                        : org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
-        var reservation =
-                fusion
-                        ? null
-                        : new DecodeResources.RequestReservation(1L, String.valueOf(7502L), 1L);
-        var route = mock(RouteResult.class);
-        when(route.selectedEndpointsAvailable()).thenReturn(true);
-        when(route.requestId()).thenReturn(String.valueOf(7502L));
-        when(route.ctx()).thenReturn(context);
-        when(route.prefillEndpoint()).thenReturn(prefill);
-        when(route.decodeEndpoint()).thenReturn(decode);
-        when(route.decodeReservation()).thenReturn(reservation);
-        var placement = RequestCleanupPassTest.requireValue(context.beginPlacement(null));
-        org.junit.jupiter.api.Assertions.assertTrue(context.publishRoute(placement, route));
-        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
-                context,
-                observedRequest ->
-                        observedRequest.completePlacement(
-                                placement, PublicationResult.PUBLISHED, 1000L));
-        var member = new Delivery.Member(route, null);
-        synchronized (context) {
-            assertTrue(context.validateDelivery(route, 1001L));
-            member.initialize(kind, kind == Delivery.SendMode.BATCH_ENQUEUE ? 11L : 0L);
-            context.recordDeliveryStarted(member, 1001L);
-        }
-        assertEquals(
-                kind == Delivery.SendMode.BATCH_ENQUEUE ? SendState.SENDING : SendState.NOT_STARTED,
-                context.snapshot().delivery().send());
-        return new Fixture(context, route, prefill, decode, reservation, member);
-    }
-
     @Test
     void committedBatchCanReportNotSentBeforeAnyBytesAreSent() {
         var fixture = fixture(Delivery.SendMode.BATCH_ENQUEUE, false);
@@ -217,7 +257,7 @@ class RequestDeliveryClaimStateTest {
                         context.beginClose(update.after().pendingEnd(), 1003L));
         assertEquals(DecodeResources.ReleaseReason.NOT_SENT, context.releaseReason());
         assertFalse(context.snapshot().delivery().acknowledged());
-        assertFalse(context.validateDelivery(fixture.route(), 1004L));
+        assertFalse(context.validateDelivery(fixture.route(), null, 1004L));
         var duplicate =
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                         context,
@@ -242,32 +282,33 @@ class RequestDeliveryClaimStateTest {
     }
 
     @Test
-    void abandoningUnpublishedRouteClosesItsSenderWithoutInventingNotSentProof() {
+    void cancellingUnpublishedRouteClosesItsSenderAndPreservesFirstReason() {
         var fixture = fixture(Delivery.SendMode.ROUTE_DECISION, false);
         var context = fixture.context();
-        var update =
-                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
-                        context,
-                        observedRequest ->
-                                observedRequest.recordDeliveryResult(
-                                        new Abandonment(
-                                                fixture.delivery(),
-                                                CancelReason.CLIENT_CANCELLED,
-                                                1002L)));
-        assertEquals(UpdateKind.APPLIED, update.kind());
-        assertTrue(update.after().deliveryReleasable());
-        assertEquals(SendState.ROUTE_CLOSED, update.after().delivery().send());
-        assertFalse(update.after().delivery().acknowledged());
-        var repeated =
-                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
-                        context,
-                        observedRequest ->
-                                observedRequest.recordDeliveryResult(
-                                        new Abandonment(
-                                                fixture.delivery(), CancelReason.SHUTDOWN, 1003L)));
-        assertEquals(UpdateKind.NO_CHANGE, repeated.kind());
-        assertSame(repeated.before(), repeated.after());
-        assertEquals(CancelReason.CLIENT_CANCELLED, repeated.after().delivery().abandonment());
+        assertTrue(
+                context.requestCancel(
+                        new ContextResult.Cancellation(
+                                0L,
+                                CancelReason.CLIENT_CANCELLED,
+                                false,
+                                1002L,
+                                org.flexlb.dao.loadbalance.StrategyErrorType.REQUEST_CANCELLED,
+                                "client cancelled")));
+        var cancelled = context.snapshot();
+        assertTrue(cancelled.deliveryReleasable());
+        assertEquals(SendState.ROUTE_CLOSED, cancelled.delivery().send());
+        assertFalse(cancelled.delivery().acknowledged());
+        assertFalse(
+                context.requestCancel(
+                        new ContextResult.Cancellation(
+                                0L,
+                                CancelReason.SHUTDOWN,
+                                false,
+                                1003L,
+                                org.flexlb.dao.loadbalance.StrategyErrorType.REQUEST_CANCELLED,
+                                "shutdown")));
+        assertSame(cancelled, context.snapshot());
+        assertEquals(CancelReason.CLIENT_CANCELLED, context.snapshot().delivery().abandonment());
     }
 
     @Test
@@ -297,7 +338,7 @@ class RequestDeliveryClaimStateTest {
         assertNull(expired.after().cancellation(), "handoff owns scheduling cancellation race");
         assertEquals(SendState.SENDING, context.snapshot().delivery().send());
         assertFalse(
-                context.validateDelivery(fixture.route(), 100_001L),
+                context.validateDelivery(fixture.route(), null, 100_001L),
                 "a committed batch cannot be committed a second time");
         assertFalse(
                 context.snapshot().deliveryReleasable(),
@@ -423,7 +464,7 @@ class RequestDeliveryClaimStateTest {
             org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                     context,
                     observedRequest ->
-                            observedRequest.recordDeliveryResult(
+                            observedRequest.recordRemoteCleanup(
                                     new CleanupAcknowledgement(
                                             fixture.delivery(),
                                             CancelEvidenceKind.CLEANED,
@@ -469,7 +510,7 @@ class RequestDeliveryClaimStateTest {
                                         1002L)));
         assertNull(context.snapshot().outcome());
         assertNotNull(context.snapshot().pendingEnd());
-        assertFalse(context.validateDelivery(fixture.route(), 1003L));
+        assertFalse(context.validateDelivery(fixture.route(), null, 1003L));
         assertEquals(SendState.SENDING, context.snapshot().delivery().send());
         assertFalse(
                 context.snapshot().deliveryReleasable(),
@@ -494,7 +535,7 @@ class RequestDeliveryClaimStateTest {
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.recordDeliveryResult(
+                        observedRequest.recordPreparationFailure(
                                 new PreparationFailure(
                                         fixture.delivery(),
                                         fixture.route(),

@@ -103,10 +103,6 @@ public final class EndpointTrace {
         record(stage);
     }
 
-    public String unavailableReason() {
-        return unavailableReason;
-    }
-
     public void recordCleanupCounts(long scanned, long removed) {
         scannedKeys = scanned;
         removedMappings = removed;
@@ -573,10 +569,6 @@ public final class EndpointTrace {
 
         public Stage failureStage() {
             return firstFailureStage.get();
-        }
-
-        public boolean hasCallbackStarted() {
-            return callbackStartedNanos != 0L;
         }
 
         public void recordRpcStarted(long timeoutMs) {

@@ -1,11 +1,12 @@
 package org.flexlb.balance.scheduler;
 
-import java.util.Objects;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
-/** Owns a timer pool; callers own the meaning and cancellation of its scheduled tasks. */
+/**
+ * Owns a timer pool; callers own the meaning and cancellation of its scheduled tasks.
+ */
 public final class ScheduledTaskTimer implements TaskTimer, AutoCloseable {
     private final ScheduledThreadPoolExecutor executor;
 
@@ -24,8 +25,7 @@ public final class ScheduledTaskTimer implements TaskTimer, AutoCloseable {
 
     @Override
     public Future<?> schedule(Runnable task, long delayMs) {
-        return executor.schedule(
-                Objects.requireNonNull(task, "task"), delayMs, TimeUnit.MILLISECONDS);
+        return executor.schedule(task, delayMs, TimeUnit.MILLISECONDS);
     }
 
     @Override

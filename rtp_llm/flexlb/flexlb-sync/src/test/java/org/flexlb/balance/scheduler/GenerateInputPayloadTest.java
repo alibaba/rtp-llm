@@ -47,7 +47,7 @@ class GenerateInputPayloadTest {
                         .setUnknownFields(
                                 UnknownFieldSet.newBuilder().mergeVarintField(999, 71).build())
                         .build();
-        var wire = BatchEnqueueHelper.parseInput(original.toByteString()).toBuilder();
+        var wire = EngineDelivery.parseInput(original.toByteString()).toBuilder();
         assertEquals(0, wire.getTokenIdsCount(), "Master must not materialize the token list");
         wire.setPriority(60)
                 .getGenerateConfigBuilder()
@@ -185,7 +185,7 @@ class GenerateInputPayloadTest {
                     InvalidProtocolBufferException.class, () -> GenerateInputPB.parseFrom(bytes));
             assertThrows(
                     InvalidProtocolBufferException.class,
-                    () -> BatchEnqueueHelper.parseInput(ByteString.copyFrom(bytes)));
+                    () -> EngineDelivery.parseInput(ByteString.copyFrom(bytes)));
         }
     }
 
@@ -219,7 +219,7 @@ class GenerateInputPayloadTest {
         var failure =
                 assertThrows(
                         InvalidProtocolBufferException.class,
-                        () -> BatchEnqueueHelper.parseInput(wire));
+                        () -> EngineDelivery.parseInput(wire));
         assertNull(failure.getUnfinishedMessage());
         assertNull(
                 failure.getCause(),
@@ -250,11 +250,11 @@ class GenerateInputPayloadTest {
                 allocations.isThreadAllocatedMemorySupported());
         allocations.setThreadAllocatedMemoryEnabled(true);
         for (int i = 0; i < 3; i++) {
-            BatchEnqueueHelper.parseInput(bytes);
+            EngineDelivery.parseInput(bytes);
         }
         long thread = Thread.currentThread().threadId();
         long before = allocations.getThreadAllocatedBytes(thread);
-        var prepared = BatchEnqueueHelper.parseInput(bytes);
+        var prepared = EngineDelivery.parseInput(bytes);
         long allocated = allocations.getThreadAllocatedBytes(thread) - before;
         assertTrue(
                 allocated < 256 * 1024L,
@@ -280,11 +280,10 @@ class GenerateInputPayloadTest {
             expected = GenerateInputPB.parseFrom(bytes);
         } catch (InvalidProtocolBufferException malformed) {
             assertThrows(
-                    InvalidProtocolBufferException.class,
-                    () -> BatchEnqueueHelper.parseInput(bytes));
+                    InvalidProtocolBufferException.class, () -> EngineDelivery.parseInput(bytes));
             return;
         }
-        var wire = BatchEnqueueHelper.parseInput(bytes).toBuilder().build();
+        var wire = EngineDelivery.parseInput(bytes).toBuilder().build();
         assertEquals(0, wire.getTokenIdsCount());
         assertEquals(expected, GenerateInputPB.parseFrom(wire.toByteString()));
     }

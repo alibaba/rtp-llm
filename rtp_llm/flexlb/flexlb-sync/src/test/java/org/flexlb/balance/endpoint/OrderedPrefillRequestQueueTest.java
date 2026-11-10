@@ -5,7 +5,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.CountDownLatch;
@@ -27,15 +26,35 @@ import static org.mockito.Mockito.when;
  * Checks queue ordering, exact item identity and immutable captures while additions and removals change the live queue.
  */
 class OrderedPrefillRequestQueueTest {
-    private static final Comparator<org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem>
-            ORDER =
-                    Comparator.comparingInt(
-                                    org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
-                                            ::priority)
-                            .reversed()
-                            .thenComparingLong(
-                                    org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
-                                            ::enqueueSeq);
+    @Test
+    void acceptanceOrderIgnoresPriorityAndOriginalEnqueueSequence() {
+        var queue = OrderedPrefillRequestQueue.fifo(4);
+        var first = item(30, 10);
+        var second = item(10, 90);
+        var third = item(20, 50);
+        queue.add(first);
+        queue.add(second);
+        queue.add(third);
+        assertEquals(List.of(30L, 10L, 20L), ids(queue.capture()));
+        assertSame(first, queue.peek());
+    }
+
+    @Test
+    void removingMiddleItemPreservesOrderAndReceivingItAgainAppendsIt() {
+        var queue = OrderedPrefillRequestQueue.fifo(4);
+        var first = item(30, 10);
+        var middle = item(10, 90);
+        var last = item(20, 50);
+        queue.add(first);
+        queue.add(middle);
+        queue.add(last);
+        var beforeRemoval = queue.capture();
+        assertTrue(queue.remove(middle));
+        assertEquals(List.of(30L, 20L), ids(queue.capture()));
+        assertTrue(queue.add(middle));
+        assertEquals(List.of(30L, 20L, 10L), ids(queue.capture()));
+        assertEquals(List.of(30L, 10L, 20L), ids(beforeRemoval));
+    }
 
     @Test
     void directModeNeverAcquiresQueueMembership() {
@@ -61,7 +80,7 @@ class OrderedPrefillRequestQueueTest {
 
     @Test
     void capturedEmptinessDoesNotMaterializeOrFollowLaterQueueChanges() {
-        var index = OrderedPrefillRequestQueue.ordered(4, ORDER);
+        var index = OrderedPrefillRequestQueue.fifo(4);
         var request = item(1, 50);
         when(request.seqLen())
                 .thenThrow(new AssertionError("must not materialize prediction input"));
@@ -77,7 +96,7 @@ class OrderedPrefillRequestQueueTest {
 
     @Test
     void additionsAndRemovalsMatchReferenceOrderAndPreserveOldCaptures() {
-        var index = OrderedPrefillRequestQueue.ordered(16, ORDER);
+        var index = OrderedPrefillRequestQueue.fifo(16);
         var expected = new ArrayList<RouteResult>();
         var random = new Random(36);
         for (int step = 0; step < 400; step++) {
@@ -91,7 +110,6 @@ class OrderedPrefillRequestQueueTest {
                 assertFalse(index.add(request));
                 assertEquals(addedVersion, index.version());
                 expected.add(request);
-                expected.sort(ORDER);
             } else {
                 var request = expected.remove(random.nextInt(expected.size()));
                 assertTrue(index.remove(request));
@@ -134,7 +152,7 @@ class OrderedPrefillRequestQueueTest {
 
     @Test
     void equalOrderingKeysStillRequireExactIdentity() {
-        var index = OrderedPrefillRequestQueue.ordered(2, ORDER);
+        var index = OrderedPrefillRequestQueue.fifo(2);
         var first = item(1, 50);
         var second = item(1, 50);
         assertTrue(index.add(first));
@@ -159,7 +177,7 @@ class OrderedPrefillRequestQueueTest {
     @Test
     @Timeout(10)
     void concurrentCapturesShareMaterializationAndUnchangedRequestValues() throws Exception {
-        var index = OrderedPrefillRequestQueue.ordered(2, ORDER);
+        var index = OrderedPrefillRequestQueue.fifo(2);
         var first = item(1, 50);
         index.add(first);
         var old = index.capture();
@@ -191,7 +209,7 @@ class OrderedPrefillRequestQueueTest {
 
     @Test
     void captureDoesNotReadPlanningInputs() {
-        var index = OrderedPrefillRequestQueue.ordered(2, ORDER);
+        var index = OrderedPrefillRequestQueue.fifo(2);
         var first = item(1, 50);
         var second = item(2, 40);
         when(second.seqLen()).thenThrow(new IllegalStateException("test failure")).thenReturn(10L);

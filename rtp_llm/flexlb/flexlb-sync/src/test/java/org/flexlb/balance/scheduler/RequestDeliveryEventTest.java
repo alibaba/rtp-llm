@@ -37,7 +37,7 @@ class RequestDeliveryEventTest {
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                         current.context(),
                         observedRequest ->
-                                observedRequest.recordDeliveryResult(
+                                observedRequest.recordDeliveryPrediction(
                                         new Prediction(previous.delivery(), 3000L, 1002L)));
         var staleCompletion =
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
@@ -81,7 +81,7 @@ class RequestDeliveryEventTest {
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                         fixture.context(),
                         observedRequest ->
-                                observedRequest.recordDeliveryResult(
+                                observedRequest.recordDeliveryPrediction(
                                         new Prediction(fixture.delivery(), 3000L, 1002L)));
         assertEquals(UpdateKind.APPLIED, prediction.kind());
         assertEquals(SendState.SENDING, prediction.after().delivery().send());

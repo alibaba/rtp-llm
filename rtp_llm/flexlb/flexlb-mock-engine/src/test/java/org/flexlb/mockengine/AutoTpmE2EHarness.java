@@ -2,13 +2,13 @@ package org.flexlb.mockengine;
 
 import com.google.protobuf.ByteString;
 import io.grpc.stub.StreamObserver;
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
-import org.flexlb.balance.scheduler.DeliveryDispatcher;
-import org.flexlb.balance.scheduler.PlacementKey;
+import org.flexlb.balance.scheduler.CapacityKey;
+import org.flexlb.balance.scheduler.DeliveryCoordinator;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRouteSelector;
 import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
@@ -25,7 +25,7 @@ import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.PreemptionConfig;
-import org.flexlb.config.VictimStage;
+import org.flexlb.config.PreemptionStage;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -102,7 +102,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     final EndpointRegistry endpointRegistry;
     final AbstractRequestScheduler scheduler;
     final org.flexlb.balance.scheduler.RequestRepository requests;
-    final DeliveryDispatcher dispatcher;
+    final DeliveryCoordinator dispatcher;
     private final RequestSchedulerTestRuntime schedulerRuntime;
 
     /** requestIds in the order the mock engines actually received them via enqueueBatch. */
@@ -353,12 +353,12 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                         });
 
         dispatcher =
-                new DeliveryDispatcher(
+                new DeliveryCoordinator(
+                        new org.flexlb.balance.scheduler.RequestRepository(),
                         grpcClient,
                         configService,
                         reporter,
-                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                        new org.flexlb.balance.scheduler.SchedulerConfiguration()
                                 .decodeAdmissionCapacity(configService),
                         org.mockito.Mockito.mock(
                                 org.flexlb.balance.scheduler.DeliveryExecution.class));
@@ -463,10 +463,10 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         };
     }
 
-    void allowPreemption(VictimStage first, VictimStage... additional) {
+    void allowPreemption(PreemptionStage first, PreemptionStage... additional) {
         PreemptionConfig preemption = new PreemptionConfig();
-        EnumSet<VictimStage> stages = EnumSet.of(first, additional);
-        preemption.setAllowedVictimStages(stages);
+        EnumSet<PreemptionStage> stages = EnumSet.of(first, additional);
+        preemption.setAllowedPreemptionStages(stages);
         config.priorityOrdering().setPreemption(preemption);
     }
 
@@ -728,7 +728,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         return server(RoleType.DECODE, "127.0.0.1", httpPort(grpcPort), grpcPort, requestId);
     }
 
-    private PlacementResult<RouteResult, PlacementKey> routeResult(RequestContext context) {
+    private RoutingResult<RouteResult, CapacityKey> routeResult(RequestContext context) {
         return schedulerRuntime.routeResult(context, defaultRoute(context));
     }
 
@@ -747,7 +747,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 new CostBasedPrefillStrategy(cache, configService),
                 new DecodeSelector(
                         configService,
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                        new org.flexlb.balance.scheduler.SchedulerConfiguration()
                                 .decodeAdmissionCapacity(configService)),
                 new VitWorkerSelector(),
                 org.mockito.Mockito.mock(

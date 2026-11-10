@@ -1,12 +1,12 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.DecodePreemption;
-import org.flexlb.balance.eviction.DefaultDecodePreemption;
-import org.flexlb.balance.eviction.PriorityDecodePreemptionPolicy;
+import org.flexlb.balance.preemption.DecodePreemption;
+import org.flexlb.balance.preemption.DefaultDecodePreemption;
+import org.flexlb.balance.preemption.PriorityDecodePreemptionPolicy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -32,7 +32,7 @@ import java.util.Objects;
  */
 public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private final RequestRepository requests = new RequestRepository();
-    private final PlacementAvailability placementAvailability = new PlacementAvailability();
+    private final CapacityNotifier capacityNotifier = new CapacityNotifier();
     private final BindingRouter router;
     private final EndpointRegistry registry;
     private final DecodePreemption decodePreemption;
@@ -47,24 +47,22 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     public RequestSchedulerTestRuntime(
             ConfigService configService,
-            DeliveryDispatcher delivery,
+            DeliveryCoordinator delivery,
             DeliveryMetricsReporter deliveryReporter,
             RequestSchedulerReporter requestReporter,
             EngineGrpcClient engineClient) {
         Objects.requireNonNull(delivery, "delivery");
-        var capacity = new PlacementConfiguration().decodeAdmissionCapacity(configService);
+        var capacity = new SchedulerConfiguration().decodeAdmissionCapacity(configService);
         this.registry =
                 new EndpointRegistry(
                         configService,
                         requests,
                         deliveryReporter,
                         delivery,
-                        placementAvailability,
+                        capacityNotifier,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                 configService.loadBalanceConfig()),
-                        order ->
-                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
-                                        16, order));
+                        () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
         this.router = new BindingRouter(registry, configService, capacity);
         this.runtime =
                 org.mockito.Mockito.spy(
@@ -77,10 +75,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                                 configService,
                                 engineClient));
         var facilities = org.mockito.Mockito.spy(runtime.deliveries());
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                runtime, "deliveries", facilities);
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                delivery, "execution", facilities);
+        SchedulerTestServices.setDependency(runtime, "deliveries", facilities);
         // Keep transport and Dispatcher real; inject capacity pressure at its infrastructure owner.
         org.mockito.Mockito.doAnswer(
                         invocation ->
@@ -130,7 +125,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         configService.loadBalanceConfig(),
                         router,
                         decodePreemption,
-                        placementAvailability,
+                        capacityNotifier,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                 configService.loadBalanceConfig()),
                         new OrderedRequestQueue(
@@ -166,8 +161,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         return registry;
     }
 
-    public PlacementAvailability placementAvailability() {
-        return placementAvailability;
+    public CapacityNotifier capacityNotifier() {
+        return capacityNotifier;
     }
 
     public void bindRouter(RequestRouteSelector exactRouter) {
@@ -175,12 +170,12 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     }
 
     /** Translate fixture response metadata into an exact queue admission. */
-    public PlacementResult<RouteResult, PlacementKey> routeResult(
+    public RoutingResult<RouteResult, CapacityKey> routeResult(
             RequestContext context, Response response) {
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(response, "response");
         if (!response.isSuccess()) {
-            return PlacementResult.rejected(response);
+            return RoutingResult.rejected(response);
         }
         if (response.getServerStatus() == null) {
             throw new IllegalArgumentException("successful fixture route has no worker metadata");
@@ -292,18 +287,18 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
 
         @Override
-        public PlacementResult<RouteResult, PlacementKey> select(
+        public RoutingResult<RouteResult, CapacityKey> select(
                 RequestContext context, String policyGroup) {
             return requireBound().select(context, policyGroup);
         }
 
         @Override
-        WorkerEndpoint blockedEndpoint(PlacementKey key) {
+        WorkerEndpoint blockedEndpoint(CapacityKey key) {
             return requireBound().blockedEndpoint(key);
         }
 
         @Override
-        PlacementResult<RouteResult, PlacementKey> select(
+        RoutingResult<RouteResult, CapacityKey> select(
                 RequestContext context,
                 String group,
                 org.flexlb.balance.endpoint.DecodeEndpoint endpoint,

@@ -33,7 +33,7 @@ class BatchEnqueueHelperTest {
                         .addErrors(
                                 EngineRpcService.EnqueueBatchErrorPB.newBuilder().setRequestId(1))
                         .build();
-        var results = BatchEnqueueHelper.validate(17, claims, response, null);
+        var results = EngineDelivery.validate(17, claims, response, null);
         assertEquals(
                 List.of(Delivery.Result.Status.PREFILL_REJECTED, Delivery.Result.Status.DELIVERED),
                 results.stream().map(Delivery.Result::status).toList());
@@ -66,8 +66,7 @@ class BatchEnqueueHelperTest {
             case "wrong batch" -> response.setBatchId(18);
         }
         var results =
-                BatchEnqueueHelper.validate(
-                        17, List.of(claim(1), claim(2)), response.build(), null);
+                EngineDelivery.validate(17, List.of(claim(1), claim(2)), response.build(), null);
         assertEquals(2, results.size());
         assertTrue(
                 results.stream()
@@ -111,7 +110,7 @@ class BatchEnqueueHelperTest {
                                                                         .newBuilder()
                                                                         .setRequestId(2))))
                         .build();
-        var retained = BatchEnqueueHelper.retain(prepared, List.of(second));
+        var retained = EngineDelivery.retain(prepared, List.of(second));
         assertEquals(2, prepared.getDpSlots(0).getRequestsCount());
         assertEquals(1, retained.getDpSlots(0).getRequestsCount());
         assertEquals(2L, retained.getDpSlots(0).getRequests(0).getInput().getRequestId());
@@ -157,9 +156,9 @@ class BatchEnqueueHelperTest {
         var member =
                 DeliveryTestSupport.member(
                         new RouteResult(context, selections), Delivery.SendMode.BATCH_ENQUEUE, 17L);
-        long bound = 16L + BatchEnqueueHelper.payloadSizeUpperBound(member.route());
+        long bound = 16L + EngineDelivery.payloadSizeUpperBound(member.route());
         verify(data, never()).getGenerateInput();
-        assertTrue(bound >= BatchEnqueueHelper.prepare(17L, List.of(member)).getSerializedSize());
+        assertTrue(bound >= EngineDelivery.prepare(17L, List.of(member)).getSerializedSize());
     }
 
     private static Delivery.Member claim(long id) {

@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
@@ -26,13 +26,11 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.test.util.ReflectionTestUtils;
 
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
-import static org.flexlb.balance.endpoint.EndpointTestSupport.runWithStateLock;
 import static org.flexlb.balance.endpoint.EndpointTestSupport.withStateLock;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -162,7 +160,7 @@ class RequestInflightRecoveryTest {
                             new IllegalStateException("Prefill prepare failed")));
             f.drain();
             assertEquals(1L, f.decode.routingView().totalLoad());
-            f.owner.onDeliveryResult(
+            f.owner.recordRemoteCleanup(
                     new ContextResult.CleanupAcknowledgement(
                             f.claim,
                             ContextResult.CancelEvidenceKind.CLEANED,
@@ -272,15 +270,14 @@ class RequestInflightRecoveryTest {
                                                 f.config,
                                                 org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                                         f.config)),
-                                        new DeliveryDispatcher(
+                                        new DeliveryCoordinator(
+                                                new org.flexlb.balance.scheduler
+                                                        .RequestRepository(),
                                                 null,
                                                 DeliveryTestSupport.service(f.config),
                                                 new DeliveryMetricsReporter(null),
-                                                org.mockito.Mockito.mock(
-                                                        org.flexlb.balance.scheduler.TaskTimer
-                                                                .class),
                                                 new org.flexlb.balance.scheduler
-                                                                .PlacementConfiguration()
+                                                                .SchedulerConfiguration()
                                                         .decodeAdmissionCapacity(
                                                                 DeliveryTestSupport.service(
                                                                         f.config)),
@@ -296,10 +293,7 @@ class RequestInflightRecoveryTest {
                                 List.of(f.route, behindHead),
                                 "ordered-prefix",
                                 mock(PrefillTimePredictor.Evaluator.class),
-                                java.util.OptionalLong.empty(),
-                                null,
-                                Delivery.PrefixPolicy.ORDERED_PREFIX,
-                                () -> true);
+                                java.util.OptionalLong.empty());
                 assertNotNull(boundary, "The ordered prefix cannot skip its blocked head");
                 assertEquals(CapacityBoundary.Status.UNAVAILABLE, boundary.status());
                 assertEquals(0L, d2.routingView().engineCapacityUsed());
@@ -409,12 +403,10 @@ class RequestInflightRecoveryTest {
                             owner.repository,
                             reporter,
                             DeliveryTestSupport.route(reporter),
-                            new PlacementAvailability(),
+                            new CapacityNotifier(),
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                     service.loadBalanceConfig()),
-                            order ->
-                                    org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
-                                            16, order));
+                            () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
             org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner),
                     "endpoints",
@@ -447,24 +439,14 @@ class RequestInflightRecoveryTest {
                     RequestExecutionTestSupport.registerPrefillRoute(
                             context, prefill, decode, reservation, 0L, System.currentTimeMillis());
             prefillState = (PrefillEndpoint) prefill;
-            runWithStateLock(
-                    org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(prefillState),
-                    () -> {
-                        ReflectionTestUtils.invokeMethod(
-                                prefillState,
-                                "enableQueueLocked",
-                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
-                                        16,
-                                        Comparator.comparing(
-                                                org.flexlb.balance.endpoint.PrefillRequestQueue
-                                                                .QueueItem
-                                                        ::requestId)));
-                    });
+            prefillState.enableQueue(
+                    QueueExecutionSettings.capture(
+                            config, org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)));
             var admission = SchedulerTestSupport.claim(owner, String.valueOf(REQUEST_ID), future);
             try (var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertEquals(
-                        PlacementResult.Status.SUCCESS,
+                        RoutingResult.Status.SUCCESS,
                         RequestProtocolTestSupport.commitRoute(
                                 owner,
                                 route,
@@ -490,7 +472,7 @@ class RequestInflightRecoveryTest {
             // Inject strong proof only AFTER each test's assertions. This prevents an unrelated
             // shutdown timeout from hiding the missing terminal-settlement assertion.
             if (claim != null && !claim.completion().toCompletableFuture().isDone()) {
-                owner.onDeliveryResult(
+                owner.recordRemoteCleanup(
                         new ContextResult.CleanupAcknowledgement(
                                 claim,
                                 ContextResult.CancelEvidenceKind.CLEANED,
@@ -535,7 +517,7 @@ class RequestInflightRecoveryTest {
             try (var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertEquals(
-                        PlacementResult.Status.SUCCESS,
+                        RoutingResult.Status.SUCCESS,
                         RequestProtocolTestSupport.commitRoute(
                                 owner,
                                 item,
@@ -570,13 +552,14 @@ class RequestInflightRecoveryTest {
                     withStateLock(
                             org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(prefillState),
                             () -> {
-                                return prefillState.commitDelivery(
-                                        org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
-                                                List.of(route),
-                                                batch,
-                                                new long[] {30_000L},
-                                                null,
-                                                System.currentTimeMillis()));
+                                return prefillState
+                                        .dequeueForDelivery(
+                                                org.flexlb.balance.scheduler.DeliveryTestSupport
+                                                        .queued(
+                                                                List.of(route),
+                                                                batch,
+                                                                new long[] {30_000L}))
+                                        .value();
                             });
             assertNotNull(handoff);
             {
@@ -586,7 +569,7 @@ class RequestInflightRecoveryTest {
                 assertNotNull(claim);
                 assertEquals(
                         ContextResult.SendState.SENDING, route.ctx().snapshot().delivery().send());
-                owner.onDeliveryResult(
+                owner.recordDeliveryPrediction(
                         new ContextResult.Prediction(
                                 claim,
                                 org.flexlb.balance.prediction.PrefillTimePredictor

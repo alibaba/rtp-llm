@@ -179,7 +179,7 @@ class DecodeReuseAdmissionTest {
         assertEquals(1, cache.prefixHitBlocks(List.of(1L)));
 
         // A fresh allocation must evict the ELDEST pure-LRU block, which is
-        // now key 2: without the read refresh, key 1 would be the victim.
+        // now key 2: without the read refresh, key 1 would be the request selected for preemption.
         assertNotNull(cache.acquire(1, List.of(9L)));
         assertFalse(
                 cache.snapshotKeys().contains(2L),
@@ -216,7 +216,7 @@ class DecodeReuseAdmissionTest {
 
         // Genuine over-subscription: a 3-block pool with 2 parked keys and 1
         // held block cannot index 4 new keys at once — the ELDEST pure-LRU
-        // entries are the victims (1, 2, then the just-parked 7), keeping
+        // entries are the requests selected for preemption (1, 2, then the just-parked 7), keeping
         // the pool at capacity, never above.
         MockLruBlockCache tiny = new MockLruBlockCache(3, 0.0);
         assertTrue(MockEngineTestSupport.seedCache(tiny, List.of(1L, 2L)));

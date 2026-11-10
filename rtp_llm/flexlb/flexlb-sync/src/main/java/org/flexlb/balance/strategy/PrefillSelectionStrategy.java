@@ -1,8 +1,8 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.scheduler.PlacementKey;
+import org.flexlb.balance.scheduler.CapacityKey;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.route.RoleType;
@@ -19,14 +19,14 @@ public interface PrefillSelectionStrategy {
      * Rank candidates and register the winner. Refresh only conflicting candidates before retrying.
      * SUCCESS guarantees that the registration callback returned REGISTERED.
      */
-    <I extends CandidateInput> PlacementResult<Selection<I>, PlacementKey> selectAndRegister(
+    <I extends CandidateInput> RoutingResult<Selection<I>, CapacityKey> selectAndRegister(
             Request request,
             SchedulingMetadata metadata,
             RoleType role,
             String group,
             List<I> inputs,
             LongSupplier clock,
-            Function<Selection<I>, PlacementResult.Registration> register);
+            Function<Selection<I>, RoutingResult.Registration> register);
 
     /**
      * Synchronous snapshot access; only the selected input identity may be retained in the result.

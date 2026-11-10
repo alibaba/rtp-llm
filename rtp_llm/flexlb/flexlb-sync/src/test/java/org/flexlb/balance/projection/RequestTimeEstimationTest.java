@@ -75,8 +75,7 @@ class RequestTimeEstimationTest {
                         new GroupPlanner.Constraints(16, 1000, 1000, 0, 0),
                         List.of(
                                 new GroupPlanner.Item(
-                                        String.valueOf(1), 0, 1, 10, Long.MAX_VALUE, 10, 0)),
-                        null);
+                                        String.valueOf(1), 0, 1, 10, Long.MAX_VALUE, 10, 0)));
         var inputs =
                 new RequestTimeEstimation.Inputs(
                         queue,
@@ -103,8 +102,7 @@ class RequestTimeEstimationTest {
                         new GroupPlanner.Constraints(1, 1000, 1000, 0, 0),
                         List.of(
                                 new GroupPlanner.Item(
-                                        String.valueOf(1), 0, 1, 10, Long.MAX_VALUE, 10, 0)),
-                        null);
+                                        String.valueOf(1), 0, 1, 10, Long.MAX_VALUE, 10, 0)));
         var inputs =
                 new RequestTimeEstimation.Inputs(
                         queue, emptyWork(31), 0, new CountingEvaluator(), routeProjection());
@@ -137,8 +135,7 @@ class RequestTimeEstimationTest {
                         BuiltinGroupPlanner.SINGLE,
                         queue.ordering(),
                         queue.constraints(),
-                        queue.activeItems(),
-                        null);
+                        queue.activeItems());
         var later =
                 new RequestTimeEstimation.Inputs(
                         laterQueue, emptyWork(150), 0, inputs.evaluator(), inputs.deliveryMode());
@@ -157,8 +154,7 @@ class RequestTimeEstimationTest {
                         new GroupPlanner.Constraints(1, 1000, 1000, 0, 30),
                         List.of(
                                 new GroupPlanner.Item(
-                                        String.valueOf(1), 0, 1, 13, Long.MAX_VALUE, 10, 0)),
-                        null);
+                                        String.valueOf(1), 0, 1, 13, Long.MAX_VALUE, 10, 0)));
         var evaluator =
                 new PrefillTimePredictor.Evaluator() {
                     public long estimateMs(long tokens, long hit) {
@@ -252,8 +248,7 @@ class RequestTimeEstimationTest {
                         new GroupPlanner.Constraints(4, 1000, 1000, 100, 30),
                         List.of(
                                 new GroupPlanner.Item(
-                                        String.valueOf(1), 0, 1, 13, Long.MAX_VALUE, 10, 0)),
-                        null);
+                                        String.valueOf(1), 0, 1, 13, Long.MAX_VALUE, 10, 0)));
         var result =
                 project(
                         new RequestTimeEstimation.Inputs(
@@ -509,8 +504,7 @@ class RequestTimeEstimationTest {
                                             org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE,
                                             Comparator.comparing(GroupPlanner.Item::requestId),
                                             constraints,
-                                            List.of(),
-                                            null),
+                                            List.of()),
                                     emptyWork(100L),
                                     0L,
                                     fastEvaluator,
@@ -534,8 +528,7 @@ class RequestTimeEstimationTest {
                                                             0L,
                                                             99L,
                                                             1L,
-                                                            0L)),
-                                            null),
+                                                            0L))),
                                     emptyWork(100L),
                                     0L,
                                     genericEvaluator,
@@ -553,8 +546,7 @@ class RequestTimeEstimationTest {
                         org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE,
                         Comparator.comparing(GroupPlanner.Item::requestId),
                         new GroupPlanner.Constraints(16, 1_000L, 1_000L, 0L, 0L),
-                        List.of(),
-                        null);
+                        List.of());
         assertThrows(
                 IllegalArgumentException.class,
                 () ->
@@ -591,8 +583,7 @@ class RequestTimeEstimationTest {
                         org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                         order,
                         new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 0L, 0L),
-                        items,
-                        null);
+                        items);
         var incoming = new Probe(9999L, 1, 0L, Long.MAX_VALUE, 20L, 0L, 0L);
         var result =
                 project(
@@ -623,8 +614,7 @@ class RequestTimeEstimationTest {
                             org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
                             new GroupPlanner.Constraints(1, 1_000L, 1_000L, 0L, 0L),
-                            items,
-                            null);
+                            items);
             var known =
                     project(
                             new RequestTimeEstimation.Inputs(
@@ -662,8 +652,7 @@ class RequestTimeEstimationTest {
                         org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                         Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
                         new GroupPlanner.Constraints(1, 1_000L, 1_000L, 0L, 0L),
-                        items,
-                        null);
+                        items);
         items.clear();
         var inputs =
                 new RequestTimeEstimation.Inputs(
@@ -764,8 +753,7 @@ class RequestTimeEstimationTest {
                 org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                 Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
                 constraints,
-                active,
-                null);
+                active);
     }
 
     private static org.flexlb.config.DispatcherConfig.Type projection(boolean batch) {
@@ -813,8 +801,7 @@ class RequestTimeEstimationTest {
                 org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                 Comparator.comparing(GroupPlanner.Item::requestId),
                 new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 0L, 30L),
-                List.of(),
-                null);
+                List.of());
     }
 
     private static WorkSnapshot emptyWork(long capturedAtMs) {

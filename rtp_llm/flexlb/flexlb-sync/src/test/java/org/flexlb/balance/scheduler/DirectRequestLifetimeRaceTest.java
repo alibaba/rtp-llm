@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
@@ -73,8 +73,8 @@ class DirectRequestLifetimeRaceTest {
                         mock(RequestSchedulerReporter.class),
                         mock(TheoryCacheHitReporter.class),
                         router,
-                        mock(org.flexlb.balance.eviction.DecodePreemption.class),
-                        new PlacementAvailability());
+                        mock(org.flexlb.balance.preemption.DecodePreemption.class),
+                        new CapacityNotifier());
         try {
             var context = RequestProtocolTestSupport.context(config, 101L);
             var prefill = mock(PrefillEndpoint.class);
@@ -86,7 +86,7 @@ class DirectRequestLifetimeRaceTest {
                             org.mockito.ArgumentMatchers.anyBoolean()))
                     .thenReturn(
                             new PrefillEndpoint.Registration(
-                                    PlacementResult.Registration.REGISTERED,
+                                    RoutingResult.Registration.REGISTERED,
                                     mock(PrefillEndpoint.RequestRecord.class)));
             var selectedEndpoint = prefill;
             var metadata = new ServerStatus();
@@ -114,7 +114,7 @@ class DirectRequestLifetimeRaceTest {
                     .thenAnswer(
                             call -> {
                                 RouteResult route = call.getArgument(0);
-                                when(route.prefillReservation().belongsTo(route)).thenReturn(true);
+
                                 return capture;
                             });
             var status =
@@ -125,7 +125,7 @@ class DirectRequestLifetimeRaceTest {
                             call ->
                                     SelectionTestSupport.registerResult(
                                             call,
-                                            PlacementResult.success(
+                                            RoutingResult.success(
                                                     new org.flexlb.balance.strategy
                                                             .PrefillSelectionStrategy.Selection<>(
                                                             "127.0.0.1:8080",
@@ -219,7 +219,7 @@ class DirectRequestLifetimeRaceTest {
             verify(prefill)
                     .commitDirect(
                             org.mockito.ArgumentMatchers.argThat(route -> route.ctx() == context));
-            verify(prefill, org.mockito.Mockito.never()).commitDelivery(any());
+            verify(prefill, org.mockito.Mockito.never()).dequeueForDelivery(any());
             verify(selectedEndpoint, org.mockito.Mockito.never()).close();
         } finally {
             RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(requests);

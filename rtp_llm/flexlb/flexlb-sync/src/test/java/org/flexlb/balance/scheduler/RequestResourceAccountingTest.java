@@ -8,6 +8,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.dao.loadbalance.Response;
@@ -67,11 +68,14 @@ class RequestResourceAccountingTest {
                 assertThrows(
                         IllegalArgumentException.class,
                         () ->
-                                owner.requests.commitDelivery(
-                                        new org.flexlb.balance.scheduler.Delivery.Member(
-                                                owner.item, permit),
-                                        Delivery.SendMode.BATCH_ENQUEUE,
-                                        1L));
+                                org.flexlb.balance.scheduler.DeliveryTestSupport.transport(
+                                                owner.requests.dispatcher)
+                                        .commit(
+                                                new org.flexlb.balance.scheduler.Delivery.Member(
+                                                        owner.item, permit),
+                                                Delivery.SendMode.BATCH_ENQUEUE,
+                                                1L,
+                                                null));
                 assertNull(owner.item.ctx().snapshot().delivery());
                 assertEquals(ContextResult.Phase.OPEN, owner.item.ctx().snapshot().phase());
                 assertNotNull(owner.item.ctx().snapshot().route());
@@ -162,10 +166,10 @@ class RequestResourceAccountingTest {
             assertEquals(1, f.decode.resourceSnapshot().activeDispatchPermits());
             try (var member = prepared.value()) {
                 var failure = new IllegalStateException("snapshot materialization failed");
-                f.requests.onDeliveryResult(
+                f.requests.recordPreparationFailure(
                         new ContextResult.PreparationFailure(
                                 null, f.item, failure.getMessage(), System.currentTimeMillis()));
-                f.requests.onDeliveryResult(
+                f.requests.recordPreparationFailure(
                         new ContextResult.PreparationFailure(
                                 null, f.item, failure.getMessage(), System.currentTimeMillis()));
                 assertFalse(f.item.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
@@ -187,7 +191,7 @@ class RequestResourceAccountingTest {
             }
             assertFalse(f.item.ctx().data().getFuture().isDone());
             f.assertReserved();
-            AbstractRequestScheduler.finishPlacement(f.admission);
+            AbstractRequestScheduler.finishRouting(f.admission);
             f.assertEmpty();
             f.assertCapacityReusable();
         }
@@ -259,11 +263,14 @@ class RequestResourceAccountingTest {
                     acquisition.status());
             try (var member = new Delivery.Member(f.item, acquisition.value())) {
                 var claim =
-                        f.requests.commitDelivery(
-                                new org.flexlb.balance.scheduler.Delivery.Member(
-                                        f.item, member.decode()),
-                                Delivery.SendMode.ROUTE_DECISION,
-                                0L);
+                        org.flexlb.balance.scheduler.DeliveryTestSupport.transport(
+                                        f.requests.dispatcher)
+                                .commit(
+                                        new org.flexlb.balance.scheduler.Delivery.Member(
+                                                f.item, member.decode()),
+                                        Delivery.SendMode.ROUTE_DECISION,
+                                        0L,
+                                        null);
                 assertNotNull(claim);
                 f.requests.onDeliveryResult(
                         new ContextResult.RouteDelivered(
@@ -286,7 +293,7 @@ class RequestResourceAccountingTest {
                                                 System.currentTimeMillis()),
                                 System.currentTimeMillis()));
             } finally {
-                f.prefillHandoff.close();
+
             }
             assertTrue(
                     f.item.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess(),
@@ -633,8 +640,8 @@ class RequestResourceAccountingTest {
         final RouteResult item;
         final DecodeResources.RequestReservation reservation;
         final PrefillEndpoint.RequestRecord routeReservation;
-        final org.flexlb.balance.scheduler.Delivery prefillHandoff;
-        final PlacementOperation admission;
+        final WorkSnapshot prefillHandoff;
+        final RoutingContext admission;
         final DecodeResources.AdmissionCapacity capacity =
                 new DecodeResources.AdmissionCapacity(1, 90);
 
@@ -661,7 +668,7 @@ class RequestResourceAccountingTest {
                             service, reporter, requestReporter, mock(TheoryCacheHitReporter.class));
             var channel = mock(EngineGrpcClient.class);
             when(channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(cleanup);
-            org.springframework.test.util.ReflectionTestUtils.setField(
+            org.flexlb.balance.scheduler.DeliveryTestSupport.setField(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests).dispatcher,
                     "grpcClient",
                     channel);
@@ -672,12 +679,10 @@ class RequestResourceAccountingTest {
                             SchedulerTestSupport.repository(projector),
                             reporter,
                             DeliveryTestSupport.route(reporter),
-                            new PlacementAvailability(),
+                            new CapacityNotifier(),
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                     service.loadBalanceConfig()),
-                            order ->
-                                    org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
-                                            16, order));
+                            () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
             runtime = org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests);
             org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                     runtime, "endpoints", endpoints);
@@ -751,22 +756,22 @@ class RequestResourceAccountingTest {
                                                     held.set(item.prefillReservation());
                                                     return true;
                                                 }))
-                                == org.flexlb.balance.PlacementResult.Status.SUCCESS));
+                                == org.flexlb.balance.RoutingResult.Status.SUCCESS));
             }
             routeReservation = held.get();
             prefillHandoff =
                     org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(prefill, item);
             assertNotNull(prefillHandoff);
             if (!keepAdmissionOpen) {
-                AbstractRequestScheduler.finishPlacement(admission);
+                AbstractRequestScheduler.finishRouting(admission);
             }
         }
 
         @Override
         public void close() {
             try {
-                AbstractRequestScheduler.finishPlacement(admission);
-                prefillHandoff.close();
+                AbstractRequestScheduler.finishRouting(admission);
+
                 prefill.rollback(routeReservation);
                 SchedulerTestSupport.shutdown(runtime);
             } finally {
@@ -782,11 +787,14 @@ class RequestResourceAccountingTest {
             var member = new Delivery.Member(item, acquisition.value());
             try {
                 var claim =
-                        requests.commitDelivery(
-                                new org.flexlb.balance.scheduler.Delivery.Member(
-                                        item, member.decode()),
-                                Delivery.SendMode.BATCH_ENQUEUE,
-                                1L);
+                        org.flexlb.balance.scheduler.DeliveryTestSupport.transport(
+                                        requests.dispatcher)
+                                .commit(
+                                        new org.flexlb.balance.scheduler.Delivery.Member(
+                                                item, member.decode()),
+                                        Delivery.SendMode.BATCH_ENQUEUE,
+                                        1L,
+                                        null);
                 assertNotNull(claim);
                 assertEquals(
                         ContextResult.SendState.SENDING,
@@ -794,7 +802,6 @@ class RequestResourceAccountingTest {
                 return claim;
             } finally {
                 member.close();
-                prefillHandoff.close();
             }
         }
 
@@ -862,7 +869,7 @@ class RequestResourceAccountingTest {
                     0,
                     SchedulerTestSupport.repository(requests).liveRequestCount(),
                     "request inflight");
-            assertEquals(0, prefill.progress().queueDepth(), "Prefill queue membership");
+            assertEquals(0, prefill.queueDepth(), "Prefill queue membership");
             assertEquals(0, prefill.stats().locallyOwnedRequests(), "Prefill inflight");
             assertEquals(
                     0, prefill.stats().individuallyOwnedRequests(), "Prefill individual lease");

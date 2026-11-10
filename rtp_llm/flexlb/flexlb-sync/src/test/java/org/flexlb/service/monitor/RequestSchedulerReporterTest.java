@@ -5,7 +5,7 @@ import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.service.monitor.RequestSchedulerReporter.CancelEvent;
-import org.flexlb.service.monitor.RequestSchedulerReporter.EvictionEvent;
+import org.flexlb.service.monitor.RequestSchedulerReporter.PreemptionEvent;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -48,7 +48,7 @@ class RequestSchedulerReporterTest {
     void committedVictimStatisticsDistinguishQueueWithdrawalAndEngineCancellation(
             boolean cancelled) {
         var observed = org.mockito.Mockito.spy(reporter);
-        var victims =
+        var requestsToPreempt =
                 java.util.List.of(
                         new org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView(
                                 String.valueOf(1L),
@@ -68,25 +68,29 @@ class RequestSchedulerReporterTest {
                                 true,
                                 2L,
                                 true));
-        observed.reportPreemptionVictims(
-                String.valueOf(3L), 70, "decode", "capacity", victims, cancelled);
+        observed.reportPreemptedRequests(
+                String.valueOf(3L), 70, "decode", "capacity", requestsToPreempt, cancelled);
         verify(observed)
-                .reportVictim(20, 70, cancelled ? "decode_running" : "decode_reserved", "capacity");
+                .reportPreemptedRequest(
+                        20, 70, cancelled ? "decode_running" : "decode_reserved", "capacity");
         verify(observed)
-                .reportVictim(30, 70, cancelled ? "decode_cancel" : "decode_reserved", "capacity");
+                .reportPreemptedRequest(
+                        30, 70, cancelled ? "decode_cancel" : "decode_reserved", "capacity");
         verify(observed)
-                .reportVictimKvTokens(20, cancelled ? "decode_running" : "decode_reserved", 100L);
+                .reportPreemptedKvTokens(
+                        20, cancelled ? "decode_running" : "decode_reserved", 100L);
         verify(observed)
-                .reportVictimKvTokens(30, cancelled ? "decode_cancel" : "decode_reserved", 200L);
-        verify(observed).reportEviction(EvictionEvent.COMMIT, 70, "capacity", "success");
-        for (var victim : victims) {
+                .reportPreemptedKvTokens(30, cancelled ? "decode_cancel" : "decode_reserved", 200L);
+        verify(observed).reportPreemption(PreemptionEvent.COMMIT, 70, "capacity", "success");
+        for (var requestToPreempt : requestsToPreempt) {
             verify(observed, org.mockito.Mockito.times(cancelled ? 1 : 0))
-                    .reportEngineCancel(CancelEvent.CONFIRM, "decode", victim.priority());
+                    .reportEngineCancel(CancelEvent.CONFIRM, "decode", requestToPreempt.priority());
         }
-        observed.reportPreemptionCancelRequests("decode", victims);
-        for (var victim : victims) {
-            verify(observed).reportEngineCancel(CancelEvent.REQUEST, "decode", victim.priority());
-            verify(observed).reportCancel(victim.priority(), "PRIORITY_PREEMPTED");
+        observed.reportPreemptionCancelRequests("decode", requestsToPreempt);
+        for (var requestToPreempt : requestsToPreempt) {
+            verify(observed)
+                    .reportEngineCancel(CancelEvent.REQUEST, "decode", requestToPreempt.priority());
+            verify(observed).reportCancel(requestToPreempt.priority(), "PRIORITY_PREEMPTED");
         }
     }
 
@@ -118,7 +122,7 @@ class RequestSchedulerReporterTest {
                         "decode_kv_full");
         doThrow(failure).when(monitor).report(AUTO_TPM_VICTIM_COUNT, tags, 1.0);
         assertDoesNotThrow(
-                () -> reporter.reportVictim(20, 70, "decode_reserved", "decode_kv_full"));
+                () -> reporter.reportPreemptedRequest(20, 70, "decode_reserved", "decode_kv_full"));
         verify(monitor)
                 .report(
                         AUTO_TPM_PRIORITY_PREEMPT_COUNT,
@@ -134,8 +138,8 @@ class RequestSchedulerReporterTest {
         "COMMIT, auto_tpm.eviction_commit.count, conflict"
     })
     void evictionOutcomesPreserveTheirMetricAndTagSchema(
-            EvictionEvent event, String metric, String result) {
-        reporter.reportEviction(event, 70, "decode_kv_full", result);
+            PreemptionEvent event, String metric, String result) {
+        reporter.reportPreemption(event, 70, "decode_kv_full", result);
 
         var ordered = inOrder(monitor);
         ordered.verify(monitor)
@@ -149,7 +153,7 @@ class RequestSchedulerReporterTest {
 
     @Test
     void victimEventPreservesBothMetricSchemasAndTheirOrder() {
-        reporter.reportVictim(20, 70, "decode_reserved", "decode_kv_full");
+        reporter.reportPreemptedRequest(20, 70, "decode_reserved", "decode_kv_full");
 
         var ordered = inOrder(monitor);
         ordered.verify(monitor)

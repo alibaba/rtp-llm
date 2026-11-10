@@ -45,8 +45,10 @@ classDiagram
     RequestRouteSelector --> EndpointRegistry
     PrefillEndpoint --> PrefillRequestQueue
     OrderedPrefillRequestQueue ..|> PrefillRequestQueue
-    QueuedRequestScheduler --> GroupPlanner
-    QueuedRequestScheduler --> DeliveryDispatcher : 准备和投递
+    QueuedRequestScheduler --> PrefillDeliveryScheduler : 事件与下次检查时间
+    PrefillDeliveryScheduler --> PrefillQueueScheduler : 单队列投递
+    PrefillQueueScheduler --> GroupPlanner
+    PrefillQueueScheduler --> DeliveryDispatcher : 连续前缀准备和投递
     DirectRequestScheduler --> DeliveryDispatcher : 提交选定路由
     BuiltinGroupPlanner ..|> GroupPlanner
     RequestTimeEstimation --> GroupPlanner
@@ -54,7 +56,7 @@ classDiagram
 
 - `RequestScheduler` 定义调度时机、请求/Endpoint 变化通知与停止调度。DIRECT 和 QUEUE 实现决定何时选路及推进；策略、队列和组批规则可替换。
 - `AbstractRequestScheduler` 直接负责注册、准入句柄、取消、超时、资源交接与请求结算，不额外持有生命周期管理对象。具体调度实现继承这些流程，并实现调度事件与触发策略；`RequestContext` 维护原子请求事实和结果优先级。取消和超时不是队列的资源释放职责。
-- 取消、超时和失败统一通过结束流程调用 `removeRequest`；失败重试只由 `shouldRetryRouteFailure` 决策一次，资源释放完成后交回 `onRequest`。QUEUE 的首次入队与恢复共用一个入口，在同一把锁内替换旧队列成员并保留原序号；不再通过状态变化通知反查请求、区分取消和恢复。
+- 取消、超时和失败统一通过结束流程调用 `removeRequest`；失败重试只由 `shouldRetryRouteFailure` 决策一次，资源释放完成后交回 `scheduleRequest`。QUEUE 的首次入队与恢复共用一个入口，在同一把锁内替换旧队列成员并保留原序号；不再通过状态变化通知反查请求、区分取消和恢复。
 - `CostBasedPrefillStrategy` 经 CandidateInput 的只读容量入口完成默认 Prefill 容量归因。`RequestRouteSelector` 不再读取容量并改判策略结果；资源竞争仍由提交时的 Endpoint 原子校验决定。
 - `RequestRepository` 管理注册、活动/终态身份与归档。队列维护成员和顺序，策略决定选择结果，Endpoint 持有精确资源账本。
 - `PlacementConfiguration` 完成调度组件装配。抢占策略由 `DecodePreemptionPolicy` 决定，`DecodePreemption` 定义执行入口，默认执行实现为 `DefaultDecodePreemption`。
@@ -81,7 +83,7 @@ Context 的 OPEN / ENDING / CLOSED 由已选终态和归档记录推导，不再
 
 PrefillEndpoint.commitDirect(route, record) 在 Endpoint 事件中校验并提交请求记录，返回此前工作量快照。排队提交校验同一个 Delivery 的成员、预测、批次记录和失败成员；整组验证完成前不改变成员占用。RequestRoute 和 Delivery 保存普通 Endpoint 引用，没有独立的 generation 凭证或引用计数。批次特征在事件外构建，预测与批次记录共用；关闭 Delivery 释放临时发送许可，不删除已提交请求。
 
-队列等待是否仍然成立由 QueuedRequestScheduler.PrefillQueueScheduler 根据 Decision 判断。队列成员、请求记录、等待订阅与下线在同一个 EndpointEventLoop 中串行处理，资源锁和 QueueGuard 已移除。调度启停归 Scheduler，记录增删归 Endpoint；通知和耗时预测在事件外执行。详见[资源管理](architecture/03-resource-management.md)。
+`PrefillQueueScheduler` 根据 Decision 管理单个队列的等待订阅；`PrefillDeliveryScheduler` 管理就绪队列、定时检查和已接纳的投递任务。Prefill 按接收顺序追加，只提交当前队首连续前缀；取消、超时和抢占移除准确成员，不改变剩余顺序。`PrefillEndpoint.acceptQueuedRoute` 按请求锁 → Endpoint 锁完成入队和发布，消费者不会读到半发布条目。成员与资源变更由 Endpoint 锁保护，容量通知和耗时预测在锁外执行。详见[队列调度](architecture/02-queue-scheduling.md)。
 
 ## 投递、执行与停服
 
@@ -147,7 +149,7 @@ Prefill 状态归并直接产生 `WorkerEndpoint.StatusChange.Prefill`，删除�
 
 队列拒绝直接调用 `AbstractRequestScheduler.rejectRoute`；排队超时走已有 `cancel(..., DEADLINE_EXCEEDED)`，不再经过 `QueueKind` 事件分发。`RequestData.getRequestScheduler()` 返回实际调度器实例，准入校验直接使用精确 `RequestContext`，不再通过 ID 和 Future 重查请求。
 
-`RequestRoute` 用明确的 Prefill/Decode/VIT pin 字段保存代际使用权，不再维护 pin 数组和角色下标；响应与逆序释放仍遵守原选择顺序。只供测试转发 Future 的入口已删除，payload 大小估算归 `BatchEnqueueHelper`。Endpoint 退休统一通过原有完成 Future 等待和读取异常，删除重复异常字段及手工 wait/notify 协议；中断恢复与有界等待保持不变。
+`RequestRoute` 用明确的 Prefill/Decode/VIT pin 字段保存代际使用权，不再维护 pin 数组和角色下标；响应与逆序释放仍遵守原选择顺序。只供测试转发 Future 的入口已删除，payload 大小估算归 `EngineDelivery`。Endpoint 退休统一通过原有完成 Future 等待和读取异常，删除重复异常字段及手工 wait/notify 协议；中断恢复与有界等待保持不变。
 
 Prefill 预测输入直接在原锁内捕获队列、已提交工作和版本，去掉 `ProjectionSource` 外围重复的 `Snapshot` 包装；预测仍在锁外执行，缓存发布后释放请求引用。
 

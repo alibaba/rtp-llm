@@ -35,13 +35,13 @@ public final class SchedulerTestSupport {
                 : decodeReservation(endpoint.resourceSnapshot(), requestId);
     }
 
-    public static PlacementOperation claim(
+    public static RoutingContext claim(
             AbstractRequestScheduler scheduler,
             String id,
             java.util.concurrent.CompletableFuture<?> future) {
         var context = scheduler.repository.findActive(id);
         return context != null && context.data().getFuture() == future
-                ? scheduler.claimPlacement(context)
+                ? scheduler.tryBeginRouteSelection(context)
                 : null;
     }
 

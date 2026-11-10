@@ -28,7 +28,7 @@ class RouteResultTest {
                 EndpointTestSupport.realPrefill(
                         status,
                         SchedulingTestConfig.newConfig(),
-                        org.mockito.Mockito.mock(DeliveryDispatcher.class),
+                        org.mockito.Mockito.mock(DeliveryCoordinator.class),
                         new RequestRepository(),
                         org.mockito.Mockito.mock(
                                 org.flexlb.service.monitor.DeliveryMetricsReporter.class));

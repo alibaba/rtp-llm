@@ -58,13 +58,16 @@ class PriorityLatencyE2ETest {
             // Wait for the actual held endpoint queue, not an intermediate aggregate of 150.
             AutoTpmE2EHarness.await(
                     () ->
-                            h.prefillEndpoint(0).progress().queueDepth() == total
-                                    && h.requests.pendingDeliveryRequestCount() == total,
+                            h.prefillEndpoint(0).queueDepth() == total
+                                    && org.flexlb.balance.scheduler.SchedulerTestServices
+                                                    .pendingDeliveryRequestCount(h.requests)
+                                            == total,
                     10_000,
                     "all requests must reach the endpoint priority queue before release");
             assertEquals(
                     total,
-                    h.requests.pendingDeliveryRequestCount(),
+                    org.flexlb.balance.scheduler.SchedulerTestServices.pendingDeliveryRequestCount(
+                            h.requests),
                     "all requests must be committed into the endpoint priority queue before release");
 
             // Release the transport capacity without changing frozen queue settings.
@@ -90,7 +93,8 @@ class PriorityLatencyE2ETest {
                                 + ", arrivals="
                                 + h.engineArrivalOrder.size()
                                 + ", queued="
-                                + h.requests.pendingDeliveryRequestCount()
+                                + org.flexlb.balance.scheduler.SchedulerTestServices
+                                        .pendingDeliveryRequestCount(h.requests)
                                 + ", prefillWork="
                                 + h.prefillEndpoint(0).captureRouteProjectionInputs().work()
                                 + ", decode="

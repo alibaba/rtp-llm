@@ -45,7 +45,7 @@ class RequestContextConcurrencyTest {
                 .thenReturn(
                         java.util.concurrent.CompletableFuture.completedFuture(
                                 org.flexlb.engine.grpc.EngineGrpcClient.CancelReply.FAILED));
-        org.springframework.test.util.ReflectionTestUtils.setField(
+        org.flexlb.balance.scheduler.DeliveryTestSupport.setField(
                 runtime.dispatcher, "grpcClient", channel);
         var workers = Executors.newFixedThreadPool(3, Thread.ofPlatform().daemon().factory());
         try {
@@ -101,8 +101,13 @@ class RequestContextConcurrencyTest {
                                     if (order == Order.CANCEL_FIRST)
                                         assertTrue(cancelled.await(5, TimeUnit.SECONDS));
                                     try {
-                                        return owner.commitDelivery(
-                                                member, Delivery.SendMode.BATCH_ENQUEUE, 1L);
+                                        return org.flexlb.balance.scheduler.DeliveryTestSupport
+                                                .transport(owner.dispatcher)
+                                                .commit(
+                                                        member,
+                                                        Delivery.SendMode.BATCH_ENQUEUE,
+                                                        1L,
+                                                        null);
                                     } finally {
                                         committed.countDown();
                                     }
@@ -145,10 +150,12 @@ class RequestContextConcurrencyTest {
                 assertNotNull(after.cancellation());
                 assertFalse(context.confirmDelivery(System.currentTimeMillis()));
                 assertNull(
-                        owner.commitDelivery(
-                                new Delivery.Member(route, null),
-                                Delivery.SendMode.BATCH_ENQUEUE,
-                                1L));
+                        org.flexlb.balance.scheduler.DeliveryTestSupport.transport(owner.dispatcher)
+                                .commit(
+                                        new Delivery.Member(route, null),
+                                        Delivery.SendMode.BATCH_ENQUEUE,
+                                        1L,
+                                        null));
                 assertNull(before.cancellation(), "published snapshots must remain immutable");
                 assertNull(before.delivery(), "the pre-commit snapshot must not acquire a sender");
                 if (result != null) {

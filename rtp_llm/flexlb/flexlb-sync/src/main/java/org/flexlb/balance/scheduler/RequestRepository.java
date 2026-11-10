@@ -127,20 +127,6 @@ public final class RequestRepository {
         return closed;
     }
 
-    /**
-     * Count accepted requests before delivery handoff, including direct requests.
-     */
-    public int pendingDeliveryRequestCount() {
-        int pending = 0;
-        for (RequestContext context : snapshotActive()) {
-            var state = context.snapshot();
-            if (state.phase() == ContextResult.Phase.OPEN && state.delivery() == null) {
-                pending++;
-            }
-        }
-        return pending;
-    }
-
     public long oldestLiveRequestAgeMs() {
         long oldest = Long.MAX_VALUE;
         for (RequestContext context : snapshotActive()) {

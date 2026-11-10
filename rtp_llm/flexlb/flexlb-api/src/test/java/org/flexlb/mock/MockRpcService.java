@@ -88,10 +88,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
 
     // ==================== Accessors for test assertions ====================
 
-    public List<EngineRpcService.EnqueueBatchRequestPB> getEnqueuedRequests() {
-        return List.copyOf(enqueuedRequests);
-    }
-
     /** Release a payload after a test has retained the evidence it needs. */
     public void removeRecordedBatch(EngineRpcService.EnqueueBatchRequestPB batch) {
         enqueuedRequests.remove(batch);

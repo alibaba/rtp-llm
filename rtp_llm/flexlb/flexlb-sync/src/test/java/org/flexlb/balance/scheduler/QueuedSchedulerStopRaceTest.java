@@ -1,8 +1,8 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.planner.BuiltinGroupPlanner;
+import org.flexlb.balance.preemption.DecodePreemption;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -11,7 +11,6 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
@@ -27,8 +26,8 @@ import static org.mockito.Mockito.when;
 class QueuedSchedulerStopRaceTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void rejectedExecutionAfterStopReleasesTheSlotWithoutRecordingARequestFailure(
-            boolean stopping) {
+    void rejectedExecutionAfterStopReleasesTheSlotWithoutRecordingARequestFailure(boolean stopping)
+            throws Exception {
         var config = SchedulingTestConfig.batchConfig();
         var requests = mock(RequestRepository.class);
         when(requests.snapshotActive()).thenReturn(java.util.List.of());
@@ -41,11 +40,11 @@ class QueuedSchedulerStopRaceTest {
                         requests,
                         tasks,
                         mock(ExpirationTimer.class),
-                        mock(DeliveryDispatcher.class),
+                        mock(DeliveryCoordinator.class),
                         mock(ResponseCompletionExecutor.class),
                         mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                         mock(org.flexlb.service.TheoryCacheHitReporter.class),
-                        new PlacementAvailability(),
+                        new CapacityNotifier(),
                         new OrderedRequestQueue(false),
                         BuiltinGroupPlanner.from(config),
                         mock(org.flexlb.balance.endpoint.EndpointRegistry.class));
@@ -54,6 +53,7 @@ class QueuedSchedulerStopRaceTest {
         var rejection =
                 new RejectedExecutionException("pool stopped between selection and submission");
         when(executor.isShutdown()).thenReturn(stopping);
+        when(executor.isTerminated()).thenReturn(true);
         doAnswer(
                         call -> {
                             if (stopping) scheduler.stop();
@@ -68,18 +68,38 @@ class QueuedSchedulerStopRaceTest {
         when(prefill.ipPort()).thenReturn("127.0.0.1:1");
         when(prefill.getStatus().getRole()).thenReturn(RoleType.PREFILL);
         ReflectionTestUtils.setField(scheduler, "planners", executor);
+        var prefillDelivery = ReflectionTestUtils.getField(scheduler, "prefillDelivery");
+        ReflectionTestUtils.setField(prefillDelivery, "planners", executor);
         try {
             scheduler.onEndpointChanged(prefill);
-            assertDoesNotThrow(scheduler::schedule);
-            assertEquals(0, ReflectionTestUtils.getField(scheduler, "queueSchedulingInFlight"));
+            scheduler.start();
+            RequestProtocolTestSupport.awaitCondition(
+                    () ->
+                            stopping
+                                    ? scheduler.awaitStopped(System.nanoTime())
+                                    : ReflectionTestUtils.getField(
+                                                    scheduler, "requestProcessingFailure")
+                                            != null);
+            scheduler.stop();
+            org.junit.jupiter.api.Assertions.assertTrue(
+                    scheduler.awaitStopped(
+                            System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2)));
+            assertEquals(
+                    0, ReflectionTestUtils.getField(prefillDelivery, "queueSchedulingInFlight"));
             if (stopping) {
-                verify(tasks, never()).recordFailure(rejection);
+                org.junit.jupiter.api.Assertions.assertNull(
+                        ReflectionTestUtils.getField(scheduler, "requestProcessingFailure"));
                 verify(prefill, never()).closeQueue();
             } else {
-                verify(tasks).recordFailure(rejection);
+                org.junit.jupiter.api.Assertions.assertSame(
+                        rejection,
+                        ReflectionTestUtils.getField(scheduler, "requestProcessingFailure"));
                 verify(prefill).closeQueue();
             }
         } finally {
+            scheduler.stop();
+            scheduler.awaitStopped(
+                    System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2));
             ReflectionTestUtils.setField(scheduler, "planners", original);
             scheduler.close();
         }

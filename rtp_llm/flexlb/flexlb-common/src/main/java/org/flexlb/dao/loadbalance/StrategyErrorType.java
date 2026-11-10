@@ -45,7 +45,8 @@ public enum StrategyErrorType {
     NOT_MASTER(8517, false),
     // Rejected before registration: retry on another scheduler, not the stopping node.
     SCHEDULER_UNAVAILABLE(8518, true),
-    // Auto-TPM victim terminal: an already-admitted request was cancelled by
+    // Auto-TPM request selected for preemption terminal: an already-admitted request was cancelled
+    // by
     // a strictly higher-priority admission attempt.
     PRIORITY_PREEMPTED(8429, false),
     // Auto-TPM incoming rejection caused by a proven priority blocker.  The

@@ -239,24 +239,24 @@ public final class DecodeResources {
             java.util.Objects.requireNonNull(reservation, "reservation");
         }
 
-        public static PreemptionUpdate handedOff(RequestReservation victim) {
-            return new PreemptionUpdate(Kind.CANCEL_HANDED_OFF, victim);
+        public static PreemptionUpdate handedOff(RequestReservation requestToPreempt) {
+            return new PreemptionUpdate(Kind.CANCEL_HANDED_OFF, requestToPreempt);
         }
 
-        public static PreemptionUpdate canceled(RequestReservation victim) {
-            return new PreemptionUpdate(Kind.CANCELED, victim);
+        public static PreemptionUpdate canceled(RequestReservation requestToPreempt) {
+            return new PreemptionUpdate(Kind.CANCELED, requestToPreempt);
         }
 
-        public static PreemptionUpdate fenced(RequestReservation victim) {
-            return new PreemptionUpdate(Kind.REQUEST_FENCED, victim);
+        public static PreemptionUpdate fenced(RequestReservation requestToPreempt) {
+            return new PreemptionUpdate(Kind.REQUEST_FENCED, requestToPreempt);
         }
 
-        public static PreemptionUpdate active(RequestReservation victim) {
-            return new PreemptionUpdate(Kind.ACTIVE, victim);
+        public static PreemptionUpdate active(RequestReservation requestToPreempt) {
+            return new PreemptionUpdate(Kind.ACTIVE, requestToPreempt);
         }
 
-        public static PreemptionUpdate finished(RequestReservation victim) {
-            return new PreemptionUpdate(Kind.FINISHED, victim);
+        public static PreemptionUpdate finished(RequestReservation requestToPreempt) {
+            return new PreemptionUpdate(Kind.FINISHED, requestToPreempt);
         }
 
         boolean releasesCapacity() {
@@ -404,15 +404,10 @@ public final class DecodeResources {
     public static final class AdmissionSummary {
         private final DecodeRoutingView routing;
         private final CapacityRelease[] placementOccupancy;
-        private final CapacityRelease[] engineOccupancy;
 
-        AdmissionSummary(
-                DecodeRoutingView routing,
-                CapacityRelease[] placementOccupancy,
-                CapacityRelease[] engineOccupancy) {
+        AdmissionSummary(DecodeRoutingView routing, CapacityRelease[] placementOccupancy) {
             this.routing = routing;
             this.placementOccupancy = placementOccupancy;
-            this.engineOccupancy = engineOccupancy;
         }
 
         public DecodeRoutingView routing() {
@@ -422,12 +417,12 @@ public final class DecodeResources {
         public CapacityRelease placementOccupancy(int priority) {
             return placementOccupancy[priority];
         }
-
-        public CapacityRelease engineOccupancy(int priority) {
-            return engineOccupancy[priority];
-        }
     }
 
+    /**
+     * Computes request and KV deficits against configured limits, accounting for exact releases.
+     * A zero request limit is unlimited; the KV limit is expressed as a percentage.
+     */
     public record AdmissionCapacity(long maxEngineRequests, long maxKvUsagePercent) {
 
         public AdmissionCapacity {
@@ -439,7 +434,7 @@ public final class DecodeResources {
         }
 
         /**
-         * Use the same occupancy scope for the observation and every exact victim release.
+         * Use the same occupancy scope for the observation and every exact request selected for preemption release.
          */
         public CapacityDeficit evaluate(
                 CapacityUsage usage,
@@ -536,9 +531,9 @@ public final class DecodeResources {
 
         public CapacityRelease plus(CapacityRelease other) {
             return new CapacityRelease(
-                    saturatedAddNonNegative(requests, other.requests),
-                    saturatedAddNonNegative(hardKvTokens, other.hardKvTokens),
-                    saturatedAddNonNegative(expectedKvTokens, other.expectedKvTokens));
+                    saturatedAdd(requests, other.requests),
+                    saturatedAdd(hardKvTokens, other.hardKvTokens),
+                    saturatedAdd(expectedKvTokens, other.expectedKvTokens));
         }
 
         static long saturatedAddNonNegative(long left, long right) {

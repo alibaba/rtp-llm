@@ -2,7 +2,6 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.RouteResult;
 
-import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
@@ -23,13 +22,7 @@ public final class PrefillCleanupDeadlockFixture {
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillEndpoint state =
             org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
-                    lock,
-                    OrderedPrefillRequestQueue.ordered(
-                            4,
-                            Comparator.comparing(
-                                    org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
-                                            ::requestId)),
-                    clock::get);
+                    lock, OrderedPrefillRequestQueue.fifo(4), clock::get);
     private final EndpointRetirementTestSupport generation =
             new EndpointRetirementTestSupport(() -> {});
     private final RouteResult next;

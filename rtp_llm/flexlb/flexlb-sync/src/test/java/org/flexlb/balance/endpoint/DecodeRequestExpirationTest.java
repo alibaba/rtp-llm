@@ -169,7 +169,7 @@ class DecodeRequestExpirationTest {
 
     @Test
     void missingConfirmedPriorityOwnerExpiresSyntheticHoldExactlyOnce() {
-        DecodeResources.RequestReservation victim = reserve(1L, 500, 700, 30);
+        DecodeResources.RequestReservation requestToPreempt = reserve(1L, 500, 700, 30);
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
         assertEquals(
                 DecodeResources.PreemptionBeginResult.SUCCESS,
@@ -182,16 +182,18 @@ class DecodeRequestExpirationTest {
 
         assertEquals(
                 ReservationReleaseResult.RELEASED,
-                endpoint.release(victim, DecodeResources.ReleaseReason.EXPIRED).status());
+                endpoint.release(requestToPreempt, DecodeResources.ReleaseReason.EXPIRED).status());
         assertNotEquals(
                 ReservationReleaseResult.RELEASED,
-                endpoint.release(victim, DecodeResources.ReleaseReason.EXPIRED).status());
+                endpoint.release(requestToPreempt, DecodeResources.ReleaseReason.EXPIRED).status());
         assertFalse(
-                endpoint.updatePreemption(101L, DecodeResources.PreemptionUpdate.canceled(victim))
+                endpoint.updatePreemption(
+                                101L, DecodeResources.PreemptionUpdate.canceled(requestToPreempt))
                         .status()
                         .applied());
         assertFalse(
-                endpoint.updatePreemption(101L, DecodeResources.PreemptionUpdate.finished(victim))
+                endpoint.updatePreemption(
+                                101L, DecodeResources.PreemptionUpdate.finished(requestToPreempt))
                         .status()
                         .applied());
         assertEquals(0, endpoint.routingView().totalLoad());
@@ -201,7 +203,7 @@ class DecodeRequestExpirationTest {
 
     @Test
     void incomingLeaseExpirationAbortsOnlyItsAdmissionAttempt() {
-        DecodeResources.RequestReservation victim = reserve(1L, 500, 700, 30);
+        DecodeResources.RequestReservation requestToPreempt = reserve(1L, 500, 700, 30);
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
         assertEquals(
                 DecodeResources.PreemptionBeginResult.SUCCESS,
@@ -219,7 +221,7 @@ class DecodeRequestExpirationTest {
         assertEquals(0, endpoint.resourceSnapshot().reservedCount());
         assertEquals(
                 ReservationReleaseResult.RELEASED,
-                endpoint.release(victim, DecodeResources.ReleaseReason.EXPIRED).status());
+                endpoint.release(requestToPreempt, DecodeResources.ReleaseReason.EXPIRED).status());
     }
 
     @Test
@@ -299,14 +301,14 @@ class DecodeRequestExpirationTest {
 
     private DecodeResources.PreemptionBeginResult beginPreemption(
             long attemptToken,
-            List<Long> victimIds,
+            List<Long> requestIdsToPreempt,
             long incomingRequestId,
             long hardKv,
             long expectedKv,
             int priority) {
         return endpoint.beginPreemption(
                 attemptToken,
-                victimIds.stream().map(reservations::get).toList(),
+                requestIdsToPreempt.stream().map(reservations::get).toList(),
                 String.valueOf(incomingRequestId),
                 hardKv,
                 expectedKv,

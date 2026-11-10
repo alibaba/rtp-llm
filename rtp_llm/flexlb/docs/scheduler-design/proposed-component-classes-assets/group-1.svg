@@ -128,7 +128,7 @@
 <polygon fill="none" stroke="#cbd5e1" points="364,-430 364,-542 580,-542 580,-430 364,-430"/>
 <text text-anchor="start" x="372" y="-525.2" font-family="Arial" font-size="11.00">+ start(): void</text>
 <text text-anchor="start" x="372" y="-513.2" font-family="Arial" font-size="11.00">+ schedule(): void</text>
-<text text-anchor="start" x="372" y="-501.2" font-family="Arial" font-size="11.00">+ onRequest(ctx): void</text>
+<text text-anchor="start" x="372" y="-501.2" font-family="Arial" font-size="11.00">+ scheduleRequest(ctx): void</text>
 <text text-anchor="start" x="372" y="-489.2" font-family="Arial" font-size="11.00">+ onRequestChanged(ctx): void</text>
 <text text-anchor="start" x="372" y="-477.2" font-family="Arial" font-size="11.00">+ onEndpointChanged(endpoint): void</text>
 <text text-anchor="start" x="372" y="-465.2" font-family="Arial" font-size="11.00">+ stop(): void</text>
@@ -177,7 +177,7 @@
 <text text-anchor="start" x="23" y="-527.2" font-family="Arial" font-size="11.00">&#45; RequestLifecycle lifecycle</text>
 <polygon fill="none" stroke="#cbd5e1" points="15,-404 15,-516 231,-516 231,-404 15,-404"/>
 <text text-anchor="start" x="23" y="-499.2" font-family="Arial" font-size="11.00">+ start(): void</text>
-<text text-anchor="start" x="23" y="-487.2" font-family="Arial" font-size="11.00">+ onRequest(ctx): void</text>
+<text text-anchor="start" x="23" y="-487.2" font-family="Arial" font-size="11.00">+ scheduleRequest(ctx): void</text>
 <text text-anchor="start" x="23" y="-475.2" font-family="Arial" font-size="11.00">+ onRequestChanged(ctx): void</text>
 <text text-anchor="start" x="23" y="-463.2" font-family="Arial" font-size="11.00">+ onEndpointChanged(endpoint): void</text>
 <text text-anchor="start" x="23" y="-451.2" font-family="Arial" font-size="11.00">+ close(): void</text>
@@ -214,7 +214,7 @@
 <text text-anchor="start" x="11" y="-183.2" font-family="Arial" font-size="11.00">&#45; AtomicLong notifications</text>
 <polygon fill="none" stroke="#cbd5e1" points="3,0 3,-172 244,-172 244,0 3,0"/>
 <text text-anchor="start" x="11" y="-155.2" font-family="Arial" font-size="11.00">+ start(): void</text>
-<text text-anchor="start" x="11" y="-143.2" font-family="Arial" font-size="11.00">+ onRequest(ctx): void</text>
+<text text-anchor="start" x="11" y="-143.2" font-family="Arial" font-size="11.00">+ scheduleRequest(ctx): void</text>
 <text text-anchor="start" x="11" y="-131.2" font-family="Arial" font-size="11.00">+ onRequestChanged(ctx): void</text>
 <text text-anchor="start" x="11" y="-119.2" font-family="Arial" font-size="11.00">+ onEndpointChanged(endpoint): void</text>
 <text text-anchor="start" x="11" y="-107.2" font-family="Arial" font-size="11.00">&#45; schedulePlacement(now): void</text>

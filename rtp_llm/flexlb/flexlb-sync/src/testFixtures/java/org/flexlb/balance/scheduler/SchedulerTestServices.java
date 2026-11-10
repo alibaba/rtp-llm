@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -41,7 +41,7 @@ public final class SchedulerTestServices {
     private final EndpointRegistry endpoints;
     final DeliveryMetricsReporter deliveryReporter;
     final RequestSchedulerReporter requestReporter;
-    public final DeliveryDispatcher dispatcher;
+    public final DeliveryCoordinator dispatcher;
     private final LongSupplier clock;
     private final DeliveryExecution deliveries;
     final EngineGrpcClient engineClient;
@@ -61,7 +61,7 @@ public final class SchedulerTestServices {
             EndpointRegistry endpoints,
             DeliveryMetricsReporter deliveryReporter,
             RequestSchedulerReporter requestReporter,
-            DeliveryDispatcher dispatcher,
+            DeliveryCoordinator dispatcher,
             ConfigService config,
             EngineGrpcClient engineClient) {
         this(
@@ -80,26 +80,26 @@ public final class SchedulerTestServices {
             EndpointRegistry endpoints,
             DeliveryMetricsReporter deliveryReporter,
             RequestSchedulerReporter requestReporter,
-            DeliveryDispatcher dispatcher,
+            DeliveryCoordinator dispatcher,
             ConfigService config,
             EngineGrpcClient engineClient,
             LongSupplier clock) {
         this.engineClient = Objects.requireNonNull(engineClient);
-        deliveries = new DeliveryExecution(config, this::recordFailure);
+        this.deliveries = new DeliveryExecution(config, this::recordFailure);
         this.requests = Objects.requireNonNull(requests, "requests");
         this.endpoints = Objects.requireNonNull(endpoints, "endpoints");
         this.deliveryReporter = Objects.requireNonNull(deliveryReporter, "deliveryReporter");
-        deliveryReporter.registerExecutor(deliveries);
+        deliveryReporter.registerExecutor(this.deliveries);
         this.requestReporter = Objects.requireNonNull(requestReporter, "requestReporter");
         this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher");
-        org.springframework.test.util.ReflectionTestUtils.setField(
+        org.flexlb.balance.scheduler.DeliveryTestSupport.setField(dispatcher, "requests", requests);
+        org.flexlb.balance.scheduler.DeliveryTestSupport.setField(
                 dispatcher, "mode", config.loadBalanceConfig().getDispatcher().getType());
         org.springframework.test.util.ReflectionTestUtils.setField(
-                dispatcher, "execution", deliveries);
-        org.springframework.test.util.ReflectionTestUtils.setField(dispatcher, "timer", taskTimer);
-        if (org.springframework.test.util.ReflectionTestUtils.getField(dispatcher, "grpcClient")
+                dispatcher, "execution", this.deliveries);
+        if (org.flexlb.balance.scheduler.DeliveryTestSupport.getField(dispatcher, "grpcClient")
                 == null) {
-            org.springframework.test.util.ReflectionTestUtils.setField(
+            org.flexlb.balance.scheduler.DeliveryTestSupport.setField(
                     dispatcher, "grpcClient", engineClient);
         }
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -114,7 +114,7 @@ public final class SchedulerTestServices {
     /**
      * Publish deterministic fixture choices through the production endpoint registration boundary.
      */
-    public static PlacementResult<RouteResult, PlacementKey> registerSelection(
+    public static RoutingResult<RouteResult, CapacityKey> registerSelection(
             RequestContext context, List<RoleSelection> selections) {
         context.data().initializeExecutionOrder(System.currentTimeMillis());
         var data = context.data();
@@ -144,11 +144,11 @@ public final class SchedulerTestServices {
                                     endpoint.captureRouteProjectionInputs(),
                                     prefill.workMs(),
                                     config.isQueue());
-                    if (registration.status() == PlacementResult.Registration.CONFLICT
-                            || registration.status() == PlacementResult.Registration.UNAVAILABLE)
-                        return PlacementResult.retry();
-                    if (registration.status() != PlacementResult.Registration.REGISTERED)
-                        return PlacementResult.blocked(prefill.placementKey());
+                    if (registration.status() == RoutingResult.Registration.CONFLICT
+                            || registration.status() == RoutingResult.Registration.UNAVAILABLE)
+                        return RoutingResult.retry();
+                    if (registration.status() != RoutingResult.Registration.REGISTERED)
+                        return RoutingResult.blocked(prefill.capacityKey());
                     registered.add(
                             new RoleSelection.Prefill(
                                     endpoint, metadata, prefill.workMs(), registration.record()));
@@ -165,15 +165,15 @@ public final class SchedulerTestServices {
                                     capacity);
                     if (acquired.status() == DecodeResources.ReserveStatus.VERSION_CONFLICT
                             || acquired.status() == DecodeResources.ReserveStatus.ENDPOINT_RETIRED)
-                        return PlacementResult.retry();
+                        return RoutingResult.retry();
                     if (acquired.status() != DecodeResources.ReserveStatus.ACQUIRED)
-                        return PlacementResult.blocked(decode.placementKey());
+                        return RoutingResult.blocked(decode.capacityKey());
                     registered.add(new RoleSelection.Decode(endpoint, metadata, acquired.value()));
                 } else registered.add(role);
             }
             var route = new RouteResult(context, registered);
             transferred = true;
-            return PlacementResult.success(route);
+            return RoutingResult.success(route);
         } finally {
             if (!transferred) {
                 Throwable failure = null;
@@ -240,6 +240,20 @@ public final class SchedulerTestServices {
         return (AbstractRequestScheduler) scheduler;
     }
 
+    /**
+     * Count accepted requests before delivery handoff, including direct requests.
+     */
+    public static int pendingDeliveryRequestCount(RequestRepository repository) {
+        int pending = 0;
+        for (RequestContext context : repository.snapshotActive()) {
+            var state = context.snapshot();
+            if (state.phase() == ContextResult.Phase.OPEN && state.delivery() == null) {
+                pending++;
+            }
+        }
+        return pending;
+    }
+
     /** Replaces a test dependency in both setup and the already assembled request owners. */
     public static void setDependency(SchedulerTestServices fixture, String name, Object value) {
         org.springframework.test.util.ReflectionTestUtils.setField(fixture, name, value);
@@ -248,16 +262,11 @@ public final class SchedulerTestServices {
                     fixture.dispatcher, "execution", value);
             return;
         }
-        if (name.equals("taskTimer")) {
-            org.springframework.test.util.ReflectionTestUtils.setField(
-                    fixture.dispatcher, "timer", value);
-            return;
-        }
         if (name.equals("dispatcher")) {
+            org.flexlb.balance.scheduler.DeliveryTestSupport.setField(
+                    value, "requests", fixture.requests());
             org.springframework.test.util.ReflectionTestUtils.setField(
                     value, "execution", fixture.deliveries());
-            org.springframework.test.util.ReflectionTestUtils.setField(
-                    value, "timer", fixture.taskTimer());
         }
         String field =
                 switch (name) {
@@ -277,15 +286,25 @@ public final class SchedulerTestServices {
         }
     }
 
-    public static Throwable failure(SchedulerTestServices fixture) {
-        var workFailure =
-                (Throwable)
-                        org.springframework.test.util.ReflectionTestUtils.getField(
-                                fixture.tasks, "failure");
-        return workFailure != null ? workFailure : fixture.failure;
+    public static void throwIfFailed(RequestTaskPool pool) {
+        synchronized (owners) {
+            for (var owner : owners.keySet()) {
+                if (org.springframework.test.util.ReflectionTestUtils.getField(owner, "taskPool")
+                        == pool) owner.throwIfRequestFailed();
+            }
+        }
     }
 
     public static void bind(AbstractRequestScheduler owner, SchedulerTestServices runtime) {
+        if (org.mockito.Mockito.mockingDetails(owner).isMock()
+                && !org.mockito.Mockito.mockingDetails(owner).isSpy()) {
+            org.springframework.test.util.ReflectionTestUtils.setField(
+                    owner, "closeQueue", new RequestCloseQueue());
+            org.mockito.Mockito.doCallRealMethod()
+                    .when(owner)
+                    .recordRequestFailure(org.mockito.ArgumentMatchers.any());
+            org.mockito.Mockito.doCallRealMethod().when(owner).throwIfRequestFailed();
+        }
         owners.put(owner, runtime);
         for (String name :
                 new String[] {"tasks", "dispatcher", "responseCompletions", "deliveryReporter"}) {
@@ -309,7 +328,7 @@ public final class SchedulerTestServices {
             org.flexlb.config.FlexlbConfig config,
             DecodeResources.AdmissionCapacity capacity,
             org.flexlb.service.TheoryCacheHitReporter trace) {
-        org.springframework.test.util.ReflectionTestUtils.setField(
+        org.flexlb.balance.scheduler.DeliveryTestSupport.setField(
                 dispatcher, "decodeAdmissionCapacity", capacity);
         var owner =
                 new PassiveScheduler(
@@ -322,7 +341,7 @@ public final class SchedulerTestServices {
                         trace,
                         endpoints) {
                     @Override
-                    protected boolean allowsPreemption() {
+                    public boolean allowsRoutePreemption() {
                         return config.isQueue();
                     }
 
@@ -330,7 +349,7 @@ public final class SchedulerTestServices {
                     protected org.flexlb.dao.loadbalance.StrategyErrorType
                             schedulingTimeoutError() {
                         return config.isQueue()
-                                ? org.flexlb.dao.loadbalance.StrategyErrorType.RESOURCE_EXHAUSTED
+                                ? org.flexlb.dao.loadbalance.StrategyErrorType.QUEUE_TIMEOUT
                                 : org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED;
                     }
                 };
@@ -387,7 +406,7 @@ public final class SchedulerTestServices {
             }
             shutdownFailure = Failures.run(shutdownFailure, this::closeTimers);
             synchronized (schedulerLock) {
-                shutdownFailure = Failures.append(failure, shutdownFailure);
+                shutdownFailure = Failures.append(failure(this), shutdownFailure);
             }
             Failures.rethrow(shutdownFailure, "Scheduler shutdown failed");
             return new ShutdownResult(
@@ -399,14 +418,28 @@ public final class SchedulerTestServices {
         }
     }
 
+    public static Throwable failure(SchedulerTestServices fixture) {
+        synchronized (owners) {
+            for (var entry : owners.entrySet()) {
+                if (entry.getValue() != fixture) continue;
+                var failure =
+                        (Throwable)
+                                org.springframework.test.util.ReflectionTestUtils.getField(
+                                        entry.getKey(), "requestProcessingFailure");
+                if (failure != null) return failure;
+            }
+        }
+        return fixture.failure;
+    }
+
     public static AbstractRequestScheduler create(
             AbstractRequestScheduler dependencies,
             org.flexlb.config.FlexlbConfig config,
             RequestRouteSelector router,
-            org.flexlb.balance.eviction.DecodePreemption preemption,
-            PlacementAvailability availability,
+            org.flexlb.balance.preemption.DecodePreemption preemption,
+            CapacityNotifier availability,
             GroupPlanner grouping,
-            PlacementQueue queue) {
+            SchedulingQueue queue) {
         return config.isQueue()
                 ? queued(config, router, preemption, dependencies, availability, queue, grouping)
                 : direct(router, dependencies);
@@ -415,10 +448,10 @@ public final class SchedulerTestServices {
     public static QueuedRequestScheduler queued(
             org.flexlb.config.FlexlbConfig config,
             RequestRouteSelector router,
-            org.flexlb.balance.eviction.DecodePreemption preemption,
+            org.flexlb.balance.preemption.DecodePreemption preemption,
             AbstractRequestScheduler dependencies,
-            PlacementAvailability availability,
-            PlacementQueue queue,
+            CapacityNotifier availability,
+            SchedulingQueue queue,
             GroupPlanner grouping) {
         return new QueuedRequestScheduler(
                 config,
@@ -469,10 +502,10 @@ public final class SchedulerTestServices {
     public static Object[] constructorArguments(
             org.flexlb.config.FlexlbConfig config,
             RequestRouteSelector router,
-            org.flexlb.balance.eviction.DecodePreemption preemption,
+            org.flexlb.balance.preemption.DecodePreemption preemption,
             AbstractRequestScheduler d,
-            PlacementAvailability availability,
-            PlacementQueue queue,
+            CapacityNotifier availability,
+            SchedulingQueue queue,
             GroupPlanner grouping) {
         return new Object[] {
             config,
@@ -644,7 +677,7 @@ public final class SchedulerTestServices {
                 RequestRepository requests,
                 RequestTaskPool tasks,
                 ExpirationTimer deadlines,
-                DeliveryDispatcher dispatcher,
+                DeliveryCoordinator dispatcher,
                 ResponseCompletionExecutor responses,
                 DeliveryMetricsReporter reporter,
                 org.flexlb.service.TheoryCacheHitReporter trace,
@@ -654,9 +687,7 @@ public final class SchedulerTestServices {
 
         public void start() {}
 
-        public void schedule() {}
-
-        public void onRequest(RequestContext request) {}
+        public void scheduleRequest(RequestContext request) {}
 
         public void removeRequest(RequestContext request) {}
 

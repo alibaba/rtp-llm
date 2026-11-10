@@ -1,10 +1,10 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
-import org.flexlb.balance.eviction.DecodePreemptionPolicy.DecodeEvictionProposal;
+import org.flexlb.balance.preemption.DecodePreemptionPolicy.DecodePreemptionPlan;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.PreemptionConfig;
-import org.flexlb.config.VictimStage;
+import org.flexlb.config.PreemptionStage;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
@@ -32,18 +32,19 @@ class DecodeCapacityPreemptionTest {
         DecodeResources.AdmissionCapacity policy = new DecodeResources.AdmissionCapacity(0L, 90L);
         long hardKvTokens = 100L;
         long expectedKvTokens = 250L;
-        DecodeResources.RequestReservation victim;
+        DecodeResources.RequestReservation requestToPreempt;
         {
             var selectedEndpoint = endpoint;
 
-            victim =
+            requestToPreempt =
                     org.flexlb.balance.scheduler.SelectionTestSupport.registerQueuedDecode(
                                     endpoint, String.valueOf(1L), 100L, 200L, 30)
                             .value();
             assertEquals(
                     DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     endpoint.acquireDispatchPermit(
-                                    victim, new DecodeResources.AdmissionCapacity(0, 100L))
+                                    requestToPreempt,
+                                    new DecodeResources.AdmissionCapacity(0, 100L))
                             .value()
                             .dispatch()
                             .status());
@@ -71,17 +72,19 @@ class DecodeCapacityPreemptionTest {
                                 expectedKvTokens,
                                 CapacityRelease.NONE)
                         .fits());
-        DecodeEvictionProposal proposal =
+        DecodePreemptionPlan proposal =
                 plan(
                         endpoint,
                         hardKvTokens,
                         expectedKvTokens,
                         policy,
-                        VictimStage.DECODE_ENGINE_OWNED);
-        assertEquals(DecodeEvictionProposal.CASE_KV, proposal.evictionCase());
+                        PreemptionStage.DECODE_ENGINE_OWNED);
+        assertEquals(DecodePreemptionPlan.CASE_KV, proposal.preemptionReason());
         assertEquals(
                 List.of(1L),
-                proposal.victims().stream().map(item -> Long.parseLong(item.requestId())).toList());
+                proposal.requestsToPreempt().stream()
+                        .map(item -> Long.parseLong(item.requestId()))
+                        .toList());
         if (usageChanged) {
             updateCapacity(endpoint, 250L);
         }
@@ -91,7 +94,7 @@ class DecodeCapacityPreemptionTest {
                         : DecodeResources.PreemptionBeginResult.SUCCESS,
                 endpoint.beginPreemption(
                         1L,
-                        List.of(victim),
+                        List.of(requestToPreempt),
                         String.valueOf(9L),
                         hardKvTokens,
                         expectedKvTokens,
@@ -109,11 +112,11 @@ class DecodeCapacityPreemptionTest {
         DecodeResources.AdmissionCapacity policy = new DecodeResources.AdmissionCapacity(1L, 90L);
         long hardKvTokens = 100L;
         long expectedKvTokens = 100L;
-        DecodeResources.RequestReservation victim;
+        DecodeResources.RequestReservation requestToPreempt;
         {
             var selectedEndpoint = endpoint;
 
-            victim =
+            requestToPreempt =
                     org.flexlb.balance.scheduler.SelectionTestSupport.registerQueuedDecode(
                                     endpoint, String.valueOf(1L), 100L, 200L, 30)
                             .value();
@@ -135,12 +138,17 @@ class DecodeCapacityPreemptionTest {
                                 expectedKvTokens,
                                 CapacityRelease.NONE)
                         .fits());
-        DecodeEvictionProposal proposal =
-                plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_RESERVED);
-        assertEquals(DecodeEvictionProposal.CASE_SLOT, proposal.evictionCase());
+        DecodePreemptionPlan proposal =
+                plan(
+                        endpoint,
+                        hardKvTokens,
+                        expectedKvTokens,
+                        policy,
+                        PreemptionStage.DECODE_RESERVED);
+        assertEquals(DecodePreemptionPlan.CASE_SLOT, proposal.preemptionReason());
         assertNotNull(
                 endpoint.replaceQueuedRequests(
-                        List.of(victim),
+                        List.of(requestToPreempt),
                         String.valueOf(9L),
                         hardKvTokens,
                         expectedKvTokens,
@@ -156,23 +164,30 @@ class DecodeCapacityPreemptionTest {
         DecodeResources.AdmissionCapacity policy = new DecodeResources.AdmissionCapacity(0L, 90L);
         long hardKvTokens = 100L;
         long expectedKvTokens = 200L;
-        DecodeResources.RequestReservation victim;
+        DecodeResources.RequestReservation requestToPreempt;
         {
             var selectedEndpoint = endpoint;
 
-            victim =
+            requestToPreempt =
                     org.flexlb.balance.scheduler.SelectionTestSupport.registerQueuedDecode(
                                     endpoint, String.valueOf(1L), 0L, 900L, 30)
                             .value();
         }
-        DecodeEvictionProposal proposal =
-                plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_RESERVED);
+        DecodePreemptionPlan proposal =
+                plan(
+                        endpoint,
+                        hardKvTokens,
+                        expectedKvTokens,
+                        policy,
+                        PreemptionStage.DECODE_RESERVED);
         assertEquals(
                 List.of(1L),
-                proposal.victims().stream().map(item -> Long.parseLong(item.requestId())).toList());
+                proposal.requestsToPreempt().stream()
+                        .map(item -> Long.parseLong(item.requestId()))
+                        .toList());
         assertNotNull(
                 endpoint.replaceQueuedRequests(
-                        List.of(victim),
+                        List.of(requestToPreempt),
                         String.valueOf(9L),
                         hardKvTokens,
                         expectedKvTokens,
@@ -181,14 +196,14 @@ class DecodeCapacityPreemptionTest {
         assertEquals(200L, EndpointTestSupport.expectedReservedKv(endpoint.resourceSnapshot()));
     }
 
-    private static DecodeEvictionProposal plan(
+    private static DecodePreemptionPlan plan(
             DecodeEndpoint endpoint,
             long hardKvTokens,
             long expectedKvTokens,
             DecodeResources.AdmissionCapacity policy,
-            VictimStage stage) {
+            PreemptionStage stage) {
         PreemptionConfig preemption = new PreemptionConfig();
-        preemption.setAllowedVictimStages(EnumSet.of(stage));
+        preemption.setAllowedPreemptionStages(EnumSet.of(stage));
         var failures = new HashMap<String, String>();
         var request =
                 org.flexlb.dao.loadbalance.Request.builder()
@@ -197,7 +212,7 @@ class DecodeCapacityPreemptionTest {
                         .maxNewTokens((int) (expectedKvTokens - hardKvTokens))
                         .build();
         var snapshot = endpoint.resourceSnapshot();
-        DecodeEvictionProposal proposal =
+        DecodePreemptionPlan proposal =
                 SchedulingTestConfig.planDecode(request, 70, policy, snapshot, preemption, failures)
                         .proposal();
         assertNotNull(proposal, failures.toString());

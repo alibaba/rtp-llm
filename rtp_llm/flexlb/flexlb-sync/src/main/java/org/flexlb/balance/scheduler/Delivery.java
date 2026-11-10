@@ -16,30 +16,21 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
 /**
- * Holds one selected batch and its temporary member permits until the dispatch handoff.
- * Endpoint commits queue membership; Scheduler records request delivery; Dispatcher sends it.
+ * Holds one selected request group and its temporary member permits until the dispatch handoff.
+ * Coordinator prepares the group; Dispatcher submits its members after the Endpoint accepts the queue prefix.
  * Closing this batch returns only its temporary permits, not request resource registrations.
  */
-@lombok.Getter
-@lombok.experimental.Accessors(fluent = true)
 public final class Delivery implements AutoCloseable {
     long batchId;
 
-    List<Member> members;
+    final List<Member> members;
     WorkSnapshot precedingWork;
 
     long predictedMs;
 
-    PrefillTimePredictor.PrefillBatchFeatures features;
-    PrefillTimePredictor.Evaluator evaluator;
+    final PrefillTimePredictor.Evaluator evaluator;
     String reason;
 
-    int remainingQueueDepth;
-    private boolean committed;
-    private boolean removedFailedMember;
-    long selectionTimeMs;
-
-    RouteResult bypassedHead;
     DeliveryExecution.DeliveryPermit executionPermit;
 
     final PrefillEndpoint endpoint;
@@ -48,12 +39,10 @@ public final class Delivery implements AutoCloseable {
 
     final long[] predictions;
 
-    int maxInflightBatches;
-
     CapacityBoundary boundary;
     RouteResult blocked;
 
-    public Delivery(
+    Delivery(
             PrefillEndpoint endpoint,
             boolean batch,
             int size,
@@ -65,28 +54,6 @@ public final class Delivery implements AutoCloseable {
         this.reason = reason;
         members = new ArrayList<>(size);
         predictions = batch ? null : new long[size];
-    }
-
-    /**
-     * Endpoint calls this only after validating every member in its state lock.
-     */
-    public void committed(
-            WorkSnapshot precedingWork, int remainingQueueDepth, boolean removedFailedMember) {
-        checkState(!committed, "delivery already committed");
-        this.precedingWork = precedingWork;
-        this.remainingQueueDepth = remainingQueueDepth;
-        this.removedFailedMember = removedFailedMember;
-        committed = true;
-    }
-
-    public List<RouteResult> items() {
-        return members.stream().map(Member::route).toList();
-    }
-
-    public RouteResult failedMember() {
-        return boundary != null && boundary.status() == CapacityBoundary.Status.FAILED
-                ? blocked
-                : null;
     }
 
     @Override
@@ -156,16 +123,12 @@ public final class Delivery implements AutoCloseable {
 
         void initialize(Delivery.SendMode kind, long batchId) {
             checkState(this.kind == Delivery.SendMode.NONE, "delivery member already claimed");
-            checkArgument(
-                    kind != Delivery.SendMode.NONE
-                            && (kind != Delivery.SendMode.BATCH_ENQUEUE || batchId > 0L),
-                    "invalid delivery identity");
-            this.kind = Objects.requireNonNull(kind);
+            this.kind = kind;
             this.batchId = batchId;
         }
 
         void recordFailure(Throwable failure) {
-            route.ctx().data().getRequestScheduler().taskPool.recordFailure(failure);
+            route.ctx().data().getRequestScheduler().recordRequestFailure(failure);
         }
 
         static CapacityBoundary.Attempt<Member> prepare(

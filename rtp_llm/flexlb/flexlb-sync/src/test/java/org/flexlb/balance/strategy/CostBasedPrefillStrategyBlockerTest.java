@@ -73,8 +73,7 @@ class CostBasedPrefillStrategyBlockerTest {
                                 BuiltinGroupPlanner.FIXED_WINDOW,
                                 Comparator.comparing(GroupPlanner.Item::requestId),
                                 new GroupPlanner.Constraints(1, Long.MAX_VALUE, 0L, 0L, 0L),
-                                List.of(),
-                                null),
+                                List.of()),
                         new WorkSnapshot(0L, List.of(), List.of(), 0L),
                         0L,
                         new FormulaPredictor("sum(computeTokens)").evaluator(),
@@ -117,7 +116,7 @@ class CostBasedPrefillStrategyBlockerTest {
                                         8080,
                                         8090,
                                         "test"));
-                when(endpoint.progress()).thenReturn(new PrefillEndpoint.Progress(0L, 0L, 0L, 0));
+
                 when(endpoint.captureRouteProjectionInputs())
                         .thenAnswer(
                                 ignored -> {
@@ -138,7 +137,7 @@ class CostBasedPrefillStrategyBlockerTest {
 
             // Ranking models all scoped workers, including full workers; no selected Worker is
             // published by this fixture.
-            assertEquals(org.flexlb.balance.PlacementResult.Status.BLOCKED, result.status());
+            assertEquals(org.flexlb.balance.RoutingResult.Status.BLOCKED, result.status());
             assertEquals(registered, projectedWorkers.get());
             assertEquals(entries, frozen);
             verify(directory).prefillRoutingSnapshot(role);

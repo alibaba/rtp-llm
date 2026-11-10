@@ -20,6 +20,7 @@ public final class FlexlbConfig {
 
     private SchedulerConfig scheduler = new SchedulerConfig();
     private DispatcherConfig dispatcher = new DispatcherConfig();
+    private PhasePoliciesConfig phases = new PhasePoliciesConfig();
     private RequestLifecycleConfig requestLifecycle = new RequestLifecycleConfig();
     private RoutingConfig router = new RoutingConfig();
     private WorkerRegistryConfig workerRegistry = new WorkerRegistryConfig();
@@ -66,13 +67,20 @@ public final class FlexlbConfig {
         return consistency instanceof ZookeeperConsistencyConfig;
     }
 
-    @JsonIgnore
-    public boolean isBatchDispatch() {
-        return dispatcher.getType() == DispatcherConfig.Type.BATCH;
+    public DispatcherConfig.Type deliveryType(org.flexlb.dao.route.RequestPhase phase) {
+        var policy =
+                phase == org.flexlb.dao.route.RequestPhase.ENCODER
+                        ? phases.getEncoder()
+                        : phases.getGeneration();
+        return policy.getDelivery() == null
+                ? dispatcher.getType()
+                : policy.getDelivery().getType() == PhasePoliciesConfig.DeliveryType.ENQUEUE_BATCH
+                        ? DispatcherConfig.Type.BATCH
+                        : DispatcherConfig.Type.NON_BATCH;
     }
 
     @JsonIgnore
-    public boolean allowsPreemption(VictimStage stage) {
+    public boolean allowsPreemption(PreemptionStage stage) {
         return isPriorityOrdering()
                 && scheduler.getOrdering().getPreemption() != null
                 && scheduler.getOrdering().getPreemption().allows(stage);
@@ -98,23 +106,29 @@ public final class FlexlbConfig {
         return isPriorityOrdering() ? scheduler.getOrdering().getDefaultPriority() : 50;
     }
 
+    @JsonIgnore
+    public boolean isFixedWindowDecision() {
+        return isQueue() && decisionPolicy().getType() == DecisionPolicyConfig.Type.FIXED_WINDOW;
+    }
+
     /** Resolve the QUEUE decision policy from its single configuration owner. */
     @JsonIgnore
     public DecisionPolicyConfig decisionPolicy() {
-        return queueScheduler().getDecision();
+        return decisionPolicy(org.flexlb.dao.route.RequestPhase.GENERATION);
+    }
+
+    public DecisionPolicyConfig decisionPolicy(org.flexlb.dao.route.RequestPhase phase) {
+        var policy =
+                phase == org.flexlb.dao.route.RequestPhase.ENCODER
+                        ? phases.getEncoder()
+                        : phases.getGeneration();
+        return policy.getDecision() == null ? queueScheduler().getDecision() : policy.getDecision();
     }
 
     @JsonIgnore
     public SchedulerConfig queueScheduler() {
         checkState(isQueue(), "queue scheduler configuration is not active");
         return scheduler;
-    }
-
-    @JsonIgnore
-    public boolean isFixedWindowDecision() {
-        return isQueue()
-                && queueScheduler().getDecision().getType()
-                        == DecisionPolicyConfig.Type.FIXED_WINDOW;
     }
 
     @JsonIgnore

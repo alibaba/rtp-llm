@@ -4,7 +4,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRouteSelector;
@@ -381,7 +381,7 @@ class CacheHitFeedbackFlowTest {
                 .setSchedulingMetadata(
                         SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000));
         var selected = selector.select(context, "group");
-        assertEquals(PlacementResult.Status.SUCCESS, selected.status());
+        assertEquals(RoutingResult.Status.SUCCESS, selected.status());
         var route = selected.value();
         if (route.prefillEndpoint() != null) route.prefillEndpoint().releaseRequest(route);
         if (route.decodeEndpoint() != null)

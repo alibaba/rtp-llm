@@ -1,12 +1,12 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeResources.DecodeRoutingView;
 import org.flexlb.balance.prediction.DecodeCostFormula;
-import org.flexlb.balance.scheduler.PlacementKey;
+import org.flexlb.balance.scheduler.CapacityKey;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -47,17 +47,15 @@ public class DecodeSelector implements DecodeSelectionStrategy {
     }
 
     @Override
-    public PlacementResult<DecodeRoutingView, PlacementKey> selectAndRegister(
+    public RoutingResult<DecodeRoutingView, CapacityKey> selectAndRegister(
             Request request,
             SchedulingMetadata metadata,
             String group,
             List<DecodeRoutingView> snapshots,
             CapacityReader reader,
             java.util.function.UnaryOperator<DecodeRoutingView> refresh,
-            java.util.function.Function<DecodeRoutingView, PlacementResult.Registration> register) {
-        if (snapshots.isEmpty()) {
-            return PlacementResult.blocked(new PlacementKey(RoleType.DECODE, group, null));
-        }
+            java.util.function.Function<DecodeRoutingView, RoutingResult.Registration> register) {
+        if (snapshots.isEmpty()) return noDecodeCandidates(group);
         Scratch cached = SCRATCH.get();
         Scratch scratch = cached.inUse ? new Scratch() : cached;
         scratch.inUse = true;
@@ -68,27 +66,45 @@ public class DecodeSelector implements DecodeSelectionStrategy {
             for (int attempt = 0; attempt < 8; attempt++) {
                 var result =
                         selectCandidates(request, metadata, group, scratch.views, reader, scratch);
-                if (result.status() != PlacementResult.Status.SUCCESS) return result;
+                if (result.status() != RoutingResult.Status.SUCCESS) return result;
                 var selected = result.value();
                 var registration = register.apply(selected);
-                if (registration == PlacementResult.Registration.REGISTERED) return result;
-                if (registration == PlacementResult.Registration.BLOCKED)
-                    return PlacementResult.blocked(
-                            PlacementKey.exact(
+                if (registration == RoutingResult.Registration.REGISTERED) return result;
+                if (registration == RoutingResult.Registration.BLOCKED)
+                    return RoutingResult.blocked(
+                            CapacityKey.exact(
                                     RoleType.DECODE,
                                     selected.topology().group(),
                                     selected.address()),
-                            Response.error(StrategyErrorType.RESOURCE_EXHAUSTED),
-                            java.util.Map.of("decodeCandidate", selected));
+                            Response.buildErrorResponse(
+                                    StrategyErrorType.RESOURCE_EXHAUSTED,
+                                    "Decode capacity rejected registration at "
+                                            + selected.address()
+                                            + "; deficit="
+                                            + capacity.evaluate(
+                                                    selected.placementUsage(),
+                                                    request.getHardKvTokens(),
+                                                    request.getExpectedKvTokens(),
+                                                    CapacityRelease.NONE)),
+                            Map.of(
+                                    "cause",
+                                    "Decode capacity rejected registration",
+                                    "decodeCandidate",
+                                    selected,
+                                    "capturedAtMs",
+                                    System.currentTimeMillis()));
                 int index = scratch.views.indexOf(selected);
                 var current =
-                        registration == PlacementResult.Registration.UNAVAILABLE
+                        registration == RoutingResult.Registration.UNAVAILABLE
                                 ? null
                                 : refresh.apply(selected);
                 scratch.views.set(index, current);
                 scratch.costs[index] = current == null ? Double.POSITIVE_INFINITY : cost(current);
             }
-            return PlacementResult.retry();
+            return RoutingResult.retry(
+                    Response.buildErrorResponse(
+                            StrategyErrorType.SCHEDULER_PLAN_CONFLICT,
+                            "Decode selection could not register a current candidate after 8 attempts"));
         } finally {
             scratch.clear(snapshots.size());
             if (scratch == cached && scratch.addresses.length > MAX_CACHED_WORKERS) {
@@ -97,7 +113,7 @@ public class DecodeSelector implements DecodeSelectionStrategy {
         }
     }
 
-    private PlacementResult<DecodeRoutingView, PlacementKey> selectCandidates(
+    private RoutingResult<DecodeRoutingView, CapacityKey> selectCandidates(
             Request request,
             SchedulingMetadata metadata,
             String group,
@@ -120,10 +136,9 @@ public class DecodeSelector implements DecodeSelectionStrategy {
                 candidates[candidateCount++] = index;
             }
         }
-        if (candidateCount == 0)
-            return PlacementResult.blocked(new PlacementKey(RoleType.DECODE, group, null));
+        if (candidateCount == 0) return noDecodeCandidates(group);
         if (preferred == Availability.IMPOSSIBLE) {
-            return PlacementResult.rejected(
+            return RoutingResult.rejected(
                     oversizedRequestFailure(
                             request.getExpectedKvTokens(),
                             snapshots.stream()
@@ -140,7 +155,7 @@ public class DecodeSelector implements DecodeSelectionStrategy {
                 rotation.next(
                         RoleType.DECODE, group, scratch.addresses, scratch.candidates, winners);
         checkState(selected >= 0, "Decode snapshot candidate disappeared");
-        return PlacementResult.success(snapshots.get(selected));
+        return RoutingResult.success(snapshots.get(selected));
     }
 
     private Availability availability(Request request, DecodeRoutingView view) {
@@ -159,6 +174,14 @@ public class DecodeSelector implements DecodeSelectionStrategy {
                 : Availability.BUSY;
     }
 
+    private RoutingResult<DecodeRoutingView, CapacityKey> noDecodeCandidates(String group) {
+        String cause = "No current Decode candidate in routing group " + group;
+        return RoutingResult.blocked(
+                new CapacityKey(RoleType.DECODE, group, null),
+                Response.buildErrorResponse(StrategyErrorType.NO_DECODE_WORKER, cause),
+                Map.of("cause", cause, "capturedAtMs", System.currentTimeMillis()));
+    }
+
     private static Response oversizedRequestFailure(long required, long maximum) {
         return Response.error(
                 StrategyErrorType.RESOURCE_EXHAUSTED,
@@ -169,7 +192,7 @@ public class DecodeSelector implements DecodeSelectionStrategy {
                         + maximum);
     }
 
-    private PlacementResult<DecodeRoutingView, PlacementKey> classifyCapacityFailure(
+    private RoutingResult<DecodeRoutingView, CapacityKey> classifyCapacityFailure(
             Request request,
             SchedulingMetadata metadata,
             String group,
@@ -183,10 +206,38 @@ public class DecodeSelector implements DecodeSelectionStrategy {
             Response workerFailure;
             var snapshot = reader.read(view);
             if (snapshot == null) {
-                workerFailure = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+                workerFailure =
+                        Response.buildErrorResponse(
+                                StrategyErrorType.NO_DECODE_WORKER,
+                                "Decode candidate changed before capacity attribution: "
+                                        + view.address());
+                evidence.add(Map.of("endpoint", view.address(), "reason", "CANDIDATE_CHANGED"));
             } else {
-                evidence.add(capacityEvidence(view.address(), snapshot.routing()));
+                var deficit =
+                        capacity.evaluate(
+                                snapshot.routing().placementUsage(),
+                                request.getHardKvTokens(),
+                                request.getExpectedKvTokens(),
+                                CapacityRelease.NONE);
+                // A capacity sample may recover after ranking; retry rather than invent a shortage.
+                if (deficit.fits())
+                    return RoutingResult.retry(
+                            Response.buildErrorResponse(
+                                    StrategyErrorType.SCHEDULER_PLAN_CONFLICT,
+                                    "Decode capacity changed between ranking and attribution; retry selection"));
                 workerFailure = classifyCapacityFailure(request, metadata, snapshot);
+                workerFailure.setErrorMessage(
+                        workerFailure.getErrorMessage()
+                                + "; endpoint="
+                                + view.address()
+                                + "; deficit="
+                                + deficit);
+                var detail =
+                        new java.util.LinkedHashMap<String, Object>(
+                                capacityEvidence(view.address(), snapshot.routing()));
+                detail.put("deficit", deficit);
+                detail.put("reason", workerFailure.getErrorMessage());
+                evidence.add(Map.copyOf(detail));
             }
             if (failure == null) {
                 failure = workerFailure;
@@ -199,30 +250,23 @@ public class DecodeSelector implements DecodeSelectionStrategy {
                 failure = workerFailure;
             }
         }
-        if (!uniformFailure
-                && failure.getCode() != StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode()) {
-            failure = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+        if (!uniformFailure) {
+            failure =
+                    Response.buildErrorResponse(
+                            StrategyErrorType.NO_DECODE_WORKER,
+                            "No allowed Decode endpoint admitted this request; candidate rejection reasons differ: "
+                                    + evidence);
         }
-        return PlacementResult.blocked(
-                new PlacementKey(RoleType.DECODE, group, null),
+        return RoutingResult.blocked(
+                new CapacityKey(RoleType.DECODE, group, null),
                 failure,
                 Map.of(
                         "cause",
-                        "Decode capacity exhausted",
+                        failure.getErrorMessage(),
                         "capturedAtMs",
                         System.currentTimeMillis(),
                         "decode",
                         List.copyOf(evidence)));
-    }
-
-    private static Map<String, Object> capacityEvidence(String address, DecodeRoutingView routing) {
-        return Map.of(
-                "endpoint", address,
-                "version", routing.admissionVersion(),
-                "engineLoad", routing.engineLoad(),
-                "totalLoad", routing.totalLoad(),
-                "kvTotal", routing.totalKv(),
-                "kvAvailable", routing.placementUsage().hardKvAvailable());
     }
 
     /** Classify only the dimensions that prevent this request from fitting. */
@@ -282,6 +326,16 @@ public class DecodeSelector implements DecodeSelectionStrategy {
                 higherBlocks
                         ? AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
                         : AdmissionRejectReason.SAME_PRIORITY_AHEAD);
+    }
+
+    private static Map<String, Object> capacityEvidence(String address, DecodeRoutingView routing) {
+        return Map.of(
+                "endpoint", address,
+                "version", routing.admissionVersion(),
+                "engineLoad", routing.engineLoad(),
+                "totalLoad", routing.totalLoad(),
+                "kvTotal", routing.totalKv(),
+                "kvAvailable", routing.placementUsage().hardKvAvailable());
     }
 
     private int selectLowestCost(Scratch scratch, int candidateCount) {
