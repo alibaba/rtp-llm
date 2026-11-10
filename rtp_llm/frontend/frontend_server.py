@@ -44,6 +44,50 @@ from rtp_llm.utils.util import check_with_info
 USAGE_HEADER = "USAGE"
 
 
+# AWI admission barrier.  The evaluator arms this before it starts the request
+# wave; every participant must arrive before any of them enters the engine, so
+# the scheduler sees the whole wave at once and the KV allocator must keep the
+# full input+output reservations resident together.  This is an admission
+# gate, not a synthetic residency claim: the actual residency event still comes
+# from the engine after allocation.
+_AWI_BARRIER_LOCK = threading.Lock()
+_AWI_BARRIERS: Dict[str, Dict[str, Any]] = {}
+
+
+def _arm_awi_barrier(request_ids):
+    barrier = {
+        "ids": set(request_ids),
+        "arrived": set(),
+        "event": asyncio.Event(),
+        "created": time.monotonic(),
+    }
+    with _AWI_BARRIER_LOCK:
+        for request_id in request_ids:
+            _AWI_BARRIERS[request_id] = barrier
+    return barrier
+
+
+async def _await_awi_admission(awi_request_id: str) -> None:
+    with _AWI_BARRIER_LOCK:
+        barrier = _AWI_BARRIERS.get(awi_request_id)
+        if barrier is None:
+            return
+        if awi_request_id not in barrier["arrived"]:
+            barrier["arrived"].add(awi_request_id)
+            if len(barrier["arrived"]) >= len(barrier["ids"]):
+                barrier["event"].set()
+        event = barrier["event"]
+    if not event.is_set():
+        try:
+            await asyncio.wait_for(event.wait(), timeout=180.0)
+        except asyncio.TimeoutError:
+            logging.error(
+                "AWI barrier timed out waiting for all participants: arrived=%d expected=%d",
+                len(barrier["arrived"]),
+                len(barrier["ids"]),
+            )
+
+
 def _field(value: Any, name: str) -> Any:
     if isinstance(value, dict):
         return value.get(name)
@@ -446,6 +490,7 @@ class FrontendServer(object):
                 return ORJSONResponse(
                     status_code=400, content={"error": "X-AWI-Request-ID is required"}
                 )
+            await _await_awi_admission(awi_request_id)
             sequence = self._global_controller.increment() % 4096
             request_id = generate_request_id(
                 self.py_env_configs.server_config.ip,
@@ -516,6 +561,7 @@ class FrontendServer(object):
             numeric = awi_telemetry.write_barrier(
                 operation_id, request_ids, context_tokens, len(request_ids)
             )
+            _arm_awi_barrier(request_ids)
             return ORJSONResponse(
                 content={
                     "status": "armed",
