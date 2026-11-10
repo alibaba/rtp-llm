@@ -435,7 +435,7 @@ class FrontendWorker:
             output_ids = raw_output_ids.reshape(-1).tolist()
         else:
             output_ids = list(raw_output_ids)
-        text = last_response.generate_texts[0] if last_response.generate_texts else "".join(text_parts)
+        text = "".join(part for part in text_parts if part)
         return {
             "id": external_id,
             "choices": [
