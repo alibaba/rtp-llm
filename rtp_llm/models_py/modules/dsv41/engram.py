@@ -1523,6 +1523,10 @@ class _EngramCPULookupSlot:
             self.copied.record(self.stream)
 
     def close(self):
+        # Synchronizing a side stream is illegal while the main stream is
+        # being captured by HIP graphs.  The copy events still order replay.
+        if torch.cuda.is_current_stream_capturing():
+            return
         self.stream.synchronize()
 
 
