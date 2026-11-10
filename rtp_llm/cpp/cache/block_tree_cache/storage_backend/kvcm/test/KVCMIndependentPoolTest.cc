@@ -387,6 +387,7 @@ TEST_F(KVCMIndependentPoolTest, WorkerRejectsUnknownTagBeforeAnyTransfer) {
     ASSERT_TRUE(initialize());
     RemoteOperationRequestPB operation;
     operation.set_op(REMOTE_OPERATION_READ);
+    identifyReadRequest(operation);
     operation.add_group_tags(config_.groupTags().front());
     operation.add_block_ids(blocks_.front());
     operation.add_uris("registered");
@@ -437,6 +438,7 @@ TEST_F(KVCMIndependentPoolTest, WorkerReportsTimeoutWithoutCreatingLocalPins) {
     ASSERT_TRUE(initialize());
     RemoteOperationRequestPB operation;
     operation.set_op(REMOTE_OPERATION_READ);
+    identifyReadRequest(operation);
     for (size_t group = 0; group < pools_.size(); ++group) {
         const auto& tag = config_.groupTags().at(group);
         operation.add_group_tags(tag);

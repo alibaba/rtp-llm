@@ -576,6 +576,7 @@ TEST(KVCMLocalTest, ExecuteFunctionPropagatesMetadataErrorsAndPreservesTransferS
             FunctionRequestPB request;
             auto*             remote = request.mutable_remote_request();
             remote->set_op(operation);
+            identifyReadRequest(*remote);
             remote->add_group_tags("default");
             remote->add_block_ids(environment.block_id);
             remote->add_uris("transfer_uri");
@@ -1077,6 +1078,7 @@ TEST(KVCMLocalTest, EnabledReadAndWriteResponsesCarryExplicitCompletionProof) {
             client->save_status = ec;
             RemoteOperationRequestPB request;
             request.set_op(op);
+            identifyReadRequest(request);
             request.add_group_tags("default");
             request.add_block_ids(environment.block_id);
             request.add_uris("pace://uri");
@@ -1086,6 +1088,9 @@ TEST(KVCMLocalTest, EnabledReadAndWriteResponsesCarryExplicitCompletionProof) {
                                                                             REMOTE_TRANSFER_STATUS_FAILED);
             EXPECT_EQ(response.payload_buffer_safe(), safe);
             if (!safe) {
+                // This checks a new operation against the stopped owner, not
+                // replay of the original execution identity.
+                identifyReadRequest(request);
                 RemoteOperationResponsePB rejected;
                 EXPECT_FALSE(backend->execute(request, rejected));
                 EXPECT_EQ(rejected.transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
@@ -1102,6 +1107,7 @@ TEST(KVCMLocalTest, EnabledReadAndWriteResponsesCarryExplicitCompletionProof) {
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
     RemoteOperationRequestPB local_reject;
     local_reject.set_op(REMOTE_OPERATION_READ);
+    identifyReadRequest(local_reject);
     local_reject.add_group_tags("foreign");
     local_reject.add_block_ids(environment.block_id);
     local_reject.add_uris("pace://uri");

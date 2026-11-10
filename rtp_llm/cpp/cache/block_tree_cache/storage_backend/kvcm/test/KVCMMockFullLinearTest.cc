@@ -40,6 +40,7 @@ TEST(KVCMMockFullLinearTest, PaceReadAndWriteForwardAllGroupsAndIovsInOneCall) {
                              std::vector<std::string>{"linear0", "full1", "full0", "linear0", "full0", "full1"};
             RemoteOperationRequestPB request;
             request.set_op(operation);
+            identifyReadRequest(request);
             kv_cache_manager::UriStrVec expected_uris, actual_uris;
             for (size_t index = 0; index < tags.size(); ++index) {
                 request.add_group_tags(tags[index]);
@@ -106,6 +107,7 @@ TEST(KVCMMockFullLinearTest, PaceTransferPreservesFailureTimeoutAndWriteResponse
                                       }));
             RemoteOperationRequestPB request;
             request.set_op(operation);
+            identifyReadRequest(request);
             const kv_cache_manager::UriStrVec uris{"pace://store/full1", "pace://store/linear0", "pace://store/full0"};
             size_t                            index = 0;
             for (const auto& tag : {"full1", "linear0", "full0"}) {
@@ -154,6 +156,7 @@ TEST(KVCMMockFullLinearTest, MooncakeKeepsTagRoutingAndPublishesUrisOnlyAfterAll
                                       }));
             RemoteOperationRequestPB request;
             request.set_op(operation);
+            identifyReadRequest(request);
             const std::vector<std::string> tags{"linear0", "full1", "full0", "linear0", "full0", "full1"};
             for (size_t index = 0; index < tags.size(); ++index) {
                 request.add_group_tags(tags[index]);

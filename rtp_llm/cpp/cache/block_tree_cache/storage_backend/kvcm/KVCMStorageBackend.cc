@@ -8,6 +8,7 @@
 #include <array>
 #include <cstring>
 #include <future>
+#include <functional>
 #include <map>
 #include <numeric>
 #include <set>
@@ -41,6 +42,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DecodePublicationAccounting.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DtopOriginMetadata.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/WorkerPayloadProof.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBufferSafety.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -1353,16 +1355,87 @@ public:
         return true;
     }
 
-    bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {
+    struct ReadExecution {
+        std::string                           trace_id;
+        std::shared_ptr<TransferBufferSafety> proof;
+    };
+    using ReadExecutionPtr = std::shared_ptr<ReadExecution>;
+
+    const TransferTaskRegistry& taskRegistry() const {
+        return *read_registry_;
+    }
+
+    ReadExecutionPtr beginReadExecution(const RemoteOperationRequestPB& request,
+                                        RemoteOperationResponsePB& response) {
+        response.set_sdk_failed(false);
+        response.set_payload_buffer_safe(false);
+        response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
+        response.clear_actual_uris();
+        const auto reject = [&](const char* reason) {
+            RTP_LLM_LOG_WARNING("KVCM payload admission rejected op=READ rank=%ld trace=%s reason=%s",
+                                static_cast<long>(parallelism_config_.world_rank), request.trace_id().c_str(), reason);
+        };
+        if (request.trace_id().empty()) {
+            reject("empty_trace");
+            return nullptr;
+        }
+        // Allocate the completion path before admission. It retains the registry
+        // independently of business callbacks and never infers proof on destruction.
+        auto execution = std::make_shared<ReadExecution>();
+        execution->trace_id = request.trace_id();
+        execution->proof = std::make_shared<TransferBufferSafety>(
+            [registry = read_registry_, trace_id = execution->trace_id] { registry->finish(trace_id, true); });
+        if (!read_registry_->begin(execution->trace_id)) {
+            reject("duplicate_trace");
+            return nullptr;
+        }
+        warnReadRegistrySize();
+        return execution;
+    }
+
+    void warnReadRegistrySize() const noexcept {
+        try {
+            const auto count = read_registry_->size();
+            auto threshold = next_registry_warning_.load(std::memory_order_relaxed);
+            while (threshold != 0 && count >= threshold) {
+                auto next = threshold;
+                do {
+                    next = next > std::numeric_limits<size_t>::max() / 2 ? 0 : next * 2;
+                } while (next != 0 && count >= next);
+                if (next_registry_warning_.compare_exchange_weak(threshold, next, std::memory_order_relaxed)) {
+                    RTP_LLM_LOG_WARNING("KVCM READ registry retains %zu records rank=%ld (warning threshold=%zu); "
+                                        "records are not deleted and admission remains open",
+                                        count, static_cast<long>(parallelism_config_.world_rank), threshold);
+                    return;
+                }
+            }
+        } catch (...) {
+            // Diagnostics must not revoke an execution's recorded admission.
+        }
+    }
+
+    bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response,
+                 ReadExecutionPtr execution = nullptr) {
         const bool read = request.op() == REMOTE_OPERATION_READ;
         if (!read && request.op() != REMOTE_OPERATION_WRITE) {
             return executeMetadata(request, response);
         }
+        if (read && !execution) {
+            execution = beginReadExecution(request, response);
+            if (!execution)
+                return false;
+        }
+        block_tree_cache_detail::ScopeRollback unsubmitted([execution] {
+            if (execution)
+                execution->proof->report(true);
+        });
         const auto timeout_ms =
             request.timeout_ms() > 0 ? request.timeout_ms() : kv_cache_config_.kvcm_task_timeout_ms;
         const TransferTask task({}, std::chrono::milliseconds(timeout_ms));
-        if (!rank_write_pool_ || request.timeout_ms() < 0)
-            return executePayload(request, response, task);
+        if (!rank_write_pool_ || request.timeout_ms() < 0) {
+            unsubmitted.dismiss();
+            return executePayload(request, response, task, nullptr, std::move(execution));
+        }
 
         // The synchronous RPC owns request and response until this job returns.
         // Start the budget at admission; an expired job never accesses buffers.
@@ -1372,11 +1445,25 @@ public:
         response.set_payload_buffer_safe(true);
         try {
             auto work = std::make_shared<std::packaged_task<bool()>>(
-                [&] { return executePayload(request, response, task); });
+                [&] { return executePayload(request, response, task, nullptr, execution); });
             auto done = work->get_future();
-            auto run  = [work] { (*work)(); };
-            if (pool.submit(task_class, run, task.deadline(), run))
+            std::function<void()> run = [work] { (*work)(); };
+            std::function<void()> expire = run;
+            unsubmitted.dismiss();
+            bool accepted;
+            try {
+                accepted = pool.submit(task_class, std::move(run), task.deadline(), std::move(expire));
+            } catch (...) {
+                // BlockTreeTaskPool only throws before enqueueing. A worker may
+                // otherwise begin before submit returns, so do not infer from timing.
+                if (execution)
+                    execution->proof->report(true);
+                throw;
+            }
+            if (accepted)
                 return done.get();
+            if (execution)
+                execution->proof->report(true);
         } catch (...) {
             // executePayload records buffer safety even when the SDK throws.
             RTP_LLM_LOG_WARNING("KVCM rank payload execution failed");
@@ -1386,7 +1473,22 @@ public:
     }
 
     bool executePayload(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response,
-                        const TransferTask& task, bool* source_may_be_touched = nullptr) {
+                        const TransferTask& task, bool* source_may_be_touched = nullptr,
+                        ReadExecutionPtr execution = nullptr) {
+        if (request.op() == REMOTE_OPERATION_READ && !execution) {
+            execution = beginReadExecution(request, response);
+            if (!execution) {
+                if (source_may_be_touched)
+                    *source_may_be_touched = true;
+                return false;
+            }
+        }
+        // Declared before the existing payload reconciliation scopes: their
+        // final explicit proof must be published first, including while unwinding.
+        block_tree_cache_detail::ScopeRollback publish_completion([&] {
+            if (execution)
+                execution->proof->report(response.payload_buffer_safe());
+        });
         response.set_sdk_failed(false);
         response.set_payload_buffer_safe(true);
         if (request.timeout_ms() < 0 || task.expired()) {
@@ -2283,6 +2385,19 @@ private:
                                     BlockTreeTaskClass::LOAD : BlockTreeTaskClass::BACKGROUND;
         const auto deadline = request.transfer_task->deadline();
         auto       local    = std::make_shared<LocalResult>();
+        ReadExecutionPtr execution;
+        if (requests.front().remote_request().op() == REMOTE_OPERATION_READ) {
+            RemoteOperationResponsePB admission_response;
+            execution = beginReadExecution(requests.front().remote_request(), admission_response);
+            if (!execution) {
+                source_may_be_touched = true;
+                std::rethrow_exception(completion_unknown_failure_);
+            }
+        }
+        block_tree_cache_detail::ScopeRollback unsubmitted([execution] {
+            if (execution)
+                execution->proof->report(true);
+        });
         auto       complete = prepare_completion([local](bool& touched, bool& sdk_failed) {
             touched    = local->touched;
             sdk_failed = local->sdk_failed;
@@ -2291,20 +2406,38 @@ private:
             return std::move(local->responses);
         });
         // complete owns the StorageRequest and its pins through settlement.
-        auto run = [this, requests = std::move(requests), &request, local, complete]() mutable {
-            try {
-                local->responses = dispatchRequests(requests, request, local->touched, local->sdk_failed);
-            } catch (...) {
-                local->error = std::current_exception();
-            }
-            complete();
-        };
-        auto expire = [local, error = buffer_safe_failure_, complete = std::move(complete)]() mutable {
-            local->error = error;  // Expired in the queue, before any buffer access.
-            complete();
-        };
-        if (!local_payload_pool_->submit(task_class, std::move(run), deadline, std::move(expire)))
+        std::function<void()> run =
+            [this, requests = std::move(requests), &request, local, complete, execution]() mutable {
+                try {
+                    local->responses = dispatchRequests(requests, request, local->touched, local->sdk_failed, execution);
+                } catch (...) {
+                    local->error = std::current_exception();
+                }
+                complete();
+            };
+        std::function<void()> expire =
+            [local, error = buffer_safe_failure_, complete = std::move(complete), execution]() mutable {
+                if (execution)
+                    execution->proof->report(true);
+                local->error = error;  // Expired in the queue, before any buffer access.
+                complete();
+            };
+        unsubmitted.dismiss();
+        bool accepted;
+        try {
+            accepted = local_payload_pool_->submit(task_class, std::move(run), deadline, std::move(expire));
+        } catch (...) {
+            // submit can throw only before enqueueing; its callbacks were
+            // already allocated above and may run before a successful return.
+            if (execution)
+                execution->proof->report(true);
+            throw;
+        }
+        if (!accepted) {
+            if (execution)
+                execution->proof->report(true);
             throw StorageOperationBufferSafeFailure("KVCM local payload queue rejected transfer");
+        }
     }
 
     std::shared_ptr<PayloadResult> dispatchRemoteRequests(std::vector<FunctionRequestPB>& requests,
@@ -2393,24 +2526,37 @@ private:
     std::vector<FunctionResponsePB> dispatchRequests(std::vector<FunctionRequestPB>& requests,
                                                      const StorageRequest&           storage_request,
                                                      bool&                           source_may_be_touched,
-                                                     bool&                           sdk_failed) {
+                                                     bool&                           sdk_failed,
+                                                     ReadExecutionPtr                execution = nullptr) {
         if (broadcast_manager_) {
             auto result = dispatchRemoteRequests(requests, storage_request, source_may_be_touched);
             (void)result->waitDone(/*timeout_ms=*/0, /*fatal_on_error=*/false);
             return collectResponses(result, source_may_be_touched, sdk_failed);
         }
-        const int timeout_ms = remainingTimeout(storage_request, "before payload dispatch");
+        block_tree_cache_detail::ScopeRollback unsubmitted([&] {
+            if (execution)
+                execution->proof->report(true);
+        });
         RTP_LLM_CHECK_WITH_INFO(
             requests.size() == 1, "KVCM local transfer requires exactly one request, got %zu", requests.size());
-        requests.front().mutable_remote_request()->set_timeout_ms(timeout_ms);
         std::vector<FunctionResponsePB> responses(1);
         {
             auto& local_response = *responses.front().mutable_remote_response();
+            if (requests.front().remote_request().op() == REMOTE_OPERATION_READ && !execution) {
+                execution = beginReadExecution(requests.front().remote_request(), local_response);
+                if (!execution) {
+                    source_may_be_touched = true;
+                    return validateResponses(std::move(responses), 1, source_may_be_touched);
+                }
+            }
+            const int timeout_ms = remainingTimeout(storage_request, "before payload dispatch");
+            requests.front().mutable_remote_request()->set_timeout_ms(timeout_ms);
             block_tree_cache_detail::ScopeRollback collect_sdk_failure([&] {
                 sdk_failed = sdk_failed || local_response.sdk_failed();
             });
+            unsubmitted.dismiss();
             executePayload(requests.front().remote_request(), local_response,
-                           *storage_request.transfer_task, &source_may_be_touched);
+                           *storage_request.transfer_task, &source_may_be_touched, std::move(execution));
         }
         return validateResponses(std::move(responses), 1, source_may_be_touched);
     }
@@ -2469,6 +2615,8 @@ private:
     ParallelismConfig                    parallelism_config_;
     SpeculativeExecutionConfig           sp_config_;
     std::shared_ptr<BroadcastManager>                    broadcast_manager_;
+    std::shared_ptr<TransferTaskRegistry>                 read_registry_{std::make_shared<TransferTaskRegistry>()};
+    mutable std::atomic<size_t>                           next_registry_warning_{4096};
     // TP1 shares its local pool. Multi-rank payloads use it for reads and a separate pool for writes.
     std::unique_ptr<BlockTreeTaskPool>                   local_payload_pool_;
     std::unique_ptr<BlockTreeTaskPool>                   rank_write_pool_;
@@ -2606,6 +2754,25 @@ void KVCMStorageBackend::onQuarantineChanged(uint64_t                          g
 }
 
 bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {
+    Impl::ReadExecutionPtr execution;
+    if (request.op() == REMOTE_OPERATION_READ) {
+        try {
+            execution = impl_->beginReadExecution(request, response);
+        } catch (...) {
+            // Admission has not completed. Preserve the conservative response
+            // without manufacturing a proof for an existing execution.
+            RTP_LLM_LOG_WARNING("KVCM READ registry admission failed trace=%s", request.trace_id().c_str());
+            return false;
+        }
+        if (!execution)
+            return false;
+    }
+    block_tree_cache_detail::ScopeRollback unsubmitted([&] {
+        if (execution) {
+            response.set_payload_buffer_safe(true);
+            execution->proof->report(true);
+        }
+    });
     const bool protect_unknown = impl_->protectsUnknownCompletion();
     if (!protect_unknown && request.op() != REMOTE_OPERATION_READ && request.op() != REMOTE_OPERATION_WRITE) {
         return impl_->execute(request, response);
@@ -2618,7 +2785,8 @@ bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, Remote
         return false;
     }
     try {
-        return impl_->execute(request, response);
+        unsubmitted.dismiss();
+        return impl_->execute(request, response, std::move(execution));
     } catch (...) {
         // Preserve the SDK failure flag and buffer-safety proof. Protected
         // payload scopes also retain uncertain SDK access before this guard
@@ -2626,6 +2794,10 @@ bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, Remote
         response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
         return false;
     }
+}
+
+const TransferTaskRegistry& KVCMStorageBackend::taskRegistry() const {
+    return impl_->taskRegistry();
 }
 
 }  // namespace rtp_llm

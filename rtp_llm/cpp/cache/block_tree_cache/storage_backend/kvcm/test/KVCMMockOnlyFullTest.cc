@@ -404,6 +404,7 @@ TEST(KVCMMockOnlyFullTest, TP2WorkerRegistersItsRankAndExecutesLocalPayload) {
         }));
     RemoteOperationRequestPB read_request;
     read_request.set_op(REMOTE_OPERATION_READ);
+    identifyReadRequest(read_request);
     read_request.add_group_tags("default");
     read_request.add_block_ids(environment.block_id);
     read_request.add_uris(expected_read_uris.front());
@@ -721,6 +722,7 @@ TEST(KVCMMockOnlyFullTest, RejectsMismatchedTransferVectorsBeforeClientIO) {
 
     RemoteOperationRequestPB request;
     request.set_op(REMOTE_OPERATION_READ);
+    identifyReadRequest(request);
     request.add_group_tags("default");
     request.add_block_ids(environment.block_id);
     RemoteOperationResponsePB response;
@@ -765,6 +767,7 @@ TEST_P(KVCMSdkCheckTest, TracesReadAndWriteBlockIdsWithLegacyFallback) {
         }));
     RemoteOperationRequestPB read_request;
     read_request.set_op(REMOTE_OPERATION_READ);
+    identifyReadRequest(read_request);
     read_request.add_group_tags("default");
     read_request.add_block_ids(environment.block_id);
     read_request.add_uris("read_uri");

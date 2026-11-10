@@ -7,6 +7,7 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 class RemoteOperationRequestPB;
@@ -54,6 +55,8 @@ public:
     // Returns whether the request was handled and response is valid. Transfer
     // success, failure, and timeout are carried by response.transfer_status().
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
+    // Local READ completion evidence; this accessor does not issue a query RPC.
+    const TransferTaskRegistry& taskRegistry() const;
 
     // Optional EOS publication; true means handled/skipped, not committed.
     bool captureCompletedDecode(const BatchKVCacheResource& resource,

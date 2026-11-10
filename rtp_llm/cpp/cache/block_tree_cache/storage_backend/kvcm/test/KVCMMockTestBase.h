@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <future>
 #include <functional>
 #include <memory>
@@ -33,6 +34,15 @@ namespace {
 using ::testing::_;
 using ::testing::Invoke;
 using ::testing::Return;
+
+// Independently executed manual READ requests need independent execution identities.
+// WRITE and metadata deliberately keep their existing trace semantics.
+[[maybe_unused]] void identifyReadRequest(RemoteOperationRequestPB& request) {
+    if (request.op() == REMOTE_OPERATION_READ) {
+        static std::atomic<uint64_t> sequence{1};
+        request.set_trace_id("test-read-" + std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)));
+    }
+}
 
 // Test-only observation of backend-owned I/O completion; not a write mode or
 // a BlockTree task-pool workflow barrier.
