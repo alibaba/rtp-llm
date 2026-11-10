@@ -319,6 +319,56 @@ def _prefault_host_tensor(tensor: torch.Tensor, name: str) -> None:
     )
 
 
+_STALE_CACHE_DROPPED = False
+
+
+def _release_stale_checkpoint_cache(root: Path, weight_map: dict) -> None:
+    """Free host reclaim headroom before Engram pages get pinned.
+
+    hipHostRegister makes the Engram table pages UNEVICTABLE. Meanwhile the
+    scratch load streamed the whole ~510 GiB checkpoint through the page
+    cache and left large transient allocator arenas per rank. Before this
+    existed, load19 hit a host-OOM kill: ~190 GiB pinned + ~300 GiB dead
+    shard cache + per-rank allocator retention exceeded 1 TiB with nothing
+    reclaimable left. Once per process, drop the page cache of checkpoint
+    shards that no longer contain anything needed on host (everything except
+    the Engram files themselves) and malloc_trim the loader arenas. Other
+    ranks still loading simply re-read from NVMe if they missed the cache.
+    Kill switch: DSV41_ENGRAM_KEEP_CKPT_CACHE=1.
+    """
+    global _STALE_CACHE_DROPPED
+    if _STALE_CACHE_DROPPED or os.getenv("DSV41_ENGRAM_KEEP_CKPT_CACHE", "0") == "1":
+        return
+    _STALE_CACHE_DROPPED = True
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except Exception:  # noqa: BLE001
+        pass
+    engram_files = {
+        name for key, name in weight_map.items() if ".engram." in key
+    }
+    dropped = 0
+    for path in sorted(root.glob("*.safetensors")):
+        if path.name in engram_files:
+            continue
+        try:
+            fd = os.open(str(path), os.O_RDONLY)
+            try:
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                dropped += 1
+            finally:
+                os.close(fd)
+        except OSError:
+            continue
+    logger.info(
+        "Released page cache of %d stale checkpoint shards (kept %d Engram files) "
+        "and trimmed allocator arenas before Engram pinning",
+        dropped,
+        len(engram_files),
+    )
+
+
 _SHARED_TABLE_DIR = Path("/dev/shm")
 _DIGEST_CHARS = 24
 # A release must not wait forever: GC may run a finalizer while this thread
@@ -2115,6 +2165,10 @@ class Engram(nn.Module):
         with (root / "model.safetensors.index.json").open() as file:
             weight_map = json.load(file)["weight_map"]
         prefix = f"layers.{layer_id}.engram."
+        # Once per process: free dead checkpoint cache + allocator arenas so
+        # the upcoming Engram prefault/pinning has reclaim headroom (load19
+        # host-OOMed without this).
+        _release_stale_checkpoint_cache(root, weight_map)
 
         def load(suffix):
             name = prefix + suffix
