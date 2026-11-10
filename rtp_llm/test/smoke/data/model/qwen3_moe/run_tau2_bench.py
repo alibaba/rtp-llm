@@ -315,6 +315,36 @@ def _install_task_filter(task_ids_map: dict) -> None:
     Tau2BenchAdapter._task_filter_installed = True
 
 
+def _install_empty_response_logging(log_path: str) -> None:
+    """Retain the original completion when Tau2 receives an empty assistant turn."""
+    import threading
+
+    from evalscope.benchmarks.tau_bench.tau2_bench import generation
+
+    original_generate = generation.patched_generate
+    write_lock = threading.Lock()
+
+    def logged_generate(model, messages, tools=None, tool_choice=None, **kwargs):
+        message = original_generate(
+            model=model, messages=messages, tools=tools, tool_choice=tool_choice, **kwargs
+        )
+        if message.content or message.tool_calls:
+            return message
+        record = {
+            "timestamp": time.time(),
+            "model": model,
+            "messages": [item.model_dump(mode="json") for item in messages],
+            "tools": [tool.openai_schema for tool in tools] if tools else [],
+            "tool_choice": tool_choice,
+            "response": message.model_dump(mode="json"),
+        }
+        with write_lock, open(log_path, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return message
+
+    generation.patched_generate = logged_generate
+
+
 def main() -> None:
     args = parse_args()
     api_base = f"http://{args.host}:{args.port}/v1"
@@ -404,6 +434,9 @@ def main() -> None:
             "frequency_penalty": 0.3,
         },
     )
+
+    diagnostic_root = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR") or args.work_dir
+    _install_empty_response_logging(os.path.join(diagnostic_root, "tau2_empty_responses.jsonl"))
 
     print("=== Launch ===")
     result = run_task(task_cfg)
