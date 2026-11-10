@@ -89,6 +89,10 @@ def _dequant_fp4_stack(
 class RocmFp4DequantStrategy(RoutedExpertsStrategy):
     name = "rocm_fp4_dequant"
 
+    # True when the loader TP-sharded the expert inter dim (pure-TP MoE);
+    # per-rank outputs are then partial sums requiring a TP all-reduce.
+    _tp_sharded = False
+
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
         return torch.version.hip is not None and cfg.ep_size <= 1
@@ -113,6 +117,10 @@ class RocmFp4DequantStrategy(RoutedExpertsStrategy):
         self._W3 = _dequant_fp4_stack(
             layer_weights.pop(W.v4_routed_w3_w), layer_weights.pop(W.v4_routed_w3_s)
         )
+        # sp_v4_routed_w1/w2 shard the inter dim across TP ranks under
+        # pure-TP MoE; detect it from the resident shape vs the global
+        # config value and reduce partial sums in forward.
+        self._tp_sharded = self._W1.shape[1] < self.cfg.moe_inter_dim
         self._local_y_buf: Optional[torch.Tensor] = None
 
     def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
@@ -150,6 +158,13 @@ class RocmFp4DequantStrategy(RoutedExpertsStrategy):
             self._forward_graph_safe(x_2d, weights, indices, y)
         else:
             self._forward_eager(x_2d, weights, indices, y)
+        if self._tp_sharded:
+            from rtp_llm.models_py.distributed.collective_torch import (
+                Group,
+                all_reduce,
+            )
+
+            all_reduce(y, Group.TP, inplace=True)
         return y
 
     def _expert_out(

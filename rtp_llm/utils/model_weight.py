@@ -334,6 +334,60 @@ def sp_moe_w1(
         return t
 
 
+def sp_v4_routed_w1(
+    t: torch.Tensor,
+    tp: int,
+    tp_rank: int,
+    ep: int,
+    ep_rank: int,
+    dp: int,
+    dp_rank: int,
+    moe_pure_tp_mode: bool = False,
+    **kwargs: Any,
+) -> torch.Tensor:
+    """V4/V4.1 routed gate/up weight or scale ``[E, inter, ...]``.
+
+    Shards the expert intermediate dim (dim 1) under pure-TP MoE on ROCm,
+    where the runtime dequant strategy sums partial results across ranks.
+    CUDA paths keep the historical replicate-per-rank behaviour (their
+    Mega/DeepEP strategies distribute experts via EP instead).
+    """
+    if moe_pure_tp_mode and torch.version.hip is not None and tp > 1:
+        if t.shape[1] % tp:
+            raise ValueError(
+                f"V4 routed inter dim {t.shape[1]} not divisible by tp {tp}"
+            )
+        return t.split(t.shape[1] // tp, dim=1)[tp_rank]
+    return t
+
+
+def sp_v4_routed_w2(
+    t: torch.Tensor,
+    tp: int,
+    tp_rank: int,
+    ep: int,
+    ep_rank: int,
+    dp: int,
+    dp_rank: int,
+    moe_pure_tp_mode: bool = False,
+    **kwargs: Any,
+) -> torch.Tensor:
+    """V4/V4.1 routed down weight or scale ``[E, dim, inter_packed]``.
+
+    The packed-FP4 payload (inter/2 bytes, low nibble = even inter index)
+    and the UE8M0 scales (inter/32 groups) both shard evenly along the
+    last dim when inter is divisible by 32*tp, keeping nibble pairs and
+    scale groups aligned with the w1/w3 row shards.
+    """
+    if moe_pure_tp_mode and torch.version.hip is not None and tp > 1:
+        if t.shape[-1] % tp:
+            raise ValueError(
+                f"V4 routed down last dim {t.shape[-1]} not divisible by tp {tp}"
+            )
+        return t.split(t.shape[-1] // tp, dim=-1)[tp_rank]
+    return t
+
+
 def stack_(ts: List[torch.Tensor]):
     return stack_0(ts)
 
@@ -1666,12 +1720,12 @@ class W:
         v4_shared_w3_s: sp_id,
         v4_shared_w13_w: sp_id,
         v4_shared_w13_s: sp_id,
-        v4_routed_w1_w: sp_id,
-        v4_routed_w1_s: sp_id,
-        v4_routed_w2_w: sp_id,
-        v4_routed_w2_s: sp_id,
-        v4_routed_w3_w: sp_id,
-        v4_routed_w3_s: sp_id,
+        v4_routed_w1_w: sp_v4_routed_w1,
+        v4_routed_w1_s: sp_v4_routed_w1,
+        v4_routed_w2_w: sp_v4_routed_w2,
+        v4_routed_w2_s: sp_v4_routed_w2,
+        v4_routed_w3_w: sp_v4_routed_w1,
+        v4_routed_w3_s: sp_v4_routed_w1,
         v4_mtp_enorm: sp_id,
         v4_mtp_hnorm: sp_id,
         v4_mtp_norm: sp_id,
