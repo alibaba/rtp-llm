@@ -1987,7 +1987,13 @@ class Engram(nn.Module):
         ):
             from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
-            self._direct_fp8_lookup = type(wkv) is V41MXFP8Linear
+            # The fused quantized lookup emits the SM100/SM103 packed KV
+            # contract. Pre-SM89 devices gather unpaced BF16 rows and run the
+            # fallback projection instead.
+            self._direct_fp8_lookup = (
+                type(wkv) is V41MXFP8Linear
+                and not getattr(wkv, "_fallback", False)
+            )
 
     def warmup_lookup(self, ids, device):
         if self._direct_fp8_lookup:
