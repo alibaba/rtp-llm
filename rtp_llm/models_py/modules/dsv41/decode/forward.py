@@ -606,4 +606,6 @@ def forward_decode(
             extra["start_pos"] = start_pos.detach().cpu()
         _rt.dump(step=v4._dbg_step, extra=extra)
         v4._dbg_step += 1
+    if os.environ.get("DSV41_TRACE_CAPTURE"):
+        print(f"[cap] return outputs shape={tuple(hidden.shape)}", flush=True)
     return PyModelOutputs(hidden)
