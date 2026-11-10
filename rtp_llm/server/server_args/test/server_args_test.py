@@ -203,39 +203,86 @@ class CacheConfigArgumentsTest(TestCase):
                     expected,
                 )
 
-    def test_device_frozen_abort_ratio_defaults_environment_and_cli(self):
-        env_name = "BLOCK_TREE_DEVICE_FROZEN_ABORT_RATIO"
-        option = "--block_tree_device_frozen_abort_ratio"
-        for args, env, expected in (
-            ([], {}, 0.3),
-            (None, {}, 0.3),
-            ([], {env_name: "0.45"}, 0.45),
-            (None, {env_name: "0.45"}, 0.45),
-            ([option, "0.6"], {env_name: "0.45"}, 0.6),
-            ([option, "0"], {env_name: "0.45"}, 0.0),
-            ([option, "1"], {}, 1.0),
+    def test_remote_task_budget_is_independent_of_host_and_sdk(self):
+        cases = (
+            ([], {}, 20000),
+            ([], {"KVCM_TASK_TIMEOUT_MS": "23000"}, 23000),
+            (
+                ["--kvcm_task_timeout_ms", "24000"],
+                {"KVCM_TASK_TIMEOUT_MS": "23000"},
+                24000,
+            ),
+        )
+        for args, env, expected in cases:
+            with self.subTest(args=args, env=env):
+                config = self.parse_cache_config(args, env)
+                self.assertEqual(config.kvcm_task_timeout_ms, expected)
+                self.assertEqual(config.memory_cache_sync_timeout_ms, 10000)
+                self.assertEqual(config.disk_cache_sync_timeout_ms, 30000)
+                self.assertEqual(config.kvcm_get_timeout_ms, 12000)
+                self.assertEqual(config.kvcm_put_timeout_ms, 12000)
+
+    def test_block_pool_frozen_abort_range_defaults_environment_and_cli(self):
+        lower_env = "BLOCK_POOL_FROZEN_ABORT_LOWER_RATIO"
+        upper_env = "BLOCK_POOL_FROZEN_ABORT_UPPER_RATIO"
+        lower_option = "--block_pool_frozen_abort_lower_ratio"
+        upper_option = "--block_pool_frozen_abort_upper_ratio"
+        for args, env, lower, upper in (
+            ([], {}, 0.3, 0.4),
+            (None, {}, 0.3, 0.4),
+            ([], {lower_env: "0.35"}, 0.35, 0.4),
+            (None, {lower_env: "0.35"}, 0.35, 0.4),
+            ([], {upper_env: "0.8"}, 0.3, 0.8),
+            (None, {upper_env: "0.8"}, 0.3, 0.8),
+            ([], {lower_env: "0.45", upper_env: "0.8"}, 0.45, 0.8),
+            ([lower_option, "0.6"], {lower_env: "0.45", upper_env: "0.8"}, 0.6, 0.8),
+            ([upper_option, "0.7"], {upper_env: "0.8"}, 0.3, 0.7),
+            ([lower_option, "0"], {lower_env: "0.35"}, 0.0, 0.4),
+            ([lower_option, "1", upper_option, "1"], {}, 1.0, 1.0),
+            ([lower_option, "0", upper_option, "0"], {}, 0.0, 0.0),
+            ([lower_option, "0.4", upper_option, "0.4"], {}, 0.4, 0.4),
         ):
             with self.subTest(args=args, env=env):
                 config = self.parse_cache_config(args, env)
-                self.assertEqual(config.block_tree_device_frozen_abort_ratio, expected)
-                restored = pickle.loads(pickle.dumps(config))
-                self.assertEqual(restored.block_tree_device_frozen_abort_ratio, expected)
-
-    def test_device_frozen_abort_ratio_rejects_invalid_cli_and_environment(self):
-        for value in ("-0.1", "1.1", "nan", "inf", "-inf", "invalid"):
-            with self.subTest(value=value, source="cli"), self.assertRaises(
-                SystemExit
-            ):
-                self.parse_cache_config(
-                    ["--block_tree_device_frozen_abort_ratio", value], {}
+                self.assertEqual(config.block_pool_frozen_abort_lower_ratio, lower)
+                self.assertEqual(
+                    config.block_pool_frozen_abort_upper_ratio, upper
                 )
-            for args in (None, []):
-                with self.subTest(value=value, source="env", args=args), self.assertRaises(
-                    SystemExit
-                ):
-                    self.parse_cache_config(
-                        args, {"BLOCK_TREE_DEVICE_FROZEN_ABORT_RATIO": value}
-                    )
+                restored = pickle.loads(pickle.dumps(config))
+                self.assertEqual(restored.block_pool_frozen_abort_lower_ratio, lower)
+                self.assertEqual(
+                    restored.block_pool_frozen_abort_upper_ratio, upper
+                )
+
+    def test_block_pool_frozen_abort_bounds_reject_invalid_cli_and_environment(self):
+        for name in (
+            "block_pool_frozen_abort_lower_ratio",
+            "block_pool_frozen_abort_upper_ratio",
+        ):
+            for value in ("-0.1", "1.1", "nan", "inf", "-inf", "invalid"):
+                with self.subTest(
+                    name=name, value=value, source="cli"
+                ), self.assertRaises(SystemExit):
+                    self.parse_cache_config([f"--{name}", value], {})
+                for args in (None, []):
+                    with self.subTest(
+                        name=name, value=value, source="env", args=args
+                    ), self.assertRaises(SystemExit):
+                        self.parse_cache_config(args, {name.upper(): value})
+
+    def test_setup_rejects_reversed_frozen_abort_bounds(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for args, env in (
+            (["--block_pool_frozen_abort_lower_ratio", "0.45"], {}),
+            (["--block_pool_frozen_abort_upper_ratio", "0.2"], {}),
+            ([], {"BLOCK_POOL_FROZEN_ABORT_LOWER_RATIO": "0.45"}),
+            (None, {"BLOCK_POOL_FROZEN_ABORT_UPPER_RATIO": "0.2"}),
+        ):
+            with self.subTest(args=args, env=env), patch.dict(
+                os.environ, env, clear=True
+            ), patch.object(sys, "argv", ["server"]), self.assertRaises(SystemExit):
+                setup_args(args)
 
     def test_crc_default_and_environment(self):
         for args in (None, []):

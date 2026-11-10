@@ -485,7 +485,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("block_tree_transfer_worker_count", &KVCacheConfig::block_tree_transfer_worker_count)
         .def_readwrite("block_tree_business_queue_max_size", &KVCacheConfig::block_tree_business_queue_max_size)
         .def_readwrite("block_tree_transfer_queue_max_size", &KVCacheConfig::block_tree_transfer_queue_max_size)
-        .def_readwrite("block_tree_device_frozen_abort_ratio", &KVCacheConfig::block_tree_device_frozen_abort_ratio)
+        .def_readwrite("block_pool_frozen_abort_lower_ratio", &KVCacheConfig::block_pool_frozen_abort_lower_ratio)
+        .def_readwrite("block_pool_frozen_abort_upper_ratio", &KVCacheConfig::block_pool_frozen_abort_upper_ratio)
         .def_readwrite("block_tree_device_evict_low_watermark_ratio",
                        &KVCacheConfig::block_tree_device_evict_low_watermark_ratio)
         .def_readwrite("block_tree_device_evict_high_watermark_ratio",
@@ -584,7 +585,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      15,
+                                      16,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -672,9 +673,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.disk_cache_read_thread_count,
                                       self.disk_cache_write_thread_count,
                                       self.disk_cache_evict_timeout_ms,
-                                      self.block_tree_device_frozen_abort_ratio);
+                                      self.block_pool_frozen_abort_lower_ratio,
+                                      self.block_pool_frozen_abort_upper_ratio);
             },
             [](py::tuple t) {
+                const py::tuple frozen_bounds_state = t;
+                const bool has_frozen_bounds =
+                    t.size() == 91 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 16;
+                if (has_frozen_bounds) {
+                    t = t[py::slice(0, 90, 1)].cast<py::tuple>();
+                    t[1] = py::int_(15);
+                }
                 const py::tuple frozen_ratio_state = t;
                 const bool has_frozen_ratio =
                     t.size() == 90 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 15;
@@ -756,12 +765,19 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
 
                 KVCacheConfig c;
-                if (has_frozen_ratio) {
-                    c.block_tree_device_frozen_abort_ratio = frozen_ratio_state[89].cast<double>();
+                if (has_frozen_bounds) {
+                    c.block_pool_frozen_abort_upper_ratio = frozen_bounds_state[90].cast<double>();
                 }
-                if (!std::isfinite(c.block_tree_device_frozen_abort_ratio)
-                    || c.block_tree_device_frozen_abort_ratio < 0.0 || c.block_tree_device_frozen_abort_ratio > 1.0) {
-                    throw std::runtime_error("invalid KVCacheConfig device frozen abort ratio");
+                if (has_frozen_ratio) {
+                    c.block_pool_frozen_abort_lower_ratio = frozen_ratio_state[89].cast<double>();
+                }
+                if (!std::isfinite(c.block_pool_frozen_abort_lower_ratio)
+                    || !std::isfinite(c.block_pool_frozen_abort_upper_ratio)
+                    || c.block_pool_frozen_abort_lower_ratio < 0.0
+                    || c.block_pool_frozen_abort_lower_ratio > c.block_pool_frozen_abort_upper_ratio
+                    || c.block_pool_frozen_abort_upper_ratio > 1.0) {
+                    throw std::runtime_error("invalid KVCacheConfig block pool frozen abort ratio range: expected finite "
+                                             "0 <= lower <= upper <= 1");
                 }
                 if (has_disk_timeout) {
                     c.disk_cache_evict_timeout_ms = disk_timeout_state[88].cast<int64_t>();

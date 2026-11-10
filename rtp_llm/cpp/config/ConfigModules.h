@@ -142,13 +142,14 @@ struct FMHAConfig {
     std::string to_string() const;
 };
 
-constexpr double kDefaultDeviceLowWatermarkRatio  = 0.82;
-constexpr double kDefaultDeviceHighWatermarkRatio = 0.90;
-constexpr double kDefaultDeviceFrozenAbortRatio   = 0.30;
-constexpr double kDefaultMemoryLowWatermarkRatio  = 0.90;
-constexpr double kDefaultMemoryHighWatermarkRatio = 0.94;
-constexpr double kDefaultDiskLowWatermarkRatio    = 0.92;
-constexpr double kDefaultDiskHighWatermarkRatio   = 0.97;
+constexpr double kDefaultDeviceLowWatermarkRatio        = 0.82;
+constexpr double kDefaultDeviceHighWatermarkRatio       = 0.90;
+constexpr double kDefaultBlockPoolFrozenAbortLowerRatio = 0.30;
+constexpr double kDefaultBlockPoolFrozenAbortUpperRatio = 0.40;
+constexpr double kDefaultMemoryLowWatermarkRatio        = 0.90;
+constexpr double kDefaultMemoryHighWatermarkRatio       = 0.94;
+constexpr double kDefaultDiskLowWatermarkRatio          = 0.92;
+constexpr double kDefaultDiskHighWatermarkRatio         = 0.97;
 
 struct KVCacheConfig {
     bool                                    reuse_cache           = false;
@@ -171,11 +172,12 @@ struct KVCacheConfig {
     // Prefer WorkLoop for supported final layouts; legal legacy layouts fall back at creation.
     bool btc_transfer_engine_async = true;
     // Slots per device in each WorkLoop's private async CRC service.
-    double block_tree_device_frozen_abort_ratio = kDefaultDeviceFrozenAbortRatio;
     int64_t btc_crc_slot_count                           = 8;
     int64_t block_tree_transfer_worker_count             = 1;
     int64_t block_tree_business_queue_max_size           = 10000;
     int64_t block_tree_transfer_queue_max_size           = 10000;
+    double  block_pool_frozen_abort_lower_ratio          = kDefaultBlockPoolFrozenAbortLowerRatio;
+    double  block_pool_frozen_abort_upper_ratio          = kDefaultBlockPoolFrozenAbortUpperRatio;
     double  block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
     double  block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
     double  block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
