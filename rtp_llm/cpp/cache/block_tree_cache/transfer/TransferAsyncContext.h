@@ -18,6 +18,12 @@ public:
     virtual bool           success() const               = 0;
     virtual TransferResult result() const                = 0;
 
+    // An immutable observation for exceptional coordinator completion. A
+    // pending RPC implementation must not read responses still owned by gRPC.
+    virtual std::shared_ptr<const TransferExecutionDiagnostics> executionDiagnostics() const {
+        return nullptr;
+    }
+
     ErrorInfo errorInfo() const {
         return result().status;
     }

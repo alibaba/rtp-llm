@@ -157,6 +157,24 @@ cc_test(
 )
 
 cc_test(
+    name = "frozen_task_test",
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = ["FrozenTaskTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "frozen_execution_test",
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = ["FrozenExecutionTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [":block_transfer_engine_test_utils"],
+    tags = ["L20_CU13"],
+)
+
+cc_test(
     name = "transfer_batch_async_context_test",
     exec_properties = {"gpu": "L20_CU13"},
     srcs = ["TransferBatchAsyncContextTest.cc"],

@@ -88,6 +88,14 @@ public:
     void freezeBlock(BlockIdxType block) noexcept;
     bool isFrozen(BlockIdxType block) const;
 
+    // Prepare, but do not acquire or release, one FROZEN reference per block.
+    // Call while ordinary references protect these allocations, before frozen
+    // holds are acquired. Invoke the returned closure exactly once after the
+    // caller acquires its frozen holds, and this pool must outlive the closure.
+    // Preparation may allocate; release cannot allocate and isolates capacity
+    // notification failures so a completed decrement is never retried.
+    std::function<void()> prepareFrozenReferenceRelease(BlockIdList blocks);
+
     // Number of distinct blocks carrying at least one tree reference of this type.
     size_t referencedBlocksNum(BlockTreeRefType ref_type) const;
 
@@ -195,6 +203,7 @@ private:
     void          checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
     static size_t treeRefTypeIndex(BlockTreeRefType ref_type);
     void          incTreeRefNoLock(BlockIdxType block, size_t ref_type_index);
+    void          releaseFrozenReferences(const BlockIdList& blocks, const std::function<void()>& notify) noexcept;
 
     size_t       totalBlocksNumNoLock() const;
     void         refillAscendingFreeBlocksNoLock();

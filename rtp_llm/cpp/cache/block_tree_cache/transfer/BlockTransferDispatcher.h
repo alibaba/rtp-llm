@@ -3,11 +3,13 @@
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
+#include <list>
 #include <memory>
 #include <mutex>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
 
 namespace rtp_llm {
 
@@ -47,8 +49,12 @@ public:
     // queued business settlement must be drained separately afterwards.
     void waitForTransfers() const;
 
+    // Local diagnostics/explicit release access. No polling or automatic release.
+    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
+
 private:
     struct CompletionTicket;
+    struct CoordinatedExecution;
     void registerTransfer() const;
     void retireTransfer() const noexcept;
 
@@ -61,6 +67,9 @@ private:
 
     std::shared_ptr<TransferAsyncContext> executeMultiRank(TransferTask task,
                                                            const char*  completion_operation = nullptr) const;
+    void submitCoordinated(TransferTask task, TransferDoneCallback done, const char* completion_operation) const;
+    FrozenTask::ExecutionInfo describeExecution(const TransferTask& task, const char* completion_operation) const;
+    void retainFrozenTask(std::list<std::shared_ptr<FrozenTask>>& prepared_slot) const noexcept;
 
     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine_;
@@ -69,6 +78,8 @@ private:
     mutable std::condition_variable               completion_cv_;
     mutable size_t                                inflight_transfers_{0};
     std::function<void()>                         drain_observer_for_test_;
+    mutable std::mutex                            frozen_mutex_;
+    mutable std::list<std::shared_ptr<FrozenTask>> frozen_tasks_;
 };
 
 using BlockTransferDispatcherPtr = std::shared_ptr<BlockTransferDispatcher>;
