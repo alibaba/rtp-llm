@@ -43,7 +43,13 @@ def engram_inject_kernel(
     rstd *= tl.rsqrt(tl.sum(key * key, 0) / DIM + EPS)
     dot = tl.sum(hidden * q * k * key, 0) * rstd * (DIM**-0.5)
     gate_input = tl.sqrt(tl.maximum(tl.abs(dot), 1.0e-6))
-    gate_input = tl.extra.cuda.libdevice.copysign(gate_input, dot)
+    # Exact IEEE copysign(gate_input, dot) via sign-bit surgery: backend
+    # neutral (the AMD Triton compiler rejects tl.extra.cuda.libdevice
+    # device functions) and bit-identical to the libdevice call, including
+    # the signed-zero case the reference semantics preserve.
+    magnitude = gate_input.to(tl.uint32, bitcast=True) & 0x7FFFFFFF
+    sign_bit = dot.to(tl.uint32, bitcast=True) & 0x80000000
+    gate_input = (magnitude | sign_bit).to(tl.float32, bitcast=True)
     gate = tl.sigmoid(gate_input)
     if HAS_MASK:
         gate = tl.where(tl.load(Mask + token), gate, 0)
