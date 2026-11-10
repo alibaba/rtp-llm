@@ -109,6 +109,19 @@ class SparseAttnV4DecodeFp8Op:
         by ``attn_sink``). Empty rows report ``+inf`` and must be guarded
         by the consumer.
         """
+        if torch.version.hip is not None:
+            return self._forward_rocm(
+                q,
+                kv_cache,
+                attn_sink,
+                topk_idxs,
+                topk_length,
+                extra_k_cache,
+                extra_topk_idxs,
+                extra_topk_length,
+                return_lse,
+            )
+
         return self._forward_flash_mla(
             q,
             kv_cache,
@@ -123,6 +136,161 @@ class SparseAttnV4DecodeFp8Op:
             extra_topk_length,
             return_lse,
         )
+
+    def _forward_rocm(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_sink: Optional[torch.Tensor],
+        topk_idxs: torch.Tensor,
+        topk_length: Optional[torch.Tensor],
+        extra_k_cache: Optional[torch.Tensor],
+        extra_topk_idxs: Optional[torch.Tensor],
+        extra_topk_length: Optional[torch.Tensor],
+        return_lse: bool,
+    ) -> torch.Tensor:
+        """MI308X decode via the existing 528B/288B dequant codecs.
+
+        FlashMLA's fused dual-pool kernel is CUDA-only.  ROCm gathers and
+        dequantizes only the selected slots of each pool with the Triton
+        codecs already used by the V4.1 prefill path, concatenates them into
+        a BF16 row set, and runs one ``_sparse_attn`` with the original
+        per-slot ``-1`` mask plus the learned sink.  This is exact (no
+        approximation and no full-cache dequantization); the gathered set is
+        bounded by ``topk_length`` (128 SWA + at most 8192 compressed slots).
+        """
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
+            dequantize_k_cache_slots_fp4,
+        )
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_triton import (
+            dequantize_and_gather_k_cache_slots,
+        )
+        from rtp_llm.models_py.modules.dsv41.utils import _sparse_attn
+
+        if return_lse:
+            raise NotImplementedError(
+                "ROCm DSV4.1 decode does not expose FlashMLA LSE; "
+                "no caller on this lane requests it"
+            )
+        if q.dim() != 4:
+            raise ValueError(f"q must be [B, S, H, D], got {tuple(q.shape)}")
+        batch, seq_len, heads, head_dim = q.shape
+        if seq_len != 1:
+            raise NotImplementedError(
+                "ROCm DSV4.1 decode supports q_len=1 only, got "
+                f"{seq_len}"
+            )
+        if head_dim != self.head_dim:
+            raise ValueError(
+                f"q head_dim {head_dim} != op head_dim {self.head_dim}"
+            )
+        if int(kv_cache.shape[2]) != 528:
+            raise ValueError(
+                "ROCm DSV4.1 decode expects the native 528-byte SWA pool, "
+                f"got {int(kv_cache.shape[2])} bytes"
+            )
+
+        swa_slots = topk_idxs.reshape(batch, 1, -1)[:, 0, :]
+        swa_width = int(swa_slots.shape[1])
+        swa_kv = torch.empty(
+            (batch, swa_width, head_dim),
+            dtype=torch.bfloat16,
+            device=q.device,
+        )
+        dequantize_and_gather_k_cache_slots(
+            swa_kv, kv_cache, swa_slots, topk_length, 0
+        )
+        positions = torch.arange(swa_width, device=q.device, dtype=torch.int32)
+        valid_swa = swa_slots >= 0
+        if topk_length is not None:
+            valid_swa = valid_swa & (
+                positions.view(1, -1) < topk_length.to(torch.int32).view(-1, 1)
+            )
+        swa_indices = torch.where(
+            valid_swa,
+            positions.view(1, -1).expand(batch, -1),
+            torch.full_like(swa_slots, -1),
+        )
+
+        if extra_k_cache is None:
+            kv = swa_kv
+            indices = swa_indices
+        else:
+            if extra_topk_idxs is None:
+                raise ValueError("extra_k_cache requires extra_topk_idxs")
+            extra_slots = extra_topk_idxs.reshape(batch, 1, -1)[:, 0, :]
+            extra_width = int(extra_slots.shape[1])
+            positions_extra = torch.arange(
+                extra_width, device=q.device, dtype=torch.int32
+            )
+            valid_extra = extra_slots >= 0
+            if extra_topk_length is not None:
+                valid_extra = valid_extra & (
+                    positions_extra.view(1, -1)
+                    < extra_topk_length.to(torch.int32).view(-1, 1)
+                )
+            masked_extra = torch.where(
+                valid_extra, extra_slots, torch.full_like(extra_slots, -1)
+            )
+            entry_bytes = int(extra_k_cache.shape[2])
+            if entry_bytes == 288:
+                extra_kv = dequantize_k_cache_slots_fp4(
+                    extra_k_cache, masked_extra.reshape(-1)
+                ).view(batch, extra_width, head_dim)
+            elif entry_bytes in (528, 584):
+                extra_kv = torch.empty(
+                    (batch, extra_width, head_dim),
+                    dtype=torch.bfloat16,
+                    device=q.device,
+                )
+                if entry_bytes == 528:
+                    dequantize_and_gather_k_cache_slots(
+                        extra_kv, extra_k_cache, extra_slots, extra_topk_length, 0
+                    )
+                else:
+                    from rtp_llm.models_py.modules.dsv41.fp8._swa_dequant_triton import (
+                        dequantize_and_gather_k_cache_slots as dequantize_584,
+                    )
+
+                    dequantize_584(
+                        extra_kv, extra_k_cache, extra_slots, extra_topk_length, 0
+                    )
+            else:
+                raise ValueError(
+                    "unsupported extra KV pool entry width "
+                    f"{entry_bytes}; expected 288 (FP4) or 528/584 (FP8)"
+                )
+            kv = torch.cat([swa_kv, extra_kv], dim=1)
+            indices = torch.cat(
+                [
+                    swa_indices,
+                    torch.where(
+                        valid_extra,
+                        positions_extra.view(1, -1).expand(batch, -1) + swa_width,
+                        torch.full_like(extra_slots, -1),
+                    ),
+                ],
+                dim=1,
+            )
+
+        if attn_sink is None:
+            sink = torch.full(
+                (heads,), float("-inf"), dtype=torch.float32, device=q.device
+            )
+        else:
+            sink = attn_sink.to(device=q.device, dtype=torch.float32).reshape(-1)
+            if sink.numel() != heads:
+                raise ValueError(
+                    f"attn_sink must have {heads} entries, got {sink.numel()}"
+                )
+        out = _sparse_attn(
+            q,
+            kv,
+            sink,
+            indices.unsqueeze(1),
+            self.softmax_scale,
+        )
+        return out.contiguous()
 
     def _forward_flash_mla(
         self,
