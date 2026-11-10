@@ -2329,6 +2329,15 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             throw;
         }
 
+        // The warmup forwards above leave freed transients behind as cached
+        // allocator segments; the capture pool allocates fresh raw memory and
+        // cannot reuse them. On near-full cards (44GB L20 carrying ~41GB of
+        // weights) that few-hundred-MB overhead is the difference between a
+        // successful capture and cudaErrorMemoryAllocation. Warmup work has
+        // been drained, so returning the cached segments here is safe; memory
+        // owned by already-instantiated graphs is not released by emptyCache.
+        cuda_graph::graphEmptyCache();
+
         auto&       graph               = graph_instances_[key].graph_;
         std::string output_dot_filename = "";
         if (enable_cuda_graph_debug_mode_) {
