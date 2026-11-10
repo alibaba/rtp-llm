@@ -132,10 +132,17 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         Thread.sleep(500); // Let the gRPC channel process the worker's GOAWAY.
 
         int existingBatches = getPrefillEndpoint().getInflightBatchCount();
+        long releaseDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         Response rejected = submitRequest(20002).get(5, TimeUnit.SECONDS);
         assertFalse(rejected.isSuccess());
         assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), rejected.getCode());
         assertTrue(rejected.getErrorMessage() != null && !rejected.getErrorMessage().isEmpty());
+        // Await endpoint ownership settlement after asynchronous response publication.
+        // Share the existing response deadline with exact ownership settlement.
+        while (getPrefillEndpoint().getInflightBatchCount() != existingBatches
+                && System.nanoTime() < releaseDeadline) {
+            Thread.sleep(10);
+        }
         assertEquals(existingBatches, getPrefillEndpoint().getInflightBatchCount());
         assertEquals(1, mockPrefillWorker.getEnqueueCount());
         assertEquals(0, mockDecodeWorker.getEnqueueCount());

@@ -4300,7 +4300,7 @@ yarl==1.24.5 \
     --hash=sha256:ff405d91509d88e8d44129cd87b18d70acd1f0c1aeabd7bc3c46792b1fe2acba \
     --hash=sha256:ffcd54362564dc1a30fb74d8b8a6e5a6b11ebd5e27266adc3b7427a21a6c9104
     # via aiohttp
-z3-solver @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/z3_solver-4.13.0.0%2Blocal.ali-py2.py3-none-manylinux2014_aarch64.whl \
+z3-solver @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/z3_solver-4.13.0.0-py2.py3-none-manylinux2014_aarch64.whl \
     --hash=sha256:e94170200c64f5d67295529e0568b15ba59a5f3b29c496402f8c941aec4aaa9b
     # via
     #   -r deps/requirements_cuda13_arm.txt
