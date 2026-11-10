@@ -3,7 +3,13 @@
 import weakref
 
 import torch
-from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
+try:
+    from deep_gemm.utils.layout import (
+        get_mn_major_tma_aligned_packed_ue8m0_tensor,
+    )
+except ImportError:  # ROCm/CPU builds do not ship DeepGEMM.
+    get_mn_major_tma_aligned_packed_ue8m0_tensor = None
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.base.common.embedding import Embedding
@@ -34,6 +40,11 @@ class V41MXFP8Linear(torch.nn.Module):
         if scales.shape != ((self.N + 31) // 32, (self.K + 31) // 32):
             raise ValueError(
                 f"Invalid V4.1 FP8 scales: {(self.N, self.K)}, {scales.shape}"
+            )
+        if get_mn_major_tma_aligned_packed_ue8m0_tensor is None:
+            raise RuntimeError(
+                "V41MXFP8Linear native scales require DeepGEMM; use the "
+                "ROCm BF16 fallback instead of constructing this module"
             )
         rows = torch.arange(self.N, device=scales.device) // 32
         return get_mn_major_tma_aligned_packed_ue8m0_tensor(
