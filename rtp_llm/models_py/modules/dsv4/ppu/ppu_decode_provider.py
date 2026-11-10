@@ -31,6 +31,7 @@ class PpuDecodeProvider(PpuModuleProvider):
             strategy_type = PpuMegaMoEFP4Strategy
             strategy_kwargs["resources"] = self._mega_resources
             strategy_kwargs["module_name"] = self._mega_module_name
+            strategy_kwargs["streamed"] = self._mega_streamed
         return PpuEPMoE(
             *args,
             platform_provider=self,
@@ -78,6 +79,9 @@ class PpuDecodeProvider(PpuModuleProvider):
         self._moe_backend = self.execution_options.get("DSV4_PPU_DECODE_MOE_BACKEND", "deepep")
         if self._moe_backend not in ("deepep", "megamoe"):
             raise ValueError("DSV4_PPU_DECODE_MOE_BACKEND must be deepep or megamoe")
+        self._mega_streamed = self._bool("DSV4_PPU_MEGAMOE_STREAMED", False)
+        if self._mega_streamed and self._moe_backend != "megamoe":
+            raise ValueError("Streamed execution requires the MegaMoE backend")
         self._mega_resources = None
         self._mega_module_name = "deep_gemm_mega"
         if self._moe_backend == "megamoe":

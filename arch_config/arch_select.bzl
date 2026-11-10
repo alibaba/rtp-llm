@@ -130,7 +130,7 @@ def subscribe_deps():
 def whl_deps():
     return select({
         "@rtp_llm//:using_ppu": [
-            "deep-gemm-mega@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/ppu/deep_gemm_mega-2.1.0%2Bppu2.2.0.torch2.11.cu130.r1-cp312-cp312-linux_x86_64.whl#sha256=48039c6fbac4832b8990fdc1ace9ce1b5bfc3a7c4d7fa02a9b5172e01f78c392",
+            "deep-gemm-mega@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/ppu/deep_gemm_mega-2.1.1%2Bppu2.2.0.torch2.11.cu130.rtp1670-cp312-cp312-linux_x86_64.whl#sha256=d661fe8b34ddd27caf392cf5b82478d82867a3bb8460ab77c881d52e83c57c1e",
             "apache-tvm-ffi==0.1.12",
             # Runtime JIT dependencies are intentionally outside the Bazel lock.
             "tilelang==0.1.13",

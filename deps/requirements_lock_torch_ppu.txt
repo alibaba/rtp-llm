@@ -856,7 +856,7 @@ deep-ep @ https://pkg.flytiger-eco.com/artifactory/pypi_generic/deep_ep/2.2.1+v0
 deep-gemm @ https://pkg.flytiger-eco.com/artifactory/pypi_generic/deep_gemm/1.0.0+v0.4.0.ppu2.2.0/deep_gemm-1.0.0+cu130torch2.11.0alios7u2oe-cp312-cp312-linux_x86_64.whl#sha256=7e42900e3e86927f874daac8466f2d8611efe9b0c2ffeea30a306fe5e445a0cd \
     --hash=sha256:7e42900e3e86927f874daac8466f2d8611efe9b0c2ffeea30a306fe5e445a0cd
     # via -r work/requirements.in
-deep-gemm-mega @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/ppu/deep_gemm_mega-2.1.0%2Bppu2.2.0.torch2.11.cu130.r1-cp312-cp312-linux_x86_64.whl#sha256=48039c6fbac4832b8990fdc1ace9ce1b5bfc3a7c4d7fa02a9b5172e01f78c392 \
+deep-gemm-mega @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/ppu/deep_gemm_mega-2.1.1%2Bppu2.2.0.torch2.11.cu130.rtp1670-cp312-cp312-linux_x86_64.whl#sha256=d661fe8b34ddd27caf392cf5b82478d82867a3bb8460ab77c881d52e83c57c1e \
     --hash=sha256:48039c6fbac4832b8990fdc1ace9ce1b5bfc3a7c4d7fa02a9b5172e01f78c392
     # via -r requirements_torch_ppu.txt
 einops==0.8.2 \
