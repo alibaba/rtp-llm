@@ -4,6 +4,7 @@
 #include <utility>
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
+#include "rtp_llm/cpp/multimodal_processor/RemoteMultimodalProcessor.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/multimodal_processor/test/FakeMultimodalProcessor.h"
 
@@ -12,6 +13,27 @@ using namespace std;
 namespace rtp_llm {
 
 class MultimodalProcessorTest: public DeviceTestBase {};
+
+TEST_F(MultimodalProcessorTest, RemoteTransportStartsAtReleaseOnlyForTemplateStartup) {
+    MMTransportConfig transport;
+    transport.mode = "invalid";
+    // Normal startup still reports a transport configuration error immediately.
+    EXPECT_THROW((RemoteMultimodalProcessor({}, 32, transport)), std::invalid_argument);
+    // A template must not open its transport until the controller releases it.
+    RemoteMultimodalProcessor processor({}, 32, transport, nullptr, -1, true);
+    EXPECT_THROW(processor.startDeferredServices(), std::invalid_argument);
+}
+
+TEST_F(MultimodalProcessorTest, RemoteTransportReleaseIsIdempotent) {
+    MMTransportConfig transport;
+    transport.mode = kMMTransportModeGrpc;
+    RemoteMultimodalProcessor processor({}, 32, transport, nullptr, -1, true);
+    EXPECT_NO_THROW(processor.startDeferredServices());
+    auto* ready_transport = processor.output_transport_.get();
+    ASSERT_NE(ready_transport, nullptr);
+    EXPECT_NO_THROW(processor.startDeferredServices());
+    EXPECT_EQ(processor.output_transport_.get(), ready_transport);
+}
 
 namespace {
 class PreparedV41Processor: public FakeMultimodalProcessor {

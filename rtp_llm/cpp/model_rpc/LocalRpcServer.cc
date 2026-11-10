@@ -299,7 +299,8 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
                                                           maga_init_params.model_config_.max_seq_len,
                                                           maga_init_params.vit_config.output_transport,
                                                           metrics_reporter_,
-                                                          maga_init_params.parallelism_config.local_rank));
+                                                          maga_init_params.parallelism_config.local_rank,
+                                                          defer_engine_loop_));
     }
 
     return grpc::Status::OK;
@@ -309,11 +310,16 @@ void LocalRpcServer::updateRuntimeEndpoints(const RuntimeConfig& runtime_config)
     if (!defer_tp_broadcaster_) {
         RTP_LLM_FAIL("runtime endpoints can only be updated before deferred services start");
     }
-    maga_init_params_.runtime_config.worker_addrs = runtime_config.worker_addrs;
+    maga_init_params_.runtime_config.worker_addrs      = runtime_config.worker_addrs;
     maga_init_params_.runtime_config.worker_grpc_addrs = runtime_config.worker_grpc_addrs;
 }
 
 void LocalRpcServer::startDeferredServices() {
+    // The multimodal RDMA reader must also be created after the SCR barrier,
+    // before the engine starts threads that may read ACCL's environment.
+    if (mm_processor_) {
+        mm_processor_->startDeferredServices();
+    }
     // Every rank must start, including TP followers and ranks without a
     // broadcaster. Do this before the broadcaster-specific early returns.
     if (defer_engine_loop_) {

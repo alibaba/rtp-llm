@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <torch/python.h>
@@ -29,10 +30,28 @@ public:
     RemoteMultimodalProcessor(const MMModelConfig&         mm_model_config,
                               int64_t                      max_seq_len,
                               const MMTransportConfig&     transport_config,
-                              kmonitor::MetricsReporterPtr metrics_reporter = nullptr,
-                              int                          device_id        = -1):
-        MultimodalProcessor(py::none(), mm_model_config, max_seq_len, metrics_reporter),
-        output_transport_(createMMRemoteOutputTransport(transport_config, metrics_reporter, device_id)) {}
+                              kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
+                              int                          device_id           = -1,
+                              bool                         defer_service_start = false):
+        MultimodalProcessor(py::none(), mm_model_config, max_seq_len, metrics_reporter), device_id_(device_id) {
+        if (defer_service_start) {
+            // RDMA readers map uverbs devices, which CRIU cannot checkpoint.
+            // Keep the processor identity stable for HTTP/RPC consumers, but
+            // open its transport only after SCR identity fixup and release.
+            deferred_transport_config_ = transport_config;
+            RTP_LLM_LOG_INFO("multimodal output transport deferred until SCR release");
+        } else {
+            output_transport_ = createMMRemoteOutputTransport(transport_config, metrics_reporter_, device_id_);
+        }
+    }
+
+    void startDeferredServices() override {
+        if (deferred_transport_config_) {
+            output_transport_ =
+                createMMRemoteOutputTransport(*deferred_transport_config_, metrics_reporter_, device_id_);
+            deferred_transport_config_.reset();
+        }
+    }
 
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
                                                       std::string                                 ip_port    = "",
@@ -87,6 +106,8 @@ private:
     }
 
     std::unique_ptr<MMRemoteOutputTransport> output_transport_;
+    std::optional<MMTransportConfig>         deferred_transport_config_;
+    int                                      device_id_;
 };
 
 }  // namespace rtp_llm
