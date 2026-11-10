@@ -6,31 +6,36 @@ import java.util.concurrent.*;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.forward.*;
 
-/** One Forward lane; only prepared, deduplicated media enter this queue. */
+/**
+ * Batches prepared, deduplicated media on a single Forward lane.
+ */
 final class VitScheduler implements AutoCloseable {
-    static final class Work {
-        private final VitGeometry.Image image;
-        private final long enqueued=System.nanoTime(), deadline;
-        private final CompletableFuture<VitGeometry.Image> result=new CompletableFuture<>();
-        private Work(VitGeometry.Image image,long deadline) { this.image=image; this.deadline=deadline; }
-        CompletionStage<VitGeometry.Image> result() { return result.minimalCompletionStage(); }
-    }
     private final VitConfig config;
     private final VitMetrics metrics;
     private final ArrayDeque<Work> waiting=new ArrayDeque<>();
     private final SimulatedCompute compute=new SimulatedCompute();
     private final Thread worker;
+
     private volatile boolean closed;
+
     private volatile RuntimeException failure;
+
     private int running;
     private long sequence;
 
-    VitScheduler(VitConfig config) { this(config,new VitMetrics()); }
     VitScheduler(VitConfig config,VitMetrics metrics) {
         this.config=config; this.metrics=metrics;
         worker=Thread.ofVirtual().name("vision-"+config.id()).start(this::run);
     }
-    Work submit(VitGeometry.Image image) { return submit(image,Long.MAX_VALUE); }
+
+    @Override public void close() {
+        List<Work> rest;
+        synchronized(this) { if(closed) { compute.close();worker.interrupt();return; }closed=true;rest=new ArrayList<>(waiting);waiting.clear();notifyAll(); }
+        var error=Status.UNAVAILABLE.withDescription("V stopped").asRuntimeException();
+        for(var job:rest) complete(job,error);
+        compute.close();worker.interrupt();
+    }
+
     synchronized Work submit(VitGeometry.Image image,long deadline) {
         if(closed || failure!=null) throw Status.UNAVAILABLE.withDescription("V scheduler stopped").asRuntimeException();
         if(waiting.size()>=config.queueSize()) {
@@ -40,6 +45,7 @@ final class VitScheduler implements AutoCloseable {
         var work=new Work(image,deadline);
         waiting.add(work); reportQueueDepth(); notifyAll(); return work;
     }
+
     boolean cancel(Work work) {
         synchronized(this) {
             if(!waiting.remove(work)) return false;
@@ -48,21 +54,13 @@ final class VitScheduler implements AutoCloseable {
         work.result.completeExceptionally(Status.CANCELLED.withDescription("V ready work cancelled").asRuntimeException());
         return true;
     }
-    private synchronized List<Work> next() throws InterruptedException {
-        while(!closed && waiting.isEmpty()) wait();
-        if(closed) return null;
-        long until=waiting.getFirst().enqueued+TimeUnit.MILLISECONDS.toNanos(config.batchSize()==1?0:config.waitMs());
-        while(!closed && !waiting.isEmpty() && waiting.size()<config.batchSize() && until>System.nanoTime())
-            TimeUnit.NANOSECONDS.timedWait(this,until-System.nanoTime());
-        if(closed) return null;
-        var jobs=new ArrayList<Work>();
-        while(!waiting.isEmpty() && jobs.size()<config.batchSize()) {
-            jobs.add(waiting.remove());
-            reportQueueDepth();
-        }
-        running=jobs.size(); return jobs;
+
+    synchronized Map<String,Double> snapshot() {
+        checkHealthy();
+        return Map.of("mock_vit_running_image_count",(double)running);
     }
-    private void reportQueueDepth() { metrics.events.observe("py_rtp_vit_embedding_queue_size", waiting.size()); }
+
+    void checkHealthy() { if(failure!=null) throw failure; if(closed) throw new IllegalStateException("V scheduler closed"); }
 
     private void run() {
         List<Work> batch=List.of();
@@ -112,25 +110,43 @@ final class VitScheduler implements AutoCloseable {
         } catch(InterruptedException error) { Thread.currentThread().interrupt(); fail(batch,Status.UNAVAILABLE.withCause(error).asRuntimeException()); }
         catch(Exception error) { fail(batch,new IllegalStateException("V forward failed",error)); }
     }
+
+    private synchronized List<Work> next() throws InterruptedException {
+        while(!closed && waiting.isEmpty()) wait();
+        if(closed) return null;
+        long until=waiting.getFirst().enqueued+TimeUnit.MILLISECONDS.toNanos(config.batchSize()==1?0:config.waitMs());
+        while(!closed && !waiting.isEmpty() && waiting.size()<config.batchSize() && until>System.nanoTime())
+            TimeUnit.NANOSECONDS.timedWait(this,until-System.nanoTime());
+        if(closed) return null;
+        var jobs=new ArrayList<Work>();
+        while(!waiting.isEmpty() && jobs.size()<config.batchSize()) {
+            jobs.add(waiting.remove());
+            reportQueueDepth();
+        }
+        running=jobs.size(); return jobs;
+    }
+
+    private void reportQueueDepth() { metrics.events.observe("py_rtp_vit_embedding_queue_size", waiting.size()); }
+
     private static void complete(Work work,Throwable error) {
         if(error==null) work.result.complete(work.image); else work.result.completeExceptionally(error);
     }
+
     private void fail(List<Work> batch,RuntimeException error) {
         List<Work> rest;
         synchronized(this) { failure=error;closed=true;running=0;rest=new ArrayList<>(waiting);waiting.clear();notifyAll(); }
         if(batch!=null) for(var job:batch) complete(job,error);
         for(var job:rest) complete(job,error);
     }
-    void checkHealthy() { if(failure!=null) throw failure; if(closed) throw new IllegalStateException("V scheduler closed"); }
-    synchronized Map<String,Double> snapshot() {
-        checkHealthy();
-        return Map.of("mock_vit_running_image_count",(double)running);
-    }
-    @Override public void close() {
-        List<Work> rest;
-        synchronized(this) { if(closed) { compute.close();worker.interrupt();return; }closed=true;rest=new ArrayList<>(waiting);waiting.clear();notifyAll(); }
-        var error=Status.UNAVAILABLE.withDescription("V stopped").asRuntimeException();
-        for(var job:rest) complete(job,error);
-        compute.close();worker.interrupt();
+
+    /**
+     * Carries a prepared image, its deadline and its Forward result.
+     */
+    static final class Work {
+        private final VitGeometry.Image image;
+        private final long enqueued=System.nanoTime(), deadline;
+        private final CompletableFuture<VitGeometry.Image> result=new CompletableFuture<>();
+        private Work(VitGeometry.Image image,long deadline) { this.image=image; this.deadline=deadline; }
+        CompletionStage<VitGeometry.Image> result() { return result.minimalCompletionStage(); }
     }
 }

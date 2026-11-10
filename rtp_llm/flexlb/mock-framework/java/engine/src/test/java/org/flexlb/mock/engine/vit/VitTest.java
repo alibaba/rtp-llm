@@ -14,46 +14,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Exercises the ViT RPCs, cache residency, admission and Forward scheduling.
+ */
 class VitTest {
     @TempDir Path directory;
-    VitConfig config(String expression,long device,long host,long hashes,int wait) throws Exception {
-        return config(expression,device,host,hashes,wait,Map.of());
-    }
-    VitConfig config(String expression,long device,long host,long hashes,int wait,Map<String,Object> overrides) throws Exception {
-        var path=directory.resolve(UUID.randomUUID()+".json");
-        var settings=new HashMap<String,Object>(Map.of("mock.vit.skip.download",true,
-            "mm_cache_gpu_max_bytes",device,"mm_cache_cpu_max_bytes",host,"mm_hash_key_cache_max_bytes",hashes,
-            "gpu_max_batch_size",8,"gpu_batch_wait_ms",wait,"mock.compute",Map.of("forward",Map.of("expression",expression))));
-        settings.putAll(Map.of("patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024, "hidden_size", 4));
-        settings.putAll(overrides);
-        new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",settings)));
-        return VitConfig.load(path);
-    }
-    static MultimodalInputsPB input(String key) {
-        return MultimodalInputsPB.newBuilder().setRequestId(1).addMultimodalInputs(MultimodalInputPB.newBuilder()
-            .setMultimodalType(1).setMultimodalUrl(key).setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(56).setHeight(28))).build();
-    }
-    static double sample(String text, String name) {
-        var values=text.lines().filter(line -> line.startsWith(name + "{") && line.contains("role=\"vit\""))
-            .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1))).toArray();
-        assertTrue(values.length>0,"Missing metric: "+name);
-        return Arrays.stream(values).sum();
-    }
-    static ManagedChannel channel(VitNode node) {
-        return ManagedChannelBuilder.forTarget((String)node.endpoints().get("rpc")).usePlaintext().build();
-    }
-    private static <T> CompletableFuture<T> response(java.util.function.Consumer<io.grpc.stub.StreamObserver<T>> call) {
-        var result=new CompletableFuture<T>();
-        call.accept(new io.grpc.stub.StreamObserver<>() {
-            public void onNext(T value) { result.complete(value); }
-            public void onError(Throwable error) { result.completeExceptionally(error); }
-            public void onCompleted() {}
-        });
-        return result;
-    }
+
     @Test void nativeWorkRatesCountUniqueMediaAcrossRpcCacheAndAsyncPaths() throws Exception {
         var metrics=new VitMetrics();
-        try(var service=new VitService(config("1",4096,4096,4096,0),metrics)) {
+        try(var service=new VitNode.RpcService(config("1",4096,4096,4096,0),metrics)) {
             var multi=input("one").toBuilder().addMultimodalInputs(input("two").getMultimodalInputs(0))
                 .addMultimodalInputs(input("one").getMultimodalInputs(0)).build();
             VitTest.<MultimodalOutputPB>response(out->service.remoteMultimodalEmbedding(multi,out)).get(3,TimeUnit.SECONDS);
@@ -73,10 +42,38 @@ class VitTest {
             assertTrue(text.contains("source=\"get_embedding_result\",status=\"success\""));
         }
     }
+
+    VitConfig config(String expression,long device,long host,long hashes,int wait) throws Exception {
+        return config(expression,device,host,hashes,wait,Map.of());
+    }
+
+    VitConfig config(String expression,long device,long host,long hashes,int wait,Map<String,Object> overrides) throws Exception {
+        var path=directory.resolve(UUID.randomUUID()+".json");
+        var settings=new HashMap<String,Object>(Map.of("mock.vit.skip.download",true,
+            "mm_cache_gpu_max_bytes",device,"mm_cache_cpu_max_bytes",host,"mm_hash_key_cache_max_bytes",hashes,
+            "gpu_max_batch_size",8,"gpu_batch_wait_ms",wait,"mock.compute",Map.of("forward",Map.of("expression",expression))));
+        settings.putAll(Map.of("patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024, "hidden_size", 4));
+        settings.putAll(overrides);
+        new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",settings)));
+        return VitConfig.load(path);
+    }
+
+    static MultimodalInputsPB input(String key) {
+        return MultimodalInputsPB.newBuilder().setRequestId(1).addMultimodalInputs(MultimodalInputPB.newBuilder()
+            .setMultimodalType(1).setMultimodalUrl(key).setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(56).setHeight(28))).build();
+    }
+
+    static double sample(String text, String name) {
+        var values=text.lines().filter(line -> line.startsWith(name + "{") && line.contains("role=\"vit\""))
+            .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1))).toArray();
+        assertTrue(values.length>0,"Missing metric: "+name);
+        return Arrays.stream(values).sum();
+    }
+
     @Test void consumersCannotCompleteSharedCacheOrForwardResults() throws Exception {
         var settings=config("100",4096,4096,4096,0);
         var image=new VitGeometry.Image("private-result",56,28,2);
-        try(var cache=new VitCache(settings);var scheduler=new VitScheduler(settings)) {
+        try(var cache=new VitCache(settings, new VitMetrics());var scheduler=new VitScheduler(settings, new VitMetrics())) {
             var claims=cache.acquire(List.of(image.key(),image.key()));
             var first=claims.getFirst(); var second=claims.getLast();
             first.result().toCompletableFuture().complete(image);
@@ -87,7 +84,7 @@ class VitTest {
             cache.publish(first,image,null);
             assertEquals(image,second.result().toCompletableFuture().join());
             second.close(); assertFalse(second.hasConsumers());
-            var work=scheduler.submit(image);
+            var work=scheduler.submit(image, Long.MAX_VALUE);
             work.result().toCompletableFuture().cancel(true);
             assertEquals(image,work.result().toCompletableFuture().get(3,TimeUnit.SECONDS));
         }
@@ -115,7 +112,7 @@ class VitTest {
 
     @Test void gpuEvictionWithoutHostRoomStillCountsLogicalRemoval() throws Exception {
         var metrics=new VitMetrics();
-        try(var service=new VitService(config("1",40,0,4096,0),metrics)) {
+        try(var service=new VitNode.RpcService(config("1",40,0,4096,0),metrics)) {
             for(String key:List.of("first","second"))
                 VitTest.<MultimodalOutputPB>response(out->service.remoteMultimodalEmbedding(input(key),out)).get(3,TimeUnit.SECONDS);
             assertEquals(1,sample(service.metrics(),"py_rtp_vit_embedding_cache_eviction_qps_total"));
@@ -137,12 +134,18 @@ class VitTest {
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
     }
+
+    static ManagedChannel channel(VitNode node) {
+        return ManagedChannelBuilder.forTarget((String)node.endpoints().get("rpc")).usePlaintext().build();
+    }
+
     @Test void geometryMatchesNativeDsv41PlannerAtPinnedSource() {
         // Values evaluated from ba26ddf1dd plan_image_grid/num_image_tokens, not this Java implementation.
         int[][] vectors = {{1,1,184},{56,28,202},{512,512,184},{1024,1024,652},{1920,1080,968},
             {32768,1,1024},{1,32768,1024},{3840,2160,968},{513,777,268}};
         for (int[] v : vectors) assertEquals(v[2],VitGeometry.rows(v[0],v[1],14,3,295936,1024));
     }
+
     @Test void statusCountsUniqueMediaUntilPublicationCompletes() throws Exception {
         try (var node=VitNode.start(config("200",1024,1024,1024,0),0,0)) {
             var channel=channel(node);
@@ -159,6 +162,7 @@ class VitTest {
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
     }
+
     @Test void mergesRequestsIntoOneForwardAndReturnsOnlyMetadata() throws Exception {
         try(var node=VitNode.start(config("2 + batchSize",1024,1024,1024,150),0,0);
             var threads=Executors.newVirtualThreadPerTaskExecutor()) {
@@ -187,9 +191,10 @@ class VitTest {
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
     }
+
     @Test void logicalByteBudgetsMoveEmbeddingsIndependentlyOfHashResidency() throws Exception {
         var config=config("1",16,16,1024,0);
-        try(var cache=new VitCache(config)) {
+        try(var cache=new VitCache(config, new VitMetrics())) {
             var images=List.of(new VitGeometry.Image("a",56,28,2),new VitGeometry.Image("b",56,28,2),new VitGeometry.Image("c",56,28,2));
             for(var image:images) { var claim=cache.acquire(List.of(image.key())).getFirst();cache.publish(claim,image,null); }
             assertEquals("",cache.tier("a"));assertNotNull(cache.hash("a"));
@@ -199,8 +204,9 @@ class VitTest {
             assertTrue(cache.snapshot().get("py_rtp_vit_embedding_cache_bytes") == 32.0);
         }
     }
+
     @Test void failedProducerReleasesTheClaimAndOldCompletionCannotPublishANewGeneration() throws Exception {
-        try(var cache=new VitCache(config("1",16,16,1024,0))) {
+        try(var cache=new VitCache(config("1",16,16,1024,0), new VitMetrics())) {
             var image=new VitGeometry.Image("a",56,28,2);var first=cache.acquire(List.of(image.key())).getFirst();var joined=cache.acquire(List.of(image.key())).getFirst();
             assertFalse(joined.producer());assertFalse(joined.result().toCompletableFuture().isDone());
             cache.publish(first,null,new IllegalStateException("failed"));assertTrue(joined.result().toCompletableFuture().isCompletedExceptionally());
@@ -208,6 +214,7 @@ class VitTest {
             cache.publish(fresh,image,null);assertEquals(image,fresh.result().toCompletableFuture().join());
         }
     }
+
     @Test void oneWaiterDeadlineDoesNotCancelAnotherWaiterOrTheSharedForward() throws Exception {
         try(var node=VitNode.start(config("150",16,16,1024,0),0,0);var threads=Executors.newVirtualThreadPerTaskExecutor()) {
             var channel=channel(node);
@@ -219,6 +226,7 @@ class VitTest {
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
     }
+
     @Test void malformedMetadataAndSpanMismatchAreRejectedBeforePAllocation() throws Exception {
         var nativeInput=GenerateInputPB.newBuilder().setRequestId(1).addAllTokenIds(List.of(10,-200,20))
             .addAllMultimodalInputs(input("x").getMultimodalInputsList())
@@ -233,6 +241,7 @@ class VitTest {
         assertThrows(StatusRuntimeException.class,()->MediaInput.apply(nativeInput,output.toBuilder().clearMultimodalFeatureHash().build(),MediaInput.IMAGE_TOKEN));
         assertThrows(StatusRuntimeException.class,()->VitGeometry.validate(MultimodalInputsPB.getDefaultInstance(),true));
     }
+
     @Test void cacheKeyUsesLinuxNativeIdentityAndExcludesTimeout() {
         String[] values={"https://example.com/image.png","中文url"};
         String[] expected={"2000644620635833837","18006779371473338865"};
@@ -241,17 +250,18 @@ class VitTest {
         var changed=media.toBuilder().setMmPreprocessConfig(media.getMmPreprocessConfig().toBuilder().setMmTimeoutMs(2)).build();
         assertEquals(MediaInput.key(media),MediaInput.key(changed));
     }
+
     @Test void queueOverflowRejectsWorkAndStopCompletesEveryStageWaiter() throws Exception {
         var path=directory.resolve("bounded.json");
         new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",Map.of(
             "patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024, "hidden_size", 4,"gpu_max_batch_size",1,"vit_concurrency",1,"vit_max_queue_size",0,"mock.compute",Map.of("forward",Map.of("expression","1000"))))));
-        try(var scheduler=new VitScheduler(VitConfig.load(path))) {
-            var first=scheduler.submit(new VitGeometry.Image("a",28,28,1));
+        try(var scheduler=new VitScheduler(VitConfig.load(path), new VitMetrics())) {
+            var first=scheduler.submit(new VitGeometry.Image("a",28,28,1), Long.MAX_VALUE);
             long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
             while(scheduler.snapshot().get("mock_vit_running_image_count")==0) { assertTrue(System.nanoTime()<end);Thread.sleep(2); }
-            var second=scheduler.submit(new VitGeometry.Image("b",28,28,1));
+            var second=scheduler.submit(new VitGeometry.Image("b",28,28,1), Long.MAX_VALUE);
             assertEquals(Status.Code.RESOURCE_EXHAUSTED,assertThrows(StatusRuntimeException.class,
-                ()->scheduler.submit(new VitGeometry.Image("c",28,28,1))).getStatus().getCode());
+                ()->scheduler.submit(new VitGeometry.Image("c",28,28,1), Long.MAX_VALUE)).getStatus().getCode());
             scheduler.close();
             assertThrows(ExecutionException.class,()->first.result().toCompletableFuture().get(2,TimeUnit.SECONDS));
             assertThrows(ExecutionException.class,()->second.result().toCompletableFuture().get(2,TimeUnit.SECONDS));
@@ -263,8 +273,8 @@ class VitTest {
         try(var scheduler = new VitScheduler(config("1", 1024, 1024, 1024, 0), metrics)) {
             var expired = scheduler.submit(new VitGeometry.Image("expired", 28, 28, 100), System.nanoTime() - 1);
             assertThrows(ExecutionException.class, () -> expired.result().toCompletableFuture().get(2, TimeUnit.SECONDS));
-            var first = scheduler.submit(new VitGeometry.Image("first", 28, 28, 10));
-            var second = scheduler.submit(new VitGeometry.Image("second", 28, 28, 22));
+            var first = scheduler.submit(new VitGeometry.Image("first", 28, 28, 10), Long.MAX_VALUE);
+            var second = scheduler.submit(new VitGeometry.Image("second", 28, 28, 22), Long.MAX_VALUE);
             first.result().toCompletableFuture().get(2, TimeUnit.SECONDS); second.result().toCompletableFuture().get(2, TimeUnit.SECONDS);
             assertEquals(32, sample(org.flexlb.mock.metrics.MetricTags.scrape(metrics.registry, Map.of()), "py_rtp_vit_embedding_tps_total"));
             assertEquals(32, sample(org.flexlb.mock.metrics.MetricTags.scrape(metrics.registry, Map.of()), "py_rtp_vit_embedding_tps_total"));
@@ -290,11 +300,11 @@ class VitTest {
     }
 
     @Test void queuedStageCanBeCancelledWithoutAnotherForward() throws Exception {
-        try(var scheduler=new VitScheduler(config("120",16,16,1024,0))) {
-            var first=scheduler.submit(new VitGeometry.Image("a",28,28,1));
+        try(var scheduler=new VitScheduler(config("120",16,16,1024,0), new VitMetrics())) {
+            var first=scheduler.submit(new VitGeometry.Image("a",28,28,1), Long.MAX_VALUE);
             long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
             while(scheduler.snapshot().get("mock_vit_running_image_count")==0) { assertTrue(System.nanoTime()<end);Thread.sleep(2); }
-            var abandoned=scheduler.submit(new VitGeometry.Image("b",28,28,1));
+            var abandoned=scheduler.submit(new VitGeometry.Image("b",28,28,1), Long.MAX_VALUE);
             assertTrue(scheduler.cancel(abandoned)); assertFalse(scheduler.cancel(first));
             first.result().toCompletableFuture().get(2,TimeUnit.SECONDS);
             assertThrows(ExecutionException.class,()->abandoned.result().toCompletableFuture().get(2,TimeUnit.SECONDS));
@@ -305,7 +315,7 @@ class VitTest {
     @Test void admissionIsReleasedAfterSharedResultPublication() throws Exception {
         var settings=config("100",1024,1024,1024,0,Map.of("vit_concurrency",1,"vit_max_queue_size",0));
         var published=new CountDownLatch(1); var finishPublication=new CountDownLatch(1);
-        try(var cache=new VitCache(settings);var scheduler=new VitScheduler(settings);
+        try(var cache=new VitCache(settings, new VitMetrics());var scheduler=new VitScheduler(settings, new VitMetrics());
             var preparation=new VitPreparation(settings,cache,scheduler,new VitMetrics())) {
             var claims=preparation.submit(input("first"));
             var notified=claims.getFirst().result().thenRun(()->{
@@ -338,7 +348,7 @@ class VitTest {
     }
 
     @Test void healthDoesNotWaitForVisionSchedulingLock() throws Exception {
-        try (var scheduler = new VitScheduler(config("1",1024,1024,1024,0));
+        try (var scheduler = new VitScheduler(config("1",1024,1024,1024,0), new VitMetrics());
              var readers = Executors.newVirtualThreadPerTaskExecutor()) {
             synchronized (scheduler) {
                 readers.submit(scheduler::checkHealthy).get(1, TimeUnit.SECONDS);
@@ -346,6 +356,16 @@ class VitTest {
             scheduler.close();
             assertThrows(IllegalStateException.class, scheduler::checkHealthy);
         }
+    }
+
+    private static <T> CompletableFuture<T> response(java.util.function.Consumer<io.grpc.stub.StreamObserver<T>> call) {
+        var result=new CompletableFuture<T>();
+        call.accept(new io.grpc.stub.StreamObserver<>() {
+            public void onNext(T value) { result.complete(value); }
+            public void onError(Throwable error) { result.completeExceptionally(error); }
+            public void onCompleted() {}
+        });
+        return result;
     }
 
 }

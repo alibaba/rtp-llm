@@ -4,10 +4,13 @@ import io.prometheus.client.*;
 import java.util.*;
 import org.flexlb.mock.metrics.*;
 
-/** Per-V instance telemetry; no simulated per-process CPU/GPU utilization. */
+/**
+ * Collects ViT events and snapshots of scheduler and cache state.
+ */
 final class VitMetrics {
     final CollectorRegistry registry = new CollectorRegistry();
     final EventMetrics events;
+
     VitMetrics() {
         events = new EventMetrics("vit");
         events.register(registry);
@@ -17,11 +20,9 @@ final class VitMetrics {
                 "py_rtp_vit_embedding_cache_inflight_qps", "py_rtp_vit_embedding_cache_eviction_qps",
                 "py_rtp_vit_embedding_overload_qps", "py_rtp_vit_embedding_tps")) events.observe(name, 0);
     }
+
     void started() { events.observe("py_rtp_vit_qps", 1, Map.of("source", "mm_embedding")); }
-    // Like real's entry/exception markers: shared work and its RPC waiters report one failure.
-    private static final class ReportedError extends Throwable {
-        ReportedError() { super(null, null, false, false); }
-    }
+
     void error(Throwable error, VitCache.Claim claim) {
         synchronized(error) {
             boolean reported = Arrays.stream(error.getSuppressed()).anyMatch(ReportedError.class::isInstance);
@@ -30,6 +31,11 @@ final class VitMetrics {
             if (!reported && !entryReported) events.increment("py_rtp_vit_error_qps");
         }
     }
+
+    String scrape(VitScheduler scheduler, VitCache cache) {
+        return MetricTags.scrape(collect(scheduler, cache));
+    }
+
     List<Collector.MetricFamilySamples> collect(VitScheduler scheduler, VitCache cache) {
         var state = new TreeMap<>(scheduler.snapshot()); state.putAll(cache.snapshot());
         var gauges = new Collector() {
@@ -48,11 +54,11 @@ final class VitMetrics {
         result.addAll(MetricTags.collect(snapshot, tags));
         return List.copyOf(result);
     }
-    String scrape(VitScheduler scheduler, VitCache cache) {
-        var text = new java.io.StringWriter();
-        try { io.prometheus.client.exporter.common.TextFormat.write004(text,
-            Collections.enumeration(collect(scheduler, cache))); }
-        catch (java.io.IOException impossible) { throw new java.io.UncheckedIOException(impossible); }
-        return text.toString();
+
+    /**
+     * Marks a shared failure so it is counted once across work and RPC waiters.
+     */
+    private static final class ReportedError extends Throwable {
+        ReportedError() { super(null, null, false, false); }
     }
 }
