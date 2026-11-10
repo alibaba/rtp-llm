@@ -23,6 +23,23 @@ def _pad_heads(q, attn_sink):
 def flash_mla_sparse_fwd(
     q, kv, indices, sm_scale, d_v=512, attn_sink=None, topk_length=None
 ):
+    if torch.version.hip is not None:
+        # ROCm has no FlashMLA wheel.  The portable Triton kernel used here
+        # handles an arbitrary head count, so no 64-head padding is needed.
+        from rtp_llm.models_py.modules.dsv41.rocm_sparse_mla import (
+            sparse_mla_prefill,
+        )
+
+        return sparse_mla_prefill(
+            q,
+            kv,
+            indices,
+            sm_scale,
+            d_v=d_v,
+            attn_sink=attn_sink,
+            topk_length=topk_length,
+        )
+
     from flash_mla import flash_mla_sparse_fwd as native
 
     q, sink, heads = _pad_heads(q, attn_sink)
@@ -33,6 +50,14 @@ def flash_mla_sparse_fwd(
 
 
 def flash_mla_with_kvcache(*, q, attn_sink=None, **kwargs):
+    if torch.version.hip is not None:
+        raise NotImplementedError(
+            "DSV4.1 ROCm decode must go through "
+            "rtp_llm.models_py.modules.dsv41.fp8.decode.fp8_sparse_attn_decode_op "
+            "once its ROCm gather+dequant path is enabled; the FlashMLA "
+            "kvcache wrapper has no ROCm implementation."
+        )
+
     from flash_mla import flash_mla_with_kvcache as native
 
     q, sink, heads = _pad_heads(q, attn_sink)
