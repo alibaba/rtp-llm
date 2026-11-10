@@ -19,11 +19,11 @@ SOURCES = {
   'onpolicy_standalone_candidate.py': '8c36ff1bb662fa5ba5177c1f4e17646664c81fe93790087f00d3c10178f468a8',
   'q36_4plus4_claim_loader.py': '0075f76555d41822bfd23d3879165aa754b0b0f19484f99ec3f5166dfbe0c5ac',
   'q36_4plus4_claim_guard.py': '8bbfcd82128c1c2ac4018ec1f9fd101547389523077acbbd4c3435c5321f9e0e',
-  'q36_standalone_bootstrap_selector.py': '5191455766b2f51e372a5e5c6a7b7aa4418532af315cb7d3877c77cf76e41ce9',
+  'q36_standalone_bootstrap_selector.py': 'd1392c78d102b007fa615b2b0d3c699bbc6b1b98c22e757d0c0c6ffd3bb8cf1a',
   'standalone_bootstrap_v4.py': 'd3c993deb80505b578b97fd5222ff396dec4f0b5362dc6937aa503ff211e66a8'},
  'Q36_ADAPTER_DIR': {
-  'standalone_rtp_adapter_v3.py': 'b849f17ab606e0554db3802eb43979dd10cedd64361cc8082f716c173cf64f5c',
-  'standalone_rtp_adapter_v4.py': '45bf62e56e7dbdc7955536aa083854d16db87774d7cfad3348090cc0ccba6afe',
+  'standalone_rtp_adapter_v3.py': '746017e37515ecacbbd17e822d8665a619a21fd04b27ca327b246890cbca6c35',
+  'standalone_rtp_adapter_v4.py': '2b918782db5107752212184343afd0cf4710f99a6b841147071151163e4cdb71',
   'rtp_cleanup.py': '4506fe79022d0d02f14118ee30d65f1a935a4bb63e51d538831287fb663bdb5b'},
  'Q36_DISAGG_CODE_DIR': {
   'verl_nixl_guarded.py': '72716bd1e687b8a005cf0400a7ec998c5e440937268a301c0cc47b47cba3f1c8',
@@ -85,8 +85,8 @@ def preflight(env):
         if env.get('RLLM_RTP_KEEP_KV_CACHE') != '1' or env.get('RTP_LLM_RL_MODE') != '1':
             raise RuntimeError('resident KV requires explicit native keep and RL mode')
         verify_sources(env, {
-          'Q36_CODE_DIR': {'standalone_bootstrap_v5.py':'a6db33ff9c3eb5e9fe03a8b99fccf526b42d2fd330e0570e61ff7487793c3ae7'},
-          'Q36_ADAPTER_DIR': {'standalone_rtp_adapter_v5.py':'f67a5a6bb80a8354344a37295840b12efa815c58aaf165e97b0fb5909a951a24'}})
+          'Q36_CODE_DIR': {'standalone_bootstrap_v5.py':'1e25f1b0f9f546173fd623413dfcf63545af1d53bf155c419e3fbfd69c5d448c'},
+          'Q36_ADAPTER_DIR': {'standalone_rtp_adapter_v5.py':'b1adfbd8a300197568af4c3b6706e35bc46f34f07b4e368571b0f697354e10e1'}})
     import rtp_cleanup
     if rtp_cleanup._qualified_owner_count() != 1:
         raise RuntimeError('cleanup must select exactly one qualified native owner')

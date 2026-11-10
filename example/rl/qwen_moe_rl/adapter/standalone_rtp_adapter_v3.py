@@ -146,7 +146,9 @@ class StandaloneRTPAdapter(RTPServerAdapter):
                     restart = {'error': repr(error)}
             restart = self._broadcast(restart)
             if restart['error'] is not None: raise RuntimeError(restart['error'])
-            if not restart.get('native_boot') or not restart.get('native_incarnation'):
+            boot = restart.get('native_boot')
+            incarnation = restart.get('native_incarnation')
+            if type(boot) is not int or boot < 0 or not isinstance(incarnation, str) or not incarnation:
                 raise RuntimeError('native boot and incarnation are required before weight transfer')
             local_error = None
             try:

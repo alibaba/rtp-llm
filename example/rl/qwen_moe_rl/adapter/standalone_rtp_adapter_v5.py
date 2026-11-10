@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import sys
 
-V4_SHA256 = '45bf62e56e7dbdc7955536aa083854d16db87774d7cfad3348090cc0ccba6afe'
+V4_SHA256 = '2b918782db5107752212184343afd0cf4710f99a6b841147071151163e4cdb71'
 MODEL_CONFIG_SHA256 = '93a4693fa9d8392fbfccd4b3c9873f4bfdcb14fdede978b123d07d19675efe99'
 root = Path(os.environ['Q36_ADAPTER_DIR']).resolve(strict=True)
 source = root / 'standalone_rtp_adapter_v4.py'
