@@ -43,9 +43,9 @@ public final class MasterProbe {
                 }
                 if (tokens != 3 || !finished) throw new IllegalStateException("Native routed stream incomplete");
             } finally { engine.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
-            try (var client = new NativeClient(args[0])) {
+            try (var client = new InferenceRpcClient(args[0])) {
                 var result = client.send(request(1601), Duration.ofSeconds(8)).completion().toCompletableFuture().get(9, TimeUnit.SECONDS);
-                if (result.outcome() != NativeClient.Outcome.success || result.outputTokens() != 3 || result.ttftNanos() == null)
+                if (result.outcome() != InferenceRpcClient.Outcome.success || result.outputTokens() != 3 || result.ttftNanos() == null)
                     throw new IllegalStateException("Client failed through production Master: " + result);
                 new ObjectMapper().writeValue(Path.of(args[2]).toFile(), Map.of("enqueued_by_master", route.getEnqueuedByMaster(),
                     "outcome", result.outcome().name(), "tokens", result.outputTokens(), "ttft_ns", result.ttftNanos(), "elapsed_ns", result.elapsedNanos()));

@@ -9,6 +9,7 @@ import java.nio.file.*;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
+import org.flexlb.mock.protocol.MediaInput;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -26,11 +27,11 @@ class RequestJournalTest {
     @Test void backupAttemptsAndCancellationAreRecordedIncrementally() throws Exception {
         var path = directory.resolve("requests.jsonl");
         var journal = new RequestJournal(path, "client-0", plan());
-        try (var first = new NativeClientTest.Harness(); var backup = new NativeClientTest.Harness();
-             var client = new NativeClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")), journal::record)) {
+        try (var first = new InferenceRpcClientTest.Harness(); var backup = new InferenceRpcClientTest.Harness();
+             var client = new InferenceRpcClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")), journal::record, MediaInput.IMAGE_TOKEN, 0L, 1)) {
             first.scheduleFailure = io.grpc.Status.UNAVAILABLE;
-            backup.output = (id, response) -> response.onNext(NativeClientTest.token(id, 1, false));
-            var call = client.send(NativeClientTest.request(100), Duration.ofSeconds(8));
+            backup.output = (id, response) -> response.onNext(InferenceRpcClientTest.token(id, 1, false));
+            var call = client.send(InferenceRpcClientTest.request(100), Duration.ofSeconds(8));
             call.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS);
             PlaybackTest.eventually(() -> {
                 try { return Files.readString(path).contains("\"FIRST_TOKEN\""); } catch (IOException e) { return false; }
@@ -77,17 +78,17 @@ class RequestJournalTest {
     }
     @Test void writerFailureStopsAllClientsAndKeepsPlaybackFailed() throws Exception {
         Path topology = directory.resolve("topology.json");
-        try (var master = new NativeClientTest.Harness();
-             var zero = new ClientNode("client-0", topology, directory.resolve("client-0"));
-             var one = new ClientNode("client-1", topology, directory.resolve("client-1"))) {
+        try (var master = new InferenceRpcClientTest.Harness();
+             var zero = new ReplayControlServer("client-0", topology, directory.resolve("client-0"));
+             var one = new ReplayControlServer("client-1", topology, directory.resolve("client-1"))) {
             new com.fasterxml.jackson.databind.ObjectMapper().writeValue(topology.toFile(), List.of(master.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
             zero.start(InputFixture.plan(directory, null, 100, 10, 4, 16, 3000, 1000));
             PlaybackTest.eventually(() -> one.state(new ClientProtocol.Sequence(1)).issued() > 0);
-            var workerField = ClientNode.class.getDeclaredField("worker"); workerField.setAccessible(true);
-            var journalField = LoadClient.class.getDeclaredField("journal"); journalField.setAccessible(true);
+            var sessionField = ReplayControlServer.class.getDeclaredField("session"); sessionField.setAccessible(true);
+            var journalField = ReplayControlServer.Session.class.getDeclaredField("journal"); journalField.setAccessible(true);
             var channelField = RequestJournal.class.getDeclaredField("file"); channelField.setAccessible(true);
-            var journal = (RequestJournal) journalField.get(workerField.get(one));
+            var journal = (RequestJournal) journalField.get(sessionField.get(one));
             ((FileChannel) channelField.get(journal)).close();
             PlaybackTest.eventually(() -> zero.state(new ClientProtocol.Sequence(1)).done());
             var result = zero.stop(new ClientProtocol.Empty());
@@ -102,11 +103,11 @@ class RequestJournalTest {
         for (boolean timeout : List.of(false, true)) {
             var path = directory.resolve(timeout ? "timeout.jsonl" : "rejection.jsonl");
             var journal = new RequestJournal(path, "client-0", plan());
-            try (var master = new NativeClientTest.Harness();
-                 var client = new NativeClient(() -> List.of(master.endpoint().get("rpc")), journal::record)) {
+            try (var master = new InferenceRpcClientTest.Harness();
+                 var client = new InferenceRpcClient(() -> List.of(master.endpoint().get("rpc")), journal::record, MediaInput.IMAGE_TOKEN, 0L, 1)) {
                 if (timeout) master.scheduleDelay = 1000;
                 else master.route = r -> r.toBuilder().setSuccess(false).setCode(429).clearLifecycle().build();
-                var call = client.send(NativeClientTest.request(100), Duration.ofMillis(timeout ? 100 : 3000));
+                var call = client.send(InferenceRpcClientTest.request(100), Duration.ofMillis(timeout ? 100 : 3000));
                 call.completion().toCompletableFuture().get(4, TimeUnit.SECONDS);
                 journal.finish(1, 1);
                 var events = read(path).stream().filter(row -> row.has("kind")).toList();

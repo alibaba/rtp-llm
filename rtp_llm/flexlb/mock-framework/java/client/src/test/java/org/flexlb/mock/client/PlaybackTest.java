@@ -5,9 +5,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
+import org.flexlb.mock.protocol.MediaInput;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.flexlb.mock.client.ClientProtocol.*;
+import org.flexlb.mock.client.ReplayControlServer.Session;
 
 class PlaybackTest {
     @TempDir Path directory;
@@ -18,11 +20,16 @@ class PlaybackTest {
                 qps, null, slots, queue, 3000, 1000);
         }
     }
-    Path topology(NativeClientTest.Harness h) throws Exception {
+    Path topology(InferenceRpcClientTest.Harness h) throws Exception {
         var path = directory.resolve(UUID.randomUUID() + ".json");
         new ObjectMapper().writeValue(path.toFile(), List.of(h.endpoint())); return path;
     }
-    static String master(NativeClientTest.Harness h) { return "127.0.0.1:" + h.master.getPort(); }
+    private Session worker(WorkerPlan plan, ClientMetrics metrics, InferenceRpcClientTest.Harness harness)
+            throws Exception {
+        return new Session(plan, metrics, topology(harness), directory.resolve(UUID.randomUUID() + ".jsonl"),
+            "client-0", MediaInput.IMAGE_TOKEN, 0, 0L, 1);
+    }
+    static String master(InferenceRpcClientTest.Harness h) { return "127.0.0.1:" + h.master.getPort(); }
     static void eventually(java.util.function.BooleanSupplier condition) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
         while (!condition.getAsBoolean() && System.nanoTime() < deadline) Thread.sleep(10);
@@ -30,14 +37,14 @@ class PlaybackTest {
     }
     @Test void ttftHistogramDistinguishesSlowCallsAboveThirtySeconds() {
         var metrics = new ClientMetrics();
-        metrics.finished(new NativeClient.Result(1, java.time.Instant.now(), TimeUnit.SECONDS.toNanos(45),
-            TimeUnit.SECONDS.toNanos(46), 2, NativeClient.Outcome.success, "OK", 0, "", TimeUnit.SECONDS.toNanos(1)));
+        metrics.finished(new InferenceRpcClient.Result(1, java.time.Instant.now(), TimeUnit.SECONDS.toNanos(45),
+            TimeUnit.SECONDS.toNanos(46), 2, InferenceRpcClient.Outcome.success, "OK", 0, "", TimeUnit.SECONDS.toNanos(1)));
         var scrape = metrics.scrape();
         assertTrue(scrape.contains("mock_client_ttft_seconds_bucket{role=\"client\",le=\"30.0\",} 0.0"));
         assertTrue(scrape.contains("mock_client_ttft_seconds_bucket{role=\"client\",le=\"60.0\",} 1.0"));
     }
     @Test void naturalEndDrainsQueueAndConsumesRealNativeResponses() throws Exception {
-        try (var h = new NativeClientTest.Harness(); var load = new LoadClient(workerPlan(master(h), 3, 10, 2, 4), new ClientMetrics(), topology(h), directory.resolve(UUID.randomUUID() + ".jsonl"), "client-0")) {
+        try (var h = new InferenceRpcClientTest.Harness(); var load = worker(workerPlan(master(h), 3, 10, 2, 4), new ClientMetrics(), h)) {
             load.begin(System.currentTimeMillis() + 30);
             var result = load.await(5000);
             assertTrue(result.done()); assertFalse(result.stopped()); assertTrue(result.errors().isEmpty(), result.toString());
@@ -48,7 +55,7 @@ class PlaybackTest {
         }
     }
     @Test void fullQueueFailsInsteadOfBlockingDroppingOrExceedingConcurrency() throws Exception {
-        try (var h = new NativeClientTest.Harness(); var load = new LoadClient(workerPlan(master(h), 30, 500, 1, 1), new ClientMetrics(), topology(h), directory.resolve(UUID.randomUUID() + ".jsonl"), "client-0")) {
+        try (var h = new InferenceRpcClientTest.Harness(); var load = worker(workerPlan(master(h), 30, 500, 1, 1), new ClientMetrics(), h)) {
             h.tokenDelay = 300;
             load.begin(System.currentTimeMillis() + 30);
             var result = load.await(5000);
@@ -58,7 +65,7 @@ class PlaybackTest {
         }
     }
     @Test void stopBeforeBeginDoesNotSendAndIsIdempotent() throws Exception {
-        try (var h = new NativeClientTest.Harness(); var load = new LoadClient(workerPlan(master(h), 3, 10, 1, 2), new ClientMetrics(), topology(h), directory.resolve(UUID.randomUUID() + ".jsonl"), "client-0")) {
+        try (var h = new InferenceRpcClientTest.Harness(); var load = worker(workerPlan(master(h), 3, 10, 1, 2), new ClientMetrics(), h)) {
             load.halt(); load.halt();
             var result = load.await(5000);
             assertEquals(0, result.issued()); assertEquals(3, result.unsent()); assertTrue(result.errors().isEmpty());
@@ -66,11 +73,11 @@ class PlaybackTest {
         }
     }
     @Test void stopClosesAdmissionAndDrainTimeoutCancelsInflight() throws Exception {
-        try (var h = new NativeClientTest.Harness()) {
+        try (var h = new InferenceRpcClientTest.Harness()) {
             h.tokenDelay = 5000;
             var plan = workerPlan(master(h), 10, 20, 1, 10);
             plan = new WorkerPlan(1, plan.masters(), plan.requests_file(), plan.count(), 0, 1, 1, plan.sha256(), plan.qps(), plan.replay_speed(), 1, 10, 10000, 80);
-            try (var load = new LoadClient(plan, new ClientMetrics(), topology(h), directory.resolve(UUID.randomUUID() + ".jsonl"), "client-0")) {
+            try (var load = worker(plan, new ClientMetrics(), h)) {
                 load.begin(System.currentTimeMillis() + 30);
                 assertTrue(h.scheduleEntered.await(2, TimeUnit.SECONDS));
                 load.halt(); long issued = load.state().issued();
@@ -81,10 +88,10 @@ class PlaybackTest {
         }
     }
     @Test void businessErrorsAreRecordedWithoutFailingPlayback() throws Exception {
-        try (var h = new NativeClientTest.Harness()) {
+        try (var h = new InferenceRpcClientTest.Harness()) {
             h.route = r -> r.toBuilder().setSuccess(false).setCode(429).clearLifecycle().build();
             var metrics = new ClientMetrics();
-            try (var load = new LoadClient(workerPlan(master(h), 3, 10, 1, 4), metrics, topology(h), directory.resolve(UUID.randomUUID() + ".jsonl"), "client-0")) {
+            try (var load = worker(workerPlan(master(h), 3, 10, 1, 4), metrics, h)) {
                 load.begin(System.currentTimeMillis() + 30);
                 var result = load.await(5000);
                 assertEquals(3, result.finished()); assertTrue(result.errors().isEmpty());
@@ -94,10 +101,10 @@ class PlaybackTest {
     }
     @Test void threeClientsSplitGlobalCountAndUseTcpEvenForClientZero() throws Exception {
         Path topology = directory.resolve("topology.json");
-        try (var h = new NativeClientTest.Harness();
-             var zero = new ClientNode("client-0", topology, directory.resolve("zero"));
-             var one = new ClientNode("client-1", topology, directory.resolve("one"));
-             var two = new ClientNode("client-2", topology, directory.resolve("two"))) {
+        try (var h = new InferenceRpcClientTest.Harness();
+             var zero = new ReplayControlServer("client-0", topology, directory.resolve("zero"));
+             var one = new ReplayControlServer("client-1", topology, directory.resolve("one"));
+             var two = new ReplayControlServer("client-2", topology, directory.resolve("two"))) {
             new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url()), Map.of("role", "client", "control", two.url())));
             var start = InputFixture.plan(directory, null, 7, 10, 4, 4, 3000, 1000);
@@ -121,9 +128,9 @@ class PlaybackTest {
             Path topology = directory.resolve("replay-" + early + ".json");
             Path source = InputFixture.write(directory.resolve("replay-" + early + ".mckidx"),
                 java.util.stream.IntStream.range(0, 6).mapToObj(i -> i * (early ? 30000L : 100L)).toList());
-            try (var h = new NativeClientTest.Harness();
-                 var zero = new ClientNode("client-0", topology, directory.resolve("zero-" + early));
-                 var one = new ClientNode("client-1", topology, directory.resolve("one-" + early))) {
+            try (var h = new InferenceRpcClientTest.Harness();
+                 var zero = new ReplayControlServer("client-0", topology, directory.resolve("zero-" + early));
+                 var one = new ReplayControlServer("client-1", topology, directory.resolve("one-" + early))) {
                 new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                     Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
                 zero.start(new Start(List.of(master(h)), source.toString(), null, 5.0, 4, 8, 3000, 1000, true, null));
@@ -140,9 +147,9 @@ class PlaybackTest {
     }
     @Test void oneWorkerOverflowStopsWholeGroupAndCannotBecomeSuccessfulSummary() throws Exception {
         Path topology = directory.resolve("topology.json");
-        try (var h = new NativeClientTest.Harness();
-             var zero = new ClientNode("client-0", topology, directory.resolve("zero"));
-             var one = new ClientNode("client-1", topology, directory.resolve("one"))) {
+        try (var h = new InferenceRpcClientTest.Harness();
+             var zero = new ReplayControlServer("client-0", topology, directory.resolve("zero"));
+             var one = new ReplayControlServer("client-1", topology, directory.resolve("one"))) {
             h.tokenDelay = 500;
             new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
@@ -155,9 +162,9 @@ class PlaybackTest {
     }
     @Test void unreachablePeerStopsTheRemainingClientAndKeepsMissingResultsVisible() throws Exception {
         Path topology = directory.resolve("topology.json");
-        try (var h = new NativeClientTest.Harness();
-             var zero = new ClientNode("client-0", topology, directory.resolve("zero"));
-             var one = new ClientNode("client-1", topology, directory.resolve("one"))) {
+        try (var h = new InferenceRpcClientTest.Harness();
+             var zero = new ReplayControlServer("client-0", topology, directory.resolve("zero"));
+             var one = new ReplayControlServer("client-1", topology, directory.resolve("one"))) {
             new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
             zero.start(InputFixture.plan(directory, List.of(master(h)), 20, 2, 2, 4, 3000, 1000));
@@ -172,7 +179,7 @@ class PlaybackTest {
     @Test void malformedFileFailsBeforeAnyWorkerStarts() throws Exception {
         Path topology = directory.resolve("topology.json"), input = directory.resolve("bad.mckidx");
         Files.writeString(input, "{\"token_ids\":[1],\"max_new_tokens\":2}\nnot-json\n");
-        try (var h = new NativeClientTest.Harness(); var zero = new ClientNode("client-0", topology, directory.resolve("zero"))) {
+        try (var h = new InferenceRpcClientTest.Harness(); var zero = new ReplayControlServer("client-0", topology, directory.resolve("zero"))) {
             new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(), Map.of("role", "client", "control", zero.url())));
             assertThrows(java.io.IOException.class, () -> zero.start(new Start(null, input.toString(), 10.0, null, 1, 4, 3000, 1000)));
             assertFalse(zero.stop(new Empty()).errors().isEmpty());
@@ -183,9 +190,9 @@ class PlaybackTest {
     @Test void corruptedSharedInputStopsTheWholeGroup() throws Exception {
         Path topology = directory.resolve("topology.json"), input = directory.resolve("input.mckidx");
         InputFixture.write(input, Collections.nCopies(20, 0L));
-        try (var h = new NativeClientTest.Harness();
-             var zero = new ClientNode("client-0", topology, directory.resolve("zero"));
-             var one = new ClientNode("client-1", topology, directory.resolve("one"))) {
+        try (var h = new InferenceRpcClientTest.Harness();
+             var zero = new ReplayControlServer("client-0", topology, directory.resolve("zero"));
+             var one = new ReplayControlServer("client-1", topology, directory.resolve("one"))) {
             new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
             byte[] data = Files.readAllBytes(input);

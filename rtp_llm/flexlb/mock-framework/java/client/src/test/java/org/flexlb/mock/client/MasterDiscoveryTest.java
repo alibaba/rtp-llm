@@ -17,7 +17,7 @@ class MasterDiscoveryTest {
     }
     @Test void observesLeadershipThenDiscoversReplacementWithoutChangingThePlaybackPlan() throws Exception {
         Path topology = directory.resolve("topology.json");
-        try (var first = new NativeClientTest.Harness(); var second = new NativeClientTest.Harness(); var added = new NativeClientTest.Harness()) {
+        try (var first = new InferenceRpcClientTest.Harness(); var second = new InferenceRpcClientTest.Harness(); var added = new InferenceRpcClientTest.Harness()) {
             first.leader = second.leader;
             publish(topology, List.of(first.endpoint(), second.endpoint()));
             try (var discovery = new MasterDiscovery(topology, null)) {
@@ -36,7 +36,7 @@ class MasterDiscoveryTest {
     }
     @Test void explicitSelectionStaysFixedAndMalformedDiscoveryFailsPlayback() throws Exception {
         Path topology = directory.resolve("topology.json");
-        try (var first = new NativeClientTest.Harness(); var second = new NativeClientTest.Harness()) {
+        try (var first = new InferenceRpcClientTest.Harness(); var second = new InferenceRpcClientTest.Harness()) {
             publish(topology, List.of(first.endpoint(), second.endpoint()));
             try (var discovery = new MasterDiscovery(topology, List.of(first.endpoint().get("rpc")))) {
                 assertEquals(List.of(first.endpoint().get("rpc")), discovery.routes());

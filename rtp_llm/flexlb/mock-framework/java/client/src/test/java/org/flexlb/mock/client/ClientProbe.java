@@ -48,7 +48,7 @@ public final class ClientProbe {
                 response.onNext(FlexlbCancelResponsePB.newBuilder().setFound(true).build()); response.onCompleted();
             }
         }).build().start();
-        try (var client = new NativeClient("127.0.0.1:" + master.getPort())) {
+        try (var client = new InferenceRpcClient("127.0.0.1:" + master.getPort())) {
             var results = new LinkedHashMap<String, Object>();
             for (long id : new long[]{1501, 1502}) {
                 var input = GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(List.of(1, 2, 3, 4))
@@ -57,7 +57,7 @@ public final class ClientProbe {
                     .setGenerateInput(input.toByteString()).build();
                 var call = client.send(request, Duration.ofSeconds(3));
                 var result = call.completion().toCompletableFuture().get(4, TimeUnit.SECONDS);
-                if (result.outcome() != NativeClient.Outcome.success || result.outputTokens() != expectedTokens || result.ttftNanos() == null || result.ttftNanos() <= 0)
+                if (result.outcome() != InferenceRpcClient.Outcome.success || result.outputTokens() != expectedTokens || result.ttftNanos() == null || result.ttftNanos() <= 0)
                     throw new IllegalStateException("Native Client failed: " + result);
                 results.put(id == 1501 ? "generate" : "fetch", result);
             }
@@ -73,7 +73,7 @@ public final class ClientProbe {
         var mapper = new ObjectMapper(); var raw = exercise(args[0], args[1]);
         var output = new LinkedHashMap<String, Object>();
         for (var entry : raw.entrySet()) {
-            if (entry.getValue() instanceof NativeClient.Result r) output.put(entry.getKey(), Map.of(
+            if (entry.getValue() instanceof InferenceRpcClient.Result r) output.put(entry.getKey(), Map.of(
                 "request_id", r.requestId(), "sent_at", r.sentAt().toString(), "ttft_ns", r.ttftNanos(), "elapsed_ns", r.elapsedNanos(),
                 "output_tokens", r.outputTokens(), "outcome", r.outcome().name()));
             else output.put(entry.getKey(), entry.getValue());

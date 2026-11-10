@@ -204,16 +204,15 @@ Engine 业务参数来自实例配置。缩容时 Runner 登记预期停止，�
 
 Python 维护一份权威的当前发现信息，增加、移除和重启换地址均更新该信息。Master 等消费者能否动态加载发现变更由其自身实现负责，Case 可检查传播结果，框架不替消费者伪造路由更新。显式引用旧地址不能偷偷改指向新实例；一次运行内，Engine 的业务 RPC、控制/metrics 端口均不复用，跨用途也不能复用，例如不能把旧 metrics 端口分给新 RPC。该约束只覆盖本次 Runner 管理的 Engine，不是操作系统级端口预留。
 
-### Client：播放器控速，Client 发送与管理生命周期
+### Client 回放
 
 所有 Client 同时只有一份相同的 start 计划。Python 只操作 client0，Java 负责拆分计划和自行发压；Python 不轮询播放进度、不实时检查 QPS。先调用 client/stop 收集上一轮结果，再启动下一轮。
 
 | 组件 | 职责 |
 | --- | --- |
 | Python | 启动和监视各 JVM，调用 start/stop，最后通过已有指标查询路径执行 QPS 等 Case 检查。 |
-| client0 协调者 | 固定全部参与者，分配总请求数、QPS 和并发额度，协调准备/开始/停止，汇总执行异常与最终结果。 |
-| LoadClient 的播放线程 | 读取分片并按计划将请求放入本地发送队列。 |
-| Client（LoadClient + NativeClient） | 管理小队列和在途并发，发送请求，消费完整响应，处理超时、取消和终态，产生实际调用指标。 |
+| ReplayControlServer | 每个 Client JVM 的入口。client0 分配计划、协调起止并汇总结果。每轮在内部创建一个 Session，负责本地读数、控速、并发和排空。 |
+| InferenceRpcClient | 执行单条请求的调度和生成 RPC，消费完整输出流，处理超时、取消和终态。 |
 
 client0 同时参与本地发压，不增加协调进程或选主。单 Client 与多 Client 使用同一流程，client0 到本地和其他 Client 的控制都走 TCP。准备完成后，各 JVM 独立产出和发送，请求与响应不经 client0 中转。client0 意外退出使整体失败，不做接管。
 

@@ -17,7 +17,7 @@ import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.junit.jupiter.api.Test;
 
-class NativeClientTest {
+class InferenceRpcClientTest {
     static GenerateInputPB input(long id) {
         return GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(List.of(1, 2, 3))
             .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(3).setCanUsePdSeparation(true).setReturnIncremental(true)).build();
@@ -43,7 +43,7 @@ class NativeClientTest {
         volatile int heartbeatStatus = 200;
         String http() { return "http://127.0.0.1:" + heartbeat.getAddress().getPort(); }
         Map<String, String> endpoint() { return Map.of("role", "master", "rpc", "127.0.0.1:" + master.getPort(), "http", http()); }
-        final NativeClient client;
+        final InferenceRpcClient client;
         volatile Status scheduleFailure;
         volatile boolean batched;
         volatile int scheduleDelay, tokenDelay;
@@ -108,9 +108,9 @@ class NativeClientTest {
                     cancellations.add(input); response.onNext(FlexlbCancelResponsePB.newBuilder().setFound(true).build()); response.onCompleted();
                 }
             }).build().start();
-            client = new NativeClient("127.0.0.1:" + master.getPort());
+            client = new InferenceRpcClient("127.0.0.1:" + master.getPort());
         }
-        NativeClient.Result result(NativeClient.Call call) throws Exception { return call.completion().toCompletableFuture().get(4, TimeUnit.SECONDS); }
+        InferenceRpcClient.Result result(InferenceRpcClient.Call call) throws Exception { return call.completion().toCompletableFuture().get(4, TimeUnit.SECONDS); }
         @Override public void close() throws Exception {
             client.close(); heartbeat.stop(0); workers.shutdownNow(); engine.shutdownNow(); master.shutdownNow();
             engine.awaitTermination(3, TimeUnit.SECONDS); master.awaitTermination(3, TimeUnit.SECONDS);
@@ -121,7 +121,7 @@ class NativeClientTest {
             h.scheduleDelay = 30; h.tokenDelay = 40;
             var call = h.client.send(request(1), Duration.ofSeconds(2));
             assertTrue(call.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS) >= TimeUnit.MILLISECONDS.toNanos(60));
-            var result = h.result(call); assertEquals(NativeClient.Outcome.success, result.outcome());
+            var result = h.result(call); assertEquals(InferenceRpcClient.Outcome.success, result.outcome());
             assertEquals(3, result.outputTokens()); assertNotNull(result.ttftNanos()); assertTrue(result.elapsedNanos() >= result.ttftNanos());
             assertNotNull(result.tpotNanos());
             assertTrue(result.tpotNanos() > 0 && result.tpotNanos() * 2 <= result.elapsedNanos() - result.ttftNanos());
@@ -142,14 +142,14 @@ class NativeClientTest {
             input.getGenerateConfigBuilder().setIgnoreEos(mode == 0).setMinNewTokens(mode == 1 ? 3 : 0);
             request.setGenerateInput(input.build().toByteString());
             var result = h.result(h.client.send(request.build(), Duration.ofSeconds(2)));
-            assertEquals(NativeClient.Outcome.success, result.outcome());
+            assertEquals(InferenceRpcClient.Outcome.success, result.outcome());
         }
     }
     @Test void enqueuedRouteAlwaysFetchesAndConsumesToFinalCompletion() throws Exception {
         try (var h = new Harness()) {
             h.batched = true;
             var result = h.result(h.client.send(request(2), Duration.ofSeconds(2)));
-            assertEquals(NativeClient.Outcome.success, result.outcome()); assertEquals(3, result.outputTokens());
+            assertEquals(InferenceRpcClient.Outcome.success, result.outcome()); assertEquals(3, result.outputTokens());
             assertEquals(1, h.fetches.get()); assertEquals(0, h.generates.get());
         }
     }
@@ -157,7 +157,7 @@ class NativeClientTest {
         try (var h = new Harness()) {
             h.route = r -> r.toBuilder().setSuccess(false).setCode(429).clearLifecycle().build();
             var call = h.client.send(request(3), Duration.ofSeconds(2)); var result = h.result(call);
-            assertEquals(NativeClient.Outcome.error, result.outcome()); assertEquals(429, result.errorCode()); assertNull(result.ttftNanos());
+            assertEquals(InferenceRpcClient.Outcome.error, result.outcome()); assertEquals(429, result.errorCode()); assertNull(result.ttftNanos());
             assertThrows(ExecutionException.class, () -> call.firstToken().toCompletableFuture().get());
             assertEquals(0, h.generates.get()); assertEquals(0, h.fetches.get());
         }
@@ -165,7 +165,7 @@ class NativeClientTest {
     @Test void successFlagWithFailureCodeCannotPass() throws Exception {
         try (var h = new Harness()) {
             h.route = r -> r.toBuilder().setCode(500).build();
-            assertEquals(NativeClient.Outcome.error, h.result(h.client.send(request(4), Duration.ofSeconds(2))).outcome());
+            assertEquals(InferenceRpcClient.Outcome.error, h.result(h.client.send(request(4), Duration.ofSeconds(2))).outcome());
             assertEquals(0, h.generates.get());
         }
     }
@@ -176,7 +176,7 @@ class NativeClientTest {
             assertNull(result.ttftNanos()); assertEquals("DATA_LOSS", result.grpcCode());
             h.output = (id, response) -> { response.onNext(token(id, 1, false)); response.onCompleted(); };
             result = h.result(h.client.send(request(6), Duration.ofSeconds(2)));
-            assertNotNull(result.ttftNanos()); assertEquals(NativeClient.Outcome.error, result.outcome()); assertEquals(1, result.outputTokens());
+            assertNotNull(result.ttftNanos()); assertEquals(InferenceRpcClient.Outcome.error, result.outcome()); assertEquals(1, result.outputTokens());
         }
     }
     @Test void malformedFrameAndFramesAfterFinishedFail() throws Exception {
@@ -191,7 +191,7 @@ class NativeClientTest {
         try (var h = new Harness()) {
             h.scheduleDelay = 1000;
             var call = h.client.send(request(9), Duration.ofSeconds(2)); assertTrue(h.scheduleEntered.await(2, TimeUnit.SECONDS)); call.cancel();
-            assertEquals(NativeClient.Outcome.cancelled, h.result(call).outcome()); assertTrue(h.scheduleCancelled.await(2, TimeUnit.SECONDS));
+            assertEquals(InferenceRpcClient.Outcome.cancelled, h.result(call).outcome()); assertTrue(h.scheduleCancelled.await(2, TimeUnit.SECONDS));
             var cancel = h.cancellations.poll(2, TimeUnit.SECONDS); assertNotNull(cancel); assertEquals(9, cancel.getRequestId());
             assertEquals(CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED, cancel.getReason()); assertEquals(1, h.schedules.get());
         }
@@ -200,7 +200,7 @@ class NativeClientTest {
         try (var h = new Harness()) {
             h.scheduleDelay = 1000;
             var result = h.result(h.client.send(request(10), Duration.ofMillis(80)));
-            assertEquals(NativeClient.Outcome.timeout, result.outcome()); assertNull(result.ttftNanos());
+            assertEquals(InferenceRpcClient.Outcome.timeout, result.outcome()); assertNull(result.ttftNanos());
             var cancel = h.cancellations.poll(2, TimeUnit.SECONDS); assertNotNull(cancel);
             assertEquals(CancelReasonPB.CANCEL_REASON_DEADLINE_EXCEEDED, cancel.getReason());
         }
@@ -210,7 +210,7 @@ class NativeClientTest {
             h.output = (id, response) -> response.onNext(token(id, 1, false));
             var call = h.client.send(request(11), Duration.ofSeconds(2));
             long ttft = call.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS); call.cancel();
-            var result = h.result(call); assertEquals(ttft, result.ttftNanos()); assertEquals(NativeClient.Outcome.cancelled, result.outcome());
+            var result = h.result(call); assertEquals(ttft, result.ttftNanos()); assertEquals(InferenceRpcClient.Outcome.cancelled, result.outcome());
             assertTrue(h.streamCancelled.await(2, TimeUnit.SECONDS));
             assertEquals(9, Objects.requireNonNull(h.cancellations.poll(2, TimeUnit.SECONDS)).getBatchId());
         }
@@ -231,17 +231,17 @@ class NativeClientTest {
             h.output = (id, response) -> { response.onNext(token(id, 1, id != 13)); if (id != 13) response.onCompleted(); };
             var held = h.client.send(request(13), Duration.ofSeconds(2)); held.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS);
             assertThrows(IllegalArgumentException.class, () -> h.client.send(request(13), Duration.ofSeconds(2)));
-            var others = new ArrayList<NativeClient.Call>();
+            var others = new ArrayList<InferenceRpcClient.Call>();
             for (long id = 14; id < 34; id++) others.add(h.client.send(request(id), Duration.ofSeconds(2)));
-            held.cancel(); for (var call : others) assertEquals(NativeClient.Outcome.success, h.result(call).outcome());
-            assertEquals(NativeClient.Outcome.cancelled, h.result(held).outcome());
+            held.cancel(); for (var call : others) assertEquals(InferenceRpcClient.Outcome.success, h.result(call).outcome());
+            assertEquals(InferenceRpcClient.Outcome.cancelled, h.result(held).outcome());
         }
     }
     @Test void closeCancelsActiveCallsAndRejectsFurtherSends() throws Exception {
         try (var h = new Harness()) {
             h.output = (id, response) -> response.onNext(token(id, 1, false));
             var call = h.client.send(request(34), Duration.ofSeconds(2)); call.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS);
-            h.client.close(); assertEquals(NativeClient.Outcome.cancelled, h.result(call).outcome());
+            h.client.close(); assertEquals(InferenceRpcClient.Outcome.cancelled, h.result(call).outcome());
             assertNotNull(h.cancellations.poll(2, TimeUnit.SECONDS));
             assertThrows(IllegalStateException.class, () -> h.client.send(request(35), Duration.ofSeconds(2)));
         }
@@ -251,7 +251,7 @@ class NativeClientTest {
             h.scheduleDelay = 40; h.output = (id, response) -> response.onNext(token(id, 1, false));
             var call = h.client.send(request(37), Duration.ofMillis(180));
             call.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS);
-            var result = h.result(call); assertEquals(NativeClient.Outcome.timeout, result.outcome());
+            var result = h.result(call); assertEquals(InferenceRpcClient.Outcome.timeout, result.outcome());
             assertTrue(h.engineSawDeadline.get()); assertNotNull(result.ttftNanos());
             assertTrue(result.elapsedNanos() < TimeUnit.SECONDS.toNanos(1));
             assertTrue(h.streamCancelled.await(2, TimeUnit.SECONDS));
@@ -267,13 +267,13 @@ class NativeClientTest {
             };
             var nativeInput = input(38).toBuilder(); nativeInput.getGenerateConfigBuilder().setReturnIncremental(false);
             var cumulative = h.result(h.client.send(request(38).toBuilder().setGenerateInput(nativeInput.build().toByteString()).build(), Duration.ofSeconds(2)));
-            assertEquals(NativeClient.Outcome.success, cumulative.outcome()); assertEquals(3, cumulative.outputTokens());
+            assertEquals(InferenceRpcClient.Outcome.success, cumulative.outcome()); assertEquals(3, cumulative.outputTokens());
             h.output = (id, response) -> {
                 var frame = token(id, 3, true).toBuilder();
                 frame.getFlattenOutputBuilder().getOutputIdsBuilder().setShape(2, 3).setInt32Data(ByteString.copyFrom(new byte[12]));
                 response.onNext(frame.build()); response.onCompleted();
             };
-            assertEquals(NativeClient.Outcome.success, h.result(h.client.send(request(39), Duration.ofSeconds(2))).outcome());
+            assertEquals(InferenceRpcClient.Outcome.success, h.result(h.client.send(request(39), Duration.ofSeconds(2))).outcome());
         }
     }
     @Test void cumulativeEngineFramesAreRejectedEvenWhenFrontendFlagIsFalse() throws Exception {
@@ -288,7 +288,7 @@ class NativeClientTest {
             var nativeInput = input(43).toBuilder(); nativeInput.getGenerateConfigBuilder().setReturnIncremental(false);
             var result = h.result(h.client.send(request(43).toBuilder()
                     .setGenerateInput(nativeInput.build().toByteString()).build(), Duration.ofSeconds(2)));
-            assertEquals(NativeClient.Outcome.error, result.outcome());
+            assertEquals(InferenceRpcClient.Outcome.error, result.outcome());
             assertEquals("DATA_LOSS", result.grpcCode());
         }
     }
@@ -296,7 +296,7 @@ class NativeClientTest {
         try (var h = new Harness()) {
             h.output = (id, response) -> response.onNext(token(id, 1, false));
             var call = h.client.send(request(40), Duration.ofSeconds(2)); call.firstToken().thenRun(call::cancel);
-            var result = h.result(call); assertEquals(NativeClient.Outcome.cancelled, result.outcome());
+            var result = h.result(call); assertEquals(InferenceRpcClient.Outcome.cancelled, result.outcome());
             assertEquals(1, result.outputTokens()); assertNotNull(result.ttftNanos());
         }
     }
@@ -326,7 +326,7 @@ class NativeClientTest {
             first.scheduleFailure = Status.UNAVAILABLE;
             backup.output = (id, response) -> response.onNext(token(id, 1, false));
             var routes = new AtomicReference<>(List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")));
-            try (var client = new NativeClient(routes::get)) {
+            try (var client = new InferenceRpcClient(routes::get)) {
                 var call = client.send(request(100), Duration.ofSeconds(3));
                 call.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS);
                 routes.set(List.of(first.endpoint().get("rpc")));
@@ -339,12 +339,12 @@ class NativeClientTest {
             }
         }
     }
-    private static String outcome(NativeClient.Call call) throws Exception {
+    private static String outcome(InferenceRpcClient.Call call) throws Exception {
         return call.completion().toCompletableFuture().get(3, TimeUnit.SECONDS).outcome().name();
     }
     @Test void businessRejectionDeadlineAndStreamErrorNeverRetryBackup() throws Exception {
         try (var first = new Harness(); var backup = new Harness();
-             var client = new NativeClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")))) {
+             var client = new InferenceRpcClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")))) {
             first.route = r -> r.toBuilder().setCode(429).setSuccess(false).clearLifecycle().build();
             assertEquals("error", outcome(client.send(request(101), Duration.ofSeconds(2))));
             first.route = Function.identity(); first.scheduleDelay = 2000;
@@ -358,7 +358,7 @@ class NativeClientTest {
     @Test void noHealthyMasterAndBothTransportFailuresNeverBypassScheduling() throws Exception {
         try (var first = new Harness(); var backup = new Harness()) {
             var routes = new AtomicReference<List<String>>(List.of());
-            try (var client = new NativeClient(routes::get)) {
+            try (var client = new InferenceRpcClient(routes::get)) {
                 assertEquals("error", outcome(client.send(request(104), Duration.ofSeconds(2))));
                 first.scheduleFailure = Status.UNAVAILABLE; backup.scheduleFailure = Status.UNAVAILABLE;
                 routes.set(List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")));
@@ -371,7 +371,7 @@ class NativeClientTest {
 
     @Test void remoteCancelledTransportCanUseBackupWhileLocalCancellationCannot() throws Exception {
         try (var first = new Harness(); var backup = new Harness();
-             var client = new NativeClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")))) {
+             var client = new InferenceRpcClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")))) {
             first.scheduleFailure = Status.CANCELLED;
             assertEquals("success", outcome(client.send(request(106), Duration.ofSeconds(2))));
             assertEquals(1, first.schedules.get()); assertEquals(1, backup.schedules.get());
@@ -400,7 +400,7 @@ class NativeClientTest {
         var baseKeys = new org.flexlb.mock.protocol.CacheSequence(128, tokens, List.of(), seed).keys();
         try {
             for (int cpSize : List.of(1, 4)) {
-                try (var client = new NativeClient(() -> List.of("127.0.0.1:" + server.getPort()), e -> {}, -200, seed, cpSize)) {
+                try (var client = new InferenceRpcClient(() -> List.of("127.0.0.1:" + server.getPort()), e -> {}, -200, seed, cpSize)) {
                     client.send(request(987).toBuilder().setGenerateInput(input.toByteString())
                             .setSeqLen(tokens.size()).setCacheKeyBlockSize(128).build(), Duration.ofSeconds(3))
                         .completion().toCompletableFuture().get(4, TimeUnit.SECONDS);
@@ -422,7 +422,7 @@ class NativeClientTest {
                 response.onNext(last.build()); response.onCompleted();
             };
             var result = h.result(h.client.send(request(1), Duration.ofSeconds(2)));
-            assertEquals(finished ? NativeClient.Outcome.success : NativeClient.Outcome.error, result.outcome());
+            assertEquals(finished ? InferenceRpcClient.Outcome.success : InferenceRpcClient.Outcome.error, result.outcome());
             assertEquals(1, result.outputTokens());
         }
     }

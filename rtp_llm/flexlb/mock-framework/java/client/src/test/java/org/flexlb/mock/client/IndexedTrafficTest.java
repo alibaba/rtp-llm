@@ -11,6 +11,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.flexlb.mock.client.ClientProtocol.*;
+import org.flexlb.mock.client.ReplayControlServer.Session;
+import org.flexlb.mock.protocol.MediaInput;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -54,17 +56,17 @@ class IndexedTrafficTest {
         data[Math.toIntExact(ByteBuffer.wrap(data).getLong(56))] ^= 1;
         Files.write(path, data);
         var odd = new WorkerPlan(1, null, path.toString(), 2, 1, 2, 100, identity, null, 2.0, 1, 4, 1000, 1000);
-        var items = new ArrayList<LoadClient.Item>();
+        var items = new ArrayList<Session.Item>();
         long past = System.nanoTime() - 1_000_000_000;
-        LoadClient.play(odd, past, items::add);
-        assertEquals(List.of(101L, 103L), items.stream().map(LoadClient.Item::requestId).toList());
+        Session.play(odd, past, MediaInput.IMAGE_TOKEN, items::add);
+        assertEquals(List.of(101L, 103L), items.stream().map(Session.Item::requestId).toList());
         assertEquals(List.of(5_000_000L, 15_000_000L), items.stream().map(item -> {
-            try { return LoadClient.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), null, 2.0); }
+            try { return Session.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), null, 2.0); }
             catch (IOException error) { throw new AssertionError(error); }
         }).toList());
-        assertEquals(10_000_000L, LoadClient.delayNanos(1, items.getFirst().entry().arrivalMs(), 100.0, null));
+        assertEquals(10_000_000L, Session.delayNanos(1, items.getFirst().entry().arrivalMs(), 100.0, null));
         var even = new WorkerPlan(1, null, path.toString(), 3, 0, 2, 100, identity, null, 2.0, 1, 4, 1000, 1000);
-        assertThrows(IOException.class, () -> LoadClient.play(even, past, ignored -> fail()));
+        assertThrows(IOException.class, () -> Session.play(even, past, MediaInput.IMAGE_TOKEN, ignored -> fail()));
     }
 
     @Test void fixedTotalQpsInterleavesWorkerDeadlines() throws Exception {
@@ -76,8 +78,8 @@ class IndexedTrafficTest {
                 var plan = new WorkerPlan(1, null, path.toString(), expected.get(worker).size(), worker, 2,
                     100, input.identity, 100.0, null, 1, 4, 1000, 1000);
                 var times = new ArrayList<Long>();
-                LoadClient.play(plan, past, item -> times.add(assertDoesNotThrow(() ->
-                    LoadClient.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), plan.qps(), null))));
+                Session.play(plan, past, MediaInput.IMAGE_TOKEN, item -> times.add(assertDoesNotThrow(() ->
+                    Session.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), plan.qps(), null))));
                 assertEquals(expected.get(worker), times);
             }
         }
@@ -106,7 +108,7 @@ class IndexedTrafficTest {
             assertEquals(0, zero.observedOutputTokens());
             assertThrows(IOException.class, () -> zero.playbackLimit(6));
         }
-        try (var client = new ClientNode("client-0", directory.resolve("topology.json"), directory.resolve("worker"))) {
+        try (var client = new ReplayControlServer("client-0", directory.resolve("topology.json"), directory.resolve("worker"))) {
             new ObjectMapper().writeValue(directory.resolve("topology.json").toFile(),
                 List.of(Map.of("role", "client", "control", client.url())));
             var error = assertThrows(IOException.class, () ->
@@ -123,9 +125,9 @@ class IndexedTrafficTest {
         var zeroDirectory = directory.resolve("zero");
         var oneDirectory = directory.resolve("one");
         var json = new ObjectMapper();
-        try (var backend = new NativeClientTest.Harness();
-             var zero = new ClientNode("client-0", topology, zeroDirectory);
-             var one = new ClientNode("client-1", topology, oneDirectory)) {
+        try (var backend = new InferenceRpcClientTest.Harness();
+             var zero = new ReplayControlServer("client-0", topology, zeroDirectory);
+             var one = new ReplayControlServer("client-1", topology, oneDirectory)) {
             json.writeValue(topology.toFile(), List.of(backend.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
             zero.start(new Start(List.of(PlaybackTest.master(backend)), source.toString(), null, 2.0, 4, 8, 3000, 1000));

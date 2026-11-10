@@ -13,8 +13,8 @@ import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
 public final class KvcmMasterProbe {
     public static void main(String[] args) throws Exception {
         var json = new ObjectMapper();
-        try (var client = new NativeClient(() -> List.of(args[0]), event -> {}, 1000)) {
-            NativeClient.Result last = null;
+        try (var client = new InferenceRpcClient(() -> List.of(args[0]), event -> {}, 1000, 0L, 1)) {
+            InferenceRpcClient.Result last = null;
             for (long id : List.of(8001L, 8002L)) {
                 var input = GenerateInputPB.newBuilder().setRequestId(id)
                     .addAllTokenIds(java.util.stream.IntStream.range(1, 33).boxed().toList()).setTokenIds(8, 1000)
@@ -27,7 +27,7 @@ public final class KvcmMasterProbe {
                     .setGenerateInput(input.toByteString()).build();
                 var result = client.send(request, Duration.ofSeconds(8)).completion().toCompletableFuture().get(9, TimeUnit.SECONDS);
                 last = result;
-                if (result.outcome() != NativeClient.Outcome.success || result.outputTokens() != 3)
+                if (result.outcome() != InferenceRpcClient.Outcome.success || result.outputTokens() != 3)
                     throw new IllegalStateException("KVCM routed generation failed: " + result);
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
                 while (id == 8001 && args.length > 3 && json.readTree(URI.create(args[3] + "/stats").toURL()).path("keys").asLong() == 0) {

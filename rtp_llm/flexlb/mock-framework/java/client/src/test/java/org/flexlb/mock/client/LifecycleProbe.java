@@ -11,7 +11,7 @@ public final class LifecycleProbe {
     public static void main(String[] args) throws Exception {
         var directory = Path.of(args[1]);
         var json = new ObjectMapper();
-        try (var client = new NativeClient(args[0]);
+        try (var client = new InferenceRpcClient(args[0]);
              var writer = Files.newBufferedWriter(directory.resolve("requests.jsonl"), StandardOpenOption.CREATE_NEW)) {
             long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(50);
             for (long id = 1_000_000; !Files.exists(directory.resolve("stop")); id++) {

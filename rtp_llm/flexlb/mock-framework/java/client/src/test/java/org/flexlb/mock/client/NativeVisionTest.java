@@ -72,7 +72,7 @@ class NativeVisionTest {
                     } catch(Exception error) { response.onError(Status.INTERNAL.withCause(error).asRuntimeException()); }
                 }
             }).build().start();
-            try(var client=new NativeClient(() -> List.of("127.0.0.1:"+master.getPort()), event -> {}, 1000, 0L, 4)) {
+            try(var client=new InferenceRpcClient(() -> List.of("127.0.0.1:"+master.getPort()), event -> {}, 1000, 0L, 4)) {
                 for(long id:List.of(1L,2L,3L)) {
                     var input=GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(id == 3 ? List.of(10,1000) : List.of(10,1000,20))
                         .addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl("same-image")
@@ -80,7 +80,7 @@ class NativeVisionTest {
                         .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(3).setIgnoreEos(true).setReturnIncremental(true).setCanUsePdSeparation(true).setReuseCache(true)).build();
                     var request=FlexlbScheduleRequestPB.newBuilder().setRequestId(id).setSeqLen(input.getTokenIdsCount()).setMaxNewTokens(3).setCacheKeyBlockSize(1).setGenerateInput(input.toByteString()).build();
                     var result=client.send(request,input,Duration.ofSeconds(8),List.of(924)).completion().toCompletableFuture().get(10,TimeUnit.SECONDS);
-                    assertEquals(NativeClient.Outcome.success,result.outcome(),result.toString());assertEquals(3,result.outputTokens());
+                    assertEquals(InferenceRpcClient.Outcome.success,result.outcome(),result.toString());assertEquals(3,result.outputTokens());
                     var cache = RpcServiceGrpc.newBlockingStub(pChannel).getCacheStatus(CacheVersionPB.newBuilder()
                         .setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
                     assertEquals(4, cache.getBlockSize());
