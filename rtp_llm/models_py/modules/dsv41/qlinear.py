@@ -15,6 +15,11 @@ FP4 forward goes through ``deep_gemm.fp8_fp4_gemm_nt`` (K2 in
 official ``inference/model.py``'s per-expert ``Linear.forward`` which
 calls V4's own TileLang ``fp4_gemm`` — same math, different kernel.
 
+Pre-SM100 devices (e.g. Ada sm89) have no packed-UE8M0 DeepGEMM FP4 kernel;
+there FP4 forward falls back to the exact ``dequant_weight`` bf16 GEMM. FP4
+e2m1 values times power-of-two UE8M0 scales are precisely representable in
+bf16, so the fallback introduces no additional quantization.
+
 FP8 forward stays on the PyTorch dequant path for now; the factory-mode
 FP8 linears already migrated in S2 to ``CudaFp8DeepGEMMLinear`` and don't
 go through this class for attention/indexer/shared-expert linears.
@@ -32,6 +37,20 @@ from rtp_llm.models_py.modules.dsv41.quant_layouts import (
 
 FP8_BLOCK = 128
 FP4_BLOCK = 32
+
+
+def native_fp4_gemm_supported(device: Optional[torch.device] = None) -> bool:
+    """Whether DeepGEMM's FP8xFP4 kernels (packed UE8M0 SF) can run here.
+
+    The fp8_fp4 family is SM100+ only; the layout helpers reject other
+    architectures ("Unknown SF transformation"). Non-CUDA and pre-SM100
+    devices must use the exact bf16 dequant fallback instead.
+    """
+    if device is not None and device.type != "cuda":
+        return False
+    if not torch.cuda.is_available():
+        return False
+    return torch.cuda.get_device_capability(device)[0] >= 10
 
 # FP4 e2m1 lookup: 4-bit raw -> fp32 value
 _FP4_LUT = torch.tensor(
@@ -149,15 +168,22 @@ class QuantizedLinear(nn.Module):
         scale: torch.Tensor,
         scale_gemm: Optional[torch.Tensor] = None,
     ) -> None:
-        """Bind FP4 weight plus a prepacked DeepGEMM scale."""
+        """Bind FP4 weight plus (on SM100+) a prepacked DeepGEMM scale.
+
+        Pre-SM100 devices keep ``scale_gemm=None`` and forward through the
+        exact bf16 dequant path; the DeepGEMM SF layout helper rejects
+        those architectures at bind time.
+        """
         self.weight = weight
         self.scale = scale
         self.scale_gemm = scale_gemm
-        if self.scale_gemm is None:
+        if self.scale_gemm is None and native_fp4_gemm_supported(
+            weight.device if weight.is_cuda else None
+        ):
             self.scale_gemm = prepare_fp4_weight_scale_for_deepgemm(
                 scale, self.out_features, self.in_features
             )
-        if self.scale_gemm.dtype != torch.int32:
+        if self.scale_gemm is not None and self.scale_gemm.dtype != torch.int32:
             raise TypeError(
                 f"expected packed FP4 scale int32, got {self.scale_gemm.dtype}"
             )
@@ -216,7 +242,12 @@ class QuantizedLinear(nn.Module):
         if self.storage == "bf16":
             return F.linear(x, self.weight)
         if self.storage == "fp4":
-            return self._fp4_forward_deepgemm(x)
+            if self.scale_gemm is not None:
+                return self._fp4_forward_deepgemm(x)
+            # Pre-SM100 exact fallback: FP4 e2m1 × 2^k dequantizes losslessly
+            # to bf16, then a plain GEMM keeps the checkpoint semantics.
+            w = self.dequant_weight(out_dtype=x.dtype)
+            return F.linear(x, w)
         # FP8: dequant to x's dtype on the fly.
         w = self.dequant_weight(out_dtype=x.dtype)
         return F.linear(x, w)

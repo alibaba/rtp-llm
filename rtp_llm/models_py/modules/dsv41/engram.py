@@ -1324,7 +1324,12 @@ class _EngramCPULookupSlot:
         self.collect_timing = os.getenv("DSV41_CPU_ENGRAM_LOOKUP_TIMING", "0") == "1"
         self.last_timing = None
         self.deadline_enabled = True
-        self.packed = type(module.wkv) is V41MXFP8Linear
+        # Packed FP8 rows feed wkv.forward_quantized, which only exists on
+        # SM100+ native DeepGEMM linears; pre-SM100 uses the bf16 row path.
+        self.packed = (
+            type(module.wkv) is V41MXFP8Linear
+            and getattr(module.wkv, "native_fp4_gemm", False)
+        )
         self.head_dim = module.layout.head_dim
         self.width = self.heads * (
             self.head_dim + self.head_dim // 32 if self.packed else self.head_dim
@@ -1987,7 +1992,9 @@ class Engram(nn.Module):
         ):
             from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
-            self._direct_fp8_lookup = type(wkv) is V41MXFP8Linear
+            self._direct_fp8_lookup = (
+                type(wkv) is V41MXFP8Linear and getattr(wkv, "native_fp4_gemm", False)
+            )
 
     def warmup_lookup(self, ids, device):
         if self._direct_fp8_lookup:

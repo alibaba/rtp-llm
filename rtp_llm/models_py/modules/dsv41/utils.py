@@ -22,13 +22,45 @@ class V41Embedding(Embedding):
 
 
 class V41MXFP8Linear(torch.nn.Module):
-    """Native 32x32 checkpoint blocks, expanded to per-row MXFP8 scales."""
+    """Native 32x32 checkpoint blocks, expanded to per-row MXFP8 scales.
+
+    SM100+ forwards through DeepGEMM's FP8xFP4 kernel. Pre-SM100 devices
+    (e.g. Ada sm89) cannot JIT that kernel; they keep the original FP8
+    weight plus an exact bf16 dequantization (e4m3 × 2^k is precise in
+    bf16) and run cublas GEMMs — same checkpoint semantics, no new
+    quantization.
+    """
 
     def __init__(self, weight: torch.Tensor, scales: torch.Tensor):
         super().__init__()
+        from rtp_llm.models_py.modules.dsv41.qlinear import native_fp4_gemm_supported
+
         self.weight = weight
         self.N, self.K = weight.shape
-        self.weight_scales = self.pack_scales(scales)
+        self.native_fp4_gemm = native_fp4_gemm_supported(
+            weight.device if weight.is_cuda else None
+        )
+        if self.native_fp4_gemm:
+            self.weight_scales = self.pack_scales(scales)
+            self._dequant_bf16 = None
+        else:
+            self.weight_scales = scales
+            self._dequant_bf16 = self._dequant_weight_bf16(weight, scales)
+
+    @staticmethod
+    def _dequant_weight_bf16(weight: torch.Tensor, scales: torch.Tensor):
+        """Exact bf16 view of FP8 e4m3 weights with UE8M0 32x32 scales."""
+        if scales.dtype != torch.float8_e8m0fnu:
+            raise ValueError(f"unsupported V4.1 FP8 scale dtype {scales.dtype}")
+        n, k = weight.shape
+        if scales.shape != ((n + 31) // 32, (k + 31) // 32):
+            raise ValueError(f"Invalid V4.1 FP8 scales: {(n, k)}, {scales.shape}")
+        expanded = (
+            scales.to(torch.float32)
+            .repeat_interleave(32, 0)
+            .repeat_interleave(32, 1)[:n, :k]
+        )
+        return (weight.to(torch.float32) * expanded).to(torch.bfloat16)
 
     def pack_scales(self, scales: torch.Tensor) -> torch.Tensor:
         if scales.shape != ((self.N + 31) // 32, (self.K + 31) // 32):
@@ -71,6 +103,11 @@ class V41MXFP8Linear(torch.nn.Module):
         remain closed for this linear. The caller owns the BF16 norm tensor.
         Input layout and disjoint BF16 output storage are caller preconditions.
         """
+        if self._dequant_bf16 is not None:
+            raise RuntimeError(
+                "V41MXFP8Linear pre-SM100 fallback does not consume pre-quantized "
+                "inputs; packed-lookup/fused callers must gate on native_fp4_gemm"
+            )
         m = x_q.numel() // self.K
         shape = (*x_q.shape[:-1], self.N)
         output = (
@@ -103,6 +140,14 @@ class V41MXFP8Linear(torch.nn.Module):
     def forward(self, x: torch.Tensor, out=None):
         if x.numel() == 0:
             return out if out is not None else x.new_empty((*x.shape[:-1], self.N))
+        if self._dequant_bf16 is not None:
+            # Exact pre-SM100 path: bf16 activations against the exact bf16
+            # dequantization of the FP8 checkpoint weights.
+            y = torch.nn.functional.linear(x.to(torch.bfloat16), self._dequant_bf16)
+            if out is None:
+                return y
+            out.copy_(y)
+            return out
         return self.forward_quantized(*self._quantize_input(x), out=out)
 
 
