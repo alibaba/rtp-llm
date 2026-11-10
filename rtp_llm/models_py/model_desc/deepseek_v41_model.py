@@ -20,6 +20,9 @@ from rtp_llm.models_py.modules.dsv41.engram_distributed import (
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_tagged_attention_inputs
 
 
+_CAPTURE_PROBE_SKIPPED = False
+
+
 class _V41ImageEmbedding(torch.nn.Module):
     """Embedding wrapper splicing prepared image rows before the mHC expansion.
 
@@ -265,7 +268,12 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 f"warmup={os.environ.get('RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD')}",
                 flush=True,
             )
-        if os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1":
+        global _CAPTURE_PROBE_SKIPPED
+        if (
+            os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
+            and not _CAPTURE_PROBE_SKIPPED
+        ):
+            _CAPTURE_PROBE_SKIPPED = True
             # Diagnostic: the C++ capture path runs one eager datatype probe at
             # max_seq_len before capturing. On ROCm that probe walks a 1M-token
             # context and aborts. The probe result is only used for optional
