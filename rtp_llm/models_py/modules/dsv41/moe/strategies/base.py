@@ -354,11 +354,22 @@ def select_strategy(
             if cls.name == forced:
                 if cls.can_handle(cfg):
                     if cfg.ep_size > 1 and cls.name not in ("mega", "mega_se"):
-                        raise RuntimeError(
-                            "DSV4 EP MoE requires MegaMoEStrategy. "
-                            f"Requested strategy {forced!r} would bypass Mega "
-                            f"(layer_id={cfg.layer_id}, ep_size={cfg.ep_size})."
+                        pre_sm100 = (
+                            torch.cuda.is_available()
+                            and torch.cuda.get_device_capability()[0] < 10
                         )
+                        if not (cls.name == "local_loop" and pre_sm100):
+                            raise RuntimeError(
+                                "DSV4 EP MoE requires MegaMoEStrategy. "
+                                f"Requested strategy {forced!r} would bypass Mega "
+                                f"(layer_id={cfg.layer_id}, ep_size={cfg.ep_size})."
+                            )
+                        # Pre-SM100 devices cannot JIT Mega's SM100 kernels.
+                        # LocalLoop computes this rank's EP-sharded experts
+                        # over the full (TP-replicated) token batch; the MoE
+                        # layer combines the per-rank partial routed sums with
+                        # a TP allreduce before adding the replicated shared
+                        # expert output (W.v4_shared_* load with sp_id).
                     return cls
                 if strict:
                     raise RuntimeError(

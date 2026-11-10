@@ -280,6 +280,14 @@ class MoE(nn.Module):
             self._shared_executor.prepare(self.shared_experts)
         self._final_out: torch.Tensor | None = None
         self._strategy = strategy_cls(cfg)
+        # Pre-SM100 EP fallback: forced LocalLoop with ep_size>1 computes this
+        # rank's EP-sharded experts over the full token batch; the partial
+        # routed sums are combined by a TP allreduce before the replicated
+        # shared-expert output is added. Mega/DeepEP own their combine paths
+        # and keep this flag False.
+        self._ep_local_allreduce = (
+            getattr(strategy_cls, "name", "") == "local_loop" and cfg.ep_size > 1
+        )
         self._gate_pack_static = os.environ.get(
             "MOEDBG", "0"
         ) == "0" and self._strategy.can_use_gate_pack_static(self.gate)
@@ -366,6 +374,19 @@ class MoE(nn.Module):
             x, self.gate, input_ids, expert_load=expert_load, eplb_layer=self.eplb_layer
         )
 
+    def _combine_routed_ep_partial(self, y: torch.Tensor) -> torch.Tensor:
+        """Combine EP-sharded LocalLoop partial routed sums via TP allreduce.
+
+        No-op unless select_strategy allowed forced local_loop with
+        ep_size>1 on a pre-SM100 device (see strategies/base.py). Shared
+        experts are replicated (sp_id) and are added AFTER this reduce.
+        """
+        if not self._ep_local_allreduce:
+            return y
+        from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+
+        return all_reduce(y, Group.TP)
+
     def _run_chunk(
         self,
         x: torch.Tensor,
@@ -425,6 +446,7 @@ class MoE(nn.Module):
                     expert_load=expert_load,
                     eplb_layer=self.eplb_layer,
                 )
+            routed = self._combine_routed_ep_partial(routed)
         except Exception:
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 self._shared_executor.finish()
@@ -608,6 +630,7 @@ class MoE(nn.Module):
                     expert_load=expert_load,
                     eplb_layer=self.eplb_layer,
                 )
+            y = self._combine_routed_ep_partial(y)
         except Exception:
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 self._shared_executor.finish()
