@@ -75,7 +75,9 @@ public class SnapshotBench {
         var config = config();
         // No scheduler thread or RPCs. Mutations still use the real ownership ledger and lock.
         var runtime = new WorkerBatcher("bench-" + seed, null, config, strategy, estimator,
-                new EndpointEventHandler(registry, prefillQueues, mock(org.flexlb.config.ConfigService.class)),
+                new EndpointEventHandler(registry, prefillQueues, mock(org.flexlb.config.ConfigService.class),
+                        new org.flexlb.balance.schedulev2.decode.DecodeReservations(),
+                        org.mockito.Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class)),
                 new QueueCapacity());
         Field lockField = WorkerBatcher.class.getDeclaredField("queueLock");
         lockField.setAccessible(true);

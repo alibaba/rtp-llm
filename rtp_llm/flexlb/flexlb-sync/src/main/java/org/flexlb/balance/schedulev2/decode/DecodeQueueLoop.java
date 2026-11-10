@@ -17,7 +17,6 @@ import org.flexlb.balance.schedulev2.LoopSignal;
 import org.flexlb.balance.schedulev2.PrefillPublishCheck;
 import org.flexlb.balance.schedulev2.QueueBlockReason;
 import org.flexlb.balance.schedulev2.RequestCleanup;
-import org.flexlb.balance.schedulev2.RequestStatusTimeout;
 import org.flexlb.balance.schedulev2.request.DecodeChoice;
 import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.balance.schedulev2.request.Stage;
@@ -178,10 +177,6 @@ public final class DecodeQueueLoop {
             }
         }
         releaseEndedReserved();
-        for (Iterator<Request> iterator = decodeQueue.publishedIterator(); iterator.hasNext();) {
-            reservations.remove(iterator.next().requestId());
-            iterator.remove();
-        }
         for (DecodeEndpoint endpoint : listenedEndpoints) {
             endpoint.removeEngineDispatchCapacityListener(capacityListener);
         }
@@ -193,8 +188,7 @@ public final class DecodeQueueLoop {
      */
     boolean runOnce() {
         publishedThisRound = 0;
-        boolean moved = checkPublished();
-        moved |= dispatchReserved();
+        boolean moved = dispatchReserved();
         moved |= reserveWaiting();
         return moved;
     }
@@ -235,40 +229,6 @@ public final class DecodeQueueLoop {
             Logger.error("V2 decode reservation release failed: request_id={}", choice.reservation().requestId(),
                     failure);
         }
-    }
-
-    /**
-     * 检查已发布请求在 Decode 上的 reserve，返回有没有按超时归还 reserve。
-     * <p>
-     * reserve 已清理或 Decode 下线时结束跟踪；waiting/running 续期。
-     * 活跃列表缺失可以先释放容量；从发布或最近一次状态更新开始，连续静默超时后清理剩余记录。
-     */
-    private boolean checkPublished() {
-        long statusUpdateTimeoutMs = RequestStatusTimeout.timeoutMs(configService);
-        long nowMs = System.currentTimeMillis();
-        boolean released = false;
-        Iterator<Request> iterator = decodeQueue.publishedIterator();
-        while (iterator.hasNext()) {
-            Request request = iterator.next();
-            DecodeChoice choice = request.decodeChoice();
-            DecodeEndpoint endpoint = choice.endpoint();
-            DecodeEndpoint.ReservationHandle reservation = choice.reservation();
-            if (endpoint.isRetired() || !reservation.equals(endpoint.reservationHandle(request.requestId()))) {
-                iterator.remove();
-                reservations.remove(request.requestId());
-                continue;
-            }
-            if (endpoint.expireStaleRequest(reservation, request.publishedAtMs(), nowMs, statusUpdateTimeoutMs)) {
-                iterator.remove();
-                reservations.remove(request.requestId());
-                reporter.reportStatusUpdateTimeout(RoleType.DECODE, endpoint.ipPort());
-                Logger.warn(
-                        "Request worker status timeout: requestId={}, role=DECODE, endpoint={}, publishedAgeMs={}, timeoutMs={}",
-                        request.requestId(), endpoint.ipPort(), nowMs - request.publishedAtMs(), statusUpdateTimeoutMs);
-                released = true;
-            }
-        }
-        return released;
     }
 
     private boolean dispatchReserved() {
@@ -366,7 +326,9 @@ public final class DecodeQueueLoop {
         }
     }
 
-    private void publishResult(Request request, DecodeChoice choice, DecodeEndpoint.EngineDispatchPermit permit) {
+    private void publishResult(Request request,
+                               DecodeChoice selectedDecode,
+                               DecodeEndpoint.EngineDispatchPermit permit) {
         DecodeEndpoint.EngineDispatchPermitTransferStatus transfer;
         try {
             transfer =
@@ -384,13 +346,13 @@ public final class DecodeQueueLoop {
         }
         decodeQueue.removeReserved(request);
         if (request.publish(Stage.DECODE_RESERVED,
-                List.of(request.selectedPrefill().serverStatus(), choice.serverStatus()))) {
+                List.of(request.selectedPrefill().serverStatus(), selectedDecode.serverStatus()))) {
             publishedThisRound++;
+            selectedDecode.endpoint().registerPublished(selectedDecode.reservation(), request.publishedAtMs());
             cleanup.releasePublished(request);
-            decodeQueue.addPublished(request);
-            for (DecodeEndpoint.DecodeRequestView victim : choice.preemptedRequests()) {
+            for (DecodeEndpoint.DecodeRequestView victim : selectedDecode.preemptedRequests()) {
                 queueReporter.decodePreempted(request.priority(), victim.priority(), victim.phase(),
-                        choice.endpoint().ipPort());
+                        selectedDecode.endpoint().ipPort());
             }
         } else {
             // 请求已经结束，结果没发给调用方，归还 reserve
@@ -642,7 +604,7 @@ public final class DecodeQueueLoop {
      * 找一台空的 Decode，不看容量直接放过去并发布。返回 false 表示没有空的 Decode，请求留在 waiting。
      * <p>
      * reserve 按已经发给引擎记（不进排队，也不再要 permit），请求的 KV 照样记到这台 Decode 上，
-     * 后面的请求看到的就不是空机器了。发布后和普通请求一样进 published，等引擎上报或超时归还。
+     * 后面的请求看到的就不是空机器了。发布后由该节点的 Worker status 处理续期、完成和超时归还。
      */
     private boolean placeOnEmptyDecode(Request request, DecodeRequirement requirement, String group) {
         DecodeChoice choice;
@@ -672,8 +634,8 @@ public final class DecodeQueueLoop {
             if (request.publish(Stage.DECODE_WAITING,
                     List.of(request.selectedPrefill().serverStatus(), choice.serverStatus()))) {
                 publishedThisRound++;
+                choice.endpoint().registerPublished(choice.reservation(), request.publishedAtMs());
                 cleanup.releasePublished(request);
-                decodeQueue.addPublished(request);
             } else {
                 // 请求已经结束，结果没发给调用方，归还 reserve
                 releaseNow(request);

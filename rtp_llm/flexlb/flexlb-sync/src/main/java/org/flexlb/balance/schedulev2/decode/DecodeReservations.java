@@ -6,7 +6,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * V2 仍在管理的 Decode 预占 ID。创建预占前登记，归还或交给引擎后移除。
+ * V2 仍在管理的 Decode 预占 ID。创建预占前登记，未发布回滚或已发布记录清理后移除。
  * 旧孤儿清理持有 endpoint 锁时只查这个并发表，不获取请求锁或队列锁。
  */
 @Component

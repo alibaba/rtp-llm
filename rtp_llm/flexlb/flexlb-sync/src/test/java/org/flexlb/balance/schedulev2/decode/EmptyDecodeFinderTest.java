@@ -34,9 +34,10 @@ class EmptyDecodeFinderTest {
 
     @Test
     void findReturnsFirstEmptyDecodeWithItsAddress() {
-        DecodeEndpoint endpoint =
-                new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "10.0.0.2", 8080, 8081, "test"),
-                        mock(EndpointEventHandler.class));
+        EndpointEventHandler events = mock(EndpointEventHandler.class);
+        when(events.getDecodeReservations()).thenReturn(new org.flexlb.balance.schedulev2.decode.DecodeReservations());
+        DecodeEndpoint endpoint = new DecodeEndpoint(
+                WorkerStatus.createDiscovered(RoleType.DECODE, "g", "10.0.0.2", 8080, 8081, "test"), events);
         WorkerEndpoint.EndpointHold hold = endpoint.tryHold();
         DecodeEndpoint.DecodeRoutingView busy = view("10.0.0.1", 1, 0L, 0L, hold.generationId());
         DecodeEndpoint.DecodeRoutingView empty = view("10.0.0.2", 0, 0L, 0L, hold.generationId());

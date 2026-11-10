@@ -349,13 +349,16 @@ class RequestLifetimeTest {
             }
 
             EndpointEventHandler eventHandler = new EndpointEventHandler(registry,
-                    org.mockito.Mockito.mock(PrefillQueueRegistry.class), mock(org.flexlb.config.ConfigService.class));
+                    org.mockito.Mockito.mock(PrefillQueueRegistry.class), mock(org.flexlb.config.ConfigService.class),
+                    new org.flexlb.balance.schedulev2.decode.DecodeReservations(),
+                    org.mockito.Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
             if (evidenceSource == RoleType.PREFILL) {
                 eventHandler.onPrefillStatus(prefill,
                         org.flexlb.balance.endpoint.EndpointTestSupport.statusObservation(RoleType.PREFILL),
                         List.of(WorkerStatusFact.active(item)));
             } else {
-                eventHandler.onDecodeStatus(decode, List.of(org.flexlb.balance.endpoint.WorkerStatusFact.active(reservation)));
+                eventHandler.onDecodeStatus(decode,
+                        List.of(org.flexlb.balance.endpoint.WorkerStatusFact.active(reservation)));
             }
 
             if (!ackBeforeEvidence) {

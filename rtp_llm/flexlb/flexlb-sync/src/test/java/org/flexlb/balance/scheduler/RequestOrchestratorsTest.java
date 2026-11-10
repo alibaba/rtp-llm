@@ -134,9 +134,10 @@ class RequestOrchestratorsTest {
         RequestRegistry lifecycle = mock(RequestRegistry.class);
         EndpointRegistry registry = mock(EndpointRegistry.class);
         DecodeReservations v2 = new DecodeReservations();
-        DecodeEndpoint endpoint =
-                new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"),
-                        mock(EndpointEventHandler.class));
+        EndpointEventHandler events = mock(EndpointEventHandler.class);
+        when(events.getDecodeReservations()).thenReturn(v2);
+        DecodeEndpoint endpoint = new DecodeEndpoint(
+                WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"), events);
         try (var hold = endpoint.tryHold()) {
             endpoint.reserve(hold, "legacy", 16L, 16L, 50);
             endpoint.reserve(hold, "v2", 16L, 16L, 50);

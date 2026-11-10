@@ -420,8 +420,10 @@ class RequestLifecycleDeliveryLockContractTest {
         RequestSlot original = lifecycle.requestSlot("207");
 
         new EndpointEventHandler(lifecycle, org.mockito.Mockito.mock(PrefillQueueRegistry.class),
-                mock(org.flexlb.config.ConfigService.class)).onPrefillStatus(endpoint,
-                        org.flexlb.balance.endpoint.EndpointTestSupport.statusObservation(RoleType.PDFUSION),
+                mock(org.flexlb.config.ConfigService.class),
+                new org.flexlb.balance.schedulev2.decode.DecodeReservations(),
+                org.mockito.Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class)).onPrefillStatus(
+                        endpoint, org.flexlb.balance.endpoint.EndpointTestSupport.statusObservation(RoleType.PDFUSION),
                         List.of(WorkerStatusFact.terminal(registered.item(), WorkerStatusFact.Kind.COMPLETED, 0L)));
         Response terminal = registered.future().get(5L, TimeUnit.SECONDS);
         assertTrue(terminal.isSuccess());

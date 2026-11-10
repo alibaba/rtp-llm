@@ -15,7 +15,7 @@ public final class DecodeRequestState {
 
     static final int DEFAULT_PRIORITY = 0;
 
-    private long publishedAtMs; // 0 表示尚未发布，不检查状态更新超时
+    private volatile long publishedAtMs; // 0 表示尚未发布，不检查状态更新超时
 
     long kvTokens;
     /**
@@ -50,14 +50,6 @@ public final class DecodeRequestState {
      * Non-zero while stale WorkerStatus must not resurrect this request id.
      */
     long settledAtMs;
-    /**
-     * True when a previously active request is missing from the Worker's active report
-     * and its Finished report has not arrived. The request ID and reservation token remain
-     * available for scheduler completion, but the request no longer counts toward capacity.
-     * A RUNNING or KV_ALLOCATED report clears this flag; Finished, expiration, or endpoint
-     * removal clears the retained request record.
-     */
-    boolean waitingForWorkerFinishedReport;
 
     public DecodeRequestState(long kvTokens, long kvBudgetTokens, int priority, long reservationToken) {
         if (reservationToken < 0L) {
@@ -123,7 +115,6 @@ public final class DecodeRequestState {
         kvBudgetTokens = kvTokens;
         this.phase = java.util.Objects.requireNonNull(phase, "phase");
         lastSeenAtMs = observedAtMs;
-        waitingForWorkerFinishedReport = false;
         queued = false;
         engineLifecycleOwned = false;
         dispatchPermit = null;

@@ -22,7 +22,7 @@ import java.util.Map;
 public final class RunnerTestSupport {
 
     private static final EndpointEventHandler NOOP_EVENT_SINK =
-            Mockito.mock(EndpointEventHandler.class);
+            org.flexlb.balance.endpoint.EndpointTestSupport.noopEventSink();
 
     private RunnerTestSupport() {
     }

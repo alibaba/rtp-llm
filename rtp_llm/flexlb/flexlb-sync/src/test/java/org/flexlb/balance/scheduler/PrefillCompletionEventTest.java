@@ -47,8 +47,9 @@ class PrefillCompletionEventTest {
         var reporter = mock(BatchSchedulerReporter.class);
         var requestReporter = mock(RequestSchedulerReporter.class);
         var requests = new RequestRegistry(service, reporter, requestReporter);
-        var eventHandler =
-                new EndpointEventHandler(requests, org.mockito.Mockito.mock(PrefillQueueRegistry.class), service);
+        var eventHandler = new EndpointEventHandler(requests, org.mockito.Mockito.mock(PrefillQueueRegistry.class),
+                service, new org.flexlb.balance.schedulev2.decode.DecodeReservations(),
+                org.mockito.Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
         var queueCapacity = new QueueCapacity();
         var endpoints = new EndpointRegistry(service, eventHandler, reporter, EndpointTestSupport.parkedDelivery(),
                 new NonBatchTtftEstimator(), new PlacementAvailability(), queueCapacity, new PrefillQueueRegistry(),

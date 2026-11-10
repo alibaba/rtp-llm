@@ -51,6 +51,7 @@ import static org.mockito.Mockito.when;
 
 class QueuedDecodeWithdrawalTest {
     private FlexlbConfig config;
+    private ConfigService service;
     private RequestRegistry registry;
     private GlobalQueueCoordinator queue;
     private DecodeEndpoint decode;
@@ -59,14 +60,16 @@ class QueuedDecodeWithdrawalTest {
     @BeforeEach
     void setUp() {
         config = SchedulingTestConfig.batchConfig();
-        ConfigService service = mock(ConfigService.class);
+        service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         registry = new RequestRegistry(service, mock(BatchSchedulerReporter.class), mock(RequestSchedulerReporter.class));
         queue = mock(GlobalQueueCoordinator.class);
         when(queue.requeue(any())).thenReturn(true);
         registry.attachGlobalQueue(queue);
-        decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, null,
-                "127.0.0.1", 8000, 8001, null), mock(EndpointEventHandler.class));
+        EndpointEventHandler events = mock(EndpointEventHandler.class);
+        when(events.getDecodeReservations()).thenReturn(new org.flexlb.balance.schedulev2.decode.DecodeReservations());
+        decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, null, "127.0.0.1", 8000, 8001, null),
+                events);
     }
 
     @AfterEach
@@ -107,8 +110,10 @@ class QueuedDecodeWithdrawalTest {
         decode.close();
         WorkerStatus status = WorkerStatus.createDiscovered(RoleType.DECODE, null,
                 "127.0.0.1", 8000, 8001, null);
-        decode = new DecodeEndpoint(status, new EndpointEventHandler(registry,
-                org.mockito.Mockito.mock(PrefillQueueRegistry.class), mock(org.flexlb.config.ConfigService.class)));
+        decode = new DecodeEndpoint(status,
+                new EndpointEventHandler(registry, org.mockito.Mockito.mock(PrefillQueueRegistry.class), service,
+                        new org.flexlb.balance.schedulev2.decode.DecodeReservations(),
+                        org.mockito.Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class)));
         applyStatus(Map.of(), Map.of());
         var item = queued(42);
         var slot = registry.requestSlot("42");
@@ -125,7 +130,7 @@ class QueuedDecodeWithdrawalTest {
         applyStatus(Map.of(), Map.of());
         assertEquals(RequestState.Phase.ACKNOWLEDGED, slot.snapshot().state());
         assertEquals(1, registry.snapshotActiveRequests().size());
-        assertEquals(0, decode.routingView().engineCapacityUsed());
+        assertEquals(1, decode.routingView().engineCapacityUsed());
         assertTrue(decode.isAcceptedByEngine(item.decodeReservation()));
         applyStatus(Map.of(), Map.of("42", task));
         assertEquals(RequestState.Phase.COMPLETED, slot.snapshot().state());

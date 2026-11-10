@@ -35,9 +35,12 @@ import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.DecodeTaskPhase;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.service.monitor.V2QueueReporter;
 import org.flexlb.sync.status.WorkerDirectory;
@@ -45,6 +48,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -79,15 +83,15 @@ class DecodeQueueLoopTest {
     private final DecodeSelector selector = mock(DecodeSelector.class);
     private final DefaultRouter router = mock(DefaultRouter.class);
     private final ConfigService configService = mock(ConfigService.class);
-    private final DecodeEndpoint decode =
-            new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"),
-                    mock(EndpointEventHandler.class));
-    private final ServerStatus decodeStatus = new ServerStatus();
     private final RequestSchedulerReporter reporter = mock(RequestSchedulerReporter.class);
+    private final EndpointEventHandler endpointEvents = new EndpointEventHandler(mock(RequestRegistry.class),
+            mock(PrefillQueueRegistry.class), configService, reservations, reporter);
+    private final DecodeEndpoint decode = new DecodeEndpoint(
+            WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"), endpointEvents);
+    private final ServerStatus decodeStatus = new ServerStatus();
     private final EmptyDecodeFinder emptyDecodeFinder = mock(EmptyDecodeFinder.class);
-    private final DecodeEndpoint emptyDecode =
-            new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.3", 8080, 8081, "test"),
-                    mock(EndpointEventHandler.class));
+    private final DecodeEndpoint emptyDecode = new DecodeEndpoint(
+            WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.3", 8080, 8081, "test"), endpointEvents);
     private final EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
     private final DecodeQueueLoop loop;
 
@@ -160,11 +164,11 @@ class DecodeQueueLoopTest {
         when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenReturn(1);
         assertTrue(loop.runOnce());
         assertEquals(152, decodeQueue.waitingCount());
-        assertEquals(100, decodeQueue.publishedCount());
+        assertEquals(100, decode.getInflightCount());
         when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenReturn(150);
         assertTrue(loop.runOnce());
         assertEquals(2, decodeQueue.waitingCount());
-        assertEquals(250, decodeQueue.publishedCount());
+        assertEquals(250, decode.getInflightCount());
     }
 
     @Test
@@ -179,7 +183,7 @@ class DecodeQueueLoopTest {
             }
         }
         assertTrue(loop.runOnce());
-        assertEquals(150, decodeQueue.publishedCount());
+        assertEquals(150, decode.getInflightCount());
         assertEquals(1, decodeQueue.waitingCount());
     }
 
@@ -195,7 +199,7 @@ class DecodeQueueLoopTest {
             }
         }
         assertTrue(loop.runOnce());
-        assertEquals(100, decodeQueue.publishedCount());
+        assertEquals(100, decode.getInflightCount());
         assertEquals(51, decodeQueue.waitingCount());
     }
 
@@ -209,10 +213,10 @@ class DecodeQueueLoopTest {
         }
         assertTrue(loop.runOnce());
         assertEquals(Stage.PUBLISHED, reserved.stage());
-        assertEquals(100, decodeQueue.publishedCount());
+        assertEquals(100, decode.getInflightCount());
         assertEquals(1, decodeQueue.waitingCount());
         assertTrue(loop.runOnce());
-        assertEquals(101, decodeQueue.publishedCount());
+        assertEquals(101, decode.getInflightCount());
         assertEquals(0, decodeQueue.waitingCount());
     }
 
@@ -226,7 +230,7 @@ class DecodeQueueLoopTest {
             addWaiting(Integer.toString(i));
         }
         assertTrue(loop.runOnce());
-        assertEquals(100, decodeQueue.publishedCount());
+        assertEquals(100, emptyDecode.getInflightCount());
         assertEquals(1, decodeQueue.waitingCount());
     }
 
@@ -486,13 +490,16 @@ class DecodeQueueLoopTest {
         Request request = addWaiting("1");
         loop.runOnce();
         assertEquals(Stage.PUBLISHED, request.stage());
-        assertEquals(1, decodeQueue.publishedCount());
+        assertEquals(1, decode.getInflightCount());
         assertNotNull(decode.reservationHandle("1"));
         assertTrue(reservations.contains("1"));
 
-        loop.runOnce();
+        assertFalse(loop.runOnce());
+        assertNotNull(decode.reservationHandle("1"));
+        markRequestStale(decode, "1");
+        updateDecodeStatus(decode, Map.of(), Map.of(), false);
 
-        assertEquals(0, decodeQueue.publishedCount());
+        assertEquals(0, decode.getInflightCount());
         assertNull(decode.reservationHandle("1"));
         assertFalse(reservations.contains("1"));
         verify(reporter).reportStatusUpdateTimeout(RoleType.DECODE, decode.ipPort());
@@ -503,13 +510,108 @@ class DecodeQueueLoopTest {
         Request request = addWaiting("1");
         loop.runOnce();
         loop.runOnce();
-        assertEquals(1, decodeQueue.publishedCount());
+        assertEquals(1, decode.getInflightCount());
 
         decode.release(request.decodeChoice().reservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
         loop.runOnce();
 
-        assertEquals(0, decodeQueue.publishedCount());
+        assertEquals(0, decode.getInflightCount());
+        assertFalse(reservations.contains("1"));
         verify(reporter, never()).reportStatusUpdateTimeout(RoleType.DECODE, decode.ipPort());
+    }
+
+    @Test
+    void reportedPublishedRequestMissingFromWorkerStatusWaitsForStatusTimeout() {
+        config.getRequestLifecycle().getRequest().setStatusUpdateTimeoutMs(Long.MAX_VALUE);
+        Request request = addWaiting("1");
+        loop.runOnce();
+        updateDecodeStatus(decode, Map.of("1", task("1", TaskPhase.RECEIVED)), Map.of(), false);
+        assertTrue(reservations.contains("1"));
+
+        // 从 active 消失但未到状态超时：容量保留，不报超时
+        updateDecodeStatus(decode, Map.of(), Map.of(), false);
+        assertEquals(Stage.PUBLISHED, request.stage());
+        assertNotNull(decode.reservationHandle("1"));
+        assertEquals(1L, decode.routingView().totalLoad());
+        verify(reporter, never()).reportStatusUpdateTimeout(RoleType.DECODE, decode.ipPort());
+
+        // 距最近活跃超过状态超时后，由下一次版本变化清理
+        config.getRequestLifecycle().getRequest().setStatusUpdateTimeoutMs(1000L);
+        markRequestStale(decode, "1");
+        updateDecodeStatus(decode, Map.of(), Map.of(), false);
+        assertNull(decode.reservationHandle("1"));
+        assertFalse(reservations.contains("1"));
+        assertEquals(0L, decode.routingView().totalLoad());
+        verify(reporter).reportStatusUpdateTimeout(RoleType.DECODE, decode.ipPort());
+        Request next = addWaiting("2");
+        assertTrue(loop.runOnce());
+        assertEquals(Stage.PUBLISHED, next.stage());
+    }
+
+    @Test
+    void unchangedStatusDefersEmptyDecodePublicationExpiryToNextVersion() {
+        config.getRequestLifecycle().getRequest().setStatusUpdateTimeoutMs(0L);
+        doReturn(PlacementResult.blocked(RoleType.DECODE)).when(selector).select(any(), any(), any());
+        doAnswer(call -> SelectedRole.decode(emptyDecode.tryHold(), emptyDecodeStatus())).when(emptyDecodeFinder)
+                .find(any(), any());
+        Request request = addWaiting("1");
+        loop.runOnce();
+        assertEquals(Stage.PUBLISHED, request.stage());
+        assertTrue(reservations.contains("1"));
+        markRequestStale(emptyDecode, "1");
+
+        // 同版本心跳只续期，不清理；下一次版本变化才按状态超时清理
+        updateDecodeStatus(emptyDecode, Map.of(), Map.of(), true);
+        assertNotNull(emptyDecode.reservationHandle("1"));
+        verify(reporter, never()).reportStatusUpdateTimeout(RoleType.DECODE, emptyDecode.ipPort());
+
+        updateDecodeStatus(emptyDecode, Map.of(), Map.of(), false);
+        assertNull(emptyDecode.reservationHandle("1"));
+        assertFalse(reservations.contains("1"));
+        assertEquals(0L, emptyDecode.routingView().totalLoad());
+        verify(reporter).reportStatusUpdateTimeout(RoleType.DECODE, emptyDecode.ipPort());
+    }
+
+    @Test
+    void finishedDuringPublicationDoesNotRecreateReservation() {
+        Request request = addWaiting("1");
+        request.future()
+                .thenRun(() -> updateDecodeStatus(decode, Map.of(), Map.of("1", task("1", TaskPhase.RUNNING)), false));
+
+        loop.runOnce();
+
+        assertEquals(Stage.PUBLISHED, request.stage());
+        assertNull(decode.reservationHandle("1"));
+        assertFalse(reservations.contains("1"));
+        verify(reporter, never()).reportStatusUpdateTimeout(RoleType.DECODE, decode.ipPort());
+    }
+
+    @Test
+    void retirementDuringPublicationDoesNotRecreateReservation() {
+        Request request = addWaiting("1");
+        request.future().thenRun(decode::close);
+
+        loop.runOnce();
+
+        assertEquals(Stage.PUBLISHED, request.stage());
+        assertNull(decode.reservationHandle("1"));
+        assertFalse(reservations.contains("1"));
+    }
+
+    @Test
+    void retirementClearsReservationProtection() {
+        Request request = addWaiting("1");
+        loop.runOnce();
+        try (WorkerEndpoint.EndpointHold hold = decode.tryHold()) {
+            decode.reserveUnqueued(hold, "2", 16L, 16L, 30);
+        }
+        reservations.add("2");
+
+        decode.close();
+
+        assertEquals(Stage.PUBLISHED, request.stage());
+        assertFalse(reservations.contains("1"));
+        assertFalse(reservations.contains("2"));
     }
 
     @Test
@@ -531,7 +633,7 @@ class DecodeQueueLoopTest {
                 second.future().join().getServerStatus());
         assertNotNull(emptyDecode.reservationHandle("2"));
         assertEquals(1L, emptyDecode.routingView().totalLoad());
-        assertEquals(2, decodeQueue.publishedCount());
+        assertEquals(2, decode.getInflightCount() + emptyDecode.getInflightCount());
     }
 
     @Test
@@ -837,6 +939,57 @@ class DecodeQueueLoopTest {
         queueCapacity.increaseTotalQueueCount(request.future());
         assertTrue(queueCapacity.tryReserveEngineSubQueueSlot(config, RoleType.PREFILL, 1));
         request.holdQueueSlot(RoleType.PREFILL);
+    }
+
+    /**
+     * 把节点上该请求记录的时间回拨，使下一次状态回调确定性判定为超时。
+     */
+    @SuppressWarnings("unchecked")
+    private static void markRequestStale(DecodeEndpoint endpoint, String requestId) {
+        Object state = org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "state");
+        Map<String, org.flexlb.balance.endpoint.DecodeRequestState> requests =
+                (Map<String, org.flexlb.balance.endpoint.DecodeRequestState>) org.springframework.test.util.ReflectionTestUtils
+                        .getField(state, "decodeRequests");
+        org.flexlb.balance.endpoint.DecodeRequestState request = requests.get(requestId);
+        long staleAtMs = System.currentTimeMillis() - 10_000L;
+        request.setPublishedAtMs(staleAtMs);
+        request.setLastSeenAtMs(staleAtMs);
+    }
+
+    private void updateDecodeStatus(DecodeEndpoint endpoint,
+                                    Map<String, TaskInfo> active,
+                                    Map<String, TaskInfo> finished,
+                                    boolean sameVersion) {
+        WorkerStatus status = endpoint.getStatus();
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setAlive(true);
+        response.setRole(RoleType.DECODE);
+        response.setTotalKvCacheTokens(1000L);
+        response.setAvailableKvCacheTokens(1000L);
+        response.setRunningTaskInfo(active);
+        response.setFinishedTaskInfo(finished);
+        response.setStatusVersion(sameVersion
+                ? status.appliedStatusCursor().statusVersion()
+                : Math.max(1L, status.appliedStatusCursor().statusVersion() + 1));
+        Runnable notify;
+        status.lock.lock();
+        try {
+            WorkerStatus.StatusObservation observation = status.freezeStatusResponse(response);
+            notify = sameVersion
+                    ? endpoint.observeStatusHeartbeat(status, observation)
+                    : endpoint.applyPreparedStatus(status, status.prepareNewStatus(observation));
+        } finally {
+            status.lock.unlock();
+        }
+        notify.run();
+    }
+
+    private static TaskInfo task(String requestId, TaskPhase phase) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(requestId);
+        task.setPhase(phase);
+        task.setInputLength(16L);
+        return task;
     }
 
     private void assertReturnedToMain(Request request) {

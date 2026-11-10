@@ -62,7 +62,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         this.lifecycle = new RequestRegistry(
                 configService, batchReporter, requestReporter);
         this.endpointEvents = new EndpointEventHandler(lifecycle, org.mockito.Mockito.mock(PrefillQueueRegistry.class),
-                configService);
+                configService, new org.flexlb.balance.schedulev2.decode.DecodeReservations(),
+                org.mockito.Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
         DispatcherConfig dispatcher = Objects.requireNonNull(
                 configService.loadBalanceConfig().getDispatcher(),
                 "dispatcher");

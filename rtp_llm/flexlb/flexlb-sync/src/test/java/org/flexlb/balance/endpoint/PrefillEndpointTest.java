@@ -246,8 +246,9 @@ class PrefillEndpointTest {
         var queues = mock(PrefillQueueRegistry.class);
         var configService = mock(org.flexlb.config.ConfigService.class);
         org.mockito.Mockito.when(configService.loadBalanceConfig()).thenReturn(config);
-        var events =
-                new org.flexlb.balance.scheduler.EndpointEventHandler(requestRuntime.requests(), queues, configService);
+        var events = new org.flexlb.balance.scheduler.EndpointEventHandler(requestRuntime.requests(), queues,
+                configService, new org.flexlb.balance.schedulev2.decode.DecodeReservations(),
+                mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
         endpoint = EndpointTestSupport.standalonePrefillEndpoint(
                 EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090), config,
                 EndpointTestSupport.routeStrategy(requestRuntime), events, endpointReporter, v2Reporter);

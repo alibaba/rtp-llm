@@ -183,8 +183,7 @@ final class StrategyTestSupport {
     private static final class TestRequestRuntime {
         private final RequestRegistry requests =
                 Mockito.mock(RequestRegistry.class);
-        private final EndpointEventHandler events =
-                Mockito.mock(EndpointEventHandler.class);
+        private final EndpointEventHandler events = org.flexlb.balance.endpoint.EndpointTestSupport.noopEventSink();
 
         RequestRegistry requests() {
             return requests;

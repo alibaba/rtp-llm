@@ -1,13 +1,16 @@
 package org.flexlb.balance.scheduler;
 
+import lombok.Getter;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.WorkerStatusFact;
 import org.flexlb.balance.schedulev2.RequestStatusTimeout;
+import org.flexlb.balance.schedulev2.decode.DecodeReservations;
 import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
@@ -23,14 +26,23 @@ public final class EndpointEventHandler {
 
     private final RequestRegistry scheduler;
     private final PrefillQueueRegistry prefillQueueRegistry;
+    @Getter
     private final ConfigService configService;
+    @Getter
+    private final DecodeReservations decodeReservations;
+    @Getter
+    private final RequestSchedulerReporter requestReporter;
 
     public EndpointEventHandler(RequestRegistry scheduler,
                                 PrefillQueueRegistry prefillQueueRegistry,
-                                ConfigService configService) {
+                                ConfigService configService,
+                                DecodeReservations decodeReservations,
+                                RequestSchedulerReporter requestReporter) {
         this.scheduler = scheduler;
         this.prefillQueueRegistry = prefillQueueRegistry;
         this.configService = configService;
+        this.decodeReservations = decodeReservations;
+        this.requestReporter = requestReporter;
     }
 
     public void onPrefillStatus(PrefillEndpoint prefillEndpoint,
@@ -39,9 +51,8 @@ public final class EndpointEventHandler {
         handlePrefillStatus(prefillEndpoint, statusObservation, facts);
     }
 
-    public void onDecodeStatus(
-            DecodeEndpoint source,
-            List<org.flexlb.balance.endpoint.WorkerStatusFact> facts) {
+    public void onDecodeStatus(DecodeEndpoint source,
+                               List<org.flexlb.balance.endpoint.WorkerStatusFact> facts) {
         handleDecodeStatus(source, facts);
     }
 
@@ -158,9 +169,8 @@ public final class EndpointEventHandler {
         }
     }
 
-    private void handleDecodeStatus(
-            DecodeEndpoint source,
-            List<org.flexlb.balance.endpoint.WorkerStatusFact> facts) {
+    private void handleDecodeStatus(DecodeEndpoint source,
+                                    List<org.flexlb.balance.endpoint.WorkerStatusFact> facts) {
         for (org.flexlb.balance.endpoint.WorkerStatusFact fact : facts) {
             try {
                 scheduler.processDecodeStatus(source, fact);

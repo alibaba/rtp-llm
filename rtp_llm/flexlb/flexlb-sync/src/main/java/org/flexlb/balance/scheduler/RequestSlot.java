@@ -1153,7 +1153,9 @@ public final class RequestSlot {
         executeEngineObservationEffects(observation);
     }
 
-    private EngineObservation applyDecodeStatusLocked(DecodeEndpoint source, org.flexlb.balance.endpoint.WorkerStatusFact fact, long nowMs) {
+    private EngineObservation applyDecodeStatusLocked(DecodeEndpoint source,
+                                                      org.flexlb.balance.endpoint.WorkerStatusFact fact,
+                                                      long nowMs) {
         requireSlotLock("Decode fact reduction");
         if (!ownsDecodeFactLocked(source, fact.reservation())) { return EngineObservation.STALE; }
         lastWorkerStatusAtMs = Math.max(lastWorkerStatusAtMs, nowMs);

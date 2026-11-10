@@ -134,16 +134,34 @@ class DecodeEndpointLayeredViewTest {
     // ==================== calibrate: registry follows the reports ====================
 
     @Test
-    void calibrate_dropsEntriesNoLongerReported() {
+    void calibrate_keepsLocalRequestUntilFinished() {
         reserve(1L, 500, 508, 30);
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.KV_ALLOCATED, 256)), null, 10_000);
         assertTrue(isConfirmed(1L));
 
         updateStatus(Map.of(), null, 10_000);
 
+        assertTrue(isConfirmed(1L));
+        assertEquals(1, endpoint.resourceSnapshot().acceptedCount());
+        assertEquals(1, endpoint.resourceSnapshot().confirmed().size());
+        assertEquals(1, endpoint.routingView().engineCapacityUsed());
+
+        updateStatus(Map.of(), Map.of("1", runningTask(1L, TaskPhase.KV_ALLOCATED, 256)), 10_000);
+
         assertFalse(isConfirmed(1L));
-        assertEquals(0, endpoint.resourceSnapshot().acceptedCount());
-        assertEquals(0, endpoint.resourceSnapshot().confirmed().size());
+        assertEquals(0, endpoint.routingView().engineCapacityUsed());
+    }
+
+    @Test
+    void calibrate_dropsUntrackedRequestNoLongerReported() {
+        updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
+        assertTrue(isConfirmed(1L));
+
+        updateStatus(Map.of(), null, 10_000);
+
+        assertFalse(isConfirmed(1L));
+        assertTrue(endpoint.resourceSnapshot().confirmed().isEmpty());
+        assertEquals(0, endpoint.routingView().engineCapacityUsed());
     }
 
     @Test

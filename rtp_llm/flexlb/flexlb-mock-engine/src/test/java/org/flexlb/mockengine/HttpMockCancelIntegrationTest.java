@@ -41,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Cross-process 8429 wiring integration test (C1 three-piece set, self-test
@@ -521,7 +522,9 @@ class HttpMockCancelIntegrationTest {
         WorkerStatus status = WorkerStatus.createDiscovered(
                 RoleType.DECODE, "test", "127.0.0.1",
                 grpcPort - 2, grpcPort, null);
-        return new DecodeEndpoint(status, mock(EndpointEventHandler.class));
+        EndpointEventHandler events = mock(EndpointEventHandler.class);
+        when(events.getDecodeReservations()).thenReturn(new org.flexlb.balance.schedulev2.decode.DecodeReservations());
+        return new DecodeEndpoint(status, events);
     }
 
     private MockPerformanceModel model(double decodeStepMs,

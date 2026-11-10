@@ -90,8 +90,15 @@ public final class EndpointTestSupport {
                 new org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry(), requestReporter);
     }
 
-    static EndpointEventHandler noopEventSink() {
-        return org.mockito.Mockito.mock(EndpointEventHandler.class);
+    public static EndpointEventHandler noopEventSink() {
+        var configService = org.mockito.Mockito.mock(org.flexlb.config.ConfigService.class);
+        org.mockito.Mockito.when(configService.loadBalanceConfig())
+                .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        var events = org.mockito.Mockito.mock(EndpointEventHandler.class);
+        org.mockito.Mockito.when(events.getConfigService()).thenReturn(configService);
+        org.mockito.Mockito.when(events.getDecodeReservations())
+                .thenReturn(new org.flexlb.balance.schedulev2.decode.DecodeReservations());
+        return events;
     }
 
     public static WorkerStatus workerStatus(
@@ -353,6 +360,8 @@ public final class EndpointTestSupport {
         private final List<ScheduledRequest> offerFailures =
                 new CopyOnWriteArrayList<>();
         TestRequestRuntime() {
+            org.mockito.Mockito.when(events.getDecodeReservations())
+                    .thenReturn(new org.flexlb.balance.schedulev2.decode.DecodeReservations());
             org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.stubRouteDelivery(requests, this::onCompleted);
             org.mockito.Mockito.doAnswer(invocation -> {
                 onQueueOfferFailure(

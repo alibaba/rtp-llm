@@ -169,9 +169,11 @@ class EndpointCleanupDeadlockTest {
             Runnable sweep;
             Runnable endpointOperation;
             if (kind.startsWith("decode")) {
-                var endpoint = spy(new DecodeEndpoint(WorkerStatus.createDiscovered(
-                        RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
-                        mock(EndpointEventHandler.class)));
+                var events = mock(EndpointEventHandler.class);
+                when(events.getDecodeReservations())
+                        .thenReturn(new org.flexlb.balance.schedulev2.decode.DecodeReservations());
+                var endpoint = spy(new DecodeEndpoint(
+                        WorkerStatus.createDiscovered(RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), events));
                 DecodeEndpoint.ReservationHandle reservation;
                 try (var hold = endpoint.tryHold()) {
                     assertNotNull(hold);

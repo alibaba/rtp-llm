@@ -64,8 +64,9 @@ class EndpointCleanupOwnershipTest {
                 .map(RequestSlot::requestId).collect(java.util.stream.Collectors.toSet());
         String id = "7001";
         registry.register(RequestLifecycleTestSupport.context(config, id));
-        var endpoint = new DecodeEndpoint(WorkerStatus.createDiscovered(
-                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), mock(EndpointEventHandler.class));
+        var endpoint =
+                new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
+                        org.flexlb.balance.endpoint.EndpointTestSupport.noopEventSink());
         try (var hold = endpoint.tryHold()) {
             assertNotNull(hold);
             assertNotNull(endpoint.reserveUnqueued(hold, id, 1L, 1L, 50));
@@ -100,8 +101,9 @@ class EndpointCleanupOwnershipTest {
     @ValueSource(booleans = {false, true})
     void registrationAfterAbsentCheckAcquiresFreshReservation(boolean confirmed) throws Exception {
         String id = "7003";
-        var endpoint = new DecodeEndpoint(WorkerStatus.createDiscovered(
-                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), mock(EndpointEventHandler.class));
+        var endpoint =
+                new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
+                        org.flexlb.balance.endpoint.EndpointTestSupport.noopEventSink());
         var oldReservation = reserve(endpoint, id, 100L, 150L);
         if (confirmed) {
             EndpointCleanupTestSupport.confirmDecode(endpoint, id);
@@ -211,11 +213,13 @@ class EndpointCleanupOwnershipTest {
         ledger.assertEmpty();
     }
 
-    @Test void confirmedRecordIsRetainedUntilExactTerminalRecordRemoval() {
+    @Test
+    void confirmedRecordIsRetainedUntilExactTerminalRecordRemoval() {
         String id = "7005";
         registry.register(RequestLifecycleTestSupport.context(config, id));
-        var endpoint = new DecodeEndpoint(WorkerStatus.createDiscovered(
-                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), mock(EndpointEventHandler.class));
+        var endpoint =
+                new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
+                        org.flexlb.balance.endpoint.EndpointTestSupport.noopEventSink());
         var reservation = reserve(endpoint, id, 100L, 150L);
         EndpointCleanupTestSupport.confirmDecode(endpoint, id);
         assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));

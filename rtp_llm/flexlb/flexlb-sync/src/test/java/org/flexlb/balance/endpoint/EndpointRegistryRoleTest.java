@@ -63,7 +63,9 @@ class EndpointRegistryRoleTest {
         var queues = Mockito.spy(new PrefillQueueRegistry());
         var runtime = EndpointTestSupport.requestRuntime();
         var availability = Mockito.mock(PlacementAvailability.class);
-        var events = new EndpointEventHandler(runtime.requests(), queues, service);
+        var events = new EndpointEventHandler(runtime.requests(), queues, service,
+                new org.flexlb.balance.schedulev2.decode.DecodeReservations(),
+                org.mockito.Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
         var localRegistry = new EndpointRegistry(service, events, Mockito.mock(BatchSchedulerReporter.class),
                 EndpointTestSupport.routeStrategy(runtime), new NonBatchTtftEstimator(), availability,
                 new QueueCapacity(), queues, Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
