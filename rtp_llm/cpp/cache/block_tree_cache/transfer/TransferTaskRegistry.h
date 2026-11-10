@@ -63,13 +63,10 @@ public:
         return trace_id != 0 && finish(std::to_string(trace_id), buffer_safe);
     }
 
-    // Preserve request order, including duplicates. Missing IDs or another
-    // worker incarnation never constitute a completion proof.
-    std::vector<State> query(const std::string& expected_epoch, const std::vector<std::string>& trace_ids) const {
+    // The worker group has one shared lifetime. Read-only queries of this
+    // instance preserve request order and never create missing records.
+    std::vector<State> queryLocal(const std::vector<std::string>& trace_ids) const {
         std::vector<State> states(trace_ids.size(), State::UNKNOWN);
-        if (expected_epoch != epoch_) {
-            return states;
-        }
         std::lock_guard<std::mutex> lock(mutex_);
         for (size_t i = 0; i < trace_ids.size(); ++i) {
             const auto it = records_.find(trace_ids[i]);
@@ -80,7 +77,7 @@ public:
         return states;
     }
 
-    std::vector<State> query(const std::string& expected_epoch, const std::vector<uint64_t>& trace_ids) const {
+    std::vector<State> queryLocal(const std::vector<uint64_t>& trace_ids) const {
         std::vector<std::string> keys;
         keys.reserve(trace_ids.size());
         for (const auto trace_id : trace_ids) {
@@ -88,7 +85,16 @@ public:
             // registered the literal "0". Empty string records cannot exist.
             keys.push_back(trace_id == 0 ? std::string{} : std::to_string(trace_id));
         }
-        return query(expected_epoch, keys);
+        return queryLocal(keys);
+    }
+
+    // Retain the explicit epoch check for callers that already hold one.
+    std::vector<State> query(const std::string& expected_epoch, const std::vector<std::string>& trace_ids) const {
+        return expected_epoch == epoch_ ? queryLocal(trace_ids) : std::vector<State>(trace_ids.size(), State::UNKNOWN);
+    }
+
+    std::vector<State> query(const std::string& expected_epoch, const std::vector<uint64_t>& trace_ids) const {
+        return expected_epoch == epoch_ ? queryLocal(trace_ids) : std::vector<State>(trace_ids.size(), State::UNKNOWN);
     }
 
 private:

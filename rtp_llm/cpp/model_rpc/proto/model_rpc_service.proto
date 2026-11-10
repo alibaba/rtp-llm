@@ -910,12 +910,44 @@ message ShutdownResponsePB {
     int64 deadline_unix_ms = 5;
 }
 
+// Query existing worker evidence without admitting, cancelling or replaying I/O.
+// Numeric transfer traces and KVCM READ string traces are separate namespaces.
+message TransferCompletionKeyPB {
+    oneof trace {
+        uint64 transfer_trace_id = 1;
+        string kvcm_trace_id = 2;
+    }
+}
+
+enum TransferCompletionStatePB {
+    TRANSFER_COMPLETION_UNKNOWN = 0;
+    TRANSFER_COMPLETION_RUNNING = 1;
+    TRANSFER_COMPLETION_BUFFER_SAFE = 2;
+}
+
+message TransferCompletionQueryRequestPB {
+    repeated TransferCompletionKeyPB keys = 1;
+}
+
+message TransferCompletionEntryPB {
+    TransferCompletionKeyPB key = 1;
+    TransferCompletionStatePB state = 2;
+}
+
+message TransferCompletionQueryResponsePB {
+    oneof worker {
+        uint32 rank = 1;
+    }
+    repeated TransferCompletionEntryPB entries = 2;
+}
+
 message FunctionRequestPB {
     oneof request {
         MemoryOperationRequestPB mem_request = 1;
         RemoteOperationRequestPB remote_request = 2;
         P2PConnectorBroadcastTpRequestPB p2p_request = 3;
         ShutdownRequestPB shutdown_request = 4;
+        TransferCompletionQueryRequestPB completion_query = 5;
     }
 }
 
@@ -1016,6 +1048,7 @@ message FunctionResponsePB {
         RemoteOperationResponsePB remote_response = 2;
         P2PConnectorBroadcastTpResponsePB p2p_response = 3;
         ShutdownResponsePB shutdown_response = 4;
+        TransferCompletionQueryResponsePB completion_query = 5;
     }
 }
 

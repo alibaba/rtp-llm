@@ -93,6 +93,33 @@ kvcm_backend_test_deps = [
 ]
 
 cc_test_wrapper(
+    name = "kvcm_completion_query_test",
+    testonly = True,
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = [
+        "KVCMCompletionQueryTest.cc",
+        "KVCMMockTestBase.h",
+        "MockKVCMClient.h",
+    ],
+    copts = ["-fno-access-control"] + copts(),
+    tags = [
+        "L20_CU13",
+        "exclusive-if-local",
+    ],
+    target_compatible_with = select({
+        "//:using_remote_kv_cache": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = kvcm_backend_test_deps + [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache:transfer_task_registry",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
+        "@grpc//:grpc++",
+    ],
+)
+
+cc_test_wrapper(
     name = "kvcm_worker_registry_test",
     testonly = True,
     exec_properties = {"gpu": "L20_CU13"},

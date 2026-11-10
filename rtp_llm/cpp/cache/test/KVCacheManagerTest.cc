@@ -28,6 +28,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionQuery.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
@@ -2226,6 +2227,171 @@ public:
     ErrorInfo                   completion_error{ErrorInfo::OkStatus()};
     bool                        buffer_safe{false};
 };
+
+TEST_F(KVCacheManagerTest, CompletionQueryWithoutInitializedBackendsReturnsUnknownAndActualRank) {
+    auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 2;
+    parallelism.tp_rank = 1;
+    KVCacheManager manager(cache_config, false, nullptr, KVCacheConfig{}, parallelism);
+    ASSERT_EQ(manager.blockTreeCache(), nullptr);
+    FunctionRequestPB request;
+    auto* query = request.mutable_completion_query();
+    query->add_keys()->set_transfer_trace_id(42);
+    query->add_keys()->set_kvcm_trace_id("42");
+    query->add_keys()->set_transfer_trace_id(42);
+    query->add_keys()->set_transfer_trace_id(0);
+    query->add_keys()->set_kvcm_trace_id("");
+    query->add_keys();
+    FunctionResponsePB response;
+    ASSERT_TRUE(manager.executeFunction(request, response));
+    ASSERT_TRUE(response.has_completion_query());
+    const auto& result = response.completion_query();
+    EXPECT_EQ(result.worker_case(), TransferCompletionQueryResponsePB::kRank);
+    EXPECT_EQ(result.rank(), 1u);
+    ASSERT_EQ(result.entries_size(), query->keys_size());
+    for (int index = 0; index < query->keys_size(); ++index) {
+        EXPECT_EQ(result.entries(index).key().SerializeAsString(), query->keys(index).SerializeAsString());
+        EXPECT_EQ(result.entries(index).state(), TRANSFER_COMPLETION_UNKNOWN);
+    }
+    EXPECT_EQ(manager.blockTreeCache(), nullptr);
+    EXPECT_FALSE(manager.initialized());
+}
+
+TEST_F(KVCacheManagerTest, CompletionQueryPreservesEvidenceNamespacesAndNeverSubmitsTransfer) {
+    auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(manager->init());
+    auto engine = std::make_shared<RecordingBatchTransferEngine>();
+    manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+    constexpr uint64_t running_trace = 4201;
+    constexpr uint64_t safe_trace = 4202;
+    constexpr uint64_t missing_trace = 4203;
+    for (const uint64_t trace : {running_trace, safe_trace}) {
+        engine->buffer_safe = trace == safe_trace;
+        FunctionRequestPB transfer;
+        appendValidGroupedTransfer(manager, transfer);
+        transfer.mutable_mem_request()->set_transfer_trace_id(trace);
+        FunctionResponsePB result;
+        ASSERT_TRUE(manager->executeFunction(transfer, result));
+        ASSERT_EQ(result.mem_response().code(), MemoryOperationResponsePB::OK);
+    }
+    const auto& registry = manager->block_tree_cache_->transfer_dispatcher_->taskRegistry();
+    ASSERT_EQ(registry.size(), 2u);
+    ASSERT_EQ(engine->submitted_batch_count, 2u);
+    ASSERT_EQ(manager->blockTreeCache()->storageBackend(), nullptr);
+
+    FunctionRequestPB request;
+    auto* query = request.mutable_completion_query();
+    query->add_keys()->set_transfer_trace_id(running_trace);
+    query->add_keys()->set_transfer_trace_id(safe_trace);
+    query->add_keys()->set_kvcm_trace_id(std::to_string(safe_trace));
+    query->add_keys()->set_transfer_trace_id(missing_trace);
+    query->add_keys()->set_transfer_trace_id(safe_trace);
+    query->add_keys()->set_transfer_trace_id(0);
+    query->add_keys()->set_kvcm_trace_id("");
+    query->add_keys();
+    const std::vector<TransferCompletionStatePB> expected{
+        TRANSFER_COMPLETION_RUNNING,
+        TRANSFER_COMPLETION_BUFFER_SAFE,
+        TRANSFER_COMPLETION_UNKNOWN,
+        TRANSFER_COMPLETION_UNKNOWN,
+        TRANSFER_COMPLETION_BUFFER_SAFE,
+        TRANSFER_COMPLETION_UNKNOWN,
+        TRANSFER_COMPLETION_UNKNOWN,
+        TRANSFER_COMPLETION_UNKNOWN};
+    FunctionResponsePB response;
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        ASSERT_TRUE(manager->executeFunction(request, response));
+        ASSERT_TRUE(response.has_completion_query());
+        const auto& result = response.completion_query();
+        EXPECT_EQ(result.worker_case(), TransferCompletionQueryResponsePB::kRank);
+        EXPECT_EQ(result.rank(), 0u);
+        ASSERT_EQ(result.entries_size(), query->keys_size());
+        for (int index = 0; index < query->keys_size(); ++index) {
+            EXPECT_EQ(result.entries(index).key().SerializeAsString(), query->keys(index).SerializeAsString());
+            EXPECT_EQ(result.entries(index).state(), expected[index]);
+        }
+        EXPECT_EQ(engine->submitted_batch_count, 2u);
+        EXPECT_EQ(registry.size(), 2u);
+    }
+
+    FrozenTask::ExecutionInfo execution;
+    execution.remote = false;
+    execution.expected_rank_count = 1;
+    execution.expected_peers = {{0, "local"}};
+    for (const uint64_t trace : {running_trace, safe_trace}) {
+        execution.trace_id = trace;
+        const auto result = manager->queryTransferCompletion(execution, 1000);
+        ASSERT_EQ(result.ranks.size(), 1u);
+        EXPECT_EQ(result.trace_id, execution.trace_id);
+        EXPECT_EQ(result.ranks.front().rank, 0u);
+        const auto expected_state = trace == safe_trace ? TransferTaskRegistry::State::BUFFER_SAFE :
+                                                         TransferTaskRegistry::State::RUNNING;
+        EXPECT_EQ(result.ranks.front().state, expected_state);
+        EXPECT_EQ(result.all_safe, trace == safe_trace);
+        EXPECT_FALSE(result.ranks.front().cq_received);
+        EXPECT_FALSE(result.ranks.front().grpc_code.has_value());
+    }
+    execution.trace_id = std::to_string(safe_trace);
+    const auto missing_backend = manager->queryTransferCompletion(execution, 1000);
+    ASSERT_EQ(missing_backend.ranks.size(), 1u);
+    EXPECT_EQ(missing_backend.ranks.front().state, TransferTaskRegistry::State::UNKNOWN);
+    EXPECT_FALSE(missing_backend.all_safe);
+    EXPECT_EQ(engine->submitted_batch_count, 2u);
+    EXPECT_EQ(registry.size(), 2u);
+
+    // Querying an absent execution did not consume its future admission.
+    FunctionRequestPB transfer;
+    appendValidGroupedTransfer(manager, transfer);
+    transfer.mutable_mem_request()->set_transfer_trace_id(missing_trace);
+    ASSERT_TRUE(manager->executeFunction(transfer, response));
+    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::OK);
+    EXPECT_EQ(engine->submitted_batch_count, 3u);
+    EXPECT_EQ(registry.size(), 3u);
+}
+
+TEST_F(KVCacheManagerTest, CompletionQueryClearsReusedResponseAndAcceptsEmptyKeys) {
+    auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    auto manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(manager->init());
+    const auto& registry = manager->block_tree_cache_->transfer_dispatcher_->taskRegistry();
+    ASSERT_EQ(registry.size(), 0u);
+    FunctionRequestPB request;
+    auto* query = request.mutable_completion_query();
+    query->add_keys()->set_transfer_trace_id(71);
+    query->add_keys()->set_kvcm_trace_id("absent-read");
+    FunctionResponsePB response;
+    response.mutable_mem_response()->set_buffer_safe(true);
+    ASSERT_TRUE(manager->executeFunction(request, response));
+    ASSERT_TRUE(response.has_completion_query());
+    EXPECT_FALSE(response.has_mem_response());
+    ASSERT_EQ(response.completion_query().entries_size(), 2);
+
+    query->clear_keys();
+    query->add_keys()->set_transfer_trace_id(72);
+    ASSERT_TRUE(manager->executeFunction(request, response));
+    ASSERT_EQ(response.completion_query().entries_size(), 1);
+    EXPECT_EQ(response.completion_query().entries(0).key().trace_case(),
+              TransferCompletionKeyPB::kTransferTraceId);
+    EXPECT_EQ(response.completion_query().entries(0).key().transfer_trace_id(), 72u);
+    EXPECT_EQ(response.completion_query().entries(0).state(), TRANSFER_COMPLETION_UNKNOWN);
+
+    query->clear_keys();
+    ASSERT_TRUE(manager->executeFunction(request, response));
+    EXPECT_EQ(response.completion_query().entries_size(), 0);
+    response.mutable_remote_response()->set_payload_buffer_safe(true);
+    ASSERT_TRUE(manager->executeFunction(request, response));
+    ASSERT_TRUE(response.has_completion_query());
+    EXPECT_FALSE(response.has_remote_response());
+    EXPECT_EQ(response.completion_query().worker_case(), TransferCompletionQueryResponsePB::kRank);
+    EXPECT_EQ(response.completion_query().rank(), 0u);
+    EXPECT_EQ(response.completion_query().entries_size(), 0);
+    EXPECT_EQ(registry.size(), 0u);
+}
 
 TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsMissingExecutionIdentityAndClearsOldSafetyProof) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);

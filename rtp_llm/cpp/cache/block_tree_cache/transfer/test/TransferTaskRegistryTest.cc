@@ -84,6 +84,59 @@ TEST(TransferTaskRegistryTest, QueryRequiresCurrentWorkerEpochAndPreservesOrder)
     EXPECT_TRUE(registry.query(registry.epoch(), std::vector<std::string>{}).empty());
 }
 
+TEST(TransferTaskRegistryTest, LocalStringQueryPreservesOrderWithoutCreatingRecords) {
+    Registry registry;
+    ASSERT_TRUE(registry.begin("safe"));
+    ASSERT_TRUE(registry.finish("safe", true));
+    ASSERT_TRUE(registry.begin("running"));
+    const Registry& local = registry;
+    const std::vector<std::string> ids{"running", "missing", "safe", "safe", ""};
+    const std::vector<State> expected{
+        State::RUNNING, State::UNKNOWN, State::BUFFER_SAFE, State::BUFFER_SAFE, State::UNKNOWN};
+    EXPECT_EQ(local.queryLocal(ids), expected);
+    EXPECT_EQ(local.queryLocal(ids), expected);
+    EXPECT_EQ(local.size(), 2u);
+    EXPECT_TRUE(local.queryLocal(std::vector<std::string>{}).empty());
+    EXPECT_TRUE(registry.begin("missing"));
+}
+
+TEST(TransferTaskRegistryTest, LocalNumericQueryRejectsZeroAndObservesMonotonicProof) {
+    Registry registry;
+    const uint64_t largest = std::numeric_limits<uint64_t>::max();
+    ASSERT_TRUE(registry.begin(uint64_t{42}));
+    ASSERT_TRUE(registry.begin(largest));
+    ASSERT_TRUE(registry.begin("0"));
+    ASSERT_TRUE(registry.finish("0", true));
+    const std::vector<uint64_t> ids{0, 42, 43, largest, 42};
+    EXPECT_EQ(registry.queryLocal(ids),
+              (std::vector<State>{State::UNKNOWN, State::RUNNING, State::UNKNOWN, State::RUNNING, State::RUNNING}));
+    ASSERT_TRUE(registry.finish(uint64_t{42}, true));
+    ASSERT_TRUE(registry.finish(uint64_t{42}, false));
+    EXPECT_EQ(registry.queryLocal(ids),
+              (std::vector<State>{
+                  State::UNKNOWN, State::BUFFER_SAFE, State::UNKNOWN, State::RUNNING, State::BUFFER_SAFE}));
+    EXPECT_EQ(registry.size(), 3u);
+    EXPECT_TRUE(registry.queryLocal(std::vector<uint64_t>{}).empty());
+    EXPECT_TRUE(registry.begin(uint64_t{43}));
+}
+
+TEST(TransferTaskRegistryTest, LocalQueryUsesThisInstanceWithoutWeakeningEpochChecks) {
+    Registry first;
+    Registry second;
+    ASSERT_TRUE(first.begin("execution"));
+    ASSERT_TRUE(first.finish("execution", true));
+    ASSERT_TRUE(second.begin("execution"));
+    const std::vector<std::string> ids{"execution"};
+    EXPECT_EQ(first.queryLocal(ids), (std::vector<State>{State::BUFFER_SAFE}));
+    EXPECT_EQ(second.queryLocal(ids), (std::vector<State>{State::RUNNING}));
+    EXPECT_EQ(first.query(first.epoch(), ids), first.queryLocal(ids));
+    EXPECT_EQ(second.query(second.epoch(), ids), second.queryLocal(ids));
+    EXPECT_EQ(first.query(second.epoch(), ids), (std::vector<State>{State::UNKNOWN}));
+    EXPECT_EQ(second.query(first.epoch(), ids), (std::vector<State>{State::UNKNOWN}));
+    EXPECT_EQ(first.size(), 1u);
+    EXPECT_EQ(second.size(), 1u);
+}
+
 TEST(TransferTaskRegistryTest, GrowthBeyondFormerCapacityRetainsEveryExecution) {
     Registry registry;
     constexpr size_t count = 8193;

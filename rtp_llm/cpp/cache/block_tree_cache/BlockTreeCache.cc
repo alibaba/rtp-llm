@@ -135,6 +135,13 @@ void BlockTreeCache::shutdownLoads() {
     loader_.shutdown();
 }
 
+TransferTaskRegistry::State BlockTreeCache::localTransferCompletion(uint64_t trace_id) const {
+    if (!transfer_dispatcher_) {
+        return TransferTaskRegistry::State::UNKNOWN;
+    }
+    return transfer_dispatcher_->taskRegistry().queryLocal(std::vector<uint64_t>{trace_id}).front();
+}
+
 TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
     auto context = transfer_dispatcher_->executePerRank(std::move(task));
     context->waitDone();

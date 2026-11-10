@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/store/BlockTreeStorer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
 
 namespace rtp_llm {
 
@@ -178,6 +179,7 @@ public:
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
     TransferResult executeTransfer(TransferTask task);
+    TransferTaskRegistry::State localTransferCompletion(uint64_t trace_id) const;
 
     // Accessors
     BlockTree* tree() const {

@@ -363,6 +363,7 @@ bool KVCacheManager::init() {
         RTP_LLM_LOG_ERROR("KVCacheManager::init: failed to create BlockTreeCache");
         return false;
     }
+    transfer_broadcast_manager_ = std::move(broadcast_manager);
     coordinator_manager_->attachBlockTreeCache(block_tree_cache_);
     initCacheEventPublisher();
 
@@ -735,7 +736,64 @@ KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysT
     return coordinator_manager_->incrKVCacheRef(resource, cache_keys, is_connector);
 }
 
+TransferTaskRegistry::State KVCacheManager::localTransferCompletion(const TransferExecutionTrace& trace_id) const {
+    if (!validTransferExecutionTrace(trace_id) || !block_tree_cache_) {
+        return TransferTaskRegistry::State::UNKNOWN;
+    }
+    if (const auto* transfer_trace = std::get_if<uint64_t>(&trace_id)) {
+        return block_tree_cache_->localTransferCompletion(*transfer_trace);
+    }
+#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
+    auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
+    if (backend) {
+        return backend->taskRegistry().queryLocal(std::vector<std::string>{std::get<std::string>(trace_id)}).front();
+    }
+#endif
+    return TransferTaskRegistry::State::UNKNOWN;
+}
+
+TransferCompletionQueryResult KVCacheManager::queryTransferCompletion(const FrozenTask::ExecutionInfo& execution,
+                                                                    int timeout_ms) const {
+    return TransferCompletionQuery(transfer_broadcast_manager_,
+                                   [this](const TransferExecutionTrace& trace_id) {
+                                       return localTransferCompletion(trace_id);
+                                   })
+        .query(execution, timeout_ms);
+}
+
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
+    if (request.has_completion_query()) {
+        auto* query_response = response.mutable_completion_query();
+        query_response->Clear();
+        query_response->set_rank(static_cast<uint32_t>(parallelism_config_.tp_rank));
+        for (const auto& key : request.completion_query().keys()) {
+            auto* entry = query_response->add_entries();
+            entry->mutable_key()->CopyFrom(key);
+            auto state = TransferTaskRegistry::State::UNKNOWN;
+            switch (key.trace_case()) {
+                case TransferCompletionKeyPB::kTransferTraceId:
+                    state = localTransferCompletion(TransferExecutionTrace{key.transfer_trace_id()});
+                    break;
+                case TransferCompletionKeyPB::kKvcmTraceId:
+                    state = localTransferCompletion(TransferExecutionTrace{key.kvcm_trace_id()});
+                    break;
+                default:
+                    break;
+            }
+            switch (state) {
+                case TransferTaskRegistry::State::RUNNING:
+                    entry->set_state(TRANSFER_COMPLETION_RUNNING);
+                    break;
+                case TransferTaskRegistry::State::BUFFER_SAFE:
+                    entry->set_state(TRANSFER_COMPLETION_BUFFER_SAFE);
+                    break;
+                default:
+                    entry->set_state(TRANSFER_COMPLETION_UNKNOWN);
+                    break;
+            }
+        }
+        return true;
+    }
     if (request.has_remote_request()) {
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
         if (!block_tree_cache_) {
