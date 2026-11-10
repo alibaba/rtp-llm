@@ -420,6 +420,10 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
             continue;
         }
 
+        if (awiBarrierHold(stream)) {
+            continue;
+        }
+
         const auto state                 = stream->getStatus();
         const bool load_initiated_before = stream->hasEvent(StreamEvents::LoadInitiated);
         if (!stream->hasEvent(StreamEvents::CanRun)) {
@@ -597,6 +601,10 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
             continue;
         }
         if (!evaluateRunningBatch(admitted_streams, stream)) {
+            continue;
+        }
+
+        if (awiBarrierHold(stream)) {
             continue;
         }
 

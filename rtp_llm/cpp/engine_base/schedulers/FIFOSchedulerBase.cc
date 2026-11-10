@@ -5,13 +5,133 @@
 #include <mutex>
 #include <unordered_set>
 
+#include "autil/legacy/jsonizable.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/engine_base/schedulers/AwiObservationRegistry.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 using namespace std;
 namespace rtp_llm {
+
+namespace {
+
+// Payload schema for the AWI evaluator barrier (see AwiObservationRegistry.h).
+struct AwiBarrierInfo: public autil::legacy::Jsonizable {
+    std::string              operation_id;
+    std::vector<std::string> request_ids;
+    int64_t                  context_tokens {0};
+
+    void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
+        json.Jsonize("operation_id", operation_id);
+        json.Jsonize("request_ids", request_ids);
+        json.Jsonize("context_tokens", context_tokens);
+    }
+};
+
+struct AwiSchedulerInfoUpdate: public autil::legacy::Jsonizable {
+    AwiBarrierInfo barrier;
+    bool           has_barrier {false};
+
+    void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
+        if (json.GetMode() == autil::legacy::Jsonizable::FROM_JSON) {
+            try {
+                json.Jsonize("awi_barrier", barrier);
+                has_barrier = true;
+            } catch (const autil::legacy::ExceptionBase&) {
+                has_barrier = false;
+            }
+        }
+    }
+};
+
+}  // namespace
+
+void FIFOSchedulerBase::updateSchedulerInfo(const std::string& scheduler_info) {
+    if (scheduler_info.find("awi_barrier") == std::string::npos) {
+        return;
+    }
+    AwiSchedulerInfoUpdate update;
+    try {
+        autil::legacy::FromJsonString(update, scheduler_info);
+    } catch (const autil::legacy::ExceptionBase& e) {
+        RTP_LLM_LOG_WARNING("AWI barrier payload parse failed: %s", e.what());
+        return;
+    }
+    if (!update.has_barrier || update.barrier.operation_id.empty()) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(lock_);
+        AwiObservationRegistry::instance().armBarrier(
+            update.barrier.operation_id, update.barrier.request_ids, update.barrier.context_tokens);
+    }
+    RTP_LLM_LOG_INFO("AWI barrier armed: op=%s requests=%zu context_tokens=%ld",
+                     update.barrier.operation_id.c_str(),
+                     update.barrier.request_ids.size(),
+                     (long)update.barrier.context_tokens);
+}
+
+bool FIFOSchedulerBase::awiBarrierHold(const GenerateStreamPtr& stream) {
+    auto&             registry = AwiObservationRegistry::instance();
+    std::string       operation_id;
+    const std::string request_id = stream->generateInput()->request_info.request_id;
+    if (request_id.empty() || !registry.isArmed(request_id, &operation_id)) {
+        return false;  // not part of any armed operation
+    }
+    if (registry.opResolved(operation_id)) {
+        return false;  // wave already released (or failed); admit normally
+    }
+    // Collect the armed peers currently visible to this scheduler. Runs under
+    // the scheduler lock, so the joint decision below is atomic w.r.t. admission.
+    std::vector<GenerateStreamPtr> peers;
+    const auto                     collect = [&peers, &registry, &operation_id](const std::list<GenerateStreamPtr>& streams) {
+        for (const auto& candidate : streams) {
+            const auto& candidate_id = candidate->generateInput()->request_info.request_id;
+            if (!candidate_id.empty() && registry.belongsToOp(operation_id, candidate_id)) {
+                peers.push_back(candidate);
+            }
+        }
+    };
+    collect(waiting_streams_);
+    collect(running_streams_);
+    collect(new_streams_);
+    if (peers.size() < registry.opPeerCount(operation_id)) {
+        return true;  // wave still arriving; hold without consuming capacity
+    }
+    // Joint coexistence check with the engine's own block accounting: every
+    // armed sequence must be able to grow to its full input+output reservation
+    // simultaneously within the currently free blocks.
+    size_t needed_blocks = 0;
+    for (const auto& peer : peers) {
+        const size_t max_tokens = peer->maxTokenNum();
+        const int    seq_length = peer->seqLength();
+        const int    remaining  = max_tokens > (size_t)seq_length ? (int)(max_tokens - (size_t)seq_length) : 0;
+        needed_blocks += (size_t)std::max(0, peer->estimatePeakNeedBlocks(remaining));
+    }
+    const size_t available_blocks = cache_manager_ ? cache_manager_->availableBlocksNum() : 0;
+    if (needed_blocks > available_blocks) {
+        const std::string message = "AWI barrier: kv capacity exceeded for operation " + operation_id
+                                    + " (needed_blocks=" + std::to_string(needed_blocks)
+                                    + ", available_blocks=" + std::to_string(available_blocks) + ")";
+        RTP_LLM_LOG_WARNING("%s", message.c_str());
+        registry.failBarrier(operation_id, "kv_capacity_exceeded", (int64_t)peers.size());
+        for (const auto& peer : peers) {
+            peer->reportError(ErrorCode::MALLOC_FAILED, message);
+        }
+        return true;  // streams carry the error; admission stays withheld
+    }
+    registry.releaseBarrier(operation_id);
+    RTP_LLM_LOG_INFO("AWI barrier released: op=%s peers=%zu needed_blocks=%zu available_blocks=%zu",
+                     operation_id.c_str(),
+                     peers.size(),
+                     needed_blocks,
+                     available_blocks);
+    return false;
+}
 
 FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runtime_config,
                                      const ModelConfig&                     model_config,
@@ -218,6 +338,10 @@ std::unordered_set<GenerateStream*> FIFOSchedulerBase::evaluateWaitingStreams(li
         // PD decode streams may already carry CanRun before FIFO admission.
         // Capacity checks must still run for the current scheduling round.
         if (!stream->hasError() && evaluateRunningMemory(admitted_streams, stream)) {
+            if (awiBarrierHold(stream)) {
+                ++it;
+                continue;
+            }
             if (!stream->hasEvent(StreamEvents::CanRun)) {
                 stream->reportEvent(StreamEvents::CanRun);
             }

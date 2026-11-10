@@ -47,6 +47,10 @@ public:
 
     void reportMetrics();
 
+    // AWI evaluator instrumentation: arms operation-scoped admission barriers
+    // (payload {"awi_barrier": {...}}); other content is ignored.
+    void updateSchedulerInfo(const std::string& scheduler_info) override;
+
     // for test
     int64_t waitingStreamsSize();
     int64_t runningStreamsSize();
@@ -67,6 +71,11 @@ protected:
     virtual void fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const {}
 
     bool   checkInputLength(const GenerateStreamPtr& stream);
+
+    // AWI barrier admission gate: true = hold this stream (armed operation's
+    // wave not yet jointly satisfiable). Uses the engine's real block
+    // accounting; reports a genuine capacity error on shortfall.
+    bool awiBarrierHold(const GenerateStreamPtr& stream);
     void   cancelStreams(std::list<GenerateStreamPtr>& streams);
     size_t                              evaluateAndUpdateStreams(std::list<GenerateStreamPtr>&              streams,
                                                                  const std::unordered_set<GenerateStream*>* admitted_streams = nullptr);
