@@ -56,6 +56,17 @@ def can_fuse_big_pre() -> bool:
     return False
 
 
+@lru_cache(maxsize=None)
+def _tilelang_mhc_post_supported(index) -> bool:
+    """TileLang's mhc_post kernel rejects pre-SM100 devices at runtime.
+
+    Observed on L20/sm89: "TileLang mhc_post failed" for a small bf16
+    residual while the torch reference below produces identical math.
+    SM100+ keeps the TileLang path unchanged.
+    """
+    return torch.cuda.get_device_capability(index)[0] >= 10
+
+
 class DelayedHCUnit(HCUnitBase):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -161,7 +172,11 @@ class DelayedHCUnit(HCUnitBase):
         return y, post, comb
 
     def _post_impl(self, x, residual, post, comb):
-        if residual.is_cuda and residual.dtype == torch.bfloat16:
+        if (
+            residual.is_cuda
+            and residual.dtype == torch.bfloat16
+            and _tilelang_mhc_post_supported(residual.device)
+        ):
             return TileLangHCUnit._post_impl(self, x, residual, post, comb)
         return (
             post.float() * x.float().unsqueeze(-2)
