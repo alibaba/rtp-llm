@@ -67,12 +67,16 @@ def bounded_plan(v4, context, attn_inputs, kv_cache, policy):
     cumulative = [0]
     for chunk in query.chunk_lengths_per_req:
         cumulative.append(cumulative[-1] + chunk)
+    if context.cp_size == 8 and context.kv_cache_sharded:
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_metadata import _upload
+
+        cu = _upload(cumulative, context.global_positions.device, torch.int32)
+    else:
+        cu = torch.tensor(cumulative, dtype=torch.int32, device=context.global_positions.device)
     return replace(
         admitted,
         context=query,
         exchange=exchange,
         indexer_groups=groups,
-        cu_seqlens=torch.tensor(
-            cumulative, dtype=torch.int32, device=context.global_positions.device
-        ),
+        cu_seqlens=cu,
     ), "compact140"

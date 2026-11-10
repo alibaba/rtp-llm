@@ -12,7 +12,7 @@ from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.backend import V41QuantizedTensor, V41StepContext
 from rtp_llm.models_py.modules.dsv41.ppu import _quant
 from rtp_llm.models_py.modules.dsv41.ppu.attention import COMBINED_WIDTH
-from rtp_llm.models_py.modules.dsv41.ppu.cache import PPUKVCache, PPURequestSlots
+from rtp_llm.models_py.modules.dsv41.ppu.cache import PPUKVCache
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import (
     CP8_WORKSPACE_DEQUANT_ENV,
     SharedNativeCache,
@@ -253,6 +253,7 @@ class _CPPrefillWorkspace:
             offset = swa_offset + swa_count
 
         self.kv = torch.empty((offset, geometry.head_dim), dtype=torch.bfloat16, device=positions.device)
+        self.kv8 = None
         plans = getattr(cache, "prefill_plans", None)
         if plans is None:
             meta = torch.tensor(layout, dtype=torch.int64, device=positions.device).reshape(-1, 4)
@@ -319,6 +320,28 @@ class _CPPrefillWorkspace:
             if not (self.fused_dequant and _quant.try_dequantize_prefill_rows(packed, out, global_pool=False)):
                 ops.decode_kv(packed, pool_tag="swa_kv", descriptor=descriptor, out=out)
 
+    def q8_kv(self):
+        # The global bank stays immutable until the workspace changes source.
+        # Update just the uniformly-strided SWA stripes after the first layer.
+        requests = len(self.swa_ranges)
+        if not requests or self.kv.shape[0] % requests:
+            return self.kv
+        stride = self.kv.shape[0] // requests
+        count = self.swa_ranges[0][3]
+        global_count = stride - count
+        if any(
+            begin != rid * stride + global_count or length != count
+            for rid, begin, _, length, _ in self.swa_ranges
+        ):
+            return self.kv
+        if self.kv8 is None:
+            self.kv8 = self.kv.clamp(-448, 448).to(torch.float8_e4m3fn)
+        else:
+            width = self.kv.shape[1]
+            swa = self.kv.view(requests, stride, width)[:, global_count:]
+            self.kv8.view(requests, stride, width)[:, global_count:].copy_(swa.clamp(-448, 448))
+        return self.kv8
+
 
 def _full_cp_workspace_bounds(cp, positions):
     """Reuse the full zigzag split's host geometry to size its SWA intervals."""
@@ -346,7 +369,8 @@ def _full_cp_workspace_bounds(cp, positions):
 
 
 def build_cp_prefill_workspace(
-    *, ops, cache, layer_id, geometry, context, selected_blocks, window, swa_starts, cp, shared
+    *, ops, cache, layer_id, geometry, context, selected_blocks, window, swa_starts, cp, shared,
+    q8=False,
 ):
     """Reuse global rows and indices, refreshing only this layer's SWA rows."""
     ratio = geometry.ratio(layer_id)
@@ -361,7 +385,8 @@ def build_cp_prefill_workspace(
         workspace = cached[2]
     workspace.refresh_swa(ops, cache, layer_id)
     indices, lengths = workspace.indices(context.positions, selected_blocks, ratio, window)
-    return workspace.kv.unsqueeze(1), indices, lengths
+    kv = workspace.q8_kv() if q8 else workspace.kv
+    return kv.unsqueeze(1), indices, lengths
 
 
 def _compress_pairs(
@@ -499,8 +524,7 @@ def _produce_global(
     scores: Optional[torch.Tensor],
     positions: torch.Tensor,
     request_ids: torch.Tensor,
-    cache: PPUKVCache,
-    slots: Dict[int, PPURequestSlots],
+    cache: SharedNativeCache,
     layer_id: int,
     append_starts: Optional[dict] = None,
     prefill_layout=None,
@@ -533,7 +557,7 @@ def _produce_global(
         else ((request, None) for request in ranges)
     )
     for (rid, start, end, append, rows, state_rows), packed in prepared:
-        handle = None if request_local else slots[rid]
+        handle = None if request_local else cache.slots[rid]
         begin, stop = start // ratio, end // ratio
         if packed is not None:
             entry_positions, packed_global, packed_index = packed

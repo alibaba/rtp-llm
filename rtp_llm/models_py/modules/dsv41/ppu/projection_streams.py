@@ -1,9 +1,8 @@
-"""Bounded Q/KV overlap for ordinary shared PPU eager decode.
+"""One owned side stream for independent PPU compute.
 
-Only projection/normalization callbacks run here. Query work remains on the
-default caller stream; the independent KV callback runs on one owned stream.
-Every consumer, cache write and collective stays after the join on the caller.
-Graph, speculative, CED and prefill execution retain their serial route.
+The default stream runs query work or routed experts. The side stream runs
+KV projections or shared experts. Both results join on the caller stream
+before their consumers run.
 """
 
 import threading
@@ -73,8 +72,8 @@ class QKVStreams:
     """One side stream and two reusable events, owned for the model lifetime.
 
     ``query_fn(x)`` may return ``(qr, q)`` and ``kv_fn(x)`` returns normalized
-    BF16 KV. Both callbacks must be rank-local compute with no collectives or
-    cache mutation. The shared runtime is nonreentrant; the lock also rejects
+    BF16 KV. The side callback must be rank-local compute with no collectives
+    or cache mutation. The shared runtime is nonreentrant; the lock also rejects
     overlapping calls through this resource instead of re-recording events.
     """
 

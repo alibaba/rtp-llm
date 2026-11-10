@@ -1775,13 +1775,20 @@ class PPUMoE:
 
     # -- forward ----------------------------------------------------------
 
-    def _map_expert_ids(self, ids, weights, layer_id):
+    def _map_expert_ids(self, ids, weights, layer_id, *, single_replica=False):
         if not self._eplb_layers:
             return ids
         layer = self._eplb_layers.get(self._resolve_layer_id(layer_id))
         if layer is None:
             return ids
-        physical = layer.map_ids(ids)
+        if single_replica and layer.logical_to_physical.shape[1] == 1:
+            # EplbLayer validates exactly one valid slot per logical expert
+            # for a one-column map. There is no replica rotation to compute.
+            lookup = ids.reshape(-1).clamp_min(0)
+            physical = layer.logical_to_physical.reshape(-1).index_select(0, lookup).view_as(ids)
+            physical.masked_fill_(ids < 0, -1)
+        else:
+            physical = layer.map_ids(ids)
         # Borrow the actual dispatched tensors for bounded native diagnostics.
         # Graph capture retains these same device buffers; no host reads here.
         self._eplb_routes[layer.layer_id] = (ids, physical, weights)
@@ -1795,6 +1802,7 @@ class PPUMoE:
         *,
         layer_id: Optional[int] = None,
         expert_load=None,
+        prepared_buffer=None,
     ) -> torch.Tensor:
         """Routed-expert forward: BF16 ``[T, hidden]`` in, BF16 ``[T, hidden]`` out.
 
@@ -1805,11 +1813,18 @@ class PPUMoE:
         expert_ids, expert_weights = self._apply_fake_balance(
             expert_ids, expert_weights
         )
-        expert_ids = self._map_expert_ids(expert_ids, expert_weights, layer_id)
+        expert_ids = self._map_expert_ids(
+            expert_ids, expert_weights, layer_id,
+            single_replica=(
+                prepared_buffer is not None
+                and os.environ.get("RTP_V41_PPU_CP8_YOCO_FAST_PREFILL", "0") == "1"
+            ),
+        )
         if self.backend == "megamoe":
             # Empty owners must still enter MegaMoE's cross-rank protocol.
             return self._forward_megamoe(
-                x, expert_ids, expert_weights, layer_id, expert_load
+                x, expert_ids, expert_weights, layer_id, expert_load,
+                prepared_buffer=prepared_buffer,
             )
         if x.size(0) == 0:
             if self._use_deepep_dispatch():
@@ -1905,6 +1920,23 @@ class PPUMoE:
             raise RuntimeError("a MegaMoE workspace cannot move between devices")
 
     def _ensure_mega_buffer(self, x):
+        return self._ensure_mega_capacity(x.device, x.shape[0])
+
+    def prepare_full_cp8(self, device, rows):
+        """Prepare once for the uniform host-padded CP8 role world."""
+        import torch.distributed as dist
+
+        if (
+            self.backend != "megamoe"
+            or self.ep_size != 8
+            or device.type != "cuda"
+            or not dist.is_initialized()
+            or self.group is not dist.group.WORLD
+        ):
+            return None
+        return self._ensure_mega_capacity(device, rows, uniform_rows=True)
+
+    def _ensure_mega_capacity(self, device, row_count, *, uniform_rows=False):
         import torch.distributed as dist
 
         group = self.group
@@ -1916,22 +1948,24 @@ class PPUMoE:
             raise RuntimeError("MegaMoE group must match this model's EP size and rank")
         capturing = torch.cuda.is_current_stream_capturing()
         if capturing:
-            if self._mega_buffer is None or x.shape[0] > self._mega_capacity:
+            if self._mega_buffer is None or row_count > self._mega_capacity:
                 raise RuntimeError(
                     "MegaMoE requires eager warmup with sufficient capacity before capture"
                 )
             return self._mega_buffer
-        # All ranks enter, even when their own rows fit the existing allocation.
-        # A rank-local overflow check would deadlock CP/DP peers on growth.
-        rows = torch.tensor([x.shape[0]], dtype=torch.int64, device=x.device)
-        if self.ep_size > 1:
-            dist.all_reduce(rows, op=dist.ReduceOp.MAX, group=group)
-        required = max(128, 1 << (max(1, int(rows.item())) - 1).bit_length())
+        if not uniform_rows:
+            # A rank-local overflow check would deadlock CP/DP peers on growth.
+            rows = torch.tensor([row_count], dtype=torch.int64, device=device)
+            if self.ep_size > 1:
+                dist.all_reduce(rows, op=dist.ReduceOp.MAX, group=group)
+            row_count = int(rows.item())
+        required = max(128, 1 << (max(1, row_count) - 1).bit_length())
         if self._mega_buffer is None or required > self._mega_capacity:
-            # The preceding collective orders all peers after the old complete
-            # call; drain local work before dropping its symmetric allocation.
-            self.close()
-            self._mega_device = x.device
+            # A growing symmetric buffer must remain live until all peers
+            # have drained its previous users. The old reduction already
+            # provides that rendezvous for nonuniform calls.
+            self.close(group=group if uniform_rows else None)
+            self._mega_device = device
             self._mega_buffer = self._get_mega_module().get_symm_buffer_for_mega_moe(
                 group,
                 self.num_physical_experts,
@@ -1946,7 +1980,7 @@ class PPUMoE:
             self._mega_capacity = required
             if self._mega_recv_stats is None:
                 self._mega_recv_stats = torch.zeros(
-                    self.num_local_experts, dtype=torch.int32, device=x.device
+                    self.num_local_experts, dtype=torch.int32, device=device
                 )
         return self._mega_buffer
 
@@ -1983,7 +2017,7 @@ class PPUMoE:
         expert_ids = self._map_expert_ids(expert_ids, expert_weights, layer_id)
         return self._forward_megamoe(
             x, expert_ids, expert_weights, layer_id, expert_load,
-            graph_buffer=self._mega_buffer,
+            prepared_buffer=self._mega_buffer,
             fused_expert_load=fused_expert_load,
         )
 
@@ -1995,7 +2029,7 @@ class PPUMoE:
         layer_id,
         expert_load=None,
         *,
-        graph_buffer=None,
+        prepared_buffer=None,
         fused_expert_load=False,
     ):
         self._validate_megamoe_input(x)
@@ -2006,7 +2040,12 @@ class PPUMoE:
             expert_weights.to(torch.float32),
             slots=COMM_SLOTS,
         )
-        buffer = self._ensure_mega_buffer(x) if graph_buffer is None else graph_buffer
+        if prepared_buffer is None:
+            buffer = self._ensure_mega_buffer(x)
+        else:
+            if prepared_buffer is not self._mega_buffer or x.shape[0] > self._mega_capacity:
+                raise ValueError("prepared MegaMoE capacity does not cover this forward")
+            buffer = prepared_buffer
         mega = self._get_mega_module()
         counts = (
             self._expert_load_counts(expert_load, x.device)
@@ -2050,10 +2089,12 @@ class PPUMoE:
         self.mega_moe_calls += 1
         return y
 
-    def close(self):
+    def close(self, *, group=None):
         """Release this model's workspace after coordinated rank drain."""
         if self._mega_buffer is not None:
             torch.cuda.synchronize(device=self._mega_device)
+            if group is not None:
+                torch.distributed.barrier(group=group, device_ids=[self._mega_device.index])
             self._mega_buffer.destroy()
             self._mega_buffer = None
             self._mega_capacity = 0

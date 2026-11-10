@@ -854,6 +854,13 @@ class DistributedEnpmGroup:
         dist.all_reduce(scalar, op=dist.ReduceOp.MAX, group=self.pg)
         return int(scalar.item())
 
+    def reduce_scatter_sum(self, values, local_rows):
+        import torch.distributed as dist
+
+        local = values.new_empty((local_rows, values.shape[1]))
+        dist.reduce_scatter_tensor(local, values, group=self.pg)
+        return local
+
 
 class LocalEnpmGroup:
     """Single-process simulation of the ENP group for CPU tests.
@@ -969,6 +976,7 @@ def engram_lookup(
     layout: EngramShardLayout,
     group=None,
     max_rows_per_round: int = COPY_BATCH_ROWS,
+    uniform_rank_rows: bool = False,
 ) -> torch.Tensor:
     """Collective host-sharded Engram lookup -> bf16 ``[*rows.shape, dim]``.
 
@@ -991,19 +999,31 @@ def engram_lookup(
         # Single-process direct lookup: the lone shard owns every valid row.
         out = _lookup_round(flat, shard.rank, shard, layout, device)
         return out.reshape(*rows.shape, shard.dim)
-    group_max = adapter.all_max_count(flat.numel(), device)
+    fixed_rows = False
+    if uniform_rank_rows and isinstance(adapter, DistributedEnpmGroup) and rows.is_cuda:
+        import torch.distributed as dist
+
+        # Full CP8 has the same padded rows per rank. Only use this proof
+        # when the eight participating ENP ranks are the whole CP8 world.
+        fixed_rows = adapter.size == dist.get_world_size() == 8
+    group_max = flat.numel() if fixed_rows else adapter.all_max_count(flat.numel(), device)
     lengths = _round_lengths(group_max, int(max_rows_per_round))
     rank = adapter.rank
     pieces: list[torch.Tensor] = []
     offset = 0
     for length in lengths:
-        chunk = _round_chunk(flat, offset, length)
+        chunk = flat.narrow(0, offset, length) if fixed_rows else _round_chunk(flat, offset, length)
         gathered = adapter.all_gather_ids(chunk)
         contribution = _lookup_round(gathered, rank, shard, layout, gathered.device)
-        reduced = adapter.all_reduce_sum(contribution)
-        pieces.append(reduced[rank * length : (rank + 1) * length])
+        if fixed_rows:
+            pieces.append(adapter.reduce_scatter_sum(contribution, length))
+        else:
+            reduced = adapter.all_reduce_sum(contribution)
+            pieces.append(reduced[rank * length : (rank + 1) * length])
         offset += length
-    if pieces:
+    if fixed_rows and len(pieces) == 1:
+        out = pieces[0]
+    elif pieces:
         out = torch.cat(pieces, dim=0)[: flat.numel()]
     else:
         out = torch.zeros((0, shard.dim), dtype=torch.bfloat16, device=device)

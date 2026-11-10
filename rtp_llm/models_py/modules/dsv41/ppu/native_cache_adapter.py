@@ -341,6 +341,46 @@ class SharedNativeCache(NativeCacheBridge):
                     source, rid, global_entries=length // self.geometry.ratio(source),
                 )
 
+    def bind_shared_source_prefix(self, prefixes):
+        """Agree on full stripes whose physical pages alias across requests."""
+        self.shared_prefix_stripes = {}
+        if len(self.lengths) < 2 or len(set(self.lengths)) != 1 or min(prefixes) <= 0:
+            return
+        keys, candidates = [], []
+        for key, pool in self.pools.items():
+            if key[1] not in _FULL:
+                continue
+            placement = self.placements[key]
+            width = placement.physical_span * placement.size
+            stripes = min(prefixes) // width
+            host = getattr(self.inputs[pool.framework_tag], "kv_cache_block_id", None)
+            if (
+                stripes and isinstance(host, torch.Tensor) and host.device.type == "cpu"
+                and host.shape == placement.table.shape
+                and host.shape[0] >= len(prefixes) and host.shape[1] >= stripes
+            ):
+                pages = host[:len(prefixes), :stripes]
+                canonical = pages[0]
+                block_count = pool.tensor.shape[0] // placement.pages
+                if not (
+                    torch.equal(pages, canonical.expand_as(pages))
+                    and bool(((canonical >= 0) & (canonical < block_count)).all())
+                ):
+                    stripes = 0
+            else:
+                stripes = 0
+            keys.append(key)
+            candidates.append(stripes)
+        if not keys:
+            return
+        import torch.distributed as dist
+        from rtp_llm.models_py.distributed.collective_torch import Group, _get_group
+
+        # Never pick a shorter collective from a rank-local alias check alone.
+        agreed = torch.tensor(candidates, dtype=torch.int32, device=self.device)
+        dist.all_reduce(agreed, op=dist.ReduceOp.MIN, group=_get_group(Group.TP))
+        self.shared_prefix_stripes = dict(zip(keys, agreed.tolist()))
+
     def _prepare_source_batched(self, source, *, verify):
         from rtp_llm.models_py.modules.dsv41.ppu.prefill_readback import gather_pool
 

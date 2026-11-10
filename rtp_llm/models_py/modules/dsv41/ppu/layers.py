@@ -79,6 +79,27 @@ def _full_cp8_prefill_context(state):
     return None
 
 
+def cp8_yoco_small_ops_enabled(state):
+    policy = getattr(getattr(state, "runtime", None), "policy", None)
+    return (
+        os.environ.get("RTP_V41_PPU_CP8_YOCO_SMALL_OPS", "1") == "1"
+        and getattr(state, "prefill", False)
+        and not state.idle
+        and getattr(policy, "mode", None) == "compact"
+        and (
+            _full_cp8_prefill_context(state) is not None
+            or state.use_compact_cp8_ops(state.context)
+        )
+    )
+
+
+def cp8_yoco_fast_prefill_enabled(state):
+    return (
+        os.environ.get("RTP_V41_PPU_CP8_YOCO_FAST_PREFILL", "0") == "1"
+        and cp8_yoco_small_ops_enabled(state)
+    )
+
+
 def try_graph_rms_norm(hidden_states, weight, eps) -> torch.Tensor | None:
     """Normalize BF16 Graph activations with one FP32 reduction and BF16 store."""
     if (
@@ -160,7 +181,12 @@ class PPUSharedRMSNorm(BaseNorm):
             from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import verify_rmsnorm_bf16
 
             return verify_rmsnorm_bf16(hidden_states, self.weight, self.variance_epsilon)
-        cp8_prefill = _full_cp8_prefill_context(state) is not None
+        prefill_runtime = getattr(self, "_cp8_prefill_runtime", runtime)
+        prefill_state = prefill_runtime.current if prefill_runtime is not None else None
+        cp8_prefill = (
+            _full_cp8_prefill_context(state) is not None
+            or cp8_yoco_small_ops_enabled(prefill_state)
+        )
         if (
             cp8_prefill
             and os.environ.get("RTP_V41_PPU_CP8_FLASHINFER_RMSNORM", "1") == "1"
@@ -260,14 +286,23 @@ class PPUSharedHCUnit(HCUnitBase):
             raise RuntimeError("previous delayed mHC state was not produced")
         previous_state = previous.state if previous is not None else None
         reduce_block_m = getattr(self, "_graph_mhc_reduce_block_m", None)
-        if reduce_block_m is None:
+        state = getattr(getattr(self, "runtime", None), "current", None)
+        aiu_prenorm = (
+            self.name == "attn"
+            and os.environ.get("RTP_V41_PPU_CP8_YOCO_AIU_PRENORM", "0") == "1"
+            and cp8_yoco_fast_prefill_enabled(state)
+            and _full_cp8_prefill_context(state) is not None
+            and not torch.is_grad_enabled()
+            and not torch.cuda.is_current_stream_capturing()
+        )
+        if reduce_block_m is None and not aiu_prenorm:
             state = self.ops.mhc(
                 x, None, phase="pre", parameters=self.parameters_map, state=previous_state,
             )
         else:
             state = self.ops._mhc.pre(
                 x, self.parameters_map, state=previous_state,
-                reduce_block_m=reduce_block_m,
+                reduce_block_m=reduce_block_m, aiu_prenorm=aiu_prenorm,
             )
         # Native pre may flatten token axes; public HC consumers preserve them.
         leading_shape = tuple(x.shape[:-2])
@@ -560,8 +595,27 @@ class PPUSharedMoE(nn.Module):
                     return routed.reshape(shape), shared.reshape(shape)
                 routed = combine_routed_and_shared(routed, shared)
             return routed.reshape(shape)
-        ids, weights = pad_topk_for_dispatch(*self.gate(flat))
-        if state is not None:
+        cp = _full_cp8_prefill_context(state)
+        routing_cp = cp
+        if (
+            cp is None
+            and getattr(state, "compacted", False)
+            and state.use_compact_cp8_ops(state.context)
+        ):
+            routing_cp = state.context
+        direct_routes = (
+            routing_cp is not None
+            and flat.is_cuda
+            and os.environ.get("RTP_V41_PPU_CP8_DIRECT_MOE_ROUTES", "0") == "1"
+        )
+        if direct_routes:
+            routed_rows = torch.empty((), dtype=torch.int64, device=flat.device)
+            ids, weights = self.gate(flat, graph_routes=(routing_cp.local_is_real, routed_rows))
+            if os.environ.get("RTP_V41_SHARED_EVIDENCE_DIR"):
+                state.routed_rows[self.layer_id] = int(routed_rows)
+        else:
+            ids, weights = pad_topk_for_dispatch(*self.gate(flat))
+        if state is not None and not direct_routes:
             if state.idle:
                 real = torch.zeros(flat.shape[0], dtype=torch.bool, device=flat.device)
             elif state.prefill and state.context is not None:
@@ -573,12 +627,58 @@ class PPUSharedMoE(nn.Module):
             ids = torch.where(real[:, None], ids, torch.full_like(ids, -1))
             weights = torch.where(real[:, None], weights, torch.zeros_like(weights))
             state.routed_rows[self.layer_id] = int((ids >= 0).any(-1).sum())
-        routed = self.ops.moe(
-            flat, ids, weights, layer_id=self.layer_id, expert_load=expert_load
+        # The compact query layout fits the full CP8 workspace reserved at
+        # entry. Reusing it also avoids a capacity all-reduce on each layer.
+        prefill_buffer = (
+            getattr(state, "prefill_mega_buffer", None)
+            if cp is not None or (routing_cp is not None and cp8_yoco_fast_prefill_enabled(state))
+            else None
         )
+
+        def run_routed(value):
+            return self.ops.moe(
+                value, ids, weights, layer_id=self.layer_id, expert_load=expert_load,
+                **({"prepared_buffer": prefill_buffer} if prefill_buffer is not None else {}),
+            )
+
         if self.shared_expert is None:
-            return routed.reshape(shape)
-        return combine_routed_and_shared(routed, self.shared_expert(flat)).reshape(shape)
+            return run_routed(flat).reshape(shape)
+        prefill_exact = (
+            cp8_yoco_small_ops_enabled(state)
+            or (
+                cp is not None
+                and os.environ.get("RTP_V41_PPU_CP8_FUSED_SHARED_SWIGLU", "0") == "1"
+            )
+        )
+        fused_swiglu = (
+            cp is not None and cp8_yoco_fast_prefill_enabled(state)
+            and os.environ.get("RTP_V41_PPU_CP8_YOCO_FUSED_SWIGLU", "0") == "1"
+        )
+
+        def run_shared(value):
+            return self.shared_expert(
+                value, fused_activation=fused_swiglu,
+                prefill_exact=prefill_exact and not fused_swiglu,
+            )
+
+        if (
+            cp is not None and prefill_buffer is not None
+            and os.environ.get("RTP_V41_PPU_CP8_YOCO_OVERLAP_SHARED", "0") == "1"
+            and cp8_yoco_fast_prefill_enabled(state)
+            and not torch.is_grad_enabled() and not torch.cuda.is_current_stream_capturing()
+            and torch.cuda.current_stream(flat.device) == torch.cuda.default_stream(flat.device)
+        ):
+            from rtp_llm.models_py.modules.dsv41.ppu.projection_streams import QKVStreams
+
+            if runtime.qkv_streams is None:
+                runtime.qkv_streams = QKVStreams(flat.device)
+            routed, shared = runtime.qkv_streams.run(
+                flat, run_routed, run_shared,
+            )
+        else:
+            routed = run_routed(flat)
+            shared = run_shared(flat)
+        return combine_routed_and_shared(routed, shared).reshape(shape)
 
 
 class PPUSharedEngram(nn.Module):
@@ -601,12 +701,13 @@ class PPUSharedEngram(nn.Module):
         self.k_weight = source.get(prefix + ".k_weight").to(device, torch.bfloat16)
         self._prefetched = None
 
-    def prefetch(self, hashes):
+    def prefetch(self, hashes, *, uniform_rank_rows=False):
         if hashes is None:
             raise ValueError("shared Engram requires scheduler token-window hashes")
         if self._prefetched is not None:
             raise RuntimeError("unconsumed Engram prefetch from an earlier call")
-        self._prefetched = (hashes, self.ops.engram_lookup(hashes, layer_id=self.layer_id))
+        options = {"uniform_rank_rows": True} if uniform_rank_rows else {}
+        self._prefetched = (hashes, self.ops.engram_lookup(hashes, layer_id=self.layer_id, **options))
 
     def clear(self):
         self._prefetched = None

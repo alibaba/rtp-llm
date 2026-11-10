@@ -162,9 +162,11 @@ class PPUOps(V41BackendOps):
         layer_id: int,
         context: Optional[V41StepContext] = None,
         expert_load=None,
+        prepared_buffer=None,
     ) -> torch.Tensor:
         return self._moe.forward(
-            x, expert_ids, expert_weights, layer_id=layer_id, expert_load=expert_load
+            x, expert_ids, expert_weights, layer_id=layer_id, expert_load=expert_load,
+            prepared_buffer=prepared_buffer,
         )
 
     def index_score(
@@ -257,6 +259,7 @@ class PPUOps(V41BackendOps):
         *,
         layer_id: int,
         context: Optional[V41StepContext] = None,
+        uniform_rank_rows: bool = False,
     ) -> torch.Tensor:
         binding = self._engram.get(int(layer_id))
         if binding is None:
@@ -276,7 +279,8 @@ class PPUOps(V41BackendOps):
             per_rank[shard.rank] = rows
             return group.lookup(per_rank)[shard.rank]
         return _engram_lookup(
-            rows, layer_id=int(layer_id), shard=shard, layout=layout, group=group
+            rows, layer_id=int(layer_id), shard=shard, layout=layout, group=group,
+            uniform_rank_rows=uniform_rank_rows,
         )
 
     def mhc(

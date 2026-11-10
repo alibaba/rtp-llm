@@ -1,5 +1,6 @@
 """PPU construction of the existing V4.1 Block execution surface."""
 
+import os
 from dataclasses import replace
 
 import torch
@@ -13,6 +14,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.layers import (
     PPUSharedMoE,
     PPUSharedRMSNorm,
     _ordinary_decode_graph,
+    cp8_yoco_fast_prefill_enabled,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.mhc import _prefer_triton
 from rtp_llm.utils.model_weight import W
@@ -65,13 +67,66 @@ class SharedPPUBlock(Block):
         x, input_ids, positions, cu_seqlens = state.before_block(
             self, x, input_ids, positions, cu_seqlens
         )
-        self.bind_execution_context("prefill", ced=state.runtime.policy.mode != "full")
+        fast_yoco = cp8_yoco_fast_prefill_enabled(state)
+        self.bind_execution_context(
+            "prefill", ced=state.runtime.policy.mode != "full" and not fast_yoco
+        )
         if self.engram is not None:
-            self.engram.prefetch(self.engram_hashes)
+            context = state.context
+            uniform_rows = (
+                fast_yoco and context is not None and context.cp_size == 8
+                and context.gather_restore_positions is None
+                and os.environ.get("RTP_V41_PPU_CP8_YOCO_ENGRAM_RS", "0") == "1"
+            )
+            self.engram.prefetch(self.engram_hashes, uniform_rank_rows=uniform_rows)
+        if (
+            self.layer_id == 20 and fast_yoco and state.plan is not None and state.cache.sharded
+            and os.environ.get("RTP_V41_PPU_CP8_YOCO_SPLIT_L20", "1") == "1"
+            and self.attn.is_kv_source and self.attn.is_index_source
+            and input_ids is not None and kwargs.get("routing_metadata") is None
+            and not torch.is_grad_enabled()
+        ):
+            from rtp_llm.models_py.modules.dsv41.ppu.attention_layer import optimized_diagnostics_enabled
+
+            if not optimized_diagnostics_enabled():
+                return self._forward_compact_l20(x, input_ids, state, expert_load)
         with state.publication(self.layer_id):
             return super().forward(
                 x, input_ids, positions, cu_seqlens, expert_load=expert_load, **kwargs
             )
+
+    def _forward_compact_l20(self, x, input_ids, state, expert_load):
+        residual = self._inject_engram(x)
+        hidden, _, _ = self.attn_hc.pre(residual)
+        exchange = state.plan.exchange
+
+        def compact_after_producer():
+            nonlocal residual
+            residual = exchange.compact(residual)
+            mix = self.attn_hc.state
+            compact_mix = replace(
+                mix, hidden=None,
+                pre_mix=exchange.compact(mix.pre_mix),
+                post_mix=exchange.compact(mix.post_mix),
+                residual_mix=exchange.compact(mix.residual_mix),
+            )
+            self.attn_hc.pre_mix_out = compact_mix.pre_mix
+            self.attn_hc.state = compact_mix
+            state.compact_l20_queries(residual, exchange.compact(input_ids))
+
+        attn_out = self.attn(
+            self.attn_norm(hidden), compact_after_producer=compact_after_producer
+        )
+        mix = self.attn_hc.state
+        transition = self._try_mega_mhc(attn_out, residual, mix.post_mix, mix.residual_mix)
+        if transition is None:
+            residual = self.attn_hc.post(attn_out, residual, mix.post_mix, mix.residual_mix)
+            hidden, post, comb = self.ffn_hc.pre(residual)
+            hidden = self.ffn_norm(hidden)
+        else:
+            residual, hidden, post, comb = transition
+        ffn_out = self.ffn(hidden, state.compact_ids, expert_load=expert_load)
+        return self.ffn_hc.post(ffn_out, residual, post, comb)
 
     def forward_decode(self, x, attn_metadata, input_ids, expert_load=None, **kwargs):
         state = self.attn.runtime.current

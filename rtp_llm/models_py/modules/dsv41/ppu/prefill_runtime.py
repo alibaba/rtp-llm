@@ -16,7 +16,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import (
     SharedNativeCache,
 )
 from rtp_llm.models_py.modules.dsv41.prefill.ced import permits_ced
-from rtp_llm.models_py.modules.dsv41.prefill.ced import CEDPlan, _MIN_TOKENS
+from rtp_llm.models_py.modules.dsv41.prefill.ced import CEDPlan, _DERIVED_KEYS, _MIN_TOKENS
 
 
 class _Overlay:
@@ -109,6 +109,7 @@ class SharedForwardState:
         self._restored_rows = None
         self._local_cp_rows = None
         self.original_context = self.context = None
+        self.prefill_mega_buffer = None
         self.plan = None
         self.compacted = False
         self.compact_ids = None
@@ -136,6 +137,8 @@ class SharedForwardState:
                     layer.engram_token_mask = layer.engram_token_mask & context.local_is_real
         self.context = context
         if isinstance(self.cache, SharedNativeCache):
+            from rtp_llm.models_py.modules.dsv41.ppu.layers import cp8_yoco_fast_prefill_enabled
+
             full_cp8 = (
                 self.prefill
                 and context is not None
@@ -143,7 +146,31 @@ class SharedForwardState:
                 and context.kv_cache_sharded
                 and context.gather_restore_positions is None
             )
-            self.cache.bind_swa_fresh_lengths(self.lengths if full_cp8 else None)
+            keep_plans = (
+                context is not None and context.gather_restore_positions is not None
+                and os.environ.get("RTP_V41_PPU_CP8_YOCO_SHARED_PREFIX_READBACK", "0") == "1"
+                and self.cache.shared_prefix_stripes is not None
+            )
+            self.cache.bind_swa_fresh_lengths(
+                self.lengths if full_cp8 else None, keep_plans=keep_plans,
+            )
+            if (
+                full_cp8 and self.cache.shared_prefix_stripes is None
+                and os.environ.get("RTP_V41_PPU_CP8_YOCO_SHARED_PREFIX_READBACK", "0") == "1"
+                and cp8_yoco_fast_prefill_enabled(self)
+            ):
+                self.cache.bind_shared_source_prefix(self.query_prefixes)
+            if (
+                full_cp8
+                and (self.runtime.policy.mode == "full" or cp8_yoco_fast_prefill_enabled(self))
+                and context.input_lengths_global_host is not None
+                and self.prefill_mega_buffer is None
+                and os.environ.get("RTP_V41_PPU_CP8_FORWARD_MEGA_CAPACITY", "1") == "1"
+            ):
+                # Every CP rank has the same padded chunk from the host split.
+                self.prefill_mega_buffer = self.runtime.model._shared_ops.moe_engine.prepare_full_cp8(
+                    context.global_positions.device, context.chunk_length
+                )
         if context is not None and context.gather_restore_positions is not None and self.runtime.policy.mode == "exact":
             self.exact_context = context
             self.plan_reason = "public_exact_compaction"
@@ -155,7 +182,10 @@ class SharedForwardState:
                 self.prefill
                 and context.cp_size == 8
                 and context.kv_cache_sharded
-                and context.gather_restore_positions is None
+                and (
+                    context.gather_restore_positions is None
+                    or self.use_compact_cp8_ops(context)
+                )
                 and os.environ.get("RTP_V41_PPU_CP8_REUSE_LOCAL_ROWS", "0") == "1"
             )
             if reuse and self._local_cp_rows is not None and self._local_cp_rows[0] is context:
@@ -180,13 +210,23 @@ class SharedForwardState:
             cu = torch.cat((sizes.new_zeros(1), sizes.cumsum(0)))
         return positions.long(), requests.long(), cu.int(), torch.ones_like(positions, dtype=torch.bool)
 
-    def full_rows(self, context):
+    def use_compact_cp8_ops(self, context):
+        return (
+            self.compacted
+            and context is not None
+            and context is self.context
+            and context.cp_size == 8
+            and context.kv_cache_sharded
+            and os.environ.get("RTP_V41_PPU_CP8_COMPACT_PREFILL_OPS", "1") == "1"
+        )
+
+    def full_rows(self, context, *, selected_only=False):
         if context is None:
             p, r, _, valid = self.rows()
             return p, r, valid
         device = context.global_positions.device
         selected = context.gather_restore_positions
-        reuse = (
+        reuse = selected_only or (
             selected is None
             and self.prefill
             and context.cp_size == 8
@@ -194,17 +234,38 @@ class SharedForwardState:
             and os.environ.get(CP8_ROW_PREP_ENV, "1") == "1"
         )
         if reuse:
-            key = self.query_prefixes, self.lengths, device
+            key = (
+                self.query_prefixes, self.lengths, device,
+                id(context) if selected_only else None,
+            )
             if self._restored_rows is not None and self._restored_rows[0] == key:
                 return self._restored_rows[1], self._restored_rows[2], slice(None)
 
-        positions = torch.cat([torch.arange(p, p + n, device=device) for p, n in zip(self.query_prefixes, self.lengths)])
-        requests = torch.repeat_interleave(
-            torch.arange(len(self.lengths), device=device),
-            torch.tensor(self.lengths, device=device),
-            output_size=positions.numel() if reuse else None,
-        )
+        from rtp_llm.models_py.modules.dsv41.ppu.layers import cp8_yoco_small_ops_enabled
+
+        if (
+            reuse
+            and cp8_yoco_small_ops_enabled(self)
+            and self.lengths
+            and self.lengths[0] > 0
+            and all(length == self.lengths[0] for length in self.lengths)
+            and all(prefix == self.query_prefixes[0] for prefix in self.query_prefixes)
+        ):
+            length = self.lengths[0]
+            flat = torch.arange(len(self.lengths) * length, device=device)
+            requests = flat // length
+            positions = flat % length + self.query_prefixes[0]
+        else:
+            positions = torch.cat([torch.arange(p, p + n, device=device) for p, n in zip(self.query_prefixes, self.lengths)])
+            requests = torch.repeat_interleave(
+                torch.arange(len(self.lengths), device=device),
+                torch.tensor(self.lengths, device=device),
+                output_size=positions.numel() if reuse else None,
+            )
         if reuse:
+            if selected_only:
+                positions = positions.index_select(0, selected)
+                requests = requests.index_select(0, selected)
             # The CP gather already restored every real row, in request order.
             self._restored_rows = key, positions, requests
             return positions, requests, slice(None)
@@ -266,7 +327,7 @@ class SharedForwardState:
                 raise ValueError("real CP Engram windows disagree with input tokens")
         if layer == 19:
             self.prepare_plan()
-        if layer == 21 and self.plan is not None:
+        if layer == 21 and self.plan is not None and not self.compacted:
             hc = self.v4.layers[20].ffn_hc
             carry = hc.state
             hidden, self.compact_ids = self.plan.compact(self.v4, hidden, ids, self.shared)
@@ -278,20 +339,41 @@ class SharedForwardState:
                 for field in fields(carry)
             })
             hc.pre_mix_out = hc.state.pre_mix
-            self.context = self.plan.context
-            self.v4._propagate_cp_ctx(self.context)
-            self.compacted = True
-            mask = hidden.new_ones((hidden.shape[0], 1), dtype=torch.bool)
-            self.valid_output_rows = self.plan.restore_rows(mask).flatten()
-            original = self.original_context
-            ends = torch.tensor([p + n - 1 for p, n in zip(self.query_prefixes, self.lengths)], device=original.global_positions.device)
-            last = original.local_is_real & (original.global_positions == ends[original.req_id_per_token.long()])
-            if not bool(self.valid_output_rows[last].all()):
-                raise RuntimeError("YOCO removed a framework first-token output row")
-            logging.info("PPU shared YOCO compact %s", self.evidence())
+            self._activate_compact(hidden)
         if self.compacted:
             return hidden, self.compact_ids, self.context.global_positions, self.plan.cu_seqlens
         return hidden, ids, positions, cu
+
+    def compact_l20_queries(self, hidden, input_ids):
+        # L20 will publish its selection directly in compact row order.
+        self.compact_ids = input_ids
+        self.shared["topk"] = {}
+        self.shared["candidates"] = None
+        self.shared["ced_indexer_projection"] = self.plan.project_indexer_weights
+        for key in _DERIVED_KEYS:
+            self.shared.pop(key, None)
+        self._activate_compact(hidden)
+
+    def _activate_compact(self, hidden):
+        self.context = self.plan.context
+        self.v4._propagate_cp_ctx(self.context)
+        self.compacted = True
+        exchange = self.plan.exchange
+        # The local source indices already encode every restored real row.
+        self.valid_output_rows = hidden.new_zeros(exchange.original_rows, dtype=torch.bool)
+        self.valid_output_rows.index_fill_(0, exchange.send_indices, True)
+        original = self.original_context
+        ends_host = [p + n - 1 for p, n in zip(self.query_prefixes, self.lengths)]
+        if original.cp_size == 8 and original.kv_cache_sharded:
+            from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_metadata import _upload
+
+            ends = _upload(ends_host, original.global_positions.device, torch.int64)
+        else:
+            ends = torch.tensor(ends_host, device=original.global_positions.device)
+        last = original.local_is_real & (original.global_positions == ends[original.req_id_per_token.long()])
+        if not bool(self.valid_output_rows[last].all()):
+            raise RuntimeError("YOCO removed a framework first-token output row")
+        logging.info("PPU shared YOCO compact %s", self.evidence())
 
     def publication(self, layer):
         return self.plan.candidate_publication(self.shared) if layer == 20 and self.plan is not None else nullcontext()
