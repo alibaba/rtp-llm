@@ -94,10 +94,14 @@ class RunEnvironment:
                     errors.extend(result)
             except Exception as error:
                 errors.append(f'{label}: {type(error).__name__}: {error}')
+
+        async def drain_clients():
+            await self.clients.stop_playback()
+
         if self.supervisor.failure.done():
             errors.append(self.supervisor.failure.result())
         # Keep producers and observers alive through Client drain and the final scrape.
-        await cleanup('client final stop', self.clients.stop_playback)
+        await cleanup('client final stop', drain_clients)
         if self.monitoring:
             await cleanup('prometheus final scrape', self.monitoring.final_scrape)
         await cleanup('client processes', self.clients.close)

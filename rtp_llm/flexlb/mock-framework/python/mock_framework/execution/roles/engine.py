@@ -130,7 +130,8 @@ class EngineRole:
 
     async def close(self):
         names = [name for name, _ in self.supervisor.children if name in self.processes]
-        errors = await self.supervisor.stop(names, 3)
+        # All Engine JVMs shut down concurrently, including in full-scale Cases.
+        errors = await self.supervisor.stop(names, 15)
         active = {name for name, _ in self.supervisor.children}
         for node in self.processes - active:
             (self.records.directory / 'components' / node / 'ready.json').unlink(missing_ok=True)

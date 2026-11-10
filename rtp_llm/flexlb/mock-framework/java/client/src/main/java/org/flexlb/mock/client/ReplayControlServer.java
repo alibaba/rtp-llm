@@ -120,7 +120,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                 call(created.peers.get(i), "worker/prepare", new ClientReplayPlan(created.number, args.masters(), args.requests_file(),
                     count, i, clients, created.firstId, identity, args.qps(), args.replay_speed(), slots,
                     args.queue_capacity(), args.request_timeout_ms(), args.drain_timeout_ms(), args.reuse_cache(),
-                    args.fallback_max_output_tokens(), args.warmup()));
+                    args.fallback_max_output_tokens(), args.warmup()), 10_000);
             }
             long startAt = System.currentTimeMillis() + Math.max(1000, created.peers.size() * 100L);
             for (String peer : created.peers) {
@@ -207,8 +207,12 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
     }
 
     private JsonNode call(String url, String operation, Object args) throws Exception {
-        var body = Map.of("interface", operation, "args", args, "timeout_ms", 2000);
-        var request = HttpRequest.newBuilder(URI.create(url + "/invoke")).timeout(Duration.ofSeconds(3))
+        return call(url, operation, args, 2_000);
+    }
+
+    private JsonNode call(String url, String operation, Object args, int timeoutMillis) throws Exception {
+        var body = Map.of("interface", operation, "args", args, "timeout_ms", timeoutMillis);
+        var request = HttpRequest.newBuilder(URI.create(url + "/invoke")).timeout(Duration.ofMillis(timeoutMillis + 1_000L))
             .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofByteArray(JSON.writeValueAsBytes(body))).build();
         var response = http.send(request, HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() != 200) throw new IOException(operation + " at " + url + ": HTTP " + response.statusCode());
@@ -269,7 +273,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                     for (String peer : peers) {
                         if (unavailable.contains(peer) || states.containsKey(peer) && states.get(peer).done()) continue;
                         try {
-                            var state = JSON.treeToValue(call(peer, "worker/state", new Sequence(number)), State.class);
+                            var state = JSON.treeToValue(call(peer, "worker/state", new Sequence(number), 5_000), State.class);
                             states.put(peer, state);
                             if (!state.errors().isEmpty()) error(peer + ": " + state.errors().getFirst());
                         } catch (Exception failure) { error(peer + ": " + failure); unavailable.add(peer); }

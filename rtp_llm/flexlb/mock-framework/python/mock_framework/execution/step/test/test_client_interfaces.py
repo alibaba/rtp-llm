@@ -458,6 +458,7 @@ def test_teardown_collects_unstopped_playback_before_final_scrape(failed, tmp_pa
         order.append("client")
         if failed:
             raise ExecutionError("queue full")
+        return {"127.0.0.1:9000": {"done": True}}
 
     async def scrape():
         order.append("scrape")

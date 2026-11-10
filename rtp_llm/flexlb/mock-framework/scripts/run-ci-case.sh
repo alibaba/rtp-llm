@@ -34,5 +34,17 @@ uv run --locked --offline mock-case compile "$case_file" --output "$output_dir/c
 uv run --locked --offline mock-case launch "$case_file" \
   --java "$JAVA_HOME/bin/java" --prometheus "$PROMETHEUS_BIN" \
   --output "$output_dir/launch.yaml"
+if [[ -n "${MOCK_CI_SCRAPE_INTERVAL:-}" ]]; then
+  uv run --locked --offline python - "$output_dir/launch.yaml" "$MOCK_CI_SCRAPE_INTERVAL" <<'PY'
+from pathlib import Path
+import sys
+import yaml
+
+path = Path(sys.argv[1])
+launch = yaml.safe_load(path.read_text())
+launch['prometheus']['scrape_interval'] = sys.argv[2]
+path.write_text(yaml.safe_dump(launch, sort_keys=False))
+PY
+fi
 exec uv run --locked --offline mock-case run "$case_file" \
   --launch "$output_dir/launch.yaml" --output "$output_dir/result"
