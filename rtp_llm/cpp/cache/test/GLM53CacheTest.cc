@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
@@ -413,6 +414,23 @@ TEST(GLM53CacheConfigTest, EagleMtpOwnsIndependentTypedPools) {
     EXPECT_NE(local_default_group, default_group);
     EXPECT_NE(local_kv_group, kv_group);
     EXPECT_NE(local_state_group, state_group);
+
+    // The model runner receives the physical table vector before the draft's
+    // first layer selects its own table. Its initial MLA plan must use the
+    // draft's physical group even though both models call their MLA group 0.
+    CacheLayerLayout target_layout;
+    target_layout.layer_to_groups.assign(config.layer_to_group_id.begin(),
+                                         config.layer_to_group_id.begin() + mtp_layer);
+    target_layout.layer_group_types.assign(config.layer_group_types.begin(),
+                                           config.layer_group_types.begin() + mtp_layer);
+    ASSERT_EQ(default_group, 4);
+    CacheLayerLayout draft_layout;
+    draft_layout.layer_to_groups                = {default_group};
+    draft_layout.layer_group_types              = mtp_config.layer_group_types;
+    draft_layout.local_layer_region_to_group_id = mtp_config.layer_region_to_group_id;
+    const std::vector<int> page_ids = {7397, 31, 49, 67, 79163, 83, 97};
+    EXPECT_EQ(page_ids.at(target_layout.initialMlaBlockTableGroup()), 7397);
+    EXPECT_EQ(page_ids.at(draft_layout.initialMlaBlockTableGroup()), 79163);
 }
 
 TEST(GLM53CacheConfigTest, EagleSmallPagesUseGlmValidationForBothModels) {

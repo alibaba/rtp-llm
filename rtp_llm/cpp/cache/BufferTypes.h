@@ -69,6 +69,22 @@ struct CacheLayerLayout {
         const int group_id = layer_region_to_group_id[local_layer_id][region_id];
         return group_id >= 0 ? std::optional<int>(group_id) : std::nullopt;
     }
+
+    size_t initialMlaBlockTableGroup() const {
+        if (!local_layer_region_to_group_id.empty()) {
+            // Draft layer group ids are model-local, but the scheduler's block
+            // tables use physical group ids. MLA builds its slot map before
+            // the model loop selects the current layer's group.
+            for (size_t layer = 0; layer < layer_group_types.size(); ++layer) {
+                if (layer_group_types[layer] == CacheGroupType::FULL) {
+                    if (const auto group = resolvePhysicalGroupId(layer, KVCacheRegionName::DEFAULT)) {
+                        return static_cast<size_t>(*group);
+                    }
+                }
+            }
+        }
+        return 0;
+    }
 };
 
 struct KVCacheBuffer {

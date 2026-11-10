@@ -443,6 +443,13 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
     // New CUDA layout: [group, batch, kernel_blocks].
     // Per-group device views are zero-copy slices.
     const size_t group = inputs.kv_cache_kernel_block_id.size(0);
+    const size_t initial_group = description_.attention_conf.use_mla && kv_cache_layer_layout_ ?
+                                     kv_cache_layer_layout_->initialMlaBlockTableGroup() :
+                                     0;
+    RTP_LLM_CHECK_WITH_INFO(initial_group < group,
+                            "initial block table group %zu is out of range (groups=%zu)",
+                            initial_group,
+                            group);
 
     py_attn_inputs.kv_cache_kernel_block_id_device_by_group.clear();
     py_attn_inputs.kv_cache_kernel_block_id_device_by_group.reserve(group);
@@ -452,8 +459,8 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
         py_attn_inputs.kv_cache_kernel_block_id_device_by_group.push_back(inputs.kv_cache_kernel_block_id[g]);
     }
 
-    // Legacy 2-D device field defaults to group 0.
-    py_attn_inputs.kv_cache_kernel_block_id_device = py_attn_inputs.kv_cache_kernel_block_id_device_by_group[0];
+    py_attn_inputs.kv_cache_kernel_block_id_device =
+        py_attn_inputs.kv_cache_kernel_block_id_device_by_group[initial_group];
 
     // Gate host materialization: MHA reads device fields only, while MLA/
     // SparseMLA/ROCm/CP paths still consume the singular host block table.
@@ -501,7 +508,8 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
         for (size_t group_id = 0; group_id < group; ++group_id) {
             py_attn_inputs.kv_cache_kernel_block_id_host_by_group.push_back(all_groups[group_id]);
         }
-        py_attn_inputs.kv_cache_kernel_block_id_host = py_attn_inputs.kv_cache_kernel_block_id_host_by_group[0];
+        py_attn_inputs.kv_cache_kernel_block_id_host =
+            py_attn_inputs.kv_cache_kernel_block_id_host_by_group[initial_group];
     }
 
     if (inputs.kv_cache_block_id.defined()) {
@@ -513,6 +521,9 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
         } else {
             RTP_LLM_CHECK_WITH_INFO(false, "kv_cache_block_id shape should be 2 or 3");
         }
+        RTP_LLM_CHECK_WITH_INFO(initial_group < static_cast<size_t>(physical_groups.size(0)),
+                                "initial block table group %zu is out of range for physical blocks",
+                                initial_group);
 
         if (!skip_host_kv) {
             if (physical_groups.dtype() != torch::kInt32) {
@@ -524,7 +535,7 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
         }
 
         if (physical_groups.device().is_cuda()) {
-            py_attn_inputs.kv_cache_block_id_device = physical_groups[0];
+            py_attn_inputs.kv_cache_block_id_device = physical_groups[initial_group];
             if (description_.attention_conf.use_mla && !skip_host_kv) {
                 auto all_groups_host = physical_groups.cpu().contiguous().pin_memory();
                 buffer_holder_.hold_host(all_groups_host);
@@ -534,7 +545,7 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
                 for (size_t group_id = 0; group_id < physical_group_count; ++group_id) {
                     py_attn_inputs.kv_cache_block_id_host_by_group.push_back(all_groups_host[group_id]);
                 }
-                py_attn_inputs.kv_cache_block_id_host = py_attn_inputs.kv_cache_block_id_host_by_group[0];
+                py_attn_inputs.kv_cache_block_id_host = py_attn_inputs.kv_cache_block_id_host_by_group[initial_group];
             }
         } else {
             if (!physical_groups.is_pinned()) {
@@ -548,10 +559,11 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
                 for (size_t group_id = 0; group_id < physical_group_count; ++group_id) {
                     py_attn_inputs.kv_cache_block_id_host_by_group.push_back(physical_groups[group_id]);
                 }
-                py_attn_inputs.kv_cache_block_id_host = py_attn_inputs.kv_cache_block_id_host_by_group[0];
+                py_attn_inputs.kv_cache_block_id_host = py_attn_inputs.kv_cache_block_id_host_by_group[initial_group];
             }
-            const auto cuda_i32                     = runtimeCudaI32Options();
-            py_attn_inputs.kv_cache_block_id_device = physical_groups[0].to(cuda_i32, /*non_blocking=*/true);
+            const auto cuda_i32 = runtimeCudaI32Options();
+            py_attn_inputs.kv_cache_block_id_device =
+                physical_groups[initial_group].to(cuda_i32, /*non_blocking=*/true);
         }
     }
 }
