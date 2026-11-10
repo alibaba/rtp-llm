@@ -12,6 +12,11 @@ from rtp_llm.models_py.modules.factory.linear import LinearFactory
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 _FP8_LINEAR_REGISTRY = weakref.WeakSet()
 
+# Pre-SM100 fallback caches an exact bf16 weight view only for linears at or
+# below this element count (16MB bf16); larger (typically replicated) weights
+# dequantize per call to keep the resident footprint at FP8 size.
+_V41_MXFP8_BF16_CACHE_MAX_NUMEL = 8_000_000
+
 
 class V41Embedding(Embedding):
     """Main TP embedding with the target/draft token shape preserved."""
@@ -44,13 +49,20 @@ class V41MXFP8Linear(torch.nn.Module):
             self.weight_scales = self.pack_scales(scales)
             self._dequant_bf16 = None
         else:
-            # Exact bf16 becomes the canonical weight; the FP8 original is
-            # released so the fallback does not double the linear's footprint
-            # (weight-residency policy is satisfied by the bf16 view, which
-            # is reported with its checkpoint provenance).
-            self._dequant_bf16 = self._dequant_weight_bf16(weight, scales)
-            self.weight = self._dequant_bf16
             self.weight_scales = scales
+            if weight.numel() <= _V41_MXFP8_BF16_CACHE_MAX_NUMEL:
+                # Small (TP-sharded) linears: keep an exact bf16 view as the
+                # canonical weight so decode steps never re-dequantize.
+                self._dequant_bf16 = self._dequant_weight_bf16(weight, scales)
+                self.weight = self._dequant_bf16
+            else:
+                # Large replicated weights (e.g. the sp_id-replicated shared
+                # expert w13/w2, ~2.8GB/rank of bf16 copies across layers):
+                # keep only the FP8 checkpoint bytes resident and dequantize
+                # per call through the chunked exact path. The temporary is
+                # recycled by the caching allocator.
+                self.weight = weight
+                self._dequant_bf16 = None
 
     @staticmethod
     def _dequant_weight_bf16(weight: torch.Tensor, scales: torch.Tensor):
@@ -117,7 +129,7 @@ class V41MXFP8Linear(torch.nn.Module):
         remain closed for this linear. The caller owns the BF16 norm tensor.
         Input layout and disjoint BF16 output storage are caller preconditions.
         """
-        if self._dequant_bf16 is not None:
+        if not self.native_fp4_gemm:
             raise RuntimeError(
                 "V41MXFP8Linear pre-SM100 fallback does not consume pre-quantized "
                 "inputs; packed-lookup/fused callers must gate on native_fp4_gemm"
@@ -154,10 +166,17 @@ class V41MXFP8Linear(torch.nn.Module):
     def forward(self, x: torch.Tensor, out=None):
         if x.numel() == 0:
             return out if out is not None else x.new_empty((*x.shape[:-1], self.N))
-        if self._dequant_bf16 is not None:
+        if not self.native_fp4_gemm:
             # Exact pre-SM100 path: bf16 activations against the exact bf16
-            # dequantization of the FP8 checkpoint weights.
-            y = torch.nn.functional.linear(x.to(torch.bfloat16), self._dequant_bf16)
+            # dequantization of the FP8 checkpoint weights (cached for small
+            # linears, per-call chunked for large replicated ones).
+            w_bf16 = self._dequant_bf16
+            temporary = w_bf16 is None
+            if temporary:
+                w_bf16 = self._dequant_weight_bf16(self.weight, self.weight_scales)
+            y = torch.nn.functional.linear(x.to(torch.bfloat16), w_bf16)
+            if temporary:
+                del w_bf16
             if out is None:
                 return y
             out.copy_(y)
