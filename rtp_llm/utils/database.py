@@ -13,6 +13,16 @@ from rtp_llm.lora.lora_file import LoraCkpt
 from rtp_llm.utils import ckpt_file_info
 from rtp_llm.utils.ckpt_file_info import CkptFileInfo, FinetuneType
 
+try:  # The AWI placement recorder ships in-tree; degrade if absent.
+    from rtp_llm.utils.awi_weights import record_fetch, record_slice_fetch
+except ImportError:  # pragma: no cover
+
+    def record_fetch(name, tensors):  # type: ignore[misc]
+        return None
+
+    def record_slice_fetch(name, nbytes):  # type: ignore[misc]
+        return None
+
 _LAYER_RE = re.compile(r"(?:^|\.)(?:layers|h|blocks|layer)\.(\d+)\.")
 
 
@@ -240,7 +250,10 @@ class CkptDatabase(BaseDatabase):
         ckpt_file = self._tensor_index.get(name)
         if ckpt_file is not None:
             self._recycle_consumed_shards(name)
-            return [ckpt_file.load_tensor(name, data_type)]
+            tensors = [ckpt_file.load_tensor(name, data_type)]
+            # AWI placement provenance: every loader-fetched checkpoint key.
+            record_fetch(name, tensors)
+            return tensors
         return []
 
     def load_tensor_slice(
@@ -251,7 +264,9 @@ class CkptDatabase(BaseDatabase):
     ) -> torch.Tensor:
         ckpt_file = self._tensor_index[name]
         self._recycle_consumed_shards(name)
-        return ckpt_file.load_tensor_slice(name, tensor_slice, data_type)
+        tensor = ckpt_file.load_tensor_slice(name, tensor_slice, data_type)
+        record_slice_fetch(name, tensor.numel() * tensor.element_size())
+        return tensor
 
     def get_tensor_shape(self, name: str) -> torch.Size:
         return self._tensor_index[name].get_tensor_shape(name)

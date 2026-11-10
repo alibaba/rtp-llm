@@ -134,6 +134,14 @@ def publish_startup_facts(py_env_configs=None, engine=None) -> None:
         if py_env_configs is not None:
             awi.set_configuration_json(build_configuration_json(py_env_configs, engine))
         awi.set_startup_network_fetches(startup_network_fetches())
+        # Republish weights placement so keys fetched after model construction
+        # (multimodal engine) join the same per-rank report.
+        try:
+            from rtp_llm.utils import awi_weights
+
+            awi_weights.republish()
+        except Exception:  # noqa: BLE001
+            logging.warning("AWI: weights republish failed", exc_info=True)
         logging.info(
             "AWI: startup facts published (network_fetches=%d)",
             startup_network_fetches(),

@@ -712,6 +712,17 @@ class DeepSeekV4Model(GptModelBase):
             layer.attn.init_rope_cache(device=device_str)
         self._load_scoped_extra_weights(self.weight)
         del self.weight
+        # AWI placement contract: publish per-rank checkpoint-key residency
+        # from the live allocations before warmup/capture and KV sizing run.
+        # set_model_root lets the post-startup republish fold in the vision
+        # keys that the multimodal engine fetches after this constructor.
+        from rtp_llm.utils.awi_weights import (
+            publish_weights_placement,
+            set_model_root,
+        )
+
+        set_model_root(self.v4, self._ckpt_path)
+        publish_weights_placement(self.v4, self._ckpt_path)
         if torch.cuda.is_available() and device_str.startswith("cuda"):
             gpu_mem_gb = torch.cuda.memory_allocated(torch.device(device_str)) / 1024**3
             logging.info("[DeepSeekV4Model] GPU mem after load: %.1f GB", gpu_mem_gb)
