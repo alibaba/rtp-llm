@@ -229,6 +229,29 @@ class V4Transformer(nn.Module):
         from rtp_llm.utils.model_weight import W
 
         gw = mw.global_weights
+        if torch.version.hip is not None:
+            # The generic loader materializes every Engram table on the GPU
+            # before the model is built.  Engram is the one component that must
+            # live in host RAM on every hardware family; drop the loader copy
+            # before any block exists so the 2 x ~95 GiB no longer competes
+            # with expert weights and the full-context KV pool.  Engram loads
+            # its own host copy in from_checkpoint afterwards.
+            dropped = 0
+            freed = 0
+            for scope in (gw, *mw.weights):
+                for key in list(scope):
+                    if "engram" in key.lower():
+                        tensor = scope.pop(key)
+                        freed += tensor.numel() * tensor.element_size()
+                        dropped += 1
+            if dropped:
+                import torch as _torch
+                _torch.cuda.empty_cache()
+                print(
+                    f"[mem] dropped {dropped} loader Engram tensors "
+                    f"({freed / 2**30:.2f} GiB) before block construction",
+                    flush=True,
+                )
         shared_attention = {}
         self.layers = nn.ModuleList(
             [
