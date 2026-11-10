@@ -44,7 +44,7 @@ successful Schedule can continue independently after FlexLB exits.
 From the FlexLB directory:
 
 ```bash
-./mvnw -B -P 'opensource,!internal' -pl flexlb-api,flexlb-mock-engine -am clean package \
+./mvnw -B -P 'opensource,!internal' -pl flexlb-api -am clean package \
   -Dtest=ConfigServiceTest,ApplicationLifecycleTest,FlexlbGrpcDrainTest,FlexlbServiceImplTest,AppStateHookServerTest,ScheduleForwardMatrixTest,FlexlbServiceCancelTest,FlexlbForwardHopGuardNettyTest,FollowerAsyncForwardingNettyTest \
   -Dsurefire.failIfNoSpecifiedTests=false
 python3 -m unittest discover -s APP-META/docker-config/tests -v
@@ -56,39 +56,3 @@ pending RPC surviving both quiet expiry and a shutdown-thread interrupt.
 Spring tests verify drain finishes before serving resources are destroyed.
 Shell tests verify stop failure blocks teardown/restart and first-start works.
 The old HTTP token-holding fixture has been removed.
-
-## Packaged application + mock engine + real entry TERM
-
-```bash
-python3 APP-META/docker-config/tests/run_mock_engine_term.py --scenario late --quiet-period-ms 7000 --output /tmp/flexlb-term-late
-python3 APP-META/docker-config/tests/run_mock_engine_term.py --scenario queued --output /tmp/flexlb-term-queued
-python3 APP-META/docker-config/tests/run_mock_engine_term.py --scenario engine --output /tmp/flexlb-term-engine
-```
-
-Output directories must not exist. Requires JDK 21, Python `grpcio`, `grpcio-tools`
-and `protobuf`, as does the existing `flexlb_ft` harness. Build jars first using
-the command above; do not rebuild them during a process test.
-
-Every scenario launches `sh whale_start.sh`, the real supervisor and packaged
-Spring Boot application, then sends SIGTERM to the **entry PID**. Full production
-`appctl.sh stop` signals Java and waits. Only installation paths, ownership
-preparation, Java launch setup and unused nginx/xagent/tomcat operations use a
-local sandbox. Production Java components are not replaced.
-
-An independent Java mock engine serves one prefill and one decode worker. Real
-TCP gRPC follows Schedule → EnqueueBatch → FetchResponse:
-
-- `late`: first idle longer than the configured quiet period without TERM; then
-  send TERM and repeated short requests. All succeed and extend the quiet window.
-- `queued`: occupy the sole decode slot with a long request, queue three more
-  Schedule RPCs, and TERM the entry. Pending RPCs must survive beyond six seconds
-  and finish before service exit, including after gRPC stops accepting new calls.
-- `engine`: send TERM after Schedule has returned; FlexLB exits while independent
-  engine generation continues and finishes successfully.
-
-Each run checks request IDs, terminal output-length metadata, P/D completion
-records, successful entry exit and shutdown log timestamps. It records client
-and engine responses, process commands/PIDs, jar hashes and a result JSON.
-Mock output metadata is checked; real model token contents are not generated.
-These are single-master tests with consistency disabled. They do not exercise
-ZK election, master handoff or production container cleanup.
