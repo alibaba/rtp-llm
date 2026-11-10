@@ -1587,8 +1587,12 @@ TEST(LoadAsyncContextTest, LocalOnlyAdoptionPredicateAndBoundedInlineWait) {
     EXPECT_FALSE(local_only_context->done());
     EXPECT_FALSE(local_only_context->waitDoneFor(std::chrono::milliseconds(1)));
 
+    // Device-tier descriptors carry no copy transfer (remaining_transfer_count_
+    // counts only HOST/DISK descriptors), so a local-only adoption finishes the
+    // instant it is committed: done() flips without any completeTransfers call.
+    // This is the property the admission pass relies on - the load is already
+    // settled when the inline bounded wait runs, only its detection lagged.
     ASSERT_TRUE(local_only_context->commit());
-    ASSERT_TRUE(local_only_context->completeTransfers(1, true));
     EXPECT_TRUE(local_only_context->done());
     EXPECT_TRUE(local_only_context->waitDoneFor(std::chrono::milliseconds(1)));
     EXPECT_EQ(commits, 1u);
