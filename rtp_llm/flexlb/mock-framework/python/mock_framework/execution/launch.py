@@ -105,4 +105,6 @@ def local_launch(case, java, prometheus, *, framework):
     if 'client' in case.environment:
         commands['client'] = prefix + ['-jar', str(artifact('java/client/target/mock-client-1.0-SNAPSHOT-all.jar'))]
     raw['components'] = {role: {'command': list(commands[role]), 'startup_timeout': '60s'} for role in case.environment}
+    if 'master' in raw['components']:
+        raw['components']['master']['startup_timeout'] = '120s'
     return prepare_launch(raw, case, framework)

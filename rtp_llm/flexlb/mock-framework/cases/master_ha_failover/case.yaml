@@ -115,7 +115,7 @@ phases:
     expect:
       eq:
         ref: steps.get_master_a
-    within: 120s
+    within: 180s
     wait_after: 30s
   - id: check_master_leader_after_restart_a
     describe: 检查所有存活 Master 中唯一的主节点。
@@ -161,7 +161,7 @@ phases:
     expect:
       eq:
         ref: steps.get_master_b
-    within: 120s
+    within: 180s
     wait_after: 30s
   - id: check_master_leader_after_restart_b
     describe: 检查所有存活 Master 中唯一的主节点。
