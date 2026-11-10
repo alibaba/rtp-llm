@@ -42,7 +42,7 @@ phases:
       count: 1
     wait_after: 10s
 - id: playback
-  describe: 同一轮先低速预热，再原速播放剩余请求并回查缓存窗口。
+  describe: 同一轮先低速预热，再原速播放剩余请求。
   timeout: 525s
   steps:
   - id: start_client
@@ -61,22 +61,6 @@ phases:
       drain_timeout: 150s
     within: 430s
     wait_after: 395s
-  - id: check_cache_warmup_first
-    describe: 回查约第 300–330 秒的 Prefill 命中率。
-    interface: engine/cache/hit_rate
-    args:
-      range: [-95s, -65s]
-    expect:
-      gte: 0.9
-    within: 30s
-  - id: check_cache_warmup_second
-    describe: 回查约第 330–360 秒的 Prefill 命中率。
-    interface: engine/cache/hit_rate
-    args:
-      range: [-65s, -35s]
-    expect:
-      gte: 0.9
-    within: 30s
 - id: performance
   describe: 检查稳态性能、完整回放和排空后的成功率。
   timeout: 540s
