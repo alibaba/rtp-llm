@@ -185,8 +185,8 @@ struct KVCacheConfig {
     // Evict/store override; -1 inherits the load timeout above.
     int64_t                                 disk_cache_evict_timeout_ms                     = -1;
     int64_t                                 disk_cache_staging_block_count                  = 128;
-    int64_t                                 memory_cache_max_descriptors_per_transfer_batch = 8;
-    int64_t                                 block_tree_transfer_worker_count                = 4;
+    int64_t                                 memory_cache_max_descriptors_per_transfer_batch = 256;
+    int64_t                                 block_tree_transfer_worker_count                = 16;
     int64_t                                 block_tree_business_queue_max_size              = 10000;
     int64_t                                 block_tree_transfer_queue_max_size              = 10000;
     // Abort when any DEVICE/HOST/DISK pool's frozen fraction exceeds this ratio; 0 disables the guard.
