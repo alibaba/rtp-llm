@@ -77,7 +77,7 @@ WorkerStatus 报真实等待/执行任务、finished/version，available_concurr
 
 所有活动请求的不同物理块占用 device 额度，包括缓存命中、KV Loading 和等待 PD 交接的请求；共享前缀只计一次。命中也必须取得 device 额度才返回 Ready。最后一个活动引用释放后归还额度，缓存 key 可继续留在统一池。仅在统一池需要空间时执行 LRU，不因 device 暂时不足驱逐历史缓存。未持有 device 额度的缓存恢复视为瞬时，不模拟 Host/device 数据搬运、带宽、层级归属或额外队列。
 
-Scheduler 接口保持 `Ready / Loading / Failed`；初次申请临时容量不足时等待容量变化，单请求超过 device 减预留后的容量立即失败；Decode 每轮增长前检查 device，增长失败按容量错误结束。WorkerStatus、CacheStatus 容量和现有 DEVICE 指标始终报告 device 约束，key 列表及 item num 报告统一索引，可大于 device 总块数。free 按已分配块优先填满空闲 device 的瞬时模型计数，available 表示可供活动请求使用的额度，不等同于未缓存空槽。
+本地 `prepare()` 返回 `Ready` 或 `Failed`。初次申请临时容量不足时等待容量变化，单请求超过 device 减预留后的容量立即失败。Decode 每轮增长前检查 device，增长失败按容量错误结束。WorkerStatus、CacheStatus 容量和现有 DEVICE 指标始终报告 device 约束，key 列表及 item num 报告统一索引，可大于 device 总块数。free 按已分配块优先填满空闲 device 的瞬时模型计数，available 表示可供活动请求使用的额度，不等同于未缓存空槽。
 
 容量不足时，按 LRU 淘汰可回收的前缀树叶子。请求持有的块不会被淘汰。成功终态只发布已计算的完整块，失败或取消只释放占用。Master CacheStatus 与 KVCM Reporter 使用同一份有效块状态。P/D 网络交接仍走原生协议。
 
@@ -468,7 +468,7 @@ ViT Cache Claim 和 Forward Work 只提供只读 CompletionStage；调用方转�
 
 ### Prefill CP
 
-采集数据用最终共享前缀跨度描述前缀关系，展开后的回放数据保存 token 和请求信息。见[标准压缩输入与分片](architecture.md#标准压缩输入与分片)。本地回放用 Client 和 Mock P 的启动配置指定相同的 `seq_size_per_block`、`cache_key_hash_seed` 和 `prefill_cp_size`。例如基础块 128、CP4 时，Client 发 K4、K8，并将请求的 `cache_key_block_size` 设为 512。CP size 缺省时按 1，Client 缺省基础块大小时不生成路由键。
+回放文件保存前缀链和请求信息，Client 读取后还原匿名 token。本地回放用 Client 和 Mock P 的启动配置指定相同的 `seq_size_per_block`、`cache_key_hash_seed` 和 `prefill_cp_size`。例如基础块 128、CP4 时，Client 发 K4、K8，并将请求的 `cache_key_block_size` 设为 512。CP size 缺省时按 1，Client 缺省基础块大小时不生成路由键。[共享索引回放输入](architecture.md#共享索引回放输入)
 
 Whale 使用真实 Frontend 时，需要让 Mock P 遵守真实 Frontend 的缓存路由合同：相同 `cache_key_hash_seed` 和基础 `seq_size_per_block`，并对齐 CP 分片配置。基础块为 128 时，Mock P 设置 `prefill_cp_size=4`，按 128-token 块滚动哈希并保留 K4、K8。媒体身份也在基础块边界参与哈希。P 的 KV 分配、复用、完整块提交、CacheStatus.block_size 和 token 容量统一使用 512 的逻辑边界；`test_block_num` 仍是每 rank 物理块数（含 null block）。有效配置额外显示只读的 `cache_key_block_size`。
 
