@@ -35,7 +35,8 @@ def _tile_ops():
 
 def collapse_delayed(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
     """Read residual streams using FP32 coefficients and accumulation."""
-    if x.is_cuda and x.dtype == torch.bfloat16:
+    # TileLang/TileKernels are CUDA-only; ROCm uses the pure-torch path.
+    if x.is_cuda and x.dtype == torch.bfloat16 and torch.version.hip is None:
         ops = _tile_ops()
         shape = x.shape
         return ops.mhc_pre_apply_mix(
@@ -83,7 +84,9 @@ class DelayedHCUnit(HCUnitBase):
 
     def _pre_impl(self, x: torch.Tensor, dbg_tag=None):
         shape = x.shape
-        if x.is_cuda and x.dtype == torch.bfloat16:
+        # TileLang mHC kernels are CUDA-only; the else branch below is the
+        # complete pure-torch pre (F.linear + rsqrt + sinkhorn fallback).
+        if x.is_cuda and x.dtype == torch.bfloat16 and torch.version.hip is None:
             from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import (
                 is_supported,
                 prenorm,
@@ -161,7 +164,13 @@ class DelayedHCUnit(HCUnitBase):
         return y, post, comb
 
     def _post_impl(self, x, residual, post, comb):
-        if residual.is_cuda and residual.dtype == torch.bfloat16:
+        # TileLang mHC post kernel is CUDA-only; the torch path below is the
+        # reference equivalent.
+        if (
+            residual.is_cuda
+            and residual.dtype == torch.bfloat16
+            and torch.version.hip is None
+        ):
             return TileLangHCUnit._post_impl(self, x, residual, post, comb)
         return (
             post.float() * x.float().unsqueeze(-2)

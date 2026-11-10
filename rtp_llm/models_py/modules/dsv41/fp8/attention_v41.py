@@ -336,6 +336,7 @@ def rms_norm(x, weight, eps):
     # for compressor projections and non-CUDA reference execution.
     if (
         x.is_cuda
+        and torch.version.hip is None
         and x.dtype == torch.bfloat16
         and x.ndim >= 2
         and x.numel() > 0

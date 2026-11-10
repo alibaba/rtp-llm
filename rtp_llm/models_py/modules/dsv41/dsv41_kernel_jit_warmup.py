@@ -273,7 +273,12 @@ def _shared_expert_signatures(model):
             routed_dtype, routed_stride = routed.dtype, tuple(routed.stride())
         elif strategy.name == "mega":
             routed_dtype, routed_stride = torch.bfloat16, (dim, 1)
-        elif strategy.name in ("local_loop", "grouped_fp4", "deepep"):
+        elif strategy.name in (
+            "local_loop",
+            "grouped_fp4",
+            "deepep",
+            "rocm_fp4_dequant",
+        ):
             routed_dtype, routed_stride = torch.float32, (dim, 1)
         else:
             raise ValueError(f"unknown V41 routed output contract: {strategy.name}")
@@ -350,6 +355,11 @@ def warmup_v41_shared_expert_jit(model, *, max_m, device):
 @torch.inference_mode()
 def warmup_v41_engram_jit(model, *, max_m, device):
     if not model_warm_up_enabled() or not common._is_cuda_device(device):
+        return
+    if torch.version.hip is not None:
+        # The UVA/quantized Engram lookup kernels this warms are SM100-only;
+        # ROCm keeps host-resident tables with the CPU lookup path and never
+        # populates embed_tokens._num_sms.
         return
     state = getattr(model, "_engram_hash_state", None)
     if state is None:

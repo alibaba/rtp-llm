@@ -850,9 +850,17 @@ class AttentionFP8(nn.Module):
         self.wo_a_w = wo_a_w
         self.wo_a_s = wo_a_s
         K_local = n_heads_local * head_dim // n_groups_local
-        _stk_w, _stk_s = _prepare_wo_a_stacked(
-            wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
-        )
+        if torch.version.hip is None:
+            _stk_w, _stk_s = _prepare_wo_a_stacked(
+                wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
+            )
+        else:
+            # The DeepGEMM packed-UE8M0 stacked layout is SM100-only. Keep a
+            # plain view and an int32 sentinel scale: every fused consumer
+            # (_v41_output_projection/_v41_mega_attention/_v41_wo_a_quant)
+            # rejects it and falls back to the per-group BF16 linears.
+            _stk_w = wo_a_w.view(n_groups_local, o_lora_rank, K_local)
+            _stk_s = torch.empty(0, dtype=torch.int32, device=wo_a_w.device)
         self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
         self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
         self.wo_b = _fp8_w_s(
@@ -1702,10 +1710,19 @@ class AttentionFP8(nn.Module):
     def _rmsnorm_weighted(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         # The historical native rtp_llm_ops.rmsnorm binding left the tree with the
         # bundled C++ FlashInfer; flashinfer-python owns the same kernel now.
-        import flashinfer
-
         orig_shape = x.shape
         x_2d = x.reshape(-1, orig_shape[-1])
+        if torch.version.hip is not None:
+            # flashinfer is CUDA-only; fp32 math with the same input/output
+            # dtype boundary as the CUDA kernel.
+            xf = x_2d.float()
+            normed = (
+                xf * torch.rsqrt(xf.square().mean(-1, keepdim=True) + self.eps)
+                * weight.float()
+            )
+            return normed.to(x.dtype).view(orig_shape)
+        import flashinfer
+
         return flashinfer.norm.rmsnorm(x_2d, weight, eps=self.eps).view(orig_shape)
 
     def _try_fused_qr_kv(
