@@ -354,7 +354,7 @@ def _prepare_wo_a_stacked(
     floor-log2 bitcasts each block scale and packs 4 UE8M0 bytes per
     int32; output shape ``[G, R, K/512]`` matches
     ``deep_gemm.fp8_einsum(..., recipe=(1, 1, 128))`` expectations."""
-    from .utils import _native_fp8_gemm_available
+    from ..utils import _native_fp8_gemm_available
 
     if not _native_fp8_gemm_available():
         # SM80 reference path: dequantize the grouped wo_a once and run a
