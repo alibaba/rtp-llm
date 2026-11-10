@@ -121,13 +121,21 @@ FrozenTask::FrozenTask(PreparedExecution&& prepared, TransferResult failure):
 }
 
 void FrozenTask::freeze() noexcept {
+    // Snapshot before taking mutex_: debugString() also locks it. The pool
+    // prints this context only if a frozen-block threshold triggers abort.
+    std::string abort_context;
+    try {
+        abort_context = debugString();
+    } catch (...) {
+        // Diagnostics must not prevent acquiring the frozen references.
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_ != State::PREPARED) {
         return;
     }
     for (const auto& target : targets_) {
         for (const auto block : target.blocks) {
-            target.pool->freezeBlock(block);
+            target.pool->freezeBlock(block, abort_context.empty() ? nullptr : abort_context.c_str());
         }
     }
     frozen_at_us_ = wallTimeUs();

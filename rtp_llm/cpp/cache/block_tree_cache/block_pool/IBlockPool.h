@@ -85,7 +85,8 @@ public:
     bool canReclaimCacheBlock(BlockIdxType block) const;
 
     // Add one FROZEN reference; the caller decides when to release its hold.
-    void freezeBlock(BlockIdxType block) noexcept;
+    // abort_context is borrowed for this call and printed only on threshold abort.
+    void freezeBlock(BlockIdxType block, const char* abort_context = nullptr) noexcept;
     bool isFrozen(BlockIdxType block) const;
 
     // Prepare, but do not acquire or release, one FROZEN reference per block.
@@ -202,7 +203,7 @@ private:
     bool          validBlockNoLock(BlockIdxType block) const;
     void          checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
     static size_t treeRefTypeIndex(BlockTreeRefType ref_type);
-    void          incTreeRefNoLock(BlockIdxType block, size_t ref_type_index);
+    void          incTreeRefNoLock(BlockIdxType block, size_t ref_type_index, const char* abort_context = nullptr);
     void          releaseFrozenReferences(const BlockIdList& blocks, const std::function<void()>& notify) noexcept;
 
     size_t       totalBlocksNumNoLock() const;

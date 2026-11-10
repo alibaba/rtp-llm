@@ -140,7 +140,7 @@ void IBlockPool::incTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type
         [this, ref_type_index](BlockIdxType block) { incTreeRefNoLock(block, ref_type_index); });
 }
 
-void IBlockPool::incTreeRefNoLock(BlockIdxType block, size_t ref_type_index) {
+void IBlockPool::incTreeRefNoLock(BlockIdxType block, size_t ref_type_index, const char* abort_context) {
     RTP_LLM_CHECK(tree_refcounts_[block] < std::numeric_limits<uint32_t>::max());
     const bool was_active    = isActiveNoLock(block);
     const bool was_available = isAvailableNoLock(block);
@@ -163,13 +163,16 @@ void IBlockPool::incTreeRefNoLock(BlockIdxType block, size_t ref_type_index) {
         const double frozen_ratio  = static_cast<double>(frozen_blocks) / static_cast<double>(total_blocks);
         if (frozen_ratio > effective_frozen_block_abort_ratio_) {
             RTP_LLM_LOG_ERROR(
-                "pool [%s] frozen blocks exceed abort ratio %.17g (lower=%.17g upper=%.17g): frozen=%zu total=%zu",
+                "pool [%s] frozen blocks exceed abort ratio %.17g (lower=%.17g upper=%.17g): frozen=%zu total=%zu "
+                "block=%d context=%s",
                 config_->pool_name.c_str(),
                 effective_frozen_block_abort_ratio_,
                 config_->frozen_block_abort_lower_ratio,
                 config_->frozen_block_abort_upper_ratio,
                 frozen_blocks,
-                total_blocks);
+                total_blocks,
+                block,
+                abort_context ? abort_context : "unavailable");
             fflush(stdout);
             fflush(stderr);
             std::abort();
@@ -177,11 +180,11 @@ void IBlockPool::incTreeRefNoLock(BlockIdxType block, size_t ref_type_index) {
     }
 }
 
-void IBlockPool::freezeBlock(BlockIdxType block) noexcept {
+void IBlockPool::freezeBlock(BlockIdxType block, const char* abort_context) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     checkAllocatedNoLock(block);
-    incTreeRefNoLock(block, treeRefTypeIndex(BlockTreeRefType::FROZEN));
+    incTreeRefNoLock(block, treeRefTypeIndex(BlockTreeRefType::FROZEN), abort_context);
 }
 
 bool IBlockPool::isFrozen(BlockIdxType block) const {
