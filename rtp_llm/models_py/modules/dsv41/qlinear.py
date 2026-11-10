@@ -25,6 +25,7 @@ FP8 linears already migrated in S2 to ``CudaFp8DeepGEMMLinear`` and don't
 go through this class for attention/indexer/shared-expert linears.
 """
 
+import os
 from typing import Dict, Optional
 
 import torch
@@ -37,6 +38,12 @@ from rtp_llm.models_py.modules.dsv41.quant_layouts import (
 
 FP8_BLOCK = 128
 FP4_BLOCK = 32
+# Decode-sized batches dequantize FP4 experts block-by-block instead of
+# materializing the whole weight (graph-capture pools stay small).
+_FP4_CHUNKED_GEMM_MAX_ROWS = int(
+    os.environ.get("DSV41_FP4_CHUNKED_GEMM_MAX_ROWS", "256")
+)
+_FP4_DEQUANT_GEMM_CHUNK_ROWS = 128
 
 
 def native_fp4_gemm_supported(device: Optional[torch.device] = None) -> bool:
@@ -116,6 +123,29 @@ def _fp4_unpack_to_fp32(
     w_f = lut[interleaved]
     scale_f = scale_ue8m0.to(torch.float32).repeat_interleave(FP4_BLOCK, 1)[:, :in_dim]
     return w_f * scale_f
+
+
+def _fp4_unpack_rows_to_bf16(
+    weight_int8: torch.Tensor, scale_ue8m0: torch.Tensor
+) -> torch.Tensor:
+    """Exact bf16 dequant of packed FP4 rows for block-wise GEMMs.
+
+    Same math as :func:`_fp4_unpack_to_fp32` without the int64 interleave
+    temporary: the LUT gathers land directly in the strided halves. e2m1
+    values carry <=4 significand bits, so the fp32 product with the
+    power-of-two scale casts to bf16 losslessly.
+    """
+    out_dim, packed_in = weight_int8.shape
+    in_dim = packed_in * 2
+    w_uint = weight_int8.to(torch.int32) & 0xFF
+    low = w_uint & 0x0F
+    high = (w_uint >> 4) & 0x0F
+    lut = _fp4_lut(weight_int8.device)
+    w_f = torch.empty(out_dim, in_dim, dtype=torch.float32, device=weight_int8.device)
+    w_f[:, 0::2] = lut[low.long()]
+    w_f[:, 1::2] = lut[high.long()]
+    scale_f = scale_ue8m0.to(torch.float32).repeat_interleave(FP4_BLOCK, 1)[:, :in_dim]
+    return (w_f * scale_f).to(torch.bfloat16)
 
 
 def _fp8_dequant_to_fp32(
@@ -260,6 +290,30 @@ class QuantizedLinear(nn.Module):
         )
         return out.to(x.dtype).reshape(*orig_shape[:-1], self.out_features)
 
+    def _forward_fp4_chunked(self, x_2d: torch.Tensor) -> torch.Tensor:
+        """Bounded-transient exact FP4 GEMM for decode-sized batches.
+
+        Dequantizes one 128-row block of the packed expert weight at a time
+        and GEMMs it into the output slice, so per-call transients stay at a
+        few MB. Whole-weight fp32 dequants (~90MB per expert call) pinned a
+        fresh transient per captured batch size and OOM'd bs4 decode-graph
+        capture on 44.5/46GB cards.
+        """
+        x_bf16 = x_2d.to(torch.bfloat16)
+        output = torch.empty(
+            (x_2d.shape[0], self.out_features),
+            dtype=torch.bfloat16,
+            device=x_2d.device,
+        )
+        for begin in range(0, self.out_features, _FP4_DEQUANT_GEMM_CHUNK_ROWS):
+            end = min(begin + _FP4_DEQUANT_GEMM_CHUNK_ROWS, self.out_features)
+            w_chunk = _fp4_unpack_rows_to_bf16(
+                self.weight[begin:end], self.scale[begin:end]
+            )
+            output[:, begin:end] = F.linear(x_bf16, w_chunk)
+            del w_chunk
+        return output if output.dtype == x_2d.dtype else output.to(x_2d.dtype)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.storage == "bf16":
             return F.linear(x, self.weight)
@@ -268,6 +322,12 @@ class QuantizedLinear(nn.Module):
                 return self._fp4_forward_deepgemm(x)
             # Pre-SM100 exact fallback: FP4 e2m1 × 2^k dequantizes losslessly
             # to bf16, then a plain GEMM keeps the checkpoint semantics.
+            # Decode-sized batches take the block-wise path; large prefill
+            # batches keep the faster whole-weight dequant.
+            rows = x.numel() // self.in_features if x.numel() else 0
+            if 0 < rows <= _FP4_CHUNKED_GEMM_MAX_ROWS:
+                y = self._forward_fp4_chunked(x.reshape(-1, self.in_features))
+                return y.reshape(*x.shape[:-1], self.out_features)
             w = self.dequant_weight(out_dtype=x.dtype)
             return F.linear(x, w)
         # FP8: dequant to x's dtype on the fly.
