@@ -72,7 +72,6 @@ from rtp_llm.dash_sc.inference.grammar_validator import (
     GrammarCompilationError,
     GrammarValidator,
 )
-from rtp_llm.dash_sc.inference.tpm_recheck import TpmRecheckResult, recheck_tpm
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     _build_mm_inputs_from_request,
@@ -88,6 +87,7 @@ from rtp_llm.dash_sc.inference.servicer import (
     build_think_runtime,
     iter_real_model_stream_infer,
 )
+from rtp_llm.dash_sc.inference.tpm_recheck import TpmRecheckResult, recheck_tpm
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.metrics import AccMetrics
 from rtp_llm.ops import RoleType
@@ -199,6 +199,16 @@ class _RoutingFakeVisitor:
 
 
 class DashErrorSpecForFtExceptionTest(unittest.TestCase):
+    def test_download_timeout_maps_to_400_and_preserves_public_message(self) -> None:
+        error = FtRuntimeException(
+            ExceptionType.MM_DOWNLOAD_FAILED, "Temporary multimodal download failure"
+        )
+        error.__cause__ = TimeoutError("download timed out")
+        mapping = _dash_error_mapping_for_ft_exception(error)
+        self.assertEqual(mapping.error_spec, DASH_ERROR_BAD_REQUEST)
+        self.assertEqual(mapping.error_spec.status_code, 400)
+        self.assertEqual(mapping.public_message, error.message)
+
     def test_non_default_exception_groups(self) -> None:
         cases = (
             (ExceptionType.INVALID_PARAMS, DASH_ERROR_BAD_REQUEST),
@@ -217,6 +227,7 @@ class DashErrorSpecForFtExceptionTest(unittest.TestCase):
                 DASH_ERROR_ADMISSION_OVERLOADED,
             ),
             (ExceptionType.GENERATE_TIMEOUT, DASH_ERROR_TIMEOUT),
+            (ExceptionType.CONNECT_TIMEOUT, DASH_ERROR_TIMEOUT),
             (ExceptionType.OUT_OF_VOCAB_RANGE, DASH_ERROR_INVALID_OUTPUT),
             (ExceptionType.CANCELLED_ERROR, DASH_ERROR_ABORT),
         )
@@ -859,7 +870,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 request_ready_time_ms=int(time.time() * 1000),
                 interval_ms=10_000,
                 callback_url="http://callback.local/limits",
-            )
+            ),
         )
         with patch(
             "rtp_llm.dash_sc.inference.servicer.recheck_tpm", new=AsyncMock()
@@ -897,7 +908,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 request_ready_time_ms=int(time.time() * 1000) - 5_000,
                 interval_ms=1_000,
                 callback_url="http://callback.local/limits",
-            )
+            ),
         )
         with patch(
             "rtp_llm.dash_sc.inference.servicer.recheck_tpm", new=AsyncMock()
@@ -936,7 +947,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 request_ready_time_ms=int(time.time() * 1000) - 5_000,
                 interval_ms=1_000,
                 callback_url="http://callback.local/limits",
-            )
+            ),
         )
         result = TpmRecheckResult(
             ok=True,
@@ -982,7 +993,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 request_ready_time_ms=int(time.time() * 1000) - 5_000,
                 interval_ms=1_000,
                 callback_url="http://callback.local/limits",
-            )
+            ),
         )
         result = TpmRecheckResult(
             ok=False,
@@ -1049,7 +1060,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 request_ready_time_ms=int(time.time() * 1000) - 5_000,
                 interval_ms=1_000,
                 callback_url="http://callback.local/limits",
-            )
+            ),
         )
         result = TpmRecheckResult(
             ok=False,

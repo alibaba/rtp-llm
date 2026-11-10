@@ -1,17 +1,18 @@
-import threading
 import pickle
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
-from rtp_llm.multimodal import mm_preprocess
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.metrics import AccMetrics
-from rtp_llm.multimodal.vit_metrics import record_vit_preprocess_value
+from rtp_llm.multimodal import mm_preprocess
 from rtp_llm.multimodal.mm_preprocess import (
     MultiprocessPreprocessExecutor,
     _PreprocessTaskError,
     _worker_process_task,
 )
+from rtp_llm.multimodal.vit_metrics import record_vit_preprocess_value
 
 
 class _FailingFuture:
@@ -27,12 +28,69 @@ class _WorkItem:
         self.future = _FailingFuture(error)
         self.embedding_result = None
         self.mm_timeout_ms = 60000
+        self.media_traces = ()
 
     def remaining_timeout_s(self):
         return 60.0
 
 
 class MultiprocessPreprocessExecutorTest(unittest.TestCase):
+    def test_download_error_survives_worker_transport_without_becoming_timeout(self):
+        for with_samples in (False, True):
+            with self.subTest(with_samples=with_samples):
+
+                def preprocess(_inputs, _config, **_params):
+                    if with_samples:
+                        record_vit_preprocess_value(
+                            AccMetrics.MM_DOWNLOAD_PROXY_QPS_METRIC, 1
+                        )
+                    raise FtRuntimeException(
+                        ExceptionType.MM_DOWNLOAD_FAILED,
+                        "Temporary multimodal download failure",
+                    ) from TimeoutError("download timed out")
+
+                mm_preprocess._worker_preprocess_func = preprocess
+                mm_preprocess._worker_vit_config = SimpleNamespace()
+                mm_preprocess._worker_preprocess_params = {}
+                expected = _PreprocessTaskError if with_samples else FtRuntimeException
+                with self.assertRaises(expected) as raised:
+                    _worker_process_task([])
+                error = pickle.loads(pickle.dumps(raised.exception))
+                executor = MultiprocessPreprocessExecutor.__new__(
+                    MultiprocessPreprocessExecutor
+                )
+                executor._preprocess_queue_lock = threading.Lock()
+                executor._pending_preprocess_tasks = set()
+                executor._rebuild_pool = Mock()
+                executor._record_timeout_locked = Mock()
+                with self.assertRaises(FtRuntimeException) as received:
+                    executor.get_result(_WorkItem(error))
+                self.assertEqual(
+                    received.exception.exception_type, ExceptionType.MM_DOWNLOAD_FAILED
+                )
+                self.assertEqual(
+                    received.exception.message, "Temporary multimodal download failure"
+                )
+                executor._rebuild_pool.assert_not_called()
+                executor._record_timeout_locked.assert_not_called()
+
+    def test_outer_preprocess_wait_timeout_remains_a_timeout(self):
+        executor = MultiprocessPreprocessExecutor.__new__(
+            MultiprocessPreprocessExecutor
+        )
+        executor._pool_lock = threading.Lock()
+        executor._preprocess_queue_lock = threading.Lock()
+        executor._pending_preprocess_tasks = set()
+        executor._record_timeout_locked = Mock()
+        executor._rebuild_pool = Mock()
+        item = _WorkItem(mm_preprocess.multiprocessing.pool.TimeoutError())
+        with self.assertRaisesRegex(
+            TimeoutError, "Preprocessing timeout after 60000ms"
+        ):
+            executor.get_result(item)
+        executor._record_timeout_locked.assert_called_once()
+        executor._rebuild_pool.assert_not_called()
+
     def test_counter_samples_survive_success_and_failed_worker_results(self):
         metric = AccMetrics.MM_DOWNLOAD_PROXY_QPS_METRIC
         for failed in (False, True):
