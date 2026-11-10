@@ -13,6 +13,7 @@ _CLASS_TO_MODULE: Dict[str, str] = {
     "ChatGlmV4Vision": "rtp_llm.models.chat_glm_v4_vision",
     "CosyVoiceQwen": "rtp_llm.models.cosyvoice_qwen",
     "DeepSeekV2": "rtp_llm.models.deepseek_v2",
+    "Glm5Mtp": "rtp_llm.models.deepseek_v2",
     "DeepSeekV3Mtp": "rtp_llm.models.deepseek_v2",
     "DeepSeekV41": "rtp_llm.models.deepseek_v41",
     "DeepSeekV41DSpark": "rtp_llm.models.deepseek_v41",

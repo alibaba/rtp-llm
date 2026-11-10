@@ -10,6 +10,9 @@
 #include <mutex>
 #include <condition_variable>
 #include <list>
+#include <optional>
+#include <stdexcept>
+#include <string>
 
 namespace rtp_llm {
 
@@ -18,7 +21,7 @@ struct BatchDecodeSchedulerConfigLocal: public autil::legacy::Jsonizable {
         json.Jsonize("batch_size", batch_size_);
         json.Jsonize("mode", mode_, "decode");
     }
-    uint32_t    batch_size_;
+    uint32_t    batch_size_ = 0;
     std::string mode_;
 };
 class BatchDecodeScheduler: public SchedulerBase {
@@ -36,8 +39,21 @@ public:
         batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
         scheduler_type_   = SchedulerType::kBatchDecode;
         dp_rank_          = dp_rank;
+        if (cache_manager_ && cache_manager_->hasSparseKvOffload()) {
+            offload_max_batch_size_ = runtime_config.max_generate_batch_size;
+            validateOffloadBatchSize(runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size,
+                                     *offload_max_batch_size_);
+        }
     }
     virtual ~BatchDecodeScheduler() = default;
+
+    static void validateOffloadBatchSize(int64_t batch_size, int64_t max_requests) {
+        if (batch_size <= 0 || max_requests <= 0 || batch_size > max_requests) {
+            throw std::invalid_argument(
+                "sparse KV offload requires batch_decode_scheduler_batch_size in [1, max_generate_batch_size="
+                + std::to_string(max_requests) + " (concurrency_limit)], got " + std::to_string(batch_size));
+        }
+    }
 
     // Reject inputs longer than the KV cache can hold; mark the stream errored so the caller
     // sees the failure via collectStreamOutput / pollStreamOutput. Mirrors FIFOScheduler.
@@ -105,13 +121,24 @@ public:
     void updateSchedulerInfo(const std::string& scheduler_info) override {
         BatchDecodeSchedulerConfigLocal config;
         autil::legacy::FromJsonString(config, scheduler_info);
-        batch_size_ = config.batch_size_;
-        if (config.mode_ == "decode") {
-            scheduler_type_ = SchedulerType::kBatchDecode;
-        } else if (config.mode_ == "prefill") {
-            scheduler_type_ = SchedulerType::kBatchPrefill;
+        if (offload_max_batch_size_) {
+            validateOffloadBatchSize(config.batch_size_, *offload_max_batch_size_);
+            if (config.mode_ != "decode") {
+                throw std::invalid_argument("sparse KV offload requires scheduler mode=decode");
+            }
         }
-        RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %d, mode to %d", batch_size_, int(scheduler_type_));
+        {
+            std::lock_guard<std::mutex> lock(lock_);
+            batch_size_ = config.batch_size_;
+            if (config.mode_ == "decode") {
+                scheduler_type_ = SchedulerType::kBatchDecode;
+            } else if (config.mode_ == "prefill") {
+                scheduler_type_ = SchedulerType::kBatchPrefill;
+            }
+            RTP_LLM_LOG_INFO(
+                "BatchDecodeScheduler update batch size to %d, mode to %d", batch_size_, int(scheduler_type_));
+        }
+        cond_.notify_all();
     }
 
     // 根据状态机转移后的目标状态，将 stream 路由到对应的队列
@@ -278,6 +305,7 @@ private:
     std::list<GenerateStreamPtr> loading_cache_streams_;
     std::list<GenerateStreamPtr> running_streams_;
     uint32_t                     batch_size_;
+    std::optional<int64_t>       offload_max_batch_size_;
     bool                         reorder_request_;
     uint32_t                     current_step_ = 0;
     bool                         draining_mixed_modes_ = false;

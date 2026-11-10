@@ -67,6 +67,7 @@ struct GptModelInputs {
     std::vector<std::string> kv_cache_group_tags;      // Local payload row -> group identity; not transmitted by TP.
     torch::Tensor            kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
     torch::Tensor            kv_cache_update_mapping;  // [block_copy_num, 3]: payload row, src/dst physical block IDs
+    torch::Tensor            kv_cache_generation_updates;  // pinned int64 [M,3]: tag row, block ID, generation
     torch::Tensor            kv_cache_copy_token_lengths;  // CPU int32 [copy count]; zero means full copy.
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
@@ -108,6 +109,9 @@ struct GptModelInputs {
     // So, the model has different inference logic for target verify and normal inference.
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
+    // The executor sets the round's role before asynchronous preparation;
+    // target hidden states may not exist until after that preparation starts.
+    bool is_draft_extend = false;
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;

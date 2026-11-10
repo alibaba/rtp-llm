@@ -956,7 +956,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AvailableCapacityAggregatesCanonic
     const size_t total_available             = allocator->availableBlocksNum();
     const size_t tokens_before               = allocator->availableTokensNum();
     const auto   capacity_before             = allocator->tokenCapacity(config.seq_size_per_block);
-    auto expected_available_capacity = [&]() {
+    auto         expected_available_capacity = [&]() {
         return pools[1]->availableBlocksNum() * config.group("full").seqSizePerBlock();
     };
 
@@ -1723,6 +1723,48 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, LinearAndSWAPeakFitEqualSmallPools
     }
     allocator->free({resource, token_ids});
     EXPECT_EQ(allocator->freeBlocksNum(), 6u);
+}
+
+TEST_F(HybridPoolCoordinatorCacheManagerTest, CompleteTokenIdsReserveStepReclaimsSwaRollingWindow) {
+    auto spec      = makeResolvedMhaSpec(DataType::TYPE_FP16,
+                                    /*local_head_num_kv=*/1,
+                                    /*size_per_head=*/1,
+                                    /*seq_size_per_block=*/4,
+                                    "swa");
+    auto config    = makeSingleGroupCacheConfig(spec, CacheGroupType::SWA, /*layer_num=*/1, /*block_num=*/16);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    const size_t free_before = allocator->freeBlocksNum();
+    auto         batch_res   = makeBatchResource(/*batch_size=*/1, config);
+    auto         token_ids   = makeCompleteTokenIds(
+        /*batch_size=*/1, /*seq_length=*/32, /*seq_size_per_block=*/4);
+    token_ids->setReserveStep(9);
+
+    MallocInfo malloc_info{batch_res, token_ids};
+    malloc_info.enable_cache_lookup = false;
+    malloc_info.reuse_cache         = false;
+    ASSERT_TRUE(allocator->malloc(malloc_info).success);
+
+    // Prefill keeps only the two active tail blocks; reserve applies to decode allocation.
+    ASSERT_EQ(validBlockCount(batch_res->blocks(0, "swa")), 2u);
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before - 2);
+    for (int seq_len = 33; seq_len <= 45; ++seq_len) {
+        SCOPED_TRACE(seq_len);
+        ASSERT_GT(batch_res->curBlocksNum(), 0u);
+        token_ids->setSeqLength(seq_len);
+
+        MallocInfo incr_info{batch_res, token_ids};
+        incr_info.enable_cache_lookup          = false;
+        incr_info.reuse_cache                  = false;
+        incr_info.enable_remove_skipped_blocks = true;
+        ASSERT_TRUE(allocator->malloc(incr_info).success);
+        EXPECT_EQ(validBlockCount(batch_res->blocks(0, "swa")), 5u);
+        EXPECT_EQ(allocator->freeBlocksNum(), free_before - 5);
+    }
+
+    allocator->free(FreeInfo{batch_res, token_ids});
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, PreparedSWALoadReserveRejectsPoolLocalShortfall) {

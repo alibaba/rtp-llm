@@ -1211,6 +1211,23 @@ class AttentionFP8(nn.Module):
             return None
         return raw_u8[:, :useful_bytes].view(vec_dtype).view(-1, vec_dim)
 
+    def configure_sparse_offload(self, plan, max_write_rows: int) -> None:
+        if self.compress_ratio != 4 or self.compressor is None:
+            raise ValueError("V4 sparse offload requires a CSA layer")
+        self.offload_plan = plan
+        self.compressor.offload_plan = plan
+        # One native striped page keeps both row-copy planes contiguous and
+        # lets the fused CSA writer use its existing cache geometry contract.
+        stride = ((max_write_rows * 584 + 575) // 576) * 576
+        raw = torch.zeros(
+            (1, stride),
+            dtype=torch.uint8,
+            device=plan.storage.resident_planes[0].device,
+        )
+        self.compressor.offload_staging = raw.as_strided(
+            (1, max_write_rows, 584), (stride, 584, 1)
+        )
+
     def _pool_view_3d_fp8(self, attn_type: str) -> Optional[torch.Tensor]:
         """Return ``[num_blocks, eb, ENTRY_BYTES]`` uint8 view of an FP8 KV
         pool, respecting C++-side TMA padding (per-block stride may exceed
@@ -1220,6 +1237,13 @@ class AttentionFP8(nn.Module):
         """
         if self._kv_cache is None:
             return None
+        plan = getattr(self, "offload_plan", None)
+        if attn_type == "csa_kv" and plan is not None:
+            payload = plan.storage.resident_planes[0]
+            return payload.as_strided(
+                (payload.shape[0], plan.storage.rows_per_page, 584),
+                (payload.stride(0), 584, 1),
+            )
         spec = self._pool_spec.get(attn_type)
         if spec is None:
             return None
@@ -1320,6 +1344,9 @@ class AttentionFP8(nn.Module):
         this layer + cache tag.  Returns 0 if pool unavailable."""
         if self._kv_cache is None:
             return 0
+        plan = getattr(self, "offload_plan", None)
+        if attn_type == "csa_kv" and plan is not None:
+            return plan.storage.rows_per_page
         spec = self._pool_spec.get(attn_type)
         if spec is None:
             return 0
@@ -2271,6 +2298,15 @@ class AttentionFP8(nn.Module):
             position_ids=position_ids,
             compressor_meta=indexer_compressor_meta,
         )
+        cmp_local_raw = attn_metadata.topk_buffer_compressed[:bsz]
+        plan = getattr(self, "offload_plan", None)
+        if plan is not None:
+            # Compressor compute targets private staging. Its runtime.write
+            # waits for this fetch before updating Host/resident KV rows.
+            selection = self._translate_compressed_selection(
+                cmp_local_raw, bsz, q_len, attn_metadata, CSA_KV
+            )
+            plan.runtime.begin(selection.contiguous())
         csa_compressor_meta = self._decode_compressor_meta_from_metadata(
             attn_metadata,
             state_attn_type=CSA_STATE,
@@ -2288,7 +2324,6 @@ class AttentionFP8(nn.Module):
         )
         # CSA cmp_local_raw = indexer's raw indices (the +win offset is
         # added later inside the epilogue's translate path).
-        cmp_local_raw = attn_metadata.topk_buffer_compressed[:bsz]
         return self._forward_decode_compressed(
             qkv.q,
             cmp_local_raw,
@@ -2296,6 +2331,7 @@ class AttentionFP8(nn.Module):
             q_len,
             attn_metadata,
             cmp_attn_type=CSA_KV,
+            prefetch_started=plan is not None,
         )
 
     def _forward_decode_hca(
@@ -2345,6 +2381,35 @@ class AttentionFP8(nn.Module):
             cmp_attn_type=HCA_KV,
         )
 
+    def _translate_compressed_selection(
+        self,
+        cmp_local_raw: torch.Tensor,
+        bsz: int,
+        q_len: int,
+        attn_metadata: "DSv4DecodeAttnMetadataFP8",
+        cmp_attn_type: str,
+    ) -> torch.Tensor:
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
+            translate_local_to_global_slots,
+        )
+
+        T = bsz * q_len
+        # HCA layers share dense indices; CSA selection comes from its indexer.
+        if self.indexer is None and attn_metadata.hca_cmp_global_slots is not None:
+            return attn_metadata.hca_cmp_global_slots[:T]
+        assert attn_metadata.req_id_per_token is not None
+        cmp_pool_bt = attn_metadata.pool_block_tables[cmp_attn_type]
+        cmp_tokens_per_block = int(
+            attn_metadata.paged_pool_tokens_per_block[cmp_attn_type]
+        ) // int(self.compress_ratio)
+        return translate_local_to_global_slots(
+            attn_metadata.req_id_per_token[:T],
+            cmp_pool_bt[:bsz],
+            cmp_local_raw.reshape(T, cmp_local_raw.shape[-1]),
+            entries_per_block=self._pool_entries_per_block(cmp_attn_type),
+            tokens_per_block_for_block_table=cmp_tokens_per_block,
+        )
+
     def _forward_decode_compressed(
         self,
         q: torch.Tensor,  # [B, 1, H, D]
@@ -2353,6 +2418,8 @@ class AttentionFP8(nn.Module):
         q_len: int,
         attn_metadata: "DSv4DecodeAttnMetadataFP8",  # type: ignore[name-defined]
         cmp_attn_type: str,
+        *,
+        prefetch_started: bool = False,
     ) -> torch.Tensor:
         """Shared CSA/HCA epilogue: translate pool-local → global slots
         for both SWA and compressed pools, then one dual-pool FlashMLA
@@ -2363,9 +2430,6 @@ class AttentionFP8(nn.Module):
         )
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
             get_or_build_sched_meta,
-        )
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
-            translate_local_to_global_slots,
         )
         from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
 
@@ -2395,26 +2459,21 @@ class AttentionFP8(nn.Module):
         # the result once per step, shared across all 43 layers).
         assert attn_metadata.req_id_per_token is not None
         assert attn_metadata.swa_global_slots is not None
-        req_id = attn_metadata.req_id_per_token[:T]
         swa_global = attn_metadata.swa_global_slots[:T]
 
-        # Translate compressed local → global slots. HCA layers share a
-        # precomputed ``hca_cmp_global_slots`` (dense idx input is
-        # identical across HCA layers); CSA layers must translate per-
-        # layer because ``topk_buffer_compressed`` is populated by the
-        # per-layer indexer.
-        if self.indexer is None and attn_metadata.hca_cmp_global_slots is not None:
-            cmp_global = attn_metadata.hca_cmp_global_slots[:T]
+        plan = getattr(self, "offload_plan", None)
+        if cmp_attn_type == "csa_kv" and plan is not None:
+            if not prefetch_started:
+                # Mega CSA still produces its selection in the fused tail.
+                selection = self._translate_compressed_selection(
+                    cmp_local_raw, bsz, q_len, attn_metadata, cmp_attn_type
+                )
+                plan.runtime.begin(selection.contiguous())
+            read = plan.runtime.acquire(plan.storage_index)
+            cmp_global = read.indices
         else:
-            cmp_tokens_per_block = int(
-                attn_metadata.paged_pool_tokens_per_block[cmp_attn_type]
-            ) // int(self.compress_ratio)
-            cmp_global = translate_local_to_global_slots(
-                req_id,
-                cmp_pool_bt[:bsz],
-                cmp_local_raw.reshape(T, K_cmp),
-                entries_per_block=self._pool_entries_per_block(cmp_attn_type),
-                tokens_per_block_for_block_table=cmp_tokens_per_block,
+            cmp_global = self._translate_compressed_selection(
+                cmp_local_raw, bsz, q_len, attn_metadata, cmp_attn_type
             )
 
         # Iter3.2: swa_global / cmp_global are int32 from the translator,

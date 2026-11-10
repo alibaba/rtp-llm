@@ -201,5 +201,54 @@ class AttentionFactoryGenerationPrefillMlaCudaGraphTest(
             self._select([_SafeAttentionImpl], mode="invalid_graph_mode")
 
 
+class SparseMlaPromptPrefillRoutingTest(unittest.TestCase):
+    def test_prompt_seeding_keeps_cp_prefill_backend(self):
+        self._check_route(cp_enabled=True, verify=False, extend=False)
+
+    def test_decode_verify_and_extend_keep_decode_backend(self):
+        for verify, extend in ((True, False), (False, True)):
+            with self.subTest(verify=verify, extend=extend):
+                self._check_route(cp_enabled=False, verify=verify, extend=extend)
+
+    def _check_route(self, cp_enabled, verify, extend):
+        class CpSparseImpl(_StubAttentionImpl):
+            @classmethod
+            def is_sparse(cls):
+                return True
+
+            @classmethod
+            def support_parallelism_config(cls, parallelism):
+                return parallelism.prefill_cp_config.is_enabled()
+
+        class DecodeSparseImpl(CpSparseImpl):
+            @classmethod
+            def support_parallelism_config(cls, parallelism):
+                return not parallelism.prefill_cp_config.is_enabled()
+
+        inputs = types.SimpleNamespace(
+            is_prefill=True,
+            is_target_verify=verify,
+            is_draft_extend=extend,
+            sequence_lengths=torch.empty(0, dtype=torch.int32),
+            cu_kv_seqlens_device=torch.tensor([0, 1024]),
+        )
+        configs = types.SimpleNamespace(is_sparse=True, indexer_topk=8)
+        parallelism = types.SimpleNamespace(
+            prefill_cp_config=types.SimpleNamespace(is_enabled=lambda: cp_enabled)
+        )
+        weight = types.SimpleNamespace(
+            weights={}, get_global_weight_or_none=lambda _name: None
+        )
+        with patch.object(
+            attn_factory, "PREFILL_MLA_IMPS", [CpSparseImpl]
+        ), patch.object(attn_factory, "DECODE_MLA_IMPS", [DecodeSparseImpl]):
+            impl = attn_factory.get_mla_impl(
+                configs, weight, inputs, parallelism_config=parallelism
+            )
+        self.assertIs(
+            type(impl), DecodeSparseImpl if verify or extend else CpSparseImpl
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

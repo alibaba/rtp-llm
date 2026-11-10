@@ -282,6 +282,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
     py_attn_inputs.is_prefill       = !decode_batch_size;
     py_attn_inputs.is_target_verify = inputs.is_target_verify;
+    py_attn_inputs.is_draft_extend  = py_attn_inputs.is_prefill && inputs.is_draft_extend;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",
@@ -792,6 +793,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
     } flag_guard{prepared_attention_inputs_};
 
+    if (cache_manager_ && cache_manager_->hasSparseKvOffload() && !inputs.is_fake_stream) {
+        // Covers warmup and direct draft forwards as well as normal execution.
+        // Sub-forwards can grow, while the executor owns batch-level shrink.
+        cache_manager_->resizeOffloadHotCache(inputs.input_lengths.size(0), /*grow_only=*/true);
+    }
+
     if (hidden_state_capture_publisher_) {
         hidden_state_capture_publisher_->beginForward();
     }
@@ -1245,6 +1252,7 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
     buffer_holder_.hold_host(inputs.kv_cache_block_id);
     buffer_holder_.hold_host(inputs.kv_cache_group_types);
     buffer_holder_.hold_host(inputs.kv_cache_update_mapping);
+    buffer_holder_.hold_host(inputs.kv_cache_generation_updates);
     if (inputs.multimodal_features.has_value()) {
         for (auto& mm_feature : inputs.multimodal_features.value()) {
             buffer_holder_.hold_host(mm_feature);

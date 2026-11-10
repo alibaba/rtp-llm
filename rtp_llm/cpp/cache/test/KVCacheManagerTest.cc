@@ -1799,8 +1799,8 @@ public:
         return std::make_shared<CompletedTransferAsyncContext>(std::move(result), task.descriptors().size());
     }
 
-    size_t submitted_batch_count{0};
-    size_t submitted_descriptor_count{0};
+    size_t                      submitted_batch_count{0};
+    size_t                      submitted_descriptor_count{0};
     std::vector<CacheCopyError> copy_errors;
     ErrorInfo                   completion_error{ErrorInfo::OkStatus()};
 };
@@ -2913,6 +2913,323 @@ TEST_F(KVCacheManagerTest, AllocationWaitBackoffBoundsRepeatedPrefixRollback) {
     }
     EXPECT_GE(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(60));
     pool->decTreeRef(*block, BlockTreeRefType::CACHE);
+}
+
+TEST_F(KVCacheManagerTest, OffloadCapacityChargesEveryPhysicalOwner) {
+    auto config =
+        makeSingleGroupCacheConfig(makeResolvedMlaSpec(TYPE_BF16, 16, 8, 4, "default"), CacheGroupType::FULL, 2, 6);
+    auto policy    = config.group("default").policy;
+    policy.offload = {true, 8};
+    setTestGroupPolicies(config, {policy});
+    KVCacheConfig options;
+    options.enable_sparse_kv_offload          = true;
+    options.sparse_kv_offload_hot_cache_mode = "dynamic";
+    options.sparse_kv_offload_host_mb         = 1;
+    options.sparse_kv_offload_test_hbm_blocks = 2;
+    options.test_block_num                    = 6;
+    const auto result = CacheConfigCreator::configureOffloadCapacity(
+        config, options, kOffloadAllocationChunkBytes + 4096, 1);
+    ASSERT_EQ(config.tiered_cache_configs.size(), 1u);
+    const auto& capacity = config.tiered_cache_configs.at("default");
+    EXPECT_EQ(capacity.total_blocks, 6u);
+    EXPECT_EQ(capacity.hbm_blocks, 2u);
+    EXPECT_EQ(result.host_bytes, 1536u);
+    EXPECT_EQ(result.hbm_bytes, 768u);
+    EXPECT_EQ(result.metadata_bytes, 432u);
+    EXPECT_EQ(result.fixed_bytes, kOffloadAllocationChunkBytes + 1948u);
+    EXPECT_EQ(result.gpu_bytes, kOffloadAllocationChunkBytes + 3148u);
+}
+
+
+TEST_F(KVCacheManagerTest, StaticOffloadCapacityOmitsDynamicMetadataAndRejectsInvalidMode) {
+    auto config =
+        makeSingleGroupCacheConfig(makeResolvedMlaSpec(TYPE_BF16, 16, 8, 4, "default"), CacheGroupType::FULL, 2, 6);
+    auto policy = config.group("default").policy;
+    policy.offload = {true, 8};
+    setTestGroupPolicies(config, {policy});
+    KVCacheConfig options;
+    options.enable_sparse_kv_offload = true;
+    options.sparse_kv_offload_host_mb = 1;
+    options.sparse_kv_offload_test_hbm_blocks = 2;
+    options.test_block_num = 6;
+    const auto result = CacheConfigCreator::configureOffloadCapacity(config, options, 4096, 1);
+    EXPECT_FALSE(config.tiered_cache_configs.at("default").dynamic_hot_cache);
+    EXPECT_EQ(result.fixed_bytes, 1752u);
+    EXPECT_EQ(result.gpu_bytes, 2952u);
+    EXPECT_EQ(result.metadata_bytes, 432u);
+    options.sparse_kv_offload_hot_cache_mode = "invalid";
+    EXPECT_ANY_THROW(CacheConfigCreator::configureOffloadCapacity(config, options, 4096, 1));
+}
+
+TEST_F(KVCacheManagerTest, DisabledOffloadKeepsLegacyCapacityAndNoTieredStorage) {
+    auto config =
+        makeSingleGroupCacheConfig(makeResolvedMlaSpec(TYPE_BF16, 16, 8, 4, "default"), CacheGroupType::FULL, 2, 6);
+    KVCacheConfig options;
+    options.test_block_num                    = 6;
+    options.sparse_kv_offload_host_mb         = 1024;
+    options.sparse_kv_offload_test_hbm_blocks = 2;
+    ModelConfig model;
+    model.max_seq_len = 4;
+    EXPECT_EQ(CacheConfigCreator::computeLocalBlockNum(config, model, {}, options, {}), 6u);
+    EXPECT_TRUE(config.tiered_cache_configs.empty());
+    EXPECT_FALSE(config.group("default").policy.offload.enabled);
+}
+
+TEST_F(KVCacheManagerTest, OffloadCapacityChargesSharedRuntimeOnceButKeepsBothStorages) {
+    ModelConfig model;
+    model.num_layers                   = 2;
+    model.data_type                    = TYPE_BF16;
+    model.attn_config.use_mla          = true;
+    model.attn_config.kv_lora_rank     = 16;
+    model.attn_config.rope_head_dim    = 8;
+    model.attn_config.tokens_per_block = 4;
+    KVCacheSpecDesc desc;
+    desc.tag                  = "default";
+    desc.cache_type           = MultiHeadLatentAttention;
+    desc.offload              = CacheOffloadPolicy{true, 8};
+    model.kv_cache_spec_descs = {{desc}, {desc}};
+    KVCacheConfig options;
+    options.enable_sparse_kv_offload          = true;
+    options.sparse_kv_offload_hot_cache_mode = "dynamic";
+    options.sparse_kv_offload_host_mb         = 1;
+    options.sparse_kv_offload_test_hbm_blocks = 2;
+    options.test_block_num                    = 6;
+    auto separate                             = CacheConfigCreator::createConfig(model, {}, options);
+    EXPECT_EQ(separate.offload_runtime_counts.at("default"), 2u);
+    const auto baseline = CacheConfigCreator::configureOffloadCapacity(
+        separate, options, kOffloadAllocationChunkBytes + 4096, 1);
+    for (auto& layer : model.kv_cache_spec_descs) {
+        layer.front().offload_runtime_group = 0;
+    }
+    auto shared = CacheConfigCreator::createConfig(model, {}, options);
+    EXPECT_EQ(shared.offload_runtime_counts.at("default"), 1u);
+    const size_t shared_budget = kOffloadAllocationChunkBytes + 2604;
+    const auto result = CacheConfigCreator::configureOffloadCapacity(shared, options, shared_budget, 1);
+    EXPECT_EQ(result.config.total_blocks, 6u);
+    EXPECT_EQ(result.hbm_bytes, baseline.hbm_bytes);
+    EXPECT_EQ(result.host_bytes, baseline.host_bytes);
+    EXPECT_EQ(result.metadata_bytes, 240u);
+    EXPECT_EQ(result.fixed_bytes, kOffloadAllocationChunkBytes + 1596u);
+    EXPECT_EQ(result.gpu_bytes, shared_budget);
+    EXPECT_EQ(baseline.metadata_bytes - result.metadata_bytes, 192u);
+    EXPECT_EQ(baseline.fixed_bytes - result.fixed_bytes, 352u);
+    EXPECT_ANY_THROW(CacheConfigCreator::configureOffloadCapacity(separate, options, shared_budget, 1));
+    model.kv_cache_spec_descs[0][0].offload_runtime_group.reset();
+    EXPECT_EQ(CacheConfigCreator::createConfig(model, {}, options).offload_runtime_counts.at("default"), 2u);
+}
+
+TEST_F(KVCacheManagerTest, WarmupOffloadPublishesRealStorageWithDeploymentSelectionCapacity) {
+    ModelConfig model;
+    model.num_layers                   = 2;
+    model.data_type                    = TYPE_BF16;
+    model.attn_config.use_mla           = true;
+    model.attn_config.kv_lora_rank      = 16;
+    model.attn_config.rope_head_dim     = 8;
+    model.attn_config.tokens_per_block = 8;
+    model.attn_config.kernel_tokens_per_block = 4;
+    KVCacheSpecDesc desc;
+    desc.tag        = "default";
+    desc.cache_type = MultiHeadLatentAttention;
+    desc.offload    = CacheOffloadPolicy{true, 257};
+    model.kv_cache_spec_descs = {{desc}, {desc}};
+    KVCacheConfig options;
+    options.enable_sparse_kv_offload = true;
+    // Production capacity overrides must not enlarge the temporary backing.
+    options.test_block_num = 10000;
+    options.sparse_kv_offload_host_mb = 1024;
+    options.sparse_kv_offload_test_hbm_blocks = 100;
+    for (bool dynamic : {false, true}) {
+        options.sparse_kv_offload_hot_cache_mode = dynamic ? "dynamic" : "static";
+        const auto config = CacheConfigCreator::createWarmupConfig(model, {}, options, 3);
+        auto manager = std::make_shared<KVCacheManager>(config, true);
+        ASSERT_TRUE(manager->init());
+        const auto layout = manager->getMainModelGroupedCacheLayerLayout();
+        for (int layer = 0; layer < 2; ++layer) {
+            const auto storage = layout.at("default", layer).offload;
+            ASSERT_NE(storage, nullptr);
+            EXPECT_EQ(storage->hot_cache != nullptr, dynamic);
+            EXPECT_EQ(storage->active_hot_rows.defined(), dynamic);
+            EXPECT_EQ(storage->total_blocks, 3u);
+            EXPECT_EQ(storage->hbm_blocks, 2u);
+            EXPECT_EQ(storage->max_selected_rows, 257u);
+            ASSERT_FALSE(storage->host_planes.empty());
+            EXPECT_TRUE(storage->host_planes.front().is_pinned());
+            EXPECT_EQ(storage->host_planes.front().size(0), 2);
+            EXPECT_EQ(storage->resident_planes.front().size(0), 4 + 65);
+        }
+    }
+    options.enable_sparse_kv_offload = false;
+    const auto legacy = CacheConfigCreator::createWarmupConfig(model, {}, options);
+    EXPECT_TRUE(legacy.tiered_cache_configs.empty());
+    EXPECT_EQ(legacy.group("default").block_num, 2u);
+}
+
+TEST_F(KVCacheManagerTest, OffloadMtpBudgetsDraftAndProjectsItsStorageToLocalLayer) {
+    ModelConfig model;
+    model.num_layers                   = 2;
+    model.data_type                    = TYPE_BF16;
+    model.attn_config.use_mla          = true;
+    model.attn_config.kv_lora_rank     = 16;
+    model.attn_config.rope_head_dim    = 8;
+    model.attn_config.tokens_per_block = 4;
+    KVCacheSpecDesc desc;
+    desc.tag                   = "default";
+    desc.cache_type            = MultiHeadLatentAttention;
+    desc.offload               = CacheOffloadPolicy{true, 16};
+    desc.offload_runtime_group = 0;
+    model.kv_cache_spec_descs  = {{desc}, {desc}};
+    auto draft                 = model;
+    draft.num_layers           = 1;
+    draft.kv_cache_spec_descs  = {{desc}};
+    KVCacheConfig options;
+    options.enable_sparse_kv_offload          = true;
+    options.sparse_kv_offload_hot_cache_mode = "dynamic";
+    options.sparse_kv_offload_host_mb         = 1;
+    options.sparse_kv_offload_test_hbm_blocks = 2;
+    options.test_block_num                    = 6;
+    SpeculativeExecutionConfig speculative;
+    speculative.type              = SP_TYPE_EAGLE;
+    speculative.gen_num_per_cycle = 3;
+    auto config = CacheConfigCreator::createConfig(model, {}, options, speculative, &draft, true, true);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    EXPECT_EQ(config.offload_runtime_counts.at("default"), 2u);
+    EXPECT_EQ(config.blockSizeBytesForGroup("default"), 576u);
+    const auto capacity = CacheConfigCreator::configureOffloadCapacity(
+        config, options, kOffloadAllocationChunkBytes + (1 << 20), 8);
+    EXPECT_EQ(capacity.fixed_bytes, kOffloadAllocationChunkBytes + 5220u);
+    EXPECT_EQ(capacity.metadata_bytes, 432u);
+    EXPECT_EQ(capacity.gpu_bytes, kOffloadAllocationChunkBytes + 6804u);
+    const auto blocks = CacheConfigCreator::synchronizeOffloadConfig(config, {});
+    config.finalizeBlockNums(blocks, {});
+    EXPECT_EQ(config.mtp_sub_configs.front()->tiered_cache_configs.at("default").total_blocks, blocks);
+    KVCacheManager manager(config);
+    ASSERT_TRUE(manager.init());
+    const auto all            = manager.allLayerCacheBase();
+    const auto local          = manager.getMTPModuleGroupedCacheLayerLayout(0);
+    const auto global_storage = all.group("default").at(2).offload;
+    const auto local_storage  = local.group("default").at(0).offload;
+    ASSERT_TRUE(global_storage);
+    ASSERT_TRUE(local_storage);
+    EXPECT_EQ(global_storage->owner_layer, 2);
+    EXPECT_EQ(local_storage->owner_layer, 0);
+    EXPECT_EQ(local_storage->resident_planes[0].data_ptr(), global_storage->resident_planes[0].data_ptr());
+    EXPECT_EQ(local_storage->generations.data_ptr(), global_storage->generations.data_ptr());
+}
+
+TEST_F(KVCacheManagerTest, OffloadVersionSnapshotsAreIndependentAndCoalesceOverwrites) {
+    KVCacheManager manager(makeSparseOffloadTestConfig());
+    ASSERT_TRUE(manager.init());
+    const auto pool  = manager.coordinator_manager_->groupBlockPools().front();
+    const auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    pool->incRef(*block);
+    const auto initial = manager.takeOffloadVersionUpdates();
+    ASSERT_EQ(initial.sizes(), (torch::IntArrayRef{1, 3}));
+    EXPECT_TRUE(initial.is_pinned());
+    EXPECT_EQ(initial.scalar_type(), torch::kInt64);
+    EXPECT_EQ(initial[0][2].item<int64_t>(), 1);
+
+    pool->incRef(*block);
+    pool->decRef(*block);
+    const auto empty = manager.takeOffloadVersionUpdates();
+    EXPECT_EQ(empty.sizes(), (torch::IntArrayRef{0, 3}));
+    EXPECT_TRUE(empty.is_pinned());
+    manager.markOffloadOverwrite("default", {*block});
+    manager.markOffloadOverwrite("default", {*block});
+    const auto overwritten = manager.takeOffloadVersionUpdates();
+    EXPECT_EQ(overwritten.sizes(), (torch::IntArrayRef{1, 3}));
+    EXPECT_EQ(overwritten[0][2].item<int64_t>(), 3);
+    EXPECT_EQ(initial[0][2].item<int64_t>(), 1);
+    EXPECT_EQ(manager.takeOffloadVersionUpdates().size(0), 0);
+
+    manager.publishOffloadVersions(overwritten, {"default"});
+    for (const auto& storage : pool->allLayerOffloadStorage()) {
+        const auto actual = storage->generations.cpu();
+        EXPECT_EQ(actual[*block].item<int64_t>(), 3);
+        EXPECT_EQ(actual[0].item<int64_t>(), 0);
+        EXPECT_EQ(actual.sum().item<int64_t>(), 3);
+    }
+    EXPECT_ANY_THROW(manager.publishOffloadVersions(torch::zeros({1, 3}, torch::kInt64), {"default"}));
+    EXPECT_ANY_THROW(manager.publishOffloadVersions(overwritten, {"unknown"}));
+    pool->decRef(*block);
+}
+
+TEST_F(KVCacheManagerTest, OffloadCopiesAcrossAllFourTiersBeforeVersionPublication) {
+    KVCacheManager manager(makeSparseOffloadTestConfig());
+    ASSERT_TRUE(manager.init());
+    const auto       pool = manager.coordinator_manager_->groupBlockPools().front();
+    BlockIndicesType blocks;
+    for (int i = 0; i < 9; ++i) {
+        const auto block = pool->malloc();
+        ASSERT_TRUE(block.has_value());
+        blocks.push_back(*block);
+        pool->incRef(*block);
+    }
+    manager.publishOffloadVersions(manager.takeOffloadVersionUpdates(), {"default"});
+    const auto mappings = torch::tensor({0, 1, 2, 0, 3, 6, 0, 7, 4, 0, 8, 9}, torch::kInt32).reshape({4, 3});
+    auto       bytes    = [&](int layer, int block) {
+        const auto buffers = manager.convertIndexToBuffer(layer, "default", block);
+        EXPECT_EQ(buffers.size(), 1u);
+        const auto& buffer = buffers.front();
+        EXPECT_EQ(buffer.is_cuda, block < 5);
+        return torch::from_blob(
+            buffer.addr,
+            {static_cast<int64_t>(buffer.size_bytes)},
+            torch::TensorOptions(torch::kUInt8).device(buffer.is_cuda ? torch::kCUDA : torch::kCPU));
+    };
+    for (int layer = 0; layer < 2; ++layer) {
+        for (int row = 0; row < 4; ++row) {
+            bytes(layer, mappings[row][1].item<int>()).fill_(10 * layer + row + 1);
+            bytes(layer, mappings[row][2].item<int>()).zero_();
+        }
+    }
+    // Scheduling bumps targets before take; executing the plan must not bump them a second time.
+    manager.markOffloadOverwrite("default", {2, 6, 4, 9});
+    const auto snapshot = manager.takeOffloadVersionUpdates();
+    manager.blockBatchCopyForForward(mappings, {"default"});
+    manager.publishOffloadVersions(snapshot, {"default"});
+    runtimeSyncAndCheck();
+    for (int layer = 0; layer < 2; ++layer) {
+        for (int row = 0; row < 4; ++row) {
+            const int target = mappings[row][2].item<int>();
+            EXPECT_TRUE(bytes(layer, target).cpu().eq(10 * layer + row + 1).all().item<bool>());
+            EXPECT_EQ(pool->allLayerOffloadStorage()[layer]->generations[target].cpu().item<int64_t>(), 2);
+        }
+    }
+    EXPECT_EQ(manager.takeOffloadVersionUpdates().size(0), 0);
+    manager.blockCopy(1, 9);
+    EXPECT_EQ(manager.takeOffloadVersionUpdates()[0][2].item<int64_t>(), 3);
+    manager.blockBatchCopyByGroup({{"default", 1, 9}});
+    EXPECT_EQ(manager.takeOffloadVersionUpdates()[0][2].item<int64_t>(), 4);
+    for (const auto block : blocks) {
+        pool->decRef(block);
+    }
+}
+
+TEST_F(KVCacheManagerTest, OffloadForkPlansInvalidateTargetsWhenMappingBufferIsReused) {
+    const auto     config = makeSparseOffloadTestConfig();
+    KVCacheManager manager(config);
+    ASSERT_TRUE(manager.init());
+    auto       resource = makeDSV4BatchResource(config);
+    auto       tokens   = makeDSV4CompleteTokenIds(8, 16, 8);
+    MallocInfo allocation{resource, tokens};
+    allocation.reuse_cache         = false;
+    allocation.enable_cache_lookup = false;
+    ASSERT_TRUE(manager.malloc(allocation).success);
+    manager.takeOffloadVersionUpdates();
+    std::vector<TaggedBlockIdPair> mappings{{"default", 1, 2}};
+    ASSERT_TRUE(manager.updateKVBlock(resource, {0, 0}, true, mappings));
+    ASSERT_EQ(mappings.size(), 1u);
+    const auto snapshot = manager.takeOffloadVersionUpdates();
+    ASSERT_EQ(snapshot.sizes(), (torch::IntArrayRef{1, 3}));
+    EXPECT_EQ(snapshot[0][1].item<int64_t>(), mappings[0].dst);
+    EXPECT_EQ(snapshot[0][2].item<int64_t>(), 2);
+    const auto pool = manager.coordinator_manager_->groupBlockPools().front();
+    for (int batch = 0; batch < resource->batchSize(); ++batch) {
+        for (const auto block : resource->blocks(batch, "default")) {
+            pool->decRef(block);
+        }
+    }
 }
 
 }  // namespace test

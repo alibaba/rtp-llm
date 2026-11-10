@@ -300,6 +300,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
             return_value=SimpleNamespace(
                 hidden_states=hidden_states,
                 residual=residual,
+                topk_indices=None,
             )
         )
         model.__dict__.update(
@@ -505,6 +506,33 @@ class AttentionInputRoutingTest(unittest.TestCase):
         self.assertEqual(factory.call_count, 2)
         for call in factory.call_args_list:
             self.assertEqual(call.kwargs["decode_cascade_max_requests"], 0)
+
+    def test_sparse_offload_prefill_guard_runs_before_backend_selection(self):
+        for model_type in (GenericMoeModel, DeepSeekV4Model):
+            model = object.__new__(model_type)
+            nn.Module.__init__(model)
+            model.config = SimpleNamespace(
+                attn_config=SimpleNamespace(use_mla=False, is_sparse=False)
+            )
+            model.offload_plans = {(0, "default"): SimpleNamespace(runtime=Mock())}
+            model.kv_cache = SimpleNamespace(group_tags=["default"])
+            attn = PyAttentionInputs()
+            attn.is_prefill = True
+            inputs = SimpleNamespace(attention_inputs=attn)
+            for graph in (False, True):
+                with self.subTest(model=model_type.__name__, graph=graph):
+                    with self.assertRaisesRegex(ValueError, "ordinary context prefill"):
+                        model.prepare_fmha_impl(inputs, is_cuda_graph=graph)
+            with self.assertRaisesRegex(ValueError, "ordinary context prefill"):
+                model.forward(inputs)
+            for verify, extend in ((True, False), (False, True)):
+                attn.is_target_verify = verify
+                attn.is_draft_extend = extend
+                model.validate_sparse_kv_offload_inputs({"default": attn})
+            attn.is_prefill = False
+            attn.is_target_verify = False
+            attn.is_draft_extend = False
+            model.validate_sparse_kv_offload_inputs(attn)
 
     def test_dspark_commit_publishes_only_with_swa_inputs(self):
         model = object.__new__(DeepSeekV4DSparkModel)

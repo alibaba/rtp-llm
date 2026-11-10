@@ -2,7 +2,7 @@ import pickle
 from unittest import TestCase, main
 
 from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_FIELD_VALUES
-from rtp_llm.ops import KVCacheConfig
+from rtp_llm.ops import CacheOffloadPolicy, KVCacheConfig, KVCacheSpecDesc
 
 EVENT_PICKLE_FIELDS = tuple(KV_CACHE_EVENT_FIELD_VALUES)
 
@@ -19,12 +19,15 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 72)
-                self.assertEqual(state[:2], ("KVCacheConfig", 9))
+                self.assertEqual(len(state), 77)
+                self.assertEqual(state[:2], ("KVCacheConfig", 12))
                 self.assertEqual(
                     state[64:69], tuple(KV_CACHE_EVENT_FIELD_VALUES.values())
                 )
                 self.assertIs(state[69], enable_crc)
+                self.assertEqual(state[70:72], (0, 0))
+                self.assertEqual(state[72:75], (False, 0, 0))
+                self.assertEqual(state[75], 2048)
                 # Normalizing old fields must not mutate the supplied tuple.
                 original_state = tuple(list(state))
                 direct = KVCacheConfig.__new__(KVCacheConfig)
@@ -84,6 +87,25 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertFalse(hasattr(config, "linear_step"))
         self.assertFalse(hasattr(config, "linear_cache_tail_blocks"))
 
+    def test_version_nine_uses_offload_defaults(self):
+        source = KVCacheConfig()
+        source.enable_crc = False
+        source.reuse_cache_tail_blocks = 13
+        source.linear_pool_blocks = 31
+        source.swa_pool_blocks = 17
+        source.enable_sparse_kv_offload = True
+        source.sparse_kv_offload_host_mb = 1024
+        source.sparse_kv_offload_test_hbm_blocks = 2
+        state = source.__getstate__()
+        previous = (state[0], 9, *state[2:72])
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(previous)
+        self.assertEqual(restored.reuse_cache_tail_blocks, 13)
+        self.assertEqual(restored.linear_pool_blocks, 31)
+        self.assertEqual(restored.swa_pool_blocks, 17)
+        self.assertFalse(restored.enable_crc)
+        self.assertFalse(restored.enable_sparse_kv_offload)
+
     def test_version_eight_uses_new_retention_defaults(self):
         source = KVCacheConfig()
         source.enable_crc = False
@@ -113,6 +135,100 @@ class KVCacheConfigPickleTest(TestCase):
             ):
                 restored = KVCacheConfig.__new__(KVCacheConfig)
                 restored.__setstate__(malformed)
+
+    def test_offload_round_trip_and_previous_event_state(self):
+        source = KVCacheConfig()
+        values = {
+            "enable_sparse_kv_offload": True,
+            "sparse_kv_offload_host_mb": 1024,
+            "sparse_kv_offload_test_hbm_blocks": 2,
+        }
+        for name, value in values.items():
+            setattr(source, name, value)
+        restored = pickle.loads(pickle.dumps(source))
+        for name, value in values.items():
+            self.assertEqual(getattr(restored, name), value)
+        state = source.__getstate__()
+        previous = (state[0], 7, *state[2:69])
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(previous)
+        defaults = KVCacheConfig()
+        for name in values:
+            self.assertEqual(getattr(restored, name), getattr(defaults, name))
+        self.assertFalse(restored.enable_sparse_kv_offload)
+
+    def test_hot_cache_mode_round_trip_and_version_eleven_default(self):
+        source = KVCacheConfig()
+        for mode in ("static", "dynamic"):
+            with self.subTest(mode=mode):
+                source.sparse_kv_offload_hot_cache_mode = mode
+                restored = pickle.loads(pickle.dumps(source))
+                self.assertEqual(restored.sparse_kv_offload_hot_cache_mode, mode)
+        state = source.__getstate__()
+        previous = (state[0], 11, *state[2:76])
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(previous)
+        self.assertEqual(restored.sparse_kv_offload_hot_cache_mode, "static")
+        invalid = (*state[:76], "invalid")
+        with self.assertRaises(RuntimeError):
+            KVCacheConfig.__new__(KVCacheConfig).__setstate__(invalid)
+
+    def test_hot_rows_round_trip_and_version_ten_default(self):
+        source = KVCacheConfig()
+        source.sparse_kv_offload_hot_rows = 4096
+        restored = pickle.loads(pickle.dumps(source))
+        self.assertEqual(restored.sparse_kv_offload_hot_rows, 4096)
+        state = source.__getstate__()
+        previous = (state[0], 10, *state[2:75])
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(previous)
+        self.assertEqual(restored.sparse_kv_offload_hot_rows, 2048)
+
+    def test_version_eight_preserves_legacy_offload_fields(self):
+        source = KVCacheConfig()
+        source.enable_crc = False
+        source.enable_sparse_kv_offload = True
+        source.sparse_kv_offload_host_mb = 1024
+        source.sparse_kv_offload_test_hbm_blocks = 2
+        state = source.__getstate__()
+        previous = (state[0], 8, *state[2:69], *state[72:75])
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(previous)
+        self.assertTrue(restored.enable_sparse_kv_offload)
+        self.assertEqual(restored.sparse_kv_offload_host_mb, 1024)
+        self.assertEqual(restored.sparse_kv_offload_test_hbm_blocks, 2)
+        self.assertTrue(restored.enable_crc)
+
+    def test_descriptor_offload_round_trip_and_legacy_state(self):
+        desc = KVCacheSpecDesc()
+        desc.tag = "default"
+        policy = CacheOffloadPolicy()
+        policy.enabled = True
+        policy.max_selected_rows = 256
+        policy.max_requests = 8
+        desc.offload = policy
+        desc.offload_runtime_group = 7
+        restored = pickle.loads(pickle.dumps(desc))
+        self.assertEqual(restored.tag, "default")
+        self.assertTrue(restored.offload.enabled)
+        self.assertEqual(restored.offload.max_selected_rows, 256)
+        self.assertEqual(restored.offload.max_requests, 8)
+        self.assertEqual(restored.offload_runtime_group, 7)
+        previous = KVCacheSpecDesc.__new__(KVCacheSpecDesc)
+        previous.__setstate__(desc.__getstate__()[:21])
+        self.assertTrue(previous.offload.enabled)
+        self.assertIsNone(previous.offload_runtime_group)
+        legacy = KVCacheSpecDesc.__new__(KVCacheSpecDesc)
+        legacy.__setstate__(desc.__getstate__()[:20])
+        self.assertEqual(legacy.tag, "default")
+        self.assertIsNone(legacy.offload)
+
+    def test_legacy_offload_policy_preserves_full_batch_quota(self):
+        restored = CacheOffloadPolicy.__new__(CacheOffloadPolicy)
+        restored.__setstate__((True, 256))
+        self.assertTrue(restored.enabled)
+        self.assertEqual(restored.max_selected_rows, 256)
+        self.assertEqual(restored.max_requests, 0)
 
 
 if __name__ == "__main__":

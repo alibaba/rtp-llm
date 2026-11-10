@@ -322,6 +322,22 @@ struct CompressedKVCacheSpec: public OpaqueKVCacheSpec {
         return std::make_shared<CompressedKVCacheSpec>(*this);
     }
 
+    CacheEntryLayout entryLayout() const override {
+        const uint32_t pages = seq_size_per_block / kernel_seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(entriesPerBlock() % pages == 0, "opaque entries must cover whole native pages");
+        const uint32_t rows  = entriesPerBlock() / pages;
+        const int64_t  width = block_size() / entriesPerBlock();
+        // FlashMLA fp8_model1 pages store all 576-byte KV payloads first,
+        // followed by all 8-byte scale records. The 584-byte logical entry
+        // size is not a row stride. Expose both native planes to row copies.
+        if (entry_dtype_ == TYPE_UINT8 && width == 584 && (tag == "csa_kv" || tag == "hca_kv")) {
+            return {rows,
+                    {{false, TYPE_UINT8, 0, {rows, 576}, {576, 1}},
+                     {false, TYPE_UINT8, static_cast<size_t>(rows) * 576, {rows, 8}, {8, 1}}}};
+        }
+        return {rows, {{false, entry_dtype_, 0, {rows, width}, {width, 1}}}};
+    }
+
     std::string debugString(size_t indent = 0) const override {
         std::ostringstream os;
         os << std::string(indent, ' ') << "CompressedKVCacheSpec{\n";

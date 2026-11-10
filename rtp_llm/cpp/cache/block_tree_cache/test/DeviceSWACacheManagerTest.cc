@@ -695,6 +695,67 @@ TEST_F(DeviceSWACacheManagerTest, RemoveSkippedBlocks_WithReserveStep) {
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 3);
 }
 
+TEST_F(DeviceSWACacheManagerTest, RemoveSkippedBlocks_ReserveTokensDoNotRetainWholeBlocks) {
+    for (int reserve_tokens : {9, 512, 513, 1025}) {
+        SCOPED_TRACE(reserve_tokens);
+        auto      group = makeGroup(512);
+        BlockIds  blocks;
+        const int reserve_blocks = (reserve_tokens + 511) / 512;
+        ASSERT_TRUE(group.malloc(blocks, 131072, false, reserve_tokens));
+        for (int seq_len = 131072; seq_len < 131072 + 16384; seq_len += 127) {
+            SCOPED_TRACE(seq_len);
+            ASSERT_TRUE(group.mallocForDecode(blocks, seq_len, false, reserve_tokens));
+            group.removeSkippedBlocks(blocks, false, reserve_tokens);
+
+            EXPECT_LE(validBlockCount(blocks.blocks()), static_cast<size_t>(2 + reserve_blocks));
+            // Preserve the two current window blocks and every speculative token's block.
+            const int seq_slots   = (seq_len + 511) / 512;
+            const int total_slots = (seq_len + reserve_tokens + 511) / 512;
+            for (int pos = seq_slots - 2; pos < total_slots; ++pos) {
+                ASSERT_FALSE(isNullBlockIdx(blocks.blocks()[pos])) << "position " << pos;
+            }
+        }
+        group.unreference(blocks.blocks());
+        EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
+    }
+}
+
+TEST_F(DeviceSWACacheManagerTest, DecodeRollingWindowReusesOneSpareBlock) {
+    for (int active_tail_blocks : {1, 2}) {
+        SCOPED_TRACE(active_tail_blocks);
+        auto policy               = makePolicy(false);
+        policy.active_tail_blocks = active_tail_blocks;
+        auto spec                 = std::make_shared<MHAKVCacheSpec>();
+        spec->seq_size_per_block  = 512;
+        DeviceSWACacheManager group({}, spec, block_pool_, 0, policy);
+
+        // Each request reserves 9 tokens. Both requests share a single turnover block.
+        const size_t steady_blocks = active_tail_blocks + 1;
+        auto         held          = block_pool_->malloc(total_blocks_ - 2 * steady_blocks - 1).value();
+        block_pool_->incRef(held);
+        std::vector<BlockIds> requests(2);
+        for (auto& blocks : requests) {
+            ASSERT_TRUE(group.malloc(blocks, 131072, false, /*reserve_step=*/9));
+            ASSERT_TRUE(group.mallocForDecode(blocks, 131072, false, /*reserve_step=*/9));
+        }
+        ASSERT_EQ(block_pool_->freeBlocksNum(), 1u);
+        for (int seq_len = 131072; seq_len <= 131072 + 32768; seq_len += 512) {
+            SCOPED_TRACE(seq_len);
+            for (auto& blocks : requests) {
+                ASSERT_TRUE(group.mallocForDecode(blocks, seq_len, false, /*reserve_step=*/9));
+                group.removeSkippedBlocks(blocks, false, /*reserve_step=*/9);
+                EXPECT_EQ(validBlockCount(blocks.blocks()), steady_blocks);
+                EXPECT_EQ(block_pool_->freeBlocksNum(), 1u);
+            }
+        }
+        for (auto& blocks : requests) {
+            group.unreference(blocks.blocks());
+        }
+        block_pool_->decRef(held);
+        EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
+    }
+}
+
 // ==================== free ====================
 
 TEST_F(DeviceSWACacheManagerTest, Free_ReleasesRealBlocks) {

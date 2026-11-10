@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
+#include <functional>
 
 #define private public
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
@@ -283,16 +284,54 @@ TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
     EXPECT_TRUE(saw_decode_warmup);
 }
 
+TEST_F(NormalEngineTest, testDecodeWarmupMeasuresTransientPeakAndRestoresCacheOnFailure) {
+    CustomConfig config;
+    ModelConfig model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.pd_sep_config.role_type = RoleType::DECODE;
+    auto engine = std::make_shared<NormalEngine>(params, nullptr);
+    ASSERT_TRUE(engine->stop().ok());
+    const auto production_cache = engine->resource_context_.cache_manager;
+
+    constexpr int64_t transient_bytes = 8 * 1024 * 1024;
+    bool fail_forward = false;
+    NormalExecutor::test_model_factory = [&](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(model_config.vocab_size, [&](const GptModelInputs& inputs) {
+            EXPECT_TRUE(inputs.warmup);
+            // This buffer dies before decodeWarmUp reads the measurement.
+            auto transient = torch::empty(
+                {transient_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+            if (fail_forward) {
+                throw std::runtime_error("warmup forward failed");
+            }
+        });
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() { NormalExecutor::test_model_factory = nullptr; }
+    } factory_reset_guard;
+
+    const auto result = engine->decodeWarmUp(params);
+    EXPECT_GE(result.max_used_memory, transient_bytes);
+    EXPECT_EQ(engine->executor_, nullptr);
+    EXPECT_EQ(engine->resource_context_.cache_manager, production_cache);
+    fail_forward = true;
+    EXPECT_THROW(engine->decodeWarmUp(params), std::runtime_error);
+    EXPECT_EQ(engine->executor_, nullptr);
+    EXPECT_EQ(engine->resource_context_.cache_manager, production_cache);
+}
+
 TEST_F(NormalEngineTest, testCacheManagerInitFailureDoesNotPublishPartialState) {
     ModelConfig model;
-    model.num_layers                   = 1;
-    model.attn_config.head_num         = 1;
-    model.attn_config.kv_head_num      = 1;
-    model.attn_config.size_per_head    = 1;
+    model.num_layers                          = 1;
+    model.attn_config.head_num                = 1;
+    model.attn_config.kv_head_num             = 1;
+    model.attn_config.size_per_head           = 1;
     model.attn_config.tokens_per_block        = 1;
     model.attn_config.kernel_tokens_per_block = 1;
-    model.kv_cache_spec_descs          = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
-    const auto config                  = CacheConfigCreator::createWarmupConfig(model, {});
+    model.kv_cache_spec_descs                 = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
+    const auto config                         = CacheConfigCreator::createWarmupConfig(model, {});
 
     auto            previous  = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
     auto            candidate = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
@@ -447,6 +486,47 @@ TEST_F(NormalEngineTest, testPrefillWarmUpUsesCachelessSingleInput) {
     EXPECT_TRUE(saw_cacheless_warmup);
 }
 
+TEST_F(NormalEngineTest, testSparsePrefillWarmupPublishesBothKvRoutes) {
+    CustomConfig config;
+    config.warm_up = true;
+    ModelConfig model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.pd_sep_config.role_type = RoleType::PREFILL;
+    params.model_config_.attn_config.use_mla = true;
+    params.model_config_.attn_config.is_sparse = true;
+    const KVCacheSpecDesc default_desc{"default", KVCacheSpecType::MultiHeadAttention};
+    KVCacheSpecDesc indexer_desc{"indexer_kv", KVCacheSpecType::OpaqueKV};
+    indexer_desc.entry_dtype = DataType::TYPE_UINT8;
+    indexer_desc.entry_elems = 132;
+    indexer_desc.entry_count_mode = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+    indexer_desc.compression_ratio = 1;
+    params.model_config_.kv_cache_spec_descs.assign(
+        static_cast<size_t>(params.model_config_.num_layers), {default_desc, indexer_desc});
+
+    bool saw_warmup = false;
+    NormalExecutor::test_model_factory = [&](const GptModelInitParams& init_params) {
+        EXPECT_NE(init_params.cache_manager, nullptr);
+        EXPECT_TRUE(init_params.kv_cache_layer_layout.has_value());
+        return std::make_unique<MockModel>(model_config.vocab_size, [&](const GptModelInputs& inputs) {
+            if (!inputs.warmup) {
+                return;
+            }
+            saw_warmup = true;
+            EXPECT_EQ(inputs.kv_cache_group_tags, (std::vector<std::string>{"default", "indexer_kv"}));
+            ASSERT_TRUE(inputs.kv_cache_kernel_block_id.defined());
+            EXPECT_EQ(inputs.kv_cache_kernel_block_id.size(0), 2);
+            EXPECT_TRUE(inputs.kv_cache_kernel_block_id.eq(0).all().item<bool>());
+        });
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() { NormalExecutor::test_model_factory = nullptr; }
+    } factory_reset_guard;
+    auto engine = std::make_shared<NormalEngine>(params, nullptr);
+    EXPECT_TRUE(saw_warmup);
+}
+
 TEST_F(NormalEngineTest, testFp8KVCache) {
     CustomConfig config;
     config.kv_cache_data_type = DataType::TYPE_FP8_E4M3;
@@ -520,6 +600,110 @@ TEST_F(NormalEngineTest, testDecodeRoleRejectsPrefillOnlyBeforeScheduling) {
     ASSERT_NE(positive_stream, nullptr);
     EXPECT_FALSE(positive_stream->hasError());
     EXPECT_EQ(positive_stream->curBlocksNum(), 0);
+}
+
+TEST_F(NormalEngineTest, testSparseOffloadRejectsUnsupportedRequestsBeforeScheduling) {
+    auto make_query = [] {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 2;
+        query->generate_config->timeout_ms     = 5000;
+        query->begin_time_us                   = autil::TimeUtility::currentTimeInMicroSeconds();
+        return query;
+    };
+
+    for (const std::string mode : {"static", "dynamic"}) {
+        SCOPED_TRACE(mode);
+        CustomConfig config;
+        config.role_type = RoleType::DECODE;
+        auto engine      = createMockEngine(config);
+        auto baseline    = make_query();
+        baseline->generate_config->num_return_sequences = 2;
+        EXPECT_FALSE(engine->makeStream(baseline)->hasError());
+
+        // Exercise admission on the real engine with a small mock model/cache;
+        // no offload storage or external model weights are needed for this gate.
+        engine->kv_cache_config.enable_sparse_kv_offload         = true;
+        engine->kv_cache_config.sparse_kv_offload_hot_cache_mode = mode;
+        const auto initial_free_blocks = engine->getCacheManager()->freeBlocksNum();
+        for (int variant = 0; variant < 5; ++variant) {
+            SCOPED_TRACE(variant);
+            auto query = make_query();
+            if (variant == 0) {
+                query->generate_config->num_return_sequences = 2;
+            } else if (variant == 1) {
+                query->generate_config->num_beams = 2;
+            } else if (variant < 4) {
+                // Even an all-one variable schedule uses the unsupported beam API.
+                query->generate_config->variable_num_beams = variant == 2 ? std::vector<int>{1, 2} :
+                                                                          std::vector<int>{1, 1};
+            }
+            auto check_rejected = [&](const GenerateStreamPtr& stream) {
+                ASSERT_NE(stream, nullptr);
+                EXPECT_TRUE(stream->hasError());
+                EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                EXPECT_NE(stream->stopReason().find(variant == 4 ? "context prefill" : "single-sequence"),
+                          std::string::npos);
+                EXPECT_EQ(stream->curBlocksNum(), 0);
+                EXPECT_FALSE(stream->hasEvent(StreamEvents::CanRun));
+            };
+            auto prepared = engine->makeStream(query);
+            if (variant == 4) {
+                // P/D allocation creates a context stream before importing prompt KV.
+                EXPECT_FALSE(prepared->hasError());
+                EXPECT_TRUE(prepared->isContextStream());
+                engine->enqueue(prepared);
+            }
+            check_rejected(prepared);
+            check_rejected(engine->enqueue(query));
+            auto direct_stream = engine->createStream(query);
+            engine->enqueue(direct_stream);
+            check_rejected(direct_stream);
+            auto [successes, streams] = engine->enqueueMultiple({query, query});
+            EXPECT_EQ(successes, std::vector<bool>({false, false}));
+            ASSERT_EQ(streams.size(), 2);
+            for (const auto& stream : streams) {
+                check_rejected(stream);
+            }
+            EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+            EXPECT_EQ(engine->getCacheManager()->freeBlocksNum(), initial_free_blocks);
+        }
+
+        auto warmup = make_query();
+        warmup->fake_query = true;
+        warmup->generate_config->num_return_sequences = 32;
+        auto warmup_stream                            = engine->makeStream(warmup);
+        EXPECT_FALSE(warmup_stream->hasError());
+        EXPECT_TRUE(engine->validateStreamForScheduling(warmup_stream));
+        warmup->fake_query = false;
+        warmup_stream->setIsFakeStream(true);
+        EXPECT_TRUE(engine->validateStreamForScheduling(warmup_stream));
+
+        // Perform the single-token P/D handoff, then let the engine finish a
+        // normal single-sequence request after all rejected requests above.
+        auto valid = engine->makeStream(make_query());
+        ASSERT_FALSE(valid->hasError());
+        ASSERT_TRUE(valid->initKVBlock().ok());
+        valid->setIsContextStream(false);
+        valid->step();
+        valid->incLastOutputPos();
+        valid->update({torch::tensor({{5}}, torch::kInt32),
+                       1,
+                       torch::Tensor(),
+                       torch::Tensor(),
+                       torch::Tensor(),
+                       torch::Tensor(),
+                       torch::Tensor(),
+                       torch::Tensor(),
+                       torch::Tensor(),
+                       torch::Tensor()});
+        engine->enqueue(valid);
+        auto output = valid->nextOutput(5000);
+        ASSERT_TRUE(output.ok()) << output.status().ToString();
+        EXPECT_FALSE(valid->hasError());
+        EXPECT_EQ(valid->outputTokenLen(), 2);
+    }
 }
 
 TEST_F(NormalEngineTest, testDirectEngineEntriesConvertPrefillValidationErrorsToStreamErrors) {
@@ -1281,5 +1465,114 @@ TEST_F(NormalEngineTest, testAllowsUnsupportedCombosWithoutOutputVocab) {
     config.warm_up_with_loss   = true;
     EXPECT_NO_THROW(createMockEngine(config));
 }
+
+namespace {
+
+EngineInitParams supportedConfig() {
+    EngineInitParams params;
+    params.kv_cache_config.enable_sparse_kv_offload = true;
+    params.parallelism_config.role_type             = RoleType::DECODE;
+    params.pd_sep_config.role_type                  = RoleType::DECODE;
+    params.model_config_.attn_config.use_mla        = true;
+    params.model_config_.attn_config.is_sparse      = true;
+    KVCacheSpecDesc desc;
+    desc.tag                                 = "default";
+    desc.cache_type                          = KVCacheSpecType::MultiHeadLatentAttention;
+    desc.offload                             = CacheOffloadPolicy{true, 2048};
+    params.model_config_.kv_cache_spec_descs = {{desc}};
+    return params;
+}
+
+TEST(SparseKvOffloadConfigTest, AcceptsTpDecodeAndRejectsUnsupportedCombinations) {
+    auto params                                  = supportedConfig();
+    params.parallelism_config.tp_size            = 2;
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, true, true, false));
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, false, false));
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, true));
+    auto glm_mtp                        = params;
+    glm_mtp.model_config_.model_type    = "glm_5";
+    glm_mtp.sp_config.model_type        = "glm_5_mtp";
+    glm_mtp.sp_config.type              = SP_TYPE_EAGLE;
+    glm_mtp.sp_config.gen_num_per_cycle = 3;
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(glm_mtp, true, true, false));
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(glm_mtp, false, true, false));
+    glm_mtp.sp_config.model_type = "deepseek-v3-mtp";
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(glm_mtp, true, true, false));
+    auto v4_dspark = params;
+    v4_dspark.model_config_.model_type = "deepseek_v4";
+    v4_dspark.sp_config.model_type = "deepseek_v4_dspark";
+    v4_dspark.sp_config.type = SP_TYPE_DSPARK;
+    v4_dspark.sp_config.gen_num_per_cycle = 3;
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(v4_dspark, true, true, false));
+    v4_dspark.parallelism_config.tp_size = 1;
+    v4_dspark.parallelism_config.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
+    v4_dspark.parallelism_config.prefill_cp_config.prefill_cp_size = 2;
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(v4_dspark, true, true, false));
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(v4_dspark, false, true, false));
+    v4_dspark.sp_config.gen_num_per_cycle = 0;
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(v4_dspark, true, true, false));
+    const std::vector<std::function<void(EngineInitParams&)>> unsupported = {
+        [](auto& p) { p.pd_sep_config.role_type = RoleType::PDFUSION; },
+        [](auto& p) { p.parallelism_config.role_type = RoleType::PREFILL; },
+        [](auto& p) { p.parallelism_config.pp_size = 2; },
+        [](auto& p) { p.parallelism_config.prefill_cp_config.prefill_cp_size = 2; },
+        [](auto& p) { p.parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER; },
+        [](auto& p) { p.parallelism_config.prefill_cp_config.method = CPRotateMethod::PREFILL_CP; },
+        [](auto& p) { p.sp_config.type = SP_TYPE_MTP; },
+        [](auto& p) { p.sp_config.type = SP_TYPE_VANILLA; },
+        [](auto& p) { p.kv_cache_config.enable_memory_cache = true; },
+        [](auto& p) { p.kv_cache_config.enable_disk_cache = true; },
+        [](auto& p) { p.kv_cache_config.enable_remote_cache = true; },
+        [](auto& p) { p.kv_cache_config.multi_task_prompt = "prompts.json"; },
+        [](auto& p) { p.kv_cache_config.multi_task_prompt_str = "{\"system\": [1, 2]}"; },
+        [](auto& p) { p.kv_cache_config.multi_task_prompt_tokens = {{"system", {1, 2}}}; },
+        [](auto& p) { p.model_config_.kv_cache_spec_descs.clear(); },
+    };
+    for (size_t i = 0; i < unsupported.size(); ++i) {
+        SCOPED_TRACE(i);
+        auto invalid = params;
+        unsupported[i](invalid);
+        EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(invalid, false, true, false));
+        invalid.kv_cache_config.enable_sparse_kv_offload = false;
+        EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(invalid, true, false, true));
+    }
+}
+
+TEST(SparseKvOffloadConfigTest, RejectsBatchDecodeSizeAboveHotCacheCapacity) {
+    auto params                                      = supportedConfig();
+    params.runtime_config.use_batch_decode_scheduler = true;
+    params.runtime_config.max_generate_batch_size    = 32;
+    auto& batch_size = params.runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
+    for (const int64_t valid : {1, 32}) {
+        batch_size = valid;
+        EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
+    }
+    for (const int64_t invalid : {-1, 0, 33}) {
+        SCOPED_TRACE(invalid);
+        batch_size = invalid;
+        EXPECT_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false), std::invalid_argument);
+    }
+    params.kv_cache_config.enable_sparse_kv_offload = false;
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
+    params.kv_cache_config.enable_sparse_kv_offload  = true;
+    params.runtime_config.use_batch_decode_scheduler = false;
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
+}
+
+TEST(SparseKvOffloadConfigTest, UsesModelDeclarationWithoutHardcodedTagsOrRowWidths) {
+    auto params                                  = supportedConfig();
+    params.model_config_.attn_config.use_mla     = false;
+    params.model_config_.attn_config.is_sparse   = false;
+    auto& desc                                   = params.model_config_.kv_cache_spec_descs[0][0];
+    desc.cache_type                              = KVCacheSpecType::OpaqueKV;
+    desc.entry_elems                             = 512;
+    desc.tag                                     = "custom_sparse_kv";
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
+    desc.offload->enabled = false;
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
+}
+
+}  // namespace
 
 }  // namespace rtp_llm

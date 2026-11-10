@@ -7,6 +7,7 @@
 #include <future>
 #include <mutex>
 #include <string>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -206,6 +207,43 @@ public:
 private:
     EngineFailureMode mode_;
 };
+
+class MockScheduler: public SchedulerBase {
+public:
+    MOCK_METHOD(absl::Status, enqueue, (const GenerateStreamPtr&), (override));
+    MOCK_METHOD((std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>),
+                enqueueGroup,
+                (const std::vector<GenerateStreamPtr>&),
+                (override));
+    MOCK_METHOD((absl::StatusOr<std::list<GenerateStreamPtr>>), schedule, (), (override));
+    MOCK_METHOD(absl::Status, stop, (), (override));
+    MOCK_METHOD(bool, empty, (), (override));
+    MOCK_METHOD(int64_t, lastScheduleTime, (), (override));
+    MOCK_METHOD(int64_t, onflightStreams, (), (override));
+    MOCK_METHOD(void, updateSchedulerInfo, (const std::string&), (override));
+};
+
+TEST(LocalRpcServerTest, SchedulerUpdateRejectsInvalidCapacityWithoutEscapingRpc) {
+    TestLocalRpcServer server;
+    auto               engine        = std::make_shared<FailingEngine>(EngineFailureMode::THROW_STD_EXCEPTION);
+    auto               scheduler     = std::make_unique<MockScheduler>();
+    auto*              scheduler_ptr = scheduler.get();
+    engine->scheduler_               = std::move(scheduler);
+    server.setEngineForTest(engine);
+
+    UpdateSchedulerInfoRequestPB request;
+    EmptyPB                      response;
+    request.set_scheduler_info(R"({"batch_size":64})");
+    EXPECT_CALL(*scheduler_ptr, updateSchedulerInfo(request.scheduler_info()))
+        .WillOnce(Throw(std::invalid_argument("offload batch exceeds concurrency_limit")));
+    const auto rejected = server.UpdateSchedulerInfo(nullptr, &request, &response);
+    EXPECT_EQ(rejected.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_THAT(rejected.error_message(), HasSubstr("concurrency_limit"));
+
+    request.set_scheduler_info(R"({"batch_size":32})");
+    EXPECT_CALL(*scheduler_ptr, updateSchedulerInfo(request.scheduler_info())).Times(1);
+    EXPECT_TRUE(server.UpdateSchedulerInfo(nullptr, &request, &response).ok());
+}
 
 class RecordingWriter: public LocalRpcServer::WriterInterface {
 public:

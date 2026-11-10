@@ -160,9 +160,10 @@ MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) 
         std::dynamic_pointer_cast<LoadAsyncContext>(init_result.async_context);
     if (!load_context || !load_context->needBackendMatch()) {
         std::shared_ptr<AsyncContext> pending_async_context = std::move(init_result.async_context);
-        auto                          prefill_info          = malloc_info;
-        prefill_info.enable_remove_skipped_blocks           = false;
-        MallocResult incr_result                            = incrMalloc(prefill_info);
+        auto prefill_info                         = malloc_info;
+        prefill_info.enable_remove_skipped_blocks = false;
+        prefill_info.initial_seq_len              = malloc_info.complete_token_ids->seqLength();
+        MallocResult incr_result                  = incrMalloc(prefill_info);
         if (!incr_result.success) {
             if (load_context != nullptr) {
                 load_context->abortPending();
@@ -711,7 +712,8 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
                 malloc_info.reuse_cache,
                 0,
                 &backfilled_positions,
-                prepared.required_positions[static_cast<size_t>(group_id)])) {
+                prepared.required_positions[static_cast<size_t>(group_id)],
+                cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, seq_len))) {
             return false;
         }
         const auto& blocks = block_ids.blocks();
@@ -764,6 +766,7 @@ bool CoordinatorCacheManager::finishDeferredMalloc(const MallocInfo& malloc_info
     if (success) {
         auto prefill_info                         = malloc_info;
         prefill_info.enable_remove_skipped_blocks = false;
+        prefill_info.initial_seq_len              = malloc_info.complete_token_ids->seqLength();
         const auto incr_result                    = incrMalloc(prefill_info);
         success                = incr_result.success;
         if (!success) {
@@ -811,6 +814,10 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             auto&       filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_id)];
             const auto  required_positions = chunkCachePositions(malloc_info, config_.group(tag));
             auto&       group              = kv_cache_groups_[static_cast<size_t>(group_id)];
+            const int   initial_seq_len =
+                malloc_info.initial_seq_len > 0 ?
+                    cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, malloc_info.initial_seq_len) :
+                    0;
             const bool  allocated =
                 malloc_info.enable_remove_skipped_blocks ?
                      group->mallocForDecode(
@@ -820,7 +827,8 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
                                   malloc_info.reuse_cache,
                                   reserve_step,
                                   &filled_positions,
-                                  required_positions);
+                                  required_positions,
+                                  initial_seq_len);
             if (!allocated) {
                 all_success  = false;
                 failed_batch = b;
@@ -1601,9 +1609,10 @@ bool CoordinatorCacheManager::doInit() {
     group_pool_configs.reserve(static_cast<size_t>(group_nums));
     const auto& topology_groups = config_.topology().groups();
     for (const auto& group : topology_groups) {
-        const int              group_id    = static_cast<int>(group_pool_configs.size());
-        DeviceBlockPoolConfig  pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config_, group);
-        const CacheGroupPolicy policy      = group.policy;
+        const int             group_id    = static_cast<int>(group_pool_configs.size());
+        DeviceBlockPoolConfig pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config_, group);
+        pool_config.offload_version_owner = offload_version_owner_;
+        const CacheGroupPolicy policy     = group.policy;
         if (policy.memory_placement == CacheMemoryPlacement::DEVICE) {
             pool_config.use_pinned_cpu_backing = allocation_type_ == AllocationType::HOST;
             pool_config.use_device_malloc_backing =
@@ -1672,7 +1681,7 @@ bool CoordinatorCacheManager::doInit() {
     }
 
 #if USING_CUDA || USING_ROCM
-    if (allocation_type_ == AllocationType::DEVICE && group_nums == 1
+    if (allocation_type_ == AllocationType::DEVICE && group_nums == 1 && !group_block_pools_.front()->isOffload()
         && topology_groups.front().policy.group_type == CacheGroupType::FULL) {
         const auto&                    group         = topology_groups.front();
         const auto                     kv_tensors    = kv_cache_groups_.front()->allLayerCacheBase();
@@ -1773,8 +1782,19 @@ GroupedCacheLayerLayout CoordinatorCacheManager::allLayerCacheBase() const {
     GroupedCacheLayerLayout::GroupLayouts groups;
     for (size_t group_id = 0; group_id < kv_cache_groups_.size(); ++group_id) {
         std::vector<BlockBufferPtrInfo> layers(topology->layers().size());
-        const auto                      layer_tensors = kv_cache_groups_[group_id]->allLayerCacheBase();
-        const auto                      scale_tensors = kv_cache_groups_[group_id]->allLayerScaleCacheBase();
+        const auto&                     pool = group_block_pools_[group_id];
+        if (pool->isOffload()) {
+            for (const auto& storage : pool->allLayerOffloadStorage()) {
+                RTP_LLM_CHECK_WITH_INFO(storage->owner_layer >= 0
+                                            && static_cast<size_t>(storage->owner_layer) < layers.size(),
+                                        "invalid offload owner layer");
+                layers[storage->owner_layer].offload = storage;
+            }
+            groups.emplace(topology->groups()[group_id].tag, CacheLayerLayout(std::move(layers)));
+            continue;
+        }
+        const auto layer_tensors = kv_cache_groups_[group_id]->allLayerCacheBase();
+        const auto scale_tensors = kv_cache_groups_[group_id]->allLayerScaleCacheBase();
         for (const auto& [layer_id, tensor] : layer_tensors) {
             RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layers.size(),
                                     "layer_id %d out of group kv layout range %zu",
@@ -1886,61 +1906,42 @@ void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBloc
         return;
     }
 
-    size_t copy_nums[BatchCopyParams::TYPE_SIZE] = {};
+    struct Copy {
+        BlockInfo                 source;
+        BlockInfo                 destination;
+        BatchCopyParams::CopyType type;
+    };
+    std::vector<Copy> copies;
+    size_t            copy_nums[BatchCopyParams::TYPE_SIZE] = {};
     for (const auto& mapping : copy_mapping) {
         const auto group_id = static_cast<int>(groupIdForTag(mapping.tag));
         RTP_LLM_CHECK_WITH_INFO(
             static_cast<size_t>(group_id) < group_block_pools_.size(), "missing block pool for group %d", group_id);
-        const auto copy_type =
-            BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(group_id)]->where(),
-                                           group_block_pools_[static_cast<size_t>(group_id)]->where());
         for (int layer_id : config_.layerIdsForGroup(mapping.tag)) {
-            const auto& physical_group = config_.physicalGroupForLayer(layer_id, mapping.tag);
-            copy_nums[copy_type] += physical_group.kvScaleStrideBytes() > 0 ? 2 : 1;
+            const auto source      = kv_cache_groups_[group_id]->convertIndexToBuffer(layer_id, mapping.src);
+            const auto destination = kv_cache_groups_[group_id]->convertIndexToBuffer(layer_id, mapping.dst);
+            RTP_LLM_CHECK_WITH_INFO(source.size() == destination.size(), "block copy plane count mismatch");
+            for (size_t plane = 0; plane < source.size(); ++plane) {
+                const auto& src = source[plane];
+                const auto& dst = destination[plane];
+                RTP_LLM_CHECK_WITH_INFO(src.addr && dst.addr && src.size_bytes == dst.size_bytes,
+                                        "block copy plane address or size mismatch for tag=%s",
+                                        mapping.tag.c_str());
+                const auto type =
+                    BatchCopyParams::get_copy_type(dst.is_cuda ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU,
+                                                   src.is_cuda ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU);
+                copies.push_back({src, dst, type});
+                ++copy_nums[type];
+            }
         }
     }
-
     BatchCopyParams copy_params;
     for (size_t i = 0; i < BatchCopyParams::TYPE_SIZE; ++i) {
         copy_params.reserve(static_cast<BatchCopyParams::CopyType>(i), copy_nums[i]);
     }
-
-    for (const auto& mapping : copy_mapping) {
-        const auto group_id = static_cast<int>(groupIdForTag(mapping.tag));
-        RTP_LLM_CHECK_WITH_INFO(
-            static_cast<size_t>(group_id) < group_block_pools_.size(), "missing block pool for group %d", group_id);
-        const auto copy_type =
-            BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(group_id)]->where(),
-                                           group_block_pools_[static_cast<size_t>(group_id)]->where());
-
-        for (int layer_id : config_.layerIdsForGroup(mapping.tag)) {
-            const auto&  physical_group      = config_.physicalGroupForLayer(layer_id, mapping.tag);
-            const size_t kv_block_size_bytes = physical_group.kvBlockStrideBytes();
-            const size_t scale_block_bytes   = physical_group.kvScaleStrideBytes();
-            auto         src_addr_info =
-                kv_cache_groups_[static_cast<size_t>(group_id)]->convertIndexToAddr(layer_id, mapping.src);
-            auto dst_addr_info =
-                kv_cache_groups_[static_cast<size_t>(group_id)]->convertIndexToAddr(layer_id, mapping.dst);
-
-            if (!src_addr_info.kv_addr || !dst_addr_info.kv_addr) {
-                RTP_LLM_LOG_ERROR("Failed to get block address for pool %s(group %d) layer %d, src_block %d, "
-                                  "dst_block %d",
-                                  group_block_pools_[static_cast<size_t>(group_id)]->poolName().c_str(),
-                                  group_id,
-                                  layer_id,
-                                  mapping.src,
-                                  mapping.dst);
-                continue;
-            }
-
-            copy_params.add(dst_addr_info.kv_addr, src_addr_info.kv_addr, kv_block_size_bytes, copy_type);
-
-            if (scale_block_bytes > 0 && src_addr_info.kv_scale_addr && dst_addr_info.kv_scale_addr) {
-                copy_params.add(dst_addr_info.kv_scale_addr, src_addr_info.kv_scale_addr, scale_block_bytes, copy_type);
-            }
-        }
+    for (const auto& copy : copies) {
+        copy_params.add(copy.destination.addr, copy.source.addr, copy.source.size_bytes, copy.type);
     }
-
     execBatchCopy(copy_params);
 }
 

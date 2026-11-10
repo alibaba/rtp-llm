@@ -777,6 +777,11 @@ class KVCacheConfig:
     kv_cache_event_host_ip_port: str
     ssm_state_dtype: str
     test_block_num: int
+    enable_sparse_kv_offload: bool
+    sparse_kv_offload_host_mb: int
+    sparse_kv_offload_hot_rows: int
+    sparse_kv_offload_hot_cache_mode: str
+    sparse_kv_offload_test_hbm_blocks: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -982,6 +987,12 @@ class CacheCpPolicyDesc:
     prefill_slice_layout: typing.Any
     def __init__(self) -> None: ...
 
+class CacheOffloadPolicy:
+    enabled: bool
+    max_selected_rows: int
+    max_requests: int
+    def __init__(self) -> None: ...
+
 class KVCacheSpecDesc:
     tag: str
     cache_type: KVCacheSpecType
@@ -1003,6 +1014,8 @@ class KVCacheSpecDesc:
     memory: typing.Any
     tail: typing.Any
     cp: typing.Any
+    offload: typing.Optional[CacheOffloadPolicy]
+    offload_runtime_group: typing.Optional[int]
     def __init__(self) -> None: ...
 
 

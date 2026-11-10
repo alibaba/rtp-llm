@@ -270,6 +270,60 @@ static ModelConfig makeFlashMtpModelConfig() {
     return mc;
 }
 
+TEST(CacheConfigTest, DSV4OffloadHostBudgetIncludesFixedPoolBacking) {
+    for (auto placement : {CacheMemoryPlacement::HOST, CacheMemoryPlacement::HOST_PINNED}) {
+        for (uint32_t fixed_blocks : {0u, 4u}) {
+            auto model                              = makeFlashModelConfig();
+            model.num_layers                        = 3;
+            model.attn_config.kv_cache_dtype        = KvCacheDataType::FP8;
+            model.attn_config.layer_compress_ratios = {4, 128, 4};
+            setDsv4KvCacheSpecs(model, model.attn_config.layer_compress_ratios);
+            for (const auto& tag : dsv4StateSwaTags()) {
+                if (fixed_blocks > 0) {
+                    setDsv4ExplicitPoolBlocks(model, tag, fixed_blocks);
+                }
+                setDsv4PoolMemoryPlacement(model, tag, placement);
+            }
+            for (auto& layer : model.kv_cache_spec_descs) {
+                for (auto& desc : layer) {
+                    if (desc.tag == "csa_kv") {
+                        desc.offload = CacheOffloadPolicy{true, 8};
+                    }
+                }
+            }
+            KVCacheConfig options;
+            options.enable_sparse_kv_offload          = true;
+            options.dsv4_fixed_pool_use_memory        = true;
+            options.sparse_kv_offload_host_mb         = 1024;
+            options.sparse_kv_offload_test_hbm_blocks = 2;
+            auto       config                         = CacheConfigCreator::createConfig(model, {}, options);
+            const auto result = CacheConfigCreator::configureOffloadCapacity(config, options, size_t{1} << 40, 1);
+            config.finalizeBlockNums(result.config.total_blocks, {});
+            size_t actual_host_bytes   = 0;
+            size_t marginal_host_bytes = 0;
+            for (const auto& group : config.groups()) {
+                const auto bytes = config.blockSizeBytesForGroup(group.tag);
+                if (group.policy.offload.enabled) {
+                    actual_host_bytes += bytes * (result.config.total_blocks - result.config.hbm_blocks);
+                    marginal_host_bytes += bytes;
+                } else if (group.policy.memory_placement != CacheMemoryPlacement::DEVICE) {
+                    actual_host_bytes += bytes * group.block_num;
+                    if (group.policy.explicit_block_num == 0) {
+                        marginal_host_bytes += bytes;
+                    }
+                }
+            }
+            const size_t host_budget = size_t{1024} * 1024 * options.sparse_kv_offload_host_mb;
+            EXPECT_EQ(result.host_bytes, actual_host_bytes);
+            EXPECT_LE(actual_host_bytes, host_budget);
+            EXPECT_GT(actual_host_bytes + marginal_host_bytes, host_budget);
+            options.sparse_kv_offload_host_mb = 0;
+            EXPECT_THROW(CacheConfigCreator::configureOffloadCapacity(config, options, size_t{1} << 40, 1),
+                         std::invalid_argument);
+        }
+    }
+}
+
 static ModelConfig makeHybridAttentionModelConfig(int size_per_head = 16) {
     ModelConfig mc;
     mc.num_layers                                      = 4;
