@@ -21,6 +21,7 @@ _LOGGER = logging.getLogger(__name__)
 _POLL_S = 0.1
 _REAP_TIMEOUT_S = 10
 _STABLE_S = 600
+_REAP_TIMEOUT_ERRORS = (TimeoutError, subprocess.TimeoutExpired)
 
 
 def enter_worker_cgroup():
@@ -61,12 +62,15 @@ def _exited(process):
 
 
 def _kill_and_reap(process):
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
     deadline = time.monotonic() + _REAP_TIMEOUT_S
-    process.wait(timeout=_REAP_TIMEOUT_S)
+    if process.returncode is None:
+        # The unreaped leader pins the group ID. After reaping it, only
+        # wait for children already targeted by the original SIGKILL.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=_REAP_TIMEOUT_S)
     while True:
         try:
             pid, _ = os.waitpid(-process.pid, os.WNOHANG)
@@ -112,6 +116,24 @@ class PrefillSupervisor:
             time.sleep(_POLL_S)
         return False
 
+    def _stop_worker(self, worker):
+        try:
+            _stop(worker, self.stop_timeout if self.stopping else 0)
+            return
+        except _REAP_TIMEOUT_ERRORS:
+            if self.stopping or self._owner_exited():
+                raise
+            _LOGGER.warning(
+                "prefill event=worker_cleanup_pending pid=%s; holding readiness",
+                worker.pid,
+            )
+        while not self.stopping and not self._owner_exited():
+            try:
+                _kill_and_reap(worker)
+                return
+            except _REAP_TIMEOUT_ERRORS:
+                continue
+
     def _run_worker(self, gate):
         try:
             worker = subprocess.Popen(
@@ -130,7 +152,7 @@ class PrefillSupervisor:
             try:
                 gate.unlink(missing_ok=True)
             finally:
-                _stop(worker, self.stop_timeout if self.stopping else 0)
+                self._stop_worker(worker)
         _LOGGER.info(
             "prefill event=worker_exited pid=%s rc=%s", worker.pid, worker.returncode
         )
@@ -155,8 +177,7 @@ class PrefillSupervisor:
         except (OSError, TimeoutError, subprocess.TimeoutExpired):
             _LOGGER.exception("prefill event=worker_supervision_failed; holding container")
         if not self.stopping:
-            # A dead owner cannot recreate the same Fabric generation. Also
-            # avoid overlapping workers if a stuck rank could not be reaped.
+            # A dead owner cannot recreate the same Fabric generation.
             _LOGGER.error("prefill event=recovery_blocked; awaiting platform stop")
             while not self.stopping:
                 time.sleep(_POLL_S)
