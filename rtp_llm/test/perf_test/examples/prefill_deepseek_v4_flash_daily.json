@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "model": {
+    "label": "deepseek-v4-flash-prefill-daily",
+    "type": "deepseek_v4",
+    "checkpoint": "/mnt/nas1/hf/DeepSeek-V4-Flash",
+    "tokenizer": "/mnt/nas1/hf/DeepSeek-V4-Flash",
+    "topology": {"tp": 4, "dp": 1, "pp": 1, "ep": 4}
+  },
+  "engine": {
+    "max_seq_len": 204801,
+    "max_batch_tokens": 6600000,
+    "concurrency_limit": 32,
+    "args": {"reuse_cache": 1},
+    "env": {"TOKENIZERS_PARALLELISM": "false"}
+  },
+  "workload": {
+    "kind": "cache_grid",
+    "transport": "dashsc_input_ids",
+    "cache_alignment": 256,
+    "commit_tail_tokens": 256,
+    "probe_block_size": 256,
+    "measure_runs": 2,
+    "workspace_tokens": 6600000,
+    "seed": 20261110,
+    "traffic_request_batches": {
+      "distribution_file": "req_distribution.json",
+      "num_cases": 10000,
+      "batch_sizes": [1, 2, 4, 8, 16, 24, 32],
+      "min_input_tokens": 16384,
+      "max_input_tokens": 204800
+    }
+  },
+  "execution": {
+    "backend": "aone",
+    "resource": "daily",
+    "gpu_type": "H20_CU13",
+    "shard_count": 32,
+    "max_parallel": 4
+  },
+  "output": {"result_root": "perf_test_results"},
+  "regression": {},
+  "publish": {}
+}
