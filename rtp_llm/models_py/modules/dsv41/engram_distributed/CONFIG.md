@@ -288,6 +288,7 @@ export RTP_LLM_SUPERVISOR_STOP_TIMEOUT_S=300
 需要启用 resident Engram、真实 DSV4 Prefill warmup，并且完整计算 world 在同一个容器内。
 Supervisor 把 Owner 和业务进程放在不同 session。业务父进程退出时撤销就绪，
 回收同一业务进程组的所有残留进程，再以 1 至 60 秒的指数退避拉起业务。
+旧 rank 暂时未退出时，supervisor 保留容器和 Owner，持续回收旧进程并保持未就绪。
 同容器 Owner 保持原 PID 和 generation。新进程重新导入、校验和 warmup 后才能回流。
 默认开启 Prefill 本地 watchdog。Owner 退出后，当前容器撤销就绪并等待平台处理；
 共享组由平台使用新 generation 恢复。
