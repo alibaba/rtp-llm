@@ -72,12 +72,9 @@ def check_cached_chunks(rank, parallel, cpp):
     gates=torch.full((layout.local_rows,32),1/32,device='cuda')
     value=torch.eye(512,128,device='cuda',dtype=torch.bfloat16)
     owner.value_weights[0]=value[None].expand(96,-1,-1).contiguous()
-    index=params.prepare_execution('indexer');sfa=params.prepare_execution('sfa')
-    owner.budgets['indexer']=index.required_bytes-1
-    owner.budgets['sfa']=sfa.required_bytes-1
-    for phase in owner.phases.values():phase.release()
-    params.indexer_execution=params.sfa_execution=None
-    index=params.prepare_execution('indexer');sfa=params.prepare_execution('sfa')
+    with patch.dict(os.environ, {'RTP_PREFILL_KV_WORKSPACE_BUDGET_GIB': '0.00390625'}):
+        index = params.prepare_execution('indexer')
+        sfa = params.prepare_execution('sfa')
     assert index.plan.chunked and sfa.plan.chunked
     selected=op.compute_topk(query,gates,index_cache,params,inputs,params)
     for row,position in enumerate(layout.local_positions.tolist()):
@@ -140,13 +137,12 @@ def main():
     inputs=SimpleNamespace(is_prefill=True,is_target_verify=False,is_mtp_draft_update=False,
                            kv_cache_kernel_block_id_device=table)
     params.prepare(inputs)
-    original=owner.budgets.copy()
-    for phase,dim,capacity in [('indexer',128,4),('sfa',576,8)]:
-        fixed=owner.external_projection_bytes(layout.local_rows,indexer=phase=='indexer')
-        fixed+=layout.local_rows*dim*2+layout.physical_rows*24+64*1024*1024
-        owner.budgets[phase]=fixed+capacity*(dim*2*9+8*24)
-        params.ingress_plans[phase]=DsaKVIngress(params,phase,dim)
-    owner.budgets=original
+    for phase, dim, capacity in [('indexer', 128, 4), ('sfa', 576, 8)]:
+        fixed = layout.physical_rows * 24 + 64 * 1024 * 1024
+        budget = fixed + capacity * (dim * 2 * 9 + 8 * 24)
+        with patch.dict(os.environ, {'RTP_PREFILL_KV_WORKSPACE_BUDGET_GIB': str(budget / 2**30)}):
+            params.ingress_plans[phase] = DsaKVIngress(params, phase, dim)
+        assert params.ingress_plans[phase].capacity == capacity
     assert len(params.ingress_plans['indexer'].blocks)==3
     assert len(params.ingress_plans['sfa'].blocks)==2
     torch.manual_seed(3101)

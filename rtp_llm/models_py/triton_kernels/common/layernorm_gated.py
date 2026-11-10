@@ -519,7 +519,7 @@ def _supports_pdl(device_index):
     return torch.cuda.get_device_capability(device_index)[0] >= 9
 
 
-def fused_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps):
+def fused_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps, *, packed_output=False):
     if q.ndim != 2 or kv.ndim != 2 or q.shape[0] != kv.shape[0]:
         raise ValueError("MLA Q/KV norms require rank-2 Q/KV with equal token counts")
     for x, weight in ((q, q_weight), (kv, kv_weight)):
@@ -531,8 +531,12 @@ def fused_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps):
             raise ValueError("MLA Q/KV norms require contiguous features and weights")
         if weight.ndim != 1 or weight.numel() != x.shape[1] or x.shape[1] <= 0:
             raise ValueError("MLA norm weight shape does not match input")
-    q_out = torch.empty(q.shape, device=q.device, dtype=q.dtype)
-    kv_out = torch.empty(kv.shape, device=kv.device, dtype=kv.dtype)
+    if packed_output:
+        packed = q.new_empty((q.shape[0], q.shape[1] + kv.shape[1]))
+        q_out, kv_out = packed.split((q.shape[1], kv.shape[1]), dim=-1)
+    else:
+        q_out = torch.empty(q.shape, device=q.device, dtype=q.dtype)
+        kv_out = torch.empty(kv.shape, device=kv.device, dtype=kv.dtype)
     if q.shape[0]:
         block = triton.next_power_of_2(max(q.shape[1], kv.shape[1]))
         _fused_q_kv_rmsnorm_kernel[(q.shape[0], 2)](
@@ -542,7 +546,36 @@ def fused_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps):
             launch_pdl=_supports_pdl(q.device.index),
             num_warps=8 if block >= 2048 else 4,
         )
-    return q_out, kv_out
+    return packed if packed_output else (q_out, kv_out)
+
+
+@triton.jit
+def _rounded_add_rmsnorm_kernel(Hidden, Delta, Weight, Residual, Output,
+                               WIDTH: tl.constexpr, EPS: tl.constexpr, BLOCK: tl.constexpr):
+    row = tl.program_id(0).to(tl.int64)
+    cols = tl.arange(0, BLOCK)
+    offsets = row * WIDTH + cols
+    active = cols < WIDTH
+    hidden = tl.load(Hidden + offsets, active, other=0).to(tl.float32)
+    delta = tl.load(Delta + offsets, active, other=0).to(tl.float32)
+    residual = (hidden + delta).to(Residual.dtype.element_ty)
+    tl.store(Residual + offsets, residual, active)
+    x = residual.to(tl.float32)
+    weight = tl.load(Weight + cols, active, other=0).to(tl.float32)
+    rrms = tl.rsqrt(tl.sum(x * x) / WIDTH + EPS)
+    tl.store(Output + offsets, x * rrms * weight, active)
+
+
+def rounded_add_rmsnorm(hidden, delta, weight, eps):
+    """Fuse BF16 residual addition and RMSNorm of the rounded sum."""
+    residual, output = torch.empty_like(hidden), torch.empty_like(hidden)
+    if hidden.shape[0]:
+        width = hidden.shape[1]
+        _rounded_add_rmsnorm_kernel[(hidden.shape[0],)](
+            hidden, delta, weight, residual, output, width, eps,
+            triton.next_power_of_2(width), num_warps=8,
+        )
+    return residual, output
 
 
 def _validate_q_kv_norm(q, kv, q_weight, kv_weight):
@@ -560,7 +593,7 @@ def _validate_q_kv_norm(q, kv, q_weight, kv_weight):
 
 
 @triton.jit(do_not_specialize=["N"])
-def _grouped_q_kv_rmsnorm_kernel(
+def _grouped_mla_norm_kernel(
     Q,
     KV,
     QW,
@@ -568,6 +601,7 @@ def _grouped_q_kv_rmsnorm_kernel(
     QO,
     KVO,
     SUFFIX,
+    Q_BIAS,
     N,
     QS: tl.constexpr,
     KVS: tl.constexpr,
@@ -576,27 +610,53 @@ def _grouped_q_kv_rmsnorm_kernel(
     SUFFIX_DIM: tl.constexpr,
     QSIZE: tl.constexpr,
     KVSIZE: tl.constexpr,
-    EPS: tl.constexpr,
+    Q_EPS: tl.constexpr,
+    KV_EPS: tl.constexpr,
     ROWS: tl.constexpr,
     QB: tl.constexpr,
     KVB: tl.constexpr,
     PDL: tl.constexpr,
+    Q_LAYER_NORM: tl.constexpr,
+    Q_HAS_BIAS: tl.constexpr,
 ):
-    # Each branch keeps its own reduction width; latent512 is not padded to
-    # Q's 2048-wide reduction. Strided projection views need no contiguous copy.
-    rows = (tl.program_id(0) * ROWS + tl.arange(0, ROWS)).to(tl.int64)
-    if tl.program_id(1) == 0:
+    # Each branch keeps its own reduction width and output layout.
+    tile = tl.program_id(0)
+    if Q_LAYER_NORM:
+        # Eight Indexer rows use one warp per row, preserving the original
+        # LayerNorm reduction layout (four adjacent features per lane).
+        indexer_tiles = tl.cdiv(N, 8)
+        first_branch = tile < indexer_tiles
+    else:
+        first_branch = tl.program_id(1) == 0
+    if first_branch:
+        if Q_LAYER_NORM:
+            q_rows = (tile * 8 + tl.arange(0, 8)).to(tl.int64)
+        else:
+            q_rows = (tile * ROWS + tl.arange(0, ROWS)).to(tl.int64)
         qc = tl.arange(0, QB)
         qw = tl.load(QW + qc, qc < QSIZE, other=0).to(tl.float32)
         if PDL:
             tl.extra.cuda.gdc_wait()
             tl.extra.cuda.gdc_launch_dependents()
-        qx = tl.load(Q + rows[:, None] * QS + qc[None, :],
-                     (rows[:, None] < N) & (qc[None, :] < QSIZE), other=0).to(tl.float32)
-        qy = qx * tl.rsqrt(tl.sum(qx * qx, 1) / QSIZE + EPS)[:, None] * qw[None, :]
-        tl.store(QO + rows[:, None] * QSIZE + qc[None, :], qy,
-                 (rows[:, None] < N) & (qc[None, :] < QSIZE))
+        qx = tl.load(Q + q_rows[:, None] * QS + qc[None, :],
+                     (q_rows[:, None] < N) & (qc[None, :] < QSIZE), other=0).to(tl.float32)
+        if Q_LAYER_NORM:
+            centered = qx - (tl.sum(qx, 1) / QSIZE)[:, None]
+            centered = tl.where(qc[None, :] < QSIZE, centered, 0.0)
+            variance = tl.sum(centered * centered, 1) / QSIZE
+            rstd = 1 / tl.sqrt(variance + Q_EPS)
+            qy = (centered * rstd[:, None]) * qw[None, :]
+            if Q_HAS_BIAS:
+                bias = tl.load(Q_BIAS + qc, qc < QSIZE, other=0).to(tl.float32)
+                qy = qy + bias[None, :]
+        else:
+            qy = qx * tl.rsqrt(tl.sum(qx * qx, 1) / QSIZE + Q_EPS)[:, None] * qw[None, :]
+        tl.store(QO + q_rows[:, None] * QSIZE + qc[None, :], qy,
+                 (q_rows[:, None] < N) & (qc[None, :] < QSIZE))
     else:
+        if Q_LAYER_NORM:
+            tile -= indexer_tiles
+        rows = (tile * ROWS + tl.arange(0, ROWS)).to(tl.int64)
         kc = tl.arange(0, KVB)
         kw = tl.load(KVW + kc, kc < KVSIZE, other=0).to(tl.float32)
         if PDL:
@@ -604,7 +664,7 @@ def _grouped_q_kv_rmsnorm_kernel(
             tl.extra.cuda.gdc_launch_dependents()
         kx = tl.load(KV + rows[:, None] * KVS + kc[None, :],
                      (rows[:, None] < N) & (kc[None, :] < KVSIZE), other=0).to(tl.float32)
-        ky = kx * tl.rsqrt(tl.sum(kx * kx, 1) / KVSIZE + EPS)[:, None] * kw[None, :]
+        ky = kx * tl.rsqrt(tl.sum(kx * kx, 1) / KVSIZE + KV_EPS)[:, None] * kw[None, :]
         tl.store(KVO + rows[:, None] * KVOS + kc[None, :], ky,
                  (rows[:, None] < N) & (kc[None, :] < KVSIZE))
         if SUFFIX_DIM:
@@ -640,15 +700,52 @@ def grouped_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps, *, kv_suffix=None):
     kv_out = storage[:, :kv.shape[1]]
     if not q.shape[0]:
         return q_out, kv_out
-    _grouped_q_kv_rmsnorm_kernel[(triton.cdiv(q.shape[0], 4), 2)](
+    _grouped_mla_norm_kernel[(triton.cdiv(q.shape[0], 4), 2)](
         q, kv, q_weight, kv_weight, q_out, kv_out, kv if kv_suffix is None else kv_suffix,
+        None,
         q.shape[0], q.stride(0), kv.stride(0), storage.stride(0),
         0 if kv_suffix is None else kv_suffix.stride(0), suffix_dim,
-        q.shape[1], kv.shape[1], eps,
+        q.shape[1], kv.shape[1], eps, eps,
         4, triton.next_power_of_2(q.shape[1]), triton.next_power_of_2(kv.shape[1]),
-        _supports_pdl(q.device.index), num_warps=8,
+        _supports_pdl(q.device.index), False, False, num_warps=8,
     )
     return q_out, kv_out
+
+
+def grouped_indexer_k_sfa_kv_norm(
+    key, latent, suffix, key_weight, key_bias, kv_weight, *, key_eps, kv_eps,
+):
+    """Normalize natural-order K3.1 projection slices with one launch."""
+    if key.ndim != 2 or latent.ndim != 2 or (key.shape[1], latent.shape[1]) != (128, 512):
+        raise ValueError("grouped DSA norm requires 128-column Indexer K and 512-column SFA latent")
+    rows = key.shape[0]
+    if (latent.shape[0] != rows or suffix.ndim != 2 or suffix.shape[0] != rows
+            or suffix.shape[1] > latent.shape[1]):
+        raise ValueError("grouped DSA norm requires matching token rows and a packed KV suffix")
+    if not key.is_cuda or any(
+        x.device != key.device or x.dtype != torch.bfloat16 or x.stride(-1) != 1
+        for x in (key, latent, suffix)
+    ):
+        raise ValueError("grouped DSA norm requires BF16 CUDA slices with contiguous features")
+    affine = [(key_weight, 128), (kv_weight, 512)]
+    if key_bias is not None:
+        affine.append((key_bias, 128))
+    if any(x.device != key.device or x.shape != (width,) or not x.is_contiguous()
+           for x, width in affine):
+        raise ValueError("grouped DSA norm requires matching contiguous affine parameters")
+
+    key_out = torch.empty(key.shape, device=key.device, dtype=key.dtype)
+    suffix_width = suffix.shape[1]
+    kv_out = torch.empty((rows, 512 + suffix_width), device=key.device, dtype=latent.dtype)
+    if rows:
+        _grouped_mla_norm_kernel[(triton.cdiv(rows, 8) + triton.cdiv(rows, 4),)](
+            key, latent, key_weight, kv_weight, key_out, kv_out, suffix, key_bias,
+            rows, key.stride(0), latent.stride(0), kv_out.stride(0), suffix.stride(0),
+            suffix_width, 128, 512, key_eps, kv_eps, 4, 128, 512,
+            _supports_pdl(key.device.index), True, key_bias is not None, num_warps=8,
+        )
+    latent_out, suffix_out = kv_out.split((512, suffix_width), dim=-1)
+    return key_out, latent_out, suffix_out
 
 
 @triton.jit(do_not_specialize=["N"])

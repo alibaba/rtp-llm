@@ -21,7 +21,8 @@ class NaturalOuterLayout(QueryLayout):
             # row order. Share their read-only storage for this forward round.
             for name in (
                 "size", "rank", "device", "lengths", "prefixes", "physical_rows",
-                "local_rows", "true_rows", "all_valid", "padding_mask", "natural_valid",
+                "local_rows", "true_rows", "all_valid", "natural_all_valid",
+                "padding_mask", "natural_valid",
                 "cu_host", "cu_device", "lengths_host", "lengths_device",
             ):
                 setattr(self, name, getattr(zigzag_layout, name))
@@ -46,7 +47,11 @@ class NaturalOuterLayout(QueryLayout):
         )
         super().__init__(
             info, zigzag_layout.size, zigzag_layout.rank, zigzag_layout.device,
-            valid_mask=None if zigzag_layout.all_valid else zigzag_layout.natural_valid.clone(),
+            valid_mask=(
+                None
+                if zigzag_layout.natural_all_valid
+                else zigzag_layout.natural_valid.clone()
+            ),
             buffers=buffers,
         )
 

@@ -18,8 +18,8 @@ import torch
 def check_attention_history_contract(layer, hidden, fmha, cache, metadata):
     """Instrument one real prepared eager layer; caller owns collective order.
 
-    Call on every rank after common plan preparation. Run again with another
-    collectively prepared H chunk size to prove history visits stay KV-sized.
+    Call on every rank after common plan preparation. Hidden is routed once
+    while the Indexer and SFA still visit each of their planned KV blocks.
     No attention, quantization, cache writer or transport is replaced.
     """
     from contextlib import ExitStack
@@ -30,7 +30,7 @@ def check_attention_history_contract(layer, hidden, fmha, cache, metadata):
     if index_cache is None or not index.is_sparse():
         raise ValueError("history contract requires a real sparse Prefill cache")
     owner = sfa.workspace_owner
-    counts = dict(indexer=0, sfa=0, v_up=0, key_write=0, sfa_write=0, h_chunks=0)
+    counts = dict(indexer=0, sfa=0, v_up=0, key_write=0, sfa_write=0, h_routes=0)
 
     def counted(name, function):
         def invoke(*args, **kwargs):
@@ -38,14 +38,15 @@ def check_attention_history_contract(layer, hidden, fmha, cache, metadata):
             return function(*args, **kwargs)
         return invoke
 
-    bmm, consume = torch.bmm, owner.row_exchange.consume_chunks
+    bmm, exchange = torch.bmm, owner.row_exchange.exchange
     def observed_bmm(left, right, *args, **kwargs):
         if right is owner.value_weights[layer.layer_idx]:
             counts["v_up"] += 1
         return bmm(left, right, *args, **kwargs)
-    def observed_consume(*args, **kwargs):
-        kwargs["consumer"] = counted("h_chunks", kwargs["consumer"])
-        return consume(*args, **kwargs)
+    def observed_exchange(values, plan, direction, *args, **kwargs):
+        if direction == "to_zigzag":
+            counts["h_routes"] += 1
+        return exchange(values, plan, direction, *args, **kwargs)
 
     with ExitStack() as stack:
         for name, params in (("indexer", index.fmha_params), ("sfa", sfa.page_rr_params)):
@@ -54,13 +55,13 @@ def check_attention_history_contract(layer, hidden, fmha, cache, metadata):
         stack.enter_context(patch.object(layer.indexer.indexer_op, "write_key",
             counted("key_write", layer.indexer.indexer_op.write_key)))
         stack.enter_context(patch.object(sfa, "_write_kv_cache", counted("sfa_write", sfa._write_kv_cache)))
-        stack.enter_context(patch.object(owner.row_exchange, "consume_chunks", observed_consume))
+        stack.enter_context(patch.object(owner.row_exchange, "exchange", observed_exchange))
         stack.enter_context(patch.object(torch, "bmm", observed_bmm))
         output = layer.forward(hidden, fmha, cache, metadata=metadata)
     torch.cuda.synchronize(hidden.device)
     assert counts["indexer"] == len(index.fmha_params.indexer_execution.blocks), counts
     assert counts["sfa"] == len(sfa.page_rr_params.sfa_execution.blocks), counts
-    assert counts["h_chunks"] == (hidden.shape[0] + owner.route_chunk_rows - 1) // owner.route_chunk_rows, counts
+    assert counts["h_routes"] == 1, counts
     assert counts["v_up"] == counts["key_write"] == counts["sfa_write"] == 1, counts
     return output, counts
 
@@ -156,6 +157,71 @@ def check_projection_contract(layer, hidden, *, chunk_rows=1024):
     return diagnostics
 
 
+def check_fp8_query_outputs(layer):
+    """Check the packed Gate view, shared Q latent and Indexer outputs."""
+    import os
+    from unittest.mock import patch
+
+    from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
+        rmsnorm_fp8_quant_ue8m0,
+    )
+    from rtp_llm.models_py.triton_kernels.common.activation import (
+        sigmoid_mul_per_token_group_quant_fp8,
+    )
+    from rtp_llm.models_py.triton_kernels.common.layernorm_gated import independent_q_kv_rmsnorm
+
+    assert layer._share_fp8_q_latent
+    paired = layer.natural_q_gate_input
+    rows, start, end = 151, 17, 148
+    hidden = torch.randn(end - start, 7168, device="cuda", dtype=torch.bfloat16)
+    encoded = layer.natural_q_input.quantize_input(hidden)
+    q, gate = paired.forward_quantized(*encoded)
+    assert gate.stride() == (paired.q_width + paired.gate_width, 1)
+    assert gate.untyped_storage().data_ptr() == q.untyped_storage().data_ptr()
+    assert gate.storage_offset() == q.storage_offset() + paired.q_width
+
+    # Use small integral inputs for an exact sum-of-squares across warp
+    # reduction orders, while still exercising the joint GEMM's row stride.
+    q.copy_(torch.randint(-15, 16, q.shape, device=q.device))
+    w, eps = layer.q_norm.weight, layer.q_norm.variance_epsilon
+    norm = independent_q_kv_rmsnorm(
+        q, w, eps, q_width=layer.q_rank, kv_width=layer.kv_rank, full_rows=rows,
+    )
+    ref_values, ref_scales = layer.q_b.quantize_collective_input(norm)
+    no_norm, values, scales = rmsnorm_fp8_quant_ue8m0(q, w, eps=eps, store_norm=False)
+    assert no_norm is None
+    torch.testing.assert_close(values.view(torch.uint8), ref_values.view(torch.uint8), rtol=0, atol=0)
+    torch.testing.assert_close(scales, ref_scales, rtol=0, atol=0)
+    sfa_q = layer.q_b.forward_quantized(values, scales)
+    torch.testing.assert_close(sfa_q, layer.q_b(norm), rtol=0, atol=0)
+
+    index = layer.indexer
+    raw_q = index.wq_b.forward_quantized(values, scales).view(-1, index.index_n_heads, index.index_head_dim)
+    raw_q[0, 0].zero_()
+    raw_q[0, 1].fill_(448)
+    q_out = torch.empty((rows, *raw_q.shape[1:]), dtype=torch.float8_e4m3fn, device=q.device)
+    q_out.view(torch.uint8).fill_(0x33)
+    q_scale = torch.full((rows, index.index_n_heads, 1), -1, dtype=torch.float32, device=q.device)
+    index.indexer_op.encode_query_into(raw_q, q_out[start:end], q_scale[start:end])
+    for backend in ("legacy", "v2"):
+        with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": backend}):
+            ref_index, ref_scale = index.indexer_op.encode_query(raw_q)
+        torch.testing.assert_close(q_out[start:end].view(torch.uint8), ref_index.view(torch.uint8), rtol=0, atol=0)
+        torch.testing.assert_close(q_scale[start:end], ref_scale, rtol=0, atol=0)
+    assert (q_out[:start].view(torch.uint8) == 0x33).all() and (q_out[end:].view(torch.uint8) == 0x33).all()
+    assert (q_scale[:start] == -1).all() and (q_scale[end:] == -1).all()
+
+    output = torch.randn(gate.shape, dtype=gate.dtype, device=gate.device)
+    valid = torch.arange(output.shape[0], device=gate.device) % 7 != 0
+    gate[~valid] = float("nan")
+    out, scales = sigmoid_mul_per_token_group_quant_fp8(output, gate, valid_rows=valid)
+    ref_out, ref_scales = sigmoid_mul_per_token_group_quant_fp8(
+        torch.where(valid[:, None], output, 0), torch.where(valid[:, None], gate, 0),
+    )
+    torch.testing.assert_close(out.view(torch.uint8), ref_out.view(torch.uint8), rtol=0, atol=0)
+    torch.testing.assert_close(scales, ref_scales, rtol=0, atol=0)
+
+
 def make_layer(*, fp8=False):
     """Real CUDA modules at trained architecture dimensions; synthetic weights."""
     from rtp_llm.config.dsa_config import DsaConfig
@@ -223,6 +289,8 @@ def main():
         raise RuntimeError("CUDA numerical gate must run on the parent-selected GPU host")
     for fp8 in (False, True):
         layer = make_layer(fp8=fp8)
+        if fp8 and layer._share_fp8_q_latent:
+            check_fp8_query_outputs(layer)
         for rows in (1, 2, 31, 32, 33, 127, 128, 129, 1025, 1026, 1055, 1057, 8192, 8193):
             hidden = torch.randn(rows, 7168, device="cuda", dtype=torch.bfloat16)
             print(json.dumps(dict(fp8=fp8, **check_projection_contract(

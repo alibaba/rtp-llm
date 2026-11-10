@@ -49,8 +49,8 @@ class Fp8NaturalProjection(torch.nn.Module):
         return output[:, :self.logical_width]
 
 
-class NaturalQGateProjection(torch.nn.Module):
-    """Pack two output intervals once, then project Q and gate in one GEMM."""
+class NaturalPairedProjection(torch.nn.Module):
+    """Pack two compatible output intervals once for a single GEMM."""
 
     def __init__(self, q, gate):
         super().__init__()
@@ -82,20 +82,28 @@ class NaturalQGateProjection(torch.nn.Module):
             return out
         self.weight = pack(q.weight, gate.weight)
         if self.fp8:
+            if (not isinstance(gate, Fp8NaturalProjection)
+                    or q.weight_scales.dtype != gate.weight_scales.dtype
+                    or q.weight_scales.stride(0) != gate.weight_scales.stride(0)):
+                raise ValueError("paired FP8 projections require matching scale layouts")
             self.weight_scales = pack(q.weight_scales, gate.weight_scales)
             self._quantize_input = q.quantize_input
             self._disable_ue8m0_cast = q._disable_ue8m0_cast
+
+    def forward_quantized(self, values, scales):
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
+
+        out = torch.empty((values.shape[0], self.q_width + self.gate_width),
+                          device=values.device, dtype=torch.bfloat16)
+        fp8_gemm_nt((values, scales), (self.weight, self.weight_scales), out,
+                    disable_ue8m0_cast=self._disable_ue8m0_cast)
+        return out.split((self.q_width, self.gate_width), dim=-1)
 
     def forward(self, hidden):
         if self.nvfp4 is not None:
             out = self.nvfp4(hidden)
         elif self.fp8:
-            from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
-
-            encoded = self._quantize_input(hidden)
-            out = hidden.new_empty((hidden.shape[0], self.q_width + self.gate_width))
-            fp8_gemm_nt(encoded, (self.weight, self.weight_scales), out,
-                        disable_ue8m0_cast=self._disable_ue8m0_cast)
+            return self.forward_quantized(*self._quantize_input(hidden))
         else:
             out = torch.nn.functional.linear(hidden, self.weight)
         return out.split((self.q_width, self.gate_width), dim=-1)

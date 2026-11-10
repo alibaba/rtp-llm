@@ -166,11 +166,13 @@ def _restore_prefix_kernel(
     Gathered,
     Metadata,
     Output,
+    Suffix,
     REQUESTS,
     PAGE_TOKENS: tl.constexpr,
     SHARDS: tl.constexpr,
     LOCAL_PAGES,
     FEATURES: tl.constexpr,
+    SUFFIX_WIDTH: tl.constexpr,
     INDEXER_FP8: tl.constexpr,
     TOTAL_TOKENS,
     BLOCK: tl.constexpr,
@@ -199,14 +201,21 @@ def _restore_prefix_kernel(
     live = position < tl.load(prefix_lens + request)
     values = tl.load(Gathered + source, mask=live, other=0.0)
     output_token = tl.load(output_token_offsets + request) + position
-    if INDEXER_FP8:
+    if SUFFIX_WIDTH:
+        latent_width: tl.constexpr = FEATURES - SUFFIX_WIDTH
+        is_latent = feature < latent_width
+        tl.store(Output + output_token * latent_width + feature,
+                 values, mask=live & is_latent)
+        tl.store(Suffix + output_token * SUFFIX_WIDTH + feature - latent_width,
+                 values, mask=live & ~is_latent)
+    elif INDEXER_FP8:
         # Canonical workspace has contiguous K[N,128], then FP32 scales[N].
         # The gather payload remains interleaved bytes for the common reader.
         destination = tl.where(feature < 128, output_token * 128 + feature,
                                TOTAL_TOKENS.to(tl.int64) * 128 + output_token * 4 + feature - 128)
+        tl.store(Output + destination, values, mask=live)
     else:
-        destination = output_token * FEATURES + feature
-    tl.store(Output + destination, values, mask=live)
+        tl.store(Output + output_token * FEATURES + feature, values, mask=live)
 
 
 def pack_prefix_cuda(cache, table, descriptor, rank, output, *, indexer_fp8=False,
@@ -247,7 +256,7 @@ def pack_prefix_cuda(cache, table, descriptor, rank, output, *, indexer_fp8=Fals
         )
 
 
-def restore_prefix_cuda(gathered, descriptor, output, *, indexer_fp8=False):
+def restore_prefix_cuda(gathered, descriptor, output, *, indexer_fp8=False, suffix=None):
     if indexer_fp8 and (gathered.dtype != torch.uint8 or descriptor.feature_width != 132):
         raise ValueError("FP8 Indexer payload requires 132 raw bytes per token")
     with torch.cuda.device(gathered.device):
@@ -256,11 +265,13 @@ def restore_prefix_cuda(gathered, descriptor, output, *, indexer_fp8=False):
             gathered,
             metadata.device,
             output,
+            output if suffix is None else suffix,
             descriptor.batch_size,
             descriptor.page_tokens,
             descriptor.shard_size,
             descriptor.total_local_pages,
             descriptor.feature_width,
+            0 if suffix is None else suffix.shape[1],
             indexer_fp8,
             descriptor.total_tokens,
             _BLOCK_ELEMENTS,

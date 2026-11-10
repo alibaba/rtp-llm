@@ -406,6 +406,7 @@ def paged_short_conv_prefill(
     current_conv_state: torch.Tensor | None = None,
     continuation_mask: torch.Tensor | None = None,
     return_final_state: bool = False,
+    normalize_qk: bool = False,
 ) -> (
     tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]
     | tuple[
@@ -431,6 +432,8 @@ def paged_short_conv_prefill(
             f"paged short conv channels must be divisible by 3, got {channels}"
         )
     projection_size = channels // 3
+    if normalize_qk and (projection_size % 128 or out is not None):
+        raise ValueError("combined KDA Q/K L2Norm requires planar 128-channel heads")
     if fused_weight.shape[0] != channels or fused_weight.shape[1] < 2:
         raise ValueError(
             "paged short conv weight shape does not match input: "
@@ -623,7 +626,15 @@ def paged_short_conv_prefill(
         AUX_BLOCK=(triton.next_power_of_2(aux.shape[1]) if pack_aux else 1),
         num_warps=4,
     )
-    result = (output[0], output[1], output[2], final_state)
+    q, k = output[0], output[1]
+    if normalize_qk and tokens:
+        from fla.modules.l2norm import l2norm_fwd
+
+        # Q and K are adjacent planar outputs. Flatten head vectors as a view
+        # and normalize them in one launch with cuLA's existing L2Norm.
+        qk, _ = l2norm_fwd(output[:2].view(-1, 128))
+        q, k = qk.view(2, tokens, projection_size).unbind(0)
+    result = (q, k, output[2], final_state)
     if aux is None:
         return result
     return (*result, packed_aux if packed_aux is not None else aux)

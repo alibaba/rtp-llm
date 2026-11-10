@@ -397,8 +397,8 @@ class NaturalIntegrationTest(unittest.TestCase):
             torch.testing.assert_close(cached_query.restore, saved, rtol=0, atol=0)
             info.prefill_qkv_restore_indice.copy_(saved)
 
-    def test_query_chunks_fill_destination_slices_and_history_runs_once(self):
-        from rtp_llm.models_py.modules.kimi_k3.natural_dsa import Fp8NaturalProjection, NaturalQGateProjection
+    def test_queries_consume_complete_route_and_history_runs_once(self):
+        from rtp_llm.models_py.modules.kimi_k3.natural_dsa import Fp8NaturalProjection, NaturalPairedProjection
 
         module = load_dsa()
         cls = module.KimiK31DSA
@@ -446,7 +446,7 @@ class NaturalIntegrationTest(unittest.TestCase):
                         return q, gate
                 model.natural_q_gate_input = CpuQGate()
             else:
-                model.natural_q_gate_input = NaturalQGateProjection(
+                model.natural_q_gate_input = NaturalPairedProjection(
                     model.natural_q_input, model.natural_gate_input)
             model.q_b, model.output = linear(4, 4), linear(4, 4)
             model.q_norm = SimpleNamespace(weight=torch.ones(4).bfloat16(), variance_epsilon=1e-5)
@@ -455,7 +455,12 @@ class NaturalIntegrationTest(unittest.TestCase):
             permutation = torch.tensor([4, 1, 5, 0, 3, 2])
             query_hidden = hidden[permutation]
             events, received, produced = [], {}, {}
-            model.q_b.register_forward_hook(lambda m, a, value: produced.update(query=value))
+            def q_proj_observed(module, args, value):
+                self.assertEqual(events[-1], "hidden_ready")
+                self.assertEqual(value.shape[0], 6)
+                events.append("q_project")
+                produced["query"] = value
+            model.q_b.register_forward_hook(q_proj_observed)
             model.natural_gate_input.register_forward_hook(lambda m, a, value: produced.update(gate=value))
             if not fp8:
                 model.natural_q_gate_input.register_forward_hook(
@@ -463,21 +468,16 @@ class NaturalIntegrationTest(unittest.TestCase):
             gate_sigmoid_mul = module.gate_sigmoid_mul
 
             def checked_gate(output, gate, mask):
-                if chunk_rows >= 6:
-                    self.assertEqual(gate.untyped_storage().data_ptr(), produced["gate"].untyped_storage().data_ptr())
+                self.assertEqual(gate.untyped_storage().data_ptr(), produced["gate"].untyped_storage().data_ptr())
                 return gate_sigmoid_mul(output, gate, mask)
 
             class Exchange:
-                def consume_chunks(self, values, plan, direction, *, chunk_rows, consumer,
-                                   before_consume=None):
-                    self_outer.assertEqual(direction, "to_zigzag")
-                    if before_consume is not None:
+                def exchange(self, values, plan, direction, *, before_consume=None):
+                    if direction == "to_zigzag":
+                        self_outer.assertIsNotNone(before_consume)
                         before_consume()
-                    for start in range(0, 6, chunk_rows):
-                        slot = values[permutation[start:start + chunk_rows]]
-                        consumer(start, slot)
-                        slot.fill_(float("nan"))
-                def exchange(self, values, plan, direction):
+                        events.append("hidden_ready")
+                        return values[permutation]
                     self_outer.assertEqual(direction, "to_natural")
                     return values[permutation.argsort()].clone()
             self_outer = self
@@ -485,9 +485,8 @@ class NaturalIntegrationTest(unittest.TestCase):
                 events.append("key")
                 received["key"] = key.clone()
             def topk(query, weights, *args):
-                if chunk_rows >= 6:
-                    self.assertEqual(query.untyped_storage().data_ptr(), produced["index_query"].untyped_storage().data_ptr())
-                    self.assertEqual(weights.untyped_storage().data_ptr(), produced["weights"].untyped_storage().data_ptr())
+                self.assertEqual(query.untyped_storage().data_ptr(), produced["index_query"].untyped_storage().data_ptr())
+                self.assertEqual(weights.untyped_storage().data_ptr(), produced["weights"].untyped_storage().data_ptr())
                 events.extend(["index_history"] * 3)
                 received["index_query"], received["weights"] = query.clone(), weights.clone()
                 return torch.zeros(6, 2, dtype=torch.int32)
@@ -509,8 +508,7 @@ class NaturalIntegrationTest(unittest.TestCase):
                 _compute_topk=topk,
             )
             def attend(q, latent, suffix, cache, layer, indices):
-                if chunk_rows >= 6:
-                    self.assertEqual(q.untyped_storage().data_ptr(), produced["query"].untyped_storage().data_ptr())
+                self.assertEqual(q.untyped_storage().data_ptr(), produced["query"].untyped_storage().data_ptr())
                 received["query"], received["latent"], received["suffix"] = q.clone(), latent.clone(), suffix.clone()
                 events.extend(["sfa_history"] * 4 + ["v_up", "sfa_publish"])
                 return q.clone()
@@ -527,11 +525,9 @@ class NaturalIntegrationTest(unittest.TestCase):
                                                {"full": object(), "indexer_kv": object()},
                                                SimpleNamespace(query_layout=layout))
             if fp8:
-                chunks = (6 + chunk_rows - 1) // chunk_rows
-                self.assertEqual(len(quantizations), chunks)
-                self.assertTrue(all(name == "q" for name, rows in quantizations))
-                self.assertEqual(len(encodings["q"]), chunks)
-                self.assertEqual(len(encodings["gate"]), chunks)
+                self.assertEqual(quantizations, [("q", 6)])
+                self.assertEqual(len(encodings["q"]), 1)
+                self.assertEqual(len(encodings["gate"]), 1)
                 for q_encoding, gate_encoding in zip(encodings["q"], encodings["gate"]):
                     self.assertIs(q_encoding[0], gate_encoding[0])
                     self.assertIs(q_encoding[1], gate_encoding[1])
@@ -544,13 +540,15 @@ class NaturalIntegrationTest(unittest.TestCase):
                 q.reshape(6, 2, 2).to(torch.float8_e4m3fn).view(torch.uint8),
                 rtol=0, atol=0,
             )
-            expected_query = model.q_b(q).reshape(6, 2, 2)
+            expected_query = torch.nn.functional.linear(q, model.q_b.weight).reshape(6, 2, 2)
             torch.testing.assert_close(received["query"], expected_query, rtol=0, atol=0)
             gate = model.natural_gate_input(query_hidden)
             expected = (expected_query.reshape(6, 4) * gate.sigmoid()).masked_fill(~layout.local_valid[:, None], 0)
             expected = model.output(expected)[permutation.argsort()]
             torch.testing.assert_close(result, expected, rtol=0, atol=0)
             self.assertEqual(events.count("key"), 1)
+            self.assertEqual(events.count("hidden_ready"), 1)
+            self.assertEqual(events.count("q_project"), 1)
             self.assertEqual(events.count("index_history"), 3)
             self.assertEqual(events.count("sfa_history"), 4)
             for event in ("v_up", "sfa_publish", "index_publish"):

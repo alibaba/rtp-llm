@@ -62,6 +62,19 @@ class DirectedExchangeCPU(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.module.payload_bytes(*args)
 
+    def test_fp8_output_dispatch_uses_local_rows_and_request_geometry(self):
+        transport = self.module.DirectedRowExchange.__new__(self.module.DirectedRowExchange)
+        transport.chunk_capacity, transport.hidden_size, transport.fp8_output_width = 8192, 7168, 12288
+        for size in (4, 8, 16):
+            for rows, chunk in ((510, None), (512, 256), (514, 260), (2048, 1024), (8192, 2048)):
+                with self.subTest(size=size, rows=rows):
+                    plan = self.plan.NaturalZigzagPlan((rows * size,), size, 0)
+                    self.assertEqual(transport.fp8_pre_o_chunk_rows(plan), chunk)
+            fragmented = self.plan.NaturalZigzagPlan((size * 512, size * 128), size, 0)
+            self.assertIsNone(transport.fp8_pre_o_chunk_rows(fragmented))
+            over_slot = self.plan.NaturalZigzagPlan((size * 8500, size * 1002), size, 0)
+            self.assertEqual(transport.fp8_pre_o_chunk_rows(over_slot), 3072)
+
     def test_cp8_literal_fixtures_and_production_block_mapping(self):
         # Both directions are checked against independent literal maps; no
         # forward/reverse roundtrip can cancel a shared routing mistake.
@@ -159,6 +172,7 @@ class DirectedExchangeCPU(unittest.TestCase):
             participant._store, participant.rank, participant.size = store, rank, 4
             participant.enabled = True
             participant.max_rows, participant.chunk_capacity = 6, 3
+            participant.fp8_output_width = 0
             participant._prepared, participant._prepare_epoch = {}, 0
             participant._lock = threading.Lock()
             participants.append(participant)
@@ -296,7 +310,15 @@ def gpu_main():
                         torch.cuda._sleep(2_000_000)
                 transport.consume_chunks(consumed, plan, "to_natural", 2, consume)
                 assert_bits(consumed, restored)
-                checks += 5
+                assert transport.can_pipeline_producer
+
+                def produce_chunk(start, target):
+                    target.copy_(wanted[start:start + target.shape[0]])
+
+                # Odd-sized chunks cross peer boundaries in the ragged plan.
+                pipelined = transport.produce_chunks_and_exchange(plan, 3, produce_chunk)
+                assert_bits(pipelined, restored)
+                checks += 6
     # Queue a whole chain without host tensor assertions between calls. This
     # exposes early source reuse and cross-caller-stream lifetime races that a
     # synchronizing assertion after each exchange could accidentally conceal.
@@ -315,7 +337,13 @@ def gpu_main():
             held.append((result, tags[expected_rows].clone()))
             restored = transport.exchange(result, plan, "to_natural")
             held.append((restored, values.clone()))
-            checks += 2
+
+            def produce_chunk(start, target):
+                target.copy_(result[start:start + target.shape[0]])
+
+            pipelined = transport.produce_chunks_and_exchange(plan, 2, produce_chunk)
+            held.append((pipelined, values.clone()))
+            checks += 3
     torch.cuda.synchronize(device)
     for actual, expected in held:
         assert_bits(actual, expected)
@@ -325,7 +353,77 @@ def gpu_main():
                       "checks": checks, "owned_outputs": len(held),
                       "resident_bytes": transport.resident_bytes}), flush=True)
     production_shape_regression(module, plans, group, device, assert_bits)
+    full_fp8_query_route_regression(module, plans, group, device, rank, size)
     dist.destroy_process_group()
+
+
+def full_fp8_query_route_regression(module, plans, group, device, rank, size):
+    """One receive callback past the 8K slot capacity, with packed scales and padding."""
+    from rtp_llm.models_py.distributed.collective_torch import Fp8Activation
+
+    hidden = 7168
+    lengths = (size * 8192 + 1, size * 8192 - 1)
+    plan = plans.NaturalZigzagPlan(lengths, size, rank)
+    rows = plan.local_rows
+    transport = module.DirectedRowExchange(group, device, rows + 4, hidden, chunk_capacity=8192)
+    transport.prepare_plan(plan)
+    assert rows > transport.chunk_capacity and rows % 4 == 2
+
+    def ids(start, count):
+        return torch.arange(start, start + count, device=device, dtype=torch.int32)
+
+    expected = []
+    start = 0
+    for padded in plan.padded_lengths:
+        half = padded // (2 * size)
+        expected.extend((ids(start + rank * half, half), ids(start + padded - (rank + 1) * half, half)))
+        start += padded
+    expected = torch.cat(expected)
+    source = ids(rank * rows, rows)
+    groups = ids(0, hidden // 512)
+
+    def encode_tags(rows, iteration):
+        return ((rows[:, None] >> torch.tensor([0, 7, 14], device=device)) & 127).to(torch.uint8) ^ iteration
+
+    def encode_scales(rows, iteration):
+        return 0x7F7F7F7F ^ ((rows[None, :] + groups[:, None] + iteration) & 31)
+
+    streams = [torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)]
+    outputs = []
+    for iteration, stream in enumerate(streams):
+        with torch.cuda.stream(stream):
+            values = torch.full((rows, hidden), 42 + iteration, device=device, dtype=torch.uint8)
+            values[:, :3].copy_(encode_tags(source, iteration))
+            scale_wire = torch.empty((len(groups), (rows + 3) // 4 * 4), device=device, dtype=torch.int32)
+            scale_wire[:, :rows].copy_(encode_scales(source, iteration))
+            activation = Fp8Activation(values.view(torch.float8_e4m3fn), scale_wire)
+            calls = []
+
+            def project_heads(out):
+                out.copy_(source[:, None].float() + iteration)
+
+            def consume(values, scales):
+                assert calls == ["prepare"]
+                calls.append("consume")
+                assert values.shape == (rows, hidden) and scales.shape == (rows, len(groups))
+                assert scales.stride() == (1, (rows + 3) // 4 * 4)
+                outputs.append((values.view(torch.uint8), scales))
+
+            heads = transport.consume_fp8(
+                activation, plan, consume, before_consume=lambda: calls.append("prepare"),
+                project_heads=project_heads,
+            )
+            assert calls == ["prepare", "consume"]
+            outputs[-1] += (heads,)
+
+    torch.cuda.synchronize(device)
+    for iteration, (values, scales, heads) in enumerate(outputs):
+        torch.testing.assert_close(values[:, :3], encode_tags(expected, iteration), rtol=0, atol=0)
+        assert (values[:, 3:] == 42 + iteration).all()
+        torch.testing.assert_close(scales.T, encode_scales(expected, iteration), rtol=0, atol=0)
+        torch.testing.assert_close(heads, (expected[:, None].float() + iteration).expand_as(heads), rtol=0, atol=0)
+    print(json.dumps(dict(proof="one_full_fp8_query_route", rank=rank, rows=rows, calls_per_forward=1)),
+          flush=True)
 
 
 def allocator_handoff_regression(module, plans, group, device, assert_bits):
@@ -467,6 +565,12 @@ def production_shape_regression(module, plans, group, device, assert_bits):
                 destination.copy_(expected)
             direct = transport.produce_and_exchange(plan, "to_natural", produce)
             assert_bits(direct, values)
+
+            def produce_chunk(start, destination):
+                destination.copy_(expected[start:start + destination.shape[0]])
+
+            pipelined = transport.produce_chunks_and_exchange(plan, chunk, produce_chunk)
+            assert_bits(pipelined, values)
             consumed = torch.empty_like(values)
 
             def consume(start, received):
@@ -483,11 +587,11 @@ def production_shape_regression(module, plans, group, device, assert_bits):
                                      before_consume=before_consume)
             assert side == [True]
             assert_bits(consumed, expected)
-            checks += 4
+            checks += 5
         # Bound live caller-owned outputs and their allocator lifetime in this
         # test; transport capacity stays fixed through all repeated calls.
         streams[iteration % 2].synchronize()
-        del values, expected, result, reverse, direct, consumed
+        del values, expected, result, reverse, direct, pipelined, consumed
     torch.cuda.synchronize(device)
     print(json.dumps({"proof": "production_64k_bf16_directed_rows", "rank": rank,
                       "cp_size": size, "hidden_size": hidden, "physical_rows": 65536,

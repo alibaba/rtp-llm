@@ -70,6 +70,7 @@ class KimiK3AttentionResidual(nn.Module):
         num_blocks: Optional[int] = None,
         block_write_idx: int = -1,
         metadata=None,
+        also_quantize: bool = False,
     ) -> torch.Tensor:
         if self._verify_fp8 and getattr(metadata, "is_target_verify", False):
             return self.forward_fp8(
@@ -114,13 +115,25 @@ class KimiK3AttentionResidual(nn.Module):
             if not hasattr(rtp_llm_ops, "attn_res"):
                 raise RuntimeError("Native AttnRes requires the CUDA 13 RTP build")
             output = torch.empty_like(prefix_sum)
+            fp8 = None
+            if also_quantize:
+                from rtp_llm.models_py.distributed.collective_torch import Fp8Activation
+
+                rows, width = output.shape
+                fp8 = Fp8Activation(
+                    torch.empty_like(output, dtype=torch.float8_e4m3fn),
+                    torch.empty((width // 512, (rows + 3) // 4 * 4),
+                                dtype=torch.int32, device=output.device),
+                )
             rtp_llm_ops.attn_res(
                 prefix_sum, delta, block_residual, self.norm_weight,
                 self.projection_weight, output_norm_weight, output,
                 active_blocks, block_write_idx, self.eps,
                 0.0 if output_norm_eps is None else float(output_norm_eps),
+                **({"fp8_output": fp8.values, "fp8_scales": fp8.scale_wire}
+                   if fp8 is not None else {}),
             )
-            return output
+            return (output, fp8) if fp8 is not None else output
         if delta is not None:
             prefix_sum.add_(delta)
         if block_write_idx >= 0:

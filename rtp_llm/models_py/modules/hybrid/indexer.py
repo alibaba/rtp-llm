@@ -165,6 +165,11 @@ class Indexer(nn.Module):
                 fallback_proj=self.weights_proj,
                 original_rows=original_rows,
                 tile_decode_output=tile_decode_output,
+                bf16_dot=(
+                    self.dsa_config.indexer_use_fp8
+                    and x.dtype == torch.bfloat16
+                    and not tile_decode_output
+                ),
             )
         x = x.float()
         weights = self.weights_proj(x)
@@ -273,6 +278,9 @@ class Indexer(nn.Module):
         attention_inputs: Any,
         use_fast_path: bool,
         cp_params: Any = None,
+        *,
+        encoded_q_lora: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        prepared_key: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if use_fast_path:
             key = self._get_k_bf16(hidden_states, fmha_params)
@@ -282,7 +290,17 @@ class Indexer(nn.Module):
         if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None, "cp_params is required for sparse prefill CP"
 
-        query, key = self._get_q_k_bf16(q_lora, hidden_states, fmha_params, cp_params)
+        if encoded_q_lora is None and prepared_key is None:
+            query, key = self._get_q_k_bf16(q_lora, hidden_states, fmha_params, cp_params)
+        else:
+            query = (
+                self.project_query(q_lora)
+                if encoded_q_lora is None
+                else self.wq_b.forward_quantized(*encoded_q_lora).view(
+                    -1, self.index_n_heads, self.index_head_dim,
+                )
+            )
+            key = self.project_key(hidden_states) if prepared_key is None else prepared_key
         q_fp8, q_scale = self._quantize_q_k(
             query, key, kv_cache, fmha_params, attention_inputs, cp_params
         )

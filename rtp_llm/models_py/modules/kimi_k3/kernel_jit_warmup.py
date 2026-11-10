@@ -86,11 +86,8 @@ def _warmup_replay(model, init_resource) -> None:
             if max_steps > replay_cache.k.shape[1]:
                 raise ValueError("K3 verify width exceeds the bound replay log capacity")
             start = time.perf_counter()
-            # A single-row QKV view is already "contiguous" to PyTorch and
-            # retains the producer's row stride. Multiple rows take a compact
-            # copy. Metadata group rows can also be aligned or unaligned to
-            # 16 bytes, independently of that QKV layout. Prepare both classes
-            # explicitly so pool deduplication never depends on the group id.
+            # Metadata group rows can be aligned or unaligned to 16 bytes.
+            # Prepare both classes so pool deduplication never depends on the group id.
             cases = [(1, steps) for steps in range(1, max_steps + 1)] + [(2, 1)]
             for unaligned, (batch, steps) in (
                 (unaligned, case) for unaligned in (False, True) for case in cases
@@ -99,8 +96,7 @@ def _warmup_replay(model, init_resource) -> None:
                     cache.group_id, device, batch, unaligned=unaligned
                 )
                 tokens = batch * steps
-                # Run the same local projections to preserve beta/gate strides;
-                # target verify then makes qkv contiguous before the replay split.
+                # Run the same local projections to preserve the input strides.
                 hidden = torch.zeros(
                     (tokens, model.config.hidden_size), device=device,
                     dtype=model.embed_tokens.weight.dtype,
@@ -112,7 +108,7 @@ def _warmup_replay(model, init_resource) -> None:
                     dim=-1,
                 )
                 gate = attention._project_forget(fa)
-                q, key, value = qkv.contiguous().split((h * k, h * k, hv * v), dim=-1)
+                q, key, value = qkv.split((h * k, h * k, hv * v), dim=-1)
                 linear_serial_replay(
                     q, key, value, gate, beta, decoder.conv_weights,
                     decoder.alog, decoder.dt_bias, state, conv, replay_cache,

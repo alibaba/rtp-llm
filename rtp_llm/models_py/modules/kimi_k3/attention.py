@@ -71,6 +71,11 @@ class KimiK3KDA(KdaAttention):
             forget_projection.hidden_size if forget_weight.dtype == torch.uint8
             else forget_weight.shape[1 if forget_weight.dtype == torch.float8_e4m3fn else 0]
         )
+        strided_fp8_forget = (
+            fa_width == 128
+            and isinstance(forget_projection, CudaFp8GEMMLinear)
+            and forget_projection.scale_ue8m0
+        )
         if weights[K3W.KDA_INPUT].dtype == torch.uint8:
             local_heads = cfg.linear_num_value_heads // parallelism.tp_size
             expected = 4 * local_heads * cfg.linear_value_head_dim + fa_width + local_heads
@@ -98,11 +103,9 @@ class KimiK3KDA(KdaAttention):
             decode=decode,
             fp8_output_norm=fp8_output,
             strided_fp8_forget=(
-                parallelism.role_type == RoleType.DECODE
-                and fa_width == 128
-                and isinstance(forget_projection, CudaFp8GEMMLinear)
-                and forget_projection.scale_ue8m0
+                strided_fp8_forget and parallelism.role_type == RoleType.DECODE
             ),
+            strided_fp8_prefill_forget=strided_fp8_forget,
             ag_local_fp8_overlap=isinstance(input_projection, CudaFp8GEMMLinear),
         )
 

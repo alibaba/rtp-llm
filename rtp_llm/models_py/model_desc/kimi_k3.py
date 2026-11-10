@@ -183,7 +183,8 @@ class KimiK3DecoderLayer(nn.Module):
         return self.mlp(mlp_input, valid_mask, residual=hidden)
 
     def forward(
-        self, hidden, anchors, fmha, cache, attention_inputs, metadata, valid_mask
+        self, hidden, anchors, fmha, cache, attention_inputs, metadata, valid_mask,
+        *, mlp_delta=None, defer_mlp_residual=False,
     ):
         if self.block_size:
             previous = (self.index + self.block_size - 1) // self.block_size
@@ -201,6 +202,17 @@ class KimiK3DecoderLayer(nn.Module):
                 and not attention_inputs.is_mtp_draft_update
                 and not torch.cuda.is_current_stream_capturing()
             )
+            natural_fp8 = (
+                getattr(self.attention, "natural_kv_indexer_input", None) is not None
+                and getattr(metadata, "outer_layout", None) is not None
+                and attention_inputs.is_prefill
+                and not metadata.is_target_verify
+                and not attention_inputs.is_mtp_draft_update
+                and hidden.is_cuda
+                and hidden.shape[0] >= 4096
+                and torch.cuda.get_device_capability(hidden.device)[0] == 10
+                and not torch.cuda.is_current_stream_capturing()
+            )
             with profile_scope(f"RTP::layers.{self.index}.attention_residual"):
                 residual = (
                     self.attention_residual.forward_fp8
@@ -210,32 +222,90 @@ class KimiK3DecoderLayer(nn.Module):
                 attn_input = residual(
                     hidden,
                     anchors,
+                    delta=mlp_delta,
                     num_blocks=previous,
                     block_write_idx=previous if writes else -1,
                     output_norm_weight=self.attention_norm.weight,
                     output_norm_eps=self.attention_norm.variance_epsilon,
                     metadata=metadata,
+                    **({"also_quantize": True} if natural_fp8 else {}),
                 )
+                if natural_fp8:
+                    attn_input, encoded = attn_input
             with profile_scope(f"RTP::layers.{self.index}.attention"):
                 attended = self.attention(
-                    attn_input, fmha, cache, attention_inputs, metadata
+                    attn_input, fmha, cache, attention_inputs, metadata,
+                    **({"natural_fp8": encoded} if natural_fp8 else {}),
                 )
-            hidden = attended if writes else hidden + attended
+            if natural_fp8:
+                del encoded
+            delta = None
+            if writes:
+                hidden = attended
+            elif (
+                (
+                    (defer_mlp_residual and metadata.is_target_verify)
+                    or (
+                        attention_inputs.is_prefill
+                        and not metadata.is_target_verify
+                        and not attention_inputs.is_mtp_draft_update
+                        and metadata.query_layout is not None
+                    )
+                )
+                and hidden.is_cuda
+                and hidden.dtype == attended.dtype == torch.bfloat16
+                and hidden.shape == attended.shape
+                and hidden.is_contiguous()
+                and attended.is_contiguous()
+            ):
+                # AttnRes updates hidden in place before the MLP residual uses it.
+                delta = attended
+            else:
+                hidden = hidden + attended
             with profile_scope(f"RTP::layers.{self.index}.mlp_residual"):
                 mlp_input = self.mlp_residual(
                     hidden,
                     anchors,
+                    delta=delta,
                     num_blocks=previous + int(writes),
                     output_norm_weight=self.mlp_norm.weight,
                     output_norm_eps=self.mlp_norm.variance_epsilon,
                 )
         else:
             with profile_scope(f"RTP::layers.{self.index}.attention"):
-                hidden = hidden + self.attention(
+                attended = self.attention(
                     self.attention_norm(hidden), fmha, cache, attention_inputs, metadata
                 )
-            mlp_input = self.mlp_norm(hidden)
+                if (
+                    (not attention_inputs.is_prefill or attention_inputs.is_mtp_draft_update)
+                    and hidden.is_cuda
+                    and hidden.dtype == attended.dtype == self.mlp_norm.weight.dtype == torch.bfloat16
+                    and hidden.shape == attended.shape
+                    and hidden.is_contiguous()
+                    and attended.is_contiguous()
+                    and self.mlp_norm.weight.is_contiguous()
+                ):
+                    from rtp_llm.models_py.triton_kernels.common.layernorm_gated import rounded_add_rmsnorm
+
+                    hidden, mlp_input = rounded_add_rmsnorm(
+                        hidden, attended, self.mlp_norm.weight, self.mlp_norm.variance_epsilon,
+                    )
+                else:
+                    hidden = hidden + attended
+                    mlp_input = self.mlp_norm(hidden)
         with profile_scope(f"RTP::layers.{self.index}.mlp"):
+            if defer_mlp_residual:
+                if self.mlp.fuses_layer_residual:
+                    return self.apply_mlp(hidden, mlp_input, valid_mask), None
+                mlp_output = self.mlp(mlp_input, valid_mask)
+                if (
+                    hidden.dtype == mlp_output.dtype == torch.bfloat16
+                    and hidden.shape == mlp_output.shape
+                    and hidden.is_contiguous()
+                    and mlp_output.is_contiguous()
+                ):
+                    return hidden, mlp_output
+                return hidden + mlp_output, None
             return self.apply_mlp(hidden, mlp_input, valid_mask)
 
 
@@ -471,8 +541,34 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
     def prepare_fmha_impl(
         self, inputs, is_cuda_graph=False, cuda_graph_selection_mode=None
     ):
+        self._prepared_kda_prefill = None
         if self.dsa_workspace is not None:
-            return self._prepare_dsa(inputs, is_cuda_graph)
+            fmha_impl = self._prepare_dsa(inputs, is_cuda_graph)
+            if (
+                not is_cuda_graph
+                and self._query_layout is not None
+                and self.kv_cache is not None
+            ):
+                layout = self._outer_layout or self._query_layout
+                for index, layer in enumerate(self.layers):
+                    if layer.layer_type != HybridAttentionType.LINEAR:
+                        continue
+                    cache = self.kv_cache.get_layer_cache(index)
+                    if cache is None:
+                        continue
+                    metadata = KdaMetadata(
+                        query_layout=self._query_layout, outer_layout=self._outer_layout,
+                    )
+                    attention_inputs = select_attention_inputs_for_layer(inputs, self.kv_cache, index)
+                    layer.attention.prefill.prepare_cuda_inputs(
+                        layout.natural_attention(attention_inputs),
+                        cache, metadata,
+                    )
+                    self._prepared_kda_prefill = (
+                        fmha_impl, metadata, str(cache.tag), attention_inputs,
+                    )
+                    break
+            return fmha_impl
         from rtp_llm.models_py.modules.factory.attention.attn_factory import get_mla_impl
         from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MlaImpl
 
@@ -551,6 +647,10 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
     ):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
+        prepared = getattr(self, "_prepared_kda_prefill", None)
+        self._prepared_kda_prefill = None
+        if prepared is not None and prepared[0] is not fmha_impl:
+            prepared = None
         layout = self._query_layout
         if hidden is None:
             # Construct the target embedding in this frame. Passing the
@@ -595,37 +695,76 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
             paged_conv_meta = prepare_paged_short_conv_metadata(
                 primary.cu_seqlens if layout is None else layout.cu_host, hidden.device
             )
-        metadata = KdaMetadata(
-            is_target_verify=primary.is_target_verify,
-            prefill_paged_conv_meta=paged_conv_meta,
-            query_layout=layout,
-            outer_layout=outer_layout,
-        )
+        if prepared is not None:
+            _, metadata, linear_tag, linear_inputs = prepared
+            metadata.prefill_paged_conv_meta = paged_conv_meta
+        else:
+            metadata = KdaMetadata(
+                is_target_verify=primary.is_target_verify,
+                prefill_paged_conv_meta=paged_conv_meta,
+                query_layout=layout,
+                outer_layout=outer_layout,
+            )
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         anchors = hidden.new_empty((local_rows, self.num_blocks, hidden.shape[-1]))
+        defer_mlp_residual = (
+            self.num_blocks > 0
+            and (
+                primary.is_target_verify
+                or (
+                    primary.is_prefill
+                    and layout is not None
+                    and not primary.is_mtp_draft_update
+                )
+            )
+            and hidden.is_cuda
+            and hidden.dtype == torch.bfloat16
+            and hidden.shape[-1] == 7168
+            and torch.cuda.get_device_capability(hidden.device)[0] == 10
+        )
+        mlp_delta = None
         for index, layer in enumerate(self.layers):
             if getattr(layer.attention, "indexer", None) is not None:
                 tags = ("full", "indexer_kv")
                 attention_inputs = select_attention_inputs_for_tag(get_attention_inputs_value(inputs), "full")
                 fmha = {tag: select_fmha_impl_for_group(fmha_impl, tag) for tag in tags}
                 cache = get_layer_caches_for_groups(self.kv_cache, index, tags) if self.kv_cache else None
-                hidden = layer(hidden, anchors, fmha, cache, attention_inputs, metadata, valid_mask)
-                continue
-            attention_inputs = select_attention_inputs_for_layer(
-                inputs, self.kv_cache, index
-            )
-            fmha = (
-                None
-                if layer.layer_type == HybridAttentionType.LINEAR
-                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, index)
-            )
-            cache = self.kv_cache.get_layer_cache(index) if self.kv_cache else None
-            hidden = layer(
-                hidden, anchors, fmha, cache, attention_inputs, metadata, valid_mask
-            )
+            else:
+                cache = self.kv_cache.get_layer_cache(index) if self.kv_cache else None
+                if (
+                    prepared is not None
+                    and layer.layer_type == HybridAttentionType.LINEAR
+                    and cache is not None
+                    and str(cache.tag) == linear_tag
+                ):
+                    # The natural view and cuLA lookup are keyed by the original
+                    # inputs object. Reuse it even if the binding wraps it again.
+                    attention_inputs = linear_inputs
+                else:
+                    attention_inputs = select_attention_inputs_for_layer(
+                        inputs, self.kv_cache, index
+                    )
+                fmha = (
+                    None
+                    if layer.layer_type == HybridAttentionType.LINEAR
+                    else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, index)
+                )
+            if defer_mlp_residual:
+                hidden, mlp_delta = layer(
+                    hidden, anchors, fmha, cache, attention_inputs, metadata, valid_mask,
+                    mlp_delta=mlp_delta, defer_mlp_residual=True,
+                )
+            else:
+                hidden = layer(
+                    hidden, anchors, fmha, cache, attention_inputs, metadata, valid_mask
+                )
         if self.num_blocks:
-            hidden = self.final_residual(hidden, anchors)
+            hidden = (
+                self.final_residual(hidden, anchors, delta=mlp_delta)
+                if mlp_delta is not None
+                else self.final_residual(hidden, anchors)
+            )
         if outer_layout is not None:
             # Target MTP publication and the public final-norm/last-row ABI
             # consume the complete original Zigzag shard, including padding.

@@ -404,21 +404,19 @@ class KimiK3MlaImpl(MlaImplBase):
                 (owner,), (segment.start,), (segment.length,),
                 feature_width=self.kv_lora_rank + self.qk_rope_head_dim,
             )
-            restored = self._page_rr_adapter.read_prefix_chunk(
-                cache, self.block_table, descriptor
-            ).to(torch.bfloat16)
-            # As in the feat Page-RR path, project from a contiguous
-            # compressed-KV buffer. The sliced cache record has row stride
-            # kv_lora_rank + qk_rope_head_dim and cannot enter FP8 quant.
-            latent = torch.empty(
-                (segment.length, self.kv_lora_rank),
-                dtype=torch.bfloat16, device=q.device,
+            latent, suffix = self._page_rr_adapter.read_prefix_chunk(
+                cache, self.block_table, descriptor,
+                split_out=(
+                    torch.empty(
+                        (segment.length, self.kv_lora_rank), dtype=torch.bfloat16, device=q.device,
+                    ),
+                    torch.empty(
+                        (segment.length, self.qk_rope_head_dim), dtype=torch.bfloat16, device=q.device,
+                    ),
+                ),
             )
-            latent.copy_(restored[:, :self.kv_lora_rank])
-            suffix = restored[:, self.kv_lora_rank:]
             key, value = self._project_kv(projection, latent, suffix)
             del latent, suffix
-            del restored
             key_fp8, value_fp8 = quantize_kv_fp8(key, value)
             del key, value
             q_indptr = torch.tensor((0, q_len), dtype=torch.int32, device=q.device)
@@ -461,7 +459,7 @@ class KimiK3MlaImpl(MlaImplBase):
             int(causal), self.scale,
             max_q, max_k, True,
         )
-        return output, lse.contiguous()
+        return output, lse
 
     def _forward_bf16_chunked(self, q, compressed_kv, k_pe, kv_cache, layer_id):
         plan = self._prefix_plan
@@ -510,12 +508,17 @@ class KimiK3MlaImpl(MlaImplBase):
             q, current_k, current_v, self.qo_indptr, self.qo_indptr,
             max_q=max_q, max_k=max_q, causal=True,
         )
+        output_lse = output_lse.contiguous()
         del current_k, current_v, current_shaped, current_packed
         canonical = output.float() if plan.requires_fp32_accumulator else output
 
         capacity = plan.max_expanded_kv_tokens
         latent_buffer = torch.empty(
             (capacity, self.kv_lora_rank), dtype=torch.bfloat16,
+            device=q.device,
+        )
+        rope_buffer = torch.empty(
+            (capacity, self.qk_rope_head_dim), dtype=torch.bfloat16,
             device=q.device,
         )
         for segment in plan.slices:
@@ -526,24 +529,20 @@ class KimiK3MlaImpl(MlaImplBase):
                 continue
             length = segment.length
             latent = latent_buffer.narrow(0, 0, length)
+            rope = rope_buffer.narrow(0, 0, length)
             packed = packed_buffer.narrow(0, 0, length)
             shaped = packed.view(length, self.num_heads, sum(splits))
             descriptor = self._page_rr_adapter.build_prefix_chunk_descriptor(
                 (owner,), (segment.start,), (length,),
                 feature_width=self.kv_lora_rank + self.qk_rope_head_dim,
             )
-            restored = self._page_rr_adapter.read_prefix_chunk(
-                cache, self.block_table, descriptor
+            self._page_rr_adapter.read_prefix_chunk(
+                cache, self.block_table, descriptor, split_out=(latent, rope),
             )
-            latent.copy_(restored[:, :self.kv_lora_rank])
-            # skip-head-mid leaves the RoPE columns untouched. Fill
-            # them from the restored PageRR view before KV-up, so a
-            # separate full-prefix RoPE buffer never overlaps the
-            # restored pages and the packed projection workspace.
+            # skip-head-mid leaves the RoPE columns untouched.
             shaped[..., splits[0]:splits[0] + splits[1]].copy_(
-                restored[:, self.kv_lora_rank:].view(length, 1, splits[1])
+                rope.view(length, 1, splits[1])
             )
-            del restored
             projection.forward_skip_head_mid(
                 latent, splits, output=packed
             )

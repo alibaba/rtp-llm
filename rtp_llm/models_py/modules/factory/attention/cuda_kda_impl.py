@@ -5,6 +5,7 @@ batches use one call; in-page prefixes retain page-boundary segmented execution.
 """
 
 from dataclasses import dataclass
+from functools import cached_property
 
 import torch
 
@@ -26,7 +27,7 @@ def plan_cula_checkpoint_groups(segments, block_size, max_pages=4):
 
 def _cula_paged_prefill(
     chunk_kda, q, k, v, g, beta, a_log, dt_bias, lower_bound,
-    cache_states, sequences, block_size,
+    cache_states, sequences, block_size, qk_normalized,
 ):
     """Publish cuLA's FP32 checkpoints into RTP's paged recurrent cache."""
     if block_size % 64:
@@ -59,7 +60,7 @@ def _cula_paged_prefill(
                 values, final, published = chunk_kda(
                     *inputs, raw_beta, scale=128**-0.5,
                     initial_state=state, output_final_state=False,
-                    use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True,
+                    use_qk_l2norm_in_kernel=not qk_normalized, use_gate_in_kernel=True,
                     use_beta_sigmoid_in_kernel=True,
                     cu_seqlens=None, cu_seqlens_cpu=None,
                     safe_gate=lower_bound is not None,
@@ -99,10 +100,25 @@ class PackedCulaKdaPrefill:
     checkpoint_offsets: torch.Tensor | None
     initial_blocks: torch.Tensor
     checkpoint_blocks: torch.Tensor
-    initial_states: torch.Tensor
-    checkpoints: torch.Tensor
+    heads: int
     padding_ranges: tuple[tuple[int, int], ...]
     host_tensors: tuple[torch.Tensor, ...] = ()
+
+    @cached_property
+    def initial_states(self) -> torch.Tensor:
+        return torch.empty(
+            (self.initial_blocks.numel(), self.heads, 128, 128),
+            dtype=torch.float32,
+            device=self.initial_blocks.device,
+        )
+
+    @cached_property
+    def checkpoints(self) -> torch.Tensor:
+        return torch.empty(
+            (1, self.checkpoint_blocks.numel(), self.heads, 128, 128),
+            dtype=torch.float32,
+            device=self.checkpoint_blocks.device,
+        )
 
 
 @dataclass(frozen=True)
@@ -245,14 +261,7 @@ def prepare_cula_kda_prefill_metadata(
         ),
         initial_blocks=cpu_initial.to(device, non_blocking=True),
         checkpoint_blocks=cpu_checkpoints.to(device, non_blocking=True),
-        initial_states=torch.empty(
-            (len(initial_blocks), heads, 128, 128), dtype=torch.float32, device=device
-        ),
-        checkpoints=torch.empty(
-            (1, len(checkpoint_blocks), heads, 128, 128),
-            dtype=torch.float32,
-            device=device,
-        ),
+        heads=heads,
         padding_ranges=tuple(padding),
         host_tensors=tuple(
             value for value in (cpu_cu, cpu_initial, cpu_checkpoints, cpu_offsets)
@@ -275,6 +284,7 @@ def _cula_packed_prefill(
     cache_states,
     metadata,
     block_size,
+    qk_normalized,
 ):
     from rtp_llm.models_py.triton_kernels.kda.prefill_cache import (
         load_kda_prefill_states,
@@ -294,7 +304,7 @@ def _cula_packed_prefill(
             scale=128**-0.5,
             initial_state=metadata.initial_states,
             output_final_state=False,
-            use_qk_l2norm_in_kernel=True,
+            use_qk_l2norm_in_kernel=not qk_normalized,
             use_gate_in_kernel=True,
             use_beta_sigmoid_in_kernel=True,
             cu_seqlens=metadata.cu_seqlens,
@@ -341,6 +351,7 @@ def cula_kda_paged_prefill(
     block_size,
     *,
     metadata=None,
+    qk_normalized: bool = False,
 ):
     """Run BF16 projections and publish only real request states to RTP cache.
 
@@ -394,6 +405,7 @@ def cula_kda_paged_prefill(
             cache_states,
             metadata.packed,
             block_size,
+            qk_normalized,
         )
     return _cula_paged_prefill(
         chunk_kda,
@@ -408,4 +420,5 @@ def cula_kda_paged_prefill(
         cache_states,
         metadata.sequences,
         block_size,
+        qk_normalized,
     )

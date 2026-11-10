@@ -39,6 +39,7 @@ class KdaAttention(nn.Module):
         decode,
         fp8_output_norm=False,
         strided_fp8_forget=False,
+        strided_fp8_prefill_forget=False,
         ag_local_fp8_overlap=False,
     ):
         super().__init__()
@@ -64,6 +65,11 @@ class KdaAttention(nn.Module):
             self._project_forget_strided_fp8
             if strided_fp8_forget
             else self._project_forget_contiguous
+        )
+        self._project_prefill_forget = (
+            self._project_forget_strided_fp8
+            if strided_fp8_prefill_forget
+            else self._project_forget
         )
         self._fp8_collective = None
         self._bf16_collective = None
@@ -139,16 +145,21 @@ class KdaAttention(nn.Module):
         qkv, gate, fa, beta = fused.split(
             [3 * self.width, self.width, self.fa_width, self.heads], dim=-1
         )
-        with profile_scope("RTP::attention.kda.forget_proj"):
-            forget = self._project_forget(fa)
         kernel = (
             self.prefill
             if attention_inputs.is_prefill and not metadata.is_target_verify
             else self.decode
         )
+        with profile_scope("RTP::attention.kda.forget_proj"):
+            project_forget = (
+                self._project_prefill_forget
+                if kernel is self.prefill and not fa.is_contiguous()
+                else self._project_forget
+            )
+            forget = project_forget(fa)
         with profile_scope("RTP::attention.kda.core"):
             output = kernel(
-                qkv if kernel is self.prefill else qkv.contiguous(),
+                qkv,
                 forget,
                 beta,
                 attention_inputs,
@@ -156,7 +167,12 @@ class KdaAttention(nn.Module):
                 metadata,
             )
         valid_mask = attention_inputs.valid_token_mask
-        if valid_mask is not None:
+        if layout is not None and layout.natural_all_valid:
+            valid_mask = None
+        fused_mask = (
+            valid_mask if self._fp8_output_norm and metadata.is_target_verify else None
+        )
+        if valid_mask is not None and fused_mask is None:
             # Paged KDA skips null-block rows, leaving their output unspecified.
             output = torch.where(valid_mask[:, None], output.reshape(-1, self.width), 0)
             gate = torch.where(valid_mask[:, None], gate, 0)
@@ -171,6 +187,7 @@ class KdaAttention(nn.Module):
                     gate.reshape(-1, self.heads, self.dim),
                     self.norm.weight,
                     self.norm.eps,
+                    valid_rows=fused_mask,
                 )
             else:
                 scatter_layout = None if outer_layout is not None and outer_layout.all_valid else layout

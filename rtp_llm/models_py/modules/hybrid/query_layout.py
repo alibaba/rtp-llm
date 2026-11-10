@@ -36,9 +36,9 @@ class QueryLayout:
             raise ValueError("zigzag rank-major rows must divide the TP group")
         self.local_rows = self.physical_rows // size
         self.true_rows = sum(self.lengths)
-        # Host metadata proves this without reading a CUDA scalar. An explicit
-        # validity mask may contain holes, so it must retain the masked path.
-        self.all_valid = valid_mask is None and self.true_rows == self.physical_rows
+        # An explicit mask may contain holes even after removing layout padding.
+        self.natural_all_valid = valid_mask is None
+        self.all_valid = self.natural_all_valid and self.true_rows == self.physical_rows
         self.natural_to_rankmajor = self.restore[self.padding_mask]
         if self.natural_to_rankmajor.numel() != self.true_rows:
             raise ValueError("zigzag padding mask does not match real lengths")

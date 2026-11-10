@@ -2,6 +2,8 @@
 
 from collections.abc import Mapping
 
+from rtp_llm.models_py.utils.module_profiler import profile_scope
+
 
 def resolve_mla_routes(fmha, cache, *, sparse: bool, attention_tag="default"):
     if not sparse:
@@ -18,7 +20,9 @@ def resolve_mla_routes(fmha, cache, *, sparse: bool, attention_tag="default"):
     return fmha[attention_tag], cache[attention_tag], fmha["indexer_kv"], cache["indexer_kv"]
 
 
-def run_sparse_indexer(indexer, hidden, query_latent, cache, fmha):
+def run_sparse_indexer(
+    indexer, hidden, query_latent, cache, fmha, *, encoded_q_lora=None, prepared_key=None,
+):
     if indexer is None or cache is None:
         return None
     topk = indexer(
@@ -29,6 +33,8 @@ def run_sparse_indexer(indexer, hidden, query_latent, cache, fmha):
         fmha.attn_inputs,
         use_fast_path=not fmha.is_sparse(),
         cp_params=fmha.cp_params,
+        **({"encoded_q_lora": encoded_q_lora} if encoded_q_lora is not None else {}),
+        **({"prepared_key": prepared_key} if prepared_key is not None else {}),
     )
     _publish_indexer_cache(fmha.attn_inputs, cache)
     return topk
@@ -40,7 +46,7 @@ def _publish_indexer_cache(inputs, cache):
 
 
 def run_prepared_sparse_indexer(indexer, query, weights, cache, fmha):
-    """Complete history once after natural K ingress and all query chunks.
+    """Complete history once after natural K ingress and query projection.
 
     The caller has already written K. Warmup/non-sparse routes still publish
     their cache exactly once, matching run_sparse_indexer's fast path.
@@ -49,8 +55,9 @@ def run_prepared_sparse_indexer(indexer, query, weights, cache, fmha):
         return None
     topk = None
     if fmha.is_sparse():
-        topk = indexer._compute_topk(
-            query, weights, cache, fmha.fmha_params, fmha.attn_inputs, fmha.cp_params,
-        )
+        with profile_scope("RTP::attention.dsa.indexer_core"):
+            topk = indexer._compute_topk(
+                query, weights, cache, fmha.fmha_params, fmha.attn_inputs, fmha.cp_params,
+            )
     _publish_indexer_cache(fmha.attn_inputs, cache)
     return topk

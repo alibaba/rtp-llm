@@ -52,6 +52,7 @@ class KimiK31ModelAdapter:
         from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import CudaFp8GEMMLinear
         from .natural_dsa import route_allocation_budget
 
+        fp8_output_width = 0
         for layer in self.layers:
             if layer.layer_type == HybridAttentionType.LINEAR:
                 attention = layer.attention
@@ -67,8 +68,14 @@ class KimiK31ModelAdapter:
                 ):
                     raise ValueError("natural outer FP8 KDA output requires UE8M0 scales")
             elif getattr(layer.attention, "indexer", None) is not None:
-                if not hasattr(layer.attention, "natural_q_input"):
+                attention = layer.attention
+                if not hasattr(attention, "natural_q_input"):
                     raise ValueError("natural outer requires a supported SFA split projection backend")
+                if self.tp_size == 8 and attention._fp8_output_gate:
+                    width = attention.heads * attention.v_dim
+                    if fp8_output_width not in (0, width):
+                        raise ValueError("natural outer requires one shared FP8 DSA output width")
+                    fp8_output_width = width
         if self.norm.weight.dtype != torch.bfloat16:
             raise ValueError("natural outer requires BF16 hidden states")
         # The model owner already includes chunking, per-request CP padding
@@ -77,6 +84,7 @@ class KimiK31ModelAdapter:
         self._row_exchange = DirectedRowExchange(
             get_process_group(Group.TP), self.norm.weight.device,
             capacity, self.config.hidden_size, chunk_capacity=8192,
+            fp8_output_width=fp8_output_width,
         )
         owner = self.dsa_workspace
         owner.row_exchange = self._row_exchange
