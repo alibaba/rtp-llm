@@ -22,7 +22,9 @@ from rtp_llm.utils.backend_registry import register_backend_hook
 _registered = False
 
 
-def _register_impls(prefill_mha_imps, decode_mha_imps, **_ignored) -> None:
+def _register_impls(
+    prefill_mha_imps, decode_mha_imps, prefill_mla_imps=None, decode_mla_imps=None
+) -> None:
     from rtp_llm.models_py.modules.factory.attention.ppu_impl.fa3_mha import (
         FA3DecodeImpl,
         FA3PrefillPagedImpl,
@@ -37,6 +39,43 @@ def _register_impls(prefill_mha_imps, decode_mha_imps, **_ignored) -> None:
         "(flash_attn_3 available: %s)",
         _check_fa3_available(),
     )
+
+    # Sparse MLA (GLM-5 / DSV3.2 DSA). The PPU flash_mla 2.0 wheel exposes the
+    # same flash_mla_sparse_fwd / flash_mla_with_kvcache API and the C++
+    # bindings (SparseMlaParams, concat_and_cache_mla, indexer ops) build for
+    # PPU. SparseMlaImpl serves DP decode; CP prefill is registered below.
+    if prefill_mla_imps is not None and decode_mla_imps is not None:
+        try:
+            from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
+                SparseMlaImpl,
+            )
+
+            decode_mla_imps.append(SparseMlaImpl)
+            logging.info("[ppu attn register] SparseMlaImpl registered for sparse MLA")
+        except ImportError as e:
+            logging.warning(
+                "[ppu attn register] flash_mla unavailable, sparse MLA not "
+                "registered: %s",
+                e,
+            )
+
+        # Prefill context parallel. Once prefill_cp_config.is_enabled() the
+        # factory filters on support_prefill_cp(), which SparseMlaImpl answers
+        # False -- without this the CP list is empty and prefill has no backend.
+        try:
+            from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
+                SparseMlaCpImpl,
+            )
+
+            prefill_mla_imps.append(SparseMlaCpImpl)
+            logging.info(
+                "[ppu attn register] SparseMlaCpImpl registered for prefill CP"
+            )
+        except ImportError as e:
+            logging.warning(
+                "[ppu attn register] prefill CP sparse MLA unavailable: %s",
+                e,
+            )
 
 
 def install() -> None:

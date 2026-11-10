@@ -9,6 +9,7 @@ packer below is the reference oracle for tests; the runtime always uses the fuse
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from functools import partial
 
 import torch
 
@@ -66,6 +67,11 @@ class TorchMegaMoEInputPacker(MegaMoEInputPacker):
 class FusedMegaMoEInputPacker(MegaMoEInputPacker):
     name = "fused"
 
+    def __init__(self, *, pack_inputs=None):
+        # Recipes may select a launch policy while sharing buffer validation
+        # and slicing. None preserves the environment-selected default path.
+        self.pack_inputs = pack_inputs
+
     def pack(
         self,
         x: torch.Tensor,
@@ -89,7 +95,8 @@ class FusedMegaMoEInputPacker(MegaMoEInputPacker):
             fused_pack_mega_moe_inputs,
         )
 
-        fused_pack_mega_moe_inputs(
+        pack_inputs = self.pack_inputs or fused_pack_mega_moe_inputs
+        pack_inputs(
             x,
             weights,
             indices,
@@ -100,5 +107,18 @@ class FusedMegaMoEInputPacker(MegaMoEInputPacker):
         )
 
 
-def get_mega_moe_input_packer() -> MegaMoEInputPacker:
+def get_mega_moe_input_packer(*, prepared: bool = False) -> MegaMoEInputPacker:
+    if prepared:
+        from rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack import (
+            fused_pack_mega_moe_inputs_optimized,
+        )
+
+        # GLM checkpoints retain their fixed launch and non-finite policy.
+        return FusedMegaMoEInputPacker(
+            pack_inputs=partial(
+                fused_pack_mega_moe_inputs_optimized,
+                sanitize_non_finite=False,
+                allow_int32_indices=True,
+            )
+        )
     return FusedMegaMoEInputPacker()

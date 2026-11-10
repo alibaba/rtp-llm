@@ -24,7 +24,11 @@ def vit_start_server(
     http_port: Optional[int] = None,
     is_proxy_mode: bool = False,
     rdma_port: Optional[int] = None,
+    service_draining=None,
 ):
+    from rtp_llm.metrics import kmonitor
+
+    kmonitor.bind_service_draining(service_draining)
     # Set server_id on the passed config
     py_env_configs.server_config.vit_server_id = server_id
     if rdma_port is not None:

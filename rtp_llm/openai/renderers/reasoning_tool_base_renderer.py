@@ -389,8 +389,12 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             return await self._create_empty_delta(status.output.aux_info)
         status.update_output(
             output,
-            functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
-            self._remove_stop_word_ids,
+            functools.partial(
+                self._check_finish_reason,
+                max_new_tokens=max_new_tokens,
+                ignore_eos=status.ignore_eos,
+            ),
+            functools.partial(self._remove_stop_word_ids, ignore_eos=status.ignore_eos),
         )
 
         # NOTE: With multi-token stop words (e.g., tokenized from extra_stop_words),

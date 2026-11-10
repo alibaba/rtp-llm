@@ -314,6 +314,59 @@ TEST_F(NormalBatchStreamProcessorTest, testZeroDispatchWorkerCount) {
     EXPECT_EQ(zero_worker_dispatcher.thread_pool_, nullptr);
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testPdPublicationRequiresAContextRequestThatUsesPd) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len      = 32;
+    model_config.vocab_size       = 128;
+    model_config.input_vocab_size = 128;
+    model_config.num_layers       = 1;
+    RuntimeConfig runtime_config;
+
+    struct Case {
+        // Each pair is (uses PD, is a context request).
+        std::vector<std::pair<bool, bool>> requests;
+        bool                               publishes_on_prefill;
+    };
+    const std::vector<Case> cases = {
+        {{}, false},
+        {{{false, true}}, false},
+        {{{false, true}, {false, true}}, false},
+        {{{true, true}}, true},
+        {{{false, true}, {true, true}}, true},
+        {{{true, true}, {false, true}}, true},
+        {{{true, false}}, false},
+        {{{true, false}, {false, true}}, false},
+        {{{true, false}, {true, true}}, true},
+    };
+    for (const auto role : {RoleType::PREFILL, RoleType::DECODE, RoleType::PDFUSION}) {
+        for (size_t index = 0; index < cases.size(); ++index) {
+            SCOPED_TRACE(::testing::Message() << "role=" << static_cast<int>(role) << " case=" << index);
+            std::list<GenerateStreamPtr> streams;
+            for (const auto& [uses_pd, is_context] : cases[index].requests) {
+                auto query                             = make_shared<GenerateInput>();
+                query->input_ids                       = hostIntBuffer({1, 2, 3});
+                query->generate_config                 = make_shared<GenerateConfig>();
+                query->generate_config->max_new_tokens = uses_pd ? 8 : 1;
+                query->generate_config->pd_separation  = uses_pd;
+                auto stream =
+                    make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+                stream->generate_status_->status = StreamState::RUNNING;
+                stream->setIsContextStream(is_context);
+                streams.push_back(std::move(stream));
+            }
+            StreamGroups                   groups(streams);
+            NormalModelInputGathererConfig config;
+            config.role_type           = role;
+            config.kv_cache_group_nums = 0;
+            NormalModelInputGatherer gatherer(config);
+            const auto               inputs = gatherer.allocateModelInputBuffers(groups);
+            EXPECT_EQ(inputs.pd_separation, role == RoleType::PREFILL && cases[index].publishes_on_prefill);
+            EXPECT_EQ(inputs.request_pd_separation.numel(), groups.totalContextBatchSize());
+        }
+    }
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testNegativeDispatchWorkerCountIsRejected) {
     EXPECT_THROW(NormalOutputDispatcher({}, -1), std::invalid_argument);
 }
@@ -689,6 +742,7 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     query->input_ids                             = hostIntBuffer({1, 2, 3});
     query->generate_config                       = make_shared<GenerateConfig>();
     query->generate_config->num_return_sequences = 2;
+    query->generate_config->pd_separation        = true;
     GenerateStreamPtr stream =
         make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
 

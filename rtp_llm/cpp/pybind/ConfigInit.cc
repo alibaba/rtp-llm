@@ -873,6 +873,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_decode_cascade_attention", &HWKernelConfig::enable_decode_cascade_attention)
         .def_readwrite("disable_dpc_random", &HWKernelConfig::disable_dpc_random)
         .def_readwrite("rocm_disable_custom_ag", &HWKernelConfig::rocm_disable_custom_ag)
+        .def_readwrite("enable_fuse_kernels", &HWKernelConfig::enable_fuse_kernels)
         .def("to_string", &HWKernelConfig::to_string)
         .def(py::pickle(
             [](const HWKernelConfig& self) {
@@ -883,10 +884,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.decode_capture_batch_sizes,
                                       self.generation_prefill_cuda_graph_max_requests,
                                       self.generation_prefill_capture_token_buckets,
-                                      self.enable_decode_cascade_attention);
+                                      self.enable_decode_cascade_attention,
+                                      self.disable_dpc_random,
+                                      self.rocm_disable_custom_ag,
+                                      self.enable_fuse_kernels);
             },
             [](py::tuple t) {
-                if (t.size() != 5 && t.size() != 7 && t.size() != 8 && t.size() != 9 && t.size() != 10)
+                if (t.size() != 5 && t.size() != 7 && t.size() != 8 && t.size() != 9 && t.size() != 10 && t.size() != 11)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
@@ -905,8 +909,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     // Sizes 9/10 carry the retired independent decode capacity
                     // at t[8] (ignored; capacity is derived from buckets); the
                     // 10-tuple additionally re-states the cascade flag at t[9].
-                    if (t.size() >= 10) {
+                    if (t.size() == 10) {
                         c.enable_decode_cascade_attention = t[9].cast<bool>();
+                    }
+                    if (t.size() == 11) {
+                        c.disable_dpc_random     = t[8].cast<bool>();
+                        c.rocm_disable_custom_ag = t[9].cast<bool>();
+                        c.enable_fuse_kernels    = t[10].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());
@@ -2048,6 +2057,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         // Fields merged from PyModelConfig
         .def_readwrite("extra_data_path", &ModelConfig::extra_data_path)
         .def_readwrite("local_extra_data_path", &ModelConfig::local_extra_data_path)
+        .def_readwrite("index_share_for_mtp_iteration", &ModelConfig::index_share_for_mtp_iteration)
         .def_readwrite("model_type", &ModelConfig::model_type)
         .def_readwrite("ptuning_path", &ModelConfig::ptuning_path)
         .def_readwrite("mm_model_config", &ModelConfig::mm_model_config)

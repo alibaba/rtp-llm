@@ -12,12 +12,16 @@ _registered = False
 
 
 def _register_impls(factory, **_ignored) -> None:
+    from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_deepgemm_linear import (
+        PpuFp8DeepGemmLinear,
+    )
     from rtp_llm.models_py.modules.factory.linear.ppu_impl.int8_deepgemm_linear import (
         PpuInt8DeepGemmLinear,
     )
 
     factory.register(PpuInt8DeepGemmLinear)
-    logging.info("[ppu linear register] Registered W8A8 INT8 DeepGEMM Linear")
+    factory.register(PpuFp8DeepGemmLinear)
+    logging.info("[ppu linear register] Registered W8A8 INT8 + FP8 DeepGEMM Linear")
 
 
 def install() -> None:

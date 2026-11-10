@@ -94,6 +94,7 @@ The core features include:
 
       references/general
       references/developer
+      references/production_metrics.md
       references/cli/Guide.md
       README.md
 

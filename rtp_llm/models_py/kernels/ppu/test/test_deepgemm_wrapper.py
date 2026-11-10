@@ -67,5 +67,36 @@ class DeepGemmMaskedDispatchTest(unittest.TestCase):
             version.assert_not_called()
 
 
+class DeepGemmFp8DispatchTest(unittest.TestCase):
+    def test_grouped_layouts_use_current_stream_only_for_affected_wheel(self):
+        python_module = types.ModuleType("deep_gemm.jit_kernels.m_grouped_gemm_fp8")
+        for layout in ("contiguous", "masked", "nopad"):
+            symbol = "m_grouped_gemm_fp8_fp8_bf16_nt_" + layout
+            exported, python_impl = lambda *args: None, lambda *args: None
+            wheel = types.SimpleNamespace(**{symbol: exported})
+            setattr(python_module, symbol, python_impl)
+            for version in ("1.0.0+v0.4.0.ppu2.2.0", "1.0.0+v0.4.1.ppu2.2.0"):
+                with self.subTest(layout=layout, version=version), patch.dict(
+                    sys.modules, {python_module.__name__: python_module}
+                ), patch.object(importlib.metadata, "version", return_value=version):
+                    self.assertIs(
+                        deepgemm_wrapper._resolve_fp8_grouped(wheel, layout),
+                        python_impl if version == "1.0.0+v0.4.0.ppu2.2.0" else exported,
+                    )
+
+    def test_missing_metadata_and_symbol_preserve_exported_contract(self):
+        exported = lambda *args: None
+        wheel = types.SimpleNamespace(m_grouped_gemm_fp8_fp8_bf16_nt_nopad=exported)
+        with patch.object(
+            importlib.metadata,
+            "version",
+            side_effect=importlib.metadata.PackageNotFoundError,
+        ):
+            self.assertIs(
+                deepgemm_wrapper._resolve_fp8_grouped(wheel, "nopad"), exported
+            )
+        self.assertIsNone(deepgemm_wrapper._resolve_fp8_grouped(wheel, "masked"))
+
+
 if __name__ == "__main__":
     unittest.main()

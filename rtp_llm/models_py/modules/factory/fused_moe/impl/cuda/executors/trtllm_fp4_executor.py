@@ -3,6 +3,7 @@ from typing import Any, Dict, Optional
 import torch
 from flashinfer import ActivationType, fp4_quantize
 from flashinfer.fused_moe import trtllm_fp4_block_scale_routed_moe
+from flashinfer.fused_moe.core import get_trtllm_moe_sm100_module
 from flashinfer.utils import device_support_pdl
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -75,6 +76,15 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
 
         self.global_num_experts = config.expert_num
         self._enable_pdl = device_support_pdl(self.w1.device)
+
+        # Build before the first DeepEP dispatch. Cold compilation between
+        # dispatch and combine can exceed the peer's GPU communication timeout.
+        # FlashInfer caches the module, so subsequent layers reuse it.
+        get_trtllm_moe_sm100_module()
+        if config.ep_size > 1:
+            # Cold builds can finish minutes apart across ranks. DeepEP uses
+            # WORLD, so wait for every peer before any rank starts dispatching.
+            torch.distributed.barrier(group=torch.distributed.group.WORLD)
 
     @property
     def local_num_experts(self) -> int:

@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace py = pybind11;
 namespace rtp_llm {
@@ -60,9 +61,9 @@ public:
         params.hidden_size              = static_cast<size_t>(hidden_size);
         params.input_hidden_size        = static_cast<size_t>(hidden_size);
         params.model_data_type          = c10::ScalarType::BFloat16;
-        params.prefill_capture_seq_lens   = std::move(prefill_capture_seq_lens);
-        params.kv_cache_group_tags        = std::move(group_tags);
-        params.kernel_block_table_width   = kernel_block_table_width;
+        params.prefill_capture_seq_lens = std::move(prefill_capture_seq_lens);
+        params.kv_cache_group_tags      = std::move(group_tags);
+        params.kernel_block_table_width = kernel_block_table_width;
 
         if (position_encoding.has_value()) {
             params.position_encoding = std::move(*position_encoding);
@@ -238,6 +239,8 @@ private:
 
 PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
     using namespace rtp_llm;
+    // Query the state linked into this test module, which owns the runner.
+    m.def("cuda_graph_warmup_forward_enabled", &cudaGraphWarmupForwardEnabled);
     py::register_exception<DirtyCudaGraphCaptureError>(m, "DirtyCudaGraphCaptureError", PyExc_RuntimeError);
     py::class_<CudaGraphTestRunner>(m, "CudaGraphRunner")
         .def(py::init<>())

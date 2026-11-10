@@ -69,6 +69,7 @@ py_test(
 dsv4_py_test(
     name = "test_chunked_moe",
     deps = [
+        "//rtp_llm/models_py:models",
         "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
     ],

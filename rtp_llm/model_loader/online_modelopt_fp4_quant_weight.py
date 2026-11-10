@@ -14,24 +14,35 @@ input_scale defaults to 1.0 because no calibration data is available; the FP4
 executors fall back to dynamic per-block activation quantization.
 """
 
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import torch
 
-from rtp_llm.config.quant_config import ModelOptFp4Config, QuantizationConfig
+from rtp_llm.config.quant_config import (
+    Fp8BlockWiseQuantConfig,
+    ModelOptFp4Config,
+    QuantizationConfig,
+)
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import (
+    AtomicWeight,
     CompositeWeight,
     QuantWeight,
     WeightModule,
+)
+from rtp_llm.models_py.kernels.cuda.quant_layouts import FP4_BLOCK as MEGA_MOE_FP4_BLOCK
+from rtp_llm.models_py.kernels.cuda.quant_layouts import (
+    convert_fp8_moe_to_fp4_ue8m0,
+    quantize_moe_weight_to_fp4_ue8m0,
 )
 from rtp_llm.utils.model_weight import W, identity
 
 FLOAT4_E2M1_MAX = 6.0
 FLOAT8_E4M3_MAX = 448.0
 NVFP4_BLOCK_SIZE = 16
+_MEGA_MOE_KERNEL_NAMES = (W.moe_w1, W.moe_w2)
 
 _E2M1_BOUNDS = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
 _E2M1_ODD_BOUNDS = _E2M1_BOUNDS[[1, 3, 5]]  # banker-rounding ties
@@ -269,3 +280,317 @@ class OnlineModelOptFp4MoeWeight(CompositeWeight, QuantWeight):
         processed[self.kernel.name] = kernel_w
         processed[self.scale.name] = scale_w
         return processed
+
+
+def _mega_moe_scale_name(name: str) -> str:
+    if name == W.moe_w1:
+        return W.moe_s1
+    if name == W.moe_w2:
+        return W.moe_s2
+    raise ValueError(f"unsupported mega_moe kernel name: {name}")
+
+
+class OnlineMegaMoeFp4Weight(CompositeWeight, QuantWeight):
+    """Load-time FP4+UE8M0 quantizer for mega-MoE stacked MoE weights
+    (``moe_w1`` preserves its source stacked order, ``moe_w2`` = down)
+    starting from BF16.
+
+    The common ``MegaMoeExecutor`` consumes the packed weights and scales.
+    Converting during loading releases the BF16 tensor before executor setup.
+
+    Wired in by ``apply_mega_moe_fp4_wrappers`` (in ``model_weight_info.py``)
+    when a MegaMoE strategy is selected. Inherits ``QuantWeight`` purely so that
+    ``MoeWeight``'s sub-weight assertion passes; the ``support()`` classmethod
+    is gated to never fire from the regular ``QuantWeight.create()`` registry
+    (the explicit wrap pass is the only entry point).
+    """
+
+    moe_weight_list = list(_MEGA_MOE_KERNEL_NAMES)
+
+    @classmethod
+    def support(
+        cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
+    ) -> bool:
+        return False  # explicit-wiring only; never auto-selected
+
+    def __init__(
+        self,
+        src_weight_info: MoeAtomicWeight,
+        block_size: int = MEGA_MOE_FP4_BLOCK,
+        **kwargs: Any,
+    ):
+        if src_weight_info.name not in _MEGA_MOE_KERNEL_NAMES:
+            raise ValueError(
+                f"OnlineMegaMoeFp4Weight only wraps {_MEGA_MOE_KERNEL_NAMES}, "
+                f"got {src_weight_info.name}"
+            )
+
+        kernel = MoeAtomicWeight(
+            name=src_weight_info.name,
+            weights=src_weight_info.weights,
+            process_fun=src_weight_info.process_fun,
+            data_type=None,  # follow load_config.compute_dtype (BF16)
+            config=src_weight_info.config,
+            stacked_ckpt_keys=getattr(src_weight_info, "stacked_ckpt_keys", False),
+        )
+        scale = MoeAtomicWeight(
+            name=_mega_moe_scale_name(src_weight_info.name),
+            weights=[],  # synthesised in _load_raw_tensor
+            process_fun=identity,
+            data_type=torch.float32,
+            config=src_weight_info.config,
+        )
+
+        sub_weights = {kernel.name: kernel, scale.name: scale}
+        super().__init__(
+            sub_weights,
+            quant_config=None,
+            name=src_weight_info.name,
+            **{k: v for k, v in kwargs.items() if k != "name"},
+        )
+        self.kernel = kernel
+        self.scale = scale
+        self._block_size = block_size
+
+    def _load_raw_tensor(
+        self,
+        tensor_source: TensorSource,
+        layer_id: Optional[int],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        kernel_dict = self.kernel._load_raw_tensor(
+            tensor_source, layer_id, device, load_config
+        )
+        weight = kernel_dict[self.kernel.name]
+        packed, sf = quantize_moe_weight_to_fp4_ue8m0(weight, self._block_size)
+        del weight
+        kernel_dict[self.kernel.name] = packed
+        kernel_dict[self.scale.name] = sf
+        return kernel_dict
+
+    def _postprocess(self, tensor, device: str, load_config: LoadConfig):
+        # No layout transform here: the deepgemm SF layout + mega-moe transform
+        # require the (l1, l2) pair together and run in MegaMoeExecutor setup.
+        return {
+            self.kernel.name: tensor[self.kernel.name],
+            self.scale.name: tensor[self.scale.name],
+        }
+
+
+class OnlineMegaMoeFp4FromFp8Weight(CompositeWeight, QuantWeight):
+    """Load-time FP8 per-block → FP4+UE8M0 quantizer for mega-MoE.
+
+    Takes FP8 per-block quantized weights (``float8_e4m3fn`` kernel +
+    ``float32`` scale) and produces FP4 packed int8 + fp32 UE8M0 scale at
+    load time for the common ``MegaMoeExecutor`` to consume directly.
+
+    Wired in by ``apply_mega_moe_fp4_wrappers`` when a MegaMoE strategy is selected
+    and the original MoE weight was a ``PerBlockFp8Weight``.
+    """
+
+    moe_weight_list = list(_MEGA_MOE_KERNEL_NAMES)
+
+    @classmethod
+    def support(
+        cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
+    ) -> bool:
+        return False  # explicit-wiring only
+
+    def __init__(
+        self,
+        src_kernel: MoeAtomicWeight,
+        src_scale: MoeAtomicWeight,
+        block_size: int = MEGA_MOE_FP4_BLOCK,
+        **kwargs: Any,
+    ):
+        if src_kernel.name not in _MEGA_MOE_KERNEL_NAMES:
+            raise ValueError(
+                f"OnlineMegaMoeFp4FromFp8Weight only wraps {_MEGA_MOE_KERNEL_NAMES}, "
+                f"got {src_kernel.name}"
+            )
+
+        # Sub-weight that loads the FP8 kernel from the checkpoint.
+        kernel = MoeAtomicWeight(
+            name=src_kernel.name,
+            weights=src_kernel.weights,
+            process_fun=src_kernel.process_fun,
+            data_type=torch.float8_e4m3fn,
+            config=src_kernel.config,
+            stacked_ckpt_keys=getattr(src_kernel, "stacked_ckpt_keys", False),
+        )
+        # Sub-weight that loads the FP8 per-block scale; renamed with an
+        # ``_fp8_input`` suffix so it does not collide with the FP4 output
+        # scale tensor we emit.
+        fp8_scale_name = _mega_moe_scale_name(src_kernel.name) + "_fp8_input"
+        fp8_scale = MoeAtomicWeight(
+            name=fp8_scale_name,
+            weights=src_scale.weights,
+            process_fun=src_scale.process_fun,
+            data_type=torch.float32,
+            config=src_scale.config,
+            stacked_ckpt_keys=getattr(src_scale, "stacked_ckpt_keys", False),
+        )
+        # Output FP4 scale (synthesised in _load_raw_tensor).
+        out_scale = MoeAtomicWeight(
+            name=_mega_moe_scale_name(src_kernel.name),
+            weights=[],
+            process_fun=identity,
+            data_type=torch.float32,
+            config=src_kernel.config,
+        )
+
+        sub_weights = {
+            kernel.name: kernel,
+            fp8_scale.name: fp8_scale,
+            out_scale.name: out_scale,
+        }
+        super().__init__(
+            sub_weights,
+            quant_config=None,
+            name=src_kernel.name,
+            **{k: v for k, v in kwargs.items() if k != "name"},
+        )
+        self.kernel = kernel
+        self.fp8_scale = fp8_scale
+        self.out_scale = out_scale
+        self._block_size = block_size
+
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        names = self.kernel.get_tensor_names(layer_id, load_config)
+        names |= self.fp8_scale.get_tensor_names(layer_id, load_config)
+        return names
+
+    def _load_raw_tensor(
+        self,
+        tensor_source: TensorSource,
+        layer_id: Optional[int],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        kernel_dict = self.kernel._load_raw_tensor(
+            tensor_source, layer_id, device, load_config
+        )
+        scale_dict = self.fp8_scale._load_raw_tensor(
+            tensor_source, layer_id, device, load_config
+        )
+        weight_fp8 = kernel_dict[self.kernel.name]
+        weight_scale = scale_dict[self.fp8_scale.name]
+
+        packed, sf = convert_fp8_moe_to_fp4_ue8m0(
+            weight_fp8, weight_scale, self._block_size
+        )
+        del weight_fp8, weight_scale
+        return {
+            self.kernel.name: packed,
+            self.out_scale.name: sf,
+        }
+
+    def _split(self, tensor, load_config: LoadConfig):
+        split_kernel = self.kernel._split(
+            {self.kernel.name: tensor[self.kernel.name]}, load_config
+        )
+        split_scale = self.out_scale._split(
+            {self.out_scale.name: tensor[self.out_scale.name]}, load_config
+        )
+        out: Dict[str, torch.Tensor] = {}
+        out.update(split_kernel)
+        out.update(split_scale)
+        return out
+
+    def _postprocess(self, tensor, device: str, load_config: LoadConfig):
+        return {
+            self.kernel.name: tensor[self.kernel.name],
+            self.out_scale.name: tensor[self.out_scale.name],
+        }
+
+
+from rtp_llm.model_loader.per_block_fp8_quant_weight import (
+    LoadQuantPerBlockFp8Weight,
+    create_w8a8_fp8_per_block_weight,
+)
+
+
+class OnlineModelOptFp4HybridFp8AttnWeight(LoadQuantPerBlockFp8Weight):
+    """FP8_PER_BLOCK loader used by ``MODELOPT_FP4`` hybrid mode for non-MoE weights."""
+
+    _excluded_names = (W.moe_w1, W.moe_w2, W.mla_kc, W.mla_vc)
+
+    @classmethod
+    def support(
+        cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
+    ) -> bool:
+        if not isinstance(quant_config, ModelOptFp4Config):
+            return False
+        if quant_config.is_quanted():
+            return False
+        if getattr(quant_config, "hybrid_attn_quant_method", None) != "FP8_PER_BLOCK":
+            return False
+        if isinstance(src_weight_info, MoeAtomicWeight):
+            return False
+        name = src_weight_info.name
+        if name in cls._excluded_names:
+            return False
+        return name in cls.w8a8_weight_list
+
+    def __init__(
+        self,
+        src_weight_info: AtomicWeight,
+        quant_config: QuantizationConfig,
+        *args: Any,
+        **kwargs: Any,
+    ):
+        # FP4 quant_config has group_size=16; for the FP8 block-wise path used by
+        # attention weights we lock to the canonical FP8 per-block size (128).
+        self.group_size = Fp8BlockWiseQuantConfig.DEFAULT_FP8_QUANT_BLOCK_SIZE
+        params = src_weight_info.extract_params(
+            src_weight_info.__class__, src_weight_info, quant_config
+        )
+        kernel: AtomicWeight = create_w8a8_fp8_per_block_weight(
+            src_weight_info, **params
+        )
+        sub_weights = {kernel.name: kernel}
+        scale_name = self.w8a8_weight_list.get(src_weight_info.name)
+        scale = None
+        if scale_name:
+            scale_params = {**params}
+            scale_params["name"] = scale_name
+            scale = create_w8a8_fp8_per_block_weight(src_weight_info, **scale_params)
+            sub_weights.update({scale.name: scale})
+
+        CompositeWeight.__init__(
+            self, sub_weights, quant_config=quant_config, *args, **kwargs
+        )
+        self.kernel = kernel
+        self.scale = scale
+
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        return self.kernel.get_tensor_names(layer_id, load_config)
+
+
+def wrap_moe_for_mega_moe(weight: WeightModule) -> WeightModule:
+    """If ``weight`` is a MoE atomic / per-block FP8 wrapper for moe_w1/moe_w2,
+    return a load-time FP4 quantizer that consumes BF16 or FP8 source. Otherwise
+    return the weight unchanged.
+
+    This is the single entry point used by ``apply_mega_moe_fp4_wrappers`` in
+    ``model_weight_info.py``.
+    """
+    from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
+
+    if isinstance(weight, PerBlockFp8Weight) and weight.name in _MEGA_MOE_KERNEL_NAMES:
+        kernel = weight.kernel
+        scale = weight.scale
+        if kernel is None or scale is None:
+            return weight
+        return OnlineMegaMoeFp4FromFp8Weight(
+            src_kernel=kernel,
+            src_scale=scale,
+        )
+    if isinstance(weight, MoeAtomicWeight) and weight.name in _MEGA_MOE_KERNEL_NAMES:
+        return OnlineMegaMoeFp4Weight(weight)
+    return weight

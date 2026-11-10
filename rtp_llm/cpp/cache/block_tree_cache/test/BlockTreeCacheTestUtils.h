@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -24,6 +26,20 @@ class BroadcastManager;
 }
 
 namespace rtp_llm::block_tree_cache_test {
+
+// Match the serving lifecycle used by production metric reporters.
+class ScopedServingMetrics {
+public:
+    ScopedServingMetrics() {
+        startKmonServiceStatus(nullptr);
+        setKmonServiceServing(true);
+    }
+    ~ScopedServingMetrics() {
+        stopKmonServiceStatus();
+    }
+    ScopedServingMetrics(const ScopedServingMetrics&)            = delete;
+    ScopedServingMetrics& operator=(const ScopedServingMetrics&) = delete;
+};
 
 struct DeviceLayerBufferSpec {
     size_t kv_bytes{0};

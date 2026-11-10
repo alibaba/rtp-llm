@@ -110,8 +110,46 @@ class CudaFp8DeepGEMMLinearOutContractTest(unittest.TestCase):
         returned = CudaFp8GEMMLinear.forward(wrapper, input_tensor, out=out)
 
         self.assertIs(returned, out)
-        deepgemm.assert_called_once_with(input_tensor, out=out)
+        deepgemm.assert_called_once_with(input_tensor, out=out, input_scales=None)
         flashinfer.assert_not_called()
+
+    def test_explicit_scales_bypass_flashinfer_and_reach_gemm(self):
+        for packed_scales in (False, True):
+            with self.subTest(packed_scales=packed_scales):
+                linear = _make_linear_for_forward()
+                linear.scale_ue8m0 = packed_scales
+                input_tensor = torch.ones(2, 4).to(torch.float8_e4m3fn)
+                scales = torch.ones(
+                    2, 1, dtype=torch.int32 if packed_scales else torch.float32
+                )
+                flashinfer = Mock(
+                    side_effect=AssertionError("explicit scales must bypass FlashInfer")
+                )
+                wrapper = SimpleNamespace(
+                    _deepgemm_linear=linear, _flashinfer_linear=flashinfer
+                )
+                with patch.object(deepgemm_linear_mod, "fp8_gemm_nt") as gemm:
+                    CudaFp8GEMMLinear.forward(
+                        wrapper, input_tensor, input_scales=scales
+                    )
+                self.assertIs(gemm.call_args.args[0][0], input_tensor)
+                self.assertIs(gemm.call_args.args[0][1], scales)
+                flashinfer.assert_not_called()
+
+    def test_explicit_scale_dtype_must_match_weight_format(self):
+        for packed_scales in (False, True):
+            with self.subTest(packed_scales=packed_scales):
+                linear = _make_linear_for_forward()
+                linear.scale_ue8m0 = packed_scales
+                input_tensor = torch.ones(2, 4).to(torch.float8_e4m3fn)
+                scales = torch.ones(
+                    2, 1, dtype=torch.float32 if packed_scales else torch.int32
+                )
+                with self.assertRaisesRegex(ValueError, "expects"), patch.object(
+                    deepgemm_linear_mod, "fp8_gemm_nt"
+                ) as gemm:
+                    linear(input_tensor, input_scales=scales)
+                gemm.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -72,6 +72,14 @@ py_test(
 )
 
 py_test(
+    name = "custom_renderer_ignore_eos_test",
+    srcs = ["custom_renderer_ignore_eos_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "reasoning_tool_parsing_test",
     srcs = [
         "reasoning_tool_parsing_test.py",
@@ -478,4 +486,10 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "kmonitor_metric_reporter_test",
+    srcs = ["kmonitor_metric_reporter_test.py"],
+    deps = ["//rtp_llm:testlib"],
 )

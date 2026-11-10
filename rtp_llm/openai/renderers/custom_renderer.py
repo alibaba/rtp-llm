@@ -5,7 +5,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -44,6 +44,7 @@ from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
+    FrontendMetricFrame,
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
@@ -81,6 +82,34 @@ def _build_prompt_tokens_details(
     return None
 
 
+def _make_frontend_metric_observer(
+    observer: Callable[[Any], None],
+    context_batch_size: int = 1,
+) -> Callable[[GenerateOutputs, int], None]:
+    """Build the visitor-local private counter projector used for TPS windows."""
+
+    def observe(output: GenerateOutputs, attempt: int) -> None:
+        observer(
+            FrontendMetricFrame.from_output(
+                output, attempt=attempt, context_batch_size=context_batch_size
+            )
+        )
+
+    return observe
+
+
+def _make_frontend_metric_generate_config(
+    generate_config: GenerateConfig,
+    enabled: bool,
+) -> GenerateConfig:
+    if not enabled:
+        return generate_config
+    return generate_config.model_copy(
+        update={"frontend_metric_streaming": True, "aux_info": True},
+        deep=True,
+    )
+
+
 def _get_think_config(generate_env_config):
     """Get thinking configuration from generate_env_config.
 
@@ -97,6 +126,7 @@ def _get_think_config(generate_env_config):
 
 
 class StreamStatus:
+    ignore_eos: bool = False
     index: int = 0
     request: ChatCompletionRequest
     output: Optional[GenerateOutput] = None
@@ -112,6 +142,9 @@ class StreamStatus:
 
     def __init__(self, request: ChatCompletionRequest):
         self.request = request
+        self.ignore_eos = bool(
+            request.extra_configs and request.extra_configs.ignore_eos
+        )
         self.has_real_aux_info = True
         self._fallback_aux_info: Optional[AuxInfo] = None
 
@@ -186,6 +219,7 @@ class StreamStatus:
 
 
 class StreamStatusSync:
+    ignore_eos: bool = False
     index: int = 0
     request: ChatCompletionRequest
     output_ids: torch.Tensor = torch.empty(0, dtype=torch.int32)
@@ -199,6 +233,9 @@ class StreamStatusSync:
 
     def __init__(self, request: ChatCompletionRequest):
         self.request = request
+        self.ignore_eos = bool(
+            request.extra_configs and request.extra_configs.ignore_eos
+        )
 
     def update_output_sync(
         self,
@@ -208,7 +245,7 @@ class StreamStatusSync:
         remove_stop_word_ids_func,
     ):
         self.index += 1
-        delta_output_ids = output.output_ids.cpu().flatten().tolist()
+        delta_output_ids = output_ids.cpu().flatten().tolist()
         self.output_ids_list = copy.deepcopy(self.output_ids_list + delta_output_ids)
         self.finish_reason = check_finish_func(self.output_ids_list, input_len)
         self.output_ids = remove_stop_word_ids_func(
@@ -365,7 +402,27 @@ class CustomChatRenderer:
         self.tokenizer = tokenizer
         self.model_type = renderer_params.model_type
         self.max_seq_len = renderer_params.max_seq_len
-        self.eos_token_id = renderer_params.eos_token_id
+        primary_eos_ids = renderer_params.eos_token_id
+        if not isinstance(primary_eos_ids, (list, tuple)):
+            primary_eos_ids = [primary_eos_ids]
+        # Some checkpoints (including GLM) declare several EOS ids, while the
+        # tokenizer exposes only the primary one. Keep the full model set for
+        # per-request ignore_eos handling, separate from ordinary stop words.
+        model_config = getattr(tokenizer, "config_json", {})
+        model_eos_ids = (
+            model_config.get("eos_token_id", [])
+            if isinstance(model_config, dict)
+            else []
+        )
+        if isinstance(model_eos_ids, int):
+            model_eos_ids = [model_eos_ids]
+        eos_token_ids = [
+            token
+            for token in [*primary_eos_ids, *(model_eos_ids or [])]
+            if isinstance(token, int)
+        ]
+        self.eos_token_id = next(iter(eos_token_ids), -1)
+        self.eos_token_ids = frozenset(eos_token_ids)
         self.stop_words_id_list = renderer_params.stop_word_ids_list
         self.stop_words_str_list = [
             self.tokenizer.decode(stop_word_ids)
@@ -478,10 +535,31 @@ class CustomChatRenderer:
         request: ChatCompletionRequest,
         headers: Optional[Dict[str, str]] = None,
         v41_inputs=None,
+        frontend_metric_tags: Optional[Dict[str, str]] = None,
+        frontend_metric_observer: Optional[Callable[[Any], None]] = None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
         input_id_tensor = torch.Tensor(input_ids).int().unsqueeze(0)
+        # Ask the backend for private counter progress frames while preserving the
+        # public is_streaming flag, retry behavior, and renderer semantics.
+        backend_generate_config = _make_frontend_metric_generate_config(
+            generate_config,
+            frontend_metric_observer is not None,
+        )
+
+        raw_metric_observer = None
+        if frontend_metric_observer is not None:
+            context_batch_size = (
+                1
+                if generate_config.has_num_beams()
+                else max(generate_config.num_return_sequences, 1)
+            )
+            raw_metric_observer = _make_frontend_metric_observer(
+                frontend_metric_observer,
+                context_batch_size,
+            )
+
         output_generator: AsyncGenerator[GenerateOutputs, None] = (
             await backend_rpc_server_visitor.enqueue(
                 GenerateInput(
@@ -489,41 +567,51 @@ class CustomChatRenderer:
                     token_ids=input_id_tensor,
                     mm_inputs=mm_inputs,
                     v41_inputs=v41_inputs,
-                    generate_config=generate_config,
+                    generate_config=backend_generate_config,
                     tokenizer=self.tokenizer,
                     token_type_ids=token_type_ids,
                     headers=normalize_request_headers(headers),
+                    frontend_metric_tags=dict(frontend_metric_tags or {}),
+                    frontend_metric_observer=raw_metric_observer,
                 )
             )
         )
 
-        prompt_logits_data = None
-        if generate_config.return_prompt_logits:
-            output_generator, prompt_logits_data = await self._extract_prompt_logits(
-                output_generator
-            )
+        backend_output_generator = output_generator
+        try:
+            prompt_logits_data = None
+            if generate_config.return_prompt_logits:
+                output_generator, prompt_logits_data = (
+                    await self._extract_prompt_logits(output_generator)
+                )
 
-        # 处理非流式请求的合并逻辑
-        if not generate_config.is_streaming:
-            output_generator = await self._merge_non_streaming_outputs(output_generator)
+            # 处理非流式请求的合并逻辑
+            if not generate_config.is_streaming:
+                output_generator = await self._merge_non_streaming_outputs(
+                    output_generator
+                )
 
-        if generate_config.return_prompt_logits:
-            last_response = None
-            async for response in self.render_response_stream(
-                output_generator, request, generate_config
-            ):
+            if generate_config.return_prompt_logits:
+                last_response = None
+                async for response in self.render_response_stream(
+                    output_generator, request, generate_config
+                ):
+                    if last_response is not None:
+                        yield last_response
+                    last_response = response
                 if last_response is not None:
+                    if prompt_logits_data is not None:
+                        last_response.prompt_logits = prompt_logits_data
                     yield last_response
-                last_response = response
-            if last_response is not None:
-                if prompt_logits_data is not None:
-                    last_response.prompt_logits = prompt_logits_data
-                yield last_response
-        else:
-            async for response in self.render_response_stream(
-                output_generator, request, generate_config
-            ):
-                yield response
+            else:
+                async for response in self.render_response_stream(
+                    output_generator, request, generate_config
+                ):
+                    yield response
+        finally:
+            close = getattr(backend_output_generator, "aclose", None)
+            if callable(close):
+                await close()
 
     async def _extract_prompt_logits(
         self, output_generator: AsyncGenerator[GenerateOutputs, None]
@@ -783,8 +871,12 @@ class CustomChatRenderer:
             return await self._create_empty_delta(status.output.aux_info)
         status.update_output(
             output,
-            functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
-            self._remove_stop_word_ids,
+            functools.partial(
+                self._check_finish_reason,
+                max_new_tokens=max_new_tokens,
+                ignore_eos=status.ignore_eos,
+            ),
+            functools.partial(self._remove_stop_word_ids, ignore_eos=status.ignore_eos),
         )
         decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
         decoded_string = self.tokenizer.decode(status.tokens_to_decode)
@@ -1158,7 +1250,10 @@ class CustomChatRenderer:
         request: ChatCompletionRequest,
         generate_config: GenerateConfig,
     ) -> AsyncGenerator[StreamResponseObject, None]:
-        stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
+        stop_words_str = self._filter_eos_stop_words(
+            generate_config.stop_words_str, generate_config.ignore_eos
+        )
+        stop_word_slice_list = get_stop_word_slices(stop_words_str)
         nums_output = request.n if request.n is not None else 1
         # FIXME(zhangjianning.zjn): for variable width beam search,
         # the num_ouput may not be the last num beams,
@@ -1170,6 +1265,8 @@ class CustomChatRenderer:
         )
         nums_output = last_num_beams if last_num_beams != 1 else nums_output
         status_list = await self._create_status_list(nums_output, request)
+        for status in status_list:
+            status.ignore_eos = generate_config.ignore_eos
         index = 0
         resolved_thinking_mode = generate_config.thinking_mode
         if resolved_thinking_mode == ThinkingMode.ADAPTIVE:
@@ -1208,7 +1305,7 @@ class CustomChatRenderer:
                         status,
                         output,
                         generate_config.max_new_tokens,
-                        generate_config.stop_words_str,
+                        stop_words_str,
                         stop_word_slice_list,
                         generate_config.is_streaming,
                     )
@@ -1235,7 +1332,7 @@ class CustomChatRenderer:
         if index != 0:
             flush_response = await self._flush_buffer(
                 status_list,
-                generate_config.stop_words_str,
+                stop_words_str,
                 generate_config.is_streaming,
                 think_status_list,
             )
@@ -1322,8 +1419,12 @@ class CustomChatRenderer:
         status.update_output_sync(
             output_ids,
             input_len,
-            functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
-            self._remove_stop_word_ids,
+            functools.partial(
+                self._check_finish_reason,
+                max_new_tokens=max_new_tokens,
+                ignore_eos=status.ignore_eos,
+            ),
+            functools.partial(self._remove_stop_word_ids, ignore_eos=status.ignore_eos),
         )
         decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
         decoded_string = self.tokenizer.decode(status.tokens_to_decode)
@@ -1527,6 +1628,9 @@ class CustomChatRenderer:
         stop_words_str,  # GenerateConfig
         is_streaming,
     ):
+        stop_words_str = self._filter_eos_stop_words(
+            stop_words_str, bool(status_list and status_list[0].ignore_eos)
+        )
         stop_word_slice_list = get_stop_word_slices(
             stop_words_str
         )  # move into cpp, then pass in
@@ -1572,6 +1676,9 @@ class CustomChatRenderer:
         stop_words_str,
         is_streaming,
     ):
+        stop_words_str = self._filter_eos_stop_words(
+            stop_words_str, bool(status_list and status_list[0].ignore_eos)
+        )
         stream_response = self._flush_buffer_sync(
             status_list,
             input_len_list,
@@ -1624,6 +1731,9 @@ class CustomChatRenderer:
         stop_words_str,  # GenerateConfig
         is_streaming,
     ):
+        stop_words_str = self._filter_eos_stop_words(
+            stop_words_str, bool(status_list and status_list[0].ignore_eos)
+        )
         stop_word_slice_list = get_stop_word_slices(
             stop_words_str
         )  # move into cpp, then pass in
@@ -1664,6 +1774,9 @@ class CustomChatRenderer:
         stop_words_str,
         is_streaming,
     ):
+        stop_words_str = self._filter_eos_stop_words(
+            stop_words_str, bool(status_list and status_list[0].ignore_eos)
+        )
         stream_response = self._flush_buffer_sync(
             status_list,
             input_len_list,
@@ -1778,8 +1891,21 @@ class CustomChatRenderer:
         )
         return chat_response.model_dump_json(exclude_none=True)
 
+    def _filter_eos_stop_words(
+        self, stop_words: List[str], ignore_eos: bool
+    ) -> List[str]:
+        if not ignore_eos:
+            return stop_words
+        # Keep other explicit/model stop sequences, matching GenerateStream.
+        eos_texts = {self.tokenizer.decode([token]) for token in self.eos_token_ids}
+        return [word for word in stop_words if word not in eos_texts]
+
     def _check_finish_reason(
-        self, token_ids: List[int], input_token_length: int, max_new_tokens: int = -1
+        self,
+        token_ids: List[int],
+        input_token_length: int,
+        max_new_tokens: int = -1,
+        ignore_eos: bool = False,
     ) -> Optional[FinisheReason]:
         stop_word_ids_list_all = (
             self.get_all_extra_stop_word_ids_list() + self.stop_words_id_list
@@ -1788,9 +1914,15 @@ class CustomChatRenderer:
             return FinisheReason.length
         if len(token_ids) + input_token_length >= self.max_seq_len:
             return FinisheReason.length
-        if token_ids and token_ids[-1] == self.eos_token_id:
+        if not ignore_eos and token_ids and token_ids[-1] == self.eos_token_id:
             return FinisheReason.stop
         for stop_word_ids in stop_word_ids_list_all:
+            if (
+                ignore_eos
+                and len(stop_word_ids) == 1
+                and stop_word_ids[0] in self.eos_token_ids
+            ):
+                continue
             if (len(token_ids) >= len(stop_word_ids)) and (
                 token_ids[-len(stop_word_ids) :] == stop_word_ids
             ):
@@ -1798,7 +1930,10 @@ class CustomChatRenderer:
         return None
 
     def _remove_stop_word_ids(
-        self, output_ids: List[int], delta_output_ids: List[int]
+        self,
+        output_ids: List[int],
+        delta_output_ids: List[int],
+        ignore_eos: bool = False,
     ) -> List[int]:
         """
         Truncate token sequence at FIRST occurrence of stop word (eos or stop_word_ids).
@@ -1836,13 +1971,17 @@ class CustomChatRenderer:
         min_stop_pos = len(output_ids)
 
         # Check for eos token position
-        if self.eos_token_id in output_ids:
+        if not ignore_eos and self.eos_token_id in output_ids:
             eos_pos = output_ids.index(self.eos_token_id)
             min_stop_pos = min(min_stop_pos, eos_pos)
 
         # Check for stop word sequences - find first occurrence of each
         for stop_word_ids in stop_word_ids_list_all:
-            if not stop_word_ids:
+            if not stop_word_ids or (
+                ignore_eos
+                and len(stop_word_ids) == 1
+                and stop_word_ids[0] in self.eos_token_ids
+            ):
                 continue
             stop_len = len(stop_word_ids)
             # Scan through output_ids to find first occurrence

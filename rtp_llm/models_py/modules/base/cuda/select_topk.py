@@ -3,6 +3,7 @@ from torch import nn
 
 import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.device.device_type import is_ppu
 
 
 class SelectTopk(nn.Module):
@@ -24,6 +25,7 @@ class GroupTopK(nn.Module):
     def __init__(self):
         super().__init__()
         self.group_topk_op = compute_ops.GroupTopKOp()
+        self._ppu_fused_router = is_ppu()
 
     def forward(
         self,
@@ -37,6 +39,21 @@ class GroupTopK(nn.Module):
         renormalize: bool,
         routed_scaling_factor: float,
     ):
+        if self._ppu_fused_router:
+            from rtp_llm.models_py.kernels.ppu.group_topk import try_fused_group_topk
+
+            if try_fused_group_topk(
+                topk_weights,
+                topk_ids,
+                scores,
+                correction_bias,
+                n_group,
+                topk_group,
+                topk,
+                renormalize,
+                routed_scaling_factor,
+            ):
+                return
         scores = scores.float().sigmoid()
         scores_with_bias = scores + correction_bias.unsqueeze(0)
         self.group_topk_op.forward(

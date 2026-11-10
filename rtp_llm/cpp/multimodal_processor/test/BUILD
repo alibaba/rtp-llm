@@ -65,6 +65,7 @@ cc_test(
     ],
     copts = test_copts,
     deps = torch_deps() + cuda13_torch_link_deps + [
+        "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/config:config_modules",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

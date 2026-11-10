@@ -4,6 +4,30 @@ import logging
 from typing import Any, Dict, Optional
 
 import torch
+
+from rtp_llm.models_py.kernels.ppu.deepgemm_warmup import (
+    get_deep_gemm_warmup_mode,
+    warmup_grouped_bf16_gemm,
+    warmup_grouped_fp8_gemm,
+    warmup_grouped_int8_gemm,
+)
+from rtp_llm.models_py.kernels.ppu.deepgemm_wrapper import (
+    configure_deep_gemm_num_sms,
+    deep_gemm_default_num_sms,
+    has_deep_gemm_bf16_grouped,
+    has_deep_gemm_fp8_grouped_masked,
+    has_deep_gemm_int8_grouped_masked,
+    m_grouped_bf16_gemm_nt_masked,
+    m_grouped_fp8_gemm_nt_masked,
+    m_grouped_int8_gemm_nt_masked,
+)
+from rtp_llm.models_py.kernels.ppu.fp8_quant import (
+    masked_fp8_quantize_128,
+    masked_silu_mul_fp8_quantize_128,
+)
+from rtp_llm.models_py.kernels.ppu.int8_kernel.fused_silu_mul_int8_quant import (
+    silu_and_mul_masked_per_token_quant_int8_fwd,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -24,23 +48,6 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 )
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.utils.model_weight import W
-
-from rtp_llm.models_py.kernels.ppu.deepgemm_warmup import (
-    get_deep_gemm_warmup_mode,
-    warmup_grouped_bf16_gemm,
-    warmup_grouped_int8_gemm,
-)
-from rtp_llm.models_py.kernels.ppu.deepgemm_wrapper import (
-    configure_deep_gemm_num_sms,
-    deep_gemm_default_num_sms,
-    has_deep_gemm_bf16_grouped,
-    has_deep_gemm_int8_grouped_masked,
-    m_grouped_bf16_gemm_nt_masked,
-    m_grouped_int8_gemm_nt_masked,
-)
-from rtp_llm.models_py.kernels.ppu.int8_kernel.fused_silu_mul_int8_quant import (
-    silu_and_mul_masked_per_token_quant_int8_fwd,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +89,9 @@ class DeepGemmBf16MaskedExecutor(FusedMoeExpertExecutor):
             self._intermediate_size // 2,
         )
         if self._w2.shape != expected_w2_shape:
-            raise ValueError(f"BF16 MoE w2 shape {self._w2.shape} != {expected_w2_shape}")
+            raise ValueError(
+                f"BF16 MoE w2 shape {self._w2.shape} != {expected_w2_shape}"
+            )
         if self._w1.dtype != torch.bfloat16 or self._w2.dtype != torch.bfloat16:
             raise ValueError(
                 f"BF16 MoE expects BF16 weights, got {self._w1.dtype}/{self._w2.dtype}"
@@ -159,7 +168,9 @@ class DeepGemmBf16MaskedExecutor(FusedMoeExpertExecutor):
                 f"DeepEP hidden size {expert_x.shape[2]} != {self._hidden_size}"
             )
         if masked_m.shape != (self._num_experts,):
-            raise ValueError(f"masked_m shape {masked_m.shape} != ({self._num_experts},)")
+            raise ValueError(
+                f"masked_m shape {masked_m.shape} != ({self._num_experts},)"
+            )
 
         max_tokens = expert_x.shape[1]
         expected_m = payload.expert_tokens_meta.expected_m
@@ -407,6 +418,219 @@ class DeepGemmInt8MaskedExecutor(FusedMoeExpertExecutor):
                 dtype=torch.bfloat16,
             )
             m_grouped_int8_gemm_nt_masked(
+                (down_q, down_scale),
+                (self._w2, self._w2_scale),
+                down_output,
+                masked_m,
+                expected_m,
+            )
+            dispose_tensor(down_q)
+            dispose_tensor(down_scale)
+
+        return CombineForwardPayload(fused_expert_output=down_output)
+
+
+class DeepGemmFp8MaskedExecutor(FusedMoeExpertExecutor):
+    """Consume DeepEP low-latency BF16 payload with PPU FP8 masked DeepGEMM.
+
+    The PPU deep_ep low-latency dispatch ships BF16 activations; per-128-group
+    FP8 quantization happens here, after dispatch, only for valid rows.
+    Column-major per-expert scales avoid copies inside masked DeepGEMM.
+    """
+
+    QUANT_METHOD = "FP8_PER_BLOCK"
+    DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
+
+    @classmethod
+    def executor_type(cls) -> ExecutorType:
+        return ExecutorType.DEEPGEMM_MASKED
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        resolver = MoeConfigResolver()
+        checker.check(resolver.get_quant_method(config) == cls.QUANT_METHOD)
+        checker.check(resolver.is_bf16(config))
+        checker.check(has_deep_gemm_fp8_grouped_masked())
+
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+        weights: Dict[str, torch.Tensor],
+    ) -> None:
+        super().__init__(config, quant_config, weights)
+        self._w1 = weights[W.moe_w1]
+        self._w2 = weights[W.moe_w2]
+        self._w1_scale = weights[W.moe_s1]
+        self._w2_scale = weights[W.moe_s2]
+
+        self._num_experts, self._intermediate_size, self._hidden_size = self._w1.shape
+        if self._intermediate_size % 2 != 0:
+            raise ValueError("FP8 MoE gate/up dimension must be even")
+        expected_w2_shape = (
+            self._num_experts,
+            self._hidden_size,
+            self._intermediate_size // 2,
+        )
+        if self._w2.shape != expected_w2_shape:
+            raise ValueError(
+                f"FP8 MoE w2 shape {self._w2.shape} != {expected_w2_shape}"
+            )
+        if (
+            self._w1.dtype != torch.float8_e4m3fn
+            or self._w2.dtype != torch.float8_e4m3fn
+        ):
+            raise ValueError(
+                f"FP8 MoE expects FP8 weights, got {self._w1.dtype}/{self._w2.dtype}"
+            )
+        if (
+            self._w1_scale.dtype != torch.float32
+            or self._w2_scale.dtype != torch.float32
+        ):
+            raise ValueError(
+                "FP8 MoE expects FP32 scales, got "
+                f"{self._w1_scale.dtype}/{self._w2_scale.dtype}"
+            )
+        if self._hidden_size % self.DEEPGEMM_BLOCK_SHAPE[1] != 0:
+            raise ValueError(
+                f"FP8 MoE hidden size {self._hidden_size} is not 128-aligned"
+            )
+        if self._intermediate_size % self.DEEPGEMM_BLOCK_SHAPE[1] != 0:
+            raise ValueError(
+                f"FP8 MoE intermediate size {self._intermediate_size} "
+                "is not 128-aligned"
+            )
+        if self._w1_scale.shape != (
+            self._num_experts,
+            self._intermediate_size // self.DEEPGEMM_BLOCK_SHAPE[0],
+            self._hidden_size // self.DEEPGEMM_BLOCK_SHAPE[1],
+        ):
+            raise ValueError(
+                f"w1 scale shape {self._w1_scale.shape} does not match "
+                f"{self._w1.shape} with 128x128 blocks"
+            )
+        if self._w2_scale.shape != (
+            self._num_experts,
+            self._hidden_size // self.DEEPGEMM_BLOCK_SHAPE[0],
+            self._intermediate_size // 2 // self.DEEPGEMM_BLOCK_SHAPE[1],
+        ):
+            raise ValueError(
+                f"w2 scale shape {self._w2_scale.shape} does not match "
+                f"{self._w2.shape} with 128x128 blocks"
+            )
+
+        self._num_gemm_sms = deep_gemm_default_num_sms()
+        self._warmup_fp8_kernels()
+
+    def _warmup_fp8_kernels(self) -> None:
+        try:
+            warmup_mode = get_deep_gemm_warmup_mode()
+            if warmup_mode == "skip":
+                return
+            max_tp_tokens = max(
+                1,
+                (self.config.ll_num_max_token + self.config.tp_size - 1)
+                // self.config.tp_size,
+            )
+            max_expected_m = max(
+                1,
+                max_tp_tokens
+                * self.config.ep_size
+                * self.config.moe_k
+                // self.config.expert_num,
+            )
+            for weight in (
+                (self._w1, self._w1_scale),
+                (self._w2, self._w2_scale),
+            ):
+                warmup_grouped_fp8_gemm(
+                    weight,
+                    max_m=max_expected_m,
+                    layout="masked",
+                    mode=warmup_mode,
+                    num_sms=self._num_gemm_sms,
+                )
+        except Exception:
+            logger.exception(
+                "DeepGEMM FP8 LL warmup failed; execution will use lazy JIT"
+            )
+
+    def execute(
+        self,
+        payload: ExpertForwardPayload,
+        activation: str,
+        expert_map: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+        extra_expert_args: Optional[dict[str, Any]],
+    ) -> CombineForwardPayload:
+        if activation not in ("silu", "SiGLU"):
+            raise ValueError(
+                f"FP8 masked executor only supports gated SiLU, got {activation}"
+            )
+        if apply_router_weight_on_input:
+            raise ValueError("DeepEP LL applies router weights during combine")
+        if payload.expert_tokens_meta is None:
+            raise ValueError("DeepEP LL payload is missing token metadata")
+        masked_m = payload.expert_tokens_meta.expert_num_tokens
+        if masked_m is None:
+            raise ValueError("DeepEP LL payload is missing per-expert token counts")
+
+        expert_x = payload.expert_x
+        if expert_x.dtype != torch.bfloat16:
+            raise ValueError(f"DeepEP LL expected BF16 input, got {expert_x.dtype}")
+        if payload.expert_x_scale is not None:
+            raise ValueError("FP8 DeepEP LL executor quantizes its own input")
+        if expert_x.shape[0] != self._num_experts:
+            raise ValueError(
+                f"DeepEP returned {expert_x.shape[0]} experts, expected {self._num_experts}"
+            )
+        if expert_x.shape[2] != self._hidden_size:
+            raise ValueError(
+                f"DeepEP hidden size {expert_x.shape[2]} != {self._hidden_size}"
+            )
+        if masked_m.shape != (self._num_experts,):
+            raise ValueError(
+                f"masked_m shape {masked_m.shape} != ({self._num_experts},)"
+            )
+
+        max_tokens = expert_x.shape[1]
+        expected_m = payload.expert_tokens_meta.expected_m
+        expected_m = max_tokens if expected_m is None else min(max_tokens, expected_m)
+        device = expert_x.device
+
+        with configure_deep_gemm_num_sms(self._num_gemm_sms):
+            expert_x_q, expert_x_scale = masked_fp8_quantize_128(
+                expert_x, masked_m, expected_m
+            )
+            dispose_tensor(expert_x)
+
+            gateup_output = torch.empty(
+                (self._num_experts, max_tokens, self._intermediate_size),
+                device=device,
+                dtype=torch.bfloat16,
+            )
+            m_grouped_fp8_gemm_nt_masked(
+                (expert_x_q, expert_x_scale),
+                (self._w1, self._w1_scale),
+                gateup_output,
+                masked_m,
+                expected_m,
+            )
+            dispose_tensor(expert_x_q)
+            dispose_tensor(expert_x_scale)
+
+            down_q, down_scale = masked_silu_mul_fp8_quantize_128(
+                gateup_output, masked_m, expected_m
+            )
+            dispose_tensor(gateup_output)
+
+            down_output = torch.empty(
+                (self._num_experts, max_tokens, self._hidden_size),
+                device=device,
+                dtype=torch.bfloat16,
+            )
+            m_grouped_fp8_gemm_nt_masked(
                 (down_q, down_scale),
                 (self._w2, self._w2_scale),
                 down_output,

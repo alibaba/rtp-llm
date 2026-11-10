@@ -20,8 +20,14 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
     configure_kv_cache_event_host_ip_port,
     load_gpu_nic_affinity,
+    resolve_local_world_size,
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
+)
+from rtp_llm.server.engine_cpu_affinity import (
+    EngineCpuPlacement,
+    plan_engine_cpu_affinity,
+    resolve_engine_cpu,
 )
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
@@ -63,6 +69,8 @@ def local_rank_start(
     world_rank: int = 0,
     pipe_writer=None,
     expected_parent_pid: Optional[int] = None,
+    service_draining=None,
+    engine_cpu_plan: Optional[dict[int, EngineCpuPlacement]] = None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     if expected_parent_pid is not None:
@@ -72,6 +80,8 @@ def local_rank_start(
     logging.info(f"[PROCESS_START]Start local rank process")
 
     def signal_handler(signum, frame):
+        if service_draining is not None:
+            service_draining.set()
         logging.info(
             f"Local rank received signal {signum}, shutting down gracefully..."
         )
@@ -93,13 +103,27 @@ def local_rank_start(
         py_env_configs.distribute_config.set_local_rank(local_rank)
         configure_kv_cache_event_host_ip_port(py_env_configs)
         setup_cuda_device_and_accl_env(local_rank)
+        py_env_configs.engine_cpu_id = -1
+        if (
+            getattr(py_env_configs, "engine_cpu_affinity", "off") == "auto"
+            and torch.cuda.is_available()
+        ):
+            if engine_cpu_plan is None:
+                engine_cpu_plan = plan_engine_cpu_affinity({world_rank: local_rank})
+            placement = engine_cpu_plan.get(world_rank)
+            if placement is not None:
+                py_env_configs.engine_cpu_id = resolve_engine_cpu(
+                    world_rank, local_rank, placement
+                )
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
         install_oom_dump()
         from rtp_llm.server.backend_manager import BackendManager
 
-        backend_manager = BackendManager(py_env_configs)
+        backend_manager = BackendManager(
+            py_env_configs, service_draining=service_draining
+        )
         backend_manager.start()
         # Defer these handlers until model loading completes.
         signal.signal(signal.SIGTERM, signal_handler)
@@ -117,6 +141,8 @@ def local_rank_start(
         backend_manager.serve_forever()
 
     except BaseException as e:
+        if service_draining is not None:
+            service_draining.set()
         error_msg = f"start server error: {e}"
         error_trace = traceback.format_exc()
         logging.error(f"{error_msg}, trace: {error_trace}")
@@ -167,6 +193,7 @@ def _create_rank_processes(
     ctx,
     processes: List[BaseProcess],
     rank_pipe_readers: List[Connection],
+    service_draining=None,
 ):
     """Create and start rank processes. Each proc is appended before start() so a
     mid-loop abort still leaves every spawned object in the caller's list; teardown
@@ -176,15 +203,30 @@ def _create_rank_processes(
     cuda_device_list = _get_cuda_device_list()
     _validate_dp_configuration(py_env_configs)
 
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
+    world_ranks = range(pc.world_rank, pc.world_rank + local_world_size)
+    engine_cpu_plan = {}
+    if getattr(py_env_configs, "engine_cpu_affinity", "off") == "auto":
+        rank_device_count = resolve_local_world_size(pc)
+        engine_cpu_plan = plan_engine_cpu_affinity(
+            {rank: rank % rank_device_count for rank in world_ranks}
+        )
     parent_pid = os.getpid()
-    for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
+    for world_rank in world_ranks:
         reader, writer = ctx.Pipe(duplex=False)
         rank_pipe_readers.append(reader)
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
         proc = ctx.Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs, world_rank, writer, parent_pid),
+            args=(
+                global_controller,
+                py_env_configs,
+                world_rank,
+                writer,
+                parent_pid,
+                service_draining,
+                engine_cpu_plan,
+            ),
             name=f"rank-{world_rank}",
         )
         processes.append(proc)
@@ -290,13 +332,19 @@ def multi_rank_start(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
     cleanup=None,
+    service_draining=None,
 ):
     """Start multi-rank backend server with proper process management"""
     ctx = multiprocessing.get_context("spawn")
     processes, rank_pipe_readers = [], []
     try:
         _create_rank_processes(
-            global_controller, py_env_configs, ctx, processes, rank_pipe_readers
+            global_controller,
+            py_env_configs,
+            ctx,
+            processes,
+            rank_pipe_readers,
+            service_draining,
         )
         local_world_size = len(processes)
 
@@ -314,6 +362,7 @@ def multi_rank_start(
             monitor_interval=py_env_configs.server_config.monitor_interval,
             allow_defer_first_sigterm=True,
             pre_exit_cleanup=cleanup,
+            service_draining=service_draining,
         )
         manager.set_processes(processes, shutdown_group="backend")
         _send_pipe_status(
@@ -323,6 +372,8 @@ def multi_rank_start(
         )
         pipe_writer = None  # success closed it; a later abort speaks via exit code
     except BaseException as e:
+        if service_draining is not None:
+            service_draining.set()
         error_msg = str(e) or type(e).__name__
         error_trace = traceback.format_exc()
         logging.error(f"Multi-rank startup failed: {error_msg}")
@@ -372,6 +423,7 @@ def start_backend_server(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
     expected_parent_pid: Optional[int] = None,
+    service_draining=None,
 ):
     # The debug-load path runs inline; only a spawned manager has a parent guard.
     if expected_parent_pid is not None:
@@ -381,6 +433,8 @@ def start_backend_server(
     # below runs (a defaulted SIGTERM would kill the process with no cleanup);
     # local_rank_start / ProcessManager install the runtime handlers later.
     def abort(signum, frame):
+        if service_draining is not None:
+            service_draining.set()
         # A second signal must kill immediately, not be swallowed by teardown.
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         signal.signal(signal.SIGINT, signal.SIG_DFL)
@@ -397,7 +451,11 @@ def start_backend_server(
     pc = py_env_configs.parallelism_config
     if not torch.cuda.is_available():
         return local_rank_start(
-            global_controller, py_env_configs, pc.world_rank, pipe_writer
+            global_controller,
+            py_env_configs,
+            pc.world_rank,
+            pipe_writer,
+            service_draining=service_draining,
         )
 
     if (
@@ -423,9 +481,14 @@ def start_backend_server(
                 py_env_configs,
                 pipe_writer,
                 cleanup=manager.stop if manager else None,
+                service_draining=service_draining,
             )
         return local_rank_start(
-            global_controller, py_env_configs, pc.world_rank, pipe_writer
+            global_controller,
+            py_env_configs,
+            pc.world_rank,
+            pipe_writer,
+            service_draining=service_draining,
         )
     finally:
         if manager:

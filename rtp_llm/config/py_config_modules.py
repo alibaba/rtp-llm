@@ -715,6 +715,8 @@ class PyEnvConfigs:
         self.eplb_config: EPLBConfig = EPLBConfig()
         self.kv_cache_config: KVCacheConfig = KVCacheConfig()
         self.runtime_config: RuntimeConfig = RuntimeConfig()
+        self.engine_cpu_affinity: str = "off"
+        self.engine_cpu_id: int = -1
         # EngineConfig has been merged into RuntimeConfig and ModelConfig
         # warm_up, warm_up_with_loss, and model_warm_up are in RuntimeConfig
         # max_seq_len is in ModelConfig

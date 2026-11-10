@@ -10,6 +10,7 @@ import torch
 from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import (
     CudaGraphRunner,
     DirtyCudaGraphCaptureError,
+    cuda_graph_warmup_forward_enabled,
 )
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     CudaGraphSelectionMode,
@@ -99,6 +100,17 @@ class StaticInputTailModel:
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
         tail_signature = inputs.input_hiddens[-1].sum()
         return PyModelOutputs(inputs.input_hiddens + tail_signature)
+
+
+class MtpSeedRowsModel:
+    """Expose every captured seed row without poisoning CUDA on stale indices."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        rows = inputs.attention_inputs["full"].mtp_indexer_seed_rows
+        return PyModelOutputs(inputs.input_hiddens + rows.sum())
 
 
 class StaticTokenMetadataTailModel:
@@ -592,6 +604,54 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                         GROUP_TAGS,
                         max_context_batch_size=8,
                     )
+
+    def test_graph_phase_flags_are_scoped_to_forward(self):
+        phases = []
+
+        class PhaseModel(TaggedBlockTableModel):
+            def forward(self, inputs, fmha_impl=None):
+                phases.append(
+                    (
+                        cuda_graph_warmup_forward_enabled(),
+                        torch.cuda.is_current_stream_capturing(),
+                    )
+                )
+                return super().forward(inputs, fmha_impl)
+
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            PhaseModel(),
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [2],
+            GROUP_TAGS,
+        )
+        self.assertIn((True, False), phases)
+        self.assertIn((False, True), phases)
+        self.assertNotIn((True, True), phases)
+        self.assertFalse(cuda_graph_warmup_forward_enabled())
+        self.assertFalse(torch.cuda.is_current_stream_capturing())
+
+    def test_warmup_exception_restores_phase_flags(self):
+        class FailingWarmupModel(TaggedBlockTableModel):
+            def forward(self, inputs, fmha_impl=None):
+                if cuda_graph_warmup_forward_enabled():
+                    raise RuntimeError("injected warmup failure")
+                return super().forward(inputs, fmha_impl)
+
+        runner = CudaGraphRunner()
+        with self.assertRaisesRegex(RuntimeError, "injected warmup failure"):
+            runner.init_decode(
+                FailingWarmupModel(),
+                HIDDEN_SIZE,
+                TOKENS_PER_BLOCK,
+                KERNEL_BLOCK_TABLE_WIDTH,
+                [2],
+                GROUP_TAGS,
+            )
+        self.assertFalse(cuda_graph_warmup_forward_enabled())
+        self.assertFalse(torch.cuda.is_current_stream_capturing())
 
     def test_draft_placeholder_map_preserves_eager_graph_contract(self):
         tags = ["unused", "draft", "other"]
@@ -1772,6 +1832,33 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             output.hidden_states,
             expected_signature.unsqueeze(0).expand_as(output.hidden_states),
         )
+
+    def test_prefill_clears_mtp_seed_rows_after_graph_shrink(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_prefill(
+            MtpSeedRowsModel(),
+            4,
+            24,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [6, 24],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+        )
+        for lengths, expected in (([6, 6, 6, 6], 56), ([6], 5)):
+            inputs = _build_prefill_inputs(
+                GROUP_TAGS, {"full": 2, "aux": 1}, seq_len=lengths
+            )
+            tagged = inputs.attention_inputs
+            rows = (
+                torch.tensor(lengths, dtype=torch.int32, device="cuda").cumsum(
+                    0, dtype=torch.int32
+                )
+                - 1
+            )
+            for attention in tagged.values():
+                attention.mtp_indexer_seed_rows = rows
+            inputs.attention_inputs = tagged
+            self._assert_replay_signature(runner, inputs, expected)
 
     def test_decode_clears_hidden_rows_after_batch_shrink(self) -> None:
         runner = CudaGraphRunner()

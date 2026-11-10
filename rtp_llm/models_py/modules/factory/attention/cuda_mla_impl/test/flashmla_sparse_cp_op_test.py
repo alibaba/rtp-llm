@@ -16,6 +16,7 @@ import multiprocessing as mp
 import os
 import threading
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import List, Optional, Tuple
 from unittest import SkipTest, TestCase, main, skipIf
 from unittest.mock import Mock, patch
@@ -148,7 +149,7 @@ def _tp2_worker(rank: int, nccl_port: int, result_queue: mp.Queue) -> None:
 
         with patch.object(dist, "init_process_group", _init_pg):
             with patch(
-                "rtp_llm.models_py.distributed.collective_torch.init_symm_mem_communicator",
+                "rtp_llm.models_py.distributed.symm_mem.init_symm_mem_communicator",
                 lambda *_a, **_kw: None,
             ):
                 init_distributed_environment(
@@ -412,7 +413,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         cp_op.plan(mla_params, block_table_device, attn_inputs=attn_inputs)
 
         # With tp_size=1, all_gather is identity; mock it to avoid requiring distributed init
-        def _identity_all_gather(tensor, group=None):
+        def _identity_all_gather(tensor, group=None, role=None):
             return tensor
 
         q0_idx_list, q1_idx_list = generate_q_indices(chunk_lengths)
@@ -574,7 +575,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         cp_op.write_cache_store_impl = None
         cp_op.plan(mla_params, block_table_device, attn_inputs=attn_inputs)
 
-        def _identity_all_gather(tensor, group=None):
+        def _identity_all_gather(tensor, group=None, role=None):
             return tensor
 
         q0_idx_list, q1_idx_list = generate_q_indices(chunk_lengths)
@@ -599,6 +600,171 @@ class SparseMlaFp8CPOpTest(TestCase):
         torch.cuda.synchronize()
         self.assertEqual(out.shape, (total_q_len, num_heads, kv_lora_rank))
 
+    def test_scheduler_keeps_graph_shape_and_handles_empty_chunk_tails(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+            flashmla_sparse_cp_impl as cp_impl,
+        )
+
+        for graph in (False, True):
+            for rows in (0, 2):
+                with self.subTest(graph=graph, rows=rows):
+                    op = cp_impl.SparseMlaFp8CPOp(
+                        64, 512, 64, 512, 64, 1.0, 128, use_cuda_graph=graph
+                    )
+                    with patch.object(
+                        cp_impl, "get_mla_metadata", return_value=(object(), None)
+                    ) as metadata:
+                        op._refresh_fp8_kernel_metadata(rows)
+                        first = op._fp8_kernel_metadata_q0
+                        op._refresh_fp8_kernel_metadata(rows)
+                        self.assertEqual(
+                            metadata.call_count, (1 if graph else 2) if rows else 0
+                        )
+                        if graph:
+                            self.assertIs(op._fp8_kernel_metadata_q0, first)
+                            with self.assertRaisesRegex(
+                                RuntimeError, "changed scheduler shape"
+                            ):
+                                op._refresh_fp8_kernel_metadata(2 if rows == 0 else 0)
+                        else:
+                            op._refresh_fp8_kernel_metadata(0)
+                            self.assertIsNone(op._fp8_kernel_metadata_q0)
+                            op._refresh_fp8_kernel_metadata(2)
+                            self.assertIsNotNone(op._fp8_kernel_metadata_q0)
+
+    def test_ppu_large_query_chunks_match_single_query(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+            flashmla_sparse_cp_impl as cp_impl,
+        )
+        from rtp_llm.models_py.triton_kernels.sparse_mla.fused_qk_rope_cat_cache_mla import (
+            fused_qk_rope_cat_cache_mla,
+        )
+
+        if not cp_impl._IS_PPU:
+            self.skipTest("PPU FP8 paged-attention regression")
+        _set_seed(7331)
+        tokens, heads, latent, rope, page, topk = 2048, 64, 512, 64, 64, 2048
+        cache = torch.zeros((tokens // page + 1, page, 656), dtype=torch.uint8)
+        ckv = torch.randn((tokens, latent), dtype=torch.bfloat16)
+        kpe = torch.randn((tokens, rope), dtype=torch.bfloat16)
+        dummy_q = torch.zeros((tokens, 1, 256), dtype=torch.bfloat16)
+        cos_sin = torch.zeros((tokens, rope), dtype=torch.float32)
+        cos_sin[:, : rope // 2] = 1
+        fused_qk_rope_cat_cache_mla(
+            dummy_q,
+            ckv,
+            kpe,
+            cache,
+            torch.arange(tokens, dtype=torch.int64) + page,
+            torch.arange(tokens, dtype=torch.int32),
+            cos_sin,
+            latent,
+            rope,
+            False,
+            "fp8_ds_mla",
+        )
+        table = torch.arange(1, tokens // page + 1, dtype=torch.int32)[None]
+        for count in (1025, 4082):
+            with self.subTest(queries=count):
+                q = (
+                    torch.randn((count, heads, latent + rope), dtype=torch.float32)
+                    * 0.1
+                ).bfloat16()
+                indices = torch.randint(0, tokens, (count, 1, topk), dtype=torch.int32)
+                indices[::2, :, topk // 2 :] = -1
+                op = cp_impl.SparseMlaFp8CPOp(
+                    heads, latent, rope, latent, page, 1.0, topk
+                )
+                op.block_table, op.mla_params = table, SimpleNamespace()
+                op.precomputed_req_ids = torch.zeros(count, dtype=torch.int32)
+                op._refresh_fp8_kernel_metadata(count)
+                output = op._attend_with_kvcache(
+                    q, SimpleNamespace(kv_cache_base=cache), indices, 0
+                )
+                actual = output.float().cpu().numpy()
+                self.assertTrue(np.isfinite(actual).all())
+                for row in (0, 1023, 1024, count - 1):
+                    meta, splits = cp_impl.get_mla_metadata(
+                        cache_seqlens=None,
+                        num_q_tokens_per_head_k=heads,
+                        topk=topk,
+                        num_heads_q=heads,
+                        num_heads_k=1,
+                        is_fp8_kvcache=True,
+                    )
+                    reference, _ = cp_impl.flash_mla_with_kvcache(
+                        q=q[row : row + 1].unsqueeze(0),
+                        k_cache=cache.unsqueeze(2),
+                        block_table=table,
+                        head_dim_v=latent,
+                        cache_seqlens=None,
+                        tile_scheduler_metadata=meta,
+                        num_splits=splits,
+                        is_fp8_kvcache=True,
+                        indices=torch.where(
+                            indices[row : row + 1, 0] >= 0,
+                            indices[row : row + 1, 0] + page,
+                            -1,
+                        ).unsqueeze(0),
+                        softmax_scale=op.scale,
+                    )
+                    error = np.abs(
+                        actual[row] - reference[0, 0].float().cpu().numpy()
+                    ).max()
+                    self.assertLess(float(error), 0.002)
+
+    def test_ppu_fresh_bf16_chunks_preserve_request_boundaries(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+            flashmla_sparse_cp_impl as cp_impl,
+        )
+
+        if not cp_impl._IS_PPU:
+            self.skipTest("PPU BF16 prefill regression")
+        _set_seed(7331)
+        lengths = (256, 384)
+        ckv = torch.randn(sum(lengths), 512)
+        kpe = torch.randn(sum(lengths), 64)
+        ckv[: lengths[0]].add_(1)
+        ckv[lengths[0] :].sub_(1)
+        kv = torch.cat((ckv, kpe), dim=-1).unsqueeze(1)
+        for count in (1025, 4082):
+            with self.subTest(queries=count):
+                op = cp_impl.SparseMlaFp8CPOp(64, 512, 64, 512, 64, 1.0, 128)
+                op.cu_kv_seqlens_global = torch.tensor(
+                    [0, lengths[0], sum(lengths)], dtype=torch.int32
+                )
+                op.precomputed_req_ids = torch.arange(count, dtype=torch.int32) % 2
+                q = (torch.randn(count, 64, 576, dtype=torch.float32) * 0.1).bfloat16()
+                topk = torch.randint(
+                    0, min(lengths), (count, 1, 128), dtype=torch.int32
+                )
+                topk[::2, :, 64:] = -1
+                sizes = []
+                native = cp_impl.flash_mla_sparse_fwd
+
+                def attend(query, *args, **kwargs):
+                    sizes.append(query.size(0))
+                    return native(query, *args, **kwargs)
+
+                with patch.object(cp_impl, "flash_mla_sparse_fwd", side_effect=attend):
+                    output = op._attend_fresh_bf16(q, ckv, kpe, topk)
+                actual = output.float().cpu().numpy()
+                self.assertTrue(np.isfinite(actual).all())
+                self.assertEqual(sum(sizes), count)
+                self.assertLessEqual(max(sizes), 1024)
+                for row in (0, 1023, 1024, count - 1):
+                    offset = lengths[0] if row % 2 else 0
+                    index = torch.where(
+                        topk[row : row + 1] >= 0, topk[row : row + 1] + offset, -1
+                    )
+                    reference, _, _ = native(
+                        q[row : row + 1], kv, index, op.scale, d_v=512
+                    )
+                    error = np.abs(
+                        actual[row] - reference[0].float().cpu().numpy()
+                    ).max()
+                    self.assertLess(float(error), 0.002)
+
     def test_chunk_tail_positions_and_empty_rank_collectives(self):
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
             flashmla_sparse_cp_impl as cp_impl,
@@ -611,7 +777,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         for rank in (0, 3):
             pc.tp_rank = rank
             op = cp_impl.SparseMlaFp8CPOp(64, 512, 64, 512, 64, 1.0, 128, pc)
-            for prefix, grant in ((64, 64), (128, 2), (128, 1)):
+            for prefix, grant in ((64, 64), (128, 2), (128, 1), (0, 1)):
                 with self.subTest(rank=rank, prefix=prefix, grant=grant):
                     padded = math.ceil(grant / (2 * pc.tp_size)) * 2 * pc.tp_size
                     local = padded // pc.tp_size
@@ -653,6 +819,9 @@ class SparseMlaFp8CPOpTest(TestCase):
                     ) as metadata:
                         op.plan(mla, block_table, ai)
                         self.assertEqual(metadata.call_count, int(bool(valid)))
+                    self.assertEqual(
+                        op._ppu_fresh_bf16_prefill, cp_impl._IS_PPU and prefix == 0
+                    )
                     self.assertEqual(op.total_local_ids.tolist(), valid)
                     self.assertEqual(
                         op.full_rope_pos_ids.tolist(),
@@ -667,7 +836,7 @@ class SparseMlaFp8CPOpTest(TestCase):
                     events = []
                     op.kv_cache_write_op = Mock()
                     op.kv_cache_write_op.forward.side_effect = (
-                        lambda *args: events.append("write")
+                        lambda *args, **kwargs: events.append("write")
                     )
                     op.write_cache_store_impl = None
                     q = torch.zeros(local, 64, 576)
@@ -675,7 +844,7 @@ class SparseMlaFp8CPOpTest(TestCase):
                     k_pe = torch.zeros(local, 64)
                     gathered = [torch.randn(padded, 512), torch.randn(padded, 64)]
 
-                    def gather(tensor, group):
+                    def gather(tensor, group, role):
                         result = gathered[len(events)]
                         events.append("gather")
                         return result
@@ -1027,7 +1196,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         # from 2 ranks (rank0 has first 4, rank1 has last 4).
         _all_gather_returns = iter([input_ckv.contiguous(), input_k_pe.contiguous()])
 
-        def _mock_all_gather_tp2(tensor, group=None):
+        def _mock_all_gather_tp2(tensor, group=None, role=None):
             return next(_all_gather_returns)
 
         q0_idx_list, q1_idx_list = generate_q_indices(chunk_lengths)

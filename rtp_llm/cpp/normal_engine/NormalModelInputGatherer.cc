@@ -467,7 +467,13 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     model_input.kv_scale_stride_bytes     = config_.scale_stride_bytes;
     model_input.seq_size_per_block        = config_.seq_size_per_block;
     model_input.kernel_seq_size_per_block = config_.kernel_seq_size_per_block;
-    model_input.pd_separation             = config_.role_type == RoleType::PREFILL;
+    // A P node also serves local requests (for example max_new_tokens=1).
+    // Do not publish their KV or wait for per-layer cache-store events. Keep
+    // publication enabled for mixed batches containing any real PD request.
+    model_input.pd_separation = config_.role_type == RoleType::PREFILL
+                                && std::any_of(stream_groups.contextStreams().begin(),
+                                               stream_groups.contextStreams().end(),
+                                               [](const auto& stream) { return stream->queryPdSep(); });
     model_input.warmup                    = config_.warm_up;
     model_input.decode_entrance           = config_.decode_entrance;
     model_input.use_opaque_kv_cache_store = config_.use_opaque_kv_cache_store;

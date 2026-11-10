@@ -92,6 +92,7 @@ private:
     py::object                                    custom_output_selector_;
     ParallelismConfig                             parallelism_config;
     RuntimeConfig                                 runtime_config;
+    const int                                     engine_cpu_id_;
     EPLBConfig                                    eplb_config;
     PDSepConfig                                   pd_sep_config;
     ProfilingDebugLoggingConfig                   profiling_debug_logging_config;

@@ -21,14 +21,19 @@ from typing import Any, Generator, Literal, Optional, cast
 import torch
 
 from .deepgemm_wrapper import (
+    Fp8ScaledTensor,
     Int8ScaledTensor,
     configure_deep_gemm_num_sms,
     deep_gemm_default_num_sms,
+    fp8_gemm_nt,
     has_deep_gemm,
     int8_gemm_nt,
     m_grouped_bf16_gemm_nt_contiguous,
     m_grouped_bf16_gemm_nt_masked,
     m_grouped_bf16_gemm_nt_nopad,
+    m_grouped_fp8_gemm_nt_contiguous,
+    m_grouped_fp8_gemm_nt_masked,
+    m_grouped_fp8_gemm_nt_nopad,
     m_grouped_int8_gemm_nt_contiguous,
     m_grouped_int8_gemm_nt_masked,
     m_grouped_int8_gemm_nt_nopad,
@@ -39,7 +44,7 @@ logger = logging.getLogger(__name__)
 WarmupMode = Literal["skip", "relax", "full"]
 GroupedLayout = Literal["masked", "contiguous", "nopad"]
 WarmupLayout = Literal["dense", "masked", "contiguous", "nopad"]
-WarmupDtype = Literal["int8", "bf16"]
+WarmupDtype = Literal["int8", "bf16", "fp8"]
 
 WARMUP_MODE_ENV = "RTP_LLM_PPU_DEEPGEMM_WARMUP"
 WARMUP_MAX_TOKENS_ENV = "RTP_LLM_PPU_DEEPGEMM_WARMUP_MAX_TOKENS"
@@ -338,7 +343,7 @@ def _warmup_grouped_gemm(
         num_sms=resolved_num_sms,
         exact_m_values=exact_m_values,
     )
-    max_storage_m = min(n, k if dtype == "bf16" else k // 2)
+    max_storage_m = min(n, k if dtype in ("bf16", "fp8") else k // 2)
     if layout != "masked":
         max_storage_m *= num_groups
     spec = _cap_spec_to_storage(spec, max_storage_m)
@@ -365,6 +370,16 @@ def _warmup_grouped_gemm(
         dtype=torch.bfloat16,
         device=rhs.device,
     )
+    # FP8 block scales ((m, k // 128) per case) cannot alias the weight-scale
+    # storage, whose masked layout is far smaller; use zeroed scratch instead.
+    scratch_scale = None
+    if dtype == "fp8":
+        if rhs_scale is None:
+            raise ValueError("FP8 DeepGEMM warmup requires weight scales")
+        scale_rows = num_groups * largest_m if layout == "masked" else largest_m
+        scratch_scale = torch.zeros(
+            scale_rows * (k // 128), dtype=torch.float32, device=rhs.device
+        )
 
     start = time.monotonic()
     with _deep_gemm_compile_lock(), deep_gemm_compile_only():
@@ -404,6 +419,28 @@ def _warmup_grouped_gemm(
                         )
                     else:
                         m_grouped_int8_gemm_nt_contiguous(
+                            lhs, scaled_rhs, output, metadata
+                        )
+                elif dtype == "fp8":
+                    lhs = (
+                        _storage_view(rhs, lhs_shape, torch.float8_e4m3fn),
+                        _scratch_view(
+                            scratch_scale,
+                            (*lhs_shape[:-1], k // 128),
+                            torch.float32,
+                        ),
+                    )
+                    scaled_rhs = (rhs, rhs_scale)
+                    if layout == "masked":
+                        m_grouped_fp8_gemm_nt_masked(
+                            lhs, scaled_rhs, output, metadata, m
+                        )
+                    elif layout == "nopad":
+                        m_grouped_fp8_gemm_nt_nopad(
+                            lhs, scaled_rhs, output, metadata, m_rows
+                        )
+                    else:
+                        m_grouped_fp8_gemm_nt_contiguous(
                             lhs, scaled_rhs, output, metadata
                         )
                 else:
@@ -471,6 +508,27 @@ def warmup_grouped_bf16_gemm(
     )
 
 
+def warmup_grouped_fp8_gemm(
+    rhs: Fp8ScaledTensor,
+    *,
+    max_m: int,
+    layout: GroupedLayout,
+    mode: WarmupMode,
+    num_sms: Optional[int] = None,
+    exact_m_values: tuple[int, ...] = (),
+) -> int:
+    return _warmup_grouped_gemm(
+        rhs[0],
+        rhs[1],
+        max_m=max_m,
+        layout=layout,
+        dtype="fp8",
+        mode=mode,
+        num_sms=num_sms,
+        exact_m_values=exact_m_values,
+    )
+
+
 def warmup_dense_int8_gemm(
     rhs: Int8ScaledTensor,
     *,
@@ -528,6 +586,74 @@ def warmup_dense_int8_gemm(
     _warmup_cache.add(cache_key)
     logger.info(
         "DeepGEMM int8/dense warmup covered %d M shape(s) for N/K=%d/%d in %.2fs",
+        len(cases),
+        n,
+        k,
+        time.monotonic() - start,
+    )
+    return len(cases)
+
+
+def warmup_dense_fp8_gemm(
+    rhs: Fp8ScaledTensor,
+    *,
+    max_m: int,
+    mode: WarmupMode,
+    num_sms: Optional[int] = None,
+    exact_m_values: tuple[int, ...] = (),
+) -> int:
+    weight, weight_scale = rhs
+    if weight.ndim != 2:
+        raise ValueError(f"Dense DeepGEMM weight must be 2D, got {weight.shape}")
+    n, k = weight.shape
+    resolved_num_sms = _resolve_num_sms(weight, num_sms)
+    spec = _cap_spec_to_storage(
+        DeepGemmWarmupSpec(
+            layout="dense",
+            dtype="fp8",
+            n=n,
+            k=k,
+            num_groups=1,
+            max_m=max_m,
+            num_sms=resolved_num_sms,
+            exact_m_values=exact_m_values,
+        ),
+        min(n, k),
+    )
+    cases = _warmup_cases(spec, mode)
+    cache_key = (
+        spec.dtype,
+        spec.layout,
+        tuple(weight.shape),
+        cases,
+        spec.num_sms,
+    )
+    if not cases or cache_key in _warmup_cache:
+        return 0
+
+    # Same rationale as the grouped path: keep the result out of the weight
+    # storage so a launch escaping compile-only mode cannot corrupt the weights.
+    scratch_out = torch.empty(
+        (max(cases), n), dtype=torch.bfloat16, device=weight.device
+    )
+    scratch_scale = torch.zeros(
+        max(cases) * (k // 128), dtype=torch.float32, device=weight.device
+    )
+
+    start = time.monotonic()
+    with _deep_gemm_compile_lock(), deep_gemm_compile_only():
+        with configure_deep_gemm_num_sms(spec.num_sms):
+            for m in cases:
+                lhs = (
+                    _storage_view(weight, (m, k), torch.float8_e4m3fn),
+                    _scratch_view(scratch_scale, (m, k // 128), torch.float32),
+                )
+                output = _scratch_view(scratch_out, (m, n), torch.bfloat16)
+                fp8_gemm_nt(lhs, rhs, output)
+
+    _warmup_cache.add(cache_key)
+    logger.info(
+        "DeepGEMM fp8/dense warmup covered %d M shape(s) for N/K=%d/%d in %.2fs",
         len(cases),
         n,
         k,

@@ -67,6 +67,7 @@ class EngineConfig:
     dash_sc_grpc_config: DashScGrpcConfig
     grammar_config: GrammarConfig
     load_config: LoadConfig
+    engine_cpu_id: int = -1
 
     def to_string(self) -> str:
         """Return a formatted string representation of EngineConfig for debugging.
@@ -227,6 +228,7 @@ class EngineConfig:
             dash_sc_grpc_config=dash_sc_grpc_config,
             grammar_config=grammar_config,
             load_config=load_config,
+            engine_cpu_id=getattr(py_env_configs, "engine_cpu_id", -1),
         )
 
         runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit

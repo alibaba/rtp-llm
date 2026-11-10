@@ -108,6 +108,7 @@ if triton is not None:
         fp8_max: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
+        SANITIZE_NON_FINITE: tl.constexpr = True,
     ):
         pid_m_blk = tl.program_id(0).to(tl.int64)
         pid_blk = tl.program_id(1)
@@ -125,8 +126,9 @@ if triton is not None:
                 mask=mask,
                 other=0.0,
             ).to(tl.float32)
-            x_is_finite = tl.abs(x) < float("inf")
-            x = tl.where(x_is_finite, x, 0.0)
+            if SANITIZE_NON_FINITE:
+                x_is_finite = tl.abs(x) < float("inf")
+                x = tl.where(x_is_finite, x, 0.0)
 
             block_absmax = tl.maximum(tl.max(tl.abs(x), axis=1), eps)
             scale_raw = block_absmax / fp8_max
@@ -441,6 +443,8 @@ def _validate_inputs(
     out_sf: torch.Tensor,
     out_indices: torch.Tensor,
     out_weights: torch.Tensor,
+    *,
+    allow_int32_indices: bool = False,
 ) -> tuple[int, int, int]:
     if triton is None:
         raise RuntimeError("triton is unavailable")
@@ -459,7 +463,16 @@ def _validate_inputs(
     specs = (
         ("x", x, (T, D), torch.bfloat16),
         ("weights", weights, (T, topk), torch.float32),
-        ("indices", indices, (T, topk), torch.int64),
+        (
+            "indices",
+            indices,
+            (T, topk),
+            (
+                torch.int32
+                if allow_int32_indices and indices.dtype == torch.int32
+                else torch.int64
+            ),
+        ),
         ("out_fp8", out_fp8, (T, D), torch.float8_e4m3fn),
         ("out_sf", out_sf, (T, D // 128), torch.int32),
         ("out_indices", out_indices, (T, topk), torch.int64),
@@ -542,9 +555,19 @@ def fused_pack_mega_moe_inputs_optimized(
     out_sf: torch.Tensor,
     out_indices: torch.Tensor,
     out_weights: torch.Tensor,
+    *,
+    sanitize_non_finite: bool = True,
+    allow_int32_indices: bool = False,
 ) -> None:
     T, D, topk = _validate_inputs(
-        x, weights, indices, out_fp8, out_sf, out_indices, out_weights
+        x,
+        weights,
+        indices,
+        out_fp8,
+        out_sf,
+        out_indices,
+        out_weights,
+        allow_int32_indices=allow_int32_indices,
     )
     if T == 0:
         return
@@ -574,6 +597,7 @@ def fused_pack_mega_moe_inputs_optimized(
         fp8_max,
         BLOCK_M=block_m,
         BLOCK_K=block_k,
+        SANITIZE_NON_FINITE=sanitize_non_finite,
         num_warps=4,
     )
 

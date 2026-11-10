@@ -245,6 +245,16 @@ def _apply_auto_deepep_config(
     )
 
 
+def resolve_local_world_size(parallelism_config: ParallelismConfig) -> int:
+    local_world_size = parallelism_config.local_world_size
+    world_size = parallelism_config.world_size
+    if world_size > 1 and local_world_size == 1:
+        if torch.cuda.is_available():
+            return max(min(torch.cuda.device_count(), world_size), 1)
+        return world_size
+    return local_world_size
+
+
 def set_parallelism_config(
     parallelism_config: ParallelismConfig,
     world_rank: Optional[int] = None,
@@ -259,14 +269,7 @@ def set_parallelism_config(
         parallelism_config: ParallelismConfig to update in place
         world_rank: World rank to apply (local_rank = world_rank % local_world_size, etc.). Default 0.
     """
-    world_size = parallelism_config.world_size
-    need_local = world_size > 1 and parallelism_config.local_world_size == 1
-    if need_local:
-        if torch.cuda.is_available():
-            n = min(torch.cuda.device_count(), world_size)
-        else:
-            n = world_size
-        parallelism_config.local_world_size = max(n, 1)
+    parallelism_config.local_world_size = resolve_local_world_size(parallelism_config)
 
     # Resolve and validate parallelism configuration.
     # ep_size default is 0, which triggers automatic derivation.

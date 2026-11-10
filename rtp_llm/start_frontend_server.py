@@ -37,7 +37,11 @@ def start_frontend_server(
     server_id: int,
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
+    service_draining=None,
 ):
+    from rtp_llm.metrics import kmonitor
+
+    kmonitor.bind_service_draining(service_draining)
     _install_hot_hook_runtime(f"frontend_rank_{rank_id}_server_{server_id}")
     # Set rank_id and server_id on the passed config so port properties match this rank
     logging.info(

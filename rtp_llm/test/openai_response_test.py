@@ -3375,5 +3375,89 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         )
 
 
+class FrontendMetricRendererTest(IsolatedAsyncioTestCase):
+    async def test_private_observer_preserves_config_and_closes_raw_stream(self):
+        from types import SimpleNamespace
+
+        closed = asyncio.Event()
+        observed = []
+        captured = []
+        output = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(output_ids=torch.tensor([9]), finished=False)
+            ],
+            frontend_sp_tpot_samples=[(1, 2500.0)],
+        )
+
+        class Visitor:
+            async def enqueue(self, request):
+                captured.append(request)
+
+                async def stream():
+                    try:
+                        request.frontend_metric_observer(output, 2)
+                        yield output
+                        await asyncio.Event().wait()
+                    finally:
+                        closed.set()
+
+                return stream()
+
+        renderer = custom_renderer.CustomChatRenderer.__new__(
+            custom_renderer.CustomChatRenderer
+        )
+        renderer.tokenizer = SimpleNamespace()
+
+        async def render(stream, request, generate_config):
+            async for result in stream:
+                yield result.generate_outputs[0]
+
+        renderer.render_response_stream = render
+        config = GenerateConfig(
+            is_streaming=True, aux_info=False, num_return_sequences=2
+        )
+        stream = renderer.generate_choice(
+            1,
+            [7, 8],
+            [],
+            config,
+            Visitor(),
+            ChatCompletionRequest(messages=[]),
+            frontend_metric_tags={"priority": "80"},
+            frontend_metric_observer=observed.append,
+        )
+        self.assertIs(await stream.__anext__(), output.generate_outputs[0])
+        await stream.aclose()
+        self.assertTrue(closed.is_set())
+        self.assertFalse(config.frontend_metric_streaming)
+        self.assertFalse(config.aux_info)
+        self.assertTrue(captured[0].generate_config.frontend_metric_streaming)
+        self.assertTrue(captured[0].generate_config.aux_info)
+        self.assertTrue(captured[0].generate_config.is_streaming)
+        self.assertEqual(captured[0].frontend_metric_tags, {"priority": "80"})
+        self.assertEqual(observed[0].frontend_sp_tpot_samples, [(1, 2500.0)])
+        self.assertEqual(observed[0]._frontend_metric_attempt, 2)
+        self.assertEqual(observed[0]._frontend_context_batch_size, 2)
+
+    async def test_async_endpoint_forwards_observer_after_render(self):
+        from unittest.mock import AsyncMock, Mock
+
+        endpoint = OpenaiEndpoint.__new__(OpenaiEndpoint)
+        rendered = object()
+        endpoint.render_chat_async = AsyncMock(return_value=rendered)
+        endpoint._chat_completion_from_inputs = Mock(return_value="response")
+        request, raw_request, observer = object(), object(), Mock()
+        tags = {"priority": "80"}
+        self.assertEqual(
+            await endpoint.chat_completion_async(
+                1, request, raw_request, tags, observer
+            ),
+            "response",
+        )
+        endpoint._chat_completion_from_inputs.assert_called_once_with(
+            1, request, raw_request, rendered, tags, observer
+        )
+
+
 if __name__ == "__main__":
     main()

@@ -148,13 +148,20 @@ class FrontendWorker:
         return token_ids, tokens
 
     async def batch_infer(
-        self, prompts: List[str], request_id: int, generate_config: dict
+        self,
+        prompts: List[str],
+        request_id: int,
+        generate_config: dict,
+        frontend_metric_tags=None,
+        frontend_metric_observer=None,
     ) -> BatchPipelineResponse:
         responses = await self.pipeline.batch_infer(
             prompts=prompts,
             base_request_id=request_id,
             generate_config_json=generate_config,
             generate_env_config=self.generate_env_config,
+            frontend_metric_tags=frontend_metric_tags,
+            frontend_metric_observer=frontend_metric_observer,
         )
         # Reconstruct GenerateConfig to check flags (aux_info, calculate_loss, etc.)
         gc = self.pipeline.create_generate_config(
@@ -247,6 +254,8 @@ class FrontendWorker:
             for i, (text, urls, generate_config) in enumerate(
                 zip(request.input_texts, request.input_urls, request.generate_configs)
             ):
+                unit_kwargs = dict(kwargs)
+                unit_kwargs["frontend_metric_unit_id"] = i
                 generators.append(
                     self._yield_generate(
                         request.request_id + i * 10000,
@@ -255,7 +264,7 @@ class FrontendWorker:
                         generate_config=generate_config,
                         group_size=group_size,
                         group_id=group_id,
-                        **kwargs,
+                        **unit_kwargs,
                     )
                 )
             return self._parallel_batch_async_generators(
@@ -264,12 +273,14 @@ class FrontendWorker:
                 request.batch_infer,
             )
         else:
+            unit_kwargs = dict(kwargs)
+            unit_kwargs["frontend_metric_unit_id"] = 0
             return self._yield_generate(
                 request.request_id,
                 request.input_texts[0],
                 request.input_urls[0],
                 generate_config=request.generate_configs[0],
-                **kwargs,
+                **unit_kwargs,
             )
 
     def _format_response(

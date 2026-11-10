@@ -57,6 +57,27 @@ def _registry():
 
 
 class Fp8Fp4StrategySelectionTest(unittest.TestCase):
+    def test_native_shared_executor_rejects_generic_config_without_shared_recipe(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
+            MegaMoeSEExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.condition_checker import (
+            ConditionChecker,
+        )
+
+        config = SimpleNamespace(
+            moe_quant_method="FP8_PER_BLOCK",
+            ep_size=8,
+            ep_rank=0,
+            world_size=8,
+            world_rank=0,
+            n_shared_experts=1,
+            has_shared_expert_gate=False,
+        )
+        checker = ConditionChecker(MegaMoeSEExecutor.__name__)
+        MegaMoeSEExecutor.check_conditions(checker, config)
+        self.assertFalse(checker.all_passed())
+
     @patch(
         "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.grouped_fp4._has_fp8_fp4_grouped_kernel",
         return_value=True,

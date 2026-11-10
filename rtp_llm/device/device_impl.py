@@ -132,6 +132,13 @@ class ArmCpuImpl(CpuImpl):
 
 class GpuImpl(DeviceBase):
     def __init__(self):
+        # Avoid CPU thread oversubscription across accelerator workers.
+        torch.set_num_threads(1)
+        logging.info(
+            "Set PyTorch CPU intra-op threads to %d for %s",
+            torch.get_num_threads(),
+            type(self).__name__,
+        )
         super().__init__()
 
     def get_device_id(self) -> int:
@@ -595,7 +602,9 @@ class CudaImpl(GpuImpl):
         )  # fp8 scaling factors
 
         if shape[0] == 0:
-            raise RuntimeError("FP4 MoE weight preparation requires at least one expert")
+            raise RuntimeError(
+                "FP4 MoE weight preparation requires at least one expert"
+            )
 
         # Keep only one expert's scratch storage alive instead of retaining all
         # shuffled experts and allocating another full tensor in torch.stack.
