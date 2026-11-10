@@ -252,6 +252,25 @@ class V4Transformer(nn.Module):
                     f"({freed / 2**30:.2f} GiB) before block construction",
                     flush=True,
                 )
+        import os as _os
+        if _os.environ.get("DSV41_DEBUG_MEM") == "1":
+            def _top(scope, label):
+                rows = sorted(
+                    (
+                        (t.numel() * t.element_size(), k)
+                        for k, t in scope.items()
+                    ),
+                    reverse=True,
+                )[:8]
+                print(
+                    f"[mem] {label} total="
+                    f"{sum(t.numel() * t.element_size() for t in scope.values()) / 2**30:.2f} GiB "
+                    + " ".join(f"{k}={b / 2**30:.2f}" for b, k in rows),
+                    flush=True,
+                )
+            _top(gw, "global")
+            _top(mw.weights[0], "layer0")
+            _top(mw.weights[1], "layer1")
         shared_attention = {}
         self.layers = nn.ModuleList(
             [
