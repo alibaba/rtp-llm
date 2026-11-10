@@ -244,8 +244,8 @@ diff --git a/atom/model_ops/qwen4_exp/qsa_attention.py b/atom/model_ops/qwen4_ex
 +
 +@functools.cache
 +def _flydsl_attention_op():
-+    from aiter.ops.flydsl.kernels.qsa.attention import qsa_sparse_attention_flydsl
-+    return qsa_sparse_attention_flydsl
++    from aiter.ops.qsa import qsa_sparse_prefill
++    return qsa_sparse_prefill
  
  
  def build_qwen4_exp_rope(config, head_size: int):
