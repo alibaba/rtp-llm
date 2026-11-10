@@ -121,6 +121,18 @@ public:
         return local_server_->DumpTorchAllocatorInternal(context, request, response);
     }
 
+    ::grpc::Status AwiCommand(::grpc::ServerContext*     context,
+                              const AwiCommandRequestPB* request,
+                              AwiCommandResponsePB*      response) override {
+        return local_server_->AwiCommand(context, request, response);
+    }
+
+    ::grpc::Status AwiCommandInternal(::grpc::ServerContext*     context,
+                                      const AwiCommandRequestPB* request,
+                                      AwiRankResultPB*           response) override {
+        return local_server_->AwiCommandInternal(context, request, response);
+    }
+
     ::grpc::Status
     CheckHealth(::grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) override {
         return local_server_->CheckHealth(context, request, response);
