@@ -59,28 +59,15 @@ phases:
 
 ## 用现有接口写场景
 
-`client/start` 开始整轮回放，固定 `qps` 和 `replay_speed` 二选一。需要缓存复用时在 start 设置 `reuse_cache: true`，同时启用 Engine 的缓存复用。性能 Case 先预热，再检查预热后的指标区间。`client/stop` 收集整轮结果，随后可用 `client/requests` 检查逐请求记录。[Client 回放与请求记录](architecture.md#client-如何回放)
+先从同类 Case 复用步骤。基础收发在回放结束后检查逐请求结果。性能回归在预热后检查绝对阈值。故障恢复先保存实际选举出的主备地址，再按地址执行故障步骤。操作回执之后，用独立的读取 Step 验证发现、选举和流量是否恢复。[Basic](../cases/basic/case.yaml) · [性能回归](../cases/performance_regression/case.yaml) · [Master HA](../cases/master_ha_failover/case.yaml)
 
-`engine/scale` 通过 `direction: out` 扩容或 `direction: in` 缩容，返回实际变更的实例地址。缩容可用 `targets` 指定实例。需要验证发现收敛时，另用 `master/engine/get` 查询 Master 的实际视图。
-
-Master 故障用 `master/stop`，默认正常停止，需要强制退出时写 `mode: kill`。`master/restart` 在原地址恢复已停止的实例，`master/start` 新增实例并返回新地址。HA Case 先保存实际选举出的主备地址，按地址注入故障，再查询主节点和流量成功率。操作回执只说明动作已经完成，发现、选举和业务恢复分别用后续 Step 验证。
+接口名以 `standard_actions()` 注册的动作列表为准。每个动作的参数类型、默认值、返回类型和单位由函数签名及 `@register_step` 声明。Runner 将当次运行的接口契约保存到结果目录的 `interfaces.json`。[已注册的 Step](../python/mock_framework/execution/step/__init__.py)
 
 ### 指标门禁
 
-优先用语义接口和绝对阈值。指标范围相对当前 Step 固定的查询时刻，例如 `range: [-60s, 0s]`。多数接口省略范围时查询最近 60 秒。`client/success_rate` 显式选择 `range` 或引用 `client/stop` 的 `playback_result`。
+优先选择有明确单位和聚合方式的指标动作，用 `expect` 写绝对阈值。查询范围相对当前 Step 的固定查询时刻。比如 `range: [-60s, 0s]` 表示截至该时刻的最近 60 秒。安排预热和等待时，把所选窗口放在需要观察的阶段。
 
-- 默认 `interval` 返回整个区间的一个值，Case 省略该字段。命中率和成功率用区间内分子、分母的总增量相除。吞吐和延迟分别按接口定义计算。
-- `mode: series` 返回按采集周期排列的数值，`gte` 和 `lte` 要求每个点都满足。Counter 派生指标每点的滚动长度由实现确定。
-- 缺失样本、目标缺数据和零分母属于查询错误。自定义诊断可用 `prometheus/query`，返回原始 instant query 的样本，数值门禁优先用现成指标接口。
-
-| 接口 | 返回口径 |
-| --- | --- |
-| `client/qps` | 已发请求速率，requests/s。 |
-| `engine/prefill/tps`、`engine/prefill/tps_with_cache` | Prefill 有效执行速率，分别只计实际计算 token、计入复用 token，单位为 tokens/s。 |
-| `engine/decode/tps` | Decode 已提交输出 token 的墙钟速率，单位为 tokens/s。 |
-| `engine/cache/hit_rate` | Prefill 复用 token / 输入 token，比率为 0–1。 |
-| `client/success_rate` | 成功终态 / 全部终态，比率为 0–1。整轮模式要求没有未发请求。 |
-| `client/ttft`、`client/tpot` | Client 实际收到首 token 的耗时，以及成功请求首 token 之后的平均每 token 耗时。两者都支持 `mean`（默认）、`p95` 和 `p99`，返回单位为秒，阈值可写 `lte: 200ms`。 |
+支持 `mode` 的指标动作默认汇总整个区间。比例类指标分别汇总分子和分母，再相除。需要每个采样点都达标时，使用 `mode: series`，数值上下限会逐点检查。缺少样本或分母为零按查询错误处理。具体接口支持的参数和单位查动作源码，指标采样边界见 [指标覆盖](../views/coverage.md#指标口径)。
 
 ## 新增 Case 接口
 
