@@ -67,6 +67,43 @@ def _swa_kv_kernel(
     tl.store(output + row * 512 + columns, decoded)
 
 
+def _swa_kv_norm_rope_torch(
+    raw: torch.Tensor,
+    weight: torch.Tensor,
+    freqs_cis: torch.Tensor,
+    *,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """SM80 reference: same BF16 boundaries and MXFP8 roundtrip via torch."""
+    flat = raw.reshape(-1, 512)
+    rows = flat.shape[0]
+    if rows == 0:
+        return raw.clone()
+    values = flat.to(torch.float32)
+    inv = torch.rsqrt(values.square().mean(-1, keepdim=True) + eps)
+    normalized = (values * inv * weight.to(torch.float32)).to(torch.bfloat16)
+    freqs = torch.view_as_real(freqs_cis.reshape(-1, 32))
+    cos = freqs[..., 0].to(torch.float32)
+    sin = freqs[..., 1].to(torch.float32)
+    real = normalized[..., 448::2].to(torch.float32)
+    imag = normalized[..., 449::2].to(torch.float32)
+    real_out = real * cos - imag * sin
+    imag_out = real * sin + imag * cos
+    tail = torch.stack((real_out, imag_out), dim=-1).reshape(rows, 64)
+    rounded = torch.cat((normalized[..., :448], tail.to(torch.bfloat16)), dim=-1)
+
+    groups = rounded.to(torch.float32).reshape(rows, 16, 32)
+    maximum = groups.abs().amax(-1, keepdim=True).clamp_min(1e-4)
+    raw_scale = maximum * (1.0 / 448.0)
+    bits = raw_scale.view(torch.int32)
+    encoded = (bits >> 23) + ((bits & 0x7FFFFF) != 0).to(torch.int32)
+    scale = (encoded << 23).view(torch.float32)
+    scaled = (groups / scale).clamp(-448.0, 448.0)
+    payload = scaled.to(torch.float8_e4m3fn)
+    decoded = (payload.to(torch.float32) * scale).to(torch.bfloat16)
+    return decoded.reshape(raw.shape)
+
+
 def swa_kv_norm_rope(
     raw: torch.Tensor,
     weight: torch.Tensor,
@@ -87,6 +124,9 @@ def swa_kv_norm_rope(
     freqs = torch.view_as_real(freqs_cis.reshape(-1, 32))
     assert freqs_cis.dtype == torch.complex64 and freqs_cis.device == raw.device
     assert freqs.shape[0] == flat.shape[0] and freqs.stride(1) == 2
+    major, _ = torch.cuda.get_device_capability(raw.device)
+    if major < 9:
+        return _swa_kv_norm_rope_torch(raw, weight, freqs_cis, eps=eps)
     output = torch.empty(raw.shape, device=raw.device, dtype=raw.dtype)
     if flat.shape[0]:
         _swa_kv_kernel[(flat.shape[0],)](

@@ -34,6 +34,82 @@ SCALE_BYTES_PER_TOKEN = HEAD_DIM // QUANT_BLOCK
 ENTRY_BYTES = HEAD_DIM + SCALE_BYTES_PER_TOKEN
 
 
+def _torch_codec_supported() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    major, _ = torch.cuda.get_device_capability()
+    return major >= 9
+
+
+def _quantize_rows_torch(kv: torch.Tensor):
+    """Reference MXFP8 payload/scale bytes for ``[N, 512]`` BF16 rows."""
+    rows = kv.shape[0]
+    groups = kv.to(torch.float32).reshape(rows, 16, 32)
+    maximum = groups.abs().amax(-1, keepdim=True).clamp_min(1e-4)
+    raw_scale = maximum * (1.0 / 448.0)
+    bits = raw_scale.view(torch.int32)
+    encoded = (bits >> 23) + ((bits & 0x7FFFFF) != 0).to(torch.int32)
+    scale = (encoded << 23).view(torch.float32)
+    scaled = (groups / scale).clamp(-448.0, 448.0)
+    payload = (
+        scaled.to(torch.float8_e4m3fn)
+        .view(torch.uint8)
+        .reshape(rows, HEAD_DIM)
+    )
+    return payload, encoded.to(torch.uint8).reshape(rows, SCALE_BYTES_PER_TOKEN)
+
+
+def _pool_rows_torch(pool_3d: torch.Tensor, slots: torch.Tensor):
+    """Read payload [N,512] uint8 and scales [N,16] uint8 for physical slots."""
+    flat = pool_3d.reshape(-1)
+    slots = slots.reshape(-1).to(torch.int64)
+    valid = slots >= 0
+    rows = slots.numel()
+    payload = torch.zeros((rows, HEAD_DIM), dtype=torch.uint8, device=pool_3d.device)
+    scales = torch.full(
+        (rows, SCALE_BYTES_PER_TOKEN), 127, dtype=torch.uint8, device=pool_3d.device
+    )
+    if valid.any():
+        s = slots[valid]
+        block = s // pool_3d.shape[1]
+        position = s % pool_3d.shape[1]
+        base = block * pool_3d.stride(0) + position * (HEAD_DIM + SCALE_BYTES_PER_TOKEN)
+        cols = torch.arange(HEAD_DIM, device=pool_3d.device)
+        payload[valid] = flat[base[:, None] + cols[None, :]]
+        scols = torch.arange(SCALE_BYTES_PER_TOKEN, device=pool_3d.device)
+        scales[valid] = flat[base[:, None] + HEAD_DIM + scols[None, :]]
+    return payload, scales
+
+
+def _dequantize_rows_torch(payload: torch.Tensor, scales: torch.Tensor, dtype):
+    values = payload.view(torch.float8_e4m3fn).to(torch.float32)
+    values = values.reshape(-1, 16, 32)
+    exp = torch.exp2(scales.to(torch.float32) - 127.0)[:, :, None]
+    return (values * exp).reshape(-1, HEAD_DIM).to(dtype)
+
+
+def _insert_swa_torch(kv: torch.Tensor, pool_3d: torch.Tensor, slots: torch.Tensor) -> None:
+    slots = slots.reshape(-1).to(torch.int64)
+    valid = slots >= 0
+    if not valid.any():
+        return
+    payload, scales = _quantize_rows_torch(kv[valid])
+    flat = pool_3d.reshape(-1)
+    s = slots[valid]
+    block = s // pool_3d.shape[1]
+    position = s % pool_3d.shape[1]
+    base = block * pool_3d.stride(0) + position * (HEAD_DIM + SCALE_BYTES_PER_TOKEN)
+    cols = torch.arange(HEAD_DIM, device=pool_3d.device)
+    flat[base[:, None] + cols[None, :]] = payload
+    scols = torch.arange(SCALE_BYTES_PER_TOKEN, device=pool_3d.device)
+    flat[base[:, None] + HEAD_DIM + scols[None, :]] = scales
+
+
+def _dequantize_swa_torch(pool_3d, slots, out_dtype):
+    payload, scales = _pool_rows_torch(pool_3d, slots)
+    return _dequantize_rows_torch(payload, scales, out_dtype)
+
+
 def is_supported(pool_3d: torch.Tensor, slots: torch.Tensor) -> bool:
     """Check the device/layout contract without reading device metadata."""
     return (
@@ -229,6 +305,9 @@ def quantize_and_insert_swa_k_cache(
     """
     if slots.numel() == 0:
         return
+    if not _torch_codec_supported():
+        _insert_swa_torch(kv, pool_3d, slots)
+        return
     _quantize_and_insert_swa_kernel[(slots.numel(),)](
         kv,
         pool_3d,
@@ -253,6 +332,9 @@ def dequantize_swa_k_cache(
             (slots.numel(), HEAD_DIM), dtype=out_dtype, device=pool_3d.device
         )
     if slots.numel():
+        if not _torch_codec_supported():
+            out.copy_(_dequantize_swa_torch(pool_3d, slots, out_dtype).view_as(out))
+            return out
         _dequantize_swa_kernel[(slots.numel(),)](
             pool_3d,
             slots.reshape(-1).contiguous(),
@@ -301,6 +383,29 @@ def dequantize_and_gather_k_cache_slots(
         out, out_row_offsets, slot_mapping.shape[0]
     )
     if slot_mapping.numel():
+        if not _torch_codec_supported():
+            lengths = (
+                gather_lens.tolist()
+                if gather_lens is not None
+                else [slot_mapping.shape[1]] * slot_mapping.shape[0]
+            )
+            offsets = (
+                out_row_offsets.tolist() if out_row_offsets is not None else None
+            )
+            for b in range(slot_mapping.shape[0]):
+                length = min(int(lengths[b]), slot_mapping.shape[1])
+                if length <= 0:
+                    continue
+                values = _dequantize_swa_torch(
+                    k_cache, slot_mapping[b, :length], out.dtype
+                )
+                row = offsets[b] if offsets is not None else b
+                if out.ndim == 2:
+                    start = row + offset
+                    out[start : start + length] = values.view(length, HEAD_DIM)
+                else:
+                    out[row, offset : offset + length] = values.view(length, HEAD_DIM)
+            return
         _gather_swa_kernel[tuple(slot_mapping.shape)](
             k_cache,
             slot_mapping,
