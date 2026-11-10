@@ -323,6 +323,17 @@ py_test(
 )
 
 py_test(
+    name = "gdn_sm90_decode_conv_gate_test",
+    srcs = ["gdn_composition_test.py"],
+    main = "gdn_composition_test.py",
+    args = ["GdnDecodeConvGateSM90Test"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "fp8_kv_test",
     srcs = ["fp8_kv_test.py", "sparse_paged_fmha_test.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],

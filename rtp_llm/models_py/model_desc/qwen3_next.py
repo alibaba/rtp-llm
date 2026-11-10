@@ -1,4 +1,5 @@
 import logging
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, Optional
@@ -823,6 +824,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
         attn_meta: Qwen3NextMetadata,
+        precomputed_gates: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         is_target_verify = self._is_target_verify(attn_inputs, attn_meta)
         batch, seq = self._get_bs_from_attenion_input(
@@ -927,7 +929,11 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             )
         else:
             # NVIDIA CUDA and unsupported ROCm inputs retain the original path.
-            g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
+            g, beta = (
+                fused_gdn_gating(self.alog, a, b, self.dt_bias)
+                if precomputed_gates is None
+                else precomputed_gates
+            )
             # contiguous is applied by fused_recurrent_gated_delta_rule.
             g = g.view(batch, seq, self.local_num_v_heads)
             beta = beta.view(batch, seq, self.local_num_v_heads)
@@ -967,6 +973,26 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             kv_cache.kv_cache_base.shape[0], -1
         )
         is_target_verify = self._is_target_verify(attn_inputs, attn_meta)
+        conv_gate = getattr(self, "_decode_conv_gate", None)
+        if conv_gate is not None and not is_target_verify:
+            fused = conv_gate(
+                mixed_qkv,
+                self.conv_weights,
+                self._get_conv_states(kv_cache_tensor),
+                attn_inputs.kv_cache_kernel_block_id_device,
+                attn_inputs.sequence_lengths_plus_1_device,
+                a,
+                b,
+                self.alog,
+                self.dt_bias,
+                kv_cache.seq_size_per_block,
+            )
+            if fused is not None:
+                mixed_qkv, g, beta = fused
+                return self._fla(
+                    mixed_qkv, b, a, kv_cache_tensor, kv_cache.seq_size_per_block,
+                    attn_inputs, attn_meta, precomputed_gates=(g, beta),
+                )
         mixed_qkv = self._conv1d(
             mixed_qkv,
             kv_cache_tensor,
@@ -1154,6 +1180,20 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         self.decode_gdn = Qwen3NextGatedDeltaNetDecode(
             linear_attn_config, parallelism_config, weights
         )
+        if (
+            os.getenv("QWEN4_GDN_DECODE_CONV_GATE", "0") == "1"
+            and self._qkvz_ba_fused
+            and norm_activation == "sigmoid"
+            and (attn_tp_size, self.local_num_k_heads, self.local_num_v_heads)
+            in ((8, 2, 6), (2, 8, 24))
+            and self.head_k_dim == self.head_v_dim == 128
+            and torch.version.hip is None
+        ):
+            from rtp_llm.models_py.modules.qwen4_exp.gdn_decode_conv_gate_triton import (
+                try_decode_conv_gate,
+            )
+
+            self.decode_gdn._decode_conv_gate = try_decode_conv_gate
         self.norm = RmsNormGated(
             weights[W.linear_attn_norm_w],
             eps=layernorm_eps,

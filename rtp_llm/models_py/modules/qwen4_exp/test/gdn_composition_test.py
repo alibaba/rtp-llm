@@ -1,3 +1,4 @@
+import os
 import unittest
 from functools import partial
 from types import SimpleNamespace
@@ -190,6 +191,257 @@ class GdnCompositionTest(unittest.TestCase):
                         patcher.stop()
                     for handle in handles:
                         handle.remove()
+
+
+@unittest.skipUnless(
+    torch.cuda.is_available() and torch.version.hip is None, "NVIDIA CUDA is required"
+)
+class GdnDecodeConvGateSM90Test(unittest.TestCase):
+    def setUp(self):
+        if torch.cuda.get_device_capability() != (9, 0):
+            self.skipTest("The paged Conv1D/gating fusion is qualified on SM90")
+        torch.manual_seed(159)
+
+    @staticmethod
+    def make_pair(tp=8):
+        from rtp_llm.config.model_config import ModelConfig
+        from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextGatedDeltaNet
+        from rtp_llm.ops import DataType, ParallelismConfig
+        from rtp_llm.utils.model_weight import W
+
+        config = ModelConfig()
+        config.hidden_size = 2560
+        linear = config.linear_attention_config
+        linear.linear_num_key_heads = 16
+        linear.linear_num_value_heads = 48
+        linear.linear_key_head_dim = linear.linear_value_head_dim = 128
+        linear.linear_conv_kernel_dim = 4
+        linear.ssm_state_dtype = DataType.TYPE_FP32
+        linear.conv_state_dtype = DataType.TYPE_BF16
+        parallelism = ParallelismConfig()
+        parallelism.tp_size = parallelism.world_size = tp
+        parallelism.dp_size = parallelism.ep_size = 1
+        assert parallelism.get_attn_tp_size() == tp
+
+        def weight(*shape, scale=1.0, dtype=torch.bfloat16):
+            return torch.randn(*shape, device="cuda", dtype=dtype) * scale
+
+        weights = {
+            W.linear_attn_qkvz_w: weight(2560, 16384 // tp, scale=2560**-0.5),
+            W.linear_attn_ba_w: weight(2560, 96 // tp, scale=2560**-0.5),
+            W.linear_attn_conv1d_w: weight(10240 // tp, 1, 4, scale=0.5),
+            W.linear_attn_dt_b: weight(48 // tp, scale=0.2, dtype=torch.float32),
+            W.linear_attn_alog: weight(48 // tp, scale=0.3, dtype=torch.float32),
+            W.linear_attn_norm_w: 1 + weight(128, scale=0.1),
+            W.linear_attn_out_w: weight(6144 // tp, 2560, scale=(6144 // tp)**-0.5),
+        }
+        layers = []
+        for fuse in ("0", "1"):
+            with patch.dict(os.environ, {"QWEN4_GDN_DECODE_CONV_GATE": fuse}):
+                layer = Qwen3NextGatedDeltaNet(
+                    linear, parallelism, dict(weights), 1e-6, norm_activation="sigmoid"
+                ).eval()
+            # The check ends at the rank-local output, before TP reduction.
+            layer.tp_all_reduce = lambda x, group: x
+            layers.append(layer)
+        for layer in layers:
+            assert tuple(layer.in_proj_fused.weight.shape) == (16480 // tp, 2560)
+        return tuple(layers)
+
+    @staticmethod
+    def make_decode_case(layer, batch, tokens=1):
+        converter = layer.decode_gdn.linear_cache_converter
+        pages = batch * 4 + 2
+        packed = torch.full(
+            (pages, converter.block_size_bytes + 128), -91,
+            dtype=torch.int8, device="cuda",
+        )
+        for view in (converter.get_ssm_state_tensor(packed), converter.get_conv_state_tensor(packed)):
+            view.copy_(torch.randn_like(view) * 0.05)
+        mapping = torch.zeros(batch, 7, dtype=torch.int32, device="cuda")[:, :4]
+        mapping.copy_(torch.randperm(pages - 2, device="cuda", dtype=torch.int32).view(batch, 4) + 1)
+        lengths = torch.tensor([65 if i % 2 == 0 else 19 for i in range(batch)],
+                               dtype=torch.int32, device="cuda")
+        verify = tokens > 1
+        inputs = SimpleNamespace(
+            is_prefill=verify, is_target_verify=verify, is_cuda_graph=False,
+            kv_cache_kernel_block_id_device=mapping, sequence_lengths_plus_1_device=lengths,
+            prefix_lengths=torch.ones(batch, dtype=torch.int32),
+        )
+        meta = SimpleNamespace(is_target_verify=verify, is_cp_linear_attn=False)
+        hidden = torch.randn(batch * tokens, 2560, dtype=torch.bfloat16, device="cuda")
+        return hidden, packed, inputs, meta
+
+    @staticmethod
+    def run_decode(layer, hidden, packed, inputs, meta):
+        cache = SimpleNamespace(kv_cache_base=packed, seq_size_per_block=64)
+        return layer(hidden, None, cache, inputs, meta)
+
+    def assert_exact_decode(self, expected, actual, ref_state, state, initial):
+        self.assertTrue(torch.isfinite(expected).all().item())
+        self.assertTrue(torch.equal(expected, actual))
+        self.assertTrue(torch.equal(ref_state, state))
+        self.assertTrue(torch.equal(state[0], initial[0]))
+        self.assertTrue(torch.equal(state[-1], initial[-1]))
+
+    @torch.inference_mode()
+    def test_real_decode_bitwise_and_graph_page_replay(self):
+        old, new = self.make_pair()
+        with patch.object(new.decode_gdn, "_conv1d",
+                          side_effect=AssertionError("Eligible call fell back")):
+            for batch in (1, 16, 32, 64):
+                with self.subTest(batch=batch):
+                    hidden, initial, inputs, meta = self.make_decode_case(new, batch)
+                    original, fused = initial.clone(), initial.clone()
+                    expected = self.run_decode(old, hidden, original, inputs, meta)
+                    actual = self.run_decode(new, hidden, fused, inputs, meta)
+                    self.assert_exact_decode(expected, actual, original, fused, initial)
+
+            hidden, initial, inputs, meta = self.make_decode_case(new, 17)
+            original, fused = initial.clone(), initial.clone()
+            inputs.is_cuda_graph = True
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                self.run_decode(new, hidden, fused, inputs, meta)
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=side):
+                actual = self.run_decode(new, hidden, fused, inputs, meta)
+            address = actual.data_ptr()
+            for step in range(2):
+                hidden.mul_(1.125)
+                mapping = inputs.kv_cache_kernel_block_id_device
+                mapping[:-1].copy_(mapping[:-1].roll(1, dims=0))
+                lengths = inputs.sequence_lengths_plus_1_device
+                lengths[:-1].add_(step)
+                mapping[-1].zero_()
+                lengths[-1] = 0
+                original.copy_(initial)
+                fused.copy_(initial)
+                expected = self.run_decode(old, hidden, original, inputs, meta)
+                graph.replay()
+                self.assertEqual(actual.data_ptr(), address)
+                self.assert_exact_decode(expected, actual, original, fused, initial)
+
+    @torch.inference_mode()
+    def test_unpadded_decode_bitwise_across_context_boundary(self):
+        old, new = self.make_pair()
+        cases = ((1, 8192), (1, 32768), (16, 2048), (32, 2048), (64, 2048))
+        with patch.object(
+            new.decode_gdn,
+            "_conv1d",
+            side_effect=AssertionError("Unpadded S=1 decode fell back"),
+        ):
+            for batch, prefix in cases:
+                with self.subTest(batch=batch, prefix=prefix):
+                    hidden, initial, inputs, meta = self.make_decode_case(new, batch)
+                    for projected in new._input_project(hidden):
+                        self.assertEqual(projected.stride(), (2060, 1))
+
+                    page = prefix // 64
+                    short_map = inputs.kv_cache_kernel_block_id_device
+                    long_map = short_map.new_zeros((batch, page + 4))[:, : page + 1]
+                    # Only the final prefix page and its successor are visited.
+                    long_map[:, page - 1 : page + 1] = short_map[:, :2]
+                    inputs.kv_cache_kernel_block_id_device = long_map
+                    lengths = inputs.sequence_lengths_plus_1_device
+                    lengths.fill_(prefix + 1)
+                    original, fused = initial.clone(), initial.clone()
+
+                    # Carry the actual committed state across the boundary and
+                    # two later tokens rather than resetting it each step.
+                    for _ in range(3):
+                        expected = self.run_decode(old, hidden, original, inputs, meta)
+                        actual = self.run_decode(new, hidden, fused, inputs, meta)
+                        self.assert_exact_decode(
+                            expected, actual, original, fused, initial
+                        )
+                        hidden.normal_()
+                        lengths.add_(1)
+
+    @torch.inference_mode()
+    def test_unpadded_decode_graph_refreshes_paged_state(self):
+        self.check_unpadded_decode_graph(8, (
+            (1, (8192, 32768)),
+            (16, (2048, 2048)),
+            (32, (2048, 2048)),
+            (64, (2048, 2048)),
+        ))
+
+    @torch.inference_mode()
+    def test_tp2_decode_graph_refreshes_paged_state(self):
+        self.check_unpadded_decode_graph(2, tuple((b, (2048, 2048)) for b in (16, 32, 64)))
+
+    def check_unpadded_decode_graph(self, tp, cases):
+        old, new = self.make_pair(tp=tp)
+        with patch.object(
+            new.decode_gdn,
+            "_conv1d",
+            side_effect=AssertionError("Unpadded S=1 Graph fell back"),
+        ):
+            for batch, prefixes in cases:
+                with self.subTest(batch=batch):
+                    hidden, initial, inputs, meta = self.make_decode_case(new, batch)
+                    for projected in new._input_project(hidden):
+                        self.assertEqual(projected.stride(), (16480 // tp, 1))
+
+                    physical_pairs = inputs.kv_cache_kernel_block_id_device
+                    columns = max(prefixes) // 64 + 1
+                    table = physical_pairs.new_zeros((batch, columns + 3))[:, :columns]
+                    table[:, :2].copy_(physical_pairs[:, :2])
+                    lengths = inputs.sequence_lengths_plus_1_device
+                    lengths.fill_(65)
+                    inputs.kv_cache_kernel_block_id_device = table
+                    # The reference uses the full, same live page table in
+                    # eager mode, independently of the Graph FLA table view.
+                    reference_inputs = SimpleNamespace(**vars(inputs))
+                    inputs.is_cuda_graph = True
+                    original, fused = initial.clone(), initial.clone()
+
+                    side = torch.cuda.Stream()
+                    side.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(side):
+                        self.run_decode(new, hidden, fused, inputs, meta)
+                    torch.cuda.current_stream().wait_stream(side)
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, stream=side):
+                        actual = self.run_decode(new, hidden, fused, inputs, meta)
+                    address = actual.data_ptr()
+                    fused.copy_(initial)
+
+                    for epoch, prefix in enumerate(prefixes):
+                        page = prefix // 64
+                        table.zero_()
+                        table[:, page - 1 : page + 1].copy_(
+                            physical_pairs[:, 2 * epoch : 2 * epoch + 2]
+                        )
+                        lengths.fill_(prefix + 1)
+                        # New live request/page pair, then advance three
+                        # tokens without resetting the recurrent state.
+                        for step in range(3):
+                            with self.subTest(prefix=prefix, epoch=epoch, step=step):
+                                hidden.normal_()
+                                expected = self.run_decode(
+                                    old, hidden, original, reference_inputs, meta
+                                )
+                                graph.replay()
+                                self.assertEqual(actual.data_ptr(), address)
+                                self.assert_exact_decode(
+                                    expected, actual, original, fused, initial
+                                )
+                                lengths.add_(1)
+
+    @torch.inference_mode()
+    def test_target_verify_uses_original_multi_token_path(self):
+        old, new = self.make_pair()
+        hidden, initial, inputs, meta = self.make_decode_case(new, 3, tokens=2)
+        original, fused = initial.clone(), initial.clone()
+        expected = self.run_decode(old, hidden, original, inputs, meta)
+        with patch.object(new.decode_gdn, "_decode_conv_gate",
+                          side_effect=AssertionError("S>1 invoked the S=1 fusion")):
+            actual = self.run_decode(new, hidden, fused, inputs, meta)
+        self.assert_exact_decode(expected, actual, original, fused, initial)
 
 
 if __name__ == "__main__":
