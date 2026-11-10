@@ -31,19 +31,20 @@ from rtp_llm.utils.util import check_with_info
 class ModelFactory:
     @staticmethod
     def _share_mtp_global_weights(model: Any, propose_model: Any) -> bool:
-        """Share immutable globals with a same-checkpoint GLM5 or HY4 draft."""
+        """Share immutable globals with a same-checkpoint MLA MTP draft."""
         model_config = getattr(model, "model_config", None)
         propose_config = getattr(propose_model, "model_config", None)
         model_pair = (
             getattr(model_config, "model_type", None),
             getattr(propose_config, "model_type", None),
         )
-        if (
-            model_pair not in (("glm_5", "glm_5_mtp"), ("hy_v4", "hy_v4_mtp"))
-            or (
-                model_pair[0] == "glm_5"
-                and int(getattr(propose_config, "mtp_layer_offset", 0) or 0) <= 0
-            )
+        if model_pair not in (
+            ("glm_5", "glm_5_mtp"),
+            ("deepseek_v32", "deepseek_v32_mtp"),
+            ("hy_v4", "hy_v4_mtp"),
+        ) or (
+            model_pair[0] in ("glm_5", "deepseek_v32")
+            and int(getattr(propose_config, "mtp_layer_offset", 0) or 0) <= 0
         ):
             return False
 
@@ -314,7 +315,7 @@ class ModelFactory:
                 )
                 engine_config.sp_config.type = SpeculativeType.MTP
                 sp_type = SpeculativeType.MTP
-            elif model_type == "glm_5_mtp":
+            elif model_type in ("glm_5_mtp", "deepseek_v32_mtp"):
                 logging.warning(
                     f"create sp model type is {model_type}, so change the sp type to eagle"
                 )

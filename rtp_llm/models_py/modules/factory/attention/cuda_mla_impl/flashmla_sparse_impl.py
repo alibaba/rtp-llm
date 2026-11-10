@@ -204,7 +204,7 @@ class SparseMlaOp(object):
         attn_sink: Optional[torch.Tensor],
         kernel_heads: Optional[int] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], int]:
-        """Pad HY V4 TP-local heads to FlashMLA's 64/128-head ABI.
+        """Pad TP-local heads to FlashMLA's 64/128-head ABI.
 
         Padded sinks are ``-inf`` so they add exactly zero to the softmax
         denominator. A zero sink would incorrectly create an extra exp(0).
@@ -593,6 +593,11 @@ class SparseMlaImpl(MlaImplBase):
             op_kwargs["use_cuda_graph"] = is_cuda_graph
         has_hy4_sink = any(W.hy4_attn_sink in layer for layer in weights)
         kernel_num_heads = attn_configs.head_num
+        if issubclass(op_cls, SparseMlaFp8Op):
+            # DeepSeek V3.2 TP4 has 32 local heads. FP8 FlashMLA requires
+            # 64/128; forward pads independent heads and slices the output.
+            kernel_num_heads = _fp8_sparse_padded_heads(kernel_num_heads)
+            op_kwargs["bf16_prefill_num_heads"] = attn_configs.head_num
         if has_hy4_sink:
             # HY4's SM100 FlashMLA wheel has native h64/d576/sink kernels.
             # Avoid the compatibility h128 lanes; the h64 specialization is

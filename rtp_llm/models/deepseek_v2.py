@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, List, Optional
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import MlaAttnAtomicWeight, MlaConfig
 from rtp_llm.model_loader.ffn_weight import (
@@ -50,7 +51,25 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
     q_use_lora = False
     has_e_score_correction_bias = False
 
+    def _process_deepseek_v32_scale_meta(self, weight_keys):
+        quant_config = getattr(self.model_config, "quant_config", None)
+        if (
+            getattr(self.model_config, "model_type", "")
+            in ("deepseek_v32", "deepseek_v32_mtp")
+            and isinstance(quant_config, Fp8BlockWiseQuantConfig)
+            and quant_config.get_method() == "FP8_PER_BLOCK"
+            and quant_config.scale_fmt == "ue8m0"
+            and any(key.endswith(".weight_scale_inv") for key in weight_keys)
+            and not any(key.endswith(".scale") for key in weight_keys)
+        ):
+            # Native V3.2 describes power-of-two scaling as UE8M0 in config,
+            # but serializes those values as FP32 *.weight_scale_inv tensors.
+            # Converted GLM-style checkpoints use actual UE8M0 *.scale tensors.
+            quant_config.scale_fmt = "float32"
+            logging.info("DeepSeek V3.2: loading FP32 weight_scale_inv scales")
+
     def _process_meta(self, meta_dict, weight_keys):
+        self._process_deepseek_v32_scale_meta(weight_keys)
         if "model.layers.0.self_attn.q_a_proj.weight" in weight_keys:
             self.q_use_lora = True
         for layer_id in range(self._num_layers):
@@ -561,9 +580,33 @@ class DeepSeekV2(BaseModel):
     def support_cuda_graph(self) -> bool:
         return True
 
+    def _prepare_native_moe_scales(self):
+        if self.model_config.model_type not in (
+            "deepseek_v32",
+            "deepseek_v32_mtp",
+        ) or os.environ.get("MOE_STRATEGY") not in ("mega_moe_fp8", "mega_moe_fp8_se"):
+            return
+        encoded_layers = 0
+        for layer in self.weight.weights:
+            scales = [layer.get(name) for name in (W.moe_s1, W.moe_s2)]
+            if not all(s is not None and s.dtype == torch.float32 for s in scales):
+                continue
+            encoded = [s.to(torch.float8_e8m0fnu) for s in scales]
+            if all(torch.equal(s, e.float()) for s, e in zip(scales, encoded)):
+                # Native V3.2 stores power-of-two scales in FP32. Encoding
+                # only the scales preserves FP8 weight bits and avoids the
+                # multi-GiB FP32 expert expansion during MegaMoE setup.
+                for name, scale in zip((W.moe_s1, W.moe_s2), encoded):
+                    layer[name] = scale
+                encoded_layers += 1
+        logging.info(
+            "DeepSeek V3.2: losslessly encoded %d MoE scale pairs", encoded_layers
+        )
+
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
 
+        self._prepare_native_moe_scales()
         model_config = self.model_config
         parallelism_config = self.parallelism_config
         fmha_config = self.fmha_config
@@ -842,6 +885,7 @@ class Glm5MtpWeight(DeepSeekV2Weight):
     """
 
     def _process_meta(self, meta_dict, weight_keys):
+        self._process_deepseek_v32_scale_meta(weight_keys)
         # The MTP layer index in the source checkpoint (78 for Layout B, 0 for
         # Layout A). DeepSeekV2Weight._process_meta only inspects layers
         # [0, _num_layers) which would miss the MTP layer in Layout B.
@@ -978,6 +1022,7 @@ class Glm5Mtp(DeepSeekV2):
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.generic_moe_mtp import GenericMoeMTPModel
 
+        self._prepare_native_moe_scales()
         self.py_model = GenericMoeMTPModel(
             self.model_config,
             self.parallelism_config,
@@ -994,11 +1039,55 @@ class Glm5Mtp(DeepSeekV2):
         return Glm5MtpWeight
 
 
+class DeepSeekV32MtpWeight(Glm5MtpWeight):
+    def _process_meta(self, meta_dict, weight_keys):
+        offset = self.model_config.mtp_layer_offset
+        # A one-layer pruned main model still puts NextN at layer 1.
+        # Recognize a standalone draft by its tensors, not its layer count.
+        if (
+            f"model.layers.{offset}.enorm.weight" not in weight_keys
+            and "model.layers.0.enorm.weight" in weight_keys
+        ):
+            self.model_config.mtp_layer_offset = 0
+        super()._process_meta(meta_dict, weight_keys)
+
+
+class DeepSeekV32Mtp(Glm5Mtp):
+    """DSA NextN using the shared Python MTP path and full-checkpoint loader.
+
+    Like SGLang's DeepseekModelNextN, this uses one MoE/DSA decoder layer
+    at num_hidden_layers, with [enorm(embedding), hnorm(hidden)] input.
+    YaRN, interleaved MLA RoPE and grouped routing come from the V3.2 config.
+    Extracted checkpoints with the decoder at model.layers.0 also work.
+    """
+
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
+        with open(os.path.join(ckpt_path, "config.json")) as reader:
+            config_json = json.load(reader)
+        num_mtp_layers = int(config_json.get("num_nextn_predict_layers", 1))
+        if num_mtp_layers != 1:
+            raise ValueError(
+                "DeepSeek V3.2 MTP requires exactly one nextn layer, "
+                f"got {num_mtp_layers}"
+            )
+        config = super()._create_config(ckpt_path)
+        config.mtp_layer_offset = int(config_json["num_hidden_layers"])
+        if not config.attn_config.is_sparse:
+            raise ValueError("DeepSeek V3.2 MTP requires DSA indexer configuration")
+        return config
+
+    @staticmethod
+    def get_weight_cls():
+        return DeepSeekV32MtpWeight
+
+
 register_model("deepseek2", DeepSeekV2, ["DeepseekV2ForCausalLM"])
 register_model("deepseek3", DeepSeekV2, ["DeepseekV3ForCausalLM"])
 register_model("deepseek-v3-mtp", DeepSeekV3Mtp, ["DeepseekV3ForCausalLMNextN"])
 register_model("kimi_k2", DeepSeekV2, [])
 register_model("deepseek_v31", DeepSeekV2, [])
 register_model("deepseek_v32", DeepSeekV2, ["DeepseekV32ForCausalLM"])
+register_model("deepseek_v32_mtp", DeepSeekV32Mtp, ["DeepseekV32ForCausalLMNextN"])
 register_model("glm_5", DeepSeekV2, ["GlmMoeDsaForCausalLM"])
 register_model("glm_5_mtp", Glm5Mtp, ["GlmMoeDsaMtpForCausalLM"])

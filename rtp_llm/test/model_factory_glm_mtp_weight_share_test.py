@@ -87,6 +87,25 @@ class GlmMtpGlobalWeightShareTest(unittest.TestCase):
         self.assertIs(propose.weight.global_weights[W.lm_head], old_lm_head)
         self.assertIs(propose.py_model.embed_tokens.weight, old_embedding)
 
+    def test_deepseek_v32_full_checkpoint_shares_globals(self):
+        self.target.model_config.model_type = "deepseek_v32"
+        propose = self._make_propose(model_type="deepseek_v32_mtp", mtp_layer_offset=61)
+
+        self.assertTrue(ModelFactory._share_mtp_global_weights(self.target, propose))
+        self.assertIs(propose.weight.global_weights[W.embedding], self.target_embedding)
+        self.assertIs(propose.weight.global_weights[W.lm_head], self.target_lm_head)
+        self.assertIs(propose.py_model.embed_tokens.weight, self.target_embedding)
+
+    def test_deepseek_v32_extracted_checkpoint_does_not_share_globals(self):
+        self.target.model_config.model_type = "deepseek_v32"
+        propose = self._make_propose(model_type="deepseek_v32_mtp", mtp_layer_offset=0)
+
+        self.assertFalse(ModelFactory._share_mtp_global_weights(self.target, propose))
+        self.assertIs(
+            propose.weight.global_weights[W.embedding], self.propose_embedding
+        )
+        self.assertIs(propose.weight.global_weights[W.lm_head], self.propose_lm_head)
+
     def test_hy4_named_mtp_layout_shares_globals_at_offset_zero(self):
         self.target.model_config.model_type = "hy_v4"
         propose = self._make_propose(model_type="hy_v4_mtp", mtp_layer_offset=0)

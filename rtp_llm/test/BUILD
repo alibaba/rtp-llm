@@ -30,6 +30,12 @@ py_test(
 )
 
 py_test(
+    name = "deepseek_v32_mtp_test",
+    srcs = ["deepseek_v32_mtp_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "slice_stop_word_list_test",
     srcs = [
         "slice_stop_word_list_test.py",

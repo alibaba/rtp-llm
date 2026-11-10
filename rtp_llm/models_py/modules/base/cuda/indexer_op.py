@@ -499,6 +499,21 @@ class IndexerOp(nn.Module):
         Returns:
             Rotated key tensor
         """
+        if (
+            os.environ.get("RTP_LLM_FUSED_INDEXER_K_ROPE_HADAMARD") == "1"
+            and self.use_hadamard
+            and k.is_cuda
+            and k.dtype == torch.bfloat16
+            and k.dim() == 2
+            and k.shape[-1] == self.index_head_dim == 128
+            and k.stride(-1) == 1
+            and self.cos_sin_cache is not None
+            and self.cos_sin_cache.dtype == torch.float32
+            and 0 < self.index_head_dim - self.rope_head_dim <= self.index_head_dim
+            and (self.index_head_dim - self.rope_head_dim) % 2 == 0
+        ):
+            return self.fused_rope_hadamard_k(k, positions)
+
         # Extract position embedding part (exclude rope_head_dim from the end)
         k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
 
