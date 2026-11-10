@@ -56,7 +56,63 @@ def _host_runtime():
 
         return _runtime
     except ImportError:
-        return torch.cuda.cudart()
+        return _HipRuntime()
+
+
+class _HipRuntime:
+    """Minimal HIP host-memory shim with cuda.bindings tuple semantics."""
+
+    is_hip = True
+
+    def __init__(self):
+        import ctypes
+
+        self._ctypes = ctypes
+        self._lib = ctypes.CDLL("libamdhip64.so")
+        self._lib.hipHostRegister.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_uint,
+        ]
+        self._lib.hipHostRegister.restype = ctypes.c_int
+        self._lib.hipHostUnregister.argtypes = [ctypes.c_void_p]
+        self._lib.hipHostUnregister.restype = ctypes.c_int
+        self._lib.hipHostGetDevicePointer.argtypes = [
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_void_p,
+            ctypes.c_uint,
+        ]
+        self._lib.hipHostGetDevicePointer.restype = ctypes.c_int
+        self._lib.hipGetDevice.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        self._lib.hipGetDevice.restype = ctypes.c_int
+        self._lib.hipSetDevice.argtypes = [ctypes.c_int]
+        self._lib.hipSetDevice.restype = ctypes.c_int
+        self._lib.hipDeviceSynchronize.argtypes = []
+        self._lib.hipDeviceSynchronize.restype = ctypes.c_int
+
+    def cudaHostRegister(self, ptr, size, flags):
+        return (self._lib.hipHostRegister(ptr, size, flags),)
+
+    def cudaHostUnregister(self, ptr):
+        return (self._lib.hipHostUnregister(ptr),)
+
+    def cudaHostGetDevicePointer(self, ptr, flags):
+        out = self._ctypes.c_void_p()
+        err = self._lib.hipHostGetDevicePointer(
+            self._ctypes.byref(out), ptr, flags
+        )
+        return (err, out.value)
+
+    def cudaGetDevice(self):
+        dev = self._ctypes.c_int()
+        err = self._lib.hipGetDevice(self._ctypes.byref(dev))
+        return (err, dev.value)
+
+    def cudaSetDevice(self, device):
+        return (self._lib.hipSetDevice(int(device)),)
+
+    def cudaDeviceSynchronize(self):
+        return (self._lib.hipDeviceSynchronize(),)
 DEAD_ID = -1
 
 
@@ -581,7 +637,7 @@ class _PinnedSharedTable:
         self._registration_finalizer = weakref.finalize(
             self, self._unregister, runtime, self.storage, self._lookup_events
         )
-        if not self.storage.is_pinned():
+        if not getattr(runtime, "is_hip", False) and not self.storage.is_pinned():
             self._registration_finalizer()
             self._lease_finalizer()
             raise RuntimeError("CUDA did not recognize the Engram shared pinned pages")
