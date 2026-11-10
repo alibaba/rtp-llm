@@ -13,9 +13,9 @@ from rtp_llm.models_py.layers.linear import (
     RowParallelLinear,
 )
 from rtp_llm.models_py.layers.norm import RMSNorm
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.model_base import (
+    NewLoaderModelBase,
     required_config_value,
     select_fmha_impl_for_layer,
 )
@@ -428,7 +428,7 @@ def _validate_supported_parallelism(parallelism_config: Any) -> None:
                 )
 
 
-class Qwen3ForCausalLM(GptModelBase):
+class Qwen3ForCausalLM(NewLoaderModelBase):
 
     WEIGHTS_MAPPER = WeightsMapper(
         prefix_mapping={"model.": ""},
@@ -565,6 +565,7 @@ class Qwen3ForCausalLM(GptModelBase):
         }
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        capture = self.capture_context(getattr(inputs, "capture_hidden_states", False))
         input_ids = inputs.input_ids
         hidden_states = self.embed_tokens(input_ids)
         if fmha_impl is None:
@@ -576,5 +577,6 @@ class Qwen3ForCausalLM(GptModelBase):
                 layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
+            capture.capture_layer(i, hidden_states)
         hidden_states = self.norm(hidden_states)
-        return PyModelOutputs(hidden_states)
+        return capture.finalize(hidden_states)

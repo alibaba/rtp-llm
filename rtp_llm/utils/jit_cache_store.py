@@ -1,4 +1,5 @@
 import fcntl
+import hashlib
 import io
 import json
 import logging
@@ -12,6 +13,11 @@ from collections import namedtuple
 from contextlib import ExitStack, suppress
 from pathlib import Path
 from urllib.parse import urlparse
+
+from rtp_llm.utils.jit_cache_deep_gemm import (
+    SNAPSHOT_MANIFEST,
+    validate_deepjit_snapshot,
+)
 
 try:
     import zstandard as zstd
@@ -35,14 +41,27 @@ def file_sig(path: Path) -> tuple[int, int, int, int]:
 
 
 def _add_snapshot_members(tar, files, before) -> None:
+    checksums = {}
     for name, path in sorted(files.items()):
-        tar.add(path, arcname=name, recursive=False)
+        if name.startswith("deep_gemm/"):
+            payload = path.read_bytes()
+            checksums[name] = hashlib.sha256(payload).hexdigest()
+            info = tar.gettarinfo(path, arcname=name)
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+        else:
+            tar.add(path, arcname=name, recursive=False)
     if any(file_sig(files[name]) != sig for name, sig in before.items()):
         raise SnapshotRaced("files changed while packing")
     manifest = json.dumps({n: s[3] for n, s in before.items()}).encode()
     info = tarfile.TarInfo(MTIME_MANIFEST)
     info.size = len(manifest)
     tar.addfile(info, io.BytesIO(manifest))
+    if checksums:
+        manifest = json.dumps({"schema_version": 1, "files": checksums}).encode()
+        info = tarfile.TarInfo(SNAPSHOT_MANIFEST)
+        info.size = len(manifest)
+        tar.addfile(info, io.BytesIO(manifest))
 
 
 def pack_snapshot(archive: Path, files: dict[str, Path]) -> None:
@@ -51,9 +70,7 @@ def pack_snapshot(archive: Path, files: dict[str, Path]) -> None:
         if zstd is not None:
             with zstd.open(
                 archive, "wb", cctx=zstd.ZstdCompressor(write_checksum=True)
-            ) as body, tarfile.open(
-                fileobj=body, mode="w|", dereference=True
-            ) as tar:
+            ) as body, tarfile.open(fileobj=body, mode="w|", dereference=True) as tar:
                 _add_snapshot_members(tar, files, before)
         else:
             with tarfile.open(archive, mode="w:gz", dereference=True) as tar:
@@ -86,6 +103,8 @@ def extract_snapshot(archive: Path, target: Path) -> None:
             tar = stack.enter_context(tarfile.open(archive, mode="r:gz"))
         kwargs = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
         tar.extractall(target, members=_safe_members(tar, target), **kwargs)
+    # Both archive formats retain the same payload/entry-integrity contract.
+    validate_deepjit_snapshot(target)
     for name, ns in json.loads((target / MTIME_MANIFEST).read_text()).items():
         os.utime(_safe_path(target, name), ns=(ns, ns))
     (target / MTIME_MANIFEST).unlink()

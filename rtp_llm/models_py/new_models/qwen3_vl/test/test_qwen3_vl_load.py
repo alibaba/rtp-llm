@@ -4,6 +4,7 @@ import unittest
 from unittest import mock
 
 import torch
+from rtp_llm.models_py.new_models.model_base import NewLoaderModelBase
 import torch.nn.functional as F
 from safetensors.torch import save_file
 
@@ -323,7 +324,13 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
                 return hidden_states
 
         model = Qwen3VLForCausalLM.__new__(Qwen3VLForCausalLM)
-        torch.nn.Module.__init__(model)
+        NewLoaderModelBase.__init__(
+            model,
+            types.SimpleNamespace(
+                num_layers=2, vocab_size=8, hidden_state_capture_layer_ids=[1, 0]
+            ),
+            types.SimpleNamespace(),
+        )
         model.embed_tokens = torch.nn.Embedding(8, 4)
         model.layers = torch.nn.ModuleList([IdentityLayer()])
         model.norm = torch.nn.Identity()
@@ -382,7 +389,13 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
                 return output
 
         model = Qwen3VLForCausalLM.__new__(Qwen3VLForCausalLM)
-        torch.nn.Module.__init__(model)
+        NewLoaderModelBase.__init__(
+            model,
+            types.SimpleNamespace(
+                num_layers=2, vocab_size=8, hidden_state_capture_layer_ids=[1, 0]
+            ),
+            types.SimpleNamespace(),
+        )
         model.embed_tokens = torch.nn.Embedding(8, 4)
         with torch.no_grad():
             model.embed_tokens.weight.copy_(

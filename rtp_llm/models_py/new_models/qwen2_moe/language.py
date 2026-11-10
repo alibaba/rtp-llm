@@ -17,10 +17,10 @@ from rtp_llm.models_py.layers.linear import (
 )
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
 from rtp_llm.models_py.layers.norm import RMSResNorm
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules import FakeBalanceExpert, SelectTopk
 from rtp_llm.models_py.new_models.model_base import (
+    NewLoaderModelBase,
     required_config_value,
     select_fmha_impl_for_layer,
 )
@@ -381,7 +381,7 @@ def _extract_moe_config_values(model_config: ModelConfig, load_config: Any):
     return values
 
 
-class Qwen2MoeForCausalLM(GptModelBase):
+class Qwen2MoeForCausalLM(NewLoaderModelBase):
     WEIGHTS_MAPPER = WeightsMapper(prefix_mapping={"model.": ""})
 
     def load_weights(self, weights) -> None:
@@ -504,6 +504,7 @@ class Qwen2MoeForCausalLM(GptModelBase):
         }
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        capture = self.capture_context(getattr(inputs, "capture_hidden_states", False))
         hidden_states = self.embed_tokens(inputs.input_ids)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
@@ -520,5 +521,6 @@ class Qwen2MoeForCausalLM(GptModelBase):
                     self.kv_cache.get_layer_cache(layer_idx) if self.kv_cache else None
                 ),
             )
+            capture.capture_layer(layer_idx, hidden_states, residual)
         hidden_states, _ = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states)
+        return capture.finalize(hidden_states)

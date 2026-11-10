@@ -43,6 +43,7 @@ def _parallelism(tp_size=1, tp_rank=0, ep_size=1, ep_rank=0, dp_size=1):
         dp_size=dp_size,
         dp_rank=0,
         world_size=max(tp_size, ep_size, dp_size),
+        world_rank=max(tp_rank, ep_rank),
         local_rank=tp_rank,
         get_attn_tp_size=lambda: tp_size,
         get_attn_tp_rank=lambda: tp_rank,
@@ -67,20 +68,29 @@ def _moe_config():
     )
 
 
+class _RuntimeModelConfig(ModelConfig):
+    # Explicit test-only injection point for runtime weight-layout transforms.
+    exported_device = None
+
+
 def _runtime_model_config(
-    num_experts=2, quant_config=None, hidden_size=8, activation_type="SiGLU"
+    num_experts=2,
+    quant_config=None,
+    hidden_size=8,
+    activation_type="SiGLU",
+    moe_intermediate_size=8,
 ):
-    return types.SimpleNamespace(
-        data_type="fp32",
-        quant_config=quant_config,
-        exported_device=None,
-        expert_num=num_experts,
-        moe_k=1,
-        moe_topk_group=1,
-        hidden_size=hidden_size,
-        activation_type=activation_type,
-        attn_config=types.SimpleNamespace(head_num=2),
-    )
+    config = _RuntimeModelConfig()
+    config.data_type = "fp32"
+    config.quant_config = quant_config
+    config.expert_num = num_experts
+    config.moe_k = 1
+    config.moe_topk_group = 1
+    config.hidden_size = hidden_size
+    config.moe_inter_size = moe_intermediate_size
+    config.activation_type = activation_type
+    config.attn_config.head_num = 2
+    return config
 
 
 def _make_experts(
@@ -120,7 +130,11 @@ def _make_experts(
         ep_rank=ep_rank,
         params_dtype=torch.float32,
         model_config=_runtime_model_config(
-            num_experts, model_quant_config, hidden_size, activation_type
+            num_experts,
+            model_quant_config,
+            hidden_size,
+            activation_type,
+            moe_intermediate_size,
         ),
         parallelism_config=_parallelism(tp_size, tp_rank, ep_size, ep_rank, dp_size),
         moe_config=_moe_config(),
@@ -651,6 +665,9 @@ class MoEQuantizedDispatchTest(unittest.TestCase):
         with mock.patch(
             "rtp_llm.models_py.quant_methods.fp8_moe._runtime_fp8_dtype",
             return_value=torch.float8_e4m3fn,
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._runtime_fp8_dtype",
+            return_value=torch.float8_e4m3fn,
         ):
             method._fuse_per_tensor(layer)
 
@@ -1037,6 +1054,38 @@ class MoEQuantizedDispatchTest(unittest.TestCase):
         torch.testing.assert_close(layer.w13_scale[0, :2], up_global[2:4])
         torch.testing.assert_close(layer.w13_scale[0, 2:], gate_global[2:4])
 
+    def test_square_fused_block_scale_requires_unambiguous_projection_keys(self):
+        quant = QuantizationConfig(
+            "fp8_block",
+            source_config=types.SimpleNamespace(weight_block_size=[4, 4]),
+        )
+        for stacked in (False, True):
+            with self.subTest(stacked=stacked):
+                layer = _make_experts(
+                    num_experts=1,
+                    hidden_size=16,
+                    moe_intermediate_size=8,
+                    quant_config=quant,
+                )
+                scale = torch.arange(16, dtype=torch.float32).reshape(4, 4).add(1)
+                key = (
+                    "gate_up_proj.weight_scale_inv"
+                    if stacked
+                    else "0.gate_up_proj.weight_scale_inv"
+                )
+                with self.assertRaisesRegex(ValueError, "scale layout is ambiguous"):
+                    layer.load_weights({key: scale.unsqueeze(0) if stacked else scale})
+                # Explicit projection names remain valid even with square
+                # fused grids, and keep distinct gate/up values.
+                layer.load_weights(
+                    {
+                        "0.gate_proj.weight_scale_inv": scale[:2],
+                        "0.up_proj.weight_scale_inv": scale[2:],
+                    }
+                )
+                torch.testing.assert_close(layer.w13_scale[0, :2], scale[2:])
+                torch.testing.assert_close(layer.w13_scale[0, 2:], scale[:2])
+
     def test_single_tp_rejects_partial_final_fp8_block(self):
         quant = QuantizationConfig(
             "fp8_block",
@@ -1292,7 +1341,7 @@ class MoEQuantizedDispatchTest(unittest.TestCase):
 
     def test_unsupported_moe_activation_fails_at_construction(self):
         with self.assertRaisesRegex(ValueError, "supports activation_type='SiGLU'"):
-            _make_experts(num_experts=1, activation_type="GELU")
+            _make_experts(num_experts=1, activation_type="Gelu")
 
     def test_static_activation_fp8_scale_fails_with_explicit_error(self):
         layer = _make_experts(
@@ -1541,7 +1590,7 @@ class Qwen3MoeModelTest(unittest.TestCase):
 
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed.ignored_layers, ["model.layers.0.mlp"])
-        self.assertEqual(parsed.exclude_modules, {"lm_head"})
+        self.assertEqual(parsed.exclude_modules, {"lm_head", "model.layers.0.mlp"})
 
     def test_invalid_boolean_config_is_rejected(self):
         config = self._config()

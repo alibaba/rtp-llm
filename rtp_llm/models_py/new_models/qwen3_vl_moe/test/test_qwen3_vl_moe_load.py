@@ -3,6 +3,7 @@ import unittest
 from unittest import mock
 
 import torch
+from rtp_llm.models_py.new_models.model_base import NewLoaderModelBase
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.layers.norm import RMSResNorm
@@ -241,7 +242,13 @@ class Qwen3VLMoeNewLoaderTest(unittest.TestCase):
                 return hidden_states + residual, residual
 
         model = Qwen3VLMoeForCausalLM.__new__(Qwen3VLMoeForCausalLM)
-        torch.nn.Module.__init__(model)
+        NewLoaderModelBase.__init__(
+            model,
+            types.SimpleNamespace(
+                num_layers=2, vocab_size=8, hidden_state_capture_layer_ids=[1, 0]
+            ),
+            types.SimpleNamespace(),
+        )
         model.embed_tokens = torch.nn.Embedding(8, 4)
         model.embed_tokens.weight.data.copy_(
             torch.arange(32, dtype=torch.float32).reshape(8, 4)
@@ -290,6 +297,20 @@ class Qwen3VLMoeNewLoaderTest(unittest.TestCase):
             [call.args for call in select_fmha.call_args_list],
             [(fmha_impl, None, 0), (fmha_impl, None, 1)],
         )
+        self.assertTrue(model.supports_hidden_state_capture)
+        inputs.capture_hidden_states = True
+        with mock.patch(
+            "rtp_llm.models_py.new_models.qwen3_vl_moe.model.select_fmha_impl_for_layer",
+            return_value=fmha_impl,
+        ):
+            packed = model(inputs, fmha_impl).hidden_states
+        first_layer = model.embed_tokens(torch.tensor([1, 0, 2]))
+        first_layer[1] = image_feature[0]
+        first_layer += 11.0
+        first_layer[1] += 100.0
+        torch.testing.assert_close(
+            packed, torch.cat((expected, first_layer, expected), dim=-1)
+        )
 
     def test_deepstack_flows_through_real_rms_residual_add_norm(self):
         class AddNormLayer(torch.nn.Module):
@@ -306,7 +327,13 @@ class Qwen3VLMoeNewLoaderTest(unittest.TestCase):
                 return torch.zeros_like(hidden_states), residual
 
         model = Qwen3VLMoeForCausalLM.__new__(Qwen3VLMoeForCausalLM)
-        torch.nn.Module.__init__(model)
+        NewLoaderModelBase.__init__(
+            model,
+            types.SimpleNamespace(
+                num_layers=2, vocab_size=8, hidden_state_capture_layer_ids=[1, 0]
+            ),
+            types.SimpleNamespace(),
+        )
         model.embed_tokens = torch.nn.Embedding(8, 4)
         model.embed_tokens.weight.data.copy_(
             torch.arange(32, dtype=torch.float32).reshape(8, 4)
@@ -363,7 +390,13 @@ class Qwen3VLMoeNewLoaderTest(unittest.TestCase):
                 return hidden_states + residual, residual
 
         model = Qwen3VLMoeForCausalLM.__new__(Qwen3VLMoeForCausalLM)
-        torch.nn.Module.__init__(model)
+        NewLoaderModelBase.__init__(
+            model,
+            types.SimpleNamespace(
+                num_layers=2, vocab_size=8, hidden_state_capture_layer_ids=[1, 0]
+            ),
+            types.SimpleNamespace(),
+        )
         model.embed_tokens = torch.nn.Embedding(8, 4)
         model.multimodal_embedding_injector = MultimodalEmbeddingInjector()
         model.multimodal_deepstack_injector = MultimodalDeepstackInjector()

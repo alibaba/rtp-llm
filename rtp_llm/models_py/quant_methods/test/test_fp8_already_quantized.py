@@ -157,15 +157,30 @@ class TestQuantMethodDispatch(unittest.TestCase):
                 group_size=1,
                 fuse_silu_and_mul=True,
             )
-        with self.assertRaisesRegex(ValueError, "requires group_size=128"):
+        with self.assertRaisesRegex(ValueError, "must be divisible"):
             create_per_token_group_quant_fp8_output_scale(
-                (2, 256),
+                (2, 255),
                 torch.device("cpu"),
                 group_size=64,
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 scale_ue8m0=True,
             )
+
+    def test_ue8m0_scale_allocation_accepts_group_32_64_and_128(self):
+        for group_size in (32, 64, 128):
+            with self.subTest(group_size=group_size):
+                scale = create_per_token_group_quant_fp8_output_scale(
+                    (2, 256),
+                    torch.device("cpu"),
+                    group_size=group_size,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    scale_ue8m0=True,
+                )
+                self.assertEqual(scale.dtype, torch.int32)
+                self.assertEqual(scale.shape, (2, (256 // group_size + 3) // 4))
+                self.assertEqual(scale.stride(), (1, 4))
 
     def test_runtime_dtype_and_ue8m0_probe_use_target_device(self):
         gfx942 = SimpleNamespace(gcnArchName="gfx942:sramecc+:xnack-")
@@ -977,6 +992,36 @@ class TestFp8BlockLoad(_LoadBackendMixin, unittest.TestCase):
 
     BLOCK = 128
     runtime_backend = "cuda_deep_gemm"
+
+    def test_non_aligned_block_weights_preserve_bytes_and_logical_shape(self):
+        for quant_type in ("fp8_block", "fp8_block_online"):
+            for n, k in ((256, 193), (193, 256), (193, 197)):
+                with self.subTest(quant_type=quant_type, n=n, k=k):
+                    layer = RowParallelLinear(
+                        input_size=k,
+                        output_size=n,
+                        quant_config=_make_qc(quant_type),
+                        prefix="test",
+                        params_dtype=torch.bfloat16,
+                    )
+                    source = torch.linspace(-3, 5, n * k).reshape(n, k).bfloat16()
+                    expected, scale = per_block_quant_like_legacy(source, self.BLOCK)
+                    weights = {"test.weight": source}
+                    if quant_type == "fp8_block":
+                        weights = {
+                            "test.weight": expected,
+                            "test.weight_scale_inv": scale,
+                        }
+                    layer.load_weights(weights)
+                    layer.process_weights_after_loading()
+                    self.assertEqual(tuple(layer.weight.shape), (256, 256))
+                    self.assertEqual(layer._fp8_logical_input_size, k)
+                    self.assertEqual(layer._fp8_logical_output_size, n)
+                    bits = layer.weight.view(torch.uint8)
+                    torch.testing.assert_close(bits[:n, :k], expected.view(torch.uint8))
+                    self.assertEqual(torch.count_nonzero(bits[n:, :]).item(), 0)
+                    self.assertEqual(torch.count_nonzero(bits[:, k:]).item(), 0)
+                    torch.testing.assert_close(layer.weight_scale, scale)
 
     def test_noncanonical_block_size_fails_before_weight_allocation(self):
         quant_config = QuantizationConfig(

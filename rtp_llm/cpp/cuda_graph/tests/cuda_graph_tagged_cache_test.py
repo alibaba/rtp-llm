@@ -1793,10 +1793,9 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             TaggedDecodeActiveMaskModel(),
             HIDDEN_SIZE,
             64,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            [4],
-            GROUP_TAGS,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            decode_capture_batch_sizes=[4],
+            group_tags=GROUP_TAGS,
         )
         # Main's target-verify test above intentionally retains dummy Q rows.
         # Plain decode instead needs zero-length tails for NewLoader's planner.

@@ -20,7 +20,6 @@ from rtp_llm.models_py.model_desc.block_map import (
     get_primary_attention_inputs,
     select_attention_inputs_for_layer,
 )
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule, copy_weight_
 from rtp_llm.models_py.modules import (
     FakeBalanceExpert,
@@ -28,6 +27,7 @@ from rtp_llm.models_py.modules import (
     SelectTopk,
 )
 from rtp_llm.models_py.new_models.model_base import (
+    NewLoaderModelBase,
     required_config_value,
     select_fmha_impl_for_layer,
 )
@@ -59,12 +59,21 @@ class Qwen3NextMetadata:
         return self.prefill_conv1d_meta
 
 
+def _is_target_verify(attention_inputs: PyAttentionInputs) -> bool:
+    # Match legacy Qwen3-Next: ROCm normal decode can carry the generic
+    # verify flag, but a genuine verification batch always has prefix rows.
+    return attention_inputs.is_target_verify and not (
+        torch.version.hip is not None and attention_inputs.prefix_lengths.numel() == 0
+    )
+
+
 def _build_qwen3_next_metadata(
     inputs: PyModelInputs, hidden_states: torch.Tensor
 ) -> Qwen3NextMetadata:
     attention_inputs = get_primary_attention_inputs(inputs)
+    is_target_verify = _is_target_verify(attention_inputs)
     prefill_conv1d_meta = None
-    if attention_inputs.is_prefill and not attention_inputs.is_target_verify:
+    if attention_inputs.is_prefill and not is_target_verify:
         from rtp_llm.models_py.triton_kernels.causal_conv1d import (
             prepare_causal_conv1d_metadata,
         )
@@ -75,7 +84,7 @@ def _build_qwen3_next_metadata(
         )
     return Qwen3NextMetadata(
         prefill_conv1d_meta=prefill_conv1d_meta,
-        is_target_verify=attention_inputs.is_target_verify,
+        is_target_verify=is_target_verify,
     )
 
 
@@ -409,8 +418,8 @@ def _extract_config_values(
         raise ValueError(
             f"expert_num={expert_num} must be divisible by ep_size={ep_size}"
         )
-    if dense_model and ep_size != 1:
-        raise ValueError("Qwen3.5 Dense requires EP size 1")
+    # EP defaults to TP * DP at service startup. Dense layers have no experts
+    # and use FFN TP, so this independently inferred EP size is irrelevant.
     if linear_values["linear_num_key_heads"] % attn_tp_size != 0:
         raise ValueError("linear_num_key_heads must be divisible by attention TP")
     if linear_values["linear_num_value_heads"] % attn_tp_size != 0:
@@ -990,8 +999,8 @@ class Qwen3NextGatedDeltaNet(RtpModule):
         )
 
         # Determine prefill vs decode
-        is_prefill = (
-            attention_inputs.is_prefill and not attention_inputs.is_target_verify
+        is_prefill = attention_inputs.is_prefill and not _is_target_verify(
+            attention_inputs
         )
 
         kv_cache_tensor = None
@@ -1239,7 +1248,7 @@ class Qwen3NextGatedDeltaNet(RtpModule):
         fused_gdn_gating,
         linear_cache_converter,
     ):
-        is_target_verify = attn_inputs.is_target_verify
+        is_target_verify = _is_target_verify(attn_inputs)
         token, _ = mixed_qkv.shape
         if not is_target_verify:
             batch, seq = token, 1
@@ -1760,7 +1769,7 @@ class Qwen3NextDecoderLayer(RtpModule):
 # ================================================================== #
 
 
-class Qwen3NextForCausalLM(GptModelBase):
+class Qwen3NextForCausalLM(NewLoaderModelBase):
     """Qwen3-Next Dense + Linear Attention (prefix model.)."""
 
     _expects_mtp = False
@@ -1965,6 +1974,7 @@ class Qwen3NextForCausalLM(GptModelBase):
         return self.embed_tokens(inputs.input_ids)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        capture = self.capture_context(getattr(inputs, "capture_hidden_states", False))
         hidden_states = self.word_embedding(inputs)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
@@ -1992,10 +2002,11 @@ class Qwen3NextForCausalLM(GptModelBase):
             )
             if capture_aux_hidden:
                 self.capture_aux_hidden(i, hidden_states, residual)
+            capture.capture_layer(i, hidden_states, residual)
         if capture_aux_hidden:
             self.finish_aux_hidden_capture()
         hidden_states, residual = self.norm(hidden_states, residual)
-        outputs = PyModelOutputs(hidden_states)
+        outputs = capture.finalize(hidden_states)
         if capture_aux_hidden:
             outputs.mtp_target_hidden_states = self._mtp_target_hidden_states
         return outputs
@@ -2101,6 +2112,7 @@ class Qwen3NextMTPForCausalLM(Qwen3NextForCausalLM):
         )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        capture = self.capture_context(getattr(inputs, "capture_hidden_states", False))
         inputs_embeds = self.embed_tokens(inputs.input_ids)
         last_hidden_states = inputs.input_hiddens
         if last_hidden_states is None:
@@ -2147,8 +2159,9 @@ class Qwen3NextMTPForCausalLM(Qwen3NextForCausalLM):
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
+            capture.capture_layer(index, hidden_states, residual)
         hidden_states, residual = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states)
+        return capture.finalize(hidden_states)
 
 
 class Qwen35MoeMTPForCausalLM(Qwen3NextMTPForCausalLM):

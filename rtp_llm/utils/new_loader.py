@@ -1,3 +1,5 @@
+import json
+import os
 from typing import TYPE_CHECKING, Optional, Protocol
 
 if TYPE_CHECKING:
@@ -63,6 +65,9 @@ def new_loader_unsupported_reason(
             "online UpdateWeights is required but is not supported by NewLoader; "
             "use --use_new_loader false"
         )
+    checkpoint_reason = new_loader_checkpoint_unsupported_reason(model_config)
+    if checkpoint_reason is not None:
+        return checkpoint_reason
     if moe_config is not None and moe_config.use_deepep_low_latency:
         from rtp_llm.device.device_type import DeviceType, get_device_type
 
@@ -141,4 +146,44 @@ def new_loader_unsupported_reason(
             "Independent FFN TP/sequence parallelism is not supported by this "
             "newloader slice"
         )
+    return None
+
+
+def new_loader_checkpoint_unsupported_reason(model_config) -> Optional[str]:
+    """Check on-disk layouts before selecting either half of a multimodal model.
+
+    FT dumps already contain legacy W-name/rank-local tensors. They are not HF
+    weights and must not be dispatched through the streaming HF loader.
+    """
+    ckpt_path = getattr(model_config, "ckpt_path", None)
+    if not ckpt_path:
+        return None
+    index_path = os.path.join(ckpt_path, "model.safetensors.index.json")
+    if os.path.isfile(index_path):
+        with open(index_path, encoding="utf-8") as source:
+            index = json.load(source)
+        if isinstance(index, dict) and index.get("is_ft_style_weight", False):
+            return "FT-style pre-sharded checkpoints require the legacy loader"
+    if model_config.model_type == "llama":
+        config_path = os.path.join(ckpt_path, "config.json")
+        if not os.path.isfile(config_path):
+            return "Llama NewLoader requires a Hugging Face config.json, not Meta params.json"
+        with open(config_path, encoding="utf-8") as source:
+            config = json.load(source)
+        if not isinstance(config, dict):
+            raise ValueError("Llama checkpoint config.json must contain an object")
+        architectures = config.get("architectures")
+        if architectures is not None and (
+            not isinstance(architectures, list)
+            or not all(isinstance(name, str) for name in architectures)
+        ):
+            raise TypeError("architectures must be a list of strings")
+        if config.get("model_type", "llama") != "llama" or (
+            architectures is not None and "LlamaForCausalLM" not in architectures
+        ):
+            return "Llama NewLoader supports the Hugging Face LlamaForCausalLM checkpoint layout only"
+        if config.get("attention_bias", False) or config.get("mlp_bias", False):
+            return "Biased Llama projections are not supported by NewLoader"
+        if config.get("hidden_act", "silu") != "silu":
+            return "Llama NewLoader requires hidden_act='silu'"
     return None

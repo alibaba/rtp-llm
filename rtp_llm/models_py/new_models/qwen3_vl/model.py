@@ -25,6 +25,7 @@ class Qwen3VLForCausalLM(Qwen3VLMultimodalMixin, Qwen3ForCausalLM):
         )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        capture = self.capture_context(getattr(inputs, "capture_hidden_states", False))
         hidden_states, mm_deepstack_embeds, cpu_locs = self._embed_multimodal_inputs(
             inputs
         )
@@ -46,9 +47,10 @@ class Qwen3VLForCausalLM(Qwen3VLMultimodalMixin, Qwen3ForCausalLM):
             hidden_states = self._inject_deepstack_after_layer(
                 hidden_states, mm_deepstack_embeds, cpu_locs, layer_id
             )
+            capture.capture_layer(layer_id, hidden_states)
 
         hidden_states = self.norm(hidden_states)
-        return PyModelOutputs(hidden_states)
+        return capture.finalize(hidden_states)
 
 
 __all__ = ["Qwen3VLForCausalLM"]

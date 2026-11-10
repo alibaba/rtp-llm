@@ -265,6 +265,10 @@ class WrapperCacheSetupTest(JitCacheTestBase):
 
 
 class StoreTest(JitCacheTestBase):
+    @unittest.skipIf(
+        jit.Observer is None,
+        "watchdog is optional; polling is covered by test_missing_watchdog_uses_polling_worker",
+    )
     def test_deep_gemm_read_events_do_not_rescan_entries(self):
         component = replace(
             next(item for item in jit.COMPONENTS if item.name == "deep_gemm"),

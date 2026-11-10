@@ -268,9 +268,7 @@ class MlaGraphShrinkSmoke(GenerationContract, unittest.TestCase):
                     pointers,
                 )
         prompt = "Explain why the sky looks blue in three sentences."
-        baseline = self.manager(
-            "mla_eager", extra="--enable_cuda_graph false --mla_ops_type FLASH_INFER"
-        )
+        baseline = self.manager("mla_eager", extra="--enable_cuda_graph false")
         try:
             self.start(baseline)
             expected = self.request(baseline, "mla_eager", prompt)
@@ -278,7 +276,7 @@ class MlaGraphShrinkSmoke(GenerationContract, unittest.TestCase):
             baseline.stop_server()
         captured = self.manager(
             "mla_graph",
-            extra="--enable_cuda_graph true --decode_capture_config 4 --mla_ops_type FLASH_INFER",
+            extra="--enable_cuda_graph true --decode_capture_config 4",
         )
         try:
             self.start(captured)

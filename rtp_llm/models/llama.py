@@ -42,7 +42,7 @@ class Llama(BaseModel):
         config.ckpt_path = ckpt_path
         config.attn_config.rope_config.dim = 128
         config.attn_config.rope_config.style = 1
-        
+
         # hugggingface
         config_path = os.path.join(ckpt_path, "config.json")
         # llama-int8
@@ -180,6 +180,7 @@ class Gemma(Llama):
         force_cpu_load_weights: bool = False,
         loader_recycle_handles: bool = False,
         moe_pure_tp_preshard: bool = False,
+        keep_mla_checkpoint_weights: bool = False,
     ):
         if fmha_config.enable_open_source_fmha:
             logging.warn(
@@ -200,6 +201,7 @@ class Gemma(Llama):
             force_cpu_load_weights=force_cpu_load_weights,
             loader_recycle_handles=loader_recycle_handles,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
+            keep_mla_checkpoint_weights=keep_mla_checkpoint_weights,
         )
 
     @staticmethod

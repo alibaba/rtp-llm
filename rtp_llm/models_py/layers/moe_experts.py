@@ -694,6 +694,21 @@ class BaseMoEExperts(RtpModule):
                 [self._FP8_BLOCK_SIZE, self._FP8_BLOCK_SIZE],
             )
             global_blocks = (self.moe_inter + block_size[0] - 1) // block_size[0]
+            input_blocks = (self.hidden_size + block_size[1] - 1) // block_size[1]
+            if tensor.dim() != 2 or tuple(tensor.shape) not in (
+                (2 * global_blocks, input_blocks),
+                (input_blocks, 2 * global_blocks),
+            ):
+                raise ValueError(
+                    f"gate_up_proj.{param_name} shape {tuple(tensor.shape)} does "
+                    f"not match the fused FP8 block grid "
+                    f"({2 * global_blocks}, {input_blocks}) or its transpose"
+                )
+            if input_blocks == 2 * global_blocks:
+                raise ValueError(
+                    "fused gate_up_proj FP8 block scale layout is ambiguous; "
+                    "use separate gate_proj/up_proj weight_scale_inv keys"
+                )
             if tensor.shape[0] == 2 * global_blocks:
                 return (
                     tensor[:global_blocks].contiguous(),

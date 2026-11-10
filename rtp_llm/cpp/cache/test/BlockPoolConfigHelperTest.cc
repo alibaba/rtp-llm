@@ -8,23 +8,12 @@
 
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm::test {
 namespace {
 
-class BlockPoolConfigHelperTest: public ::testing::Test {
-protected:
-    void SetUp() override {
-        old_core_dump_on_exception_ = StaticConfig::user_ft_core_dump_on_exception;
-        StaticConfig::user_ft_core_dump_on_exception = false;
-    }
-    void TearDown() override {
-        StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception_;
-    }
-private:
-    bool old_core_dump_on_exception_{false};
-};
+// AssertUtils now always throws; no process-global core-dump toggle is needed.
+class BlockPoolConfigHelperTest: public ::testing::Test {};
 
 template<typename Fn>
 void expectRuntimeErrorContains(Fn&& fn, const std::string& expected) {

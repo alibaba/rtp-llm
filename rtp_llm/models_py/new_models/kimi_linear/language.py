@@ -27,7 +27,6 @@ from rtp_llm.models_py.model_desc.block_map import (
     select_attention_inputs_for_layer,
     select_fmha_impl_for_layer,
 )
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule, copy_weight_
 from rtp_llm.models_py.new_models.deepseek_v3.attention import DeepSeekV32MlaAttention
 from rtp_llm.models_py.new_models.deepseek_v3.language import (
@@ -38,6 +37,7 @@ from rtp_llm.models_py.new_models.deepseek_v3.language import (
 )
 from rtp_llm.models_py.new_models.deepseek_v3.mlp import DeepSeekV32MLP
 from rtp_llm.models_py.new_models.deepseek_v3.moe import DeepSeekV32MoEBlock
+from rtp_llm.models_py.new_models.model_base import NewLoaderModelBase
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.models_py.weight_mapper import WeightsMapper
 from rtp_llm.ops import HybridAttentionType, RopeStyle
@@ -986,7 +986,7 @@ class _KimiMlaKernelWeightLayout:
         return None
 
 
-class KimiLinearForCausalLM(GptModelBase):
+class KimiLinearForCausalLM(NewLoaderModelBase):
     """Clean prefix-streamed Kimi Linear NewLoader implementation."""
 
     # Kimi names routed-expert projections w1/w3/w2 while the shared
@@ -1169,6 +1169,7 @@ class KimiLinearForCausalLM(GptModelBase):
         return get_group_tags_for_layers(self.kv_cache, full_attention_layers)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        capture = self.capture_context(getattr(inputs, "capture_hidden_states", False))
         hidden_states = self.embed_tokens(inputs.input_ids)
         attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
         if fmha_impl is None:
@@ -1204,5 +1205,6 @@ class KimiLinearForCausalLM(GptModelBase):
                 layer_attention_inputs,
                 metadata,
             )
+            capture.capture_layer(index, hidden_states, residual)
         hidden_states, residual = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states)
+        return capture.finalize(hidden_states)

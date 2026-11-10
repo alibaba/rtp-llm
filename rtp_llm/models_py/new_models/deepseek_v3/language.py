@@ -27,9 +27,11 @@ from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
     get_layer_caches_for_groups,
 )
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import AttnImplFactory
-from rtp_llm.models_py.new_models.model_base import select_fmha_impl_for_layer
+from rtp_llm.models_py.new_models.model_base import (
+    NewLoaderModelBase,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.weight_mapper import WeightsMapper
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -866,7 +868,7 @@ def extract_config_values(
 # ------------------------------------------------------------------ #
 
 
-class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
+class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, NewLoaderModelBase):
     """Config-driven DeepSeek MLA/MoE implementation for newloader.
 
     WEIGHTS_MAPPER only strips "model." prefix.  All submodule names match
@@ -1055,6 +1057,7 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
         )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        capture = self.capture_context(getattr(inputs, "capture_hidden_states", False))
         if inputs.attention_inputs is None:
             raise ValueError("DeepSeek forward requires attention_inputs")
         input_ids = inputs.input_ids
@@ -1070,5 +1073,6 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
                 layer_fmha_impl,
                 kv_cache=layer_kv_cache,
             )
+            capture.capture_layer(i, hidden_states, residual)
         hidden_states, _ = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states)
+        return capture.finalize(hidden_states)

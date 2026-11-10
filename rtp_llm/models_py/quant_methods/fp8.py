@@ -525,6 +525,20 @@ def per_block_quant_like_legacy(
     return quantized.contiguous(), scales.contiguous()
 
 
+def _pad_fp8_block_weight(
+    weight: torch.Tensor, rows: int, columns: int
+) -> torch.Tensor:
+    """Pad storage without requiring a platform-specific float8 pad kernel."""
+    if tuple(weight.shape) == (rows, columns):
+        return weight.contiguous()
+    # All supported FP8 encodings represent +0 by the zero byte. Preserve the
+    # remaining bytes exactly; converting through float would requantize them.
+    return torch.nn.functional.pad(
+        weight.contiguous().view(torch.uint8),
+        (0, columns - weight.shape[1], 0, rows - weight.shape[0]),
+    ).view(weight.dtype)
+
+
 def _resolve_per_token_quant():
     """Return the selected per-token helper without grouped-GEMM imports."""
     if _is_hip_runtime():
@@ -1258,14 +1272,15 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
                 quant_shard, scale_shard = per_block_quant_like_legacy(
                     shard, self.BLOCK
                 )
-                quant_shard = torch.nn.functional.pad(
-                    quant_shard,
-                    (0, padded_k - logical_k, 0, padded_shard_n - shard_n),
+                quant_shard = _pad_fp8_block_weight(
+                    quant_shard, padded_shard_n, padded_k
                 )
                 quant_shards.append(quant_shard)
                 scale_shards.append(scale_shard)
                 runtime_shard_sizes.append(padded_shard_n)
-            fp8_weight = torch.cat(quant_shards, dim=0)
+            fp8_weight = torch.cat(
+                [shard.view(torch.uint8) for shard in quant_shards], dim=0
+            ).view(quant_shards[0].dtype)
             scale = torch.cat(scale_shards, dim=0)
             runtime_n = sum(runtime_shard_sizes)
             logical_output_n = logical_n
@@ -1273,10 +1288,7 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
             fp8_weight, scale = per_block_quant_like_legacy(weight, self.BLOCK)
             runtime_n = (logical_n + self.BLOCK - 1) // self.BLOCK * self.BLOCK
             if runtime_n != logical_n or padded_k != logical_k:
-                fp8_weight = torch.nn.functional.pad(
-                    fp8_weight,
-                    (0, padded_k - logical_k, 0, runtime_n - logical_n),
-                )
+                fp8_weight = _pad_fp8_block_weight(fp8_weight, runtime_n, padded_k)
             logical_output_n = logical_n
 
         expected_scale_shape = (
@@ -1478,6 +1490,12 @@ class Fp8BlockLinearMethod(Fp8BlockOnlineLinearMethod):
         weight = layer.weight.data
         scale = layer.weight_scale_inv.data
         _validate_fp8_block_scales(weight, scale, block_size[0], block_size[1])
+        logical_n, logical_k = weight.shape
+        weight = _pad_fp8_block_weight(
+            weight,
+            scale.shape[0] * block_size[0],
+            scale.shape[1] * block_size[1],
+        )
         if self._runtime_backend == _ROCM_AITER_BLOCK:
             weight, scale = _prepare_rocm_fp8_block_weight(weight, scale)
         if self._runtime_backend == _CUDA_DEEP_GEMM and is_deep_gemm_e8m0_used(
@@ -1488,6 +1506,8 @@ class Fp8BlockLinearMethod(Fp8BlockOnlineLinearMethod):
         layer.register_parameter(
             "weight", nn.Parameter(weight.contiguous(), requires_grad=False)
         )
+        layer._fp8_logical_input_size = logical_k
+        layer._fp8_logical_output_size = logical_n
         del layer.weight_scale_inv
         layer.register_parameter(
             "weight_scale",

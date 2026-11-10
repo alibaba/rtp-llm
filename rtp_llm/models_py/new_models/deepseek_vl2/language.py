@@ -22,7 +22,6 @@ import torch.nn as nn
 from rtp_llm.models_py.layers.embedding import ParallelLMHead, VocabParallelEmbedding
 from rtp_llm.models_py.layers.linear import QKVParallelLinear, RowParallelLinear
 from rtp_llm.models_py.layers.norm import RMSResNorm
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules import MultimodalEmbeddingInjector
 from rtp_llm.models_py.new_models.deepseek_v3.attention import DeepSeekV32MlaAttention
@@ -41,7 +40,10 @@ from rtp_llm.models_py.new_models.deepseek_v3.moe import (
     DeepSeekV32MoEBlock,
     normalize_topk_method,
 )
-from rtp_llm.models_py.new_models.model_base import select_fmha_impl_for_layer
+from rtp_llm.models_py.new_models.model_base import (
+    NewLoaderModelBase,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.weight_mapper import WeightsMapper
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
@@ -512,7 +514,7 @@ class DeepSeekVLV2DecoderLayer(RtpModule):
         return hidden_states, residual
 
 
-class DeepSeekVLV2ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
+class DeepSeekVLV2ForCausalLM(MlaRuntimeLayoutMixin, NewLoaderModelBase):
     """Language backbone with strict VL2 checkpoint filtering and injection."""
 
     WEIGHTS_MAPPER = WeightsMapper(
@@ -685,6 +687,7 @@ class DeepSeekVLV2ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
         return self.multimodal_embedding_injector(hidden_states, features, locations)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        capture = self.capture_context(getattr(inputs, "capture_hidden_states", False))
         if inputs.attention_inputs is None:
             raise ValueError("DeepSeek-VL2 forward requires attention_inputs")
         hidden_states = self._embed_inputs(inputs)
@@ -703,8 +706,9 @@ class DeepSeekVLV2ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
                     self.kv_cache.get_layer_cache(layer_idx) if self.kv_cache else None
                 ),
             )
+            capture.capture_layer(layer_idx, hidden_states, residual)
         hidden_states, _ = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states)
+        return capture.finalize(hidden_states)
 
 
 __all__ = [

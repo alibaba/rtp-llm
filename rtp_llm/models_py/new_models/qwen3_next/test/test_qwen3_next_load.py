@@ -278,6 +278,34 @@ class Qwen3NextLoadTest(unittest.TestCase):
                 self.assertIsInstance(model.layers[0].mlp, Qwen3NextMLP)
                 NewModelLoader._validate_loaded_weights(model)
                 torch.testing.assert_close(model.norm.weight, torch.full((4,), 2.0))
+                # Startup infers EP=TP*DP even for dense main/draft models.
+                # EP must not partition dense weights or reject their loading.
+                for tp_size, dp_size in ((1, 2), (2, 1)):
+                    for rank in (0, 1):
+                        tp_rank = rank if tp_size == 2 else 0
+                        parallel_load = _load_config(
+                            tp_size=tp_size, tp_rank=tp_rank, ep_size=2, ep_rank=rank
+                        )
+                        parallel_load.parallelism_config.dp_size = dp_size
+                        parallel_load.parallelism_config.dp_rank = (
+                            rank if dp_size == 2 else 0
+                        )
+                        replica = NewModelLoader(
+                            config, parallel_load, model_path=path
+                        ).load()
+                        reference = (
+                            model
+                            if tp_size == 1
+                            else NewModelLoader(
+                                config,
+                                _load_config(tp_size=tp_size, tp_rank=tp_rank),
+                                model_path=path,
+                            ).load()
+                        )
+                        for name, expected in reference.state_dict().items():
+                            torch.testing.assert_close(
+                                replica.state_dict()[name], expected
+                            )
 
     def test_production_model_type_alias_uses_qwen3_next_newloader(self):
         self.assertIs(get_model_class("qwen35_moe"), Qwen35MoeForCausalLM)
@@ -371,7 +399,9 @@ class Qwen3NextLoadTest(unittest.TestCase):
                     HybridAttentionType.NONE
                 ] * 2
                 config.capture_aux_hidden_layer_ids = [0, 1]
+                config.hidden_state_capture_layer_ids = [1, 0]
                 model = model_cls(config, _load_config())
+                self.assertTrue(model.supports_hidden_state_capture)
                 model.embed_tokens.weight.data.fill_(1)
                 model.layers = torch.nn.ModuleList([IncrementLayer(), IncrementLayer()])
                 model.norm = PassNorm()
@@ -383,10 +413,15 @@ class Qwen3NextLoadTest(unittest.TestCase):
                     attention_inputs = PyAttentionInputs()
                     attention_inputs.is_prefill = False
                     attention_inputs.is_target_verify = verify
+                    if verify:
+                        attention_inputs.prefix_lengths = torch.zeros(
+                            tokens, dtype=torch.int32
+                        )
                     inputs = types.SimpleNamespace(
                         input_ids=torch.zeros(tokens, dtype=torch.int64),
                         attention_inputs=attention_inputs,
                         multimodal_features=[],
+                        capture_hidden_states=True,
                     )
                     with mock.patch(
                         "rtp_llm.models_py.new_models.qwen3_next.language.select_fmha_impl_for_layer",
@@ -406,6 +441,10 @@ class Qwen3NextLoadTest(unittest.TestCase):
                     torch.testing.assert_close(
                         model.get_mtp_target_hidden_states(tokens).float(), expected
                     )
+                    packed = torch.cat(
+                        (expected[:, 4:], expected[:, :4], expected[:, 4:]), dim=-1
+                    )
+                    torch.testing.assert_close(outputs.hidden_states.float(), packed)
                     if verify:
                         current = outputs.mtp_target_hidden_states.data_ptr()
                         if pointer is not None:
@@ -551,9 +590,35 @@ class Qwen3NextLoadTest(unittest.TestCase):
         attention_inputs = PyAttentionInputs()
         attention_inputs.is_prefill = False
         attention_inputs.is_target_verify = True
+        attention_inputs.prefix_lengths = torch.zeros(1, dtype=torch.int32)
         inputs = types.SimpleNamespace(attention_inputs={"linear": attention_inputs})
         metadata = _build_qwen3_next_metadata(inputs, torch.zeros(1, 4))
         self.assertTrue(metadata.is_target_verify)
+
+    def test_rocm_empty_prefix_verify_flag_matches_legacy_decode(self):
+        from rtp_llm.models_py.new_models.qwen3_next.language import _is_target_verify
+
+        for hip in (None, "7.2"):
+            for prefix_count in (0, 2):
+                for verify in (False, True):
+                    with self.subTest(
+                        hip=hip, prefix_count=prefix_count, verify=verify
+                    ), mock.patch.object(torch.version, "hip", hip):
+                        attention_inputs = PyAttentionInputs()
+                        attention_inputs.is_prefill = False
+                        attention_inputs.is_target_verify = verify
+                        attention_inputs.prefix_lengths = torch.zeros(
+                            prefix_count, dtype=torch.int32
+                        )
+                        expected = verify and not (
+                            hip is not None and prefix_count == 0
+                        )
+                        self.assertEqual(_is_target_verify(attention_inputs), expected)
+                        metadata = _build_qwen3_next_metadata(
+                            types.SimpleNamespace(attention_inputs=attention_inputs),
+                            torch.zeros(2, 4),
+                        )
+                        self.assertEqual(metadata.is_target_verify, expected)
 
     def test_public_loader_streams_pytorch_checkpoint_and_runs_postprocess(self):
         config = _config(tie=False)

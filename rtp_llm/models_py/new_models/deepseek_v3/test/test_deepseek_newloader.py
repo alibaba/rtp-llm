@@ -961,8 +961,10 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             ) as config_file:
                 json.dump(_dense_loader_config_json(), config_file)
             save_file(weights, f"{checkpoint_path}/model.safetensors")
+            model_config = _dense_loader_model_config(checkpoint_path)
+            model_config.hidden_state_capture_layer_ids = [0]
             model = NewModelLoader(
-                model_config=_dense_loader_model_config(checkpoint_path),
+                model_config=model_config,
                 load_config=NewLoaderConfig(
                     tp_size=1,
                     tp_rank=0,
@@ -1056,6 +1058,17 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             weights["model.norm.weight"],
         )
         torch.testing.assert_close(outputs.hidden_states, expected)
+
+        inputs.capture_hidden_states = True
+        with mock.patch(
+            "rtp_llm.models_py.new_models.deepseek_v3.language."
+            "select_fmha_impl_for_layer",
+            return_value=fmha_impl,
+        ):
+            packed = model(inputs, fmha_impl=fmha_impl).hidden_states
+        torch.testing.assert_close(
+            packed, torch.cat((residual + mlp_output, expected), dim=-1)
+        )
 
     def test_weight_validation_preserves_error_type_and_adds_module_context(self):
         class ValueErrorLoader(RtpModule):

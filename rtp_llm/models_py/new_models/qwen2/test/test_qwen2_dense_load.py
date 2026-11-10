@@ -458,10 +458,12 @@ class Qwen2LoadTest(unittest.TestCase):
 
     def test_real_model_forward_matches_cpu_reference(self):
         weights = self._weights()
+        config = self._config()
+        config.hidden_state_capture_layer_ids = [0]
         with tempfile.TemporaryDirectory() as model_path:
             save_file(weights, f"{model_path}/model.safetensors")
             model = NewModelLoader(
-                self._config(), self._load_config(), model_path=model_path
+                config, self._load_config(), model_path=model_path
             ).load()
 
         class QOnlyFmha:
@@ -517,6 +519,21 @@ class Qwen2LoadTest(unittest.TestCase):
             model.lm_head(outputs.hidden_states),
             F.linear(expected, weights["model.embed_tokens.weight"]),
         )
+        self.assertTrue(model.supports_hidden_state_capture)
+        inputs.capture_hidden_states = True
+        with patch(
+            "rtp_llm.models_py.new_models.qwen2.language.select_fmha_impl_for_layer",
+            return_value=fmha,
+        ):
+            packed = model(inputs, fmha_impl=fmha).hidden_states
+            torch.testing.assert_close(packed, torch.cat((hidden, expected), dim=-1))
+            # A subsequent smaller request must not retain a previous capture.
+            inputs.input_ids = input_ids[:1]
+            smaller = model(inputs, fmha_impl=fmha).hidden_states
+            torch.testing.assert_close(smaller, packed[:1])
+            inputs.capture_hidden_states = False
+            ordinary = model(inputs, fmha_impl=fmha).hidden_states
+            torch.testing.assert_close(ordinary, expected[:1])
 
     def test_unknown_checkpoint_tensor_fails(self):
         model = self._model()

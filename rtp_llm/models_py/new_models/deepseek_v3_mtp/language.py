@@ -25,7 +25,6 @@ import torch.nn as nn
 
 from rtp_llm.models_py.layers.embedding import ParallelLMHead, VocabParallelEmbedding
 from rtp_llm.models_py.layers.norm import RMSResNorm
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.new_models.deepseek_v3.language import (
     MlaRuntimeLayoutMixin,
     build_rope_cache,
@@ -36,6 +35,7 @@ from rtp_llm.models_py.new_models.deepseek_v3.language import (
     read_config_json,
 )
 from rtp_llm.models_py.new_models.deepseek_v3.model import DeepSeekV32DecoderLayer
+from rtp_llm.models_py.new_models.model_base import NewLoaderModelBase
 from rtp_llm.models_py.new_models.mtp import MTPBlock
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 
@@ -114,7 +114,7 @@ def _draft_checkpoint_layer(config_json: Dict[str, Any]) -> int:
 # ------------------------------------------------------------------ #
 
 
-class DeepSeekV32MTPForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
+class DeepSeekV32MTPForCausalLM(MlaRuntimeLayoutMixin, NewLoaderModelBase):
     """DeepSeek V3 MTP draft head for new-loader.
 
     Single-layer MoE decoder + MTPBlock projection.
@@ -287,6 +287,7 @@ class DeepSeekV32MTPForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
         )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        capture = self.capture_context(getattr(inputs, "capture_hidden_states", False))
         if inputs.input_hiddens is None:
             raise ValueError("DeepSeek MTP requires input_hiddens")
         if inputs.attention_inputs is None:
@@ -313,6 +314,7 @@ class DeepSeekV32MTPForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
                 layer_fmha_impl,
                 kv_cache=layer_kv_cache,
             )
+            capture.capture_layer(i, hidden_states, residual)
 
         hidden_states, _ = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states)
+        return capture.finalize(hidden_states)

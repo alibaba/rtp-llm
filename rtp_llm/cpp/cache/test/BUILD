@@ -168,7 +168,6 @@ cc_test(
     deps = [
         ":cache_config_test_utils",
         "//rtp_llm/cpp/cache:device_block_pool_config_helper",
-        "//rtp_llm/cpp/config:static_config",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + cuda13_torch_link_deps,

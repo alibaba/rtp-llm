@@ -342,10 +342,6 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     for (auto& addr : allocate_request.peer_addrs()) {
         decode_context.peer_addrs.push_back(addr);
     }
-    GRPC_RET_IF_ERROR(decode_context,
-                      !decode_context.peer_addrs.empty(),
-                      grpc::StatusCode::INVALID_ARGUMENT,
-                      "ALLOCATE requires at least one prefill peer address");
     if (maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded
         && maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
         const auto configured_prefill_cp_size = maga_init_params_.parallelism_config.prefill_cp_config.prefill_cp_size;
@@ -365,6 +361,12 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
     auto input                  = QueryConverter::transQuery(&decode_context.allocate_request.input());
     decode_context.request_info = input->request_info;
+    // Preserve request-body validation precedence and typed early-finish
+    // reporting. Reject topology errors before creating a stream or touching
+    // any peer-dependent modulo/index operation.
+    if (decode_context.peer_addrs.empty()) {
+        throw std::invalid_argument("ALLOCATE requires at least one prefill peer address");
+    }
     auto generate_stream        = engine_->makeStream(input);
     decode_context.setRequestTimeoutMs(generate_stream->getTimeoutMs());
     decode_context.setStream(generate_stream);

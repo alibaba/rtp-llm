@@ -133,6 +133,62 @@ def _weights():
 
 
 class Qwen3BaseModelIntegrationTest(unittest.TestCase):
+    def test_checkpoint_layout_is_checked_before_automatic_loader_selection(self):
+        cases = (
+            (
+                "qwen_3",
+                "model.safetensors.index.json",
+                {"is_ft_style_weight": True},
+                "FT-style",
+            ),
+            (
+                "llama",
+                "config.json",
+                {"architectures": ["YiForCausalLM"]},
+                "LlamaForCausalLM",
+            ),
+            ("llama", "params.json", {"dim": 4}, "params.json"),
+        )
+        for model_type, filename, payload, reason in cases:
+            with self.subTest(
+                model_type=model_type, filename=filename
+            ), tempfile.TemporaryDirectory() as path:
+                with open(os.path.join(path, filename), "w") as output:
+                    json.dump(payload, output)
+                config = _model_config()
+                config.model_type = model_type
+                config.ckpt_path = path
+                config.use_new_loader = None
+                model = _base_model(config)
+                self.assertFalse(model._use_new_loader())
+                config.use_new_loader = True
+                with self.assertRaisesRegex(ValueError, reason):
+                    model._use_new_loader()
+
+    def test_gemma_constructor_forwards_new_loader_option(self):
+        from rtp_llm.models.llama import Gemma
+
+        for keep in (False, True):
+            with self.subTest(keep=keep), patch.object(
+                BaseModel, "__init__", return_value=None
+            ) as init:
+                Gemma(
+                    model_config=_model_config(),
+                    parallelism_config=_parallelism_config(),
+                    hw_kernel_config=None,
+                    kv_cache_config=None,
+                    fmha_config=types.SimpleNamespace(enable_open_source_fmha=False),
+                    moe_config=None,
+                    max_generate_batch_size=0,
+                    load_method=LoadMethod.SCRATCH,
+                    vit_config=None,
+                    merge_lora=False,
+                    keep_mla_checkpoint_weights=keep,
+                )
+                self.assertIs(
+                    init.call_args.kwargs["keep_mla_checkpoint_weights"], keep
+                )
+
     def test_force_cpu_load_weights_keeps_target_and_draft_on_legacy_loader(self):
         routes = []
 

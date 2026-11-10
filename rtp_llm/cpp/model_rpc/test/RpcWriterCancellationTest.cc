@@ -231,6 +231,8 @@ TEST(RpcWriterCancellationTest, DecodeAllocateWithoutPeersReturnsInvalidArgument
     GenerateRequestPB request;
     request.set_stage(RemoteStage::ALLOCATE);
     request.set_request_id(42);
+    request.mutable_input()->add_token_ids(0);
+    request.mutable_input()->mutable_generate_config()->set_max_new_tokens(1);
     EXPECT_TRUE(stream->Write(request));
     stream->WritesDone();
     const auto status = stream->Finish();
