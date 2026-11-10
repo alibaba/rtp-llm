@@ -1147,7 +1147,7 @@ class HostEngramEmbedding:
                             uva[1].record_stream(
                                 torch.cuda.current_stream(indices.device)
                             )
-        if indices.is_cuda:
+        if indices.is_cuda and self._uva is not None:
             from rtp_llm.models_py.modules.dsv41 import _engram_triton
 
             lookup = (
