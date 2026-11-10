@@ -2043,6 +2043,47 @@ TEST_F(DecodeRpcLoadRoutingTest, PipelineReceiverSplitsGlobalLayersAcrossPrefill
     expectLayer(store_->calls[1].buffers[0], 2, 1);
 }
 
+TEST_F(DecodeRpcLoadRoutingTest, PipelineMlaReceiverCollectsLinearHeadsWithinEachPrefillStage) {
+    auto spec      = test::makeResolvedLinearSpec(DataType::TYPE_FP32, 2, 2, 2, 2, 2, 4);
+    auto config    = test::makeSingleGroupCacheConfig(std::move(spec), CacheGroupType::LINEAR, 2, 8);
+    config.use_mla = true;
+    config.model_has_multiple_cache_groups = true;
+    ASSERT_TRUE(initReceiver(true, config));
+    auto request = makeRequest(true);
+    request.mutable_tagged_group_block_ids(0)->set_tag("linear");
+    request.mutable_stage_peer_groups(0)->add_peer_addrs("prefill-first1:1:2");
+    request.mutable_stage_peer_groups(1)->add_peer_addrs("prefill-last1:1:2");
+    grpc::ServerContext     context;
+    BroadcastLoadResponsePB response;
+    ASSERT_TRUE(server_.RemoteLoad(&context, &request, &response).ok());
+    ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_EQ(response.loaded_cache_block_count(), 1);
+    ASSERT_EQ(store_->calls.size(), 4u);
+    const std::vector<std::string> peers = {"prefill-first", "prefill-first1", "prefill-last", "prefill-last1"};
+    // Two FP32 heads: SSM is 32 bytes, followed by 16-byte Q, K and V
+    // convolution regions. Each source owns one head in all four regions.
+    const std::vector<size_t> offsets = {0, 32, 48, 64};
+    const std::vector<size_t> sizes   = {16, 8, 8, 8};
+    for (size_t call = 0; call < store_->calls.size(); ++call) {
+        const int    local_layer = static_cast<int>(call / 2);
+        const size_t shard       = call % 2;
+        EXPECT_EQ(store_->calls[call].peer, peers[call]);
+        ASSERT_EQ(store_->calls[call].buffers.size(), 1u);
+        const auto& buffer = store_->calls[call].buffers[0];
+        const auto  parts  = cache_manager_->convertIndexToBuffer(local_layer, "linear", 2);
+        ASSERT_EQ(parts.size(), 1u);
+        ASSERT_EQ(parts[0].size_bytes, 80u);
+        ASSERT_EQ(buffer->getBlocksCount(), 4u);
+        const auto key = makeCacheKey(17, "101", local_layer + 1, "linear");
+        for (size_t segment = 0; segment < offsets.size(); ++segment) {
+            const auto block = buffer->getBlock(makeLinearCacheSegmentKey(segment, key));
+            ASSERT_NE(block, nullptr);
+            EXPECT_EQ(block->addr.get(), static_cast<char*>(parts[0].addr) + offsets[segment] + shard * sizes[segment]);
+            EXPECT_EQ(block->len, sizes[segment]);
+        }
+    }
+}
+
 TEST_F(DecodeRpcLoadRoutingTest, PipelineReceiverLoadsItsLocalRangeFromSingleStagePrefill) {
     ASSERT_TRUE(initReceiver(true));
     const auto              request = makeRequest(false);
