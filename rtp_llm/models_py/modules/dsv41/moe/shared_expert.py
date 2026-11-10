@@ -183,6 +183,7 @@ class W13SharedExpert(nn.Module):
         """
         return (
             _MXFP8_FUSED_SILU_OK
+            and torch.version.hip is None
             and x.is_cuda
             and (x.dtype == torch.bfloat16)
             and (x.dim() == 2)
