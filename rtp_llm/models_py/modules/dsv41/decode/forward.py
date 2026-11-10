@@ -19,6 +19,8 @@ decode impl.
 
 from __future__ import annotations
 
+import os
+
 from functools import partial
 from typing import Any, Dict, Optional, Tuple
 
@@ -346,6 +348,8 @@ def forward_layers(
     """
     B = attn_metadata.batch_size
     q_len = attn_metadata.q_len_per_req
+    if os.environ.get("DSV41_TRACE_CAPTURE"):
+        print(f"[cap] dsv41 forward_layers B={B} q={q_len} capture={torch.cuda.is_current_stream_capturing()}", flush=True)
     input_ids = input_ids.reshape(-1)
 
     _rt_on = _rt.ENABLED
@@ -355,7 +359,11 @@ def forward_layers(
             _rt_on = False
 
     if prepare_hidden_fn is None:
+        if os.environ.get("DSV41_TRACE_CAPTURE"):
+            print("[cap] dsv41 embed start", flush=True)
         h = v4.embed(input_ids).view(B, q_len, -1)  # [B, q_len, dim]
+        if os.environ.get("DSV41_TRACE_CAPTURE"):
+            print("[cap] dsv41 embed done", flush=True)
         if _rt_on:
             _rt.record("decode_embed_out", h)
         h = h.unsqueeze(2).repeat(1, 1, v4.hc_mult, 1)  # [B, q_len, hc, dim]
@@ -364,7 +372,11 @@ def forward_layers(
     if _rt_on:
         _rt.record("decode_embed_hc_expanded", h)
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
+    if os.environ.get("DSV41_TRACE_CAPTURE"):
+        print("[cap] gate routing start", flush=True)
     routing_metadata = prepare_model_gate_routing_metadata(v4, input_ids)
+    if os.environ.get("DSV41_TRACE_CAPTURE"):
+        print("[cap] gate routing done", flush=True)
     layer_forward_range = _profiler.make_layer_forward_range()
     from rtp_llm.models_py.modules.dsv41._engram_decode_prefetch import (
         DecodeEngramPrefetch,
@@ -462,6 +474,8 @@ def forward_decode(
     ``[B, q_len]``, dispatch to :func:`forward_layers`, then re-pack to
     ``[T_total, dim]`` for the sampler.
     """
+    if os.environ.get("DSV41_TRACE_CAPTURE"):
+        print("[cap] dsv41 forward_decode entry", flush=True)
     from rtp_llm.models_py.modules.dsv41.decode.decode_fmha_impl import (
         DSv4DecodeFmhaImpl,
     )
@@ -495,8 +509,12 @@ def forward_decode(
     input_ids = input_ids.reshape(-1)
 
     if isinstance(fmha_impl, _graph_impl_types):
+        if os.environ.get("DSV41_TRACE_CAPTURE"):
+            print("[cap] prepare_in_graph start", flush=True)
         if hasattr(fmha_impl, "prepare_in_graph"):
             fmha_impl.prepare_in_graph(attn)
+        if os.environ.get("DSV41_TRACE_CAPTURE"):
+            print("[cap] prepare_in_graph done", flush=True)
         meta = fmha_impl.metadata
     else:
         paged_specs = build_paged_pool_specs(
