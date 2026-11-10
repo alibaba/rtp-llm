@@ -1,5 +1,6 @@
 import os
 import unittest
+import grpc
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -21,17 +22,21 @@ from rtp_llm.utils.base_model_datatypes import GenerateInput, MultimodalTokenExp
 
 
 class MMLatePrefillActivationTest(unittest.TestCase):
-    def create_visitor(self, separation, flag="1", multimodal=True, decode=False):
+    def create_visitor(self, separation, flag=None, multimodal=True, decode=False):
         pd_config = PDSepConfig()
         pd_config.role_type = RoleType.PDFUSION
         pd_config.decode_entrance = decode
         module = "rtp_llm.server.backend_rpc_server_visitor"
         with (
-            patch.dict(os.environ, {"RTP_LLM_LOCAL_MM_LATE_PREFILL": flag}),
+            patch.dict(os.environ),
             patch(f"{module}.ModelRpcClient"),
             patch(f"{module}.HostService"),
             patch(f"{module}.MasterClient"),
         ):
+            if flag is None:
+                os.environ.pop("RTP_LLM_LOCAL_MM_LATE_PREFILL", None)
+            else:
+                os.environ["RTP_LLM_LOCAL_MM_LATE_PREFILL"] = flag
             return BackendRPCServerVisitor(
                 max_seq_len=100,
                 seq_size_per_block=16,
@@ -70,6 +75,42 @@ class MMLatePrefillActivationTest(unittest.TestCase):
 
 
 class MMLocalDPAffinityTest(unittest.IsolatedAsyncioTestCase):
+    async def test_only_unsupported_length_probes_fall_back(self):
+        client = ModelRpcClient(["127.0.0.1:8001"], {})
+        self.addAsyncCleanup(client.close)
+        for code in (
+            grpc.StatusCode.UNIMPLEMENTED,
+            grpc.StatusCode.FAILED_PRECONDITION,
+            grpc.StatusCode.INVALID_ARGUMENT,
+            grpc.StatusCode.DEADLINE_EXCEEDED,
+        ):
+            request = GenerateInput(
+                3,
+                torch.tensor([1]),
+                [MultimodalInput("image.png", 1, torch.empty(0), MMPreprocessConfig())],
+                GenerateConfig(),
+            )
+            error = grpc.aio.AioRpcError(code, None, None)
+            with patch.object(client._channel_pool, "get", new=AsyncMock()), patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=SimpleNamespace(
+                    GetMultimodalLengths=AsyncMock(side_effect=error)
+                ),
+            ):
+                if code in (
+                    grpc.StatusCode.UNIMPLEMENTED,
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                ):
+                    await client.prepare_local_multimodal(
+                        request, SimpleNamespace(), 100
+                    )
+                    self.assertIsNone(request.mm_token_expansion)
+                else:
+                    with self.assertRaises(grpc.RpcError):
+                        await client.prepare_local_multimodal(
+                            request, SimpleNamespace(), 100
+                        )
+
     async def test_length_probe_and_prefill_share_one_dp_owner(self):
         client = ModelRpcClient(["127.0.0.1:8001", "127.0.0.1:8002"], {})
         self.addAsyncCleanup(client.close)

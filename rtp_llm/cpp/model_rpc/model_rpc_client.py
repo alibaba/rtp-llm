@@ -947,10 +947,20 @@ class ModelRpcClient(object):
         input_py.mm_token_expansion = None
         request = trans_input(input_py)
         channel = await self._channel_pool.get(address)
-        response = await RpcServiceStub(channel).GetMultimodalLengths(
-            request,
-            timeout=self._compute_grpc_timeout(input_py.generate_config.timeout_ms),
-        )
+        try:
+            response = await RpcServiceStub(channel).GetMultimodalLengths(
+                request,
+                timeout=self._compute_grpc_timeout(input_py.generate_config.timeout_ms),
+            )
+        except grpc.RpcError as error:
+            # Default-on admission remains compatible with adapters/backends
+            # without metadata-only lengths. Real media failures still propagate.
+            if error.code() in (
+                grpc.StatusCode.UNIMPLEMENTED,
+                grpc.StatusCode.FAILED_PRECONDITION,
+            ):
+                return
+            raise
         tokens, spans = multimodal_length_tokens(
             list(request.token_ids),
             mm_model_config.mm_sep_tokens,

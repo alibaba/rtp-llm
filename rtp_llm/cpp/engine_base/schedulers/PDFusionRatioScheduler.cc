@@ -167,6 +167,7 @@ PDFusionRatioScheduler::PDFusionRatioScheduler(const RuntimeConfig&             
     gdn_prefill_memory_budget_(MemoryEvaluationHelper::hasGdnPrefill(model_config)),
     current_kv_admission_(currentKVAdmissionFromEnv()),
     trace_enabled_(runtime_config.fifo_scheduler_config.pdfusion_schedule_trace),
+    late_multimodal_batch_limit_(std::max<int64_t>(1, runtime_config.fifo_scheduler_config.max_context_batch_size)),
     decode_prefill_step_(parseDecodePrefillRatio(runtime_config.fifo_scheduler_config.decode_prefill_ratio)),
     decode_since_prefill_(0),
     prefill_since_decode_(0) {
@@ -321,7 +322,76 @@ bool PDFusionRatioScheduler::evaluatePrefillMemory(const list<GenerateStreamPtr>
 
 bool PDFusionRatioScheduler::waitPredicate() {
     return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !loading_cache_streams_.empty()
-           || !running_streams_.empty() || !pending_decode_streams_.empty();
+           || !running_streams_.empty() || !pending_decode_streams_.empty() || late_multimodal_future_.valid();
+}
+
+void PDFusionRatioScheduler::advanceLateMultimodal(std::unique_lock<std::mutex>& lock, bool allow_prepare) {
+    if (late_multimodal_future_.valid()) {
+        if (late_multimodal_future_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            return;
+        }
+        // Only the scheduling thread publishes prepared tensors/identities. The
+        // worker never mutates live inputs while admission reads their metadata.
+        auto completed = std::move(late_multimodal_future_);
+        lock.unlock();
+        try {
+            completed.get()();
+        } catch (const std::exception& error) {
+            for (const auto& stream : late_multimodal_streams_) {
+                stream->reportError(ErrorCode::MM_PROCESS_ERROR, error.what());
+            }
+        }
+        lock.lock();
+        late_multimodal_streams_.clear();
+    }
+    if (stop_ || !allow_prepare || !new_streams_.empty() || !loading_cache_streams_.empty()) {
+        return;
+    }
+    for (const auto& stream : waiting_streams_) {
+        if (!stream->hasError() && stream->generateInput()->multimodal_prepared_late) {
+            return;  // KV shortage must not grow a second prepared cohort.
+        }
+    }
+    size_t tokens = 0, sequences = 0;
+    const size_t inited = countInitedKVCacheStreams() + pending_decode_streams_.size();
+    for (const auto& stream : waiting_streams_) {
+        if (stream->hasError() || !stream->hasPendingMultimodal()) {
+            continue;
+        }
+        if (late_multimodal_streams_.size() >= late_multimodal_batch_limit_
+            || (max_inited_kv_cache_streams_ > 0
+                && inited + late_multimodal_streams_.size() >= max_inited_kv_cache_streams_)) {
+            break;
+        }
+        // Reject impossible GDN requests before allocating their embeddings.
+        if (gdn_prefill_memory_budget_ && !evaluateGdnPrefillBudget({}, stream)) {
+            continue;
+        }
+        if (!GdnPrefillMemory::tryAdd(tokens, sequences, stream->contextLength(), stream->currentBatchSize(),
+                                     max_batch_tokens_size_, max_generate_batch_size_)) {
+            // Non-GDN admission permits a single oversized context. Preserve
+            // that behavior, but never combine it with another prepared input.
+            if (!gdn_prefill_memory_budget_ && late_multimodal_streams_.empty()) {
+                late_multimodal_streams_.push_back(stream);
+            }
+            break;
+        }
+        late_multimodal_streams_.push_back(stream);
+    }
+    if (!late_multimodal_streams_.empty()) {
+        try {
+            RTP_LLM_LOG_INFO("LOCAL_MM_LATE_PREFILL prepare batch=%zu tokens=%zu",
+                             late_multimodal_streams_.size(), tokens);
+            late_multimodal_future_ = std::async(std::launch::async, [streams = late_multimodal_streams_] {
+                return GenerateStream::prepareLateMultimodalBatchDeferred(streams);
+            });
+        } catch (const std::exception& error) {
+            for (const auto& stream : late_multimodal_streams_) {
+                stream->reportError(ErrorCode::MM_PROCESS_ERROR, error.what());
+            }
+            late_multimodal_streams_.clear();
+        }
+    }
 }
 
 absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
@@ -341,6 +411,7 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
     made_progress |= reapFinished(pending_decode_streams_) > 0;
 
     const RoundType round = chooseRound();
+    advanceLateMultimodal(lock, round == RoundType::PREFILL);
     if (trace_enabled_) {
         observation_                = {};
         observation_.valid          = true;
@@ -631,7 +702,7 @@ void PDFusionRatioScheduler::cancelExtraStreams() {
 }
 
 bool PDFusionRatioScheduler::hasExtraStreams() const {
-    return !pending_decode_streams_.empty() || !new_streams_.empty();
+    return !pending_decode_streams_.empty() || !new_streams_.empty() || late_multimodal_future_.valid();
 }
 
 int64_t PDFusionRatioScheduler::extraOnflightStreams() const {

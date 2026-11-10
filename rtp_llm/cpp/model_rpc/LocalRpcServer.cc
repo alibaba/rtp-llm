@@ -248,10 +248,9 @@ grpc::Status LocalRpcServer::GetMultimodalLengths(grpc::ServerContext*   context
                                                   MultimodalLengthsPB*   response) {
     auto        local   = std::dynamic_pointer_cast<LocalMultimodalProcessor>(mm_processor_);
     const auto& runtime = maga_init_params_.runtime_config;
-    if (!local || maga_init_params_.pd_sep_config.role_type != RoleType::PDFUSION || runtime.use_batch_decode_scheduler
-        || !runtime.fifo_scheduler_config.pdfusion_scheduler_mode.empty()) {
+    if (!local || maga_init_params_.pd_sep_config.role_type != RoleType::PDFUSION || runtime.use_batch_decode_scheduler) {
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
-                            "length-only multimodal input requires LOCAL PDFUSION with FIFO scheduling");
+                            "length-only multimodal input requires LOCAL PDFUSION scheduling");
     }
     try {
         if (context && context->IsCancelled()) {
@@ -272,6 +271,11 @@ grpc::Status LocalRpcServer::GetMultimodalLengths(grpc::ServerContext*   context
             response->add_lengths(length);
         }
         return grpc::Status::OK;
+    } catch (const py::error_already_set& error) {
+        py::gil_scoped_acquire gil;
+        return grpc::Status(error.matches(PyExc_NotImplementedError) ? grpc::StatusCode::UNIMPLEMENTED :
+                                                                      grpc::StatusCode::INVALID_ARGUMENT,
+                            error.what());
     } catch (const std::exception& error) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, error.what());
     }
@@ -284,7 +288,7 @@ ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::sha
         if (!output->multimodal_token_layout->length_only
             || !std::dynamic_pointer_cast<LocalMultimodalProcessor>(mm_processor_)
             || maga_init_params_.pd_sep_config.role_type != RoleType::PDFUSION || runtime.use_batch_decode_scheduler
-            || !runtime.fifo_scheduler_config.pdfusion_scheduler_mode.empty() || !output->multimodal_inputs
+            || !output->multimodal_inputs
             || output->isGroup()) {
             return ErrorInfo(ErrorCode::INVALID_PARAMS, "unsupported length-only multimodal request");
         }

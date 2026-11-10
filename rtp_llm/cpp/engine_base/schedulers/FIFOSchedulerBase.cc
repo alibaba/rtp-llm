@@ -169,6 +169,12 @@ void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
         auto& stream = *it;
 
+        // Placeholder identities must never enter KV lookup or model execution.
+        if (stream->hasPendingMultimodal() && !stream->hasError()) {
+            ++it;
+            continue;
+        }
+
         const bool already_inited_kv = stream->curBlocksNum() > 0;
         if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
             && inited_kv_streams + admitted_new_init_streams >= max_inited_kv_cache_streams_) {

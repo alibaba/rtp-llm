@@ -327,13 +327,29 @@ void GenerateStream::prepareLateMultimodal() {
 }
 
 void GenerateStream::prepareLateMultimodalBatch(const std::vector<std::shared_ptr<GenerateStream>>& streams) {
+    prepareLateMultimodalBatchDeferred(streams)();
+}
+
+std::function<void()>
+GenerateStream::prepareLateMultimodalBatchDeferred(const std::vector<std::shared_ptr<GenerateStream>>& streams) {
+    std::vector<std::function<void()>> completions;
     // Each DP backend has its own processor/queue. Never merge different owners.
     std::vector<std::shared_ptr<GenerateInput::PrepareMultimodalBatch>> owners;
     std::vector<std::vector<std::shared_ptr<GenerateStream>>>           groups;
     for (const auto& stream : streams) {
         const auto& owner = stream->generateInput()->prepare_multimodal_batch;
         if (!owner) {
-            stream->prepareLateMultimodal();
+            if (auto prepared = stream->beginLateMultimodal()) {
+                auto result = ErrorInfo(ErrorCode::INVALID_PARAMS, "missing multimodal preparation callback");
+                try {
+                    if (prepared->prepare_multimodal) {
+                        result = prepared->prepare_multimodal(prepared);
+                    }
+                } catch (const std::exception& error) {
+                    result = ErrorInfo(ErrorCode::MM_PROCESS_ERROR, error.what());
+                }
+                completions.emplace_back([stream, prepared, result] { stream->finishLateMultimodal(prepared, result); });
+            }
             continue;
         }
         auto it = std::find(owners.begin(), owners.end(), owner);
@@ -362,14 +378,23 @@ void GenerateStream::prepareLateMultimodalBatch(const std::vector<std::shared_pt
                 throw std::runtime_error("local multimodal batch returned the wrong result count");
             }
             for (size_t i = 0; i < active.size(); ++i) {
-                active[i]->finishLateMultimodal(prepared[i], results[i]);
+                completions.emplace_back([stream = active[i], input = prepared[i], result = results[i]] {
+                    stream->finishLateMultimodal(input, result);
+                });
             }
         } catch (const std::exception& error) {
             for (const auto& stream : active) {
-                stream->reportError(ErrorCode::MM_PROCESS_ERROR, error.what());
+                completions.emplace_back([stream, message = std::string(error.what())] {
+                    stream->reportError(ErrorCode::MM_PROCESS_ERROR, message);
+                });
             }
         }
     }
+    return [completions = std::move(completions)] {
+        for (const auto& complete : completions) {
+            complete();
+        }
+    };
 }
 
 void GenerateStream::finishLateMultimodal(const std::shared_ptr<GenerateInput>& prepared, const ErrorInfo& result) {

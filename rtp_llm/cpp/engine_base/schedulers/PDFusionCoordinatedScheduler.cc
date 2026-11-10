@@ -142,7 +142,7 @@ void PDFusionCoordinatedScheduler::cancelExtraStreams() {
     prefill_reservations_.clear();
 }
 PDFusionPreparedState PDFusionCoordinatedScheduler::prepareLocal(int64_t epoch) {
-    std::lock_guard<std::mutex> guard(lock_);
+    std::unique_lock<std::mutex> guard(lock_);
     if (epoch != prepared_epoch_ + 1 || committed_epoch_ != prepared_epoch_ || !model_completed_) {
         throw std::logic_error("prepareLocal duplicate or unfinished epoch");
     }
@@ -171,6 +171,8 @@ PDFusionPreparedState PDFusionCoordinatedScheduler::prepareLocal(int64_t epoch) 
     // already admitted async load or ready reservation. An empty local Decode
     // batch can always refill, including after cancellation and at the tail.
     prefill_admit_allowed_ = cadence_.prefillAdmissionAllowed() || running_streams_.empty();
+    // Never wait for media/ViT in the global PREPARE/COMMIT exchange.
+    advanceLateMultimodal(guard, prefill_admit_allowed_);
     if (cadence_config_.adaptive) {
         // Snapshot all existing reservations before evaluating fresh candidates.
         // evaluateWaitingStreams owns the CanRun/initKVBlock/LoadInitiated transitions.

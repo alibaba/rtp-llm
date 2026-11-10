@@ -329,6 +329,9 @@ public:
     StreamState moveToNext();
     void        prepareLateMultimodal();
     static void prepareLateMultimodalBatch(const std::vector<std::shared_ptr<GenerateStream>>& streams);
+    // Compute on private inputs; the returned completion installs results on the scheduler thread.
+    static std::function<void()>
+    prepareLateMultimodalBatchDeferred(const std::vector<std::shared_ptr<GenerateStream>>& streams);
     std::shared_ptr<GenerateInput> beginLateMultimodal();
     void finishLateMultimodal(const std::shared_ptr<GenerateInput>& prepared, const ErrorInfo& result);
     bool hasPendingMultimodal() const;

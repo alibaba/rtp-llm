@@ -1,4 +1,6 @@
 #include <memory>
+#include <future>
+#include <thread>
 #include <vector>
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -84,6 +86,118 @@ public:
 }  // namespace
 
 class GdnPrefillSchedulerTest: public DeviceTestBase {};
+
+namespace {
+void markPendingMM(const GenerateStreamPtr& stream,
+                   const std::shared_ptr<GenerateInput::PrepareMultimodalBatch>& prepare) {
+    stream->generateInput()->multimodal_token_layout = MultimodalTokenLayout{{{0, stream->inputLength()}}, true};
+    stream->generateInput()->prepare_multimodal_batch = prepare;
+}
+
+std::vector<ErrorInfo> fillMM(std::vector<std::shared_ptr<GenerateInput>>& inputs) {
+    for (auto& input : inputs) {
+        input->input_ids = torch::full_like(input->input_ids, 7);
+        input->multimodal_features = std::vector<torch::Tensor>{torch::zeros({input->inputLength(), 1})};
+    }
+    return std::vector<ErrorInfo>(inputs.size(), ErrorInfo::OkStatus());
+}
+}  // namespace
+
+TEST_F(GdnPrefillSchedulerTest, LateMMCompletionIsPublishedOnlyOnSchedulerThread) {
+    GdnResources f(32);
+    auto stream = f.stream(3);
+    markPendingMM(stream, std::make_shared<GenerateInput::PrepareMultimodalBatch>(fillMM));
+    auto completion = GenerateStream::prepareLateMultimodalBatchDeferred({stream});
+    EXPECT_TRUE(stream->hasPendingMultimodal());
+    EXPECT_FALSE(stream->generateInput()->multimodal_features.has_value());
+    EXPECT_EQ(stream->generateInput()->input_ids[0].item<int>(), 1);
+    completion();
+    EXPECT_FALSE(stream->hasPendingMultimodal());
+    EXPECT_EQ(stream->generateInput()->input_ids[0].item<int>(), 7);
+}
+
+TEST_F(GdnPrefillSchedulerTest, RatioContinuesDecodeWhileLateMMWaits) {
+    GdnResources f(32);
+    auto scheduler = f.ratio();
+    auto decode = f.stream(2), pending = f.stream(3), next = f.stream(3);
+    auto batch = std::make_shared<GenerateInput::PrepareMultimodalBatch>(fillMM);
+    std::promise<void> release;
+    auto gate = release.get_future().share();
+    auto slow = std::make_shared<GenerateInput::PrepareMultimodalBatch>([gate](auto& inputs) {
+        gate.wait_for(std::chrono::seconds(5));
+        return fillMM(inputs);
+    });
+    markPendingMM(pending, slow);
+    markPendingMM(next, batch);
+    ASSERT_TRUE(scheduler->enqueue(decode).ok());
+    ASSERT_TRUE(scheduler->schedule().ok());
+    decode->setIsContextStream(false);
+    ASSERT_TRUE(scheduler->enqueue(pending).ok());
+    ASSERT_TRUE(scheduler->enqueue(next).ok());
+    const auto started = std::chrono::steady_clock::now();
+    auto result = scheduler->schedule();
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    release.set_value();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->size(), 1);
+    EXPECT_EQ(result->front(), decode);
+    EXPECT_LT(elapsed, std::chrono::seconds(1));
+    EXPECT_EQ(pending->curBlocksNum(), 0);
+    EXPECT_EQ(next->curBlocksNum(), 0);
+    EXPECT_TRUE(next->hasPendingMultimodal());
+    for (int attempt = 0; attempt < 1000 && pending->hasPendingMultimodal(); ++attempt) {
+        ASSERT_TRUE(scheduler->schedule().ok());
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_FALSE(pending->hasPendingMultimodal());
+    EXPECT_TRUE(next->hasPendingMultimodal());
+}
+
+TEST_F(GdnPrefillSchedulerTest, CadencePreparesWithoutWaitingAndIsolatesFailedRequests) {
+    for (bool adaptive : {false, true}) {
+        GdnResources f(32);
+        f.runtime.fifo_scheduler_config.decode_prefill_ratio = "7";
+        PDFusionCadenceConfig cadence;
+        cadence.adaptive = adaptive;
+        PDFusionCoordinatedScheduler scheduler(
+            f.runtime, f.model, f.pd, ParallelismConfig{}, ModelSpecificConfig{}, f.cache, nullptr, 0, cadence);
+        auto failed = f.stream(3), good = f.stream(3);
+        std::promise<void> release;
+        auto gate = release.get_future().share();
+        markPendingMM(failed, std::make_shared<GenerateInput::PrepareMultimodalBatch>([gate](auto& inputs) {
+            gate.wait_for(std::chrono::seconds(5));
+            return std::vector<ErrorInfo>(inputs.size(), ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "media failed"));
+        }));
+        markPendingMM(good, std::make_shared<GenerateInput::PrepareMultimodalBatch>(fillMM));
+        ASSERT_TRUE(scheduler.enqueue(failed).ok());
+        ASSERT_TRUE(scheduler.enqueue(good).ok());
+        const auto started = std::chrono::steady_clock::now();
+        auto state = scheduler.prepareLocal(1);
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+        release.set_value();
+        EXPECT_LT(elapsed, std::chrono::seconds(1));
+        EXPECT_EQ(state.ready_prefill, 0);
+        EXPECT_EQ(failed->curBlocksNum(), 0);
+        EXPECT_EQ(good->curBlocksNum(), 0);
+        scheduler.commitLocal(1, PDFusionPlan::DECODE);
+        scheduler.completeModelStep();
+        for (int epoch = 2; epoch < 1000; ++epoch) {
+            state = scheduler.prepareLocal(epoch);
+            auto batch = scheduler.commitLocal(epoch, state.ready_prefill ? PDFusionPlan::PREFILL : PDFusionPlan::DECODE);
+            scheduler.completeModelStep();
+            if (state.ready_prefill) {
+                ASSERT_EQ(batch.size(), 1);
+                EXPECT_EQ(batch.front(), good);
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        EXPECT_TRUE(failed->hasError());
+        EXPECT_FALSE(good->hasError());
+        EXPECT_FALSE(good->hasPendingMultimodal());
+        EXPECT_GT(good->curBlocksNum(), 0);
+    }
+}
 
 TEST_F(GdnPrefillSchedulerTest, Splits65245TokenPairWithoutTruncation) {
     GdnResources f(32768);

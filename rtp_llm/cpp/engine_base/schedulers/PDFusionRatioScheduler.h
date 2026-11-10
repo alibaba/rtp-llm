@@ -1,6 +1,7 @@
 #pragma once
 
 #include <list>
+#include <future>
 #include <memory>
 #include <string>
 
@@ -61,6 +62,7 @@ protected:
     size_t  promotePendingDecodeStreams();
     RoundType chooseRound();
     bool      tryAdmitKVForPrefill(const GenerateStreamPtr& new_stream);
+    void      advanceLateMultimodal(std::unique_lock<std::mutex>& lock, bool allow_prepare);
 
     void                admitWaitingForCoordination(const std::list<GenerateStreamPtr>& ready_reservations = {});
     void                observeCommitted(const std::list<GenerateStreamPtr>& streams, bool prefill);
@@ -77,6 +79,10 @@ protected:
 
 protected:
     std::list<GenerateStreamPtr> pending_decode_streams_;
+    const size_t late_multimodal_batch_limit_;
+    // One preparation job per rank; retain its cohort until Prefill consumes it.
+    std::vector<GenerateStreamPtr> late_multimodal_streams_;
+    std::future<std::function<void()>> late_multimodal_future_;
     // Per-prefill-round scratch state, guarded by the scheduler lock.
     std::unique_ptr<AdmissionPeakState> admission_peak_state_;
     int64_t                             decode_prefill_step_  = 1;

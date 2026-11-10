@@ -95,7 +95,7 @@ class BackendRPCServerVisitor:
         self.max_seq_len = max_seq_len
         self.mm_model_config = mm_model_config
         self.local_mm_late_prefill = (
-            os.environ.get("RTP_LLM_LOCAL_MM_LATE_PREFILL", "0") == "1"
+            os.environ.get("RTP_LLM_LOCAL_MM_LATE_PREFILL", "1") == "1"
             and vit_separation == VitSeparation.VIT_SEPARATION_LOCAL
             and mm_model_config is not None
             and not pd_sep_config.decode_entrance
