@@ -353,7 +353,7 @@ def select_strategy(
         for cls in _STRATEGY_PRIORITY:
             if cls.name == forced:
                 if cls.can_handle(cfg):
-                    if cfg.ep_size > 1 and cls.name not in ("mega", "mega_se"):
+                    if cfg.ep_size > 1 and cls.name not in ("mega", "mega_se", "rocm_ep"):
                         raise RuntimeError(
                             "DSV4 EP MoE requires MegaMoEStrategy. "
                             f"Requested strategy {forced!r} would bypass Mega "
@@ -373,6 +373,9 @@ def select_strategy(
             raise RuntimeError(f"Unknown MoE strategy {forced!r}. Available: {names}")
 
     if cfg.ep_size > 1:
+        rocm_cls = next((c for c in _STRATEGY_PRIORITY if c.name == "rocm_ep"), None)
+        if rocm_cls is not None and rocm_cls.can_handle(cfg):
+            return rocm_cls
         mega_cls = next((c for c in _STRATEGY_PRIORITY if c.name == "mega"), None)
         if mega_cls is None:
             raise RuntimeError(
