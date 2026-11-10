@@ -1,18 +1,17 @@
 package org.flexlb.httpserver;
 
 import io.grpc.stub.StreamObserver;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
-import org.flexlb.service.RouteService;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
@@ -34,38 +33,38 @@ import static org.mockito.Mockito.when;
  */
 class FlexlbScheduleEngineIndexTest {
 
-    private RouteService routeService;
+    private AbstractRequestScheduler routeService;
     private FlexlbServiceImpl service;
 
     @BeforeEach
     void setUp() {
-        routeService = mock(RouteService.class);
-        LBStatusConsistencyService consistencyService = mock(LBStatusConsistencyService.class);
+        routeService = mock(AbstractRequestScheduler.class);
+        MasterStatusService consistencyService = mock(MasterStatusService.class);
         when(consistencyService.isNeedConsistency()).thenReturn(false);
 
         ConfigService configService = mock(ConfigService.class);
         FlexlbConfig routingConfig = new FlexlbConfig();
-        routingConfig.setDispatcher(DispatcherConfig.nonBatch());
+        routingConfig.setDispatcher(org.flexlb.config.ConfigTestSupport.nonBatch());
         when(configService.loadBalanceConfig()).thenReturn(routingConfig);
 
         CacheAwareService cacheAwareService = mock(CacheAwareService.class);
 
         service =
-                new FlexlbServiceImpl(
+                FlexlbServiceTestSupport.create(
                         routeService,
+                        mock(org.flexlb.balance.scheduler.RequestRepository.class),
                         consistencyService,
                         mock(EngineHealthReporter.class),
                         mock(FlexlbGrpcForwarder.class),
                         configService,
-                        mock(BatchSchedulerReporter.class),
+                        mock(DeliveryMetricsReporter.class),
                         mock(ServerScheduleLatencyRecorder.class),
-                        mock(RequestSchedulerReporter.class),
-                        cacheAwareService);
+                        mock(RequestSchedulerReporter.class));
     }
 
     @Test
     void scheduleIncludesEngineIndexForMultiEngineWorker() {
-        when(routeService.route(any(BalanceContext.class)))
+        when(routeService.submit(any(RequestContext.class)))
                 .thenReturn(CompletableFuture.completedFuture(response(serverStatus(1, 2))));
 
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = schedule();
@@ -82,7 +81,7 @@ class FlexlbScheduleEngineIndexTest {
 
     @Test
     void scheduleIncludesZeroEngineIndexForMultiEngineWorker() throws Exception {
-        when(routeService.route(any(BalanceContext.class)))
+        when(routeService.submit(any(RequestContext.class)))
                 .thenReturn(CompletableFuture.completedFuture(response(serverStatus(0, 2))));
 
         var result =
@@ -95,7 +94,7 @@ class FlexlbScheduleEngineIndexTest {
 
     @Test
     void scheduleOmitsEngineIndexForSingleEngineWorker() {
-        when(routeService.route(any(BalanceContext.class)))
+        when(routeService.submit(any(RequestContext.class)))
                 .thenReturn(CompletableFuture.completedFuture(response(serverStatus(0, 1))));
 
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = schedule();

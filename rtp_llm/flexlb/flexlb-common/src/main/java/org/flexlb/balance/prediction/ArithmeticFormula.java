@@ -5,6 +5,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static org.flexlb.balance.prediction.ArithmeticFormulaAst.Node;
 
 /**
@@ -17,25 +19,18 @@ public final class ArithmeticFormula {
     // Bounded reuse also avoids one generated class per equal-model endpoint.
     private static final int MAX_COMPILED_FORMULAS = 128;
 
-    private static final Map<Node, Compiled> COMPILED =
+    private static final Map<ParseKey, ArithmeticFormula> COMPILED =
             new LinkedHashMap<>(MAX_COMPILED_FORMULAS, 0.75f, true);
 
     private final Compiled compiled;
     private final Set<String> referencedVariables;
 
-    private ArithmeticFormula(Node root, Set<String> referencedVariables) {
-        synchronized (COMPILED) {
-            this.compiled =
-                    COMPILED.computeIfAbsent(
-                            root,
-                            node ->
-                                    new Compiled(
-                                            ArithmeticFormulaCompiler.compile(node),
-                                            ArithmeticFormulaCompiler.compileIncremental(node)));
-            if (COMPILED.size() > MAX_COMPILED_FORMULAS) {
-                COMPILED.remove(COMPILED.keySet().iterator().next());
-            }
-        }
+    private ArithmeticFormula(Node root, Set<String> referencedVariables, boolean allowAggregates) {
+        this.compiled =
+                new Compiled(
+                        ArithmeticFormulaCompiler.compile(root, false),
+                        allowAggregates ? ArithmeticFormulaCompiler.compile(root, true) : null,
+                        ArithmeticFormulaCompiler.compileIncremental(root));
         this.referencedVariables = Set.copyOf(referencedVariables);
     }
 
@@ -55,13 +50,35 @@ public final class ArithmeticFormula {
             Map<String, Integer> variables,
             Set<String> aggregateExcludedVariables,
             boolean allowAggregates) {
-        if (expression == null) {
-            throw new IllegalArgumentException("Formula expression is required");
+        checkArgument(expression != null, "Formula expression is required");
+        ParseKey key =
+                new ParseKey(
+                        expression,
+                        Map.copyOf(java.util.Objects.requireNonNull(variables, "variables")),
+                        Set.copyOf(
+                                java.util.Objects.requireNonNull(
+                                        aggregateExcludedVariables, "aggregateExcludedVariables")),
+                        allowAggregates);
+        synchronized (COMPILED) {
+            ArithmeticFormula cached = COMPILED.get(key);
+            if (cached != null) return cached;
         }
         ArithmeticFormulaParser parser =
                 new ArithmeticFormulaParser(
-                        expression, variables, aggregateExcludedVariables, allowAggregates);
-        return new ArithmeticFormula(parser.parse(), parser.referencedVariables());
+                        expression, key.variables(), key.excludedVariables(), allowAggregates);
+        Node root = parser.parse();
+        synchronized (COMPILED) {
+            ArithmeticFormula result =
+                    COMPILED.computeIfAbsent(
+                            key,
+                            ignored ->
+                                    new ArithmeticFormula(
+                                            root, parser.referencedVariables(), allowAggregates));
+            if (COMPILED.size() > MAX_COMPILED_FORMULAS) {
+                COMPILED.remove(COMPILED.keySet().iterator().next());
+            }
+            return result;
+        }
     }
 
     /** Includes variables parsed inside a {@code param()} initial value. */
@@ -77,17 +94,34 @@ public final class ArithmeticFormula {
         return compiled.full().evaluate(vars, itemVars);
     }
 
+    public double evaluateWithBindings(double[] vars, List<? extends Variables> items) {
+        checkState(compiled.bindings() != null, "Batch aggregates are disabled");
+        return compiled.bindings().evaluate(vars, items);
+    }
+
     /** A fresh, caller-owned accumulator for a nonempty append-only batch; null on compiler fallback. */
     public Aggregation newAggregation() {
         return compiled.incremental() == null ? null : new Aggregation(compiled.incremental());
     }
 
-    private record Compiled(Executable full, ArithmeticFormulaCompiler.Incremental incremental) {}
+    private record ParseKey(
+            String expression,
+            Map<String, Integer> variables,
+            Set<String> excludedVariables,
+            boolean allowAggregates) {}
+
+    private record Compiled(
+            Executable full,
+            Executable bindings,
+            ArithmeticFormulaCompiler.Incremental incremental) {}
 
     /**
-     * Accumulates per-item terms so batch expressions can be evaluated without rescanning prior
-     * items.
+     * Stable per-item bindings read directly by the compiled aggregate loop.
      */
+    public interface Variables {
+        double variable(int index);
+    }
+
     public static final class Aggregation {
         private final ArithmeticFormulaCompiler.Incremental program;
         private final double[] sums;
@@ -104,16 +138,12 @@ public final class ArithmeticFormula {
         }
 
         public double evaluate(double[] batchVars) {
-            if (!nonempty)
-                throw new IllegalStateException("Append an item before evaluating a batch");
+            checkState(nonempty, "Append an item before evaluating a batch");
             return program.evaluate(batchVars, sums);
         }
     }
 
-    /**
-     * Evaluates a compiled expression against scalar variables and optional item variables.
-     */
     interface Executable {
-        double evaluate(double[] vars, List<double[]> items);
+        double evaluate(double[] vars, List<?> items);
     }
 }

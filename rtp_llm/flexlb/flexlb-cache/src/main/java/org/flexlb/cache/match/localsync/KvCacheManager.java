@@ -3,11 +3,11 @@ package org.flexlb.cache.match.localsync;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.cache.EngineCacheInvalidator;
+import org.flexlb.metric.SafeFlexMonitor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * KV cache manager
@@ -41,7 +42,12 @@ public class KvCacheManager implements EngineCacheInvalidator {
      */
     @Autowired private CacheMetricsReporter cacheMetricsReporter;
 
-    private final Map<String, String> physicalIpPortByLogicalIpPort = new ConcurrentHashMap<>();
+    private final Map<String, WorkerStatus> workersByLogicalAddress = new ConcurrentHashMap<>();
+
+    /** The owning generation's cache lock serializes each address and its retry. */
+    private final Map<String, Long> pendingAdditions = new ConcurrentHashMap<>();
+
+    private final AtomicInteger indexReports = new AtomicInteger();
 
     @PostConstruct
     public void init() {
@@ -61,11 +67,12 @@ public class KvCacheManager implements EngineCacheInvalidator {
 
         globalCacheIndex.clear();
         engineLocalView.clear();
-        physicalIpPortByLogicalIpPort.clear();
+        workersByLogicalAddress.clear();
+        pendingAdditions.clear();
 
         // Report
-        cacheMetricsReporter.reportGlobalCacheMetrics(
-                globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
+        SafeFlexMonitor.run("cache.local.clear", cacheMetricsReporter::clearEngineLocalMetrics);
+        reportIndexMetrics();
 
         log.info("Cleared all cache data");
     }
@@ -117,23 +124,46 @@ public class KvCacheManager implements EngineCacheInvalidator {
         if (workerStatus == null) {
             return;
         }
-        updateEngineCache(
-                workerStatus.getWorkerIdentity(),
-                workerStatus.getMetricIpPort(),
-                role,
-                newCacheBlocks);
-    }
+        String engineIPort = workerStatus.getLogicalIpPort();
+        String metricIpPort = workerStatus.getMetricIpPort();
+        if (engineIPort == null || newCacheBlocks == null) return;
+        workersByLogicalAddress.put(engineIPort, workerStatus);
 
-    /** Remove both local and global cache-index state for one engine. */
-    public void removeEngineCache(String engineIpPort) {
-        if (engineIpPort == null) {
+        Long pending = pendingAdditions.get(engineIPort);
+        if (pending != null) {
+            addCacheBlock(engineIPort, pending);
+            pendingAdditions.remove(engineIPort);
+        }
+
+        // Calculate diff
+        DiffResult diffResult = engineLocalView.calculateDiff(engineIPort, newCacheBlocks);
+        SafeFlexMonitor.run(
+                "cache.diff",
+                () ->
+                        cacheMetricsReporter.reportCacheDiffMetrics(
+                                metricIpPort,
+                                role,
+                                diffResult.getAddedBlocks().size(),
+                                diffResult.getRemovedBlocks().size()));
+        if (!diffResult.hasChanges()) {
             return;
         }
-        engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
-        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort);
-        physicalIpPortByLogicalIpPort.remove(engineIpPort);
-        cacheMetricsReporter.reportGlobalCacheMetrics(
-                globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
+
+        for (Long key : diffResult.getAddedBlocks()) {
+            addCacheBlock(engineIPort, key);
+        }
+        for (Long key : diffResult.getRemovedBlocks()) {
+            globalCacheIndex.removeCacheBlock(engineIPort, key);
+            engineLocalView.removeCacheBlock(engineIPort, key);
+        }
+
+        // Report metrics
+        SafeFlexMonitor.run(
+                "cache.local",
+                () ->
+                        cacheMetricsReporter.reportEngineLocalMetrics(
+                                metricIpPort, role, engineLocalView.size(engineIPort)));
+        reportIndexMetrics();
     }
 
     /**
@@ -147,15 +177,14 @@ public class KvCacheManager implements EngineCacheInvalidator {
         Set<String> activePhysicalIpPorts = new HashSet<>(activeEngineIpPorts);
         Set<String> staleEngineIpPorts = new HashSet<>(engineLocalView.getAllEngineIpPorts());
         staleEngineIpPorts.removeIf(
-                engineIpPort ->
-                        activePhysicalIpPorts.contains(
-                                physicalIpPortByLogicalIpPort.getOrDefault(
-                                        engineIpPort, engineIpPort)));
+                engineIpPort -> {
+                    var worker = workersByLogicalAddress.get(engineIpPort);
+                    return activePhysicalIpPorts.contains(
+                            worker == null ? engineIpPort : worker.getPhysicalIpPort());
+                });
         for (String staleEngineIpPort : staleEngineIpPorts) {
             long startTime = System.nanoTime() / 1000;
-            engineLocalView.removeAllCacheBlockOfEngine(staleEngineIpPort);
-            globalCacheIndex.removeAllCacheBlockOfEngine(staleEngineIpPort);
-            physicalIpPortByLogicalIpPort.remove(staleEngineIpPort);
+            removeEngineCache(staleEngineIpPort);
             log.info(
                     "Removed stale engine cache: {}, cost={}us",
                     staleEngineIpPort,
@@ -163,49 +192,49 @@ public class KvCacheManager implements EngineCacheInvalidator {
         }
     }
 
-    private void updateEngineCache(
-            WorkerIdentity identity, String metricIpPort, String role, Set<Long> newCacheBlocks) {
-        String engineIPort = identity == null ? null : identity.getLogicalIpPort();
-        if (engineIPort == null || newCacheBlocks == null) {
+    /** Remove both local and global cache-index state for one engine. */
+    public void removeEngineCache(String engineIpPort) {
+        if (engineIpPort == null) {
             return;
         }
-        physicalIpPortByLogicalIpPort.put(engineIPort, identity.getPhysicalIpPort());
+        Set<Long> ownedKeys = engineLocalView.getEngineCacheBlocks(engineIpPort);
+        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort, ownedKeys);
+        engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
+        var worker = workersByLogicalAddress.remove(engineIpPort);
+        pendingAdditions.remove(engineIpPort);
+        SafeFlexMonitor.run(
+                "cache.local.remove",
+                () ->
+                        cacheMetricsReporter.removeEngineLocalMetrics(
+                                worker == null ? engineIpPort : worker.getMetricIpPort()));
+        reportIndexMetrics();
+    }
 
-        // Calculate diff
-        DiffResult diffResult = engineLocalView.calculateDiff(engineIPort, newCacheBlocks);
-        cacheMetricsReporter.reportCacheDiffMetrics(
-                metricIpPort,
-                role,
-                diffResult.getAddedBlocks().size(),
-                diffResult.getRemovedBlocks().size());
-        if (!diffResult.hasChanges()) {
+    private void reportIndexMetrics() {
+        // Coalesce concurrent changes; an older size report cannot overwrite retirement forever.
+        if (indexReports.getAndIncrement() != 0) {
             return;
         }
+        int pending = 1;
+        do {
+            SafeFlexMonitor.run(
+                    "cache.index",
+                    () ->
+                            cacheMetricsReporter.reportIndexMetrics(
+                                    globalCacheIndex.totalBlocks(),
+                                    globalCacheIndex.totalMappings(),
+                                    engineLocalView.getEngineViewsMapSize()));
+            pending = indexReports.addAndGet(-pending);
+        } while (pending != 0);
+    }
 
-        // Apply added cache blocks
-        for (Long addedBlock : diffResult.getAddedBlocks()) {
-            boolean contains = newCacheBlocks.contains(addedBlock);
-            if (contains) {
-                // Update local view
-                engineLocalView.addOrUpdateCacheBlock(engineIPort, addedBlock);
-                // Update global index
-                globalCacheIndex.addCacheBlock(addedBlock, engineIPort);
-            }
+    private void addCacheBlock(String address, Long key) {
+        try {
+            engineLocalView.addOrUpdateCacheBlock(address, key);
+            globalCacheIndex.addCacheBlock(key, address);
+        } catch (RuntimeException | Error failure) {
+            pendingAdditions.put(address, key);
+            throw failure;
         }
-
-        // Apply removed cache blocks
-        for (Long removedBlock : diffResult.getRemovedBlocks()) {
-            // Remove from local view
-            engineLocalView.removeCacheBlock(engineIPort, removedBlock);
-            // Remove from global index
-            globalCacheIndex.removeCacheBlock(engineIPort, removedBlock);
-        }
-
-        // Report metrics
-        cacheMetricsReporter.reportEngineLocalMetrics(
-                metricIpPort, role, engineLocalView.size(engineIPort));
-        cacheMetricsReporter.reportGlobalCacheMetrics(
-                globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
-        cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
     }
 }

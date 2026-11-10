@@ -91,7 +91,7 @@ class DirectPrefillCoalescingTest {
         }
 
         awaitCompleted(prefill, 6, 5_000);
-        assertEquals(6, prefill.getCompletedCount());
+        assertEquals(6, MockEngineTestSupport.getCompletedCount(prefill));
         assertEquals(0, prefill.getWaitingCount());
         assertEquals(0, prefill.getInflightCount());
 
@@ -103,7 +103,7 @@ class DirectPrefillCoalescingTest {
                 4,
                 stats.maxPrefillBatchSize.get(),
                 "the coalesced batch should hold 4 requests (direct_batch_size_max)");
-        assertFalse(prefill.isLeakDetected());
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill));
     }
 
     // ──────────── Test 2: direct_batch_size_max=1 restores one-request batches ────────────
@@ -121,14 +121,14 @@ class DirectPrefillCoalescingTest {
         }
 
         awaitCompleted(prefill, 5, 5_000);
-        assertEquals(5, prefill.getCompletedCount());
+        assertEquals(5, MockEngineTestSupport.getCompletedCount(prefill));
         assertEquals(
                 5,
                 stats.prefillBatches.sum(),
                 "legacy behaviour: every direct request runs as its own batch");
         assertEquals(5, stats.prefillBatchRequests.sum());
         assertEquals(1, stats.maxPrefillBatchSize.get());
-        assertFalse(prefill.isLeakDetected());
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill));
     }
 
     // ──────────── Test 3: request-level backpressure cap ────────────
@@ -161,11 +161,11 @@ class DirectPrefillCoalescingTest {
 
         // No residue from the rejection: 3 admitted requests still drain.
         awaitCompleted(prefill, 3, 5_000);
-        assertEquals(3, prefill.getCompletedCount());
+        assertEquals(3, MockEngineTestSupport.getCompletedCount(prefill));
         assertEquals(0, prefill.getWaitingCount());
         assertEquals(0, prefill.getInflightCount());
-        assertEquals("rejected", prefill.getRequestStates().get(3004L));
-        assertFalse(prefill.isLeakDetected());
+        assertEquals("rejected", MockEngineTestSupport.getRequestStates(prefill).get(3004L));
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill));
     }
 
     // ──────────── Harness ────────────
@@ -214,14 +214,15 @@ class DirectPrefillCoalescingTest {
             throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         while (System.nanoTime() < deadline) {
-            if (service.getCompletedCount() >= expected && service.getInflightCount() == 0) {
+            if (MockEngineTestSupport.getCompletedCount(service) >= expected
+                    && service.getInflightCount() == 0) {
                 return;
             }
             Thread.sleep(10);
         }
         fail(
                 "not drained: completed="
-                        + service.getCompletedCount()
+                        + MockEngineTestSupport.getCompletedCount(service)
                         + " inflight="
                         + service.getInflightCount()
                         + " waiting="

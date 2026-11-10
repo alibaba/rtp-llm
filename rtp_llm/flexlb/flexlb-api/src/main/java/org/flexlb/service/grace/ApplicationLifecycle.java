@@ -1,9 +1,11 @@
 package org.flexlb.service.grace;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.httpserver.FlexlbGrpcServer;
 import org.flexlb.listener.ApplicationWarmupState;
+import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
@@ -20,19 +22,16 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Owns the fixed application online, health and graceful-shutdown workflow.
- *
- * <p>Online starts consistency participation, waits for initial synchronization, then publishes
- * warmup completion. Offline marks health unavailable and withdraws discovery before draining
- * accepted RPCs. The owning Spring context closes serving resources after that drain.
  */
 @Slf4j
 @Component
 public class ApplicationLifecycle implements ApplicationContextAware {
     private static final long DEFAULT_WARM_UP_WAIT_MS = 3_000L;
 
-    private final LBStatusConsistencyService consistency;
+    private final AbstractRequestScheduler scheduling;
+    private final MasterStatusService consistency;
     private final FlexlbGrpcServer grpcServer;
-    private final GracefulLifecycleReporter reporter;
+    private final EngineHealthReporter reporter;
     private final Environment environment;
     private final ApplicationWarmupState warmupState;
 
@@ -45,21 +44,31 @@ public class ApplicationLifecycle implements ApplicationContextAware {
 
     @Autowired
     public ApplicationLifecycle(
-            LBStatusConsistencyService consistency,
+            MasterStatusService consistency,
             FlexlbGrpcServer grpcServer,
-            GracefulLifecycleReporter reporter,
+            EngineHealthReporter reporter,
             Environment environment,
-            ApplicationWarmupState warmupState) {
-        this(consistency, grpcServer, reporter, environment, warmupState, DEFAULT_WARM_UP_WAIT_MS);
+            ApplicationWarmupState warmupState,
+            AbstractRequestScheduler scheduling) {
+        this(
+                consistency,
+                grpcServer,
+                reporter,
+                environment,
+                warmupState,
+                scheduling,
+                DEFAULT_WARM_UP_WAIT_MS);
     }
 
     ApplicationLifecycle(
-            LBStatusConsistencyService consistency,
+            MasterStatusService consistency,
             FlexlbGrpcServer grpcServer,
-            GracefulLifecycleReporter reporter,
+            EngineHealthReporter reporter,
             Environment environment,
             ApplicationWarmupState warmupState,
+            AbstractRequestScheduler scheduling,
             long warmUpWaitMs) {
+        this.scheduling = java.util.Objects.requireNonNull(scheduling);
         this.consistency = consistency;
         this.grpcServer = grpcServer;
         this.reporter = reporter;
@@ -85,7 +94,9 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         long consistencyStartedAt = System.currentTimeMillis();
         try {
             consistency.start();
-            reporter.reportZkNodeOnline(System.currentTimeMillis() - consistencyStartedAt);
+            reporter.reportDuration(
+                    EngineHealthReporter.Event.ZK_NODE_ONLINE,
+                    System.currentTimeMillis() - consistencyStartedAt);
         } catch (Exception e) {
             Logger.error("application online registration failed", e);
         }
@@ -94,7 +105,9 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         long warmUpStartedAt = System.currentTimeMillis();
         try {
             Thread.sleep(warmUpWaitMs);
-            reporter.reportWarmerComplete(System.currentTimeMillis() - warmUpStartedAt);
+            reporter.reportDuration(
+                    EngineHealthReporter.Event.WARMER_COMPLETE,
+                    System.currentTimeMillis() - warmUpStartedAt);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             log.error("application warm up interrupted", e);
@@ -113,17 +126,28 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         log.info("context closing: requests drained; destroying serving resources");
     }
 
-    public synchronized boolean offline() {
+    public boolean offline() {
+        scheduling.checkShutdownThread();
+        return closeApplication();
+    }
+
+    public boolean isHealthy() {
+        return warmupState.isWarmupFinished() && !shutdownReceived;
+    }
+
+    private synchronized boolean closeApplication() {
         if (shutdownCompletedSuccessfully) {
             return true;
         }
         if (!shutdownReceived) {
             shutdownReceived = true;
-            reporter.reportHealthCheckOffline(0L);
+            reporter.reportDuration(EngineHealthReporter.Event.HEALTH_CHECK_OFFLINE, 0L);
             long consistencyStartedAt = System.currentTimeMillis();
             try {
                 consistency.offline();
-                reporter.reportZkNodeOffline(System.currentTimeMillis() - consistencyStartedAt);
+                reporter.reportDuration(
+                        EngineHealthReporter.Event.ZK_NODE_OFFLINE,
+                        System.currentTimeMillis() - consistencyStartedAt);
             } catch (Throwable failure) {
                 Logger.error("application offline deregistration failed", failure);
             }
@@ -133,17 +157,11 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         // Keep scheduler, forwarder and transport dependencies alive until all
         // accepted RPCs finish. The platform owns the forced-kill deadline.
         grpcServer.drain();
+        scheduling.shutdown(System.nanoTime() + TimeUnit.SECONDS.toNanos(30));
         shutdownCompletedSuccessfully = true;
-        reporter.reportShutdownComplete(
+        reporter.reportDuration(
+                EngineHealthReporter.Event.SHUTDOWN_COMPLETE,
                 TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - drainStartedAt));
         return true;
-    }
-
-    public boolean isHealthy() {
-        return warmupState.isWarmupFinished() && !shutdownReceived;
-    }
-
-    public boolean shutdownCompletedSuccessfully() {
-        return shutdownCompletedSuccessfully;
     }
 }

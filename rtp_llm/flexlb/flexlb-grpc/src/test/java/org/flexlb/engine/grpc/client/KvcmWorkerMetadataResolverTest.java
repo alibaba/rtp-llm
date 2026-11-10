@@ -106,7 +106,9 @@ class KvcmWorkerMetadataResolverTest {
         workerStatus.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    workerStatus.prepareNewStatus(workerStatus.freezeStatusResponse(response));
+                    workerStatus.prepareNewStatus(
+                            org.flexlb.dao.master.WorkerStatusTestSupport.freezeStatusResponse(
+                                    workerStatus, response));
             workerStatus.publishPreparedStatus(prepared);
             workerStatus.recordSuccessfulPoll(true);
         } finally {

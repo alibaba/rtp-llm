@@ -7,10 +7,12 @@ import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
+import org.flexlb.metric.SafeFlexMonitor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.flexlb.constant.MetricConstant.CACHE_AFFINITY_DECISION;
 import static org.flexlb.constant.MetricConstant.CACHE_DIFF_ADDED_BLOCKS_SIZE;
@@ -40,14 +42,32 @@ import static org.flexlb.constant.MetricConstant.CACHE_MATCH_STANDBY_FALLBACK_QP
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT;
 
 /**
- * Registers and reports cache hit, index size and estimated memory metrics. Memory estimates assume
- * a 64-bit JVM with compressed object pointers and eight-byte alignment.
+ * Cache metrics reporter
+ * Manages registration and reporting of all cache-related monitoring metrics
+ *
+ * <p>Memory estimation based on the following JVM assumptions:</p>
+ * <ul>
+ *   <li>64-bit JVM</li>
+ *   <li>Compressed Oops enabled (CompressedOops=true)</li>
+ *   <li>8-byte memory alignment</li>
+ *   <li>Object header structure: Mark Word(8 bytes) + Class Pointer(4 bytes) = 12 bytes</li>
+ * </ul>
+ *
+ * <p>Key object memory footprint:</p>
+ * <ul>
+ *   <li>Long wrapper object: 24 bytes (object header 12 + long value 8 + padding 4)</li>
+ *   <li>String object (15 chars): 72 bytes (String object 24 + char[] array 48)</li>
+ *   <li>ConcurrentHashMap.Node: 32 bytes (object header 12 + 4 fields 16 + padding 4)</li>
+ * </ul>
+ *
+ * @author FlexLB
  */
 @Slf4j
 @Component
@@ -59,8 +79,11 @@ public class CacheMetricsReporter {
 
     @Autowired private FlexMonitor monitor;
 
+    private final ConcurrentHashMap<String, FlexMetricTags> engineTags = new ConcurrentHashMap<>();
+
     @PostConstruct
     public void init() {
+        monitor = SafeFlexMonitor.wrap(monitor);
         registerCacheMetrics();
         log.info("CacheMetricsReporter initialized and metrics registered");
     }
@@ -80,7 +103,9 @@ public class CacheMetricsReporter {
         // Calculate cache count and bytes
         long cacheBytes = calculateEngineCacheBytes(cacheCount);
 
-        FlexMetricTags tags = FlexMetricTags.of("engineIp", ipIndex, "role", role);
+        FlexMetricTags tags =
+                engineTags.computeIfAbsent(
+                        ipIndex, address -> FlexMetricTags.of("engineIp", address, "role", role));
 
         monitor.report(CACHE_ENGINE_LOCAL_COUNT, tags, cacheCount);
         monitor.report(CACHE_ENGINE_LOCAL_BYTES, tags, cacheBytes);
@@ -125,19 +150,25 @@ public class CacheMetricsReporter {
                 + cacheCount * (nodeSize + LONG_OBJECT_BYTES);
     }
 
-    /**
-     * Report global cache metrics
-     *
-     * @param totalBlocks   Total global cache block count
-     * @param totalMappings Total global cache mapping count
-     */
-    public void reportGlobalCacheMetrics(long totalBlocks, long totalMappings) {
+    /** Cache mutation/retirement is serialized by the owning generation's cache lock. */
+    public void removeEngineLocalMetrics(String engineAddress) {
+        var tags = engineTags.remove(engineAddress);
+        if (tags != null) {
+            monitor.removeGauge(CACHE_ENGINE_LOCAL_COUNT, tags);
+            monitor.removeGauge(CACHE_ENGINE_LOCAL_BYTES, tags);
+        }
+    }
 
-        // Use statistics-based estimation
-        long totalBytes = calculateGlobalCacheBytes(totalBlocks, totalMappings);
+    /** Called after cache updates have stopped for shutdown. */
+    public void clearEngineLocalMetrics() {
+        engineTags.keySet().forEach(this::removeEngineLocalMetrics);
+    }
 
+    /** Publish the index counts captured by KvCacheManager's single metric publisher. */
+    public void reportIndexMetrics(long totalBlocks, long totalMappings, int views) {
         monitor.report(CACHE_GLOBAL_TOTAL_COUNT, totalBlocks);
-        monitor.report(CACHE_GLOBAL_BYTES, totalBytes);
+        monitor.report(CACHE_GLOBAL_BYTES, calculateGlobalCacheBytes(totalBlocks, totalMappings));
+        monitor.report(CACHE_ENGINE_VIEWS_MAP_SIZE, views);
     }
 
     /**
@@ -324,8 +355,31 @@ public class CacheMetricsReporter {
             return;
         }
 
+        monitor.report(
+                CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS,
+                FlexMetricTags.of("role", roleType.name()),
+                hitTokens);
+    }
+
+    /** Effective hits and routing matches belong to the same successfully selected request. */
+    public void reportSelectionCache(
+            RoleType roleType,
+            long totalTokens,
+            long effectiveHit,
+            long selectedMatch,
+            long maximumMatch) {
         FlexMetricTags tags = FlexMetricTags.of("role", roleType.name());
-        monitor.report(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, tags, hitTokens);
+        monitor.report(CACHE_HIT_COUNT, tags, effectiveHit);
+        monitor.report(
+                CACHE_HIT_RATIO,
+                tags,
+                totalTokens > 0L ? effectiveHit / (double) totalTokens : 0.0);
+        monitor.report(CACHE_REQUEST_TOTAL, tags, 1.0);
+        if (totalTokens > 0L) {
+            monitor.report(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, tags, selectedMatch);
+            monitor.report(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, tags, totalTokens);
+        }
+        monitor.report(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, tags, maximumMatch);
     }
 
     /** Report the outcome of a cache-affinity routing decision. */
@@ -410,15 +464,6 @@ public class CacheMetricsReporter {
     }
 
     /**
-     * Report engine view map size
-     *
-     * @param mapSize Engine view map size (number of current engines)
-     */
-    public void reportEngineViewsMapSize(int mapSize) {
-        monitor.report(CACHE_ENGINE_VIEWS_MAP_SIZE, mapSize);
-    }
-
-    /**
      * Register all cache-related monitoring metrics
      */
     private void registerCacheMetrics() {
@@ -454,6 +499,7 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.COUNTER);
         monitor.register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
         monitor.register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
+        monitor.register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.QPS);
         monitor.register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
         monitor.register(CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
         monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);

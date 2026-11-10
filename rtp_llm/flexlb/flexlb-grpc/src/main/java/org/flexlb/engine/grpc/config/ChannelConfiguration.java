@@ -3,8 +3,6 @@ package org.flexlb.engine.grpc.config;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import io.netty.channel.DefaultSelectStrategyFactory;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.epoll.Epoll;
-import io.netty.channel.epoll.EpollEventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.util.concurrent.DefaultEventExecutorChooserFactory;
 import io.netty.util.concurrent.DefaultThreadFactory;
@@ -42,7 +40,8 @@ public class ChannelConfiguration {
                 TimeUnit.MINUTES,
                 new LinkedBlockingQueue<>(
                         config.getInternalRuntime().getGrpcClientExecutorQueueCapacity()),
-                new NamedThreadFactory("engine-grpc-client-executor"));
+                new NamedThreadFactory("engine-grpc-client-executor"),
+                new GrpcCallbackCallerRunsPolicy());
     }
 
     /**
@@ -63,7 +62,7 @@ public class ChannelConfiguration {
                 TimeUnit.MINUTES,
                 new LinkedBlockingQueue<>(2000),
                 new NamedThreadFactory("flexlb-forwarder-channel-executor"),
-                new ThreadPoolExecutor.AbortPolicy());
+                new GrpcCallbackCallerRunsPolicy());
     }
 
     @Bean
@@ -75,19 +74,9 @@ public class ChannelConfiguration {
         // cancels queue forever), which is a strictly worse retention mode
         // than the default unbounded MPSC queue. Load is bounded instead at
         // admission: the dispatch executor's admission permit bounds in-flight
-        // EnqueueBatch payloads (see DefaultBatchDispatcher).
-        int threads = config.getInternalRuntime().getGrpcClientEventLoopThreads();
-        if (Epoll.isAvailable()) {
-            return new EpollEventLoopGroup(
-                    threads,
-                    null,
-                    DefaultEventExecutorChooserFactory.INSTANCE,
-                    DefaultSelectStrategyFactory.INSTANCE,
-                    RejectedExecutionHandlers.reject(),
-                    PlatformDependent::newMpscQueue);
-        }
+        // EnqueueBatch payloads (see DeliveryDispatcher).
         return new NioEventLoopGroup(
-                threads,
+                config.getInternalRuntime().getGrpcClientEventLoopThreads(),
                 null,
                 DefaultEventExecutorChooserFactory.INSTANCE,
                 SelectorProvider.provider(),

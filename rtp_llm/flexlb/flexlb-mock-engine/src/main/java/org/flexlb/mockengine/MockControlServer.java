@@ -21,9 +21,27 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Exposes mock-cluster status, fault, capacity and lifecycle controls over HTTP. Handlers resolve
- * engines by name or gRPC port, delegate scale changes to the engine manager and preserve the
- * control API's response schemas.
+ * Lightweight HTTP control server for the Java mock engine cluster.
+ *
+ * <p>Provides 15 endpoints mirroring the legacy Python mock control API:
+ * snapshot, inject, clear_inject, health, requests, set_perf, set_kv_pressure,
+ * set_queue_depth, cache_evict, stop_engine, start_engine, cancel_request,
+ * add_engine, remove_engine, and metrics. add_engine/remove_engine back runtime
+ * scale-out/in and keep the optional --discovery-file mapping in sync (see
+ * {@link DynamicEngineManager}).
+ *
+ * <p>Python compatibility layer (Phase 2): all POST endpoints accept dual
+ * addressing — either {@code {"engine": "<name>"}} resolved by engine name
+ * (e.g. "prefill-0") or {@code {"port": N}} resolved by gRPC port, matching
+ * the legacy Python mock control plane which addresses engines by name.
+ * Response schemas follow Python: /snapshot wraps engines in
+ * {@code {"engines": [...]}}, /requests is keyed by engine name, /health
+ * returns {@code {"status": "ok"}}, and /metrics emits the Python metric
+ * names with matching labels (aggregated by role by default, per-engine with
+ * {@code ?per_engine=true}). The pre-existing Java request formats are
+ * retained for backward compatibility.
+ *
+ * <p>Uses JDK built-in {@link HttpServer} — no additional Maven dependencies.
  */
 final class MockControlServer {
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -97,10 +115,6 @@ final class MockControlServer {
 
     void stop() {
         httpServer.stop(0);
-    }
-
-    int getPort() {
-        return httpServer.getAddress().getPort();
     }
 
     // ────────────────── Endpoint handlers ──────────────────
@@ -238,7 +252,7 @@ final class MockControlServer {
                             // ── Cancel-RPC fault family (RPC-layer failures simulated
                             // BEFORE the engine cancel state machine is touched — no
                             // fences, no terminal records; the gRPC Cancel handler and the
-                            // in-process MockEngineCancelChannel run the same gate) ──
+                            // in-process test cancel adapter run the same gate) ──
                             case "cancel_no_respond" -> builder.cancelNoRespond(enabled);
                             case "cancel_error" -> builder.cancelError(enabled);
                             case "cancel_unexpected_status" ->
@@ -596,7 +610,7 @@ final class MockControlServer {
      * Test-only cancel injection (C1-②, accepted-eviction 8429 wiring): POST
      * {@code {"engine"|"port": ..., "request_id": ...}} drives the same
      * three-branch {@link JavaMockEngineCluster.FastRpcService#cancelRequest}
-     * contract as the in-process MockEngineCancelChannel — on the found branch
+     * contract as the in-process test cancel adapter — on the found branch
      * the request is removed and the CANCELLED completion surfaces in the next
      * WorkerStatus finished list (iron rule 4: WorkerStatus stays the sole
      * release-confirmation source). Response: {@code {status, found, phase,
@@ -625,15 +639,14 @@ final class MockControlServer {
                     }
                     long requestId = parseRequestId(body.get("request_id"));
                     // Cancel-RPC fault-injection gate — same arriveCancelRpc entry as
-                    // the gRPC Cancel handler and the in-process MockEngineCancelChannel:
+                    // the gRPC Cancel handler and the in-process test cancel adapter:
                     // the arrival is counted once, the armed fault short-circuits
                     // BEFORE cancelRequest so the engine cancel state machine is never
                     // touched (production semantics "RPC failed = engine state
                     // unchanged": no fences, no terminal records, no census branch).
                     JavaMockEngineCluster.CancelFaultKind fault = service.arriveCancelRpc();
                     if (fault == JavaMockEngineCluster.CancelFaultKind.NO_RESPOND) {
-                        // cancel_no_respond over HTTP: outlive HttpMockEngineCancel
-                        // Channel's 500ms REQUEST_TIMEOUT (750ms > 500ms) so the
+                        // Outlive the HTTP test client's 500ms timeout (750ms > 500ms) so the
                         // client future times out, then answer 504. The cached
                         // thread pool keeps other control-plane requests responsive.
                         try {

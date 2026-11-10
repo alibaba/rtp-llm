@@ -1,129 +1,184 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.ContextResult;
+import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.RequestContext;
+import org.flexlb.balance.scheduler.RequestData;
+import org.flexlb.balance.scheduler.RouteResult;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
-import org.springframework.test.util.ReflectionTestUtils;
 
-import java.util.List;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
-
+import static org.flexlb.balance.endpoint.EndpointTestSupport.runWithStateLock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
- * Checks Encoder admission and release of local request capacity.
+ * Checks Encoder admission and load accounting across release and retirement, including stale route identities.
  */
 class EncoderEndpointTest {
+    private final AbstractRequestScheduler lifecycle = mock(AbstractRequestScheduler.class);
+    private final PlacementAvailability availability = mock(PlacementAvailability.class);
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void eitherClosedAdmissionGateRejectsCommitButAllowsRelease(boolean retired) {
+        var endpoint = endpoint();
+        var prepared = route("prepared", 20);
+        try {
+            assertTrue(endpoint.commit(prepared, 10));
+            if (retired) endpoint.beginRetirement();
+            else endpoint.getStatus().markRemovedFromDiscovery();
+            assertEquals(retired, endpoint.isRetired());
+            assertEquals(retired, endpoint.getStatus().isAvailableForScheduling());
+            assertFalse(endpoint.acceptsNewRequests());
+            assertFalse(endpoint.commit(route("late", 20), 10));
+            endpoint.release(prepared);
+            assertEquals(0L, endpoint.requestCount());
+        } finally {
+            endpoint.close();
+            endpoint.awaitRetirement(2000L);
+        }
+    }
 
     @Test
-    @SuppressWarnings("unchecked")
-    void retirementWaitsForRegistrationAlreadyInsideTheGenerationGate() throws Exception {
-        EndpointEventProjector events = mock(EndpointEventProjector.class);
-        EncoderEndpoint endpoint = endpoint(events);
-        assertTrue(endpoint.trackSelectedRequest("Aa", 10));
-        ConcurrentMap<String, Object> requests =
-                (ConcurrentMap<String, Object>)
-                        ReflectionTestUtils.getField(endpoint, "requestObservations");
-        CountDownLatch mapEntryLocked = new CountDownLatch(1);
-        CountDownLatch releaseMapEntry = new CountDownLatch(1);
-        AtomicReference<Throwable> error = new AtomicReference<>();
-        Thread mapWriter =
-                Thread.ofPlatform()
-                        .start(
-                                () -> {
-                                    try {
-                                        requests.compute(
-                                                "Aa",
-                                                (id, current) -> {
-                                                    mapEntryLocked.countDown();
-                                                    try {
-                                                        assertTrue(
-                                                                releaseMapEntry.await(
-                                                                        5, TimeUnit.SECONDS));
-                                                    } catch (InterruptedException interrupted) {
-                                                        Thread.currentThread().interrupt();
-                                                        throw new AssertionError(interrupted);
-                                                    }
-                                                    return current;
-                                                });
-                                    } catch (Throwable failure) {
-                                        error.compareAndSet(null, failure);
-                                    }
-                                });
-        Thread registering = null;
+    void scoringCountsEngineAndPendingTokensWithoutHoldingTheLockDuringEngineTraversal() {
+        var status = spy(endpoint().getStatus());
+        var endpoint = new EncoderEndpoint(status, availability);
+        var engine = mock(WorkerStatus.EngineObservation.class);
+        var task = mock(WorkerStatus.TaskObservation.class);
+        when(status.committedEngineObservation()).thenReturn(engine);
+        when(engine.runningQueryLen()).thenReturn(1L);
+        when(engine.runningTaskList()).thenReturn(java.util.Map.of("running", task));
+        doAnswer(
+                        call -> {
+                            assertFalse(endpoint.stateLock().isHeldByCurrentThread());
+                            return 100L;
+                        })
+                .when(task)
+                .inputLength();
+        var pending = route("pending", 20);
+        var request = spy(pending.ctx().data().getRequest());
+        when(pending.ctx().data().getRequest()).thenReturn(request);
+        doAnswer(
+                        call -> {
+                            assertFalse(endpoint.stateLock().isHeldByCurrentThread());
+                            return call.callRealMethod();
+                        })
+                .when(request)
+                .getSeqLen();
         try {
-            assertTrue(mapEntryLocked.await(2, TimeUnit.SECONDS));
-            // These request IDs share a map bin, allowing registration to pause after admission.
-            registering =
-                    Thread.ofPlatform()
-                            .start(
-                                    () -> {
-                                        try {
-                                            assertTrue(endpoint.trackSelectedRequest("BB", 20));
-                                        } catch (Throwable failure) {
-                                            error.compareAndSet(null, failure);
-                                        }
-                                    });
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-            while (registering.getState() != Thread.State.BLOCKED && System.nanoTime() < deadline) {
-                Thread.yield();
-            }
-            assertEquals(Thread.State.BLOCKED, registering.getState());
-
-            endpoint.close();
-
-            assertFalse(endpoint.trackSelectedRequest("late-request", 30));
-            verify(events, never())
-                    .onEncoderGenerationRetired(
-                            eq(endpoint), org.mockito.ArgumentMatchers.anyList());
+            assertTrue(endpoint.commit(route("running", 10), 4));
+            assertTrue(endpoint.commit(pending, 4));
+            assertEquals(120L, endpoint.uncachedTokens());
+            endpoint.release(pending);
+            assertEquals(100L, endpoint.uncachedTokens());
         } finally {
-            releaseMapEntry.countDown();
-            mapWriter.join(2_000);
-            if (registering != null) {
-                registering.join(2_000);
-            }
+            endpoint.close();
+            endpoint.awaitRetirement(2000L);
         }
-        endpoint.awaitRetirement();
-        assertEquals(null, error.get());
-        assertEquals(0, endpoint.pendingEncoderRequestCount());
-        verify(events)
-                .onEncoderGenerationRetired(
-                        eq(endpoint),
-                        argThat(ids -> ids.size() == 2 && ids.containsAll(List.of("Aa", "BB"))));
-        verify(events).onEncoderCapacityChanged();
+    }
+
+    @Test
+    void retirementCleansEarlierAdmissionAndRejectsLaterAdmission() throws Exception {
+        var endpoint = endpoint();
+        var route = route("request", 10);
+        doAnswer(
+                        call -> {
+                            assertFalse(endpoint.stateLock().isHeldByCurrentThread());
+                            assertFalse(endpoint.getStatus().lock.isHeldByCurrentThread());
+                            ContextResult.EndpointRetirement evidence = call.getArgument(1);
+                            org.junit.jupiter.api.Assertions.assertSame(
+                                    endpoint, evidence.endpoint());
+                            return null;
+                        })
+                .when(lifecycle)
+                .onEndpointRetired(any(), any());
+        runWithStateLock(
+                endpoint.stateLock(),
+                () -> {
+                    assertTrue(endpoint.commit(route, 2));
+                    endpoint.close();
+                    assertFalse(endpoint.commit(route("late", 10), 2));
+                });
+        endpoint.awaitRetirement(2000L);
+        assertEquals(0, endpoint.requestCount());
+        verify(lifecycle).onEndpointRetired(eq(route.ctx()), any());
     }
 
     @Test
     void closingSeveralPendingRequestsNotifiesCapacityOnce() {
-        EndpointEventProjector events = mock(EndpointEventProjector.class);
-        EncoderEndpoint endpoint = endpoint(events);
-        assertTrue(endpoint.trackSelectedRequest("request-1", 10));
-        assertTrue(endpoint.trackSelectedRequest("request-2", 20));
-        assertFalse(endpoint.trackSelectedRequest("request-1", 10));
+        var endpoint = endpoint();
+        {
+            var selectedEndpoint = endpoint;
 
+            assertTrue(endpoint.commit(route("request-1", 10), 2));
+            assertTrue(endpoint.commit(route("request-2", 20), 2));
+            assertFalse(endpoint.commit(route("request-1", 10), 2));
+        }
+        assertEquals(2, endpoint.requestCount());
         endpoint.close();
-        endpoint.awaitRetirement();
-
-        assertEquals(0, endpoint.pendingEncoderRequestCount());
-        assertFalse(endpoint.trackSelectedRequest("request-3", 30));
-        verify(events).onEncoderCapacityChanged();
+        endpoint.awaitRetirement(2000L);
+        assertEquals(0, endpoint.requestCount());
+        verify(availability).changed(endpoint);
+        verify(lifecycle, times(2)).onEndpointRetired(any(), any());
     }
 
-    private static EncoderEndpoint endpoint(EndpointEventProjector events) {
-        return new EncoderEndpoint(
+    @Test
+    void releaseRequiresTheExactRouteAndCannotRemoveAReplacement() {
+        var endpoint = endpoint();
+        var original = route("same-id", 10);
+        var replacement = route("same-id", 20);
+        try {
+            var selectedEndpoint = endpoint;
+
+            assertTrue(endpoint.commit(original, 1));
+            endpoint.release(original);
+            assertTrue(endpoint.commit(replacement, 1));
+            endpoint.release(original);
+            assertEquals(1, endpoint.requestCount());
+            assertEquals(20, endpoint.uncachedTokens());
+            endpoint.release(replacement);
+        } finally {
+            endpoint.close();
+            endpoint.awaitRetirement(2000L);
+        }
+    }
+
+    private RouteResult route(String id, long tokens) {
+        var route = mock(RouteResult.class);
+        var context = mock(RequestContext.class);
+        var data = mock(RequestData.class);
+        when(route.requestId()).thenReturn(String.valueOf(id));
+        when(route.ctx()).thenReturn(context);
+        when(context.data()).thenReturn(data);
+        when(data.getRequestScheduler()).thenReturn(lifecycle);
+        when(data.getRequest())
+                .thenReturn(Request.builder().requestId(String.valueOf(id)).seqLen(tokens).build());
+        return route;
+    }
+
+    private EncoderEndpoint endpoint() {
+        var status =
                 WorkerStatus.createDiscovered(
-                        RoleType.ENCODER, "default", "127.0.0.1", 8001, 8002, ""),
-                events);
+                        RoleType.ENCODER, "default", "127.0.0.1", 8001, 8002, "");
+        status.lock.lock();
+        try {
+            status.recordSuccessfulPoll(true);
+        } finally {
+            status.lock.unlock();
+        }
+        return new EncoderEndpoint(status, availability);
     }
 }

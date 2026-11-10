@@ -1,58 +1,58 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryMetrics;
-import org.flexlb.balance.delivery.DeliveryResult;
-import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
-import org.flexlb.balance.strategy.EncoderStrategy;
-import org.flexlb.balance.strategy.RandomStrategy;
-import org.flexlb.cache.domain.CacheMatchResult;
-import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.balance.strategy.VitWorkerSelector;
 import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks combined Prefill and Decode scheduling behavior across configured modes.
+ * Verifies that a fused Worker supplies the complete route without requiring separate Decode capacity.
  */
 class PdfusionSchedulingTest {
     @ParameterizedTest
     @CsvSource({
-        "false,false,false,false", "false,false,false,true", "false,false,true,false",
-                "false,false,true,true",
-        "false,true,false,false", "false,true,false,true", "false,true,true,false",
-                "false,true,true,true",
+        "false,false,false,false",
+        "false,false,false,true",
+        "false,false,true,false",
+        "false,false,true,true",
+        "false,true,false,false",
+        "false,true,false,true",
+        "false,true,true,false",
+        "false,true,true,true",
         "true,false,false,false"
     })
     void fusionNeedsOnlyItsOwnRole(boolean direct, boolean priority, boolean window, boolean batch)
@@ -74,51 +74,42 @@ class PdfusionSchedulingTest {
             SchedulingTestConfig.useBatchDispatcher(config);
         }
         if (direct) {
-            config.setScheduler(SchedulerConfig.direct());
+            config.setScheduler(ConfigTestSupport.direct());
         }
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+        DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
         RequestSchedulerReporter requestReporter = mock(RequestSchedulerReporter.class);
-        RequestRegistry lifecycle = new RequestRegistry(service, reporter, requestReporter);
+        var repository = new RequestRepository();
         PlacementAvailability availability = new PlacementAvailability();
-        DeliveryStrategy delivery =
-                batch
-                        ? new BatchDeliveryStrategy(
-                                () ->
-                                        CapacityBoundary.Attempt.accepted(
-                                                new BatchDeliveryStrategy.PreparedSubmission() {
-                                                    public void submit(
-                                                            BatchDeliveryStrategy.Delivery
-                                                                    delivery) {
-                                                        delivery.run(
-                                                                (items,
-                                                                        id,
-                                                                        predicted,
-                                                                        reason,
-                                                                        observer) ->
-                                                                        items.forEach(
-                                                                                item ->
-                                                                                        observer
-                                                                                                .accept(
-                                                                                                        item,
-                                                                                                        DeliveryResult
-                                                                                                                .delivered())));
-                                                    }
-
-                                                    public void close() {}
-                                                }),
-                                new AtomicLong()::incrementAndGet,
-                                lifecycle,
-                                new DeliveryMetrics(reporter))
-                        : new RouteDeliveryStrategy(lifecycle, new DeliveryMetrics(reporter));
+        var grpc = mock(EngineGrpcClient.class);
+        when(grpc.batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
+                .thenAnswer(
+                        call ->
+                                java.util.concurrent.CompletableFuture.completedFuture(
+                                        LinearDeliveryFixture.ack(call.getArgument(2))));
+        DeliveryDispatcher delivery =
+                new DeliveryDispatcher(
+                        grpc,
+                        service,
+                        reporter,
+                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
+                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                                .decodeAdmissionCapacity(service),
+                        org.mockito.Mockito.mock(
+                                org.flexlb.balance.scheduler.DeliveryExecution.class));
         EndpointRegistry endpoints =
                 new EndpointRegistry(
                         service,
-                        new EndpointEventProjector(lifecycle),
+                        repository,
                         reporter,
                         delivery,
-                        availability);
+                        availability,
+                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                service.loadBalanceConfig()),
+                        order ->
+                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
+                                        16, order));
         WorkerStatus worker =
                 WorkerStatus.createDiscovered(
                         RoleType.PDFUSION, "g1", "127.0.0.1", 8080, 8081, "test");
@@ -136,95 +127,133 @@ class PdfusionSchedulingTest {
             endpoints.publishPreparedEndpoint(
                     worker.getLogicalIpPort(),
                     worker,
-                    worker.prepareNewStatus(worker.freezeStatusResponse(status)));
-            worker.recordSuccessfulPoll(true);
+                    worker.prepareNewStatus(
+                            WorkerStatusTestSupport.freezeStatusResponse(worker, status)));
         } finally {
             worker.lock.unlock();
         }
-        WorkerDirectory directory = new WorkerDirectory(endpoints);
+        EndpointRegistry directory = endpoints;
         CacheAwareService cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any()))
-                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
+        when(cache.findMatchingEngines(any())).thenReturn(localMatches(Map.of()));
         ModelMetaConfig model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
-        DefaultRouter router =
-                new DefaultRouter(
-                        new CostBasedPrefillStrategy(
-                                directory, cache, mock(EngineHealthReporter.class)),
-                        new DecodeSelector(directory),
-                        new RandomStrategy(directory),
-                        mock(EncoderStrategy.class),
+        RequestRouteSelector router =
+                new RequestRouteSelector(
+                        directory,
+                        new CostBasedPrefillStrategy(cache, service),
+                        new DecodeSelector(
+                                service,
+                                SchedulingTestConfig.capacity(service.loadBalanceConfig())),
+                        new VitWorkerSelector(),
+                        org.mockito.Mockito.mock(
+                                org.flexlb.balance.strategy.EncoderSelectionStrategy.class),
+                        org.mockito.Mockito.mock(org.flexlb.cache.match.CacheAwareService.class),
+                        null,
+                        mock(EngineHealthReporter.class),
+                        org.mockito.Mockito.mock(CacheMetricsReporter.class),
                         service,
                         model);
-        RequestScheduler scheduler =
-                new RequestScheduler(
+        SchedulerTestServices runtime =
+                org.mockito.Mockito.spy(
+                        new SchedulerTestServices(
+                                repository,
+                                endpoints,
+                                reporter,
+                                requestReporter,
+                                delivery,
+                                service,
+                                grpc));
+        AbstractRequestScheduler lifecycle =
+                SchedulerTestSupport.create(
+                        runtime,
                         service,
-                        router,
-                        endpoints,
                         reporter,
-                        mock(EvictionManager.class),
-                        lifecycle,
+                        mock(TheoryCacheHitReporter.class),
+                        router,
+                        mock(DecodePreemption.class),
                         availability);
-        SchedulerRuntime runtime =
-                direct
-                        ? new SchedulerRuntime(lifecycle, endpoints, reporter, requestReporter)
-                        : new SchedulerRuntime(
-                                lifecycle, endpoints, reporter, requestReporter, scheduler);
+        AbstractRequestScheduler scheduler =
+                ((AbstractRequestScheduler)
+                        org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle));
         try {
             long requestId = 920001L;
-            var context = RequestLifecycleTestSupport.context(config, requestId);
-            Response response = scheduler.submit(context).get(3, TimeUnit.SECONDS);
+            var context = RequestProtocolTestSupport.context(config, requestId);
+            context.data()
+                    .setGenerateInputPb(
+                            org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
+                                    .setRequestId(requestId)
+                                    .build()
+                                    .toByteString());
+            Response response =
+                    SchedulerTestServices.entry(scheduler).submit(context).get(3, TimeUnit.SECONDS);
             assertTrue(
                     response.isSuccess(), "PDFUSION route failed: " + response.getErrorMessage());
             assertEquals(
                     List.of(RoleType.PDFUSION),
                     response.getServerStatus().stream().map(ServerStatus::getRole).toList());
-            assertEquals(0, endpoints.getEndpointCount(RoleType.DECODE));
-            assertEquals(1, lifecycle.trackedRequestCount());
+            assertEquals(0, endpoints.counts(RoleType.DECODE).published());
+            assertEquals(1, SchedulerTestSupport.repository(lifecycle).liveRequestCount());
             PrefillEndpoint endpoint =
                     (PrefillEndpoint) endpoints.get(RoleType.PDFUSION, worker.getLogicalIpPort());
-            assertEquals(1, endpoint.observedRequestCount());
+            assertEquals(1, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
             var committedWork = endpoint.captureRouteProjectionInputs().work();
-            assertTrue(committedWork.containsRequest(Long.toString(requestId)));
+            assertTrue(committedWork.containsRequest(String.valueOf(requestId)));
             TaskInfo finished = new TaskInfo();
-            finished.setRequestId(Long.toString(requestId));
+            finished.setRequestId(String.valueOf(requestId));
             finished.setBatchId(
                     direct
                             ? 0L
-                            : lifecycle.getRequestState(Long.toString(requestId), 0L).batchId());
+                            : SchedulerTestSupport.repository(lifecycle)
+                                    .getRequestState(String.valueOf(requestId), 0L)
+                                    .batchId());
             finished.setPhase(TaskPhase.RUNNING);
             finished.setErrorCode(0L);
             status.setStatusVersion(2L);
             status.setLatestFinishedVersion(1L);
             status.setFinishedTaskInfo(Map.of(Long.toString(requestId), finished));
-            Runnable projection;
+            org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange projection;
             worker.lock.lock();
             try {
                 projection =
                         endpoint.applyPreparedStatus(
                                 worker,
-                                worker.prepareNewStatus(worker.freezeStatusResponse(status)));
+                                worker.prepareNewStatus(
+                                        WorkerStatusTestSupport.freezeStatusResponse(
+                                                worker, status)));
             } finally {
                 worker.lock.unlock();
             }
-            projection.run();
-            assertEquals(0, endpoint.observedRequestCount());
-            assertEquals(0, endpoint.getInflightBatchCount());
+            endpoint.publishStatus(projection);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
+            assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+            assertEquals(0, endpoint.stats().batchCount());
             assertTrue(
-                    committedWork.containsRequest(Long.toString(requestId)),
+                    committedWork.containsRequest(String.valueOf(requestId)),
                     "published snapshots stay immutable");
             assertTrue(
                     !endpoint.captureRouteProjectionInputs()
                             .work()
-                            .containsRequest(Long.toString(requestId)));
-            if (!direct) {
-                assertEquals(
-                        RequestState.Phase.COMPLETED,
-                        lifecycle.getRequestState(Long.toString(requestId), 0L).state());
-                assertEquals(0, lifecycle.trackedRequestCount());
-            }
+                            .containsRequest(String.valueOf(requestId)));
+            assertEquals(
+                    RequestState.Phase.COMPLETED,
+                    SchedulerTestSupport.repository(lifecycle)
+                            .getRequestState(String.valueOf(requestId), 0L)
+                            .state());
+            assertEquals(0, SchedulerTestSupport.repository(lifecycle).liveRequestCount());
         } finally {
-            runtime.shutdown();
+            SchedulerTestSupport.shutdown(runtime);
         }
+    }
+
+    private static org.flexlb.cache.domain.CacheMatchResult localMatches(
+            Map<String, Integer> matches) {
+        return matches == null
+                ? null
+                : new org.flexlb.cache.domain.CacheMatchResult(
+                        org.flexlb.dao.cache.HostCacheMatch.fromLocalMatches(matches),
+                        org.flexlb.cache.domain.CacheMatchSource.LOCAL_SYNC,
+                        0L,
+                        0L);
     }
 }

@@ -1,10 +1,5 @@
 package org.flexlb.exception;
 
-import org.flexlb.enums.StatusEnum;
-
-/**
- * Reports an engine response that exceeded its read deadline.
- */
 public class EngineReadTimeoutException extends FlexLBException {
 
     public EngineReadTimeoutException(int code, String name, String message, Throwable cause) {
@@ -13,9 +8,5 @@ public class EngineReadTimeoutException extends FlexLBException {
 
     public EngineReadTimeoutException(int code, String name, String message) {
         super(code, name, message);
-    }
-
-    public EngineReadTimeoutException(StatusEnum statusEnum) {
-        super(statusEnum);
     }
 }

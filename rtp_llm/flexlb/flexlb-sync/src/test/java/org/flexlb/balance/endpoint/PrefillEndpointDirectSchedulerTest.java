@@ -1,11 +1,11 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.config.DispatcherConfig;
+import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -17,10 +17,11 @@ import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 /**
- * Checks Prefill endpoint construction with the direct scheduler.
+ * Checks direct Prefill admission enforces a shared limit atomically and returns capacity after rollback.
  */
 class PrefillEndpointDirectSchedulerTest {
 
@@ -30,60 +31,71 @@ class PrefillEndpointDirectSchedulerTest {
             names = {"PREFILL", "PDFUSION"})
     void directRequestLimitIsAtomicAndReusableAfterRollback(RoleType role) throws Exception {
         FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
-        config.setScheduler(SchedulerConfig.direct());
-        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.setScheduler(ConfigTestSupport.direct());
+        config.setDispatcher(ConfigTestSupport.nonBatch());
         config.getDispatcher().setMaxInflightPerPrefillWorker(4);
         var runtime = EndpointTestSupport.requestRuntime();
         PrefillEndpoint endpoint =
-                new PrefillEndpoint(
+                EndpointTestSupport.prefill(
                         EndpointTestSupport.workerStatus(role, "127.0.0.82", 8082, 9082),
-                        () -> config,
+                        config,
                         EndpointTestSupport.routeStrategy(runtime),
-                        runtime.events(),
-                        mock(BatchSchedulerReporter.class),
-                        new org.flexlb.balance.scheduler.PlacementAvailability());
-        endpoint.startGeneration();
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
+                                runtime.events()),
+                        mock(DeliveryMetricsReporter.class));
         try (var executor = Executors.newFixedThreadPool(8)) {
-            List<Future<PrefillState.ReservationResult<PrefillState.RouteReservation>>> futures =
+            List<Future<CapacityBoundary.Attempt<PrefillEndpoint.RequestRecord>>> futures =
                     new ArrayList<>();
             for (long id = 1; id <= 64; id++) {
                 long requestId = id;
                 futures.add(
                         executor.submit(
                                 () -> {
-                                    try (var pin = endpoint.tryPinGeneration()) {
-                                        return endpoint.reserveUnqueuedRoute(
-                                                pin, item(requestId), 10L);
+                                    {
+                                        var selectedEndpoint = endpoint;
+
+                                        return org.flexlb.balance.scheduler.SelectionTestSupport
+                                                .registerPrefill(endpoint, item(requestId), 10L);
                                     }
                                 }));
             }
-            List<PrefillState.RouteReservation> owned = new ArrayList<>();
+            List<PrefillEndpoint.RequestRecord> owned = new ArrayList<>();
             for (var future : futures) {
                 var result = future.get();
-                if (result.status() == PrefillState.CapacityStatus.ACQUIRED) {
-                    owned.add(result.reservation());
+                if (result.accepted()) {
+                    owned.add(result.value());
                 } else {
-                    assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, result.status());
+                    assertEquals(
+                            CapacityBoundary.Resource.PREFILL_REQUEST,
+                            result.boundary().resource());
                 }
             }
             assertEquals(4, owned.size());
-            assertEquals(4, endpoint.observedRequestCount());
-            try (var pin = endpoint.tryPinGeneration()) {
-                var full = endpoint.reserveUnqueuedRoute(pin, item(100L), 10L);
+            assertEquals(4, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+            {
+                var selectedEndpoint = endpoint;
+
+                var full =
+                        org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                endpoint, item(100L), 10L);
                 assertEquals(
-                        PrefillState.CapacityStatus.CAPACITY_FULL,
-                        full.status(),
+                        CapacityBoundary.Resource.PREFILL_REQUEST,
+                        full.boundary().resource(),
                         "four exact owners already consume the four-request limit");
             }
-            owned.forEach(PrefillState.RouteReservation::close);
-            assertEquals(0, endpoint.observedRequestCount());
-            try (var pin = endpoint.tryPinGeneration()) {
-                var result = endpoint.reserveUnqueuedRoute(pin, item(65L), 10L);
-                assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
-                result.reservation().close();
-                result.reservation().close();
+            owned.forEach(reservation -> endpoint.rollback(reservation));
+            assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+            {
+                var selectedEndpoint = endpoint;
+
+                var result =
+                        org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                endpoint, item(65L), 10L);
+                assertTrue(result.accepted());
+                endpoint.rollback(result.value());
+                endpoint.rollback(result.value());
             }
-            assertEquals(0, endpoint.observedRequestCount());
+            assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
         } finally {
             endpoint.close();
         }
@@ -92,8 +104,8 @@ class PrefillEndpointDirectSchedulerTest {
     @Test
     void directSchedulerCanConstructPrefillEndpoint() {
         FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
-        config.setScheduler(SchedulerConfig.direct());
-        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.setScheduler(ConfigTestSupport.direct());
+        config.setDispatcher(ConfigTestSupport.nonBatch());
 
         EndpointTestSupport.TestRequestRuntime requestRuntime =
                 EndpointTestSupport.requestRuntime();
@@ -101,23 +113,21 @@ class PrefillEndpointDirectSchedulerTest {
                 assertDoesNotThrow(
                         () -> {
                             PrefillEndpoint created =
-                                    new PrefillEndpoint(
+                                    EndpointTestSupport.prefill(
                                             workerStatus(),
-                                            () -> config,
+                                            config,
                                             EndpointTestSupport.routeStrategy(requestRuntime),
-                                            requestRuntime.events(),
-                                            mock(BatchSchedulerReporter.class),
-                                            new org.flexlb.balance.scheduler
-                                                    .PlacementAvailability());
-                            created.startGeneration();
+                                            org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                    .repository(requestRuntime.events()),
+                                            mock(DeliveryMetricsReporter.class));
                             return created;
                         });
         endpoint.close();
     }
 
-    private static org.flexlb.balance.scheduler.ScheduledRequest item(long requestId) {
-        var item = mock(org.flexlb.balance.scheduler.ScheduledRequest.class);
-        org.mockito.Mockito.when(item.requestId()).thenReturn(Long.toString(requestId));
+    private static org.flexlb.balance.scheduler.RouteResult item(long requestId) {
+        var item = mock(org.flexlb.balance.scheduler.RouteResult.class);
+        org.mockito.Mockito.when(item.requestId()).thenReturn(String.valueOf(requestId));
         org.mockito.Mockito.when(item.seqLen()).thenReturn(128L);
         return item;
     }

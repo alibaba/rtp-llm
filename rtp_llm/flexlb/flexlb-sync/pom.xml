@@ -21,8 +21,19 @@
 
   <dependencies>
     <dependency>
+      <groupId>com.google.guava</groupId>
+      <artifactId>guava</artifactId>
+    </dependency>
+    <dependency>
       <groupId>org.flexlb</groupId>
       <artifactId>flexlb-common</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.flexlb</groupId>
+      <artifactId>flexlb-common</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.flexlb</groupId>
@@ -91,6 +102,18 @@
   </dependencies>
   <build>
     <plugins>
+      <plugin><groupId>org.codehaus.mojo</groupId><artifactId>build-helper-maven-plugin</artifactId><version>3.3.0</version><executions><execution><id>test-fixtures</id><phase>generate-test-sources</phase><goals><goal>add-test-source</goal></goals><configuration><sources><source>${project.basedir}/src/testFixtures/java</source></sources></configuration></execution></executions></plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <executions>
+          <execution>
+            <goals>
+              <goal>test-jar</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>

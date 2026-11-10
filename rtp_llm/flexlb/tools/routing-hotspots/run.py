@@ -33,6 +33,11 @@ for variant, directory in [("before", baseline), ("after", root)]:
     destination.mkdir(exist_ok=True)
     runtime = classpath.replace(str(root), str(directory))
     (destination / "classpath.txt").write_text(runtime)
+    # Both revisions must implement this fixture API; do not approximate older ownership protocols.
+    compatible_verification = destination / verification.name
+    compatible_verification.write_text(verification.read_text())
+    compatible_benchmark = destination / source.name
+    compatible_benchmark.write_text(source.read_text())
     subprocess.run(
         [
             str(java / "javac"),
@@ -41,8 +46,8 @@ for variant, directory in [("before", baseline), ("after", root)]:
             runtime,
             "-d",
             str(destination),
-            str(source),
-            str(verification),
+            str(compatible_benchmark),
+            str(compatible_verification),
         ],
         check=True,
     )

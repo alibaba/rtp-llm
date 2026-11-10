@@ -47,11 +47,34 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
 /**
- * Replays trace requests against configured master targets with bounded concurrency and optional
- * engine-output reading. It records raw client events and final server latency; run-level
- * aggregation computes derived statistics, and disabling output reading leaves engine execution
- * intact.
+ * Standalone Java load client (replaces the legacy Python load client).
+ *
+ * <p>Replays trace JSONL files against a running FlexLB master via gRPC Schedule RPC.
+ * Supports multi-shard replay, configurable speed, semaphore-based concurrency control,
+ * and optional engine stream reading for TTFT/total latency. The client records raw
+ * data only — client_events.jsonl rows (renamed from per_request.jsonl: the
+ * client-side half of the multi-component JSONL event streams, rid-joined
+ * offline against the mock engine's engine_events.jsonl), the terminal
+ * server_latency.json snapshot, and pushgateway metrics; every derived
+ * statistic is computed by the run-level aggregator (aggregate_canvas_run.py),
+ * never here.
+ *
+ * <p>FETCH_OUTPUT_STREAM (default true) controls ONLY the client-side read of engine
+ * output streams (phase-2 FetchResponse/GenerateStreamCall). With FETCH_OUTPUT_STREAM=0
+ * the client stops after a successful Schedule RPC; the engine still executes the
+ * request in full (BATCH dispatcher: master enqueued it via EnqueueBatch during the
+ * Schedule RPC). This trims the client's stream-reading network cost from load tests
+ * while keeping engine-side load identical to the read-stream mode.
+ *
+ * <p>Configuration is read exclusively from environment variables at startup (no
+ * multi-layer override). Run as:
+ * <pre>{@code
+ *   java -cp <jar> org.flexlb.mockengine.JavaLoadClient
+ * }</pre>
  */
 public final class JavaLoadClient {
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -167,9 +190,7 @@ public final class JavaLoadClient {
     public static void main(String[] args) throws Exception {
         Config config = Config.fromEnv();
         config.print();
-        if (config.traceFile.isEmpty()) {
-            throw new IllegalArgumentException("TRACE_FILE environment variable is required");
-        }
+        checkArgument(!config.traceFile.isEmpty(), "TRACE_FILE environment variable is required");
         JavaLoadClient client = new JavaLoadClient(config);
         try {
             client.run();
@@ -351,7 +372,7 @@ public final class JavaLoadClient {
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
                     long sleepNanos = dueNanos - System.nanoTime();
                     if (sleepNanos > 0) {
-                        Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
+                        TimeUnit.NANOSECONDS.sleep(sleepNanos);
                     }
                 } else if (currentSpeed > 0 && record.tsMs > 0) {
                     long loopOffsetMs = (long) loopIdx * traceSpanMs;
@@ -359,7 +380,7 @@ public final class JavaLoadClient {
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
                     long sleepNanos = dueNanos - System.nanoTime();
                     if (sleepNanos > 0) {
-                        Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
+                        TimeUnit.NANOSECONDS.sleep(sleepNanos);
                     }
                 }
 
@@ -518,9 +539,9 @@ public final class JavaLoadClient {
         if (numShards <= 1) {
             return new ArrayList<>(records);
         }
-        if (shardIndex < 0 || shardIndex >= numShards) {
-            throw new IllegalArgumentException("SHARD_INDEX must be in [0, NUM_SHARDS)");
-        }
+        checkArgument(
+                shardIndex >= 0 && shardIndex < numShards,
+                "SHARD_INDEX must be in [0, NUM_SHARDS)");
         List<TraceRecord> sharded = new ArrayList<>();
         for (int i = 0; i < records.size(); i++) {
             if (i % numShards == shardIndex) {
@@ -772,7 +793,7 @@ public final class JavaLoadClient {
             try {
                 // Sleep is capped by the remaining deadline budget so the final
                 // sweep cannot overshoot the deadline by a full interval.
-                Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
+                TimeUnit.NANOSECONDS.sleep(sleepNanos);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
@@ -1475,8 +1496,7 @@ public final class JavaLoadClient {
     }
 
     private FlexlbServiceGrpc.FlexlbServiceBlockingStub nextScheduleStub() {
-        int idx = scheduleStubRR.getAndIncrement() % config.nChannels;
-        return scheduleStubs[Math.floorMod(idx, config.nChannels)];
+        return scheduleStubs[Math.floorMod(scheduleStubRR.getAndIncrement(), config.nChannels)];
     }
 
     private String roleAddr(FlexlbScheduleProtocol.FlexlbScheduleResponsePB response, String role) {
@@ -1581,10 +1601,8 @@ public final class JavaLoadClient {
 
     private static String roundRobinAddr(List<String> addrs, AtomicInteger rr, String emptyError) {
         if (addrs.isEmpty()) {
-            if (emptyError.isEmpty()) {
-                return "";
-            }
-            throw new IllegalStateException(emptyError);
+            checkState(emptyError.isEmpty(), emptyError);
+            return "";
         }
         int idx = Math.floorMod(rr.getAndIncrement(), addrs.size());
         return addrs.get(idx);
@@ -1593,10 +1611,10 @@ public final class JavaLoadClient {
     private static EngineRpcService.RoleAddrPB toRoleAddrPb(
             EngineRpcService.RoleTypePB roleType, String addr) {
         int colon = addr.lastIndexOf(':');
-        if (colon <= 0 || colon == addr.length() - 1) {
-            throw new IllegalArgumentException(
-                    "invalid engine address '" + addr + "' (expected host:port)");
-        }
+        checkArgument(
+                colon > 0 && colon != addr.length() - 1,
+                "invalid engine address '%s' (expected host:port)",
+                addr);
         int grpcPort;
         try {
             grpcPort = Integer.parseInt(addr.substring(colon + 1));
@@ -2021,311 +2039,6 @@ public final class JavaLoadClient {
                 String pushgatewayUrl,
                 boolean enableFallback,
                 String endpointsFile,
-                boolean dryRun) {
-            this(
-                    traceFile,
-                    targetAddr,
-                    grpcTarget,
-                    durationS,
-                    maxConcurrency,
-                    replaySpeed,
-                    loadClientWorkers,
-                    outputDir,
-                    numShards,
-                    shardIndex,
-                    limit,
-                    timeoutMs,
-                    slaTtftMs,
-                    fetchOutputStream,
-                    loop,
-                    nChannels,
-                    eventLoopThreads,
-                    startAtEpochMs,
-                    responseTimeoutSeconds,
-                    skipServerLatency,
-                    model,
-                    apiKey,
-                    gradient,
-                    gradientStartSpeed,
-                    gradientMaxSpeed,
-                    maxInputLen,
-                    maxOutputLen,
-                    pushgatewayUrl,
-                    enableFallback,
-                    endpointsFile,
-                    dryRun,
-                    0,
-                    0,
-                    "replay",
-                    0.0,
-                    true);
-        }
-
-        Config(
-                String traceFile,
-                String targetAddr,
-                String grpcTarget,
-                int durationS,
-                int maxConcurrency,
-                double replaySpeed,
-                int loadClientWorkers,
-                String outputDir,
-                int numShards,
-                int shardIndex,
-                int limit,
-                long timeoutMs,
-                double slaTtftMs,
-                boolean fetchOutputStream,
-                boolean loop,
-                int nChannels,
-                int eventLoopThreads,
-                long startAtEpochMs,
-                int responseTimeoutSeconds,
-                boolean skipServerLatency,
-                String model,
-                String apiKey,
-                boolean gradient,
-                int gradientStartSpeed,
-                int gradientMaxSpeed,
-                int maxInputLen,
-                int maxOutputLen,
-                String pushgatewayUrl,
-                boolean enableFallback,
-                String endpointsFile,
-                boolean dryRun,
-                int priority) {
-            this(
-                    traceFile,
-                    targetAddr,
-                    grpcTarget,
-                    durationS,
-                    maxConcurrency,
-                    replaySpeed,
-                    loadClientWorkers,
-                    outputDir,
-                    numShards,
-                    shardIndex,
-                    limit,
-                    timeoutMs,
-                    slaTtftMs,
-                    fetchOutputStream,
-                    loop,
-                    nChannels,
-                    eventLoopThreads,
-                    startAtEpochMs,
-                    responseTimeoutSeconds,
-                    skipServerLatency,
-                    model,
-                    apiKey,
-                    gradient,
-                    gradientStartSpeed,
-                    gradientMaxSpeed,
-                    maxInputLen,
-                    maxOutputLen,
-                    pushgatewayUrl,
-                    enableFallback,
-                    endpointsFile,
-                    dryRun,
-                    priority,
-                    0,
-                    "replay",
-                    0.0,
-                    true);
-        }
-
-        Config(
-                String traceFile,
-                String targetAddr,
-                String grpcTarget,
-                int durationS,
-                int maxConcurrency,
-                double replaySpeed,
-                int loadClientWorkers,
-                String outputDir,
-                int numShards,
-                int shardIndex,
-                int limit,
-                long timeoutMs,
-                double slaTtftMs,
-                boolean fetchOutputStream,
-                boolean loop,
-                int nChannels,
-                int eventLoopThreads,
-                long startAtEpochMs,
-                int responseTimeoutSeconds,
-                boolean skipServerLatency,
-                String model,
-                String apiKey,
-                boolean gradient,
-                int gradientStartSpeed,
-                int gradientMaxSpeed,
-                int maxInputLen,
-                int maxOutputLen,
-                String pushgatewayUrl,
-                boolean enableFallback,
-                String endpointsFile,
-                boolean dryRun,
-                int priority,
-                int forcePriority,
-                String sendMode,
-                double sendModeQps,
-                boolean replayUniquePrefix) {
-            this(
-                    traceFile,
-                    targetAddr,
-                    grpcTarget,
-                    durationS,
-                    maxConcurrency,
-                    replaySpeed,
-                    loadClientWorkers,
-                    outputDir,
-                    numShards,
-                    shardIndex,
-                    limit,
-                    timeoutMs,
-                    slaTtftMs,
-                    fetchOutputStream,
-                    loop,
-                    nChannels,
-                    eventLoopThreads,
-                    startAtEpochMs,
-                    responseTimeoutSeconds,
-                    skipServerLatency,
-                    model,
-                    apiKey,
-                    gradient,
-                    gradientStartSpeed,
-                    gradientMaxSpeed,
-                    maxInputLen,
-                    maxOutputLen,
-                    pushgatewayUrl,
-                    enableFallback,
-                    endpointsFile,
-                    dryRun,
-                    priority,
-                    forcePriority,
-                    sendMode,
-                    sendModeQps,
-                    0.0,
-                    replayUniquePrefix,
-                    List.of());
-        }
-
-        /**
-         * Legacy full-signature bridge (pre-GRPC_TARGETS call sites, e.g. the
-         * uniform-mode tests): delegates with no multi-target list — the
-         * single-target behavior is unchanged.
-         */
-        Config(
-                String traceFile,
-                String targetAddr,
-                String grpcTarget,
-                int durationS,
-                int maxConcurrency,
-                double replaySpeed,
-                int loadClientWorkers,
-                String outputDir,
-                int numShards,
-                int shardIndex,
-                int limit,
-                long timeoutMs,
-                double slaTtftMs,
-                boolean fetchOutputStream,
-                boolean loop,
-                int nChannels,
-                int eventLoopThreads,
-                long startAtEpochMs,
-                int responseTimeoutSeconds,
-                boolean skipServerLatency,
-                String model,
-                String apiKey,
-                boolean gradient,
-                int gradientStartSpeed,
-                int gradientMaxSpeed,
-                int maxInputLen,
-                int maxOutputLen,
-                String pushgatewayUrl,
-                boolean enableFallback,
-                String endpointsFile,
-                boolean dryRun,
-                int priority,
-                int forcePriority,
-                String sendMode,
-                double sendModeQps,
-                double rampUpSeconds,
-                boolean replayUniquePrefix) {
-            this(
-                    traceFile,
-                    targetAddr,
-                    grpcTarget,
-                    durationS,
-                    maxConcurrency,
-                    replaySpeed,
-                    loadClientWorkers,
-                    outputDir,
-                    numShards,
-                    shardIndex,
-                    limit,
-                    timeoutMs,
-                    slaTtftMs,
-                    fetchOutputStream,
-                    loop,
-                    nChannels,
-                    eventLoopThreads,
-                    startAtEpochMs,
-                    responseTimeoutSeconds,
-                    skipServerLatency,
-                    model,
-                    apiKey,
-                    gradient,
-                    gradientStartSpeed,
-                    gradientMaxSpeed,
-                    maxInputLen,
-                    maxOutputLen,
-                    pushgatewayUrl,
-                    enableFallback,
-                    endpointsFile,
-                    dryRun,
-                    priority,
-                    forcePriority,
-                    sendMode,
-                    sendModeQps,
-                    rampUpSeconds,
-                    replayUniquePrefix,
-                    List.of());
-        }
-
-        Config(
-                String traceFile,
-                String targetAddr,
-                String grpcTarget,
-                int durationS,
-                int maxConcurrency,
-                double replaySpeed,
-                int loadClientWorkers,
-                String outputDir,
-                int numShards,
-                int shardIndex,
-                int limit,
-                long timeoutMs,
-                double slaTtftMs,
-                boolean fetchOutputStream,
-                boolean loop,
-                int nChannels,
-                int eventLoopThreads,
-                long startAtEpochMs,
-                int responseTimeoutSeconds,
-                boolean skipServerLatency,
-                String model,
-                String apiKey,
-                boolean gradient,
-                int gradientStartSpeed,
-                int gradientMaxSpeed,
-                int maxInputLen,
-                int maxOutputLen,
-                String pushgatewayUrl,
-                boolean enableFallback,
-                String endpointsFile,
                 boolean dryRun,
                 int priority,
                 int forcePriority,
@@ -2372,18 +2085,15 @@ public final class JavaLoadClient {
             this.sendModeQps = sendModeQps;
             this.rampUpSeconds = rampUpSeconds;
             this.replayUniquePrefix = replayUniquePrefix;
-            if (!"replay".equals(sendMode) && !"uniform".equals(sendMode)) {
-                throw new IllegalArgumentException(
-                        "SEND_MODE must be 'replay' or 'uniform', got '" + sendMode + "'");
-            }
-            if ("uniform".equals(sendMode) && sendModeQps <= 0) {
-                throw new IllegalArgumentException(
-                        "SEND_MODE=uniform requires SEND_MODE_QPS > 0 (total target QPS)");
-            }
-            if (rampUpSeconds < 0) {
-                throw new IllegalArgumentException(
-                        "RAMP_UP_SECONDS must be >= 0, got " + rampUpSeconds);
-            }
+            checkArgument(
+                    "replay".equals(sendMode) || "uniform".equals(sendMode),
+                    "SEND_MODE must be 'replay' or 'uniform', got '%s'",
+                    sendMode);
+            checkArgument(
+                    !"uniform".equals(sendMode) || !(sendModeQps <= 0),
+                    "SEND_MODE=uniform requires SEND_MODE_QPS > 0 (total target QPS)");
+            checkArgument(
+                    !(rampUpSeconds < 0), "RAMP_UP_SECONDS must be >= 0, got %s", rampUpSeconds);
         }
 
         boolean isUniform() {
@@ -2493,10 +2203,10 @@ public final class JavaLoadClient {
                     continue;
                 }
                 int colon = addr.lastIndexOf(':');
-                if (colon <= 0 || colon == addr.length() - 1) {
-                    throw new IllegalArgumentException(
-                            "invalid GRPC_TARGETS entry '" + addr + "' (expected host:port)");
-                }
+                checkArgument(
+                        colon > 0 && colon != addr.length() - 1,
+                        "invalid GRPC_TARGETS entry '%s' (expected host:port)",
+                        addr);
                 try {
                     int port = Integer.parseInt(addr.substring(colon + 1));
                     if (port <= 0 || port > 65535) {
@@ -2510,12 +2220,10 @@ public final class JavaLoadClient {
                     out.add(addr);
                 }
             }
-            if (out.isEmpty()) {
-                throw new IllegalArgumentException(
-                        "GRPC_TARGETS is set but contains no valid host:port address: '"
-                                + raw
-                                + "'");
-            }
+            checkArgument(
+                    !out.isEmpty(),
+                    "GRPC_TARGETS is set but contains no valid host:port address: '%s'",
+                    raw);
             return out;
         }
 
@@ -2630,9 +2338,6 @@ public final class JavaLoadClient {
         }
     }
 
-    /**
-     * Retains one replay request's token shape, cache keys and scheduling metadata.
-     */
     static final class TraceRecord {
         final long requestId;
         final String sourceRid;
@@ -2645,18 +2350,6 @@ public final class JavaLoadClient {
 
         /** Auto-TPM QoS priority in [1, 100]; 0 means unset. */
         final int priority;
-
-        TraceRecord(
-                long requestId,
-                String sourceRid,
-                String traceId,
-                long tsMs,
-                int inputLen,
-                int outputLen,
-                List<Long> blockKeys,
-                List<Integer> tokenIds) {
-            this(requestId, sourceRid, traceId, tsMs, inputLen, outputLen, blockKeys, tokenIds, 0);
-        }
 
         TraceRecord(
                 long requestId,
@@ -2680,9 +2373,6 @@ public final class JavaLoadClient {
         }
     }
 
-    /**
-     * Collects scheduling and streaming observations for one replayed request.
-     */
     static final class RequestResult {
         String rid = "";
         String traceId = "";

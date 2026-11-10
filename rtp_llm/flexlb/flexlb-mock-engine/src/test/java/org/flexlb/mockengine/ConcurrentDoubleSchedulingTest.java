@@ -101,7 +101,7 @@ class ConcurrentDoubleSchedulingTest {
                         try {
                             startGate.await();
                             EngineRpcService.GenerateInputPB input =
-                                    inputWithDecode(String.valueOf(requestId), 10, decodePort);
+                                    inputWithDecode(requestId, 10, decodePort);
                             enqueue(prefill, batch(batchId, slot(0, input)));
                         } catch (Throwable t) {
                             errors.incrementAndGet();
@@ -124,8 +124,7 @@ class ConcurrentDoubleSchedulingTest {
                     () -> {
                         try {
                             startGate.await();
-                            EngineRpcService.GenerateInputPB input =
-                                    input(String.valueOf(requestId), 10);
+                            EngineRpcService.GenerateInputPB input = input(requestId, 10);
                             decode.generateStreamCall(
                                     input,
                                     new StreamObserver<>() {
@@ -168,7 +167,7 @@ class ConcurrentDoubleSchedulingTest {
                     service.getRunningCount(),
                     "runningTasks should be empty for engine on port " + service.getGrpcPort());
             assertFalse(
-                    service.isLeakDetected(),
+                    MockEngineTestSupport.isLeakDetected(service),
                     "no leak should be detected on engine on port " + service.getGrpcPort());
         }
 
@@ -203,7 +202,7 @@ class ConcurrentDoubleSchedulingTest {
                         try {
                             startGate.await();
                             EngineRpcService.GenerateInputPB input =
-                                    inputWithDecode(String.valueOf(requestId), 10, decodePort);
+                                    inputWithDecode(requestId, 10, decodePort);
                             enqueue(prefill, batch(batchId, slot(0, input)));
                         } catch (Throwable t) {
                             errors.incrementAndGet();
@@ -229,7 +228,7 @@ class ConcurrentDoubleSchedulingTest {
                     service.getRunningCount(),
                     "runningTasks should be empty for engine on port " + service.getGrpcPort());
             assertFalse(
-                    service.isLeakDetected(),
+                    MockEngineTestSupport.isLeakDetected(service),
                     "no leak should be detected on engine on port " + service.getGrpcPort());
         }
 

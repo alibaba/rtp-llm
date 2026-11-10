@@ -34,8 +34,35 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Checks Decode KV allocation retry, reserve limits and release against the modeled engine admission
- * contract.
+ * Decode KV allocation semantics (production-aligned 20260903, Zola C++
+ * forensics) — the four gaps closed against the production behavior:
+ *
+ * <ol>
+ *   <li><b>D-side ALLOCATE retry window</b> (DecodeRpcServer.cc:1190-1217
+ *       EXECUTE_WITH_RETRY: {@code decode_retry_times=100} /
+ *       {@code decode_retry_interval_ms=1} / {@code decode_retry_timeout_ms=100}):
+ *       a failed reservation retries a FRESH acquire inside the window —
+ *       another request's release flips a RETRYABLE verdict mid-window — and
+ *       only the window-exhausted verdict terminates. The loop runs
+ *       synchronously on the caller's enqueue thread (mock has no real gRPC
+ *       async) and never holds the D-side cache monitor across the sleep.</li>
+ *   <li><b>PERMANENT vs RETRYABLE classification</b>
+ *       (KVCacheAllocator.cc:100-110): {@code required + reserve > physical
+ *       total} = PERMANENT (retrying is pointless — production still spins it
+ *       to the timeout; counted in {@code lack_mem_rejects}); pool total
+ *       sufficient but temporarily short = RETRYABLE (counted in
+ *       {@code kv_admission_fails}). Both families retry identically.</li>
+ *   <li><b>reserve_step constant front-load window</b> (speculative
+ *       {@code reserve_step_ = gen_num_per_circle + 1}, non-speculative = 0):
+ *       decode demand prices {@code ceil((seq_len + reserve_step)/spb)} —
+ *       initial admission front-loads the window, growth CONSUMES it
+ *       (never re-appends); 0 keeps the exact fit bit-identical.</li>
+ *   <li><b>Master-surface 8211</b> (the P engine's closeGrpcStream rewrite of
+ *       a D-side RESOURCE_EXHAUSTED into DECODE_MALLOC_FAILED): decode-side
+ *       reservation rejections ack 8211 with the raw 602 in the message
+ *       text; prefill-pool rejections keep 602 (the two pools surface
+ *       different codes, exactly like production).</li>
+ * </ol>
  */
 class DecodeKvAllocationSemanticsTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -149,8 +176,8 @@ class DecodeKvAllocationSemanticsTest {
                 0L,
                 metrics.get("mock_engine_lack_mem_rejects_total").getOrDefault(decodePort, -1L),
                 "a flipped verdict never counts (PERMANENT side)");
-        assertFalse(prefill.isLeakDetected(), "no leak on P");
-        assertFalse(decode.isLeakDetected(), "no leak on D");
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill), "no leak on P");
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode), "no leak on D");
     }
 
     /**
@@ -213,8 +240,8 @@ class DecodeKvAllocationSemanticsTest {
                         .getOrDefault(prefill.getGrpcPort(), -1L),
                 "the P pool did not reject (100-block pool, 9-block demand)");
         assertEquals(9L, heldBlocks(decodePort), "A's pin survives the whole episode");
-        assertFalse(prefill.isLeakDetected(), "no leak on P");
-        assertFalse(decode.isLeakDetected(), "no leak on D");
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill), "no leak on P");
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode), "no leak on D");
     }
 
     /**
@@ -309,7 +336,7 @@ class DecodeKvAllocationSemanticsTest {
         assertNull(cache.acquireDetailed(9, List.of()).lease(), "a failed attempt yields no lease");
 
         cache.release(pin);
-        assertTrue(cache.admit(List.of(1L, 2L, 3L, 4L, 5L)));
+        assertTrue(MockEngineTestSupport.seedCache(cache, List.of(1L, 2L, 3L, 4L, 5L)));
         assertEquals(
                 MockLruBlockCache.AllocationFailure.PERMANENT,
                 cache.acquireWithReuseDetailed(11, List.of(1L, 2L, 3L, 4L, 5L)).failure(),
@@ -388,8 +415,8 @@ class DecodeKvAllocationSemanticsTest {
                 enqueue(prefill0, batch(1, slot(0, inputWithDecode(200L, 8 * SPB, decode0Port, 1))))
                         .getSuccessesCount());
         assertEquals(8L, heldBlocks(decode0Port), "no front-load without reserve_step");
-        assertFalse(decode.isLeakDetected(), "no leak on the speculative D");
-        assertFalse(decode0.isLeakDetected(), "no leak on the plain D");
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode), "no leak on the speculative D");
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode0), "no leak on the plain D");
     }
 
     // ────────────────── helpers ──────────────────
@@ -466,6 +493,6 @@ class DecodeKvAllocationSemanticsTest {
 
     private int controlPort() {
         assertNotNull(controlServer, "control server must be running");
-        return controlServer.getPort();
+        return MockEngineTestSupport.controlPort(controlServer);
     }
 }

@@ -151,7 +151,8 @@ class LoopShardRidDisjointTest {
                 128,
                 16,
                 Collections.emptyList(),
-                Collections.nCopies(128, 0));
+                Collections.nCopies(128, 0),
+                0);
     }
 
     private JavaLoadClient loopClient(int shardIndex) {
@@ -187,7 +188,14 @@ class LoopShardRidDisjointTest {
                         "",
                         false,
                         "",
-                        true);
+                        true,
+                        0,
+                        0,
+                        "replay",
+                        0.0,
+                        0.0,
+                        true,
+                        List.of());
         return new JavaLoadClient(config);
     }
 }

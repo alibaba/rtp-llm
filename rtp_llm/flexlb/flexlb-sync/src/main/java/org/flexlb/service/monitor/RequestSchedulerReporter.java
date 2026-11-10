@@ -1,16 +1,26 @@
 package org.flexlb.service.monitor;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRoutingView;
+import org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot;
+import org.flexlb.balance.endpoint.EndpointStats;
+import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
+import org.flexlb.metric.SafeFlexMonitor;
+import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_CONFIRM_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_QPS;
@@ -23,7 +33,6 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_RUNNING_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_SHADOW_KV_RESERVED;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_EVICTION_COMMIT_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_EVICTION_PLAN_COUNT;
-import static org.flexlb.constant.MetricConstant.AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_PREFILL_QUEUE_DEPTH;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_PRIORITY_PREEMPT_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_REQUEST_COUNT;
@@ -31,7 +40,6 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_SCHEDULE_LATENCY_MS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_KV_TOKENS;
-import static org.flexlb.constant.MetricConstant.REQUEST_LIFECYCLE_FAILURES_TOTAL;
 
 /**
  * Auto-TPM priority scheduling metrics reporter.
@@ -52,66 +60,49 @@ public class RequestSchedulerReporter {
 
     @Autowired
     public RequestSchedulerReporter(FlexMonitor monitor) {
-        this.monitor = monitor;
+        this.monitor = SafeFlexMonitor.wrap(monitor);
     }
 
     @PostConstruct
     public void init() {
-        monitor.register(AUTO_TPM_REQUEST_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_SCHEDULE_LATENCY_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_EVICTION_PLAN_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_EVICTION_COMMIT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_VICTIM_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_PREFILL_QUEUE_DEPTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_TTFT_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_PRIORITY_PREEMPT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_DECODE_RUNNING_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_DECODE_ACCEPTED_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_CANCEL_REQUEST_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_CANCEL_CONFIRM_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_CANCEL_TIMEOUT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_CANCEL_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_DECODE_ENGINE_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT,
-                FlexMetricType.QPS,
-                FlexPriorityType.NORMAL);
-        monitor.register(
-                REQUEST_LIFECYCLE_FAILURES_TOTAL, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_VICTIM_KV_TOKENS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_DECODE_RESERVED_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(
-                AUTO_TPM_DECODE_SHADOW_KV_RESERVED, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        reportLifecycleFailureCounts();
-        log.info("RequestSchedulerReporter initialized");
+        for (String metric :
+                new String[] {
+                    AUTO_TPM_REQUEST_COUNT,
+                    AUTO_TPM_EVICTION_PLAN_COUNT,
+                    AUTO_TPM_EVICTION_COMMIT_COUNT,
+                    AUTO_TPM_VICTIM_COUNT,
+                    AUTO_TPM_PRIORITY_PREEMPT_COUNT,
+                    AUTO_TPM_CANCEL_REQUEST_COUNT,
+                    AUTO_TPM_CANCEL_CONFIRM_COUNT,
+                    AUTO_TPM_CANCEL_TIMEOUT_COUNT,
+                    AUTO_TPM_CANCEL_QPS,
+                }) {
+            monitor.register(metric, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        }
+        for (String metric :
+                new String[] {
+                    AUTO_TPM_SCHEDULE_LATENCY_MS, AUTO_TPM_TTFT_MS, AUTO_TPM_VICTIM_KV_TOKENS,
+                }) {
+            monitor.register(metric, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        }
+        for (String metric :
+                new String[] {
+                    AUTO_TPM_PREFILL_QUEUE_DEPTH,
+                    AUTO_TPM_DECODE_RUNNING_COUNT,
+                    AUTO_TPM_DECODE_ACCEPTED_COUNT,
+                    AUTO_TPM_DECODE_ENGINE_LOAD,
+                    AUTO_TPM_DECODE_RESERVED_COUNT,
+                    AUTO_TPM_DECODE_SHADOW_KV_RESERVED,
+                }) {
+            monitor.register(metric, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        }
     }
 
-    /**
-     * Report request arrival by normalized priority.
-     */
     public void reportRequest(int priority) {
         monitor.report(AUTO_TPM_REQUEST_COUNT, priorityTags(priority), 1.0);
     }
 
-    /**
-     * Report end-to-end schedule latency via {@code auto_tpm.schedule.latency_ms}.
-     *
-     * @param priority  normalized priority
-     * @param result    schedule result label (e.g. success / no_available_worker)
-     * @param latencyMs milliseconds from request arrival to schedule response
-     */
+    /** Schedule response latency in milliseconds, tagged by priority and result. */
     public void reportScheduleLatency(int priority, String result, long latencyMs) {
         monitor.report(
                 AUTO_TPM_SCHEDULE_LATENCY_MS,
@@ -119,66 +110,60 @@ public class RequestSchedulerReporter {
                 latencyMs);
     }
 
-    /**
-     * Report one Decode preemption attempt rejected by target validation.
-     *
-     * @param mode return or rpc
-     * @param reason fixed target-validation reason; never a request ID or error message
-     */
-    public void reportPreemptionTargetInvalid(String mode, String reason) {
+    public void reportPrefillQueueDepth(String endpoint, int depth) {
         monitor.report(
-                AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT,
-                FlexMetricTags.of("mode", mode, "reason", reason),
-                1.0);
+                AUTO_TPM_PREFILL_QUEUE_DEPTH, FlexMetricTags.of("endpoint", endpoint), depth);
     }
 
-    /**
-     * Report a registration or terminal_cleanup failure without interrupting request cleanup.
-     */
-    public void reportLifecycleFailure(String stage) {
-        reportLifecycleFailureCount(stage, 1.0);
+    /** Master arrival-to-response latency: a lower bound of actual Engine TTFT. */
+    public void reportTtft(int priority, long latencyMs) {
+        monitor.report(AUTO_TPM_TTFT_MS, priorityTags(priority), latencyMs);
     }
 
-    /**
-     * Report an eviction plan generation outcome via
-     * {@code auto_tpm.eviction_plan.count}.
-     *
-     * @param priority incoming request priority
-     * @param evCase   eviction case label (e.g. decode_kv_full)
-     * @param result   plan result label (feasible / infeasible)
-     */
-    public void reportEvictionPlan(int priority, String evCase, String result) {
-        monitor.report(
-                AUTO_TPM_EVICTION_PLAN_COUNT,
-                FlexMetricTags.of(
-                        "priority", String.valueOf(priority), "case", evCase, "result", result),
-                1.0);
+    /** Report one snapshot: local reservations, accepted/running Engine tasks and Engine-facing load. */
+    /** Read committed victim facts; neither publication nor metric failure changes the attempt. */
+    public void reportPreemptionVictims(
+            String requestId,
+            int incomingPriority,
+            String endpoint,
+            String evictionCase,
+            List<DecodeRequestView> victims,
+            boolean cancelled) {
+        for (var victim : victims) {
+            String stage =
+                    !cancelled
+                            ? "decode_reserved"
+                            : victim.phase() == DecodeTaskPhase.RUNNING
+                                    ? "decode_running"
+                                    : "decode_cancel";
+            try {
+                reportVictim(victim.priority(), incomingPriority, stage, evictionCase);
+                reportVictimKvTokens(victim.priority(), stage, victim.kvTokens());
+                if (cancelled) reportEngineCancel(CancelEvent.CONFIRM, endpoint, victim.priority());
+            } catch (Throwable failure) {
+                Logger.warn(
+                        "[decode-capacity] failed to report victim: request_id={}",
+                        requestId,
+                        failure);
+            }
+            if (!cancelled) {
+                Logger.debug(
+                        "[decode-capacity] decode victim preempted: victim_id={} victim_priority={}"
+                                + " stage={} outcome={} kv_tokens={} incoming_id={} incoming_priority={} worker={}",
+                        victim.requestId(),
+                        victim.priority(),
+                        stage,
+                        "requeued",
+                        victim.kvTokens(),
+                        requestId,
+                        incomingPriority,
+                        endpoint);
+            }
+        }
+        reportEviction(EvictionEvent.COMMIT, incomingPriority, evictionCase, "success");
     }
 
-    /**
-     * Report an eviction plan commit outcome via
-     * {@code auto_tpm.eviction_commit.count}.
-     *
-     * @param priority incoming request priority
-     * @param evCase   eviction case label (e.g. decode_kv_full)
-     * @param result   commit result label (success / version_mismatch / partial_failure)
-     */
-    public void reportEvictionCommit(int priority, String evCase, String result) {
-        monitor.report(
-                AUTO_TPM_EVICTION_COMMIT_COUNT,
-                FlexMetricTags.of(
-                        "priority", String.valueOf(priority), "case", evCase, "result", result),
-                1.0);
-    }
-
-    /**
-     * Report one evicted victim via {@code auto_tpm.victim.count}.
-     *
-     * @param victimPriority   priority of the evicted request
-     * @param incomingPriority priority of the request that displaced it
-     * @param stage            victim scheduling stage (e.g. prefill_queued)
-     * @param evCase           eviction case label (e.g. decode_kv_full)
-     */
+    /** Report the victim and its priority-preemption event. */
     public void reportVictim(
             int victimPriority, int incomingPriority, String stage, String evCase) {
         monitor.report(
@@ -193,25 +178,10 @@ public class RequestSchedulerReporter {
                         "case",
                         evCase),
                 1.0);
+        monitor.report(AUTO_TPM_PRIORITY_PREEMPT_COUNT, FlexMetricTags.of("stage", stage), 1.0);
     }
 
-    /**
-     * Report a prefill batcher queue depth via
-     * {@code auto_tpm.prefill.queue_depth}.
-     */
-    public void reportPrefillQueueDepth(String endpoint, int depth) {
-        monitor.report(
-                AUTO_TPM_PREFILL_QUEUE_DEPTH, FlexMetricTags.of("endpoint", endpoint), depth);
-    }
-
-    /**
-     * Report one victim's released hard KV tokens via
-     * {@code auto_tpm.victim.kv_tokens} (design doc 19.2).
-     *
-     * @param victimPriority priority of the evicted request
-     * @param stage          victim scheduling stage (e.g. decode_reserved)
-     * @param kvTokens       hard KV tokens released by the eviction
-     */
+    /** Hard KV tokens actually released by one victim. */
     public void reportVictimKvTokens(int victimPriority, String stage, long kvTokens) {
         monitor.report(
                 AUTO_TPM_VICTIM_KV_TOKENS,
@@ -220,76 +190,30 @@ public class RequestSchedulerReporter {
                 kvTokens);
     }
 
-    /**
-     * Report a decode endpoint's shadow reservation count via
-     * {@code auto_tpm.decode.reserved.count}.
-     */
-    public void reportDecodeReservedCount(String endpoint, int count) {
+    public void reportEngineCancel(CancelEvent event, String endpoint, int priority) {
         monitor.report(
-                AUTO_TPM_DECODE_RESERVED_COUNT, FlexMetricTags.of("endpoint", endpoint), count);
+                event.metric,
+                FlexMetricTags.of("endpoint", endpoint, "priority", String.valueOf(priority)),
+                1.0);
     }
 
-    /**
-     * Report a decode endpoint's shadow hard-KV reservation total via
-     * {@code auto_tpm.decode.shadow_kv_reserved}.
-     */
-    public void reportDecodeShadowKvReserved(String endpoint, long kvTokens) {
+    /** Planning and commit outcomes share incoming priority, eviction case and result tags. */
+    public void reportEviction(EvictionEvent event, int priority, String evCase, String result) {
         monitor.report(
-                AUTO_TPM_DECODE_SHADOW_KV_RESERVED,
-                FlexMetricTags.of("endpoint", endpoint),
-                kvTokens);
+                event.metric,
+                FlexMetricTags.of(
+                        "priority", String.valueOf(priority), "case", evCase, "result", result),
+                1.0);
     }
 
-    /**
-     * Report the TTFT approximation via {@code auto_tpm.ttft_ms}.
-     * Approximated as "request arrival → schedule completion" on the Master;
-     * the engine-side first-token time is not observable here, so this is a
-     * lower bound of the real TTFT.
-     */
-    public void reportTtft(int priority, long latencyMs) {
-        monitor.report(AUTO_TPM_TTFT_MS, priorityTags(priority), latencyMs);
+    public void reportPreemptionCancelRequests(String endpoint, List<DecodeRequestView> victims) {
+        for (var victim : victims) {
+            reportEngineCancel(CancelEvent.REQUEST, endpoint, victim.priority());
+            reportCancel(victim.priority(), "PRIORITY_PREEMPTED");
+        }
     }
 
-    /**
-     * Report one priority preemption via
-     * {@code auto_tpm.priority_preempt.count}.
-     *
-     * @param stage victim scheduling stage (prefill_queued / decode_reserved /
-     *              decode_running / decode_cancel)
-     */
-    public void reportPriorityPreempt(String stage) {
-        monitor.report(AUTO_TPM_PRIORITY_PREEMPT_COUNT, FlexMetricTags.of("stage", stage), 1.0);
-    }
-
-    /**
-     * Report a decode endpoint's engine-reported {@code RUNNING} request
-     * count via {@code auto_tpm.decode.running.count}. The accepted layer is
-     * reported separately via
-     * {@link #reportDecodeAcceptedCount}.
-     */
-    public void reportDecodeRunningCount(String endpoint, int count) {
-        monitor.report(
-                AUTO_TPM_DECODE_RUNNING_COUNT, FlexMetricTags.of("endpoint", endpoint), count);
-    }
-
-    /**
-     * Report a decode endpoint's accepted-not-running (engine KV-allocated)
-     * request count via {@code auto_tpm.decode.accepted.count}.
-     */
-    public void reportDecodeAcceptedCount(String endpoint, int count) {
-        monitor.report(
-                AUTO_TPM_DECODE_ACCEPTED_COUNT, FlexMetricTags.of("endpoint", endpoint), count);
-    }
-
-    /**
-     * Report one cancel initiation via {@code auto_tpm.cancel.qps} — counted
-     * once per cancel intent injected into the EngineCancelChannel, tagged
-     * with the cancelled request's priority and the cancel reason
-     * (PRIORITY_PREEMPTED / USER_CANCELLED / DEADLINE_EXCEEDED).
-     *
-     * @param priority normalized priority of the cancelled request
-     * @param reason   cancel reason metric label
-     */
+    /** Count one Engine Cancel intent by victim priority and cancellation reason. */
     public void reportCancel(int priority, String reason) {
         monitor.report(
                 AUTO_TPM_CANCEL_QPS,
@@ -297,58 +221,33 @@ public class RequestSchedulerReporter {
                 1.0);
     }
 
-    /**
-     * Report one engine cancel request issued via
-     * {@code auto_tpm.cancel.request.count}.
-     *
-     * @param victimPriority normalized priority of the cancelled victim
-     */
-    public void reportCancelRequest(String endpoint, int victimPriority) {
-        monitor.report(
-                AUTO_TPM_CANCEL_REQUEST_COUNT,
-                FlexMetricTags.of("endpoint", endpoint, "priority", String.valueOf(victimPriority)),
-                1.0);
+    public void reportDecodePreemption(String endpoint, ResourceSnapshot view) {
+        FlexMetricTags tags = FlexMetricTags.of("endpoint", endpoint);
+        monitor.report(AUTO_TPM_DECODE_RESERVED_COUNT, tags, view.reservedCount());
+        monitor.report(AUTO_TPM_DECODE_SHADOW_KV_RESERVED, tags, view.routing().inflightHardKv());
+        monitor.report(AUTO_TPM_DECODE_RUNNING_COUNT, tags, view.runningCount());
+        monitor.report(AUTO_TPM_DECODE_ACCEPTED_COUNT, tags, view.acceptedCount());
+        monitor.report(AUTO_TPM_DECODE_ENGINE_LOAD, tags, view.routing().engineLoad());
     }
 
-    /**
-     * Report one cancel release confirmation via
-     * {@code auto_tpm.cancel.confirm.count} — inside the commit wait window
-     * or via the later WorkerStatus settle path, whichever happens.
-     *
-     * @param victimPriority normalized priority of the cancelled victim
-     */
-    public void reportCancelConfirm(String endpoint, int victimPriority) {
-        monitor.report(
-                AUTO_TPM_CANCEL_CONFIRM_COUNT,
-                FlexMetricTags.of("endpoint", endpoint, "priority", String.valueOf(victimPriority)),
-                1.0);
-    }
-
-    /**
-     * Report one cancel wait-window timeout via
-     * {@code auto_tpm.cancel.timeout.count}. The plan failed; the victim
-     * stays CANCEL_REQUESTED until WorkerStatus settles it (a later settle
-     * also counts one confirm, so confirms may exceed non-timed-out requests).
-     *
-     * @param incomingPriority normalized priority of the incoming request
-     *                         whose eviction plan failed
-     */
-    public void reportCancelTimeout(String endpoint, int incomingPriority) {
-        monitor.report(
-                AUTO_TPM_CANCEL_TIMEOUT_COUNT,
-                FlexMetricTags.of(
-                        "endpoint", endpoint, "priority", String.valueOf(incomingPriority)),
-                1.0);
-    }
-
-    /**
-     * Report a decode endpoint's engine-facing load (dispatched, excludes
-     * queued-phase shadow reservations) via {@code auto_tpm.decode.engine_load}.
-     * Compare it with the reserved-count gauge to distinguish engine-facing
-     * load from Prefill-queued ownership.
-     */
-    public void reportDecodeEngineLoad(String endpoint, int load) {
-        monitor.report(AUTO_TPM_DECODE_ENGINE_LOAD, FlexMetricTags.of("endpoint", endpoint), load);
+    /** Format captured queue values; this method never reads or changes live scheduling state. */
+    public static Map<String, Object> placementWait(
+            String role,
+            String group,
+            String endpoint,
+            int depth,
+            int[] counts,
+            Map<String, Object> decision) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("cause", role + " placement unavailable");
+        details.put("role", role);
+        if (group != null) details.put("group", group);
+        if (endpoint != null) details.put("endpoint", endpoint);
+        details.put("capturedAtMs", System.currentTimeMillis());
+        details.put("queueDepth", depth);
+        details.put("priorityCounts", priorityCounts(counts));
+        if (decision != null) details.put("decision", decision);
+        return Collections.unmodifiableMap(details);
     }
 
     private static FlexMetricTags[] buildPriorityTags() {
@@ -365,18 +264,94 @@ public class RequestSchedulerReporter {
                 : FlexMetricTags.of("priority", String.valueOf(priority));
     }
 
-    @Scheduled(fixedRate = 2000)
-    private void reportLifecycleFailureCounts() {
-        reportLifecycleFailureCount("registration", 0.0);
-        reportLifecycleFailureCount("terminal_cleanup", 0.0);
+    private static Map<Integer, Integer> priorityCounts(int[] counts) {
+        Map<Integer, Integer> values = new LinkedHashMap<>();
+        for (int priority = 0; priority < counts.length; priority++) {
+            if (counts[priority] > 0) values.put(priority, counts[priority]);
+        }
+        return Collections.unmodifiableMap(values);
     }
 
-    private void reportLifecycleFailureCount(String stage, double count) {
-        try {
-            monitor.report(
-                    REQUEST_LIFECYCLE_FAILURES_TOTAL, FlexMetricTags.of("stage", stage), count);
-        } catch (Throwable failure) {
-            log.warn("Failed to report request lifecycle failure, stage={}", stage, failure);
+    /**
+     * Maps eviction planning and commit events to their exported counters.
+     */
+    public enum EvictionEvent {
+        PLAN(AUTO_TPM_EVICTION_PLAN_COUNT),
+        COMMIT(AUTO_TPM_EVICTION_COMMIT_COUNT);
+
+        private final String metric;
+
+        EvictionEvent(String metric) {
+            this.metric = metric;
+        }
+    }
+
+    /**
+     * Maps cancellation requests, confirmations and timeouts to their exported counters.
+     */
+    public enum CancelEvent {
+        /** One issued cancel, tagged with the victim's priority. */
+        REQUEST(AUTO_TPM_CANCEL_REQUEST_COUNT),
+        /** Release confirmation, including after a timed-out wait; uses victim priority. */
+        CONFIRM(AUTO_TPM_CANCEL_CONFIRM_COUNT),
+        /** Failed plan wait; uses incoming priority and does not release the victim. */
+        TIMEOUT(AUTO_TPM_CANCEL_TIMEOUT_COUNT);
+
+        private final String metric;
+
+        CancelEvent(String metric) {
+            this.metric = metric;
+        }
+    }
+
+    /**
+     * Frozen decision evidence; the log representation is materialized only on failure.
+     */
+    @lombok.RequiredArgsConstructor(access = lombok.AccessLevel.PUBLIC)
+    public static final class QueueWaitSnapshot {
+        private final String endpoint;
+        private final String cause;
+        private final long capturedAtMs = System.currentTimeMillis();
+        private final EndpointStats.QueueCounts counters;
+        private final DecodeRoutingView decode;
+        private volatile Map<String, Object> snapshotValues;
+
+        public Map<String, Object> asMap() {
+            Map<String, Object> cached = snapshotValues;
+            if (cached != null) {
+                return cached;
+            }
+            int[] requestCountsByPriority = counters.byPriority();
+            int depth = java.util.Arrays.stream(requestCountsByPriority).sum();
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("cause", cause);
+            details.put("capturedAtMs", capturedAtMs);
+            details.put("endpoint", endpoint);
+            details.put("queueDepth", depth);
+            details.put("queueVersion", counters.version());
+            details.put("priorityCounts", priorityCounts(requestCountsByPriority));
+            details.put("prefillRequests", counters.outstandingRequests());
+            details.put("prefillBatchSlots", counters.batchSlots());
+            if (decode != null) {
+                details.put(
+                        "decode",
+                        Map.of(
+                                "endpoint",
+                                decode.address(),
+                                "version",
+                                decode.admissionVersion(),
+                                "engineLoad",
+                                decode.engineLoad(),
+                                "totalLoad",
+                                decode.totalLoad(),
+                                "kvTotal",
+                                decode.totalKv(),
+                                "kvAvailable",
+                                decode.placementUsage().hardKvAvailable()));
+            }
+            cached = Collections.unmodifiableMap(details);
+            snapshotValues = cached;
+            return cached;
         }
     }
 }

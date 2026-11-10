@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.scheduler.RequestContext;
+import org.flexlb.balance.scheduler.RequestRouteSelector;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -21,27 +23,22 @@ import org.flexlb.cache.match.localsync.LocalSyncCacheMatchProvider;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.LocalStandbyConfig;
 import org.flexlb.config.RoutingConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.metric.FlexMonitor;
-import org.flexlb.service.grpc.EngineGrpcService;
+import org.flexlb.service.grpc.WorkerStatusRpcClient;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
-import reactor.netty.resources.LoopResources;
 
 import java.util.List;
 import java.util.Map;
@@ -72,8 +69,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks cache-hit prediction feedback through actual selection and worker polling, including
- * delayed comparisons.
+ * Runs selection through worker status polling to check cache-hit comparisons and metrics are emitted once.
+ * Delayed fallback feedback and stale generations must not corrupt the selected prediction.
  */
 class CacheHitFeedbackFlowTest {
     private final ListAppender<ILoggingEvent> pv = new ListAppender<>();
@@ -83,18 +80,17 @@ class CacheHitFeedbackFlowTest {
     private final CacheMatchFailoverManager failover = mock(CacheMatchFailoverManager.class);
 
     private EndpointRegistry registry;
-    private WorkerDirectory directory;
     private WorkerStatus worker;
     private CacheAwareService cache;
     private CacheMetricsReporter cacheMetrics;
-    private CostBasedPrefillStrategy strategy;
+    private RequestRouteSelector selector;
     private EngineHealthReporter reporter;
     private FlexlbConfig config;
 
     @BeforeEach
     void setUp() {
         config = new FlexlbConfig();
-        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.setDispatcher(org.flexlb.config.ConfigTestSupport.nonBatch());
         config.getRouter()
                 .getRoles()
                 .getPrefill()
@@ -105,20 +101,11 @@ class CacheHitFeedbackFlowTest {
         config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
         ConfigService configs = mock(ConfigService.class);
         when(configs.loadBalanceConfig()).thenReturn(config);
-        registry =
-                new EndpointRegistry(
-                        configs,
-                        RunnerTestSupport.eventSink(),
-                        mock(org.flexlb.service.monitor.BatchSchedulerReporter.class),
-                        new org.flexlb.balance.scheduler.RouteDeliveryStrategy(
-                                mock(org.flexlb.balance.scheduler.RequestRegistry.class),
-                                mock(org.flexlb.balance.delivery.DeliveryMetrics.class)),
-                        new org.flexlb.balance.scheduler.PlacementAvailability());
-        directory = new WorkerDirectory(registry);
+        registry = RunnerTestSupport.endpointRegistry(configs);
         worker =
                 RunnerTestSupport.discovered(
                         RoleType.PREFILL, "group", "10.0.0.1", 8080, 8081, "test");
-        directory.currentOrDiscover(RoleType.PREFILL, worker.getLogicalIpPort(), () -> worker);
+        registry.currentOrDiscover(RoleType.PREFILL, worker.getLogicalIpPort(), () -> worker);
         publish(worker);
         CacheMatchConfiguration cacheConfig = mock(CacheMatchConfiguration.class);
         when(cacheConfig.isKvcmEnabled()).thenReturn(true);
@@ -155,14 +142,23 @@ class CacheHitFeedbackFlowTest {
                         query,
                         comparison,
                         mock(CacheMetadataUpdateOrchestrator.class));
-        EngineGrpcClient engineClient = mock(EngineGrpcClient.class);
-        LoopResources loops = mock(LoopResources.class);
-        when(engineClient.getEventLoopGroup())
-                .thenReturn(mock(io.netty.channel.EventLoopGroup.class));
-        when(loops.onServer(true)).thenReturn(mock(io.netty.channel.EventLoopGroup.class));
-        when(loops.onServerSelect(true)).thenReturn(mock(io.netty.channel.EventLoopGroup.class));
-        reporter = new EngineHealthReporter(monitor, cacheMetrics, engineClient, loops, directory);
-        strategy = new CostBasedPrefillStrategy(directory, cache, reporter);
+        reporter = new EngineHealthReporter(monitor, registry);
+        var strategy = new CostBasedPrefillStrategy(cache, configs);
+        var model = mock(org.flexlb.config.ModelMetaConfig.class);
+        when(model.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
+        selector =
+                new RequestRouteSelector(
+                        registry,
+                        strategy,
+                        mock(org.flexlb.balance.strategy.DecodeSelectionStrategy.class),
+                        mock(org.flexlb.balance.strategy.VitSelectionStrategy.class),
+                        mock(org.flexlb.balance.strategy.EncoderSelectionStrategy.class),
+                        cache,
+                        null,
+                        reporter,
+                        cacheMetrics,
+                        configs,
+                        model);
         pv.start();
         ((ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger")).addAppender(pv);
     }
@@ -332,7 +328,7 @@ class CacheHitFeedbackFlowTest {
                 RunnerTestSupport.discovered(
                         RoleType.PREFILL, "group", "10.0.0.1", 8080, 8081, "test");
         var observation =
-                org.flexlb.service.grpc.EngineStatusConverter.convertToStatusObservation(
+                org.flexlb.service.grpc.WorkerStatusRpcClient.convertToStatusObservation(
                         replacement, response(task("1009", true, 500), true, 2));
         assertTrue(cache.observeCacheHitFeedback(replacement, observation).isEmpty());
         assertTrue(events("cache_hit_comparison").isEmpty());
@@ -355,7 +351,7 @@ class CacheHitFeedbackFlowTest {
                         100);
         cache.trackRoutingPrediction("1010", RoleType.PREFILL, "group", engine, 1000, 400, matches);
         var observation =
-                org.flexlb.service.grpc.EngineStatusConverter.convertToStatusObservation(
+                org.flexlb.service.grpc.WorkerStatusRpcClient.convertToStatusObservation(
                         engine, response(task("1010", true, 500), true, 2));
         var results = cache.observeCacheHitFeedback(engine, observation);
         assertEquals(1, results.size());
@@ -372,20 +368,28 @@ class CacheHitFeedbackFlowTest {
     }
 
     private void select(String requestId) {
-        Request request = new Request();
-        request.setRequestId(requestId);
-        request.setSeqLen(1000);
-        request.setBlockSize(100);
-        request.setBlockCacheKeys(List.of(1L));
-        request.setBlockSize(100);
-        request.setBlockCacheKeys(List.of(1L));
-        BalanceContext context = new BalanceContext(config);
-        context.setRequest(request);
-        context.setSchedulingMetadata(
-                SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000));
-        var selected = strategy.select(context, RoleType.PREFILL, "group");
+        Request request =
+                Request.builder()
+                        .requestId(String.valueOf(requestId))
+                        .seqLen(1000)
+                        .blockSize(100)
+                        .blockCacheKeys(List.of(1L))
+                        .build();
+        RequestContext context = new RequestContext(config);
+        context.data().setRequest(request);
+        context.data()
+                .setSchedulingMetadata(
+                        SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000));
+        var selected = selector.select(context, "group");
         assertEquals(PlacementResult.Status.SUCCESS, selected.status());
-        selected.value().close();
+        var route = selected.value();
+        if (route.prefillEndpoint() != null) route.prefillEndpoint().releaseRequest(route);
+        if (route.decodeEndpoint() != null)
+            route.decodeEndpoint()
+                    .release(
+                            route.decodeReservation(),
+                            org.flexlb.balance.endpoint.DecodeResources.ReleaseReason
+                                    .LOCAL_ROLLBACK);
     }
 
     private void publish(WorkerStatus status) {
@@ -395,7 +399,9 @@ class CacheHitFeedbackFlowTest {
             registry.publishPreparedEndpoint(
                     status.getLogicalIpPort(),
                     status,
-                    status.prepareNewStatus(status.freezeStatusResponse(value)));
+                    status.prepareNewStatus(
+                            org.flexlb.dao.master.WorkerStatusTestSupport.freezeStatusResponse(
+                                    status, value)));
             status.recordSuccessfulPoll(true);
         } finally {
             status.lock.unlock();
@@ -426,20 +432,16 @@ class CacheHitFeedbackFlowTest {
 
     private void poll(
             WorkerStatus status, EngineRpcService.TaskInfoPB task, boolean finished, long version) {
-        EngineGrpcService grpc = mock(EngineGrpcService.class);
+        WorkerStatusRpcClient grpc = mock(WorkerStatusRpcClient.class);
         when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response(task, finished, version)));
         var lease = status.tryBeginStatusPoll();
         assertNotNull(lease);
         new GrpcWorkerStatusRunner(
                         "model",
-                        status.getLogicalIpPort(),
-                        "test",
-                        RoleType.PREFILL,
-                        "group",
                         status,
                         lease,
-                        directory,
+                        registry,
                         reporter,
                         grpc,
                         5000,
@@ -459,7 +461,7 @@ class CacheHitFeedbackFlowTest {
                         .setAvailableKvCache(1_000_000)
                         .setTotalKvCache(1_000_000);
         if (finished) {
-            result.addFinishedTaskList(task);
+            result.setLatestFinishedVersion(version).addFinishedTaskList(task);
         } else {
             result.addRunningTaskInfo(task);
         }

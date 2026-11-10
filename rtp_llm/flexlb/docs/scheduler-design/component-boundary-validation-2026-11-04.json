@@ -1,0 +1,459 @@
+{
+  "date": "2026-11-04",
+  "api_change": "PlacementResult adds the selection component and ENDPOINT_CHANGED status. Existing static factories remain; direct canonical-constructor calls and exhaustive status switches require adaptation.",
+  "scope": [
+    "Worker queue owns blocked-head alternatives and one-dispatch allowance",
+    "GroupPlanner readiness and next wakeup honored for bypass candidates",
+    "Prefill/Decode successful selection retained on exact-generation handoff failure; Direct Scheduler owns bounded retry",
+    "Prefill queue-wait statistics supplier safely published with volatile"
+  ],
+  "source": {
+    "before": {
+      "files": 87,
+      "physical": 25999,
+      "hashes": {
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/util/Failures.java": "3b551ec119660e196aee5bee005f0a0b1a331592757a991b037bea7233e67d2f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/dao/pv/PvLogData.java": "0e9dc9ba1b8fa3da124de4935e07ed91a01f19acf27a0d940cff34cb16f17aba",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/PlacementResult.java": "e78cfedf6a9d2e64dbf2626cbac8400244eb286cfddf4d77b04b8cb31692bef1",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/planner/BuiltinGroupPlanner.java": "34d48f41e0ea1dfd0d68f2bac0b7619596a1158881ffb6d21e108471c3bd084c",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/planner/GroupPlanner.java": "8afe7d95a7c713aa9dd28bb2aeee091f36884e4b253bf98d900f131840458c4d",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/prediction/FormulaPredictor.java": "e57bf7ab953e708336f77851406a7ebe792d385f22a23878086b93a995b227e8",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/prediction/PrefillTimePredictor.java": "790848aff7dad56a370394e673baed0c0b209e21e77f603a1a22154c4da0048c",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/prediction/LearningPredictor.java": "dd39fa8731cc41b9258580c8e6f6912ae659c1cd51a0b23d04db760b8c4a378f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/TaskTimer.java": "32a1c3fc17724f847f03b59e1c1a5e02d3c8078b10470e585c947de3a91d046f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ContextResult.java": "ba2a1885d88676fea60bf79462de4bd7af134fc70e0b5188131424499d79b501",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestTaskExecutor.java": "4ae69ddcb88054e0f345ea62e14615c25c8ed29393d5a8099b97122de3d8c924",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestTaskPool.java": "b7d8888a12a25327998dad717f46415b4565d879c8d160d348fc3651ef5a8b19",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DeliveryDispatcher.java": "19a9199dad8e439d69f0a95a22d5f2bd48391ce488337610b8d60fc43e030128",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestLifecycle.java": "c3cfb3f7581f018f1422be0385315831feaf16df49f1c6714ed204c08a846937",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AdmissionHandle.java": "c12ebff3ce43494b3cad69c362dd5163f0f45d32806f65b3a19a2c03be100e48",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestRepository.java": "c7665c27c3ef727cd09cbd48de7b7db69114c7fe3fb2614af6683610c20ea2c2",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/CancelReason.java": "22728893860a8ec209ec56ff353754fccae6bd3b82cb2b746703f3ea20de64a8",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/QueuedRequestScheduler.java": "7e6544b1e66215960402192ea7a7728ac02d2e145d9101b9b868d427bccc61e1",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestContext.java": "650c856d62c7f5cf85306ca886831e6bbeac9752fa7f91dcaf9dfc3e66dcdd18",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/QueueExecutionSettings.java": "2664fdd455167fa8f98144a3645f0d7f4d656eb3c23673f68fe48bb8e9a05804",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ExpirationTimer.java": "820ab123656ea5bebcd024d561bad6e2049114177e60599c2e6b679954f51587",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementConfiguration.java": "23e3971f6b9ca83b4f4d8cef95a99c0e25e1387822a5631bc0ec117458d28648",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestState.java": "118405e1257d41a4783e67dd732cfd4f4354d6efbd1a69eef72a6cbd0e58a1e9",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BatchEnqueueHelper.java": "84da39d982310b1bbd05d8c8e356666c2c4840db5bc8540de0f9c688f221f1ec",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementCapacityWaitQueue.java": "a2c79f444010326df9168b7cff743c7e0c386f6e5f2e2bb5154a85648fb1a278",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementAvailability.java": "1ee649f8122aa2c282f3ef5e6c4184f5abafe1f148f773e27aa8426a69de04c0",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestData.java": "5f673a6c56255af1005ff87f0c7b155ce52703807f8dddacd9433871f5f0f4be",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ScheduledTaskTimer.java": "1b8a026225e7406120edeee5ed9960106d00ceb8fef5f95d590fa9db91202574",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestScheduler.java": "4627384c412c52de2ce0c0201e325eca362804d152b7fa34b54d1f28492bb5c2",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/Delivery.java": "4f3734d673adf9e4020e52756e9dbe38006d8ecb99f6d5007e867f35d5d94ee8",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/OrderedRequestQueue.java": "6ea03a2e8d4e66f4ec579c40eeac352ffd06e2f3e682f05104b621b8df9fd55b",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementKey.java": "31078ae3706e1d43d6fea984240ad1f7bfe8a1262ddb26872bca719cb3bc698b",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementQueue.java": "f66ef68ccd7510813f5ddc95be2e902103c9bb0471ec44914c65c2d6ae726a1f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestWorkerSelector.java": "89ea293c48173f71243cf4be0a177d5b6003dac53e44c2c6e2665f9b70743d42",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DirectRequestScheduler.java": "b312fb81eee7ac078a33d87e434e25a67dfaf0d54d460f7d1a76768eeaefbb6c",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PreemptionRegistration.java": "e81b5ac3cefbe7824ad5b66ccff91597b1e7f40ff42be35f90b417a56a3fe346",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/GlobalQueueEntry.java": "cf58b69b6bb3d52be2849ebf36844fcbd8628ace455f0ca5d0cf23988a3d9f85",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ResponseCompletionExecutor.java": "d8ae89b3f58eb46c6c1a2d827ab60a7519df97f5828b4c2850e5c814a3bc8403",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestRoute.java": "d08c9d7e3fd5503079a5737a57754400c5fcabe701f9ddb22af384f4f2bf4f1f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AbstractRequestScheduler.java": "64557597708c1e970f873fe02919783dd247d260be514edb004993189c70e3ef",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DeliveryExecution.java": "32bff45e62dd79b43e69f6817ea85ccae81ac97e09003574470b215d4594d04e",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/preemption/CancelTarget.java": "b83eb0684095b14bea38036620aeda5df2a595006f104684efb849ce98e81f4f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/preemption/VictimResolution.java": "2e24c8fead8f041d4995eaf3008da29eee1927fb53b1f77426893fe0e12b7145",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/preemption/PreemptionCancelPhase.java": "4646ad52aa3df1a0422df15d384b25dc67ad63ab05477fb570e8a5178abd531b",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/DecodeResources.java": "d34872553b100a08709cbabbaeaa1c9aaf951a97251c4e7d8d4d30fb8a4ce9c7",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillActiveIndex.java": "0660135ad23bd7f8a4998dcaa090b6b26aef48bbbdae132fef00fc47adc48fb6",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillRequestQueue.java": "b7c0073f85c25ffa0ebca9ab54eccfedfce0ef71ffba3606c208b271273865e0",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/EndpointStats.java": "adfc99e96c96a13682010c50047503039938acff742d324d305240731fcd0b9f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/WorkerEndpoint.java": "957e862bc63ba634c3a5eb0b780866ebd08af87a0deb8ea5a2c0c21622d44bc4",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/EndpointRegistry.java": "3122034c2bde97a8cb81d77c91387373c0f73be1bcad430cd70d2ea713fc54b6",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/DecodeEndpoint.java": "3eb67614561304152dc8264bbb9899e4bc65d7e0d001eab1f46a0c59f76cd587",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillEndpoint.java": "4e3fab82184377e0034c8a7a7c96d3e708195b5712149beb8541384eee437003",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/delivery/CapacityBoundary.java": "444558865b94a7bfc065d9f1ed028ae8e974651c99e2d191471890576cf92bb9",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/delivery/BatchIdGenerator.java": "bd4d370302c7794f4ebab188ee5cd4ca47368c2c3c87c8c07db445764a9cd555",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/projection/RequestTimeEstimation.java": "ed1cdec465d9d268fd58401cb6d839556b3337c0164f4578ce4556ab8416a20c",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/EndpointRoundRobin.java": "37111ceaea05415cbe9220d4a434f8bd58c0e892dd3f5580649435f114a0f34c",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/VitWorkerSelector.java": "e10afeab2eb8ff0b52c82d1396cebcb8441b28fd4f2be0ed5b06fc5f60e23b97",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/VitSelectionStrategy.java": "0a5dc3611f63dfc83081f6fd31917d7bf67b2d7a0f3d15c22e5146692dc59bb9",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/PrefillCandidateSet.java": "50e720dd995293b076e4fdc0edc65ad715fa813eb27fcf64e36841d6a2d4cfc1",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/CostBasedPrefillStrategy.java": "e0b00c8517a7bc0f914587a3ae6bff43d30f198b7adc271ebd10163cbd3c8c60",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/PrefillSelectionStrategy.java": "e5dfc3de89e6676b4a04d5200632e4b25e17825732f1182bd4dd9da4cb41960e",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/DecodeSelectionStrategy.java": "eb4071eb72104fbcf6b3a13d3cb49abea08633e92ee11d2842ff8a5c58143d2f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/DecodeSelector.java": "363d58a3fbb611f20fd45012845383fa53a1a6dcb6bec72a0329c069c3977cd9",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/DefaultDecodePreemption.java": "319c6ad1f9dd707a6cd47ea00518a5a44aac7e37a6876b906a9516466fbffa11",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/DecodePreemption.java": "6b66eeaf8c97eb844758856f1278892b1e66eae2c47a50a5433da39a3612af7b",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/DecodePreemptionPolicy.java": "d5b357c544ae8db320ea26076d5071c487e527ab1470c6cd8ef95bc605f46def",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/PriorityDecodePreemptionPolicy.java": "e39b63db8921233866ed91d6cb51764f98b5cea9a5dba89374717fd3f1d6f32c",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/consistency/MasterStatusService.java": "5b8cd22860d0fcb1af8a88e04b78fedd01be5eaea2fc9457dcd1938235d7ce60",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/consistency/ZookeeperMasterElectService.java": "da1116c6672f12dd0f0429a766c580ceae80a5ea00f091f8e1832ee3bfbdec61",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/consistency/MasterStatusView.java": "3c1fc92bcfb2b83e29c58d6eae7f73a4e2757b350796207c915e304e7436227c",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/sync/runner/AbstractStatusRunner.java": "3a8d7df923e1e22c2b869e64fdc219be7d8582e5feb1759531f91cc68bfa5917",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/sync/runner/GrpcCacheStatusCheckRunner.java": "be06ab4d50af0cef602eb3c9296a50d56d3658a346bb2e1baef11fc7cdb43a46",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/sync/runner/GrpcWorkerStatusRunner.java": "279dbf432f716f45d1fdde25cac9e82e120ee34a99860186613f27f48adae41f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/sync/synchronizer/WorkerStatusSynchronizer.java": "f727114c33cd15c8277cbabfc0bb29667ae9cdc543d79bc3c1c248ff342a95eb",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/RecentCacheKeyTraceReporter.java": "48ad8bef983e86e86653735f56e9a5744cef5e1bc95e6cd2da198e64aa5df2e9",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/VitCacheSelector.java": "6a15f6d8128450a500e44af06beaaf967f9d02d5fccaa5cd17365532fac2fb4a",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/VitCacheDirectory.java": "3d5d07483898907a5e7e84aec997ee9195e387ad82bc6b4d3dcac7084bb2c2ad",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/monitor/EngineHealthReporter.java": "ec10ff73022fa3f9a9c55f8d0b1aba19c7d5ede445662c2b7b125c155432af65",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/monitor/RequestSchedulerReporter.java": "a47660edf5bd7822c7a26d54efc8add018215617e15d508fe12277fc7fe7132d",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/monitor/DeliveryMetricsReporter.java": "a78b4414d82abfc267983bb05b80ed829a377d86ee8d85f732234109a80334df",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/grpc/WorkerStatusRpcClient.java": "37d3f379e0042942a24fe9a7f122c59cf637d38745ae63a9199f511473b74d1e",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/address/WorkerAddressService.java": "4ee857d82ed918cbca2ff0a4bb4c101e10817ef92e5b5daa7a0a18e2d342647c",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/domain/consistency/SyncLBStatusResp.java": "2d04fa9e3b9e3ea88fcd79638b90881cd6f09a37e3ac8d1cbf52f164a65a14b5",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/domain/consistency/MasterChangeNotifyResp.java": "e5c7303af85c2096cdfaf966a351a389ddd54a3e793d3b41b8c3ad321438ad5a",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/domain/consistency/LBConsistencyConfig.java": "df226a60f6dc6f8bb0e7a7286311bbfbdfb0dd523ac171b00edfc0a341ac4e1e",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/domain/consistency/SyncLBStatusReq.java": "1d2bb8960cce4f2fe5cf9fe51621c1eaada2e6c809b6c28a9c46177229d4653f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/domain/consistency/MasterChangeNotifyReq.java": "883bd53f70d7a30aa30c072144d646369dae4959b14d5ed5358eb031a5fb103c"
+      }
+    },
+    "after": {
+      "files": 87,
+      "physical": 26061,
+      "hashes": {
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/util/Failures.java": "3b551ec119660e196aee5bee005f0a0b1a331592757a991b037bea7233e67d2f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/dao/pv/PvLogData.java": "0e9dc9ba1b8fa3da124de4935e07ed91a01f19acf27a0d940cff34cb16f17aba",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/PlacementResult.java": "6896f316eb806c6e38993fca88eb5371fd0d4482d61eb8e5d50b5a69f765a24c",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/planner/BuiltinGroupPlanner.java": "34d48f41e0ea1dfd0d68f2bac0b7619596a1158881ffb6d21e108471c3bd084c",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/planner/GroupPlanner.java": "8afe7d95a7c713aa9dd28bb2aeee091f36884e4b253bf98d900f131840458c4d",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/prediction/FormulaPredictor.java": "e57bf7ab953e708336f77851406a7ebe792d385f22a23878086b93a995b227e8",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/prediction/PrefillTimePredictor.java": "790848aff7dad56a370394e673baed0c0b209e21e77f603a1a22154c4da0048c",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/prediction/LearningPredictor.java": "dd39fa8731cc41b9258580c8e6f6912ae659c1cd51a0b23d04db760b8c4a378f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/TaskTimer.java": "32a1c3fc17724f847f03b59e1c1a5e02d3c8078b10470e585c947de3a91d046f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ContextResult.java": "ba2a1885d88676fea60bf79462de4bd7af134fc70e0b5188131424499d79b501",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestTaskExecutor.java": "4ae69ddcb88054e0f345ea62e14615c25c8ed29393d5a8099b97122de3d8c924",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestTaskPool.java": "b7d8888a12a25327998dad717f46415b4565d879c8d160d348fc3651ef5a8b19",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DeliveryDispatcher.java": "19a9199dad8e439d69f0a95a22d5f2bd48391ce488337610b8d60fc43e030128",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestLifecycle.java": "c3cfb3f7581f018f1422be0385315831feaf16df49f1c6714ed204c08a846937",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AdmissionHandle.java": "c12ebff3ce43494b3cad69c362dd5163f0f45d32806f65b3a19a2c03be100e48",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestRepository.java": "c7665c27c3ef727cd09cbd48de7b7db69114c7fe3fb2614af6683610c20ea2c2",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/CancelReason.java": "22728893860a8ec209ec56ff353754fccae6bd3b82cb2b746703f3ea20de64a8",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/QueuedRequestScheduler.java": "ddf4dedb50557c1ebb0345f313e8637688beaed611fbb717d3cb0af4519ee4da",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestContext.java": "650c856d62c7f5cf85306ca886831e6bbeac9752fa7f91dcaf9dfc3e66dcdd18",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/QueueExecutionSettings.java": "2664fdd455167fa8f98144a3645f0d7f4d656eb3c23673f68fe48bb8e9a05804",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ExpirationTimer.java": "820ab123656ea5bebcd024d561bad6e2049114177e60599c2e6b679954f51587",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementConfiguration.java": "23e3971f6b9ca83b4f4d8cef95a99c0e25e1387822a5631bc0ec117458d28648",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestState.java": "118405e1257d41a4783e67dd732cfd4f4354d6efbd1a69eef72a6cbd0e58a1e9",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BatchEnqueueHelper.java": "84da39d982310b1bbd05d8c8e356666c2c4840db5bc8540de0f9c688f221f1ec",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementCapacityWaitQueue.java": "a2c79f444010326df9168b7cff743c7e0c386f6e5f2e2bb5154a85648fb1a278",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementAvailability.java": "1ee649f8122aa2c282f3ef5e6c4184f5abafe1f148f773e27aa8426a69de04c0",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestData.java": "5f673a6c56255af1005ff87f0c7b155ce52703807f8dddacd9433871f5f0f4be",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ScheduledTaskTimer.java": "1b8a026225e7406120edeee5ed9960106d00ceb8fef5f95d590fa9db91202574",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestScheduler.java": "4627384c412c52de2ce0c0201e325eca362804d152b7fa34b54d1f28492bb5c2",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/Delivery.java": "4f3734d673adf9e4020e52756e9dbe38006d8ecb99f6d5007e867f35d5d94ee8",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/OrderedRequestQueue.java": "6ea03a2e8d4e66f4ec579c40eeac352ffd06e2f3e682f05104b621b8df9fd55b",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementKey.java": "31078ae3706e1d43d6fea984240ad1f7bfe8a1262ddb26872bca719cb3bc698b",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementQueue.java": "f66ef68ccd7510813f5ddc95be2e902103c9bb0471ec44914c65c2d6ae726a1f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestWorkerSelector.java": "276dedbb73f7433a63286898e505937fdb883af77dfda9e8d5f8f3d8dd52df90",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DirectRequestScheduler.java": "ac17293081b145ed42d2639869dbd50c256368b6b6d0af6751b3eb8b6829fbae",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PreemptionRegistration.java": "e81b5ac3cefbe7824ad5b66ccff91597b1e7f40ff42be35f90b417a56a3fe346",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/GlobalQueueEntry.java": "cf58b69b6bb3d52be2849ebf36844fcbd8628ace455f0ca5d0cf23988a3d9f85",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ResponseCompletionExecutor.java": "d8ae89b3f58eb46c6c1a2d827ab60a7519df97f5828b4c2850e5c814a3bc8403",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestRoute.java": "d08c9d7e3fd5503079a5737a57754400c5fcabe701f9ddb22af384f4f2bf4f1f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AbstractRequestScheduler.java": "64557597708c1e970f873fe02919783dd247d260be514edb004993189c70e3ef",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DeliveryExecution.java": "32bff45e62dd79b43e69f6817ea85ccae81ac97e09003574470b215d4594d04e",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/preemption/CancelTarget.java": "b83eb0684095b14bea38036620aeda5df2a595006f104684efb849ce98e81f4f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/preemption/VictimResolution.java": "2e24c8fead8f041d4995eaf3008da29eee1927fb53b1f77426893fe0e12b7145",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/preemption/PreemptionCancelPhase.java": "4646ad52aa3df1a0422df15d384b25dc67ad63ab05477fb570e8a5178abd531b",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/DecodeResources.java": "d34872553b100a08709cbabbaeaa1c9aaf951a97251c4e7d8d4d30fb8a4ce9c7",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillActiveIndex.java": "353b7e0a000bca846abc9c825dae67911204d85d70af5665b54607d420d48c61",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillRequestQueue.java": "fd640055e786b21bf2d22072b45de78133893c05445af8034c3232607aab5fb9",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/EndpointStats.java": "adfc99e96c96a13682010c50047503039938acff742d324d305240731fcd0b9f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/WorkerEndpoint.java": "957e862bc63ba634c3a5eb0b780866ebd08af87a0deb8ea5a2c0c21622d44bc4",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/EndpointRegistry.java": "3122034c2bde97a8cb81d77c91387373c0f73be1bcad430cd70d2ea713fc54b6",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/DecodeEndpoint.java": "3eb67614561304152dc8264bbb9899e4bc65d7e0d001eab1f46a0c59f76cd587",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillEndpoint.java": "919d23cdbc7c495405c2985bbe5edf196a0fbeeb083c89d95405aa6bc751a65f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/delivery/CapacityBoundary.java": "444558865b94a7bfc065d9f1ed028ae8e974651c99e2d191471890576cf92bb9",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/delivery/BatchIdGenerator.java": "bd4d370302c7794f4ebab188ee5cd4ca47368c2c3c87c8c07db445764a9cd555",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/projection/RequestTimeEstimation.java": "ed1cdec465d9d268fd58401cb6d839556b3337c0164f4578ce4556ab8416a20c",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/EndpointRoundRobin.java": "37111ceaea05415cbe9220d4a434f8bd58c0e892dd3f5580649435f114a0f34c",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/VitWorkerSelector.java": "e10afeab2eb8ff0b52c82d1396cebcb8441b28fd4f2be0ed5b06fc5f60e23b97",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/VitSelectionStrategy.java": "0a5dc3611f63dfc83081f6fd31917d7bf67b2d7a0f3d15c22e5146692dc59bb9",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/PrefillCandidateSet.java": "50e720dd995293b076e4fdc0edc65ad715fa813eb27fcf64e36841d6a2d4cfc1",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/CostBasedPrefillStrategy.java": "e0b00c8517a7bc0f914587a3ae6bff43d30f198b7adc271ebd10163cbd3c8c60",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/PrefillSelectionStrategy.java": "e5dfc3de89e6676b4a04d5200632e4b25e17825732f1182bd4dd9da4cb41960e",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/DecodeSelectionStrategy.java": "eb4071eb72104fbcf6b3a13d3cb49abea08633e92ee11d2842ff8a5c58143d2f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/DecodeSelector.java": "363d58a3fbb611f20fd45012845383fa53a1a6dcb6bec72a0329c069c3977cd9",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/DefaultDecodePreemption.java": "319c6ad1f9dd707a6cd47ea00518a5a44aac7e37a6876b906a9516466fbffa11",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/DecodePreemption.java": "6b66eeaf8c97eb844758856f1278892b1e66eae2c47a50a5433da39a3612af7b",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/DecodePreemptionPolicy.java": "d5b357c544ae8db320ea26076d5071c487e527ab1470c6cd8ef95bc605f46def",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/PriorityDecodePreemptionPolicy.java": "e39b63db8921233866ed91d6cb51764f98b5cea9a5dba89374717fd3f1d6f32c",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/consistency/MasterStatusService.java": "5b8cd22860d0fcb1af8a88e04b78fedd01be5eaea2fc9457dcd1938235d7ce60",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/consistency/ZookeeperMasterElectService.java": "da1116c6672f12dd0f0429a766c580ceae80a5ea00f091f8e1832ee3bfbdec61",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/consistency/MasterStatusView.java": "3c1fc92bcfb2b83e29c58d6eae7f73a4e2757b350796207c915e304e7436227c",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/sync/runner/AbstractStatusRunner.java": "3a8d7df923e1e22c2b869e64fdc219be7d8582e5feb1759531f91cc68bfa5917",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/sync/runner/GrpcCacheStatusCheckRunner.java": "be06ab4d50af0cef602eb3c9296a50d56d3658a346bb2e1baef11fc7cdb43a46",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/sync/runner/GrpcWorkerStatusRunner.java": "279dbf432f716f45d1fdde25cac9e82e120ee34a99860186613f27f48adae41f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/sync/synchronizer/WorkerStatusSynchronizer.java": "f727114c33cd15c8277cbabfc0bb29667ae9cdc543d79bc3c1c248ff342a95eb",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/RecentCacheKeyTraceReporter.java": "48ad8bef983e86e86653735f56e9a5744cef5e1bc95e6cd2da198e64aa5df2e9",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/VitCacheSelector.java": "6a15f6d8128450a500e44af06beaaf967f9d02d5fccaa5cd17365532fac2fb4a",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/VitCacheDirectory.java": "3d5d07483898907a5e7e84aec997ee9195e387ad82bc6b4d3dcac7084bb2c2ad",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/monitor/EngineHealthReporter.java": "ec10ff73022fa3f9a9c55f8d0b1aba19c7d5ede445662c2b7b125c155432af65",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/monitor/RequestSchedulerReporter.java": "a47660edf5bd7822c7a26d54efc8add018215617e15d508fe12277fc7fe7132d",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/monitor/DeliveryMetricsReporter.java": "a78b4414d82abfc267983bb05b80ed829a377d86ee8d85f732234109a80334df",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/grpc/WorkerStatusRpcClient.java": "37d3f379e0042942a24fe9a7f122c59cf637d38745ae63a9199f511473b74d1e",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/address/WorkerAddressService.java": "4ee857d82ed918cbca2ff0a4bb4c101e10817ef92e5b5daa7a0a18e2d342647c",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/domain/consistency/SyncLBStatusResp.java": "2d04fa9e3b9e3ea88fcd79638b90881cd6f09a37e3ac8d1cbf52f164a65a14b5",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/domain/consistency/MasterChangeNotifyResp.java": "e5c7303af85c2096cdfaf966a351a389ddd54a3e793d3b41b8c3ad321438ad5a",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/domain/consistency/LBConsistencyConfig.java": "df226a60f6dc6f8bb0e7a7286311bbfbdfb0dd523ac171b00edfc0a341ac4e1e",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/domain/consistency/SyncLBStatusReq.java": "1d2bb8960cce4f2fe5cf9fe51621c1eaada2e6c809b6c28a9c46177229d4653f",
+        "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/domain/consistency/MasterChangeNotifyReq.java": "883bd53f70d7a30aa30c072144d646369dae4959b14d5ed5358eb031a5fb103c"
+      }
+    }
+  },
+  "top_level_types": {
+    "before": 87,
+    "after": 87,
+    "target": 64
+  },
+  "production_physical_lines": {
+    "before": 25999,
+    "after": 26061,
+    "delta": 62,
+    "limit": 25000
+  },
+  "core_classes": {
+    "RequestLifecycle": {
+      "before_effective": 1353,
+      "after_effective": 1353,
+      "before_physical": 1479,
+      "after_physical": 1479
+    },
+    "QueuedRequestScheduler": {
+      "before_effective": 1507,
+      "after_effective": 1494,
+      "before_physical": 1694,
+      "after_physical": 1679
+    },
+    "DeliveryDispatcher": {
+      "before_effective": 1476,
+      "after_effective": 1476,
+      "before_physical": 1612,
+      "after_physical": 1612
+    },
+    "PrefillEndpoint": {
+      "before_effective": 1529,
+      "after_effective": 1542,
+      "before_physical": 1745,
+      "after_physical": 1760
+    },
+    "DecodeEndpoint": {
+      "before_effective": 1384,
+      "after_effective": 1384,
+      "before_physical": 1553,
+      "after_physical": 1553
+    }
+  },
+  "validation": {
+    "full_ut_exit": 0,
+    "full_ut_modules": [
+      {
+        "tests": 306,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "tests": 61,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "tests": 209,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "tests": 2454,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "tests": 217,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 1
+      },
+      {
+        "tests": 400,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    ],
+    "component_perf_exit": 0,
+    "component_perf_modules": [
+      {
+        "tests": 8,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    ],
+    "e2e_exit": 0,
+    "pre_commit": "Passed; repository hooks, system Node workaround, Java Spotless/google-java-format",
+    "full_ut_total": {
+      "tests": 3647,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 1,
+      "passed": 3646
+    },
+    "long_perf_exits": {
+      "before-long": 0,
+      "after-long": 0
+    },
+    "profile": "opensource,!internal"
+  },
+  "performance": {
+    "assessment": "All configured gates passed. The short NON_BATCH 10k p99 increase did not repeat in a matched 30-second comparison; do not interpret these samples as proof of a speedup or statistical non-inferiority. Host background workloads were not isolated.",
+    "comparison": "Before this change vs after, matching production SHA256 baseline; not a new comparison against main",
+    "jvm": "G1, heap 8g, ParallelGCThreads=24, ConcGCThreads=8, MaxGCPauseMillis=20; NUMA wrapper unchanged",
+    "before": [
+      {
+        "delivery": "BATCH",
+        "decision": "FIXED_WINDOW",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "3000",
+        "client_qps": "2996.8",
+        "client_p99": "28.545ms",
+        "master_p99": "24ms"
+      },
+      {
+        "delivery": "BATCH",
+        "decision": "FIXED_WINDOW",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "10000",
+        "client_qps": "9989.1",
+        "client_p99": "30.510ms",
+        "master_p99": "27ms"
+      },
+      {
+        "delivery": "NON_BATCH",
+        "decision": "SINGLE",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "3000",
+        "client_qps": "2999.7",
+        "client_p99": "0.878ms",
+        "master_p99": "<1ms"
+      },
+      {
+        "delivery": "NON_BATCH",
+        "decision": "SINGLE",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "10000",
+        "client_qps": "9995.9",
+        "client_p99": "0.905ms",
+        "master_p99": "<1ms"
+      }
+    ],
+    "after": [
+      {
+        "delivery": "BATCH",
+        "decision": "FIXED_WINDOW",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "3000",
+        "client_qps": "2996.9",
+        "client_p99": "30.716ms",
+        "master_p99": "26ms"
+      },
+      {
+        "delivery": "BATCH",
+        "decision": "FIXED_WINDOW",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "10000",
+        "client_qps": "9989.3",
+        "client_p99": "31.883ms",
+        "master_p99": "29ms"
+      },
+      {
+        "delivery": "NON_BATCH",
+        "decision": "SINGLE",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "3000",
+        "client_qps": "2999.6",
+        "client_p99": "0.574ms",
+        "master_p99": "<1ms"
+      },
+      {
+        "delivery": "NON_BATCH",
+        "decision": "SINGLE",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "10000",
+        "client_qps": "9995.0",
+        "client_p99": "6.465ms",
+        "master_p99": "2ms"
+      }
+    ],
+    "non_batch_10k_30s_recheck": {
+      "before": [
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "10000",
+          "client_qps": "9992.9",
+          "client_p99": "2.313ms",
+          "master_p99": "1ms"
+        }
+      ],
+      "after": [
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "10000",
+          "client_qps": "9993.0",
+          "client_p99": "1.031ms",
+          "master_p99": "<1ms"
+        }
+      ]
+    }
+  },
+  "initial_full_ut_regression": {
+    "test": "RequestExecutionSchedulingTest.blockedExactHeadWaitsForItsCapacityEventWithoutPolling",
+    "observed": "Unrelated lower-priority arrival caused two attempts instead of one",
+    "fix": "Queue membership changes invalidate a capacity wait only when the queue now offers a bypass candidate; spent allowance keeps the wait current",
+    "targeted_final": "31 passed, zero failures/errors"
+  },
+  "new_contracts": [
+    "Unrelated queue arrivals do not poll blocked capacity; consumed bypass allowance cannot be renewed",
+    "Replacement queue can refuse bypass under default Scheduler",
+    "Replacement GroupPlanner can delay bypass and retain its wakeup time",
+    "Queue mutation and successful-dispatch allowance do not settle resources",
+    "Exact successful Decode strategy result survives generation capture failure without internal reselection",
+    "Direct Scheduler retries one handoff failure and commits exactly once"
+  ],
+  "historical_contract_updates": "Three Prefill tests still classified successful selection followed by failed generation capture as BLOCKED (14 parameterized cases). Updated only these cases to ENDPOINT_CHANGED and asserted the retained SUCCESS result; generation identity, resource cleanup and workspace-release assertions remain.",
+  "test_fixture_repair": "QueuedBatchDeliveryTest submission-failure test awaited an executor barrier before releasing its setup latch; explicitly release after injected synchronous failure, before waiting. Previous 5-second latch and barrier timeouts raced; no assertion was relaxed.",
+  "limitations": [
+    "Production physical-line limit and core-class budgets still fail; module line count increased in this boundary repair",
+    "No new performance comparison against main",
+    "UT and perf do not prove every interleaving deadlock-free",
+    "Projection still excludes transient live collection/capacity waits as documented"
+  ],
+  "source_verification": {
+    "java_files": 592,
+    "mismatches": [],
+    "local_mismatches": [],
+    "after_short": {
+      "production_files": 87,
+      "mismatches": []
+    },
+    "before_long": {
+      "production_files": 87,
+      "mismatches": []
+    },
+    "after_long": {
+      "production_files": 87,
+      "mismatches": []
+    }
+  }
+}

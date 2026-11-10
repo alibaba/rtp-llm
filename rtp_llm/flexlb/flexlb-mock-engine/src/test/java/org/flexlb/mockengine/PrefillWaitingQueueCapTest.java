@@ -71,7 +71,7 @@ class PrefillWaitingQueueCapTest {
 
         for (int i = 1; i <= 5; i++) {
             EngineRpcService.EnqueueBatchResponsePB response =
-                    enqueue(prefill, batch(1000 + i, slot(0, input(String.valueOf(i), 10))));
+                    enqueue(prefill, batch(1000 + i, slot(0, input(i, 10))));
             assertEquals(1, response.getSuccessesCount(), "batch " + i + " should be accepted");
             assertEquals(0, response.getErrorsCount(), "batch " + i + " should have no errors");
         }
@@ -82,7 +82,7 @@ class PrefillWaitingQueueCapTest {
                 "snapshot should report 4 queued batches");
 
         EngineRpcService.EnqueueBatchResponsePB rejected =
-                enqueue(prefill, batch(1006, slot(0, input("6", 10))));
+                enqueue(prefill, batch(1006, slot(0, input(6L, 10))));
         assertEquals(0, rejected.getSuccessesCount(), "6th batch should not be accepted");
         assertEquals(1, rejected.getErrorsCount(), "6th batch should be rejected");
         String message = rejected.getErrors(0).getErrorInfo().getErrorMessage();
@@ -101,14 +101,14 @@ class PrefillWaitingQueueCapTest {
                 prefill.getWaitingCount(),
                 "rejected request must not leak waitingPrefillRequests");
         assertEquals(5, prefill.getRunningCount(), "rejected request must not leak runningTasks");
-        assertEquals("rejected", prefill.getRequestStates().get(6L));
+        assertEquals("rejected", MockEngineTestSupport.getRequestStates(prefill).get(6L));
 
         // The 5 admitted batches drain to completion despite the rejection.
         awaitInflightZero(prefill, 5_000);
         assertEquals(0, prefill.getWaitingCount());
         assertEquals(0, prefill.getRunningCount());
-        assertEquals(5, prefill.getCompletedCount());
-        assertFalse(prefill.isLeakDetected());
+        assertEquals(5, MockEngineTestSupport.getCompletedCount(prefill));
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill));
     }
 
     @Test
@@ -142,16 +142,16 @@ class PrefillWaitingQueueCapTest {
                                 batch(1500 + i, slot(0, inputWithDecode(i, 10, BASE_PORT + 1))));
                 assertEquals(1, response.getSuccessesCount());
             }
-            long prefillOccupiedBefore = prefill.getOccupiedKvTokens();
-            long decodeOccupiedBefore = decode.getOccupiedKvTokens();
+            long prefillOccupiedBefore = MockEngineTestSupport.getOccupiedKvTokens(prefill);
+            long decodeOccupiedBefore = MockEngineTestSupport.getOccupiedKvTokens(decode);
             long decodeAvailableBefore = decode.getAvailableKvTokens();
 
             EngineRpcService.EnqueueBatchResponsePB rejected =
                     enqueue(prefill, batch(1503, slot(0, inputWithDecode(3, 10, BASE_PORT + 1))));
 
             assertEquals(1, rejected.getErrorsCount());
-            assertEquals(prefillOccupiedBefore, prefill.getOccupiedKvTokens());
-            assertEquals(decodeOccupiedBefore, decode.getOccupiedKvTokens());
+            assertEquals(prefillOccupiedBefore, MockEngineTestSupport.getOccupiedKvTokens(prefill));
+            assertEquals(decodeOccupiedBefore, MockEngineTestSupport.getOccupiedKvTokens(decode));
             assertEquals(decodeAvailableBefore, decode.getAvailableKvTokens());
         } finally {
             releaseScheduler.countDown();
@@ -168,11 +168,10 @@ class PrefillWaitingQueueCapTest {
         for (int i = 1; i <= 3; i++) {
             assertEquals(
                     1,
-                    enqueue(prefill, batch(2000 + i, slot(0, input(String.valueOf(i), 10))))
-                            .getSuccessesCount());
+                    enqueue(prefill, batch(2000 + i, slot(0, input(i, 10)))).getSuccessesCount());
         }
         EngineRpcService.EnqueueBatchResponsePB rejected =
-                enqueue(prefill, batch(2004, slot(0, input("4", 10))));
+                enqueue(prefill, batch(2004, slot(0, input(4L, 10))));
         assertEquals(1, rejected.getErrorsCount(), "4th batch should hit the cap");
 
         awaitInflightZero(prefill, 5_000);
@@ -180,14 +179,17 @@ class PrefillWaitingQueueCapTest {
         // After the drain the queue is empty again: new enqueues are accepted
         // and complete normally (a rejection must not poison the queue).
         EngineRpcService.EnqueueBatchResponsePB retry =
-                enqueue(prefill, batch(2005, slot(0, input("5", 10))));
+                enqueue(prefill, batch(2005, slot(0, input(5L, 10))));
         assertEquals(1, retry.getSuccessesCount(), "post-drain enqueue should be accepted");
         assertEquals(0, retry.getErrorsCount());
 
         awaitInflightZero(prefill, 5_000);
-        assertEquals(4, prefill.getCompletedCount(), "3 initial + 1 retry should complete");
+        assertEquals(
+                4,
+                MockEngineTestSupport.getCompletedCount(prefill),
+                "3 initial + 1 retry should complete");
         assertEquals(0, prefill.getWaitingCount());
-        assertFalse(prefill.isLeakDetected());
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill));
     }
 
     // ──────────── Test 3: cap <= 0 disables the gate (unbounded, legacy) ────────────
@@ -198,14 +200,14 @@ class PrefillWaitingQueueCapTest {
 
         for (int i = 1; i <= 10; i++) {
             EngineRpcService.EnqueueBatchResponsePB response =
-                    enqueue(prefill, batch(3000 + i, slot(0, input(String.valueOf(i), 10))));
+                    enqueue(prefill, batch(3000 + i, slot(0, input(i, 10))));
             assertEquals(1, response.getSuccessesCount(), "batch " + i + " should be accepted");
             assertEquals(0, response.getErrorsCount());
         }
 
         awaitInflightZero(prefill, 5_000);
-        assertEquals(10, prefill.getCompletedCount());
-        assertFalse(prefill.isLeakDetected());
+        assertEquals(10, MockEngineTestSupport.getCompletedCount(prefill));
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill));
     }
 
     // ──────────── Harness ────────────

@@ -1,172 +1,261 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.ContextResult;
+import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.RouteResult;
+import org.flexlb.balance.strategy.EncoderSelectionStrategy;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.util.Failures;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.Map;
 
 /**
- * Encoder endpoint with local decisions that have not appeared in WorkerStatus.
- * Its task IDs also identify which status facts belong to this exact endpoint.
- *
- * <p>Selection records a pending request and its uncached-token estimate. Status observations
- * reconcile those records and publish endpoint events; forgetting a request or retiring the
- * endpoint removes its local tracking.
+ * Tracks Encoder routes until worker status observes them, then until completion or cancellation.
+ * Its state lock serializes request admission, status changes and removal.
  */
-public final class EncoderEndpoint extends WorkerEndpoint {
-    private final EndpointEventProjector endpointEvents;
-    private final ConcurrentMap<String, RequestObservation> requestObservations =
-            new ConcurrentHashMap<>();
-    private final AtomicInteger pendingRequestCount = new AtomicInteger();
+public final class EncoderEndpoint extends WorkerEndpoint
+        implements EncoderSelectionStrategy.Candidate {
+    private Map<String, Tracked> requests = new HashMap<>();
 
-    /**
-     * Bind an Encoder worker generation to its request lifecycle projector.
-     */
-    public EncoderEndpoint(WorkerStatus status, EndpointEventProjector endpointEvents) {
+    private final PlacementAvailability availability;
+
+    public EncoderEndpoint(WorkerStatus status, PlacementAvailability availability) {
         super(status);
-        this.endpointEvents = endpointEvents;
+        this.availability = availability;
     }
 
-    /**
-     * Track a selected request until status reports it running or finished.
-     * Returns false if the worker is retiring or already tracks this request.
-     */
-    public boolean trackSelectedRequest(String requestId, long estimatedUncachedTokens) {
-        try (EndpointGenerationLifecycle.HandoffPermit handoff = tryAcquireGenerationHandoff()) {
-            if (handoff == null) {
-                return false;
+    @Override
+    public String address() {
+        return ipPort();
+    }
+
+    @Override
+    public String group() {
+        return getStatus().topologySnapshot().group();
+    }
+
+    @Override
+    public boolean available() {
+        return acceptsNewRequests() && getStatus().isAlive();
+    }
+
+    @Override
+    public long requestCount() {
+        stateLock().lock();
+        try {
+            return requestCountLocked();
+        } finally {
+            stateLock().unlock();
+        }
+    }
+
+    @Override
+    public long uncachedTokens() {
+        Map<String, WorkerStatus.TaskObservation> active;
+        long localTokens;
+        stateLock().lock();
+        try {
+            active = getStatus().committedEngineObservation().runningTaskList();
+            localTokens = 0;
+            for (var request : requests.values()) {
+                if (!request.observed() && !active.containsKey(request.route().requestId()))
+                    localTokens =
+                            com.google.common.math.LongMath.saturatedAdd(
+                                    localTokens, request.uncachedTokens());
             }
-            AtomicBoolean added = new AtomicBoolean();
-            requestObservations.compute(
-                    requestId,
-                    (id, current) -> {
-                        if (current != null) {
-                            return current;
-                        }
-                        pendingRequestCount.incrementAndGet();
-                        added.set(true);
-                        return new RequestObservation(false, Math.max(0L, estimatedUncachedTokens));
-                    });
-            return added.get();
+        } finally {
+            stateLock().unlock();
         }
-    }
-
-    /**
-     * Remove a request after its lifecycle ends, including local pending load.
-     */
-    public void forgetRequest(String requestId) {
-        if (removeRequestObservation(requestId)) {
-            endpointEvents.onEncoderCapacityChanged();
-        }
-    }
-
-    /**
-     * Count selected requests still awaiting their first WorkerStatus task.
-     */
-    public int pendingEncoderRequestCount() {
-        return pendingRequestCount.get();
-    }
-
-    /**
-     * Estimated Encoder work: client MM token estimates before status, then
-     * each active task's uncached synthesized input length from WorkerStatus.
-     */
-    public long inflightUncachedTokenEstimate() {
-        var activeTasks = getStatus().committedEngineObservation().runningTaskList();
-        long total = 0L;
-        for (WorkerStatus.TaskObservation task : activeTasks.values()) {
-            total = addSaturated(total, Math.max(0L, task.inputLength()));
-        }
-        for (var entry : requestObservations.entrySet()) {
-            if (!entry.getValue().seenInWorker() && !activeTasks.containsKey(entry.getKey())) {
-                total = addSaturated(total, entry.getValue().estimatedUncachedTokens());
-            }
-        }
+        long total = localTokens;
+        for (var task : active.values())
+            total =
+                    com.google.common.math.LongMath.saturatedAdd(
+                            total, Math.max(0, task.inputLength()));
         return total;
     }
 
-    @Override
-    public Runnable applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
-        requireStatusGeneration(ws);
-        WorkerStatus.StatusObservation observation = prepared.observation();
-        if (!observation.alive()) {
-            beginRetirement();
+    public boolean commit(RouteResult route, int requestLimit) {
+        var request = route.ctx().data().getRequest();
+        long hit =
+                request.getEncoderCacheHitLen() == null
+                        ? 0
+                        : Math.max(0, request.getEncoderCacheHitLen());
+        var tracked = new Tracked(route, false, Math.max(0, request.getSeqLen() - hit));
+        stateLock().lock();
+        try {
+            if (!acceptsNewRequests()) return false;
+            if (requests.containsKey(route.requestId()) || requestCountLocked() >= requestLimit)
+                return false;
+            requests.put(route.requestId(), tracked);
+            return true;
+        } finally {
+            stateLock().unlock();
         }
-        ws.publishPreparedStatus(prepared);
-        return projectStatus(observation, true);
+    }
+
+    public void release(RouteResult route) {
+        boolean removed = false;
+        stateLock().lock();
+        try {
+            var current = requests.get(route.requestId());
+            if (current != null && current.route() == route) {
+                requests.remove(route.requestId());
+                removed = true;
+            }
+        } finally {
+            stateLock().unlock();
+        }
+        if (removed) availability.changed(this);
     }
 
     @Override
-    public Runnable observeStatusHeartbeat(
-            WorkerStatus ws, WorkerStatus.StatusObservation observation) {
-        requireStatusGeneration(ws);
-        if (observation.owner() != ws) {
-            throw new IllegalArgumentException(
-                    "Status observation belongs to another WorkerStatus generation");
+    public StatusChange applyPreparedStatus(
+            WorkerStatus status, WorkerStatus.PreparedStatus prepared) {
+        requireStatusGeneration(status);
+        List<RequestStatus> changes = new ArrayList<>();
+        stateLock().lock();
+        try {
+            com.google.common.base.Preconditions.checkState(
+                    !isRetired(), "Encoder endpoint is retired");
+            if (!prepared.observation().alive()) beginRetirement();
+            collectStatusLocked(prepared.observation(), true, changes);
+            status.publishReducedStatus(prepared);
+        } finally {
+            stateLock().unlock();
         }
-        return projectStatus(observation, false);
+        return new StatusChange.Encoder(changes);
+    }
+
+    @Override
+    public StatusChange applyStatusHeartbeat(
+            WorkerStatus status, WorkerStatus.StatusObservation observation) {
+        super.applyStatusHeartbeat(status, observation);
+        return collectStatus(observation, false);
+    }
+
+    @Override
+    public void publishStatus(StatusChange change) {
+        if (change instanceof StatusChange.None) return;
+        var observed = (StatusChange.Encoder) change;
+        Throwable failure = null;
+        for (var request : observed.requests())
+            failure = Failures.run(failure, () -> publish(request));
+        failure = Failures.run(failure, () -> availability.changed(this));
+        Failures.rethrow(failure, "Encoder status publication failed");
     }
 
     @Override
     protected void closeEndpoint() {
-        List<String> requestIds = List.copyOf(requestObservations.keySet());
-        for (String requestId : requestIds) {
-            removeRequestObservation(requestId);
+        Map<String, Tracked> retired;
+        stateLock().lock();
+        try {
+            var result = requests;
+            requests = new HashMap<>();
+            retired = result;
+        } finally {
+            stateLock().unlock();
         }
-        endpointEvents.onEncoderGenerationRetired(this, requestIds);
-        endpointEvents.onEncoderCapacityChanged();
+        Throwable failure = null;
+        for (var request : retired.values()) {
+            var route = request.route();
+            failure =
+                    Failures.run(
+                            failure,
+                            () ->
+                                    route.ctx()
+                                            .data()
+                                            .getRequestScheduler()
+                                            .onEndpointRetired(
+                                                    route.ctx(),
+                                                    new ContextResult.EndpointRetirement(
+                                                            route,
+                                                            null,
+                                                            org.flexlb.dao.route.RoleType.ENCODER,
+                                                            this,
+                                                            "Encoder endpoint retired: " + ipPort(),
+                                                            System.currentTimeMillis())));
+        }
+        failure = Failures.run(failure, () -> availability.changed(this));
+        Failures.rethrow(failure, "Encoder retirement publication failed");
     }
 
-    private boolean removeRequestObservation(String requestId) {
-        RequestObservation removed = requestObservations.remove(requestId);
-        if (removed == null) {
-            return false;
-        }
-        if (!removed.seenInWorker()) {
-            pendingRequestCount.decrementAndGet();
-        }
-        return true;
+    private long requestCountLocked() {
+        var engine = getStatus().committedEngineObservation();
+        long pending = 0;
+        for (var request : requests.values()) if (!request.observed()) pending++;
+        return Math.max(0, engine.runningQueryLen())
+                + Math.max(0, engine.waitingQueryLen())
+                + pending;
     }
 
-    private static long addSaturated(long total, long additional) {
-        return Long.MAX_VALUE - total < additional ? Long.MAX_VALUE : total + additional;
-    }
-
-    private Runnable projectStatus(
+    private StatusChange collectStatus(
             WorkerStatus.StatusObservation observation, boolean includeFinished) {
-        List<WorkerStatus.TaskObservation> running = new ArrayList<>();
-        List<WorkerStatus.TaskObservation> finished = new ArrayList<>();
-        for (WorkerStatus.TaskObservation task : observation.activeTasks().values()) {
-            if (markObserved(task.requestId())) {
-                running.add(task);
-            }
+        List<RequestStatus> changes = new ArrayList<>();
+        stateLock().lock();
+        try {
+            collectStatusLocked(observation, includeFinished, changes);
+        } finally {
+            stateLock().unlock();
+        }
+        return new StatusChange.Encoder(changes);
+    }
+
+    private void collectStatusLocked(
+            WorkerStatus.StatusObservation observation,
+            boolean includeFinished,
+            List<RequestStatus> changes) {
+        // Only locally tracked requests need reconciliation; reports may include many other tasks.
+        for (var entry : requests.entrySet()) {
+            if (!observation.activeTasks().containsKey(entry.getKey())) continue;
+            var tracked = entry.getValue();
+            if (!tracked.observed())
+                entry.setValue(new Tracked(tracked.route(), true, tracked.uncachedTokens()));
+            changes.add(
+                    new RequestStatus(
+                            tracked.route(), ContextResult.WorkerRequestEventType.ACTIVE, 0));
         }
         if (includeFinished) {
-            for (WorkerStatus.TaskObservation task : observation.finishedTasks().values()) {
-                if (markObserved(task.requestId())) {
-                    finished.add(task);
+            var members = requests.entrySet().iterator();
+            while (members.hasNext()) {
+                var entry = members.next();
+                var task = observation.finishedTasks().get(entry.getKey());
+                if (task != null) {
+                    var tracked = entry.getValue();
+                    members.remove();
+                    changes.add(
+                            new RequestStatus(
+                                    tracked.route(),
+                                    task.errorCode() == 0
+                                            ? ContextResult.WorkerRequestEventType.COMPLETED
+                                            : ContextResult.WorkerRequestEventType.FAILED,
+                                    task.errorCode()));
                 }
             }
         }
-        return () -> endpointEvents.onEncoderStatus(this, running, finished);
     }
 
-    private boolean markObserved(String requestId) {
-        return requestObservations.computeIfPresent(
-                        requestId,
-                        (id, current) -> {
-                            if (!current.seenInWorker()) {
-                                pendingRequestCount.decrementAndGet();
-                            }
-                            return new RequestObservation(true, current.estimatedUncachedTokens());
-                        })
-                != null;
+    private void publish(RequestStatus status) {
+        var route = status.route();
+        route.ctx()
+                .data()
+                .getRequestScheduler()
+                .onWorkerRequestEvent(
+                        route.ctx(),
+                        new ContextResult.WorkerRequestEvent(
+                                route,
+                                null,
+                                org.flexlb.dao.route.RoleType.ENCODER,
+                                status.kind(),
+                                status.errorCode(),
+                                "",
+                                System.currentTimeMillis()));
     }
 
-    private record RequestObservation(boolean seenInWorker, long estimatedUncachedTokens) {}
+    private record Tracked(RouteResult route, boolean observed, long uncachedTokens) {}
+
+    public record RequestStatus(
+            RouteResult route, ContextResult.WorkerRequestEventType kind, long errorCode) {}
 }

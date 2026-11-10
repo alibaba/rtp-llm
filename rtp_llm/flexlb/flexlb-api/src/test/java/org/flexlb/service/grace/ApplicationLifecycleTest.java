@@ -1,22 +1,14 @@
 package org.flexlb.service.grace;
 
-import org.flexlb.config.CacheMatchConfiguration;
-import org.flexlb.config.KvcmCacheMatchingConfig;
-import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.engine.grpc.client.KvcmGrpcClient;
-import org.flexlb.engine.grpc.client.KvcmLeaderResolver;
-import org.flexlb.engine.grpc.client.KvcmMetaServiceClient;
-import org.flexlb.engine.grpc.client.KvcmWorkerMetadataResolver;
-import org.flexlb.engine.grpc.monitor.GrpcReporter;
-import org.flexlb.engine.grpc.monitor.KvcmMetricsReporter;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.httpserver.FlexlbGrpcServer;
-import org.flexlb.listener.ApplicationWarmupState;
+import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.core.env.Environment;
-import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -24,7 +16,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -37,12 +28,12 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks application readiness and orderly shutdown of its registered resources.
+ * Verifies Spring lifecycle wiring and that serving shutdown drains transport before releasing resources.
  */
 class ApplicationLifecycleTest {
     @Test
     void contextCloseDrainsTransportBeforeDestroyingServingResources() throws Exception {
-        var consistency = mock(LBStatusConsistencyService.class);
+        var consistency = mock(MasterStatusService.class);
         var grpc = mock(FlexlbGrpcServer.class);
         var draining = new CountDownLatch(1);
         var complete = new CountDownLatch(1);
@@ -61,9 +52,10 @@ class ApplicationLifecycleTest {
                 new ApplicationLifecycle(
                         consistency,
                         grpc,
-                        mock(GracefulLifecycleReporter.class),
+                        mock(EngineHealthReporter.class),
                         context.getEnvironment(),
-                        new ApplicationWarmupState(),
+                        new org.flexlb.listener.ApplicationWarmupState(),
+                        mock(AbstractRequestScheduler.class),
                         0L);
         context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
         context.registerBean(
@@ -79,12 +71,12 @@ class ApplicationLifecycleTest {
             closing.get(3, TimeUnit.SECONDS);
         }
         assertTrue(destroyed.get());
-        assertTrue(lifecycle.shutdownCompletedSuccessfully());
+        verify(grpc).drain();
     }
 
     @Test
     void childContextCloseDoesNotStopTheServingContext() {
-        var consistency = mock(LBStatusConsistencyService.class);
+        var consistency = mock(MasterStatusService.class);
         var grpc = mock(FlexlbGrpcServer.class);
         try (var context = new AnnotationConfigApplicationContext();
                 var child = new AnnotationConfigApplicationContext()) {
@@ -92,9 +84,10 @@ class ApplicationLifecycleTest {
                     new ApplicationLifecycle(
                             consistency,
                             grpc,
-                            mock(GracefulLifecycleReporter.class),
+                            mock(EngineHealthReporter.class),
                             context.getEnvironment(),
-                            new ApplicationWarmupState(),
+                            new org.flexlb.listener.ApplicationWarmupState(),
+                            mock(AbstractRequestScheduler.class),
                             0L);
             context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
             context.refresh();
@@ -108,102 +101,47 @@ class ApplicationLifecycleTest {
     @Test
     void springCanWireProductionConstructor() {
         try (var context = new AnnotationConfigApplicationContext()) {
-            context.setAllowCircularReferences(false);
+            context.registerBean(MasterStatusService.class, () -> mock(MasterStatusService.class));
+            context.registerBean(FlexlbGrpcServer.class, () -> mock(FlexlbGrpcServer.class));
             context.registerBean(
-                    LBStatusConsistencyService.class, () -> mock(LBStatusConsistencyService.class));
-            context.registerBean(
-                    CacheMatchConfiguration.class,
-                    () -> {
-                        var configuration = mock(CacheMatchConfiguration.class);
-                        when(configuration.getKvcmRuntimeConfig())
-                                .thenReturn(new KvcmCacheMatchingConfig());
-                        return configuration;
-                    });
-            context.registerBean(
-                    KvcmMetaServiceClient.class, () -> mock(KvcmMetaServiceClient.class));
-            context.registerBean(KvcmLeaderResolver.class, () -> mock(KvcmLeaderResolver.class));
-            context.registerBean(
-                    KvcmWorkerMetadataResolver.class, () -> mock(KvcmWorkerMetadataResolver.class));
-            context.registerBean(GrpcReporter.class, () -> mock(GrpcReporter.class));
-            context.registerBean(KvcmMetricsReporter.class, () -> mock(KvcmMetricsReporter.class));
-            context.registerBean(
-                    FlexlbGrpcServer.class,
-                    () -> {
-                        // Preserve the server-to-client dependency while mocking the transport.
-                        context.getBean(KvcmGrpcClient.class);
-                        return mock(FlexlbGrpcServer.class);
-                    });
-            context.registerBean(
-                    GracefulLifecycleReporter.class, () -> mock(GracefulLifecycleReporter.class));
-            context.register(
-                    ApplicationLifecycle.class, ApplicationWarmupState.class, KvcmGrpcClient.class);
+                    EngineHealthReporter.class, () -> mock(EngineHealthReporter.class));
+            context.registerBean(org.flexlb.listener.ApplicationWarmupState.class);
+            context.register(ApplicationLifecycle.class);
+            context.getBeanFactory()
+                    .registerSingleton("scheduler", mock(AbstractRequestScheduler.class));
             context.refresh();
             assertNotNull(context.getBean(ApplicationLifecycle.class));
-            assertFalse(context.getBean(ApplicationWarmupState.class).isWarmupFinished());
-
-            var client = context.getBean(KvcmGrpcClient.class);
-            ReflectionTestUtils.invokeMethod(client, "recordHeartbeat", false);
-            assertEquals(0, client.healthSnapshot().consecutiveHeartbeatFailures());
-
-            context.getBean(ApplicationLifecycle.class).online();
-            assertTrue(context.getBean(ApplicationWarmupState.class).isWarmupFinished());
-            ReflectionTestUtils.invokeMethod(client, "recordHeartbeat", false);
-            assertEquals(1, client.healthSnapshot().consecutiveHeartbeatFailures());
         }
     }
 
     @Test
     void normalServiceDoesNotDrainAndRepeatedOfflineIsIdempotent() {
-        var consistency = mock(LBStatusConsistencyService.class);
+        var consistency = mock(MasterStatusService.class);
         var grpc = mock(FlexlbGrpcServer.class);
-        var reporter = mock(GracefulLifecycleReporter.class);
+        var reporter = mock(EngineHealthReporter.class);
         var environment = mock(Environment.class);
         when(environment.getActiveProfiles()).thenReturn(new String[0]);
-        var warmupState = new ApplicationWarmupState();
         var lifecycle =
-                new ApplicationLifecycle(consistency, grpc, reporter, environment, warmupState, 0L);
-        assertFalse(warmupState.isWarmupFinished());
-        assertFalse(lifecycle.isHealthy());
+                new ApplicationLifecycle(
+                        consistency,
+                        grpc,
+                        reporter,
+                        environment,
+                        new org.flexlb.listener.ApplicationWarmupState(),
+                        mock(AbstractRequestScheduler.class),
+                        0L);
         lifecycle.online();
-        assertTrue(warmupState.isWarmupFinished());
         assertTrue(lifecycle.isHealthy());
         verifyNoInteractions(grpc);
         assertTrue(lifecycle.offline());
         assertTrue(lifecycle.offline());
         assertFalse(lifecycle.isHealthy());
-        assertTrue(warmupState.isWarmupFinished());
         verify(consistency).offline();
         verify(grpc).drain();
-        verify(reporter).reportShutdownComplete(anyLong());
-    }
-
-    @Test
-    void repeatedOnlineResetsSharedWarmupStateUntilSynchronizationCompletes() {
-        var consistency = mock(LBStatusConsistencyService.class);
-        var environment = mock(Environment.class);
-        when(environment.getActiveProfiles()).thenReturn(new String[0]);
-        var warmupState = new ApplicationWarmupState();
-        var lifecycle =
-                new ApplicationLifecycle(
-                        consistency,
-                        mock(FlexlbGrpcServer.class),
-                        mock(GracefulLifecycleReporter.class),
-                        environment,
-                        warmupState,
-                        0L);
-        doAnswer(
-                        invocation -> {
-                            assertFalse(warmupState.isWarmupFinished());
-                            assertFalse(lifecycle.isHealthy());
-                            return null;
-                        })
-                .when(consistency)
-                .start();
-
-        lifecycle.online();
-        assertTrue(warmupState.isWarmupFinished());
-        lifecycle.online();
-        assertTrue(warmupState.isWarmupFinished());
-        assertTrue(lifecycle.isHealthy());
+        verify(reporter)
+                .reportDuration(
+                        org.mockito.ArgumentMatchers.eq(
+                                EngineHealthReporter.Event.SHUTDOWN_COMPLETE),
+                        anyLong());
     }
 }

@@ -3,9 +3,7 @@ package org.flexlb.domain.consistency;
 import lombok.Getter;
 import lombok.Setter;
 
-/**
- * Carries the master-change notification sent between FlexLB instances.
- */
+/** Master-change notification identity. */
 @Setter
 @Getter
 public class MasterChangeNotifyReq {

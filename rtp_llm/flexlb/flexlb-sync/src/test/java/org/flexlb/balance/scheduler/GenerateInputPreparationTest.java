@@ -1,0 +1,201 @@
+package org.flexlb.balance.scheduler;
+
+import com.google.protobuf.ByteString;
+import com.google.protobuf.InvalidProtocolBufferException;
+import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
+import org.flexlb.config.ConfigService;
+import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
+import org.flexlb.service.TheoryCacheHitReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+/**
+ * Checks deferred payload preparation, replacement, and cancellation before a request reaches selection.
+ */
+@Timeout(10)
+class GenerateInputPreparationTest {
+    @Test
+    void failedPreparationIsDeferredAndPayloadReplacementRemainsAuthoritative() throws Exception {
+        var context = new RequestContext(SchedulingTestConfig.batchConfig());
+        context.data().setGenerateInputPb(ByteString.copyFrom(new byte[] {(byte) 0xff}));
+        assertDoesNotThrow(context.data()::prepareGenerateInput);
+        var failure =
+                assertThrows(
+                        InvalidProtocolBufferException.class, context.data()::getGenerateInput);
+        assertSame(
+                failure,
+                assertThrows(
+                        InvalidProtocolBufferException.class, context.data()::getGenerateInput));
+        var valid = GenerateInputPB.newBuilder().setRequestId(71).addTokenIds(42).build();
+        context.data().setGenerateInputPb(valid.toByteString());
+        context.data().prepareGenerateInput();
+        var parsed = context.data().getGenerateInput();
+        assertEquals(valid, GenerateInputPB.parseFrom(parsed.toBuilder().build().toByteString()));
+        assertSame(parsed, context.data().getGenerateInput());
+        assertEquals(71L, context.data().getGenerateInput().toBuilder().getRequestId());
+        parsed.toBuilder().setRequestId(72).build();
+        assertEquals(71L, context.data().getGenerateInput().toBuilder().getRequestId());
+        context.data().setGenerateInputPb(ByteString.EMPTY);
+        assertFalse(context.data().hasGenerateInput());
+        assertNull(context.data().getGenerateInput());
+    }
+
+    @Test
+    void dispatcherDiscardsUnusedInputWithoutParsingIt() throws Exception {
+        var config = SchedulingTestConfig.newConfig();
+        config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+        var data = new RequestContext(config).data();
+        data.setGenerateInputPb(ByteString.copyFrom(new byte[] {(byte) 0xff}));
+        assertTrue(data.hasGenerateInput());
+        var dispatcher =
+                new DeliveryDispatcher(
+                        null,
+                        DeliveryTestSupport.service(config),
+                        mock(DeliveryMetricsReporter.class),
+                        mock(TaskTimer.class),
+                        SchedulingTestConfig.capacity(config),
+                        mock(DeliveryExecution.class));
+        assertNull(dispatcher.validateRequestInput(data));
+        dispatcher.releaseUnusedInput(data);
+        assertFalse(data.hasGenerateInput());
+        assertEquals(1, data.getGenerateInputSize());
+        assertNull(data.getGenerateInput());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void archiveDropsCachedInputWithoutInvalidatingAnExistingReader(boolean prepared)
+            throws Exception {
+        var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 71L);
+        var wire = GenerateInputPB.newBuilder().setRequestId(71L).addTokenIds(42).build();
+        context.data().setGenerateInputPb(wire.toByteString());
+        var reader = prepared ? context.data().getGenerateInput() : null;
+        var repository = new RequestRepository();
+        assertEquals(
+                RequestRepository.RegistrationResult.REGISTERED,
+                repository.register(
+                        context,
+                        mock(AbstractRequestScheduler.class),
+                        new RequestFuture((kind, value, failure) -> true),
+                        60_000L,
+                        org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED));
+        assertThrows(
+                IllegalStateException.class,
+                () -> context.data().setGenerateInputPb(ByteString.EMPTY));
+        repository.archive(context, RequestState.from(context.snapshot()));
+        assertNull(repository.findActive("71"));
+        assertFalse(context.data().hasGenerateInput());
+        assertNull(context.data().getGenerateInput());
+        if (reader != null) {
+            assertEquals(
+                    wire, GenerateInputPB.parseFrom(reader.toBuilder().build().toByteString()));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void cancellationOrDeadlineDuringPreparationCannotReachSelection(boolean deadline)
+            throws Exception {
+        var config = SchedulingTestConfig.batchConfig();
+        var source = RequestProtocolTestSupport.context(config, 17001L);
+        var context = spy(source);
+        var data = spy(source.data());
+        org.springframework.test.util.ReflectionTestUtils.setField(context, "data", data);
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var clockAdvanced = new AtomicBoolean();
+        Thread submittingThread = Thread.currentThread();
+        doAnswer(
+                        call -> {
+                            assertFalse(Thread.holdsLock(context));
+                            assertNotEquals(Thread.currentThread(), submittingThread);
+                            entered.countDown();
+                            assertTrue(release.await(5, TimeUnit.SECONDS));
+                            return call.callRealMethod();
+                        })
+                .when(data)
+                .prepareGenerateInput();
+        // Advance only the request clock, leaving the timer pending to exercise the absolute check.
+        doAnswer(call -> clockAdvanced.get() ? 0L : call.callRealMethod())
+                .when(data)
+                .getRequestExpiresAtMs();
+        ConfigService service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        var reporter = mock(DeliveryMetricsReporter.class);
+        var router = mock(RequestRouteSelector.class);
+        var registry =
+                SchedulerTestSupport.create(
+                        service,
+                        reporter,
+                        mock(RequestSchedulerReporter.class),
+                        mock(TheoryCacheHitReporter.class),
+                        router,
+                        mock(DecodePreemption.class),
+                        new PlacementAvailability());
+        var queue = registry;
+        try {
+            var future =
+                    SchedulerTestServices.entry(
+                                    (AbstractRequestScheduler)
+                                            org.flexlb.balance.scheduler.SchedulerTestServices
+                                                    .scheduler(queue))
+                            .submit(context);
+            assertTrue(
+                    entered.await(3, TimeUnit.SECONDS), "submit returns while planning is blocked");
+            if (deadline) {
+                clockAdvanced.set(true);
+            } else {
+                registry.cancel("17001", 0L, CancelReason.CLIENT_CANCELLED);
+                assertEquals(
+                        8504,
+                        future.get(2, TimeUnit.SECONDS).getCode(),
+                        "input preparation owns no admission handle and cannot hold cancellation open");
+            }
+            release.countDown();
+            assertEquals(deadline ? 8431 : 8504, future.get(3, TimeUnit.SECONDS).getCode());
+            RequestProtocolTestSupport.close(queue);
+            verify(router, never())
+                    .select(any(), org.mockito.ArgumentMatchers.nullable(String.class));
+            assertEquals(
+                    0,
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                            .liveRequestCount());
+        } finally {
+            release.countDown();
+            RequestProtocolTestSupport.close(queue);
+            if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(registry)) {
+                registry.closeOutstandingAndTerminalize();
+            }
+            SchedulerTestSupport.timer(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry))
+                    .close();
+            SchedulerTestSupport.closeRequestExecutors(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
+        }
+    }
+}

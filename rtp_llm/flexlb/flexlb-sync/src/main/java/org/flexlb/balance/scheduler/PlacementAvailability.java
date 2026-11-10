@@ -1,55 +1,72 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.dao.route.RoleType;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * Versioned, O(1) notification edge for logical placement capacity.
  *
- * <p>It never owns or iterates requests. Exact-endpoint changes also advance
- * their group and role-wide keys, while exact waiters consume only the exact
- * edge. This prevents one worker's release from waking requests parked on
- * every worker in the same group.</p>
+ * <p>It never owns or iterates requests. A worker change advances its group and role versions.
+ * Listeners receive the exact worker for route invalidation; waiting requests retry selection
+ * across the allowed group instead of retaining a worker-specific capacity promise.</p>
  */
 @Component
 public final class PlacementAvailability {
     private final AtomicLong sequence = new AtomicLong();
+    private final AtomicLong forgottenThrough = new AtomicLong();
     private final ConcurrentMap<PlacementKey, Long> lastChanged = new ConcurrentHashMap<>();
-    private final ConcurrentMap<Listener, Boolean> listeners = new ConcurrentHashMap<>();
+    private final Set<Listener> listeners = ConcurrentHashMap.newKeySet();
 
-    /** Notify that a fresh placement in this domain may now succeed. */
-    public void capacityChanged(PlacementKey key) {
-        publish(key, ChangeKind.CAPACITY);
-    }
-
-    /** Notify that an endpoint generation was published, replaced, or removed. */
-    public void topologyChanged(PlacementKey key) {
-        publish(key, ChangeKind.TOPOLOGY);
-    }
-
-    public void capacityChanged(RoleType role, String group, String endpoint) {
-        capacityChanged(PlacementKey.exact(role, group, endpoint));
-    }
-
-    public void topologyChanged(RoleType role, String group, String endpoint) {
-        topologyChanged(PlacementKey.exact(role, group, endpoint));
-    }
-
-    void addListener(Listener candidate) {
+    public void addListener(Listener candidate) {
         Objects.requireNonNull(candidate, "listener");
-        listeners.put(candidate, Boolean.TRUE);
+        listeners.add(candidate);
     }
 
-    void removeListener(Listener candidate) {
+    public void removeListener(Listener candidate) {
         if (candidate != null) {
             listeners.remove(candidate);
         }
+    }
+
+    /**
+     * Publish one worker's edge without retaining history from a retired generation.
+     */
+    public void changed(WorkerStatus worker, String address) {
+        changed(
+                PlacementKey.exact(worker.getRole(), worker.topologySnapshot().group(), address),
+                worker,
+                null);
+    }
+
+    public void changed(WorkerEndpoint endpoint) {
+        var status = Objects.requireNonNull(endpoint, "endpoint").getStatus();
+        changed(
+                PlacementKey.exact(
+                        status.getRole(), status.topologySnapshot().group(), endpoint.ipPort()),
+                status,
+                endpoint);
+    }
+
+    /**
+     * The registry calls this after drain, while it still owns the exact status identity.
+     * Shared group history can also be discarded: older plans retry using the floor,
+     * and active members publish subsequent edges normally. No waiters are broadcast.
+     */
+    public void clearRetired(WorkerStatus worker) {
+        checkState(!worker.isActiveGeneration(), "Cannot clear an active worker generation");
+        discardHistory(
+                new PlacementKey(worker.getRole(), worker.topologySnapshot().group(), null),
+                sequence.incrementAndGet());
     }
 
     long sequence() {
@@ -57,58 +74,55 @@ public final class PlacementAvailability {
     }
 
     long lastChangedSequence(PlacementKey key) {
-        return lastChanged.getOrDefault(key, 0L);
+        long version = lastChanged.getOrDefault(key.waitingDomain(), 0L);
+        return Math.max(version, forgottenThrough.get());
     }
 
-    private void publish(PlacementKey key, ChangeKind kind) {
+    private void changed(PlacementKey key, WorkerStatus worker, WorkerEndpoint endpoint) {
         Objects.requireNonNull(key, "key");
         long next = sequence.incrementAndGet();
-        // Publishers may reach these keys out of sequence; every edge retains
-        // the newest version even when an older publication finishes later.
-        lastChanged.merge(key, next, Math::max);
-        if (key.endpoint() != null) {
-            // Exact waiters follow role/address across topology group changes.
-            lastChanged.merge(
-                    PlacementKey.exact(key.role(), null, key.endpoint()), next, Math::max);
-            lastChanged.merge(new PlacementKey(key.role(), key.group()), next, Math::max);
+        if (!worker.isActiveGeneration()) {
+            forgottenThrough.accumulateAndGet(next, Math::max);
+        } else {
+            // An older publisher may finish after retirement and replacement publication.
+            lastChanged.merge(key.waitingDomain(), next, Math::max);
+            if (key.group() != null) {
+                lastChanged.merge(PlacementKey.anyGroup(key.role()), next, Math::max);
+            }
+            if (!worker.isActiveGeneration()) {
+                discardHistory(key, next);
+            }
         }
-        if (key.group() != null) {
-            lastChanged.merge(PlacementKey.anyGroup(key.role()), next, Math::max);
-        }
-        Event event = new Event(key, kind);
-        // One physical capacity edge produces one callback. The exact key is
-        // sufficient for group/role waiters through their relevance match and
-        // avoids three global-lock acquisitions for every endpoint release.
-        for (Listener listener : listeners.keySet()) {
+        // Preserve one callback per physical change, including the worker identity needed
+        // to invalidate existing routes. Wait queues use only the role and group.
+        for (Listener listener : listeners) {
             try {
-                listener.onAvailabilityChanged(event);
+                if (endpoint == null) listener.onAvailabilityChanged(key);
+                else listener.onEndpointChanged(endpoint);
             } catch (Throwable failure) {
                 Logger.warn("Placement availability listener failed", failure);
             }
         }
     }
 
-    enum ChangeKind {
-        CAPACITY,
-        TOPOLOGY
+    private void discardHistory(PlacementKey key, long through) {
+        // Publish the floor before deletion so a plan cannot mistake a removed edge for no change.
+        forgottenThrough.accumulateAndGet(through, Math::max);
+        lastChanged.computeIfPresent(
+                key.waitingDomain(), (ignored, version) -> version <= through ? null : version);
     }
 
-    /**
-     * Identifies the capacity or topology edge whose version changed.
-     */
-    record Event(PlacementKey key, ChangeKind kind) {
-
-        Event {
-            Objects.requireNonNull(key, "key");
-            Objects.requireNonNull(kind, "kind");
-        }
-    }
-
-    /**
-     * Receives a capacity-change edge that may make blocked placement work retryable.
-     */
     @FunctionalInterface
-    interface Listener {
-        void onAvailabilityChanged(Event event);
+    public interface Listener {
+        default void onEndpointChanged(WorkerEndpoint endpoint) {
+            var status = endpoint.getStatus();
+            onAvailabilityChanged(
+                    PlacementKey.exact(
+                            status.getRole(),
+                            status.topologySnapshot().group(),
+                            endpoint.ipPort()));
+        }
+
+        void onAvailabilityChanged(PlacementKey key);
     }
 }

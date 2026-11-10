@@ -45,11 +45,6 @@ public class HttpNettyChannelContext<T> {
      */
     private HttpResponse httpResp;
 
-    /**
-     * Cache model service SSE response in streaming calls until end of event
-     */
-    private List<Byte> buffer;
-
     private List<ByteData> byteDataList;
 
     private LongAdder byteDataSize;
@@ -68,11 +63,6 @@ public class HttpNettyChannelContext<T> {
      * Callback function invoked when exception is thrown during netty interaction
      */
     private BiConsumer<HttpNettyChannelContext<T>, Throwable> errorCallback;
-
-    /**
-     * Netty channel enhancement processing callback
-     */
-    private Consumer<HttpNettyChannelContext<T>> channelEnhanceCallback;
 
     /**
      * Processing completion flag

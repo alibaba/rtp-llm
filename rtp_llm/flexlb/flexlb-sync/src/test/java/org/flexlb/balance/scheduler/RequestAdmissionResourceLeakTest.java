@@ -2,14 +2,14 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.scheduler.RequestLifecycleTestSupport.Registered;
-import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
+import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.scheduler.RequestProtocolTestSupport.Registered;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -39,7 +39,7 @@ import static org.mockito.Mockito.when;
  */
 class RequestAdmissionResourceLeakTest {
     private FlexlbConfig config;
-    private RequestRegistry lifecycle;
+    private AbstractRequestScheduler lifecycle;
 
     @BeforeEach
     void setUp() {
@@ -47,93 +47,123 @@ class RequestAdmissionResourceLeakTest {
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         lifecycle =
-                new RequestRegistry(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.create(
                         service,
-                        mock(BatchSchedulerReporter.class),
-                        mock(RequestSchedulerReporter.class));
+                        mock(DeliveryMetricsReporter.class),
+                        mock(RequestSchedulerReporter.class),
+                        mock(TheoryCacheHitReporter.class));
     }
 
     @AfterEach
     void tearDown() {
-        if (lifecycle.closeAdmissionAndAwaitMutations()) {
+        if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(lifecycle)) {
             lifecycle.closeOutstandingAndTerminalize();
-            lifecycle.closeExpiration();
-            lifecycle.closePublisher();
+            SchedulerTestSupport.timer(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle))
+                    .close();
+            SchedulerTestSupport.closeRequestExecutors(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
         }
     }
 
     @Test
     void declinedPublicationLeavesNoCanonicalItem() {
         Registered registered = registerItem(1L);
-        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle("1", registered.future())) {
+        PlacementOperation admission =
+                SchedulerTestSupport.claim(lifecycle, "1", registered.future());
+        try (var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(
                     PlacementResult.Status.BLOCKED,
-                    lifecycle.commitRoute(registered.item(), () -> false));
-            assertNull(activeItem(1L));
-            assertTrue(lifecycle.isAdmissionOpen("1", registered.future()));
-            verify(registered.item().decodeEp(), never())
-                    .release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
+                    RequestProtocolTestSupport.commitRoute(
+                            lifecycle,
+                            registered.item(),
+                            RequestProtocolTestSupport.publication(() -> false)));
+            rollbackUnpublished(admission, registered);
+            assertNull(activeRoute(1L));
+            assertTrue(lifecycle.isAdmissionOpen(registered.item().ctx()));
+            verify(registered.item().decodeEndpoint(), never())
+                    .release(any(), eq(DecodeResources.ReleaseReason.COUNTERPART_FINISHED));
         }
     }
 
     @Test
     void throwingPublicationLeavesTheExactRegistrationRetryable() {
         Registered registered = registerItem(2L);
-        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle("2", registered.future())) {
+        PlacementOperation admission =
+                SchedulerTestSupport.claim(lifecycle, "2", registered.future());
+        try (var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertThrows(
                     IllegalStateException.class,
                     () ->
-                            lifecycle.commitRoute(
+                            RequestProtocolTestSupport.commitRoute(
+                                    lifecycle,
                                     registered.item(),
-                                    () -> {
-                                        throw new IllegalStateException("publication failed");
-                                    }));
-            assertNull(activeItem(2L));
-            assertTrue(lifecycle.isAdmissionOpen("2", registered.future()));
+                                    RequestProtocolTestSupport.publication(
+                                            () -> {
+                                                throw new IllegalStateException(
+                                                        "publication failed");
+                                            })));
+            rollbackUnpublished(admission, registered);
+            assertNull(activeRoute(2L));
+            assertTrue(lifecycle.isAdmissionOpen(registered.item().ctx()));
         }
     }
 
     @Test
     void duplicatePublicationDoesNotReleaseCanonicalDecodeReservation() {
         Registered registered = registerItem(3L);
-        RequestLifecycleTestSupport.bindRoute(lifecycle, registered);
+        RequestProtocolTestSupport.beginRoutePublication(lifecycle, registered);
         assertEquals(
                 PlacementResult.Status.CLOSED,
-                lifecycle.commitRoute(registered.item(), () -> true));
-        assertSame(registered.item(), activeItem(3L));
-        verify(registered.item().decodeEp(), never())
-                .release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
-        lifecycle.cancelRequest("3", 0L, CancelReason.CLIENT_CANCELLED);
+                RequestProtocolTestSupport.commitRoute(
+                        lifecycle,
+                        registered.item(),
+                        RequestProtocolTestSupport.publication(() -> true)));
+        assertSame(registered.item(), activeRoute(3L));
+        verify(registered.item().decodeEndpoint(), never())
+                .release(any(), eq(DecodeResources.ReleaseReason.COUNTERPART_FINISHED));
+        lifecycle.cancel("3", 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(
                 StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 registered.future().join().getCode());
-        verify(registered.item().decodeEp(), times(1))
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
+        verify(registered.item().decodeEndpoint(), times(1))
                 .release(
                         registered.item().decodeReservation(),
-                        DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+                        DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
     }
 
     @Test
     void cancellationWaitsForPublicationMutationBeforeReleasingReservation() {
         Registered registered = registerItem(4L);
-        AdmissionHandle admission = lifecycle.claimAdmissionHandle("4", registered.future());
+        PlacementOperation admission =
+                SchedulerTestSupport.claim(lifecycle, "4", registered.future());
         assertNotNull(admission);
-        assertEquals(
-                PlacementResult.Status.SUCCESS,
-                lifecycle.commitRoute(registered.item(), () -> true));
-        assertEquals(
-                RequestState.Phase.CANCEL_REQUESTED,
-                lifecycle.cancelRequest("4", 0L, CancelReason.CLIENT_CANCELLED).state());
-        verify(registered.item().decodeEp(), never())
-                .release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
-        admission.close();
+        try {
+            assertEquals(
+                    PlacementResult.Status.SUCCESS,
+                    RequestProtocolTestSupport.commitRoute(
+                            lifecycle,
+                            registered.item(),
+                            RequestProtocolTestSupport.publication(() -> true)));
+            assertEquals(
+                    RequestState.Phase.CANCEL_REQUESTED,
+                    lifecycle.cancel("4", 0L, CancelReason.CLIENT_CANCELLED).state());
+            verify(registered.item().decodeEndpoint(), never())
+                    .release(any(), eq(DecodeResources.ReleaseReason.COUNTERPART_FINISHED));
+        } finally {
+            AbstractRequestScheduler.finishPlacement(admission);
+        }
         registered.future().join();
-        verify(registered.item().decodeEp(), times(1))
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
+        verify(registered.item().decodeEndpoint(), times(1))
                 .release(
                         registered.item().decodeReservation(),
-                        DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+                        DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
     }
 
     @Test
@@ -141,22 +171,22 @@ class RequestAdmissionResourceLeakTest {
         try (var executor = Executors.newFixedThreadPool(2)) {
             for (long id = 10; id < 42; id++) {
                 Registered registered = registerItem(id);
-                RequestLifecycleTestSupport.bindRoute(lifecycle, registered);
+                RequestProtocolTestSupport.beginRoutePublication(lifecycle, registered);
                 CountDownLatch start = new CountDownLatch(1);
                 long requestId = id;
                 var canceled =
                         executor.submit(
                                 () -> {
-                                    RequestLifecycleTestSupport.await(start);
-                                    lifecycle.cancelRequest(
-                                            Long.toString(requestId),
+                                    RequestProtocolTestSupport.await(start);
+                                    lifecycle.cancel(
+                                            String.valueOf(requestId),
                                             0L,
                                             CancelReason.CLIENT_CANCELLED);
                                 });
                 var completed =
                         executor.submit(
                                 () -> {
-                                    RequestLifecycleTestSupport.await(start);
+                                    RequestProtocolTestSupport.await(start);
                                     registered
                                             .future()
                                             .complete(
@@ -166,10 +196,10 @@ class RequestAdmissionResourceLeakTest {
                 start.countDown();
                 canceled.get(5, TimeUnit.SECONDS);
                 completed.get(5, TimeUnit.SECONDS);
-                verify(registered.item().decodeEp(), timeout(1000).times(1))
+                verify(registered.item().decodeEndpoint(), timeout(1000).times(1))
                         .release(
                                 registered.item().decodeReservation(),
-                                DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+                                DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
             }
         }
     }
@@ -177,56 +207,167 @@ class RequestAdmissionResourceLeakTest {
     @Test
     void shutdownReleasesQueuedReservationsOnce() {
         Registered registered = registerItem(51L);
-        RequestLifecycleTestSupport.bindRoute(lifecycle, registered);
-        assertTrue(lifecycle.closeAdmissionAndAwaitMutations());
+        RequestProtocolTestSupport.beginRoutePublication(lifecycle, registered);
+        assertTrue(RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(lifecycle));
         lifecycle.closeOutstandingAndTerminalize();
-        verify(registered.item().decodeEp(), times(1))
+        verify(registered.item().decodeEndpoint(), times(1))
                 .release(
                         registered.item().decodeReservation(),
-                        DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+                        DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
         lifecycle.closeOutstandingAndTerminalize();
-        verify(registered.item().decodeEp(), times(1))
+        verify(registered.item().decodeEndpoint(), times(1))
                 .release(
                         registered.item().decodeReservation(),
-                        DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
-        lifecycle.closeExpiration();
-        lifecycle.closePublisher();
+                        DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
+        SchedulerTestSupport.timer(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle))
+                .close();
+        SchedulerTestSupport.closeRequestExecutors(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
     }
 
     @Test
-    void queuedPrefillPreemptionReturnsPreemptedAndReleasesDecodeOnce() throws Exception {
+    void queueRejectionReleasesDecodeOnceWithoutAffectingOtherRequests() throws Exception {
         Registered victim = registerItem(61L);
         Registered incoming = registerItem(62L);
-        RequestLifecycleTestSupport.bindRoute(lifecycle, victim);
-        lifecycle.onQueuedItemPreempted(victim.item(), incoming.item());
+        RequestProtocolTestSupport.beginRoutePublication(lifecycle, victim);
+        lifecycle.rejectRoute(victim.item(), null);
         Response response = victim.future().get(5, TimeUnit.SECONDS);
-        assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), response.getCode());
-        assertEquals("preempted by higher-priority request 62", response.getErrorMessage());
-        lifecycle.onQueuedItemPreempted(victim.item(), incoming.item());
-        lifecycle.cancelRequest("61", 0L, CancelReason.CLIENT_CANCELLED);
-        verify(victim.item().decodeEp(), times(1))
+        assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), response.getCode());
+        assertEquals(
+                "Worker scheduling queue rejected request: endpoint publication failed",
+                response.getErrorMessage());
+        lifecycle.rejectRoute(victim.item(), null);
+        lifecycle.cancel("61", 0L, CancelReason.CLIENT_CANCELLED);
+        verify(victim.item().decodeEndpoint(), times(1))
                 .release(
                         victim.item().decodeReservation(),
-                        DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
-        assertTrue(lifecycle.isAdmissionOpen("62", incoming.future()));
+                        DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
+        assertTrue(lifecycle.isAdmissionOpen(incoming.item().ctx()));
     }
 
-    private ScheduledRequest activeItem(long requestId) {
-        RequestSlot slot = lifecycle.requestSlot(Long.toString(requestId));
-        synchronized (slot) {
-            return slot.activeItem();
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.MethodSource("publicationCancellationCases")
+    void cancellationAtEveryPublicationOutcomeSettlesTheOriginalRequest(
+            String publicationOutcome, CancelReason reason, boolean inactivityExpired)
+            throws Exception {
+        Registered registered = registerItem(71L);
+        var context = registered.item().ctx();
+        PlacementOperation admission =
+                SchedulerTestSupport.claim(lifecycle, "71", registered.future());
+        assertNotNull(admission);
+        try {
+            var publication =
+                    RequestProtocolTestSupport.publication(
+                            () -> {
+                                org.junit.jupiter.api.Assertions.assertFalse(
+                                        Thread.holdsLock(context));
+                                if (inactivityExpired) {
+                                    RequestProtocolTestSupport.expireInactiveRequest(
+                                            lifecycle, context, Long.MAX_VALUE);
+                                } else {
+                                    lifecycle.cancel("71", 0L, reason);
+                                }
+                                org.junit.jupiter.api.Assertions.assertFalse(
+                                        registered.future().isDone(),
+                                        "publication owner must settle before terminalization");
+                                verify(registered.item().decodeEndpoint(), never())
+                                        .release(any(), any());
+                                return switch (publicationOutcome) {
+                                    case "SUCCESS" -> true;
+                                    case "BLOCKED" -> false;
+                                    case "THROW" ->
+                                            throw new IllegalStateException("publication failed");
+                                    default -> throw new AssertionError(publicationOutcome);
+                                };
+                            });
+            if (publicationOutcome.equals("THROW")) {
+                assertThrows(
+                        IllegalStateException.class,
+                        () ->
+                                RequestProtocolTestSupport.commitRoute(
+                                        lifecycle, registered.item(), publication));
+            } else {
+                assertEquals(
+                        PlacementResult.Status.CLOSED,
+                        RequestProtocolTestSupport.commitRoute(
+                                lifecycle, registered.item(), publication));
+            }
+        } finally {
+            AbstractRequestScheduler.finishPlacement(admission);
+        }
+        var response = registered.future().get(5, TimeUnit.SECONDS);
+        org.junit.jupiter.api.Assertions.assertFalse(response.isSuccess());
+        assertEquals(
+                reason == CancelReason.DEADLINE_EXCEEDED
+                        ? StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode()
+                        : StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+                response.getCode());
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
+        assertEquals(0, lifecycle.repository.liveRequestCount());
+        org.junit.jupiter.api.Assertions.assertFalse(
+                lifecycle.isAdmissionOpen(registered.item().ctx()));
+        verify(registered.item().decodeEndpoint())
+                .release(
+                        registered.item().decodeReservation(),
+                        DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        lifecycle.cancel("71", 0L, CancelReason.SHUTDOWN);
+        assertSame(response, registered.future().join());
+    }
+
+    static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments>
+            publicationCancellationCases() {
+        return java.util.stream.Stream.of("SUCCESS", "BLOCKED", "THROW")
+                .flatMap(
+                        outcome ->
+                                java.util.stream.Stream.concat(
+                                        java.util.stream.Stream.of(
+                                                        CancelReason.CLIENT_CANCELLED,
+                                                        CancelReason.SHUTDOWN,
+                                                        CancelReason.DEADLINE_EXCEEDED)
+                                                .map(
+                                                        reason ->
+                                                                org.junit.jupiter.params.provider
+                                                                        .Arguments.of(
+                                                                        outcome, reason, false)),
+                                        java.util.stream.Stream.of(
+                                                org.junit.jupiter.params.provider.Arguments.of(
+                                                        outcome,
+                                                        CancelReason.DEADLINE_EXCEEDED,
+                                                        true))));
+    }
+
+    private void rollbackUnpublished(PlacementOperation admission, Registered registered) {
+        var released =
+                registered
+                        .item()
+                        .decodeEndpoint()
+                        .release(
+                                registered.item().decodeReservation(),
+                                DecodeResources.ReleaseReason.LOCAL_ROLLBACK)
+                        .status();
+        assertTrue(
+                released == DecodeResources.ReservationReleaseResult.RELEASED
+                        || released == DecodeResources.ReservationReleaseResult.STALE);
+    }
+
+    private RouteResult activeRoute(long requestId) {
+        RequestContext requestContext = lifecycle.repository.findActive(String.valueOf(requestId));
+        synchronized (requestContext) {
+            return requestContext.snapshot().route();
         }
     }
 
     private Registered registerItem(long requestId) {
-        BalanceContext context = RequestLifecycleTestSupport.context(config, requestId);
-        var future = lifecycle.register(context);
-        DecodeEndpoint decode = mock(DecodeEndpoint.class);
-        var reservation = new DecodeEndpoint.ReservationHandle(1L, Long.toString(requestId), 1L);
+        RequestContext context = RequestProtocolTestSupport.context(config, requestId);
+        var future = RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
+        DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
+        var reservation = new DecodeResources.RequestReservation(1L, String.valueOf(requestId), 1L);
+        context.data().setFuture(future);
         return new Registered(
-                new ScheduledRequest(
+                org.flexlb.balance.scheduler.SchedulingTestConfig.createRoute(
                         context,
-                        future,
                         new Response(),
                         null,
                         null,

@@ -1,12 +1,14 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.PlacementAvailability;
-import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.scheduler.RouteResult;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -16,12 +18,13 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks endpoint retirement ordering against concurrent acquisition and cleanup.
+ * Races late admissions with registry detachment to verify every stateful endpoint closes admission before draining requests.
  */
 class EndpointRetirementLinearizationTest {
 
@@ -35,14 +38,23 @@ class EndpointRetirementLinearizationTest {
         EndpointRegistry registry =
                 new EndpointRegistry(
                         configService,
-                        requestRuntime.events(),
-                        mock(BatchSchedulerReporter.class),
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
+                                requestRuntime.events()),
+                        mock(DeliveryMetricsReporter.class),
                         EndpointTestSupport.routeStrategy(requestRuntime),
-                        new PlacementAvailability());
-        String prefillAddress = "127.0.0.1:8100";
-        String decodeAddress = "127.0.0.1:8200";
+                        new PlacementAvailability(),
+                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                configService.loadBalanceConfig()),
+                        order ->
+                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
+                                        16, order));
+        String prefillAddress = "127.0.0.1:8100@0";
+        String decodeAddress = "127.0.0.1:8200@0";
         WorkerStatus prefillStatus = status(RoleType.PREFILL, 8100);
         WorkerStatus decodeStatus = status(RoleType.DECODE, 8200);
+        registry.currentOrDiscover(RoleType.PREFILL, prefillAddress, () -> prefillStatus);
+        registry.currentOrDiscover(RoleType.DECODE, decodeAddress, () -> decodeStatus);
+        CacheAwareService cache = mock(CacheAwareService.class);
         PrefillEndpoint capturedPrefill =
                 (PrefillEndpoint)
                         EndpointTestSupport.publishEndpoint(
@@ -55,8 +67,8 @@ class EndpointRetirementLinearizationTest {
         CountDownLatch referencesCaptured = new CountDownLatch(1);
         CountDownLatch resumeAdmission = new CountDownLatch(1);
         ExecutorService executor = Executors.newSingleThreadExecutor();
-        EndpointRegistry.DetachedGeneration detachedPrefill = null;
-        EndpointRegistry.DetachedGeneration detachedDecode = null;
+        EndpointRegistry.Retirement detachedPrefill = null;
+        EndpointRegistry.Retirement detachedDecode = null;
         try {
             Future<AdmissionAttempt> delayedAdmission =
                     executor.submit(
@@ -67,20 +79,42 @@ class EndpointRetirementLinearizationTest {
                                 referencesCaptured.countDown();
                                 assertTrue(resumeAdmission.await(2, TimeUnit.SECONDS));
 
-                                boolean queueOfferAccepted =
-                                        EndpointTestSupport.offer(
-                                                prefill, mock(ScheduledRequest.class));
-                                boolean directPinAvailable;
-                                try (WorkerEndpoint.GenerationPin pin =
-                                        prefill.tryPinGeneration()) {
-                                    directPinAvailable = pin != null;
+                                var lateRoute = mock(RouteResult.class);
+                                org.mockito.Mockito.when(lateRoute.prefillEndpoint())
+                                        .thenReturn(prefill);
+                                boolean queueOfferAccepted = prefill.tryEnqueueRoute(lateRoute);
+                                boolean prefillAdmissionAvailable;
+                                {
+                                    WorkerEndpoint selectedEndpoint = prefill;
+
+                                    prefillAdmissionAvailable =
+                                            prefill.commitDelivery(
+                                                            org.flexlb.balance.scheduler
+                                                                    .DeliveryTestSupport.queued(
+                                                                    java.util.List.of(lateRoute),
+                                                                    new org.flexlb.balance.scheduler
+                                                                            .DeliveryTestSupport
+                                                                            .BatchInput(900L, 1),
+                                                                    new long[] {1L},
+                                                                    null,
+                                                                    System.currentTimeMillis()))
+                                                    != null;
                                 }
-                                boolean decodePinAvailable;
-                                try (WorkerEndpoint.GenerationPin pin = decode.tryPinGeneration()) {
-                                    decodePinAvailable = pin != null;
+                                boolean decodeAdmissionAvailable;
+                                {
+                                    WorkerEndpoint selectedEndpoint = decode;
+
+                                    decodeAdmissionAvailable =
+                                            org.flexlb.balance.scheduler.SelectionTestSupport
+                                                            .registerQueuedDecode(
+                                                                    decode, "late", 1L, 1L, 50)
+                                                            .status()
+                                                    == DecodeResources.ReserveStatus.ACQUIRED;
                                 }
                                 return new AdmissionAttempt(
-                                        queueOfferAccepted, directPinAvailable, decodePinAvailable);
+                                        queueOfferAccepted,
+                                        prefillAdmissionAvailable,
+                                        decodeAdmissionAvailable);
                             });
 
             assertTrue(referencesCaptured.await(2, TimeUnit.SECONDS));
@@ -91,8 +125,8 @@ class EndpointRetirementLinearizationTest {
                     detachUnderGenerationLock(
                             registry, RoleType.DECODE, decodeAddress, decodeStatus);
 
-            assertTrue(detachedPrefill.ownsEndpoint(capturedPrefill));
-            assertTrue(detachedDecode.ownsEndpoint(capturedDecode));
+            assertSame(prefillStatus, detachedPrefill.status());
+            assertSame(decodeStatus, detachedDecode.status());
             assertFalse(prefillStatus.isActiveGeneration());
             assertFalse(decodeStatus.isActiveGeneration());
             assertNull(registry.get(RoleType.PREFILL, prefillAddress));
@@ -103,19 +137,33 @@ class EndpointRetirementLinearizationTest {
             resumeAdmission.countDown();
             AdmissionAttempt attempt = delayedAdmission.get(2, TimeUnit.SECONDS);
             assertFalse(attempt.queueOfferAccepted());
-            assertFalse(attempt.directPinAvailable());
-            assertFalse(attempt.decodePinAvailable());
-            assertTrue(capturedDecode.resourceSnapshot().reserved().isEmpty());
+            assertFalse(attempt.prefillAdmissionAvailable());
+            assertFalse(attempt.decodeAdmissionAvailable());
+            assertTrue(capturedDecode.resourceSnapshot().reservedCount() == 0);
         } finally {
             resumeAdmission.countDown();
-            if (detachedPrefill != null) {
-                detachedPrefill.retireAndAwait();
+            try {
+                try {
+                    if (detachedPrefill != null) {
+                        EndpointTestSupport.completeRetirement(
+                                detachedPrefill, cache, LoggerFactory.getLogger(getClass()));
+                    }
+                } finally {
+                    if (detachedDecode != null) {
+                        EndpointTestSupport.completeRetirement(
+                                detachedDecode, cache, LoggerFactory.getLogger(getClass()));
+                    }
+                }
+                assertTrue(registry.statusSnapshot(RoleType.PREFILL).isEmpty());
+                assertTrue(registry.statusSnapshot(RoleType.DECODE).isEmpty());
+                org.mockito.Mockito.verify(cache).removeEngineBlockCache(prefillAddress);
+            } finally {
+                try {
+                    registry.close();
+                } finally {
+                    executor.shutdownNow();
+                }
             }
-            if (detachedDecode != null) {
-                detachedDecode.retireAndAwait();
-            }
-            registry.close();
-            executor.shutdownNow();
         }
     }
 
@@ -123,16 +171,18 @@ class EndpointRetirementLinearizationTest {
         return EndpointTestSupport.workerStatus(role, "127.0.0.1", port, port + 1);
     }
 
-    private static EndpointRegistry.DetachedGeneration detachUnderGenerationLock(
+    private static EndpointRegistry.Retirement detachUnderGenerationLock(
             EndpointRegistry registry, RoleType role, String address, WorkerStatus expectedStatus) {
         expectedStatus.lock.lock();
         try {
-            return registry.detachAndBeginRetirement(role, address, expectedStatus);
+            return registry.beginRetirement(role, address, expectedStatus);
         } finally {
             expectedStatus.lock.unlock();
         }
     }
 
     private record AdmissionAttempt(
-            boolean queueOfferAccepted, boolean directPinAvailable, boolean decodePinAvailable) {}
+            boolean queueOfferAccepted,
+            boolean prefillAdmissionAvailable,
+            boolean decodeAdmissionAvailable) {}
 }

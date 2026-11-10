@@ -1,61 +1,88 @@
 # Routing and Balancing
 
-路由与负载均衡是 flexlb-sync 的核心。`Router` 定义路由契约，`LoadBalancer` 定义单一角色内的
-worker 选择契约，两者组合完成多角色多阶段路由。
+核心入口是 `RequestRouteSelector`，协调 Prefill/PDFusion、Decode、VIT、Encoder 的角色策略。
+Scheduler 决定何时调度请求、失败后等待还是重试；Strategy 决定当前候选中选谁，以及版本冲突后如何重算。
 
-主要代码：`flexlb-sync/src/main/java/org/flexlb/balance/scheduler/`、`balance/strategy/`。
+主要代码：`flexlb-sync/src/main/java/org/flexlb/balance/scheduler/`、`balance/strategy/`、`balance/endpoint/`。
 
-## Router / DefaultRouter
+## 选择与登记
 
-当前 `Schedule` 可传 `schedule_roles`（Encoder、Prefill、Decode、PDFusion）只选择指定角色；
-未传时选择模型配置的全部角色。显式角色去重后按 `ModelMetaConfig.requiredRoles()` 的顺序决策；
-未配置角色以及非法枚举值返回 `INVALID_REQUEST`。现有 VIT 不属于该新增请求枚举，
-其选点仍使用 `RandomStrategy`。
-EPD 部署当前按客户端分别请求 Encoder 与 Generation 阶段；混合角色请求不在已验证链路内。
+`select(context, group)` 返回 `PlacementResult<RouteResult, PlacementKey>`。
+一次成功直接返回绑定请求与已登记角色的 `RouteResult`；队列和回调沿用该结果的精确身份。VIT 仅选择，Encoder 沿用独立提交边界。
 
-Encoder 使用独立的 `EncoderStrategy`：候选必须是已发布且存活的 Encoder endpoint。
-请求携带可选 `encoder_cache_hit_len` 时，先比较各节点在途的未命中编码工作量代理值，
-并列时比较 `running_query_len + waiting_query_len + 本地待观察请求数`；未携带时仅比较并发数。
-Encoder 不按可用 KV cache 筛选或决胜。Encoder 单独请求按 `scheduler.type` 走
-DIRECT 或独立的 QUEUE，FlexLB 返回 `ENCODER` 端点，不调用 EnqueueBatch。
-QUEUE 还会过滤已达到 `dispatcher.maxInflightPerEncoderWorker` 的节点，并在容量释放后重试；
-DIRECT 没有候选时返回 `NO_ENCODER_WORKER` (8408)。
-本地待观察请求在 endpoint 的并发 map 中逐请求更新，选点读取允许短暂滞后；并发请求可能依据
-同一份负载快照选中同一 worker。Prefill/Decode 与 PDFusion 的既有策略保持原样。
+1. 校验请求、SchedulingMetadata 和请求指定的角色。`schedule_roles` 必须属于模型配置；
+   按 `ModelMetaConfig.requiredRoles()` 顺序处理，未指定时处理全部配置角色。
+2. 捕获角色候选并在锁外评分。Prefill 的输入包含引擎工作、实际等待队列、在途工作，以及已选中尚未发布的请求；
+   Decode 的输入包含引擎观测和本地未确认登记，包括尚未发送的并发、hard KV 和 expected KV。
+3. Strategy 选出最优候选，通过回调调用该 Endpoint 的 `tryRegisterSelection`。
+   Endpoint 在自己的状态锁内检查可用性、评分版本、容量，并登记本次影响。
+   相同快照的并发登记只有一个能成功；之后的请求能看到已登记影响。
+4. 版本冲突时，Strategy 只刷新和重算冲突的候选，再与其余缓存分数比较。
+   Prefill 复用本轮 cache 查询；Decode 只重算该节点的成本。每次角色选择最多尝试 8 次，耗尽后返回 `RETRY`。
+   节点不可用时从本轮候选移除；代际信息留在 Strategy/Endpoint 边界内。
+5. 某角色失败或请求已取消时，Selector 在返回前释放本轮所有已登记资源。
+   普通等待队列不保留部分 P/D 登记。清理失败抛出异常，不能作为可重试失败交回队列。
+6. 全部角色成功后一次构造 `RouteResult`，交给 Scheduler 发布；没有结果包装、补登记或资源二次转交。
+   指定的策略 group 始终优先；未指定时，首个成功角色的 group 约束后续角色。
 
-`Router` 接口只有一个方法：`Response route(BalanceContext balanceContext)`。
+角色之间不同时持有 Endpoint 锁，不存在先占 P 锁再等 D 锁的过程。
+预测、cache 查询和资源通知均在 Endpoint 状态锁外；没有全局选点串行队列。
 
-`DefaultRouter`（`balance/scheduler/DefaultRouter.java`）由 Prefill、Decode、VIT 和
-Encoder 选择器组成，按请求有效角色顺序逐个选择，并在失败时关闭已捕获的 endpoint pin。
+选点元数据由 RoleSelection 冻结。组批构造 RPC 地址、抢占构造取消目标时直接读取冻结的地址字段，
+内部直接读取冻结的角色字段；对外响应才由 RouteResult 生成独立协议对象。
+这些字段不从 Endpoint 的后续动态观测重新读取，保持已选路由的地址一致性。
 
-### route() 流程
+## 数据归属
 
-1. **校验**：缺少请求或显式角色未配置 → `INVALID_REQUEST`。
-2. **角色列表**：`ModelMetaConfig.requiredRoles()` 给出配置顺序；请求带
-   `schedule_roles` 时取其交集，未传时使用全部配置角色。
-3. **逐角色选择**：Prefill/PDFusion 调用 `CostBasedPrefillStrategy`，Decode 调用
-   `DecodeSelector`，VIT 调用 `RandomStrategy`，Encoder 调用 `EncoderStrategy`。
-   `group` 初始为 null；每个角色选中后 `group = serverStatus.getGroup()`——**首个成功角色的
-   worker group 约束后续所有角色的候选集**（group 亲和链，如 DECODE 选中的 group 决定
-   PREFILL 只能在同 group 中选）。任一角色失败立即关闭之前的选择并返回错误。
-4. **响应**：全部成功 → success 响应（携带 `List<ServerStatus>`；物理
-   `server_ip/http_port/grpc_port` 保持不变，N>1 时每个成功项带逻辑 `engine_index`，
-   N=1 时省略该字段）；没有可用角色时按该角色的错误类型返回。
+| 粒度           | 类型                        | 保存的信息                                                                                     |
+| -------------- | --------------------------- | ---------------------------------------------------------------------------------------------- |
+| 单角色事实     | `RoleSelection`             | Endpoint、冻结拓扑、DP rank、对外协议需要的观测                                                |
+| Prefill 事实   | `RoleSelection.Prefill`     | 本请求预计工作量、精确 Prefill 登记                                                            |
+| Decode 事实    | `RoleSelection.Decode`      | 精确 Decode 登记                                                                               |
+| 单次多角色结果 | `RouteResult`               | Context、冻结 requestId、有序 RoleSelection 引用；同时作为队列和回调的精确身份，不复制角色字段 |
+| 生命周期       | `ContextResult.Snapshot`    | 引用 RouteResult，记录发布、交付、取消和清理事实                                               |
+| 放置操作       | `PlacementOperation`        | 精确 Context/撤回身份，不复制资源或分数                                                        |
+| 诊断           | `RoutingDecision`           | 选择原因与候选估计；不能代替资源账本                                                           |
+| 外部响应       | `Response` / `ServerStatus` | 按需从 RouteResult 生成独立协议对象                                                            |
 
-`RoleType.getErrorType()` 映射：PREFILL→`NO_PREFILL_WORKER`(8402)、DECODE→`NO_DECODE_WORKER`
-(8403)、PDFUSION→`NO_PDFUSION_WORKER`(8404)、VIT→`NO_VIT_WORKER`(8405)、
-ENCODER→`NO_ENCODER_WORKER`(8408)，均可重试。
+Selector 用方法内的角色列表收集已登记结果，失败时撤销其中的登记；列表不进入等待队列，也不构造 SelectionAttempt 中间对象。
+不存在对外暴露的 RouteResult.Builder；ViT 服务只返回自己的 RoleSelection，不能修改整个组合。
+角色循环统一检查成功选择恰好新增一个对应角色；P/D 和 Encoder 复用策略返回的结果，
+不再把成功结果二次包装成另一份单角色 PlacementResult。角色事实只从已登记列表读取。
+评分版本只在 Strategy/Endpoint 登记时校验，不保存在已完成的角色结果中。
+Prefill 登记保存不可变的排队输入和本次工作量，可以立即参与其他请求的投影，无需读取半成品路由。
+`RouteResult` 构造时角色组合完整，并绑定已取得的 Prefill 登记；没有 attachReservation 入口，也不再创建另一个执行包装对象。
+规划直接使用 Prefill 登记中的不可变输入，不再另建规划缓存、加锁初始化或重复构造输入。
+`PlacementOperation` 是操作身份，不实现 AutoCloseable；实际完成及清理由 Scheduler 的完成路径负责。
+同 ID 的重选使用新的执行身份，旧回调只能释放旧记录。
 
-### 角色与策略 / 资源指标映射
+## Prefill / PDFusion 策略
 
-映射不在 `RoleType` 上，而在 `FlexlbConfig`（`flexlb-common/.../config/FlexlbConfig.java`）：
+`CostBasedPrefillStrategy` 用 `RequestTimeEstimation` 同时计算排序成本和准入状态。
+缓存匹配来自统一的 `CacheAwareService`：本地命中按全量折算，远端增量按
+`cacheAffinity.remoteDiscount` 折算；详见 [缓存同步](04-worker-sync-and-cache.md)。
 
-| RoleType           | 策略（可配）                | 默认策略                                   | 资源指标（硬编码）                                           |
-| ------------------ | --------------------------- | ------------------------------------------ | ------------------------------------------------------------ |
-| PDFUSION / PREFILL | `loadBalanceStrategy`       | `SHORTEST_TTFT`                            | `WAIT_TIME`                                                  |
-| DECODE             | `decodeLoadBalanceStrategy` | `WEIGHTED_CACHE`                           | `REMAINING_KV_CACHE`                                         |
-| VIT                | `vitLoadBalanceStrategy`    | `RANDOM`                                   | `WAIT_TIME`                                                  |
-| ENCODER            | 独立 `EncoderStrategy`      | 提供命中长度时最少编码工作量，否则最少并发 | 在途预测／实际输入长度、`running + waiting + 本地待观察请求` |
+排序保留配置的 TTFT/cache affinity 规则。最优候选容量不足时返回该节点的 `BLOCKED`，
+不因为登记失败直接退到次优节点。下次因资源变化调度时重新比较允许候选；不永久绑定上次节点。
+若版本冲突后重算表明另一个候选更好，可以改选另一个候选；这与容量不足时绕过原策略不同。
+
+## Decode 策略
+
+`DecodeSelector` 先区分 READY、BUSY、IMPOSSIBLE，再用配置的成本公式比较同组候选，平分时轮转。
+DIRECT 和 QUEUE 的选点准入均计入本地尚未发送的登记，避免同时向低负载节点集中承诺容量。
+BUSY 节点仍可作为阻塞原因或抢占候选，但登记不成功就不会返回成功路由。
+静态容量不足返回终态拒绝；临时容量不足由 Scheduler 决定等待或抢占。
+发送许可使用独立的实际派发容量检查，复用同一请求登记，不再次创建请求资源记录。
+
+## VIT 与 Encoder
+
+VIT 使用 `VitWorkerSelector`；已给出的 VIT cache 选择通过 `VitCacheSelector` 校验。
+VIT 不登记 Prefill/Decode 容量；cache 结果失效返回 `VIT_ROUTE_STALE`，不能偷偷换节点。
+
+Encoder 使用 `EncoderSelectionStrategy`：有 `encoder_cache_hit_len` 时比较未命中工作量，
+并列时比较并发；未携带时比较并发，不按 KV cache 筛选。
+Encoder 单角色按 DIRECT 或独立 QUEUE 提交；QUEUE 受 `maxInflightPerEncoderWorker` 限制。
+EPD 的 Encoder 与 Generation 分阶段请求；本次选点登记变更不扩大混合阶段请求范围。
 
 ### gRPC Schedule 响应
 
@@ -65,112 +92,18 @@ ENCODER→`NO_ENCODER_WORKER`(8408)，均可重试。
 master forwarding 透传 protobuf 响应。物理地址字段与既有 service path 不变，旧客户端可忽略
 新增字段。此字段不改变 `EnqueueBatch` 的派发协议。
 
-## 回滚机制
+## 发布、失败和清理
 
-`DefaultRouter.rollBackRoutingFailure()`：对 `RoutingResult` 中已成功的每个 `ServerStatus`，
-以内部 `serverIp:httpPort@routingEngineIndex` 调用对应策略的 `rollBack(ipPort, requestId)`。
-`routingEngineIndex` 不序列化且始终存在，因此 N=1 对外省略 `engine_index` 时仍精确回滚
-`@0`；N>1 的 wire `engine_index` 只负责把选择结果传给共享 frontend。
+Scheduler 调用 `publishPlacement`，在同一尝试身份上校验并发布队列或直接路由。
+Prefill 的 SELECTED 记录进入实际队列后成为 WAITING；Direct 复用已登记的 RESERVED 记录。
+Decode 复用选择时的登记；发送阶段只取得独立的 dispatch permit。
 
-回滚的实体是**选中时的本地记账**——`WorkerStatus.removeLocalTask(requestId)` 逆转
-`putLocalTask()`：从 `runningQueueTime` 扣回估算 prefill 时间（下限 0）、把
-`inputLength - prefixLength` 的 KV token 从 used 还给 free、从 `localTaskMap` 移除。
-`lastSelectedTime` 不回滚。
+登记存在不代表已经发布。发布责任以 Context 的精确 route/placement 事实交接；未发布失败由本轮清理，
+已发布请求由生命周期清理。P/D 均只有选择登记入口；提交缺少精确登记时拒绝发布，不补建记录。
+策略只有 `selectAndRegister` 合约，成功意味着登记已完成；没有纯选择与登记入口之间的兼容适配。
 
-各策略实现：`RandomStrategy` 为 no-op（它 select 时不记账）；`ShortestTTFTStrategy`（及其
-子类 CacheAffinityFirst）回滚时**硬编码查 PREFILL** 的 worker map；`WeightedCacheLoadBalancer`
-**硬编码查 DECODE**——回滚正确性耦合于默认的策略↔角色配对，改配对时须注意。
-
-## 四种策略
-
-均实现 `LoadBalancer.select(ctx, roleType, group)`，注册名见 `LoadBalanceStrategyEnum`
-（RANDOM / SHORTEST_TTFT / CACHE_AFFINITY_FIRST / WEIGHTED_CACHE）。
-
-所有策略只从 `EndpointRegistry` 已发布的 logical worker 读取候选；单个 worker 的状态失败或
-退役只会移除该 `ip:httpPort@index`，不会连带过滤同一 frontend 的 sibling。资源、队列、cache
-命中、outstanding tokens 和 score 都读取该 logical worker 自己的状态。快照选中的候选仍须捕获
-其 exact generation，避免在选择与提交之间使用已替换或已退役的 endpoint。
-
-### RandomStrategy
-
-公共物理健康门控后随机起点环形扫描，取第一个 `isAlive()` 的逻辑 worker。不看资源水位、不做 cache 匹配、
-**不 `putLocalTask()`**（因此 rollBack 为空实现）。
-
-### ShortestTTFTStrategy（PREFILL/PDFUSION 默认）
-
-1. **候选过滤**：`isAlive()` 且 `ResourceMeasure.isResourceAvailable()`（PREFILL 用等待队列
-   长度 + 滞回，见 [03-resource-management](03-resource-management.md)）。
-2. **cache 匹配**：`CacheAwareService.findMatchingEngines()`，用逻辑
-   `ip:httpPort@index` exact-match cache ownership（见
-   [04-worker-sync-and-cache](04-worker-sync-and-cache.md)）。
-3. **打分**：每个 worker 计算
-   `hitCacheTokens = blockSize × 匹配块数`，
-   `prefillTime = seqLen − hitCacheTokens`，
-   `ttft = prefillTime + runningQueueTime`（本地维护的队列时间估计）。
-4. **选择**：
-   - 按 ttft 升序排（并列时 `lastSelectedTime` 早者优先）；
-   - 仅 PREFILL/PDFUSION 且配置了正的 `outstandingUncachedTokensThreshold` 时，过滤
-     `outstandingUncachedTokens + max(0, seqLen − hitCacheTokens)` 超阈值的 worker；若仍有
-     eligible worker，后续选择只在其中进行；若全部超阈值，恢复完整候选集并重跑后续
-     Top 候选/相似/cache 偏好流程（仍可能选中超阈值的 cache-preferred worker），决策 reason
-     记录 `SHORTEST_TTFT_OUTSTANDING_GUARD_FALLBACK`；
-   - 取 Top 候选：≤3 个全取，否则 `max(2, ⌈数量×0.3⌉)`；
-   - 相似阈值 `max(minTTFT × shortestTtftSimilarityThresholdRatio(0.2), 标准差 × 0.5)`，
-     筛出与最短 ttft 相近的 worker；
-   - 相似集合内做 **cache 偏好**：cache 命中高于最短 ttft worker 时改选 cache leader；
-   - **CAS 抢占**：按偏好序对 `lastSelectedTime` 做 `compareAndSet(快照值, now)`，第一个
-     成功者当选——防止并发调度线程用同一快照选中同一 worker。
-5. **提交**：`putLocalTask()` 记账（预扣队列时间与 KV token）、上报 cache 命中指标、
-   `ctx.recordCacheMatch()`。
-
-### CacheAffinityFirstStrategy（继承 ShortestTTFT，只重写选择步骤）
-
-- **终态 prefill 工作守卫**：每个 worker 的 `ttft` 已包含当前请求的未命中 Prefill token 和已有队列
-  未命中 token。计算 cache leader 相对最短 ttft worker 的额外工作；只有该差异不大于
-  `cacheAffinityFirstMaxExtraWorkTokens`，且缓存命中更多时，才选 leader（`CACHE_LEADER`），否则选最短
-  ttft（`SHORTEST_TTFT`）。在选 cache leader 前也复用同一 outstanding-threshold guard；低于
-  `cacheAffinityFirstMinHitRate` 的 cache leader 不参与 cache affinity
-  （`SHORTEST_TTFT_LOW_CACHE_HIT`）；超阈值的 cache leader 直接回退到最短 eligible worker
-  （`SHORTEST_TTFT_OUTSTANDING_GUARD`）。与 ShortestTTFT 不同，全部 worker 超阈值时**不做
-  cache 取舍，直接按最短 ttft 选择**（同样记录 `SHORTEST_TTFT_OUTSTANDING_GUARD_FALLBACK`）。
-- CAS 抢占失败时按剩余 eligible worker 继续选择；决策 reason 为
-  `CACHE_AFFINITY_FALLBACK` 或 `SHORTEST_TTFT_FALLBACK`。决策快照（debug 级）写入
-  `BalanceContext.shortestTtftDecisionByRole`。
-
-### CostBasedPrefillStrategy
-
-按候选的资源、排队和预测执行时间做成本筛选与打分。它与 ShortestTTFT 一样通过统一的
-`CacheAwareService.findMatchingEngines(CacheMatchQuery)` 取得 cache 匹配，因此 PREFILL 和
-PDFUSION 的 cost-based 路径也遵循 [04-worker-sync-and-cache](04-worker-sync-and-cache.md) 的
-源选择：`LOCAL_SYNC`、`KVCM` 或 KVCM 不可用时的 `LOCAL_STANDBY`。本地命中按全量折算；KVCM
-返回的远端增量命中（`global - local`，负值按 0 处理）按 `cacheAffinity.remoteDiscount`
-折算（默认 `0.2`，取值范围 `[0, 1]`），再进入原有的成本估算。
-这只改变 cache 命中的输入来源，不改变 cost-based 的候选过滤、成本公式和提交/回滚语义。
-
-### WeightedCacheLoadBalancer（DECODE 默认）
-
-1. 候选过滤：`isAlive()` + `isResourceAvailable()`（DECODE 用 KV 使用率 + 滞回）。
-2. **加权随机**（权重基于 KV cache 使用量，与 cache 匹配无关）：
-   `weight = exp(−weightedCacheDecayFactor(0.001) × (cacheUsed − 平均值))`——用得越少权重越高；
-   总权重非正或全相等时退化为均匀随机；轮盘赌选择。
-3. **cache 匹配只做记账**：选中后再查 `findMatchingEngines()`，得到
-   `prefixLength = blockSize × 匹配块数`，用于 TaskInfo 的 KV 预扣精度（`inputLength −
-prefixLength`），不影响选谁。
-4. `putLocalTask()` 记账。
-
-## BalanceContext 路由相关字段
-
-`flexlb-common/.../dao/BalanceContext.java`：输入 `config`/`request`（`seqLen`、`blockSize`、
-`blockCacheKeys`、Local Standby keys 等）；输出 `response`；per-role 记录
-`cacheMatchSelectionByRole`（角色→选中 ip + 命中 token 数，`recordCacheMatch()` 同时累计
-查询耗时/次数与 `cacheMatchSource`）和 `shortestTtftDecisionByRole`（debug 决策快照）。
-队列字段见 [02-queue-scheduling](02-queue-scheduling.md)。
-
-## 并发要点
-
-- worker map 是 `ConcurrentHashMap`，`WorkerStatus` 计数全部 Atomic；选择路径不加锁
-  （`WorkerStatus.lock` 存在但选择路径不使用）。
-- 选择的互斥靠 `lastSelectedTime` CAS；记账/回滚靠 Atomic 加减。
-- worker 是否可选由 `PrefillResourceMeasure` / `DecodeResourceMeasure` 基于活性、
-  待处理请求、KV 使用率和可选并发上限判定（见
-  [03-resource-management](03-resource-management.md)）。
+QUEUE 容量失败在角色/group 域等待，资源变化触发重选，不只订阅上次失败节点；等待登记使用 availability sequence 防止丢失唤醒。
+DIRECT 对版本冲突或未交付代际失效使用有限重试，不进入长期等待队列。
+抢占由 QueuedRequestScheduler 发起：原有 eviction 逻辑取消 victim、释放资源并恢复受害请求队列；
+成功取得的 incoming Decode 登记交给 Selector 继续完成其他角色，不重复登记。
+取消、超时及发送结果未知的资源规则见 [队列调度](02-queue-scheduling.md) 和 [资源管理](03-resource-management.md)。

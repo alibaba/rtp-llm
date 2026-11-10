@@ -49,7 +49,7 @@ class RealisticTimingTest {
                     new EngineRpcService.GenerateInputPB[nRequests];
             for (int i = 0; i < nRequests; i++) {
                 int decodePort = decodeServices.get(i % nDecode).getGrpcPort();
-                inputs[i] = inputWithDecode(String.valueOf(i + 1), 10, decodePort, 10);
+                inputs[i] = inputWithDecode(i + 1, 10, decodePort, 10);
             }
             EngineRpcService.EnqueueBatchResponsePB response =
                     enqueue(prefillServices.get(0), batch(1000, slot(0, inputs)));
@@ -94,7 +94,7 @@ class RealisticTimingTest {
             // ── Verify all completed ──
             long totalCompleted =
                     services.values().stream()
-                            .mapToLong(JavaMockEngineCluster.FastRpcService::getCompletedCount)
+                            .mapToLong(MockEngineTestSupport::getCompletedCount)
                             .sum();
             assertEquals(nRequests, totalCompleted, "all requests should be completed");
 
@@ -109,7 +109,7 @@ class RealisticTimingTest {
                                 + service.getInflightCount()
                                 + " (expected 0)");
                 assertFalse(
-                        service.isLeakDetected(),
+                        MockEngineTestSupport.isLeakDetected(service),
                         "engine port " + service.getGrpcPort() + " has leak detected");
             }
         }

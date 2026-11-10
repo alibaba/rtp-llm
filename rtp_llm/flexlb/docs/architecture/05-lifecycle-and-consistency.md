@@ -50,6 +50,26 @@ KVCM 客户端通过 `isWarmupFinished()` 读取状态。该状态类不依赖 g
 `ApplicationLifecycle` 以最高优先级处理所属 Spring 容器的 `ContextClosedEvent`，
 同步执行下线流程；子容器的关闭事件不触发服务下线。成功完成后的重复下线调用直接返回。
 
+`ApplicationLifecycle` 在入口排空后调用 `AbstractRequestScheduler.shutdown(deadlineNanos)`，
+等待截止时间由调用方传入，调度器不制定宽限期或计算 deadline。
+不持有投递执行器、请求任务池、Endpoint 或调度计时器。`PlacementConfiguration` 组装
+调度器并启动调度；EndpointRegistry 等关闭依赖在构造时传入，不依赖事后注入的 shutdown 配置。
+生产与测试共用其停机顺序。
+
+调度器通过 `ExpirationTimer.close()` 停止并等待请求超时回调，不持有底层计时器线程池。
+`taskTimer` 和 `deadlineTaskTimer` 由 Spring 创建，在调度停机事件处理完成后的 bean
+销毁阶段关闭；手工创建计时器的测试调用方负责相同的资源释放。
+
+调度资源关闭时，先停止接收新请求，等待已接受请求响应至调用方指定的截止时间；随后关闭请求注册，
+停止并等待 scheduler 和抢占任务，取消剩余请求。DIRECT 等待已提交的选路任务，QUEUE
+等待调度线程、planner 和剩余计划处理完成。接着等待投递及其准备资源释放回调、请求处理
+任务结束，再关闭 Endpoint。Endpoint 关闭产生的后续清理任务在关闭请求执行器前再次排空。
+这些等待复用各组件的执行状态，调度基类不另维护选路操作计数。
+
+停止接收后，尚未注册的新请求返回 `SCHEDULER_UNAVAILABLE`（8518）。Frontend 在响应
+不含入队标记、路由结果或生命周期记录时，以原请求重试不同的备用 FlexLB 节点。
+已接收请求的取消不使用此错误码；备用节点也不可用时保留拒绝结果，不无限重试。
+
 ### 健康检查
 
 `GET /health` 通过 `ApplicationLifecycle.isHealthy()` 判断状态：

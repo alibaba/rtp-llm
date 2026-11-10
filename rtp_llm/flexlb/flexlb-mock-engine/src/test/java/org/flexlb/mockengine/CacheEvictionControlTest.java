@@ -31,7 +31,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * Checks cache-key snapshot exposure and HTTP eviction controls for Prefill and Decode engines.
+ * KV observation/control capabilities backing the flexlb_ft KV case family
+ * (tools/online_eval/flexlb_ft/cases/kv.py):
+ *
+ * <p>1. per-engine key-set exposure — every /snapshot engine dict carries
+ * {@code cache_key_set} (the engine's full MockLruBlockCache key list,
+ * sorted) next to the {@code cache_keys} count, on prefill AND decode
+ * engines;
+ *
+ * <p>2. {@code POST /cache_evict {"engine", "keys"}} — force-evict the
+ * named keys from one engine's LRU and bump that engine's cacheVersion so
+ * the master's cache-status poll propagates the eviction (idempotent:
+ * unknown keys are a no-op with NO version bump, so re-evictions never
+ * trigger spurious master re-syncs).
+ *
+ * <p>Also pins the MockLruBlockCache unit contract: forced evictions count
+ * in {@code evictions}, evicted keys no longer prefix-hit (first miss
+ * truncates the run), and gRPC getCacheStatus — the master-facing sync
+ * surface — serves the post-eviction key set under the bumped version.
  */
 class CacheEvictionControlTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -68,7 +85,7 @@ class CacheEvictionControlTest {
     @Test
     void blockCacheEvictCountsEvictionsAndTruncatesPrefixHits() {
         MockLruBlockCache cache = new MockLruBlockCache(16);
-        assertTrue(cache.admit(List.of(101L, 102L, 103L)));
+        assertTrue(MockEngineTestSupport.seedCache(cache, List.of(101L, 102L, 103L)));
         assertEquals(3, cache.prefixHitBlocks(List.of(101L, 102L, 103L)));
 
         assertTrue(cache.evict(List.of(102L)), "evicting a present key must report changed");
@@ -164,7 +181,7 @@ class CacheEvictionControlTest {
 
         HttpResponse<String> response =
                 httpPostResponse(
-                        controlServer.getPort(),
+                        MockEngineTestSupport.controlPort(controlServer),
                         "/cache_evict",
                         "{\"engine\":\"prefill-0\",\"keys\":[201]}");
         assertEquals(200, response.statusCode());
@@ -216,7 +233,7 @@ class CacheEvictionControlTest {
         long versionBefore = cacheStatus(prefill).getVersion();
         HttpResponse<String> first =
                 httpPostResponse(
-                        controlServer.getPort(),
+                        MockEngineTestSupport.controlPort(controlServer),
                         "/cache_evict",
                         "{\"engine\":\"prefill-0\",\"keys\":[301]}");
         assertEquals(200, first.statusCode());
@@ -228,7 +245,7 @@ class CacheEvictionControlTest {
         // so the master's cache-status poll never re-syncs on a stale evict.
         HttpResponse<String> second =
                 httpPostResponse(
-                        controlServer.getPort(),
+                        MockEngineTestSupport.controlPort(controlServer),
                         "/cache_evict",
                         "{\"engine\":\"prefill-0\",\"keys\":[301]}");
         assertEquals(200, second.statusCode());
@@ -240,7 +257,7 @@ class CacheEvictionControlTest {
         // Unknown keys and the empty array are no-ops too.
         HttpResponse<String> unknown =
                 httpPostResponse(
-                        controlServer.getPort(),
+                        MockEngineTestSupport.controlPort(controlServer),
                         "/cache_evict",
                         "{\"engine\":\"prefill-0\",\"keys\":[999, 1000]}");
         assertEquals(200, unknown.statusCode());
@@ -248,7 +265,7 @@ class CacheEvictionControlTest {
 
         HttpResponse<String> empty =
                 httpPostResponse(
-                        controlServer.getPort(),
+                        MockEngineTestSupport.controlPort(controlServer),
                         "/cache_evict",
                         "{\"engine\":\"prefill-0\",\"keys\":[]}");
         assertEquals(200, empty.statusCode());
@@ -278,7 +295,7 @@ class CacheEvictionControlTest {
         assertEquals(
                 400,
                 httpPostResponse(
-                                controlServer.getPort(),
+                                MockEngineTestSupport.controlPort(controlServer),
                                 "/cache_evict",
                                 "{\"engine\":\"prefill-0\"}")
                         .statusCode());
@@ -286,7 +303,7 @@ class CacheEvictionControlTest {
         assertEquals(
                 400,
                 httpPostResponse(
-                                controlServer.getPort(),
+                                MockEngineTestSupport.controlPort(controlServer),
                                 "/cache_evict",
                                 "{\"engine\":\"prefill-0\",\"keys\":401}")
                         .statusCode());
@@ -294,7 +311,7 @@ class CacheEvictionControlTest {
         assertEquals(
                 400,
                 httpPostResponse(
-                                controlServer.getPort(),
+                                MockEngineTestSupport.controlPort(controlServer),
                                 "/cache_evict",
                                 "{\"engine\":\"prefill-0\",\"keys\":[401,\"abc\"]}")
                         .statusCode());
@@ -302,19 +319,22 @@ class CacheEvictionControlTest {
         assertEquals(
                 404,
                 httpPostResponse(
-                                controlServer.getPort(),
+                                MockEngineTestSupport.controlPort(controlServer),
                                 "/cache_evict",
                                 "{\"engine\":\"prefill-99\",\"keys\":[401]}")
                         .statusCode());
         assertEquals(
                 400,
-                httpPostResponse(controlServer.getPort(), "/cache_evict", "{\"keys\":[401]}")
+                httpPostResponse(
+                                MockEngineTestSupport.controlPort(controlServer),
+                                "/cache_evict",
+                                "{\"keys\":[401]}")
                         .statusCode());
 
         // Evicting on prefill-0 leaves decode-0's key set untouched.
         HttpResponse<String> response =
                 httpPostResponse(
-                        controlServer.getPort(),
+                        MockEngineTestSupport.controlPort(controlServer),
                         "/cache_evict",
                         "{\"engine\":\"prefill-0\",\"keys\":[401]}");
         assertEquals(200, response.statusCode());
@@ -326,7 +346,7 @@ class CacheEvictionControlTest {
         // integral decimal strings parse as block keys (strict parsing).
         HttpResponse<String> byPort =
                 httpPostResponse(
-                        controlServer.getPort(),
+                        MockEngineTestSupport.controlPort(controlServer),
                         "/cache_evict",
                         "{\"port\":" + prefill.getGrpcPort() + ",\"keys\":[\"402\"]}");
         assertEquals(200, byPort.statusCode());
@@ -453,7 +473,11 @@ class CacheEvictionControlTest {
 
     private JsonNode engineByName(String name) throws Exception {
         JsonNode engines =
-                MAPPER.readTree(httpGet(controlServer.getPort(), "/snapshot")).get("engines");
+                MAPPER.readTree(
+                                httpGet(
+                                        MockEngineTestSupport.controlPort(controlServer),
+                                        "/snapshot"))
+                        .get("engines");
         for (JsonNode engine : engines) {
             if (name.equals(engine.get("name").asText())) {
                 return engine;
@@ -468,7 +492,7 @@ class CacheEvictionControlTest {
             throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         while (System.nanoTime() < deadline) {
-            if (service.getCompletedCount() >= expected) {
+            if (MockEngineTestSupport.getCompletedCount(service) >= expected) {
                 return;
             }
             Thread.sleep(5);
@@ -479,6 +503,6 @@ class CacheEvictionControlTest {
                         + " completions on port "
                         + service.getGrpcPort()
                         + ", got "
-                        + service.getCompletedCount());
+                        + MockEngineTestSupport.getCompletedCount(service));
     }
 }

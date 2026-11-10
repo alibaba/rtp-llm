@@ -110,25 +110,21 @@ public class GlobalCacheIndex {
      *
      * @param engineIp logical worker identity in {@code ip:port@engineIndex} format
      */
-    public void removeAllCacheBlockOfEngine(String engineIp) {
-        if (engineIp == null) {
+    public void removeAllCacheBlockOfEngine(String engineIp, Set<Long> ownedKeys) {
+        if (engineIp == null || ownedKeys == null || ownedKeys.isEmpty()) {
             return;
         }
-
         lock.lock();
         try {
-            blockToEnginesMap.forEach(
-                    (blockCacheKey, engines) -> {
-                        boolean removed = engines.remove(engineIp);
-                        if (removed) {
-                            totalMappings.decrement();
-
-                            // Remove entire entry if no engine owns this cache block
-                            if (engines.isEmpty()) {
-                                blockToEnginesMap.remove(blockCacheKey);
-                            }
-                        }
-                    });
+            for (Long key : ownedKeys) {
+                Set<String> engines = blockToEnginesMap.get(key);
+                if (engines != null && engines.remove(engineIp)) {
+                    totalMappings.decrement();
+                    if (engines.isEmpty()) {
+                        blockToEnginesMap.remove(key);
+                    }
+                }
+            }
         } finally {
             lock.unlock();
         }

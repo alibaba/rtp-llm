@@ -11,6 +11,7 @@ import lombok.Getter;
 import lombok.Setter;
 import lombok.ToString;
 import org.flexlb.dao.master.WorkerIdentity;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
@@ -74,6 +75,7 @@ public class ServerStatus {
     @ToString.Exclude
     private WorkerIdentity workerIdentity = new WorkerIdentity(null, 0, 0);
 
+    /** Selection-time known work cost in ms, excluding collection and transport waits. */
     @JsonProperty("prefill_time")
     private long prefillTime;
 
@@ -97,6 +99,24 @@ public class ServerStatus {
 
     public void setPreemptRequestIds(List<String> preemptRequestIds) {
         this.preemptRequestIds = preemptRequestIds == null ? List.of() : preemptRequestIds;
+    }
+
+    public static ServerStatus forWorker(
+            RoleType role,
+            String requestId,
+            WorkerStatus.TopologySnapshot topology,
+            WorkerStatus.EngineObservation observation) {
+        ServerStatus result = new ServerStatus();
+        result.setSuccess(true);
+        result.setRole(role);
+        result.setRequestId(requestId);
+        result.setGroup(topology.group());
+        result.setServerIp(topology.ip());
+        result.setHttpPort(topology.port());
+        result.setGrpcPort(topology.grpcPort());
+        result.setSelectedEngineIndex(topology.engineIndex(), topology.multiEngineNum());
+        result.setDpRank(observation.dpRank());
+        return result;
     }
 
     /**

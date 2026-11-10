@@ -1,42 +1,64 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.projection.RequestTimeEstimation;
+import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.QueueExecutionSettings;
+import org.flexlb.balance.scheduler.RequestRepository;
+import org.flexlb.balance.strategy.PrefillSelectionStrategy;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
+import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.AbstractList;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.EnumMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
+import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 
 /**
- * <p>Discovery prepares an endpoint privately before publishing its generation for routing.
- * Captures return exact generation pins; replacement and retirement withdraw the old generation
- * and coordinate its cleanup rather than redirecting existing handles.
+ * Owns discovered worker identities and their published routing generations.
  */
 @Component
-public class EndpointRegistry {
+public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.WorkerStatusProvider {
+    private final EnumMap<RoleType, ConcurrentHashMap<String, WorkerStatus>> statusesByRole =
+            roleMaps(RoleType.values());
     private final EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>> endpointsByRole =
-            endpointMaps();
+            roleMaps(RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION, RoleType.VIT);
 
-    /** Advisory Prefill generations, atomically replaced after each map write. */
+    /**
+     * Advisory Prefill generations, atomically replaced after each map write.
+     */
+    private volatile List<EncoderEndpoint> encoderDirectory = List.of();
+
     private volatile List<PrefillRoutingEntry> prefillDirectory = List.of();
 
-    /** PDFusion uses the same Prefill planning path but a distinct role map. */
+    /**
+     * PDFusion uses the same Prefill planning path but a distinct role map.
+     */
     private volatile List<PrefillRoutingEntry> pdFusionDirectory = List.of();
 
     /**
@@ -44,141 +66,100 @@ public class EndpointRegistry {
      * replacement after changing the endpoint map. A racing reader may finish
      * an older traversal, but it cannot acquire stale ownership because the
      * selected address and generation are always revalidated by
-     * {@link #captureDecodeGeneration(DecodeEndpoint.DecodeRoutingView)}.
+     * {@link #selectDecodeEndpoint(DecodeResources.DecodeRoutingView)}.
      */
     private volatile List<Map.Entry<String, DecodeEndpoint>> decodeDirectory = List.of();
 
     private final ConfigService configService;
-    private final EndpointEventProjector endpointEvents;
-    private final BatchSchedulerReporter reporter;
-    private final DeliveryStrategy deliveryStrategy;
+    private final RequestRepository requests;
+    private final DeliveryMetricsReporter reporter;
+    private final org.flexlb.config.DispatcherConfig.Type deliveryMode;
     private final PlacementAvailability placementAvailability;
+    private final QueueExecutionSettings queueSettings;
+    private final PrefillRequestQueue.Factory workerQueues;
     private final Object lifecycleGate = new Object();
 
-    private RegistryPhase registryPhase = RegistryPhase.OPEN;
+    /**
+     * Null while open; every closing caller observes the same completed cleanup result.
+     */
+    private volatile CompletableFuture<Throwable> closeCompletion;
 
     private int inflightPublications;
     private int inflightDetachedRetirements;
 
-    private Throwable closeFailure;
+    private final long retirementTimeoutMs =
+            Long.getLong("flexlb.endpoint.retirement.timeout.ms", 30_000L);
 
     @Autowired
     public EndpointRegistry(
             ConfigService configService,
-            EndpointEventProjector endpointEvents,
-            BatchSchedulerReporter reporter,
-            DeliveryStrategy deliveryStrategy,
-            PlacementAvailability placementAvailability) {
+            RequestRepository requests,
+            DeliveryMetricsReporter reporter,
+            DeliveryDispatcher dispatcher,
+            PlacementAvailability placementAvailability,
+            GroupPlanner grouping,
+            PrefillRequestQueue.Factory workerQueues) {
+        checkArgument(retirementTimeoutMs > 0L, "endpoint retirement timeout must be positive");
         this.configService = java.util.Objects.requireNonNull(configService, "configService");
-        this.endpointEvents = java.util.Objects.requireNonNull(endpointEvents, "endpointEvents");
+        this.requests = java.util.Objects.requireNonNull(requests, "requests");
         this.reporter = java.util.Objects.requireNonNull(reporter, "reporter");
-        this.deliveryStrategy =
-                java.util.Objects.requireNonNull(deliveryStrategy, "deliveryStrategy");
+        this.deliveryMode = java.util.Objects.requireNonNull(dispatcher, "dispatcher").mode();
+        var config = configService.loadBalanceConfig();
+        this.queueSettings =
+                config.isQueue()
+                        ? QueueExecutionSettings.capture(config, Objects.requireNonNull(grouping))
+                        : null;
+        this.workerQueues = Objects.requireNonNull(workerQueues);
         this.placementAvailability =
                 java.util.Objects.requireNonNull(placementAvailability, "placementAvailability");
     }
 
-    public WorkerEndpoint get(RoleType roleType, String ipPort) {
-        Map<String, WorkerEndpoint> endpoints = endpoints(roleType);
-        return endpoints == null ? null : endpoints.get(ipPort);
+    public List<EncoderEndpoint> encoderRoutingSnapshot() {
+        return encoderDirectory;
+    }
+
+    @org.springframework.scheduling.annotation.Scheduled(fixedRate = 60_000L)
+    public void maintainExpiration() {
+        if (!requests.isClosed()) evictExpiredOrphans(10_000L, requests::retainsIdentity);
     }
 
     /**
-     * Return immutable routing values for the Decode generations observed
-     * during this traversal.
+     * Trigger TTL eviction on all prefill and decode endpoints.
      *
-     * <p>The registry is intentionally not locked while an endpoint takes its
-     * admission lock.  This avoids introducing a map-bin/admission-lock order;
-     * publication races are resolved when the selected generation is pinned
-     * by {@link #captureDecodeGeneration(DecodeEndpoint.DecodeRoutingView)}.</p>
+     * @param ttlMs max age before eviction
+     * @param retainForSchedulerCleanup current directory lookup, called outside endpoint locks;
+     *                                  candidates are revalidated in an Endpoint lock before eviction
      */
-    public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot() {
-        List<Map.Entry<String, DecodeEndpoint>> directory = decodeDirectory;
-        List<DecodeEndpoint.DecodeRoutingView> snapshot = new ArrayList<>(directory.size());
-        for (Map.Entry<String, DecodeEndpoint> entry : directory) {
-            snapshot.add(entry.getValue().routingViewSnapshot(entry.getKey()));
-        }
-        return List.copyOf(snapshot);
-    }
-
-    /**
-     * Capture the exact Decode generation represented by a routing snapshot.
-     *
-     * <p>The routing values are advisory and may change after selection. The
-     * subsequent reservation/dispatch transaction revalidates capacity under
-     * the endpoint admission lock. This method authorizes only an identical
-     * endpoint generation; every rejected or exceptional capture is closed
-     * here, while a successful caller owns the returned generation pin.</p>
-     */
-    public WorkerEndpoint.GenerationPin captureDecodeGeneration(
-            DecodeEndpoint.DecodeRoutingView expected) {
-        WorkerEndpoint.GenerationPin pin = capture(RoleType.DECODE, expected.address());
-        if (pin == null) {
-            return null;
-        }
-        boolean transferred = false;
-        try {
-            if (pin.generationId() != expected.generationId()
-                    || !(pin.endpoint() instanceof DecodeEndpoint)) {
-                return null;
-            }
-            transferred = true;
-            return pin;
-        } finally {
-            if (!transferred) {
-                pin.close();
-            }
+    public void evictExpiredOrphans(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
+        for (RoleType role : List.of(RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION)) {
+            endpointsByRole
+                    .get(role)
+                    .forEach(
+                            (address, worker) -> {
+                                int evicted =
+                                        role == RoleType.DECODE
+                                                ? ((DecodeEndpoint) worker)
+                                                        .evictExpiredRequests(
+                                                                ttlMs, retainForSchedulerCleanup)
+                                                : ((PrefillEndpoint) worker)
+                                                        .evictExpiredInflight(
+                                                                ttlMs, retainForSchedulerCleanup);
+                                if (evicted > 0) {
+                                    reporter.reportEndpointInflightTtlExpired(
+                                            role.name(), address, "ttl", evicted);
+                                    Logger.info(
+                                            "event=endpoint_inflight_ttl_eviction role={} endpoint={} evicted={} ttl_ms={}",
+                                            role,
+                                            address,
+                                            evicted,
+                                            ttlMs);
+                                }
+                            });
         }
     }
 
     /**
-     * Capture one exact currently published endpoint generation.
-     *
-     * <p>The pin is acquired inside the address key's CHM remapping critical
-     * section. Capture therefore linearizes either before exact detach (and
-     * retirement waits for the pin) or after detach (and returns {@code null}).
-     * The returned route capability is thread-confined.</p>
-     */
-    public WorkerEndpoint.GenerationPin capture(RoleType roleType, String ipPort) {
-        ConcurrentHashMap<String, WorkerEndpoint> endpoints = endpoints(roleType);
-        return endpoints == null ? null : capture(endpoints, ipPort);
-    }
-
-    /**
-     * Capture the currently addressable generations without exposing a live
-     * registry map. Addresses are snapshotted first; every exact pin is then
-     * acquired through {@link #capture(RoleType, String)}.
-     */
-    public List<WorkerEndpoint.GenerationPin> capture(RoleType roleType) {
-        List<String> addresses = endpointAddressSnapshot(roleType);
-        List<WorkerEndpoint.GenerationPin> pins = new ArrayList<>(addresses.size());
-        try {
-            for (String address : addresses) {
-                WorkerEndpoint.GenerationPin pin = capture(roleType, address);
-                if (pin != null) {
-                    pins.add(pin);
-                }
-            }
-            return pins;
-        } catch (RuntimeException | Error captureFailure) {
-            for (WorkerEndpoint.GenerationPin pin : pins) {
-                try {
-                    pin.close();
-                } catch (Throwable closeFailure) {
-                    captureFailure.addSuppressed(closeFailure);
-                }
-            }
-            throw captureFailure;
-        }
-    }
-
-    /**
-     * Return an immutable point-in-time address snapshot for one role.
-     *
-     * <p>No endpoint object or live registry map escapes.  A caller which needs
-     * generation ownership must still pass an address back through
-     * {@link #capture(RoleType, String)}; same-address replacement therefore
-     * remains linearized by the address key's remapping critical section.</p>
+     * Returns an immutable address snapshot. Select the Endpoint again before admission.
      */
     public List<String> endpointAddressSnapshot(RoleType roleType) {
         if (roleType != null && roleType.supportsPrefill()) {
@@ -195,16 +176,16 @@ public class EndpointRegistry {
                 }
             };
         }
-        Map<String, WorkerEndpoint> endpoints = endpoints(roleType);
-        return endpoints == null ? List.of() : List.copyOf(endpoints.keySet());
+        Map<String, WorkerEndpoint> endpoints = endpointsByRole.get(roleType);
+        if (endpoints == null) return List.of();
+        return endpoints.entrySet().stream()
+                .filter(entry -> selectEndpoint(roleType, entry.getKey()) == entry.getValue())
+                .map(Map.Entry::getKey)
+                .toList();
     }
 
     /**
-     * Return the immutable Prefill routing directory observed at one instant.
-     *
-     * <p>This removes per-request registry lookups while deliberately avoiding
-     * fleet-wide generation pins. A selected entry remains advisory until its
-     * address is captured and the endpoint identity is revalidated.</p>
+     * Returns an immutable Prefill directory. Entries are advisory until admission succeeds.
      */
     public List<PrefillRoutingEntry> prefillRoutingSnapshot(RoleType roleType) {
         return switch (roleType) {
@@ -214,39 +195,81 @@ public class EndpointRegistry {
         };
     }
 
-    /** Return the endpoint only when it belongs to the expected status generation. */
+    /**
+     * Returns a currently available Endpoint. Admission rechecks retirement and capacity in its state lock.
+     */
+    public WorkerEndpoint selectEndpoint(RoleType roleType, String ipPort) {
+        WorkerEndpoint endpoint = get(roleType, ipPort);
+        return endpoint == null || !endpoint.acceptsNewRequests() ? null : endpoint;
+    }
+
+    public WorkerEndpoint get(RoleType roleType, String ipPort) {
+        Map<String, WorkerEndpoint> endpoints = endpointsByRole.get(roleType);
+        return endpoints == null ? null : endpoints.get(ipPort);
+    }
+
+    /**
+     * Return the endpoint only when it belongs to the expected status generation.
+     */
     public WorkerEndpoint get(RoleType roleType, String ipPort, WorkerStatus expectedStatus) {
         WorkerEndpoint endpoint = get(roleType, ipPort);
         return endpoint != null && endpoint.getStatus() == expectedStatus ? endpoint : null;
     }
 
     /**
+     * Copies Decode routing snapshots without retaining the caller list or holding registry locks.
+     */
+    public void decodeRoutingSnapshot(
+            String group, List<DecodeResources.DecodeRoutingView> target) {
+        var directory = decodeDirectory;
+        for (int index = 0; index < directory.size(); index++) {
+            var entry = directory.get(index);
+            var view = Objects.requireNonNull(entry.getValue().routingView(entry.getKey()));
+            if (group == null || group.equals(view.topology().group())) {
+                target.add(view);
+            }
+        }
+    }
+
+    /**
+     * Returns the same Decode generation as the snapshot; admission rechecks its current capacity.
+     */
+    public WorkerEndpoint selectDecodeEndpoint(DecodeResources.DecodeRoutingView expected) {
+        WorkerEndpoint endpoint = selectEndpoint(RoleType.DECODE, expected.address());
+        return endpoint instanceof DecodeEndpoint
+                        && endpoint.getStatus().getGenerationId() == expected.generationId()
+                ? endpoint
+                : null;
+    }
+
+    /**
      * Reduce a private candidate from a new status delta, commit the validated
      * Engine observation, then make the candidate routable. A private candidate
-     * cannot own any published RequestSlot identity, so its typed scheduler
-     * reduction is necessarily empty.
+     * cannot own any published RequestContext identity, so there are no request
+     * transitions to apply before publication.
      *
      * <p>A factory, endpoint-reducer, or status-commit failure closes the
      * candidate before routing publication. If final map publication fails
      * after commit, the caller withdraws the entire WorkerStatus generation;
      * it is never restored.</p>
      */
-    public EndpointPublication publishPreparedEndpoint(
+    public WorkerEndpoint publishPreparedEndpoint(
             String address, WorkerStatus status, WorkerStatus.PreparedStatus prepared) {
         beginCandidatePublication();
+        WorkerEndpoint candidate = null;
+        boolean publicationAttempted = false;
+        Throwable failure = null;
         try {
-            requireGenerationLock(status);
+            status.requireGenerationLock();
             status.requireActiveGeneration();
             WorkerStatus.StatusObservation observation = prepared.observation();
-            if (observation.owner() != status) {
-                throw new IllegalArgumentException(
-                        "staged status belongs to another worker generation");
-            }
+            checkArgument(
+                    observation.owner() == status,
+                    "staged status belongs to another worker generation");
             RoleType role = observation.role();
-            if (role != status.getRole()) {
-                throw new IllegalArgumentException(
-                        "staged status role does not match its worker generation");
-            }
+            checkArgument(
+                    role == status.getRole(),
+                    "staged status role does not match its worker generation");
             java.util.Objects.requireNonNull(address, "address");
             if (status.appliedStatusCursor().statusVersion() >= 0L) {
                 throw new IllegalStateException(
@@ -255,22 +278,83 @@ public class EndpointRegistry {
                                 + "#"
                                 + status.getGenerationId());
             }
-            WorkerEndpoint candidate = null;
-            EndpointPublication publication;
-            try {
-                candidate = createEndpoint(status, role, observation.engine());
-                Runnable projection = candidate.initializeFromPreparedStatus(status, observation);
-                publication = new EndpointPublication(candidate, projection);
-                startCandidate(candidate);
-                status.publishPreparedStatus(prepared);
-            } catch (Throwable reductionOrCommitFailure) {
-                closeCandidate(candidate, reductionOrCommitFailure);
-                throw propagate(reductionOrCommitFailure, address);
-            }
-            return publishPrivateEndpoint(role, endpoints(role), address, candidate, publication);
+            candidate = createEndpoint(status, role, observation.engine());
+            candidate.initializeFromPreparedStatus(status, observation);
+            status.publishPreparedStatus(prepared);
+            status.trace().record(Stage.ENDPOINT_PUBLISHED);
+            WorkerEndpoint exact = candidate;
+            publicationAttempted = true;
+            mutateEndpointMap(
+                    role,
+                    endpointsByRole.get(role),
+                    address,
+                    (ignored, current) -> {
+                        checkState(
+                                current == null || current.getStatus() != status,
+                                "Endpoint generation is already published for %s",
+                                address);
+                        checkState(
+                                current == null,
+                                "Existing endpoint generation must be withdrawn before publication for %s",
+                                address);
+                        return exact;
+                    });
+            placementAvailability.changed(exact);
+            return candidate;
+        } catch (Throwable publicationFailure) {
+            failure = publicationFailure;
+            throw Failures.propagate(failure, "Endpoint publication failed for " + address);
         } finally {
-            endCandidatePublication();
+            try {
+                if (failure != null && candidate != null) {
+                    WorkerEndpoint exact = candidate;
+                    try {
+                        if (publicationAttempted) {
+                            RoleType role = status.getRole();
+                            mutateEndpointMap(
+                                    role,
+                                    endpointsByRole.get(role),
+                                    address,
+                                    (ignored, current) -> current == exact ? null : current);
+                        }
+                    } catch (Throwable withdrawalFailure) {
+                        Failures.append(failure, withdrawalFailure);
+                    } finally {
+                        Failures.run(failure, exact::closeAsynchronously);
+                    }
+                }
+            } finally {
+                endCandidatePublication();
+            }
         }
+    }
+
+    /**
+     * Detach confirmed unavailable generations without waiting for local status application.
+     */
+    public Retirement beginRequestedRetirement(RoleType role, String address, WorkerStatus status) {
+        if (status.retirementReason() == null || !status.lock.tryLock()) {
+            return null;
+        }
+        try {
+            if (!isCurrentStatus(role, address, status) || !status.isActiveGeneration()) {
+                return null;
+            }
+            return beginRetirement(role, address, status);
+        } finally {
+            status.lock.unlock();
+        }
+    }
+
+    /**
+     * Accept updates only for an exact current generation while this registry is open.
+     */
+    public boolean isCurrentStatus(RoleType role, String address, WorkerStatus expected) {
+        return closeCompletion == null
+                && expected != null
+                && role != null
+                && address != null
+                && statusesByRole.get(role).get(address) == expected;
     }
 
     /**
@@ -278,67 +362,75 @@ public class EndpointRegistry {
      * waiting for its potentially blocking drain. The caller holds the ACTIVE
      * WorkerStatus generation lock. This method publishes RETIRING only after
      * the exact endpoint gate has closed and routing withdrawal is visible;
-     * the caller closes the returned endpoint outside that lock.
+     * the caller completes the returned retirement outside that lock. A status
+     * without a published endpoint still returns a finalization capability.
      */
-    public DetachedGeneration detachAndBeginRetirement(
+    public Retirement beginRetirement(
             RoleType roleType, String ipPort, WorkerStatus expectedStatus) {
-        if (expectedStatus == null) {
-            return null;
-        }
+        Objects.requireNonNull(expectedStatus, "status");
+        Objects.requireNonNull(roleType, "role");
+        Objects.requireNonNull(ipPort, "address");
         expectedStatus.requireActiveGeneration();
-        DetachedGeneration detached;
+        Retirement retirement;
         synchronized (lifecycleGate) {
-            if (registryPhase != RegistryPhase.OPEN) {
-                throw new IllegalStateException("EndpointRegistry is closing");
+            checkState(closeCompletion == null, "EndpointRegistry is closing");
+            WorkerEndpoint expected = get(roleType, ipPort, expectedStatus);
+            retirement = new Retirement(roleType, ipPort, expectedStatus, expected);
+            if (expected != null) {
+                mutateEndpointMap(
+                        roleType,
+                        endpointsByRole.get(roleType),
+                        ipPort,
+                        (ignored, current) -> {
+                            checkState(
+                                    current == expected,
+                                    "Endpoint changed while its generation lock was held: %s",
+                                    ipPort);
+                            // Close admission while the exact mapping is still visible.
+                            current.beginRetirement();
+                            return null;
+                        });
             }
-            ConcurrentHashMap<String, WorkerEndpoint> endpoints = endpoints(roleType);
-            detached =
-                    endpoints == null ? null : detach(roleType, endpoints, ipPort, expectedStatus);
-            if (detached != null) {
-                inflightDetachedRetirements++;
-                if (!expectedStatus.beginRetirementAfterEndpointGateClosed()) {
-                    throw new IllegalStateException(
-                            "WorkerStatus generation changed while its lock was held: "
-                                    + ipPort
-                                    + "#"
-                                    + expectedStatus.getGenerationId());
-                }
+            if (!expectedStatus.beginRetirementAfterEndpointGateClosed()) {
+                throw new IllegalStateException(
+                        "WorkerStatus generation changed while its lock was held: "
+                                + ipPort
+                                + "#"
+                                + expectedStatus.getGenerationId());
             }
+            inflightDetachedRetirements++;
         }
-        if (detached != null) {
-            WorkerStatus.TopologySnapshot topology =
-                    detached.endpoint.getStatus().topologySnapshot();
-            placementAvailability.topologyChanged(roleType, topology.group(), ipPort);
-        }
-        return detached;
+        return retirement;
     }
 
     public void close() {
-        boolean interrupted = false;
-        boolean closeOwner = false;
+        boolean closeOwner;
+        CompletableFuture<Throwable> completion;
         synchronized (lifecycleGate) {
-            if (registryPhase == RegistryPhase.OPEN) {
-                registryPhase = RegistryPhase.CLOSING;
+            closeOwner = closeCompletion == null;
+            if (closeOwner) {
+                closeCompletion = new CompletableFuture<>();
                 prefillDirectory = List.of();
                 pdFusionDirectory = List.of();
                 decodeDirectory = List.of();
-                closeOwner = true;
+                encoderDirectory = List.of();
             }
-            while (registryPhase == RegistryPhase.CLOSING
-                    && (!closeOwner || inflightPublications != 0)) {
+            completion = closeCompletion;
+        }
+        if (!closeOwner) {
+            // Join outside the gate; concurrent closers retain their interruption status.
+            Failures.rethrow(completion.join(), "EndpointRegistry close failed");
+            return;
+        }
+
+        boolean interrupted = false;
+        synchronized (lifecycleGate) {
+            while (inflightPublications != 0) {
                 try {
                     lifecycleGate.wait();
                 } catch (InterruptedException interruption) {
                     interrupted = true;
                 }
-            }
-            if (!closeOwner) {
-                Throwable completedFailure = closeFailure;
-                if (interrupted) {
-                    Thread.currentThread().interrupt();
-                }
-                rethrowCloseFailure(completedFailure);
-                return;
             }
         }
 
@@ -351,156 +443,134 @@ public class EndpointRegistry {
         try {
             awaitDetachedRetirements();
         } catch (RuntimeException | Error detachedBarrierFailure) {
-            failure = appendFailure(failure, detachedBarrierFailure);
+            failure = Failures.append(failure, detachedBarrierFailure);
+        } finally {
+            completion.complete(failure);
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
-        synchronized (lifecycleGate) {
-            closeFailure = failure;
-            registryPhase = RegistryPhase.CLOSED;
-            lifecycleGate.notifyAll();
-        }
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
-        rethrowCloseFailure(failure);
-    }
-
-    /** Immutable point-in-time view; publication remains owned by this registry. */
-    @SuppressWarnings("unchecked")
-    public Map<String, PrefillEndpoint> snapshotPrefillEndpoints() {
-        return (Map<String, PrefillEndpoint>) (Map<?, ?>) Map.copyOf(endpoints(RoleType.PREFILL));
-    }
-
-    /** Immutable point-in-time view; publication remains owned by this registry. */
-    @SuppressWarnings("unchecked")
-    public Map<String, DecodeEndpoint> snapshotDecodeEndpoints() {
-        return (Map<String, DecodeEndpoint>) (Map<?, ?>) Map.copyOf(endpoints(RoleType.DECODE));
-    }
-
-    public int getEndpointCount(RoleType roleType) {
-        Map<String, WorkerEndpoint> endpoints = endpoints(roleType);
-        return endpoints == null ? 0 : endpoints.size();
+        Failures.rethrow(failure, "EndpointRegistry close failed");
     }
 
     /**
-     * Trigger TTL eviction on all prefill and decode endpoints.
-     *
-     * @param ttlMs max age before eviction
-     * @param retainForSchedulerCleanup current directory lookup, called under endpoint locks;
-     *                                  must not acquire request locks or use a historical snapshot
+     * Immutable diagnostic view; callers know the role of each resource owner.
      */
-    public void evictExpiredOrphans(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
-        endpoints(RoleType.PREFILL)
-                .forEach(
-                        (endpoint, worker) -> {
-                            PrefillEndpoint ep = (PrefillEndpoint) worker;
-                            logEndpointEviction(
-                                    RoleType.PREFILL,
-                                    endpoint,
-                                    ep.evictExpiredInflight(ttlMs, retainForSchedulerCleanup),
-                                    ttlMs);
-                        });
-        endpoints(RoleType.DECODE)
-                .forEach(
-                        (endpoint, worker) -> {
-                            DecodeEndpoint ep = (DecodeEndpoint) worker;
-                            logEndpointEviction(
-                                    RoleType.DECODE,
-                                    endpoint,
-                                    ep.evictExpiredRequests(ttlMs, retainForSchedulerCleanup),
-                                    ttlMs);
-                        });
-        endpoints(RoleType.PDFUSION)
-                .forEach(
-                        (endpoint, worker) -> {
-                            PrefillEndpoint ep = (PrefillEndpoint) worker;
-                            logEndpointEviction(
-                                    RoleType.PDFUSION,
-                                    endpoint,
-                                    ep.evictExpiredBatches(ttlMs),
-                                    ttlMs);
-                        });
+    public Map<String, WorkerEndpoint> endpointSnapshot(RoleType role) {
+        Map<String, WorkerEndpoint> endpoints = endpointsByRole.get(role);
+        return endpoints == null ? Map.of() : Map.copyOf(endpoints);
     }
 
-    private static EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>> endpointMaps() {
-        EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>> maps =
-                new EnumMap<>(RoleType.class);
-        for (RoleType role :
-                List.of(
-                        RoleType.PREFILL,
-                        RoleType.DECODE,
-                        RoleType.PDFUSION,
-                        RoleType.ENCODER,
-                        RoleType.VIT)) {
+    @Override
+    public Map<String, EndpointStats.Prefill> prefillStats() {
+        return statistics(RoleType.PREFILL, EndpointStats.Prefill.class);
+    }
+
+    @Override
+    public long blockSize(RoleType role) {
+        for (var worker : getWorkerStatuses(role, null)) {
+            long size = worker.committedEngineObservation().blockSize();
+            if (size > 0) return size;
+        }
+        return 0L;
+    }
+
+    /**
+     * Atomically install one newly discovered generation. Discovery publishes
+     * status identity only; its endpoint remains absent until the first valid
+     * WorkerStatus response commits.
+     */
+    @Override
+    public java.util.Collection<WorkerStatus> getWorkerStatuses(RoleType role, String group) {
+        if (role == null) return List.of();
+        return statusesByRole.get(role).values().stream()
+                .filter(
+                        worker ->
+                                worker.isAvailableForScheduling()
+                                        && (group == null || group.equals(worker.getGroup())))
+                .toList();
+    }
+
+    @Override
+    public Map<String, EndpointStats.Decode> decodeStats() {
+        return statistics(RoleType.DECODE, EndpointStats.Decode.class);
+    }
+
+    /**
+     * Cheap role counts; no endpoint or request snapshots are constructed.
+     */
+    public Counts counts(RoleType role) {
+        Objects.requireNonNull(role, "role");
+        Map<String, WorkerEndpoint> endpoints = endpointsByRole.get(role);
+        return new Counts(
+                statusesByRole.get(role).size(), endpoints == null ? 0 : endpoints.size());
+    }
+
+    /**
+     * Immutable point-in-time view of discovered generations for one role.
+     */
+    public Map<String, WorkerStatus> statusSnapshot(RoleType role) {
+        if (role == null) {
+            return Map.of();
+        }
+        return Map.copyOf(statusesByRole.get(role));
+    }
+
+    public WorkerStatus currentOrDiscover(
+            RoleType role, String address, Supplier<WorkerStatus> discoveredFactory) {
+        Objects.requireNonNull(role, "role");
+        Objects.requireNonNull(address, "address");
+        Objects.requireNonNull(discoveredFactory, "discoveredFactory");
+        checkState(closeCompletion == null, "EndpointRegistry is closing");
+        ConcurrentHashMap<String, WorkerStatus> statuses = statusesByRole.get(role);
+        WorkerStatus current = statuses.get(address);
+        if (current != null) {
+            return current;
+        }
+        // Construct private discovery state outside the gate: factories must not
+        // introduce a lifecycle-gate -> generation-lock edge.
+        WorkerStatus discovered =
+                Objects.requireNonNull(discoveredFactory.get(), "discovered status");
+        checkArgument(
+                discovered.getRole() == role && address.equals(discovered.getLogicalIpPort()),
+                "Discovered WorkerStatus identity does not match directory key");
+        synchronized (lifecycleGate) {
+            checkState(closeCompletion == null, "EndpointRegistry is closing");
+            WorkerStatus raced = statuses.putIfAbsent(address, discovered);
+            return raced == null ? discovered : raced;
+        }
+    }
+
+    public int discoveredCount() {
+        int total = 0;
+        for (Map<String, WorkerStatus> statuses : statusesByRole.values()) {
+            total += statuses.size();
+        }
+        return total;
+    }
+
+    private static <T> EnumMap<RoleType, ConcurrentHashMap<String, T>> roleMaps(RoleType... roles) {
+        EnumMap<RoleType, ConcurrentHashMap<String, T>> maps = new EnumMap<>(RoleType.class);
+        for (RoleType role : roles) {
             maps.put(role, new ConcurrentHashMap<>());
         }
         return maps;
     }
 
-    private ConcurrentHashMap<String, WorkerEndpoint> endpoints(RoleType role) {
-        return endpointsByRole.get(role);
-    }
-
-    private static WorkerEndpoint.GenerationPin capture(
-            ConcurrentHashMap<String, WorkerEndpoint> endpoints, String ipPort) {
-        AtomicReference<WorkerEndpoint.GenerationPin> captured = new AtomicReference<>();
-        endpoints.computeIfPresent(
-                ipPort,
-                (ignored, current) -> {
-                    captured.set(current.tryPinGeneration());
-                    return current;
-                });
-        return captured.get();
-    }
-
     private void beginCandidatePublication() {
         synchronized (lifecycleGate) {
-            if (registryPhase != RegistryPhase.OPEN) {
-                throw new IllegalStateException("EndpointRegistry is closing");
-            }
+            checkState(closeCompletion == null, "EndpointRegistry is closing");
             inflightPublications++;
         }
     }
 
     private void endCandidatePublication() {
         synchronized (lifecycleGate) {
-            if (inflightPublications <= 0) {
-                throw new IllegalStateException("EndpointRegistry publication count underflow");
-            }
+            checkState(inflightPublications > 0, "EndpointRegistry publication count underflow");
             inflightPublications--;
             if (inflightPublications == 0) {
                 lifecycleGate.notifyAll();
             }
-        }
-    }
-
-    private EndpointPublication publishPrivateEndpoint(
-            RoleType role,
-            ConcurrentHashMap<String, WorkerEndpoint> endpoints,
-            String ipPort,
-            WorkerEndpoint candidate,
-            EndpointPublication publication) {
-        try {
-            mutateEndpointMap(
-                    role,
-                    endpoints,
-                    ipPort,
-                    (ignored, current) -> {
-                        if (current != null && current.getStatus() == candidate.getStatus()) {
-                            throw new IllegalStateException(
-                                    "Endpoint generation is already published for " + ipPort);
-                        }
-                        if (current != null) {
-                            throw new IllegalStateException(
-                                    "Existing endpoint generation must be withdrawn before publication for "
-                                            + ipPort);
-                        }
-                        return candidate;
-                    });
-            signalPublishedEndpoint(candidate);
-            return publication;
-        } catch (Throwable publicationFailure) {
-            withdrawAndCloseCandidate(role, endpoints, ipPort, candidate, publicationFailure);
-            throw propagate(publicationFailure, ipPort);
         }
     }
 
@@ -515,7 +585,8 @@ public class EndpointRegistry {
             BiFunction<String, WorkerEndpoint, WorkerEndpoint> mutation) {
         boolean updatesPrefillDirectory = role != null && role.supportsPrefill();
         boolean updatesDecodeDirectory = role == RoleType.DECODE;
-        if (!updatesPrefillDirectory && !updatesDecodeDirectory) {
+        boolean updatesEncoderDirectory = role == RoleType.ENCODER;
+        if (!updatesPrefillDirectory && !updatesDecodeDirectory && !updatesEncoderDirectory) {
             return endpoints.compute(address, mutation);
         }
         synchronized (lifecycleGate) {
@@ -526,204 +597,89 @@ public class EndpointRegistry {
             }
             List<PrefillRoutingEntry> nextPrefillDirectory =
                     updatesPrefillDirectory
-                            ? registryPhase == RegistryPhase.OPEN
-                                    ? prefillDirectoryAfterMutationLocked(
-                                            prefillDirectory(role), address, (PrefillEndpoint) next)
-                                    : List.of()
+                            ? directoryAfterMutation(
+                                    role == RoleType.PREFILL ? prefillDirectory : pdFusionDirectory,
+                                    address,
+                                    PrefillRoutingEntry::address,
+                                    next == null
+                                            ? null
+                                            : new PrefillRoutingEntry(
+                                                    address, (PrefillEndpoint) next))
                             : null;
             List<Map.Entry<String, DecodeEndpoint>> nextDecodeDirectory =
                     updatesDecodeDirectory
-                            ? decodeDirectoryAfterMutationLocked(
-                                    this.decodeDirectory, address, (DecodeEndpoint) next)
+                            ? directoryAfterMutation(
+                                    decodeDirectory,
+                                    address,
+                                    Map.Entry::getKey,
+                                    next == null ? null : Map.entry(address, (DecodeEndpoint) next))
+                            : null;
+            List<EncoderEndpoint> nextEncoderDirectory =
+                    updatesEncoderDirectory
+                            ? directoryAfterMutation(
+                                    encoderDirectory,
+                                    address,
+                                    EncoderEndpoint::address,
+                                    (EncoderEndpoint) next)
                             : null;
             WorkerEndpoint published =
                     endpoints.compute(
                             address,
                             (ignored, observed) -> {
-                                if (observed != exactCurrent) {
-                                    throw new IllegalStateException(
-                                            role
-                                                    + " endpoint mapping changed outside its directory transaction: "
-                                                    + address);
-                                }
+                                checkState(
+                                        observed == exactCurrent,
+                                        "%s endpoint mapping changed outside its directory transaction: %s",
+                                        role,
+                                        address);
                                 return next;
                             });
             if (updatesPrefillDirectory) {
-                publishPrefillDirectory(role, nextPrefillDirectory);
-            } else {
+                if (role == RoleType.PREFILL) {
+                    prefillDirectory = nextPrefillDirectory;
+                } else {
+                    pdFusionDirectory = nextPrefillDirectory;
+                }
+            } else if (updatesDecodeDirectory) {
                 this.decodeDirectory = nextDecodeDirectory;
+            } else {
+                encoderDirectory = nextEncoderDirectory;
             }
             return published;
         }
     }
 
-    /** Build the exact post-mutation Prefill directory before its CHM write. */
-    private List<PrefillRoutingEntry> prefillDirectoryAfterMutationLocked(
-            List<PrefillRoutingEntry> previous, String address, PrefillEndpoint next) {
-        List<PrefillRoutingEntry> updated =
-                new ArrayList<>(previous.size() + (next == null ? 0 : 1));
-        boolean replaced = false;
-        for (PrefillRoutingEntry entry : previous) {
-            if (!entry.address().equals(address)) {
-                updated.add(entry);
-                continue;
+    /**
+     * Keep the immutable directory in address order; request routing then needs no full sort.
+     */
+    private <T> List<T> directoryAfterMutation(
+            List<T> previous, String address, Function<T, String> addressOf, T next) {
+        if (closeCompletion != null) {
+            return List.of();
+        }
+        List<T> updated = new ArrayList<>(previous.size() + (next == null ? 0 : 1));
+        boolean inserted = next == null;
+        for (T entry : previous) {
+            String currentAddress = addressOf.apply(entry);
+            if (!inserted && address.compareTo(currentAddress) <= 0) {
+                updated.add(next);
+                inserted = true;
             }
-            replaced = true;
-            if (next != null) {
-                updated.add(new PrefillRoutingEntry(address, next));
+            if (!address.equals(currentAddress)) {
+                updated.add(entry);
             }
         }
-        if (!replaced && next != null) {
-            updated.add(new PrefillRoutingEntry(address, next));
+        if (!inserted) {
+            updated.add(next);
         }
         return List.copyOf(updated);
     }
 
-    private List<PrefillRoutingEntry> prefillDirectory(RoleType role) {
-        return role == RoleType.PREFILL ? prefillDirectory : pdFusionDirectory;
-    }
-
-    /** Build the exact post-mutation directory before the CHM write. */
-    private List<Map.Entry<String, DecodeEndpoint>> decodeDirectoryAfterMutationLocked(
-            List<Map.Entry<String, DecodeEndpoint>> previous, String address, DecodeEndpoint next) {
-        if (registryPhase != RegistryPhase.OPEN) {
-            return List.of();
-        }
-        List<Map.Entry<String, DecodeEndpoint>> entries =
-                new ArrayList<>(previous.size() + (next == null ? 0 : 1));
-        for (Map.Entry<String, DecodeEndpoint> entry : previous) {
-            if (!entry.getKey().equals(address)) {
-                entries.add(entry);
-            }
-        }
-        if (next != null) {
-            entries.add(Map.entry(address, next));
-        }
-        return List.copyOf(entries);
-    }
-
-    private void publishPrefillDirectory(RoleType role, List<PrefillRoutingEntry> directory) {
-        if (role == RoleType.PREFILL) {
-            prefillDirectory = directory;
-        } else if (role == RoleType.PDFUSION) {
-            pdFusionDirectory = directory;
-        } else {
-            throw new IllegalArgumentException("Not a Prefill routing role: " + role);
-        }
-    }
-
-    private void signalPublishedEndpoint(WorkerEndpoint endpoint) {
-        if (endpoint == null) {
-            return;
-        }
-        WorkerStatus.TopologySnapshot topology = endpoint.getStatus().topologySnapshot();
-        placementAvailability.topologyChanged(
-                endpoint.getStatus().getRole(), topology.group(), endpoint.ipPort());
-    }
-
-    private void withdrawAndCloseCandidate(
-            RoleType role,
-            ConcurrentHashMap<String, WorkerEndpoint> endpoints,
-            String ipPort,
-            WorkerEndpoint candidate,
-            Throwable primaryFailure) {
-        try {
-            mutateEndpointMap(
-                    role,
-                    endpoints,
-                    ipPort,
-                    (ignored, current) -> current == candidate ? null : current);
-        } catch (Throwable withdrawalFailure) {
-            addSuppressedNoFail(primaryFailure, withdrawalFailure);
-        }
-        closeCandidate(candidate, primaryFailure);
-    }
-
-    private static void addSuppressedNoFail(Throwable primary, Throwable leaf) {
-        if (primary == null || leaf == null || primary == leaf) {
-            return;
-        }
-        try {
-            primary.addSuppressed(leaf);
-        } catch (Throwable ignoredAggregationFailure) {
-            // The exact candidate cleanup was still initiated.
-        }
-    }
-
-    private static void closeCandidate(WorkerEndpoint candidate, Throwable primaryFailure) {
-        if (candidate == null) {
-            return;
-        }
-        try {
-            candidate.closeAsynchronously();
-        } catch (Throwable closeFailure) {
-            addSuppressedNoFail(primaryFailure, closeFailure);
-        }
-    }
-
-    private static RuntimeException propagate(Throwable failure, String ipPort) {
-        if (failure instanceof RuntimeException runtimeFailure) {
-            return runtimeFailure;
-        }
-        if (failure instanceof Error error) {
-            throw error;
-        }
-        return new IllegalStateException("Endpoint publication failed for " + ipPort, failure);
-    }
-
-    private static void startCandidate(WorkerEndpoint candidate) {
-        if (candidate instanceof PrefillEndpoint prefill) {
-            prefill.startGeneration();
-        }
-    }
-
-    private static void requireGenerationLock(WorkerStatus status) {
-        if (!status.lock.isHeldByCurrentThread()) {
-            throw new IllegalStateException(
-                    "Endpoint publication requires the WorkerStatus generation lock");
-        }
-    }
-
-    private DetachedGeneration detach(
-            RoleType role,
-            ConcurrentHashMap<String, WorkerEndpoint> endpoints,
-            String ipPort,
-            WorkerStatus expectedStatus) {
-        if (!Thread.holdsLock(lifecycleGate)) {
-            throw new IllegalStateException("Endpoint detach requires the registry lifecycle gate");
-        }
-        AtomicReference<DetachedGeneration> detached = new AtomicReference<>();
-        mutateEndpointMap(
-                role,
-                endpoints,
-                ipPort,
-                (ignored, current) -> {
-                    if (current == null) {
-                        return null;
-                    }
-                    if (current.getStatus() != expectedStatus) {
-                        return current;
-                    }
-                    // Admission closes while the exact mapping is still
-                    // current. Removal becomes visible only after this
-                    // non-blocking transition succeeds.
-                    current.beginRetirement();
-                    detached.set(new DetachedGeneration(this, current));
-                    return null;
-                });
-        return detached.get();
-    }
-
-    /** Resolve one exact detached-generation barrier token. */
-    private void resolveDetachedGeneration(DetachedGeneration exact) {
+    /**
+     * Resolve the barrier after the exact generation's drain and finalization.
+     */
+    private void resolveDetachedGeneration() {
         synchronized (lifecycleGate) {
-            if (exact == null || exact.registry != this) {
-                throw new IllegalArgumentException(
-                        "Detached generation belongs to another registry");
-            }
-            if (inflightDetachedRetirements <= 0) {
-                throw new IllegalStateException("Detached retirement count underflow");
-            }
+            checkState(inflightDetachedRetirements > 0, "Detached retirement count underflow");
             inflightDetachedRetirements--;
             if (inflightDetachedRetirements == 0) {
                 lifecycleGate.notifyAll();
@@ -733,9 +689,7 @@ public class EndpointRegistry {
 
     private WorkerEndpoint createEndpoint(
             WorkerStatus status, RoleType role, WorkerStatus.EngineObservation engineStatus) {
-        if (role == RoleType.FRONTEND) {
-            throw new IllegalArgumentException("Unsupported role: " + role);
-        }
+        checkArgument(role != RoleType.FRONTEND, "Unsupported role: %s", role);
         boolean prefill = role == RoleType.PREFILL || role == RoleType.PDFUSION;
         if (prefill && engineStatus.dpSize() > 1) {
             throw new UnsupportedOperationException(
@@ -745,240 +699,331 @@ public class EndpointRegistry {
                             + ", dp_size="
                             + engineStatus.dpSize());
         }
-        prepareEndpointMetrics(role, status);
+        try {
+            reporter.prepareEndpointMetrics(role.name(), status.getIp());
+        } catch (RuntimeException telemetryFailure) {
+            Logger.warn(
+                    "Endpoint metric preparation failed: role={}, engine={}",
+                    role,
+                    status.getIp(),
+                    telemetryFailure);
+        }
         return switch (role) {
             case PREFILL, PDFUSION ->
                     new PrefillEndpoint(
                             status,
-                            configService::loadBalanceConfig,
-                            deliveryStrategy,
-                            endpointEvents,
+                            configService.loadBalanceConfig(),
+                            deliveryMode,
                             reporter,
-                            placementAvailability);
-            case DECODE -> new DecodeEndpoint(status, endpointEvents, placementAvailability);
-            case ENCODER -> new EncoderEndpoint(status, endpointEvents);
+                            placementAvailability,
+                            queueSettings,
+                            workerQueues);
+            case DECODE -> new DecodeEndpoint(status, requests, placementAvailability);
+            case ENCODER -> new EncoderEndpoint(status, placementAvailability);
             case VIT -> new WorkerEndpoint(status);
             case FRONTEND -> throw new AssertionError("validated above");
         };
     }
 
-    private void prepareEndpointMetrics(RoleType roleType, WorkerStatus status) {
-        try {
-            reporter.prepareEndpointMetrics(roleType.name(), status.getMetricIpPort());
-        } catch (RuntimeException telemetryFailure) {
-            Logger.warn(
-                    "Endpoint metric preparation failed: role={}, engine={}",
-                    roleType,
-                    status.getMetricIpPort(),
-                    telemetryFailure);
-        }
-    }
-
-    /** Wait for every generation detached before the close gate linearized. */
+    /**
+     * Wait for every generation detached before the close gate linearized.
+     */
     private void awaitDetachedRetirements() {
         boolean interrupted = false;
-        synchronized (lifecycleGate) {
-            while (inflightDetachedRetirements != 0) {
-                try {
-                    lifecycleGate.wait();
-                } catch (InterruptedException interruption) {
-                    interrupted = true;
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(retirementTimeoutMs);
+        try {
+            synchronized (lifecycleGate) {
+                while (inflightDetachedRetirements != 0) {
+                    long remaining = deadlineNanos - System.nanoTime();
+                    checkState(
+                            remaining > 0L,
+                            "Detached worker retirement timed out after %sms: pending=%s",
+                            retirementTimeoutMs,
+                            inflightDetachedRetirements);
+                    try {
+                        TimeUnit.NANOSECONDS.timedWait(lifecycleGate, remaining);
+                    } catch (InterruptedException interruption) {
+                        interrupted = true;
+                    }
                 }
             }
-        }
-        if (interrupted) {
-            Thread.currentThread().interrupt();
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
     private Throwable closeEndpointGenerations() {
-        IdentityHashMap<WorkerEndpoint, Boolean> seen = new IdentityHashMap<>();
+        Set<WorkerEndpoint> seen = Collections.newSetFromMap(new IdentityHashMap<>());
         List<WorkerEndpoint> endpoints = new ArrayList<>();
         Throwable failure = null;
         for (Map<String, WorkerEndpoint> roleEndpoints : endpointsByRole.values()) {
-            failure = collectEndpointGenerations(roleEndpoints, seen, endpoints, failure);
+            try {
+                for (WorkerEndpoint endpoint : roleEndpoints.values()) {
+                    if (seen.add(endpoint)) {
+                        endpoints.add(endpoint);
+                    }
+                }
+            } catch (RuntimeException | Error snapshotFailure) {
+                failure = Failures.append(failure, snapshotFailure);
+            }
         }
         // Phase 1: close admission for every exact generation before any
         // endpoint-local cleanup or callback can run.
         for (WorkerEndpoint endpoint : endpoints) {
-            try {
-                endpoint.beginRetirement();
-            } catch (Throwable retirementFailure) {
-                failure = appendFailure(failure, retirementFailure);
+            failure =
+                    Failures.run(
+                            failure,
+                            () -> {
+                                WorkerStatus status = endpoint.getStatus();
+                                status.lock.lock();
+                                try {
+                                    endpoint.beginRetirement();
+                                    status.beginRetirementAfterEndpointGateClosed();
+                                } finally {
+                                    status.lock.unlock();
+                                }
+                            });
+        }
+        // Discovered generations may have an in-flight cache poll before their
+        // first endpoint is published. Fence these callbacks under the same lock.
+        for (Map<String, WorkerStatus> statuses : statusesByRole.values()) {
+            for (WorkerStatus status : statuses.values()) {
+                failure =
+                        Failures.run(
+                                failure,
+                                () -> {
+                                    status.lock.lock();
+                                    try {
+                                        status.beginRetirementAfterEndpointGateClosed();
+                                    } finally {
+                                        status.lock.unlock();
+                                    }
+                                });
             }
         }
         // Phase 2: initiate every cleanup. A generation with an accepted
-        // handoff may transfer its cleanup to a dedicated continuation.
+        // cleanup may finish asynchronously through its completion callback.
         for (WorkerEndpoint endpoint : endpoints) {
-            try {
-                endpoint.close();
-            } catch (Throwable closeEndpointFailure) {
-                failure = appendFailure(failure, closeEndpointFailure);
-            }
+            failure =
+                    Failures.run(
+                            failure,
+                            () -> {
+                                endpoint.close();
+                            });
         }
-        // Phase 3: the registry is not closed until every exact generation has
-        // completed cleanup and all retirement callbacks have returned.
+        // Phase 3 shares one endpoint-drain budget; detached finalizers have a
+        // separate bounded barrier. A timeout reports failure without settling ownership.
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(retirementTimeoutMs);
         for (WorkerEndpoint endpoint : endpoints) {
-            try {
-                endpoint.awaitRetirement();
-            } catch (Throwable awaitFailure) {
-                failure = appendFailure(failure, awaitFailure);
-            }
+            failure =
+                    Failures.run(
+                            failure,
+                            () ->
+                                    endpoint.awaitRetirement(
+                                            Math.max(
+                                                    1L,
+                                                    TimeUnit.NANOSECONDS.toMillis(
+                                                            deadlineNanos - System.nanoTime()))));
         }
         return failure;
     }
 
-    private static Throwable collectEndpointGenerations(
-            Map<String, ? extends WorkerEndpoint> source,
-            IdentityHashMap<WorkerEndpoint, Boolean> seen,
-            List<WorkerEndpoint> endpoints,
-            Throwable failure) {
+    private <T> Map<String, T> statistics(RoleType role, Class<T> type) {
+        var values = new java.util.HashMap<String, T>();
+        endpointSnapshot(role)
+                .forEach(
+                        (address, endpoint) ->
+                                values.put(
+                                        endpoint.getStatus().getMetricIpPort(),
+                                        type.cast(endpoint)));
+        return Map.copyOf(values);
+    }
+
+    private boolean finalizeRetirement(
+            RoleType role,
+            String address,
+            WorkerStatus status,
+            CacheAwareService cacheAwareService,
+            org.slf4j.Logger logger) {
+        Map<String, WorkerStatus> statuses = statusesByRole.get(role);
+        status.trace().record(Stage.RETIREMENT_CACHE_LOCK_ATTEMPT);
+        status.cacheMutationLock.lock();
+        status.trace().record(Stage.RETIREMENT_CACHE_LOCK_ACQUIRED);
         try {
-            for (WorkerEndpoint endpoint : source.values()) {
-                if (seen.put(endpoint, Boolean.TRUE) == null) {
-                    endpoints.add(endpoint);
-                }
+            checkState(
+                    !status.isActiveGeneration(), "Cache cleanup requires a retiring generation");
+            if (statuses.get(address) != status) {
+                logger.error(
+                        "Status identity changed before retirement finalized for {}#{}",
+                        address,
+                        status.getGenerationId());
+                return true;
             }
-        } catch (RuntimeException | Error snapshotFailure) {
-            return appendFailure(failure, snapshotFailure);
-        }
-        return failure;
-    }
-
-    private static Throwable appendFailure(Throwable first, Throwable next) {
-        if (next == null) {
-            return first;
-        }
-        if (first == null) {
-            return next;
-        }
-        if (first != next) {
-            first.addSuppressed(next);
-        }
-        return first;
-    }
-
-    private static void rethrowCloseFailure(Throwable failure) {
-        if (failure instanceof RuntimeException runtimeFailure) {
-            throw runtimeFailure;
-        }
-        if (failure instanceof Error error) {
-            throw error;
-        }
-        if (failure != null) {
-            throw new IllegalStateException("EndpointRegistry close failed", failure);
-        }
-    }
-
-    private static void rethrowDetachedRetirementFailure(Throwable failure) {
-        if (failure instanceof RuntimeException runtimeFailure) {
-            throw runtimeFailure;
-        }
-        if (failure instanceof Error error) {
-            throw error;
-        }
-        if (failure != null) {
-            throw new IllegalStateException("Detached endpoint retirement failed", failure);
+            try {
+                if (role.requiresCacheKeys()) {
+                    status.trace().record(Stage.CACHE_CLEANUP_BEGIN);
+                    cacheAwareService.removeEngineBlockCache(address);
+                    status.trace().record(Stage.CACHE_CLEANUP_END);
+                }
+            } catch (Throwable cacheCleanupFailure) {
+                status.trace().record(Stage.CACHE_CLEANUP_FAILED, cacheCleanupFailure);
+                logger.error(
+                        "Cache cleanup failed while retiring generation {} for {}",
+                        status.getGenerationId(),
+                        address,
+                        cacheCleanupFailure);
+                return false;
+            }
+            status.trace().record(Stage.RETIREMENT_CLEANUP_END);
+            placementAvailability.clearRetired(status);
+            if (!statuses.remove(address, status)) {
+                logger.error(
+                        "Exact status removal failed while its cache lock was held for {}#{}",
+                        address,
+                        status.getGenerationId());
+            }
+            status.trace().record(Stage.STATUS_REMOVED);
+            return true;
+        } catch (Throwable finalizationFailure) {
+            logger.error(
+                    "Status retirement finalization failed for {}#{}",
+                    address,
+                    status.getGenerationId(),
+                    finalizationFailure);
+            return false;
+        } finally {
+            status.cacheMutationLock.unlock();
+            status.trace().record(Stage.RETIREMENT_CACHE_LOCK_RELEASED);
         }
     }
-
-    /**
-     * Log and report one endpoint-ledger TTL eviction pass: endpoint-side
-     * evictions were previously log-only, invisible to the
-     * inflight.ttl.expired.qps series family. On this architecture the
-     * endpoint ledgers have a single stale-unobserved exit, so every evicted
-     * entry reports the {@code ttl} reason bucket; only non-zero counts are
-     * reported, keeping the series sparse.
-     */
-    private void logEndpointEviction(RoleType role, String endpoint, int evicted, long ttlMs) {
-        if (evicted > 0) {
-            reporter.reportEndpointInflightTtlExpired(role.name(), endpoint, "ttl", evicted);
-            Logger.info(
-                    "event=endpoint_inflight_ttl_eviction role={} endpoint={} "
-                            + "evicted={} ttl_ms={}",
-                    role,
-                    endpoint,
-                    evicted,
-                    ttlMs);
-        }
-    }
-
-    private enum RegistryPhase {
-        OPEN,
-        CLOSING,
-        CLOSED
-    }
-
-    /**
-     * Result of publishing a fully initialized endpoint generation.
-     */
-    public record EndpointPublication(WorkerEndpoint endpoint, Runnable statusProjection) {}
 
     /**
      * One non-owning Prefill generation exposed to routing.
      *
-     * <p>The endpoint identity is advisory: a caller must capture the address
-     * and verify that the pinned endpoint is still this exact instance before
+     * <p>The endpoint identity is advisory: a caller must selectEndpoint the address
+     * and verify that the selected endpoint is still this exact instance before
      * transferring generation ownership to a request.</p>
      */
-    public record PrefillRoutingEntry(String address, PrefillEndpoint endpoint) {
+    public record PrefillRoutingEntry(String address, PrefillEndpoint endpoint)
+            implements PrefillSelectionStrategy.CandidateInput {
         public PrefillRoutingEntry {
             java.util.Objects.requireNonNull(address, "address");
             java.util.Objects.requireNonNull(endpoint, "endpoint");
         }
+
+        public String group() {
+            return endpoint.getStatus().topologySnapshot().group();
+        }
+
+        public long generationId() {
+            return endpoint.getStatus().getGenerationId();
+        }
+
+        public String physicalAddress() {
+            return endpoint.getStatus().getPhysicalIpPort();
+        }
+
+        public int engineCount() {
+            return endpoint.getStatus().getMultiEngineNum();
+        }
+
+        public long cacheBlockSize() {
+            var cache = endpoint.getStatus().getCacheStatus();
+            return cache == null ? 0L : cache.getBlockSize();
+        }
+
+        public RequestTimeEstimation.Inputs projectionInputs() {
+            return endpoint.captureRouteProjectionInputs();
+        }
+
+        public boolean requestCapacityAvailable() {
+            return endpoint.requestCapacityAvailable(endpoint.requestLimit, 1);
+        }
+
+        public org.flexlb.balance.strategy.PrefillSelectionStrategy.AdmissionSummary
+                admissionSummary(int priority) {
+            return endpoint.admissionSummary(priority, endpoint.requestLimit);
+        }
     }
 
     /**
-     * One exact endpoint generation moved out of the routing registry.
-     *
-     * <p>The capability is the sole completion token for the registry's
-     * detached-retirement barrier. It initiates and awaits endpoint cleanup
-     * outside the registry gate, then resolves that token exactly once.</p>
+     * Owns one retiring status identity and its optional published endpoint.
      */
-    public static final class DetachedGeneration {
-        private final EndpointRegistry registry;
+    public final class Retirement {
+        private final RoleType role;
+        private final String address;
+        private final WorkerStatus status;
         private final WorkerEndpoint endpoint;
-        private final AtomicBoolean retirementClaimed = new AtomicBoolean();
+        private final AtomicBoolean claimed = new AtomicBoolean();
 
-        private DetachedGeneration(EndpointRegistry registry, WorkerEndpoint endpoint) {
-            this.registry = registry;
+        private Retirement(
+                RoleType role, String address, WorkerStatus status, WorkerEndpoint endpoint) {
+            this.role = role;
+            this.address = address;
+            this.status = status;
             this.endpoint = endpoint;
         }
 
-        /** Exact identity check without exposing the owned endpoint resource. */
-        public boolean ownsEndpoint(WorkerEndpoint exactEndpoint) {
-            return endpoint == exactEndpoint;
+        public WorkerStatus status() {
+            return status;
         }
 
-        /** Drain this exact generation and resolve its registry barrier token. */
-        public void retireAndAwait() {
-            if (!retirementClaimed.compareAndSet(false, true)) {
-                throw new IllegalStateException(
-                        "Detached endpoint retirement was already claimed: "
-                                + endpoint.getStatus().getIpPort()
-                                + "#"
-                                + endpoint.getStatus().getGenerationId());
-            }
-            Throwable failure = null;
+        /**
+         * The registry close barrier retains ownership until this cleanup finishes.
+         */
+        public void completeAsync(CacheAwareService cacheAwareService, org.slf4j.Logger logger) {
             try {
-                try {
-                    endpoint.close();
-                } catch (Throwable closeFailure) {
-                    failure = closeFailure;
-                }
-                try {
-                    endpoint.awaitRetirement();
-                } catch (Throwable awaitFailure) {
-                    failure = appendFailure(failure, awaitFailure);
-                }
-            } finally {
-                try {
-                    registry.resolveDetachedGeneration(this);
-                } catch (Throwable resolutionFailure) {
-                    failure = appendFailure(failure, resolutionFailure);
-                }
+                WorkerEndpoint.executeRetirement(() -> complete(cacheAwareService, logger, false));
+            } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                complete(cacheAwareService, logger, false);
             }
-            rethrowDetachedRetirementFailure(failure);
+        }
+
+        private void complete(
+                CacheAwareService cacheAwareService, org.slf4j.Logger logger, boolean awaitDrain) {
+            Objects.requireNonNull(cacheAwareService, "cacheAwareService");
+            Objects.requireNonNull(logger, "logger");
+            if (!claimed.compareAndSet(false, true)) {
+                throw new IllegalStateException(
+                        "Worker retirement was already claimed: "
+                                + address
+                                + "#"
+                                + status.getGenerationId());
+            }
+            status.trace().record(Stage.RETIREMENT_CLEANUP_BEGIN);
+            Runnable finalizeExact = () -> finalizeExact(cacheAwareService, logger);
+            if (endpoint == null) {
+                finalizeExact.run();
+                return;
+            }
+            // The continuation owns the fence from this point onward. A bounded
+            // wait failure cannot discard a still-draining generation.
+            endpoint.onRetired(finalizeExact);
+            Throwable failure = Failures.run(null, () -> placementAvailability.changed(endpoint));
+            failure = Failures.run(failure, endpoint::close);
+            // Completion callbacks finalize the registry after Endpoint cleanup.
+            if (awaitDrain) {
+                failure =
+                        Failures.run(failure, () -> endpoint.awaitRetirement(retirementTimeoutMs));
+            }
+            if (failure != null) {
+                logger.error(
+                        "Endpoint cleanup failed after retiring generation {} for {}",
+                        status.getGenerationId(),
+                        address,
+                        failure);
+            }
+        }
+
+        private void finalizeExact(CacheAwareService cacheAwareService, org.slf4j.Logger logger) {
+            if (finalizeRetirement(role, address, status, cacheAwareService, logger)) {
+                resolveDetachedGeneration();
+            } else if (closeCompletion == null) {
+                CompletableFuture.delayedExecutor(1L, TimeUnit.SECONDS)
+                        .execute(() -> finalizeExact(cacheAwareService, logger));
+            }
         }
     }
 }

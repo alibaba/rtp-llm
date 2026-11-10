@@ -1,8 +1,18 @@
 package org.flexlb.util;
 
 /**
- * Resolves priority from a valid protocol value, then the QoS metadata header, then the default
- * level 50. Valid levels are 1–100; zero and invalid protocol values fall through to the header.
+ * Normalizes the Auto-TPM QoS priority carried by a request.
+ *
+ * <p>Valid priority levels are 1-100 (higher = more important).
+ * Resolution order: proto field (when it carries a valid value) &gt; gRPC
+ * metadata header {@code x-dashscope-inner-qos-level} &gt; default (50).
+ * A proto value of 0 means "unset" (proto3 default) and falls through to the
+ * header; any other invalid value also falls through.
+ *
+ * <p>When the request carries no priority at all (proto unset AND
+ * header absent/blank) the result is the default priority (50), so the
+ * request participates in Auto-TPM scheduling at the normal level. Only
+ * explicitly carried but invalid values also fall back to the default.
  */
 public final class PriorityNormalizer {
     /** gRPC metadata header carrying the caller QoS level (fallback channel). */
@@ -36,13 +46,6 @@ public final class PriorityNormalizer {
      */
     public static boolean hasPriority(int normalizedPriority) {
         return normalizedPriority != NO_PRIORITY;
-    }
-
-    /**
-     * Normalize with the built-in default (50).
-     */
-    public static int normalize(int protoPriority, String headerValue) {
-        return normalize(protoPriority, headerValue, DEFAULT_PRIORITY);
     }
 
     /**

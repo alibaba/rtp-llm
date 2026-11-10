@@ -1,13 +1,12 @@
 package org.flexlb.sync.worker;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatus.StatusObservation;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.PriorityPreemptionProgress;
-import org.flexlb.service.grpc.EngineStatusConverter;
+import org.flexlb.service.grpc.WorkerStatusRpcClient;
 import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -25,7 +24,7 @@ class WorkerStatusResponseTest {
         String TEST_JSON =
                 "{\"role\":\"PREFILL\",\"available_concurrency\":1637,\"running_task_info\":{},\"finished_task_info\":{},\"step_latency_ms\":36.636,\"iterate_count\":1,\"dp_size\":1,\"tp_size\":1,\"alive\":true,\"version\":1,\"status_version\":1752025357566,\"cache_status\":{\"available_kv_cache\":82944,\"total_kv_cache\":82944,\"block_size\":256,\"version\":-1},\"waiting_query_len\":0,\"running_query_len\":0,\"max_seq_len\":131072,\"max_batch_tokens_size\":262144}";
         WorkerStatusResponse workerStatusResponse =
-                JsonUtils.toObject(TEST_JSON, new TypeReference<WorkerStatusResponse>() {});
+                JsonUtils.toObject(TEST_JSON, WorkerStatusResponse.class);
         Assertions.assertEquals(RoleType.PREFILL, workerStatusResponse.getRole());
         Assertions.assertTrue(workerStatusResponse.isAlive());
         Assertions.assertEquals(1637, workerStatusResponse.getAvailableConcurrency());
@@ -52,11 +51,14 @@ class WorkerStatusResponseTest {
     @Test
     void converterReadsLegacyWorkerRoleAndTaskState() {
         EngineRpcService.TaskInfoPB oldWaiting =
-                EngineRpcService.TaskInfoPB.newBuilder().setRequestId(1).setIsWaiting(true).build();
+                EngineRpcService.TaskInfoPB.newBuilder()
+                        .setRequestId(1L)
+                        .setIsWaiting(true)
+                        .build();
         // An old proto3 writer omits is_waiting=false from the wire. The new
         // reader must use the running_task_info container as the fallback.
         EngineRpcService.TaskInfoPB oldRunning =
-                EngineRpcService.TaskInfoPB.newBuilder().setRequestId(2).build();
+                EngineRpcService.TaskInfoPB.newBuilder().setRequestId(2L).build();
         EngineRpcService.WorkerStatusPB proto =
                 EngineRpcService.WorkerStatusPB.newBuilder()
                         .setRole("RoleType.PREFILL")
@@ -75,8 +77,7 @@ class WorkerStatusResponseTest {
     void converterReadsAndValidatesDualWorkerStatus() {
         EngineRpcService.TaskInfoPB task =
                 EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestId(3)
-                        .setRequestIdStr("3")
+                        .setRequestId(3L)
                         .setIsWaiting(true)
                         .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED)
                         .build();
@@ -112,14 +113,14 @@ class WorkerStatusResponseTest {
         EngineRpcService.TaskInfoPB receivedFromE0 =
                 EngineRpcService.TaskInfoPB.parseFrom(
                         EngineRpcService.TaskInfoPB.newBuilder()
-                                .setRequestId(4)
+                                .setRequestId(4L)
                                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED)
                                 .build()
                                 .toByteArray());
         EngineRpcService.TaskInfoPB kvAllocatedFromE0 =
                 EngineRpcService.TaskInfoPB.parseFrom(
                         EngineRpcService.TaskInfoPB.newBuilder()
-                                .setRequestId(5)
+                                .setRequestId(5L)
                                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED)
                                 .build()
                                 .toByteArray());
@@ -141,7 +142,7 @@ class WorkerStatusResponseTest {
     void converterKeepsExplicitPhaseWhenLegacyFlagDisagrees() {
         EngineRpcService.TaskInfoPB runningButWaiting =
                 EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestId(6)
+                        .setRequestId(6L)
                         .setIsWaiting(true)
                         .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                         .build();
@@ -160,7 +161,7 @@ class WorkerStatusResponseTest {
     void converterPreservesAuthoritativePriorityCanceledTerminal() {
         EngineRpcService.TaskInfoPB canceled =
                 EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestId(8429001)
+                        .setRequestId(8429001L)
                         .setPriorityPreemptionProgress(
                                 EngineRpcService.PriorityPreemptionProgressPB
                                         .PRIORITY_PREEMPTION_CANCELED)
@@ -189,6 +190,6 @@ class WorkerStatusResponseTest {
         WorkerStatus owner =
                 WorkerStatus.createDiscovered(
                         RoleType.PREFILL, "test-group", "127.0.0.1", 8080, 8081, "test-site");
-        return EngineStatusConverter.convertToStatusObservation(owner, response);
+        return WorkerStatusRpcClient.convertToStatusObservation(owner, response);
     }
 }

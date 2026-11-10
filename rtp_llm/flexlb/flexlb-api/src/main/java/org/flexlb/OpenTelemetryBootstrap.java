@@ -139,11 +139,6 @@ final class OpenTelemetryBootstrap {
         return Resource.getDefault().merge(Resource.create(attrs.build()));
     }
 
-    static synchronized void resetForTest() {
-        shutdown();
-        initialized = false;
-    }
-
     static synchronized void shutdown() {
         FlexlbTrace.configure(null, "");
         if (provider != null) {

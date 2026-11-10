@@ -1,324 +1,63 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.EvictionManager;
-import org.flexlb.balance.strategy.SelectedRole;
-import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.route.RequestPhase;
-import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
-import org.flexlb.util.Logger;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Component;
-
-import java.util.List;
-import java.util.Objects;
-import java.util.Set;
-import java.util.concurrent.CompletableFuture;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 
 /**
- * Request submission facade for DIRECT and QUEUE.
- *
- * <p>Both modes register one canonical request. DIRECT selects and commits on
- * ingress; QUEUE defers selection to the Encoder or Generation ordered queue. Endpoint
- * batchers own only delivery after the selected route is committed.</p>
- *
- * <p>Submission validates the request and registers its Future once. DIRECT selects on ingress;
- * QUEUE hands the registered request to the Encoder or Generation coordinator. Cancellation and
- * request-state lookup return to the registry rather than selecting a new route.
+ * Defines replaceable scheduling decisions and triggers.
  */
-@Component
-public final class RequestScheduler {
-    private final DefaultRouter router;
-    private final EndpointRegistry endpointRegistry;
-    private final RequestRegistry requestRegistry;
-    private final GlobalQueueCoordinator globalQueue;
-    private final EncoderQueueCoordinator encoderQueue;
+public interface RequestScheduler extends AutoCloseable {
+    /**
+     * Start this implementation's scheduling triggers.
+     */
+    void start();
 
-    @Autowired
-    RequestScheduler(
-            ConfigService configService,
-            DefaultRouter router,
-            EndpointRegistry endpointRegistry,
-            BatchSchedulerReporter reporter,
-            EvictionManager evictionManager,
-            RequestRegistry requestRegistry,
-            PlacementAvailability placementAvailability) {
-        Objects.requireNonNull(configService, "configService");
-        this.router = Objects.requireNonNull(router, "router");
-        this.endpointRegistry = Objects.requireNonNull(endpointRegistry, "endpointRegistry");
-        this.requestRegistry = Objects.requireNonNull(requestRegistry, "lifecycle");
-        FlexlbConfig startupConfig = configService.loadBalanceConfig();
-        this.globalQueue =
-                startupConfig != null && startupConfig.isQueue()
-                        ? new GlobalQueueCoordinator(
-                                configService,
-                                Objects.requireNonNull(router, "router"),
-                                Objects.requireNonNull(reporter, "reporter"),
-                                Objects.requireNonNull(evictionManager, "evictionManager"),
-                                this.requestRegistry,
-                                Objects.requireNonNull(
-                                        placementAvailability, "placementAvailability"))
-                        : null;
-        this.encoderQueue =
-                startupConfig != null && startupConfig.isQueue() && router.hasEncoderRole()
-                        ? new EncoderQueueCoordinator(
-                                router, requestRegistry, startupConfig.isPriorityOrdering())
-                        : null;
-    }
+    /**
+     * Run available scheduling decisions. Implementations serialize concurrent invocations.
+     */
+    void schedule();
 
-    /** Register once, then enter direct admission or the ordered global queue. */
-    public CompletableFuture<Response> submit(BalanceContext context) {
-        if (context == null || context.getRequest() == null) {
-            return CompletableFuture.completedFuture(
-                    error(StrategyErrorType.INVALID_REQUEST, null));
-        }
-        // Vision lookup owns no request generation, admission, queue or KV reservation.
-        if (context.getRequest().isVitRouteOnly()) {
-            CompletableFuture<Response> future =
-                    CompletableFuture.completedFuture(router.routeVit(context));
-            context.setFuture(future);
-            return future;
-        }
-        Set<RoleType> requestedRoles = context.getRequestedRoles();
-        if (requestedRoles != null
-                && requestedRoles.contains(RoleType.ENCODER)
-                && !router.hasEncoderRole()) {
-            return CompletableFuture.completedFuture(
-                    error(
-                            StrategyErrorType.INVALID_REQUEST,
-                            "Encoder role is not configured for this model"));
-        }
-        boolean encoderOnly = router.isEncoderOnly(context);
-        if (encoderOnly) {
-            context.setRequestPhase(RequestPhase.ENCODER);
-        }
-        FlexlbConfig requestConfig = context.getConfig();
-        if (requestConfig.isQueue() && (encoderOnly ? encoderQueue == null : globalQueue == null)) {
-            return CompletableFuture.completedFuture(
-                    error(
-                            StrategyErrorType.DISPATCH_FAILED,
-                            "QUEUE configuration was enabled after scheduler startup"));
-        }
-        CompletableFuture<Response> future = requestRegistry.register(context);
-        context.setFuture(future);
-        if (!future.isDone()) {
-            scheduleRegisteredRequest(context, future, requestConfig, encoderOnly);
-        }
-        return future;
-    }
+    /**
+     * Schedule a newly registered request or one whose previous route has been fully released.
+     * The implementation decides when to run it and preserves its original ordering on retry.
+     */
+    void onRequest(RequestContext request);
 
-    public RequestState cancelRequest(String requestId, long expectedBatchId, CancelReason reason) {
-        return requestRegistry.cancelRequest(requestId, expectedBatchId, reason);
+    void onEndpointChanged(WorkerEndpoint endpoint);
+
+    /**
+     * Select the failure policy. After successful withdrawal and cleanup, retry uses onRequest.
+     */
+    default boolean shouldRetryRouteFailure(ContextResult.RouteFailure failure) {
+        return false;
     }
 
     /**
-     * Cancel the selected phase while preserving the other phase with the same request ID.
+     * Number of queued requests not yet handed to delivery; immediate schedulers report zero.
      */
-    public RequestState cancelRequest(
-            String requestId, long expectedBatchId, CancelReason reason, RequestPhase phase) {
-        return requestRegistry.cancelRequest(requestId, expectedBatchId, reason, phase);
-    }
-
-    public int getTrackedRequestCount() {
-        return requestRegistry.trackedRequestCount();
-    }
-
-    public int getQueuedRequestCount() {
-        long queued =
-                (globalQueue == null ? 0L : globalQueue.size())
-                        + (encoderQueue == null ? 0L : encoderQueue.size());
-        for (PrefillEndpoint endpoint : endpointRegistry.snapshotPrefillEndpoints().values()) {
-            queued += endpoint.queuedRequestCount();
-            if (queued >= Integer.MAX_VALUE) {
-                return Integer.MAX_VALUE;
-            }
-        }
-        return (int) queued;
-    }
-
-    public int getBlockedRequestCount() {
-        return (globalQueue == null ? 0 : globalQueue.blockedSize())
-                + (encoderQueue == null ? 0 : encoderQueue.blockedSize());
-    }
-
-    public List<RequestState> snapshotActiveRequests() {
-        return requestRegistry.snapshotActiveRequests();
-    }
-
-    public RequestState getRequestState(String requestId, long expectedBatchId) {
-        return requestRegistry.getRequestState(requestId, expectedBatchId);
+    default int queuedRequestCount() {
+        return 0;
     }
 
     /**
-     * Read the Encoder or Generation lifecycle selected by phase.
+     * Number of requests waiting for placement capacity or preemption availability.
      */
-    public RequestState getRequestState(
-            String requestId, long expectedBatchId, RequestPhase phase) {
-        return requestRegistry.getRequestState(requestId, expectedBatchId, phase);
+    default int blockedRequestCount() {
+        return 0;
     }
 
-    public void closePlacement() {
-        if (globalQueue != null) {
-            globalQueue.close();
-        }
-        if (encoderQueue != null) {
-            encoderQueue.close();
-        }
-    }
+    /**
+     * Stop producing scheduling work and cancel owned timers; do not close shared facilities.
+     */
+    void stop();
 
-    private void scheduleRegisteredRequest(
-            BalanceContext context,
-            CompletableFuture<Response> future,
-            FlexlbConfig requestConfig,
-            boolean encoderOnly) {
-        if (encoderOnly) {
-            if (requestConfig.isQueue()) {
-                enqueueEncoderRequest(context, future);
-            } else {
-                selectAndPublishEncoder(context);
-            }
-        } else if (requestConfig.isDirect()) {
-            submitDirect(context);
-        } else {
-            enqueueGenerationRequest(context, future);
-        }
-    }
+    /**
+     * Wait for accepted scheduling work, using an absolute System.nanoTime deadline.
+     */
+    boolean awaitStopped(long deadlineNanos);
 
-    private void enqueueEncoderRequest(BalanceContext context, CompletableFuture<Response> future) {
-        try {
-            if (!encoderQueue.offer(context, future)) {
-                future.complete(
-                        error(
-                                StrategyErrorType.DISPATCH_FAILED,
-                                "request scheduler is shutting down"));
-            }
-        } catch (RuntimeException failure) {
-            future.complete(
-                    error(
-                            StrategyErrorType.DISPATCH_FAILED,
-                            "Encoder queue submission failed: " + failure.getMessage()));
-        }
-    }
-
-    private static Response error(StrategyErrorType type, String detail) {
-        return Response.buildErrorResponse(type, detail);
-    }
-
-    private void selectAndPublishEncoder(BalanceContext context) {
-        Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
-        try {
-            PlacementResult<SelectedRole, PlacementKey> selection = router.selectEncoder(context);
-            context.setSchedulingDiagnostics(selection.diagnostics());
-            switch (selection.status()) {
-                case SUCCESS -> {
-                    try (SelectedRole selected = selection.value()) {
-                        Response response = new Response();
-                        response.setSuccess(true);
-                        response.setServerStatus(List.of(selected.serverStatus()));
-                        try (var pin = selected.takeGenerationPin()) {
-                            if (requestRegistry.claimEncoderRoute(
-                                            context.getRequestId(), context.getFuture(), pin)
-                                    && requestRegistry.publishEncoderRoute(
-                                            context.getRequestId(),
-                                            context.getFuture(),
-                                            response)) {
-                                failure = null;
-                            } else {
-                                failure = Response.error(StrategyErrorType.REQUEST_CANCELLED);
-                            }
-                        }
-                    }
-                }
-                case BLOCKED ->
-                        failure =
-                                selection.failure() != null
-                                        ? selection.failure()
-                                        : Response.error(StrategyErrorType.NO_ENCODER_WORKER);
-                case REJECTED -> failure = selection.failure();
-                case CLOSED -> failure = Response.error(StrategyErrorType.REQUEST_CANCELLED);
-            }
-        } catch (RuntimeException selectionFailure) {
-            Logger.warn(
-                    "Encoder DIRECT admission failed: request_id={}",
-                    context.getRequestId(),
-                    selectionFailure);
-        } finally {
-            if (failure != null) {
-                requestRegistry.publishDecisionResponseAsync(
-                        context.getRequestId(), context.getFuture(), failure, RequestPhase.ENCODER);
-            }
-        }
-    }
-
-    private void submitDirect(BalanceContext context) {
-        Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
-        try {
-            PlacementResult<RouteAdmission, PlacementKey> selection = router.select(context);
-            context.setSchedulingDiagnostics(selection.diagnostics());
-            switch (selection.status()) {
-                case SUCCESS -> {
-                    try (RouteAdmission admission = selection.value()) {
-                        var committed = admission.tryCommitDirectRoute(context, requestRegistry);
-                        failure =
-                                switch (committed.status()) {
-                                    case SUCCESS -> {
-                                        var delivery = committed.value();
-                                        requestRegistry.publishRoute(
-                                                delivery.claim(),
-                                                delivery.precedingWork(),
-                                                delivery.unstartedWorkMs());
-                                        yield null;
-                                    }
-                                    case REJECTED -> committed.failure();
-                                    case CLOSED ->
-                                            Response.error(StrategyErrorType.REQUEST_CANCELLED);
-                                    case BLOCKED ->
-                                            Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
-                                };
-                    }
-                }
-                case BLOCKED ->
-                        failure =
-                                selection.failure() != null
-                                        ? selection.failure()
-                                        : Response.error(selection.blocker().role().getErrorType());
-                case REJECTED -> failure = selection.failure();
-                case CLOSED -> failure = Response.error(StrategyErrorType.REQUEST_CANCELLED);
-            }
-        } catch (RuntimeException selectionFailure) {
-            Logger.warn(
-                    "DIRECT admission failed: request_id={}",
-                    context.getRequestId(),
-                    selectionFailure);
-        } finally {
-            if (failure != null) {
-                requestRegistry.publishDecisionResponseAsync(
-                        context.getRequestId(), context.getFuture(), failure);
-            }
-        }
-    }
-
-    private void enqueueGenerationRequest(
-            BalanceContext context, CompletableFuture<Response> future) {
-        try {
-            if (!globalQueue.offer(context, future, context.getPriority())) {
-                future.complete(
-                        error(
-                                StrategyErrorType.DISPATCH_FAILED,
-                                "request scheduler is shutting down"));
-            }
-        } catch (Throwable failure) {
-            future.complete(
-                    error(
-                            StrategyErrorType.DISPATCH_FAILED,
-                            "Queue submission failed: " + failure.getMessage()));
-        }
-    }
+    /**
+     * Stop, drain scheduler-owned work and release scheduler-owned resources.
+     */
+    @Override
+    void close();
 }

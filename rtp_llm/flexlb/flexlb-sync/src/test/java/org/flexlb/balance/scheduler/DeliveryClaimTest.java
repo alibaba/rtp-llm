@@ -1,0 +1,3113 @@
+package org.flexlb.balance.scheduler;
+
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.scheduler.RequestTaskPool.RequestWorkQueue;
+import org.flexlb.config.ConfigService;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.service.TheoryCacheHitReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.springframework.test.util.ReflectionTestUtils;
+
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+
+import static org.junit.jupiter.api.Assertions.assertAll;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.after;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyLong;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.isA;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockingDetails;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
+/**
+ * Verifies committed delivery, cancellation, and terminal evidence against exact resource ownership.
+ */
+class DeliveryClaimTest {
+    @ParameterizedTest
+    @EnumSource(
+            value = Delivery.SendMode.class,
+            names = {"BATCH_ENQUEUE", "ROUTE_DECISION"})
+    void engineTerminalAdvancesOnTheStatusThreadBeforeReturning(Delivery.SendMode kind)
+            throws Exception {
+        try (var f = new Fixture(kind)) {
+            var caller = Thread.currentThread();
+            var advanced = new CompletableFuture<Thread>();
+            doAnswer(
+                            call -> {
+                                assertFalse(Thread.holdsLock(f.context));
+                                assertNotNull(f.context.snapshot().pendingEnd());
+                                var result = call.callRealMethod();
+                                assertNotNull(f.context.snapshot().outcome());
+                                advanced.complete(Thread.currentThread());
+                                return result;
+                            })
+                    .when(f.owner)
+                    .closeRequest(
+                            eq(f.context),
+                            org.mockito.ArgumentMatchers.nullable(ContextResult.EndEvidence.class));
+            try {
+                f.clearDecodeResourceOwnership();
+                f.owner.onWorkerRequestEvent(
+                        f.context,
+                        f.decodeEvidence(
+                                f.decode,
+                                DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L)));
+                assertSame(
+                        caller,
+                        advanced.get(2, TimeUnit.SECONDS),
+                        "short state advancement must not submit another request task");
+            } finally {
+                org.mockito.Mockito.doCallRealMethod()
+                        .when(f.owner)
+                        .closeRequest(
+                                eq(f.context),
+                                org.mockito.ArgumentMatchers.nullable(
+                                        ContextResult.EndEvidence.class));
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(
+            value = Delivery.SendMode.class,
+            names = {"BATCH_ENQUEUE", "ROUTE_DECISION"})
+    void slowFrontendCallbackDoesNotHoldTheStatusThread(Delivery.SendMode kind) throws Exception {
+        try (var f = new Fixture(kind)) {
+            var caller = Thread.currentThread();
+            var callback = new CompletableFuture<Thread>();
+            var release = new java.util.concurrent.CountDownLatch(1);
+            var completed =
+                    f.context
+                            .data()
+                            .getFuture()
+                            .whenComplete(
+                                    (response, failure) -> {
+                                        callback.complete(Thread.currentThread());
+                                        RequestProtocolTestSupport.await(release);
+                                    });
+            try {
+                f.clearDecodeResourceOwnership();
+                f.owner.onWorkerRequestEvent(
+                        f.context,
+                        f.decodeEvidence(
+                                f.decode,
+                                DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L)));
+                org.junit.jupiter.api.Assertions.assertNotSame(
+                        caller, callback.get(2, TimeUnit.SECONDS));
+                assertFalse(completed.isDone(), "the deliberately slow user callback is isolated");
+            } finally {
+                release.countDown();
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            }
+        }
+    }
+
+    @Test
+    void queueNotificationFailureCannotStrandAnAcceptedCancellation() throws Exception {
+        try (var f = new Fixture()) {
+            var failure = new IllegalStateException("queue notification failed");
+            var scheduler =
+                    (RequestScheduler)
+                            org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(f.owner);
+            doThrow(failure)
+                    .when(SchedulerTestServices.lifecycle(scheduler))
+                    .removeRequest(f.context);
+
+            assertSame(
+                    failure,
+                    assertThrows(
+                            IllegalStateException.class,
+                            () -> f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED)));
+
+            assertFalse(f.context.data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
+            assertNull(
+                    f.owner.commitDelivery(
+                            new Delivery.Member(f.claim.route(), null),
+                            Delivery.SendMode.BATCH_ENQUEUE,
+                            51L));
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.notSent(
+                                    new java.util.concurrent.CancellationException()),
+                            System.currentTimeMillis()));
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            SchedulerTestSupport.awaitRequestWork(SchedulerTestSupport.runtime(f.owner));
+            assertSame(failure, SchedulerTestSupport.failure(f.owner));
+            assertFalse(f.prefillOwned.get());
+            assertFalse(f.decodeOwned.get());
+            verify(f.prefill, times(1)).releaseRequest(f.claim.route());
+            verify(f.decode, times(1)).release(eq(f.reservation), any());
+        }
+    }
+
+    @Test
+    void deliveredAckUpdatesDeadlineOnceAndReplayHasNoEffects() throws Exception {
+        try (var f = new Fixture()) {
+            var original =
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner).deadlines();
+            var timer = org.mockito.Mockito.spy(original);
+            org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner),
+                    "timer",
+                    timer);
+            var delivered =
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis());
+            try {
+                f.owner.onDeliveryResult(delivered);
+                f.context.data().getFuture().get(2, TimeUnit.SECONDS);
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+                verify(timer, times(1)).update(eq(f.context), any());
+                org.mockito.Mockito.clearInvocations(timer);
+                var before = f.context.snapshot();
+                f.owner.onDeliveryResult(delivered);
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+                assertSame(before, f.context.snapshot());
+                verify(timer, never()).update(eq(f.context), any());
+            } finally {
+                org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner),
+                        "timer",
+                        original);
+                finishOwnershipRequest(f);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void ownershipTerminalEvidenceSubmitsCleanupOnce(boolean failedDelivery) throws Exception {
+        try (var f = new Fixture()) {
+            if (!failedDelivery) {
+                f.owner.onDeliveryResult(
+                        new ContextResult.TransportResult(
+                                f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+                f.context.data().getFuture().get(2, TimeUnit.SECONDS);
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            }
+            var entered = new java.util.concurrent.CountDownLatch(1);
+            var release = new java.util.concurrent.CountDownLatch(1);
+            var runtime = SchedulerTestSupport.runtime(f.owner);
+            try (var work = runtime.tasks.registerRequestWork(f.context)) {
+                work.submitClose(
+                        () -> {
+                            entered.countDown();
+                            RequestProtocolTestSupport.await(release);
+                        },
+                        false,
+                        failure -> {
+                            throw new AssertionError(failure);
+                        });
+            }
+            try {
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                if (failedDelivery) {
+                    var failed =
+                            new ContextResult.TransportResult(
+                                    f.claim,
+                                    Delivery.Result.notSent(
+                                            new IllegalStateException("send failed")),
+                                    System.currentTimeMillis());
+                    f.owner.onDeliveryResult(failed);
+                    f.owner.onDeliveryResult(failed);
+                } else {
+                    f.applyDecodeTerminal();
+                    f.applyDecodeTerminal();
+                }
+                assertEquals(ContextResult.Phase.ENDING, f.context.snapshot().phase());
+                assertTrue(f.prefillOwned.get(), "the real close lane is still occupied");
+                verify(f.prefill, never()).releaseRequest(any());
+                verify(f.decode, never()).release(any(), any());
+            } finally {
+                release.countDown();
+                SchedulerTestSupport.awaitRequestWork(runtime);
+            }
+            f.awaitArchive();
+            verify(f.prefill, times(1)).releaseRequest(f.claim.route());
+            verify(f.decode, times(failedDelivery ? 1 : 0)).release(eq(f.reservation), any());
+            assertFalse(f.prefillOwned.get());
+            assertFalse(f.decodeOwned.get());
+        }
+    }
+
+    @Test
+    void ownershipAckRestoresDeadlineAfterOneInstallationFailure() throws Exception {
+        try (var f = new Fixture()) {
+            var original =
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner).deadlines();
+            var timer = org.mockito.Mockito.spy(original);
+            var failure = new IllegalStateException("deadline installation failed");
+            doThrow(failure).doCallRealMethod().when(timer).update(eq(f.context), any());
+            org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner),
+                    "timer",
+                    timer);
+            var delivered =
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis());
+            try {
+                assertDoesNotThrow(() -> f.owner.onDeliveryResult(delivered));
+                assertTrue(f.context.data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+                verify(f.owner, times(1)).onDeliveryResult(delivered);
+                verify(timer, times(2)).update(eq(f.context), any());
+                assertSame(
+                        failure,
+                        org.flexlb.balance.scheduler.SchedulerTestServices.failure(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                        f.owner)));
+                assertFalse(
+                        timer.needsUpdate(f.context, f.context.snapshot().deadlines()),
+                        "the ACK owner must finish deadline installation before returning");
+                org.mockito.Mockito.clearInvocations(timer);
+                f.owner.onDeliveryResult(delivered);
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+                verify(timer, never()).update(eq(f.context), any());
+            } finally {
+                org.mockito.Mockito.doCallRealMethod().when(timer).update(any(), any());
+                org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner),
+                        "timer",
+                        original);
+                finishOwnershipRequest(f);
+            }
+        }
+    }
+
+    @Test
+    void closeOwnerRetriesStopSubmissionAndLateAckDoesNotSubmitItAgain() throws Exception {
+        try (var f = new Fixture()) {
+            var dispatcher =
+                    SchedulerTestSupport.dispatcher(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            var failure = new IllegalStateException("stop submission failed");
+            doThrow(failure).doCallRealMethod().when(dispatcher).stop(f.claim);
+            f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            verify(dispatcher, times(2)).stop(f.claim);
+            assertSame(
+                    failure,
+                    org.flexlb.balance.scheduler.SchedulerTestServices.failure(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner)));
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            verify(dispatcher, times(2)).stop(f.claim);
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            verify(dispatcher, times(2)).stop(f.claim);
+        }
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void latePreemptionFinishCannotCompleteAnUnsentTerminalNotification(boolean signalFails)
+            throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            var registration = f.preempt();
+            var completion =
+                    org.mockito.Mockito.spy(
+                            new CompletableFuture<
+                                    org.flexlb.balance.preemption.VictimResolution>());
+            ReflectionTestUtils.setField(registration, "completion", completion);
+            if (signalFails) {
+                var failure = new IllegalStateException("terminal notification unavailable");
+                doThrow(failure).doCallRealMethod().when(completion).complete(any());
+            }
+            var dispatcher =
+                    SchedulerTestSupport.dispatcher(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            doAnswer(
+                            call -> {
+                                // Arrive after notifyOwners took its snapshot but before it reports
+                                // progress. The original snapshot still has unfinished preemption.
+                                f.prefillOwned.set(false);
+                                f.prefillClearedByState.set(true);
+                                f.decodeOwned.set(false);
+                                f.decodeClearedByState.set(true);
+                                f.context.completePreemption(
+                                        registration,
+                                        new ContextResult.PreemptionReport(
+                                                null,
+                                                true,
+                                                true,
+                                                false,
+                                                new ContextResult.EndEvidence(
+                                                        f.claim.route(),
+                                                        ContextResult.EndKind.WORKER,
+                                                        org.flexlb.dao.route.RoleType.DECODE,
+                                                        false,
+                                                        9L,
+                                                        org.flexlb.dao.loadbalance.StrategyErrorType
+                                                                .WORKER_EXECUTION_FAILED,
+                                                        "worker failed",
+                                                        true,
+                                                        true)),
+                                        System.currentTimeMillis());
+                                return call.callRealMethod();
+                            })
+                    .when(dispatcher)
+                    .stop(f.claim);
+            f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            assertEquals(
+                    org.flexlb.balance.preemption.VictimResolution.Outcome.REQUEST_END,
+                    registration
+                            .completion()
+                            .toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS)
+                            .outcome());
+            verify(completion, times(signalFails ? 2 : 1)).complete(any());
+            verify(dispatcher, times(1)).stop(f.claim);
+        }
+    }
+
+    @Test
+    void acknowledgementOwnerRetriesOnlyItsPublicationRegistration() throws Exception {
+        try (var f = new Fixture()) {
+            var publisher =
+                    org.mockito.Mockito.spy(
+                            SchedulerTestSupport.responseCompletions(
+                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                            f.owner)));
+            org.mockito.Mockito.doReturn(false).doCallRealMethod().when(publisher).register();
+            org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner),
+                    "responseCompletions",
+                    publisher);
+            var delivered =
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis());
+            f.owner.onDeliveryResult(delivered);
+            assertTrue(f.context.data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            verify(f.owner, times(1)).onDeliveryResult(delivered);
+            verify(publisher, times(2)).register();
+            finishOwnershipRequest(f);
+        }
+    }
+
+    @Test
+    void exhaustedReconciliationReturnsItsPermitAndInstalledInactivityOwnerClosesRequest()
+            throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            var registration = f.preempt();
+            assertTrue(
+                    RequestProtocolTestSupport.preemptionPhase(
+                            f.owner,
+                            registration,
+                            org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_IN_FLIGHT));
+            var proof = DecodeResources.PreemptionUpdate.finished(f.reservation);
+            when(f.decode.updatePreemption(4L, proof))
+                    .thenThrow(new IllegalStateException("Decode ledger unavailable"));
+            f.prefillOwned.set(false);
+            f.prefillClearedByState.set(true);
+            var failedEvidence =
+                    new ContextResult.WorkerRequestEvent(
+                            f.claim.route(),
+                            null,
+                            org.flexlb.dao.route.RoleType.PREFILL,
+                            ContextResult.WorkerRequestEventType.FAILED,
+                            9L,
+                            null,
+                            System.currentTimeMillis());
+            f.owner.onWorkerRequestEvent(f.context, failedEvidence);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            var retained = f.context.snapshot();
+            assertSame(registration, retained.preemption().identity());
+            assertFalse(retained.close().decodeSettled());
+            assertNull(retained.outcome());
+            verify(f.decode, times(3)).updatePreemption(4L, proof);
+            f.owner.onWorkerRequestEvent(f.context, failedEvidence);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            assertSame(retained, f.context.snapshot());
+            verify(f.decode, times(3)).updatePreemption(4L, proof);
+            var inactivity = retained.deadlines().inactivity();
+            assertNotNull(inactivity, "the accepted delivery retains its timeout owner");
+            assertFalse(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner)
+                            .deadlines()
+                            .needsUpdate(f.context, retained.deadlines()));
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.owner.onDeadline(
+                    inactivity, Math.max(inactivity.atMs(), retained.inactivityExpiresAtMs()));
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            assertEquals(ContextResult.Phase.CLOSED, f.context.snapshot().phase());
+            assertEquals(
+                    org.flexlb.balance.preemption.VictimResolution.Outcome.REQUEST_END,
+                    registration
+                            .completion()
+                            .toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS)
+                            .outcome());
+        }
+    }
+
+    @Test
+    void lateDecodeFinishNotifiesPreemptionBeforePrefillCleanupCompletes() throws Exception {
+        try (var f = new Fixture()) {
+            var registration = f.preempt();
+            var completion =
+                    org.mockito.Mockito.spy(
+                            new CompletableFuture<
+                                    org.flexlb.balance.preemption.VictimResolution>());
+            ReflectionTestUtils.setField(registration, "completion", completion);
+            var original =
+                    ReflectionTestUtils.getField(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner)
+                                    .tasks(),
+                            "requestWorkers");
+            var queued = new java.util.concurrent.ConcurrentLinkedQueue<Runnable>();
+            var paused = mock(java.util.concurrent.ExecutorService.class);
+            doAnswer(
+                            call -> {
+                                queued.add(call.getArgument(0));
+                                return null;
+                            })
+                    .when(paused)
+                    .execute(any(Runnable.class));
+            ReflectionTestUtils.setField(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner).tasks(),
+                    "requestWorkers",
+                    paused);
+            try {
+                // A cancel can interleave after the terminal fact is recorded, before its effects.
+                f.clearDecodeResourceOwnership();
+                f.recordDecodeStatus(
+                        f.decode, DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L));
+                f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+                assertFalse(registration.completion().toCompletableFuture().isDone());
+                assertFalse(queued.isEmpty());
+                f.owner.onDeliveryResult(
+                        new ContextResult.TransportResult(
+                                f.claim,
+                                Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                                System.currentTimeMillis()));
+            } finally {
+                ReflectionTestUtils.setField(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner).tasks(),
+                        "requestWorkers",
+                        original);
+                Runnable task;
+                while ((task = queued.poll()) != null) {
+                    task.run();
+                }
+            }
+            assertEquals(
+                    org.flexlb.balance.preemption.VictimResolution.Outcome.REQUEST_END,
+                    registration
+                            .completion()
+                            .toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS)
+                            .outcome());
+            assertFalse(f.context.snapshot().delivery().prefillProof());
+            assertEquals(ContextResult.Phase.ENDING, f.context.snapshot().phase());
+            assertTrue(f.prefillOwned.get());
+            assertFalse(f.decodeOwned.get());
+            assertFalse(f.settlement().isDone());
+            assertTrue(f.owner.repository.isCurrent(f.context));
+            verify(completion, times(1)).complete(any());
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            verify(completion, times(1)).complete(any());
+        }
+    }
+
+    @Test
+    void exhaustedStopSubmissionReturnsClaimAndInactivityCanClaimTheRemainingAction()
+            throws Exception {
+        try (var f = new Fixture()) {
+            var dispatcher =
+                    SchedulerTestSupport.dispatcher(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            var failure = new IllegalStateException("stop admission unavailable");
+            doThrow(failure)
+                    .doThrow(failure)
+                    .doThrow(failure)
+                    .doCallRealMethod()
+                    .when(dispatcher)
+                    .stop(f.claim);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            assertSame(failure, SchedulerTestSupport.failure(f.owner));
+            var retained = f.context.snapshot();
+            assertFalse(
+                    retained.close().notificationsAttempted(), "rejection is not stop acceptance");
+            verify(dispatcher, times(3)).stop(f.claim);
+            var inactivity = retained.deadlines().inactivity();
+            assertNotNull(inactivity);
+            assertFalse(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner)
+                            .deadlines()
+                            .needsUpdate(f.context, retained.deadlines()));
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.owner.onDeadline(
+                    inactivity, Math.max(inactivity.atMs(), retained.inactivityExpiresAtMs()));
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            verify(dispatcher, times(4)).stop(f.claim);
+        }
+    }
+
+    @Test
+    void ownershipTerminalCleanupRejectionRetainsResourcesUntilExplicitClose() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            f.context.data().getFuture().get(2, TimeUnit.SECONDS);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            var failure = new IllegalStateException("cleanup submission failed");
+            var originalQueue =
+                    (RequestWorkQueue)
+                            ReflectionTestUtils.getField(
+                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                    f.owner)
+                                            .tasks(),
+                                    "requestWorkQueue");
+            var queue = org.mockito.Mockito.spy(originalQueue);
+            doThrow(failure)
+                    .when(queue)
+                    .execute(
+                            eq(f.context), any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
+            ReflectionTestUtils.setField(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner).tasks(),
+                    "requestWorkQueue",
+                    queue);
+            org.mockito.Mockito.clearInvocations(f.owner);
+            try {
+                f.applyDecodeTerminal();
+                SchedulerTestSupport.awaitRequestWork(SchedulerTestSupport.runtime(f.owner));
+                assertFalse(f.settlement().isDone());
+                assertEquals(ContextResult.Phase.ENDING, f.context.snapshot().phase());
+                assertSame(f.claim.route(), f.context.snapshot().route());
+                assertTrue(f.prefillOwned.get());
+                assertFalse(
+                        f.decodeOwned.get(), "Decode terminal proof already settled its resource");
+                verify(f.prefill, never()).releaseRequest(f.claim.route());
+                assertSame(failure, SchedulerTestSupport.failure(f.owner));
+                ReflectionTestUtils.setField(
+                        SchedulerTestSupport.runtime(f.owner).tasks(),
+                        "requestWorkQueue",
+                        originalQueue);
+                f.owner.scheduleClose(f.context);
+                f.settlement().get(2, TimeUnit.SECONDS);
+                f.awaitArchive();
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+                verify(f.prefill, times(1)).releaseRequest(f.claim.route());
+                verify(f.decode, never()).release(any(), any());
+                assertFalse(f.prefillOwned.get());
+                assertFalse(f.decodeOwned.get());
+                assertSame(failure, SchedulerTestSupport.failure(f.owner));
+            } finally {
+                ReflectionTestUtils.setField(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner).tasks(),
+                        "requestWorkQueue",
+                        originalQueue);
+                if (f.owner.repository.isCurrent(f.context)) {
+                    f.owner.scheduleClose(f.context);
+                    f.settlement().get(2, TimeUnit.SECONDS);
+                    f.awaitArchive();
+                }
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+                assertSame(
+                        failure,
+                        assertThrows(
+                                IllegalStateException.class,
+                                () ->
+                                        SchedulerTestSupport.shutdown(
+                                                org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                        .runtime(f.owner))));
+            }
+        }
+    }
+
+    @Test
+    void ownershipNewTerminalRestoresDeadlineWhileWaitingForSenderProof() throws Exception {
+        try (var f = new Fixture()) {
+            var original =
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner).deadlines();
+            original.remove(f.context);
+            var timer = org.mockito.Mockito.spy(original);
+            var failure = new IllegalStateException("terminal deadline installation failed");
+            doThrow(failure).doCallRealMethod().when(timer).update(eq(f.context), any());
+            org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner),
+                    "timer",
+                    timer);
+            try {
+                f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+                verify(timer, times(2)).update(eq(f.context), any());
+                var state = f.context.snapshot();
+                assertFalse(timer.needsUpdate(f.context, state.deadlines()));
+                assertEquals(ContextResult.Phase.ENDING, state.phase());
+                assertEquals(ContextResult.SendState.SENDING, state.delivery().send());
+                assertFalse(state.delivery().prefillProof());
+                assertFalse(state.delivery().decodeProof());
+                assertFalse(f.settlement().isDone());
+                assertTrue(f.prefillOwned.get());
+                assertTrue(f.decodeOwned.get());
+                assertSame(failure, SchedulerTestSupport.failure(f.owner));
+            } finally {
+                org.mockito.Mockito.doCallRealMethod().when(timer).update(any(), any());
+                org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner),
+                        "timer",
+                        original);
+                finishOwnershipRequest(f);
+                assertSame(
+                        failure,
+                        assertThrows(
+                                IllegalStateException.class,
+                                () ->
+                                        SchedulerTestSupport.shutdown(
+                                                org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                        .runtime(f.owner))));
+            }
+        }
+    }
+
+    @Test
+    void ownershipEndingMixedReceiptDoesNotResubmitCancellation() throws Exception {
+        try (var f = new Fixture()) {
+            var granted =
+                    f.context.beginPreemption(
+                            f.reservation,
+                            91L,
+                            new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
+            var attempt = granted;
+            f.owner.onPreemption(
+                    attempt,
+                    new AbstractRequestScheduler.PreemptionEvent(
+                            org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_IN_FLIGHT,
+                            false,
+                            null,
+                            null,
+                            null));
+            f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+            assertEquals(ContextResult.Phase.ENDING, f.context.snapshot().phase());
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            org.mockito.Mockito.clearInvocations(f.owner);
+            try {
+                f.owner.onPreemption(
+                        attempt,
+                        new AbstractRequestScheduler.PreemptionEvent(
+                                org.flexlb.balance.preemption.PreemptionCancelPhase
+                                        .CANCEL_REQUESTED,
+                                false,
+                                null,
+                                null,
+                                null,
+                                new ContextResult.CleanupAcknowledgement(
+                                        f.claim,
+                                        ContextResult.CancelEvidenceKind.FENCED,
+                                        System.currentTimeMillis())));
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+                assertTrue(f.context.snapshot().delivery().prefillProof());
+                assertFalse(f.context.snapshot().delivery().decodeProof());
+                verify(f.owner, never()).cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+            } finally {
+                finishOwnershipRequest(f);
+            }
+        }
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(15)
+    void alreadyCompletedCancelReplySettlesOutsideTaskAndContextMonitors() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
+                    .thenReturn(
+                            CompletableFuture.completedFuture(
+                                    EngineGrpcClient.CancelReply.REQUEST_CLEANED));
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+
+            var observed =
+                    f.settlement()
+                            .thenRun(
+                                    () -> {
+                                        assertFalse(Thread.holdsLock(f.context));
+                                        f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+                                    });
+            f.driver();
+            observed.get(5, TimeUnit.SECONDS);
+            f.awaitArchive();
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            verify(f.prefill, times(1)).releaseRequest(f.claim.route());
+            verify(f.decode).release(f.reservation, DecodeResources.ReleaseReason.REMOTE_CLEANUP);
+        }
+    }
+
+    @Test
+    void decodeProofAndTerminalEffectsReleaseEachResourceOnce() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            f.applyDecodeTerminal();
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+
+            // Concurrent status and terminal effects still release each exact resource once.
+            assertTrue(f.settlement().isDone());
+            assertFalse(f.owner.repository.isCurrent(f.context));
+            assertFalse(f.prefillOwned.get());
+            assertFalse(f.decodeOwned.get());
+            verify(f.prefill, times(1)).releaseRequest(f.claim.route());
+            verify(f.decode, never()).release(any(), any());
+        }
+    }
+
+    @Test
+    void terminalBeforeSenderExitRetainsResourcesAndShutdownDrainsCleanup() throws Exception {
+        try (var f = new Fixture()) {
+            f.applyDecodeTerminal();
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            assertFalse(f.settlement().isDone());
+            assertTrue(f.owner.repository.isCurrent(f.context));
+            assertTrue(f.prefillOwned.get(), "the sender still pins Prefill ownership");
+            verify(f.prefill, never()).releaseRequest(any());
+
+            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner)
+                    .requests()
+                    .stopAccepting();
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            SchedulerTestSupport.shutdown(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+
+            assertTrue(f.settlement().isDone());
+            assertFalse(f.owner.repository.isCurrent(f.context));
+            assertFalse(f.prefillOwned.get());
+            assertFalse(f.decodeOwned.get());
+            verify(f.prefill, times(1)).releaseRequest(f.claim.route());
+            verify(f.decode, never()).release(any(), any());
+        }
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(15)
+    void repeatedSuccessfulTerminalBeforeSenderExitDoesNotStartRemoteCancellation()
+            throws Exception {
+        try (var f = new Fixture()) {
+            boolean senderFinished = false;
+            try {
+                f.applyDecodeTerminal();
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+                assertTrue(f.context.data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
+
+                // A repeated Worker terminal resumes cleanup while the original sender still owns
+                // the RPC.
+                f.applyDecodeTerminal();
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+                verify(f.channel, never()).cancelAsync(any(), anyInt(), any(), anyLong());
+                assertNull(
+                        f.context.snapshot().delivery().abandonment(),
+                        "successful execution must not acquire a remote-cancellation obligation");
+                assertFalse(f.settlement().isDone(), "the original sender must still exit");
+                assertTrue(f.prefillOwned.get());
+
+                f.owner.onDeliveryResult(
+                        new ContextResult.TransportResult(
+                                f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+                senderFinished = true;
+                f.settlement().get(2, TimeUnit.SECONDS);
+                f.awaitArchive();
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+
+                assertFalse(f.prefillOwned.get());
+                assertFalse(f.decodeOwned.get());
+                assertTrue(f.context.data().getFuture().join().isSuccess());
+                verify(f.prefill, times(1)).releaseRequest(f.claim.route());
+                verify(f.decode, never()).release(any(), any());
+                verify(f.channel, never()).cancelAsync(any(), anyInt(), any(), anyLong());
+            } finally {
+                // Keep a failing regression from leaving an in-flight sender or cleanup task
+                // behind.
+                if (!senderFinished) {
+                    f.owner.onDeliveryResult(
+                            new ContextResult.TransportResult(
+                                    f.claim,
+                                    Delivery.Result.delivered(),
+                                    System.currentTimeMillis()));
+                }
+                if (!f.settlement().isDone()) {
+                    f.owner.onDeliveryResult(
+                            new ContextResult.CleanupAcknowledgement(
+                                    f.claim,
+                                    ContextResult.CancelEvidenceKind.CLEANED,
+                                    System.currentTimeMillis()));
+                }
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            }
+        }
+    }
+
+    @Test
+    void rejectedWorkerSubmissionRetainsTheCleanupOwnerAndRecoversOffCaller() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            f.clearDecodeResourceOwnership();
+            f.recordDecodeStatus(
+                    f.decode, DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L));
+            f.prepareClose();
+            var executor =
+                    observeWorkers(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            var rejected = new IllegalStateException("queue acceptance rejected");
+            doAnswer(
+                            call -> {
+                                assertFalse(
+                                        Thread.holdsLock(f.context),
+                                        "queue submission must run outside the request monitor");
+                                f.owner.scheduleClose(f.context);
+                                throw rejected;
+                            })
+                    .when(executor)
+                    .execute(any(Runnable.class));
+
+            assertThrows(RuntimeException.class, () -> f.owner.scheduleClose(f.context));
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            assertTrue(f.owner.repository.isCurrent(f.context));
+
+            verify(f.prefill, never()).releaseRequest(any());
+            verify(f.decode, never()).release(any(), any());
+        }
+    }
+
+    @Test
+    void runningCleanupStillAcceptsANotificationAndPreventsEarlyShutdown() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            var executor =
+                    observeWorkers(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            var entered = new java.util.concurrent.CountDownLatch(1);
+            var release = new java.util.concurrent.CountDownLatch(1);
+            var cleanupRoute = f.claim.route();
+            doAnswer(
+                            call -> {
+                                assertFalse(Thread.holdsLock(f.context));
+                                entered.countDown();
+                                RequestProtocolTestSupport.await(release);
+                                assertTrue(f.prefillOwned.compareAndSet(true, false));
+                                return true;
+                            })
+                    .when(f.prefill)
+                    .releaseRequest(cleanupRoute);
+            var shutdownFailure = new AtomicReference<Throwable>();
+            Thread shutdown =
+                    new Thread(
+                            () -> {
+                                try {
+                                    SchedulerTestSupport.shutdown(
+                                            org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                    .runtime(f.owner));
+                                } catch (Throwable failure) {
+                                    shutdownFailure.set(failure);
+                                }
+                            });
+            try {
+                f.applyDecodeTerminal();
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                f.owner.scheduleClose(f.context);
+                int submissions = mockingDetails(executor).getInvocations().size();
+                for (int i = 0; i < 100; i++) {
+                    f.owner.scheduleClose(f.context);
+                }
+                assertEquals(
+                        submissions,
+                        mockingDetails(executor).getInvocations().size(),
+                        "running cleanup merges notifications without queuing more tasks");
+                shutdown.start();
+                RequestProtocolTestSupport.awaitCondition(
+                        () ->
+                                shutdown.getState() == Thread.State.WAITING
+                                        || shutdown.getState() == Thread.State.TIMED_WAITING);
+                assertTrue(shutdown.isAlive());
+                assertTrue(f.owner.repository.isCurrent(f.context));
+                assertTrue(f.prefillOwned.get());
+                assertFalse(
+                        f.decodeOwned.get(),
+                        "the real Decode terminal has already removed its owner");
+                assertFalse(
+                        f.settlement().isDone(),
+                        "the running Prefill release still owns settlement");
+            } finally {
+                release.countDown();
+                shutdown.join(2_000);
+            }
+            assertFalse(shutdown.isAlive());
+            assertNull(shutdownFailure.get());
+            assertFalse(f.owner.repository.isCurrent(f.context));
+            f.settlement().get(2, TimeUnit.SECONDS);
+            assertFalse(f.prefillOwned.get());
+            assertFalse(f.decodeOwned.get());
+            verify(f.prefill, times(1)).releaseRequest(f.claim.route());
+            verify(f.decode, never()).release(any(), any());
+        }
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(15)
+    void settlementAndShutdownSeeCleanupRegisteredBeforeItsSubmission() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            f.clearDecodeResourceOwnership();
+            f.prepareClose();
+            var delegate =
+                    SchedulerTestSupport.requestWorkers(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            var workers =
+                    observeWorkers(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            var entered = new java.util.concurrent.CountDownLatch(1);
+            var release = new java.util.concurrent.CountDownLatch(1);
+            doAnswer(
+                            call -> {
+                                assertFalse(Thread.holdsLock(f.context));
+                                entered.countDown();
+                                RequestProtocolTestSupport.await(release);
+                                delegate.execute(call.getArgument(0));
+                                return null;
+                            })
+                    .when(workers)
+                    .execute(any(Runnable.class));
+            var producer = new Thread(() -> f.owner.scheduleClose(f.context));
+            var closer =
+                    new Thread(
+                            () ->
+                                    SchedulerTestSupport.closeRequestWork(
+                                            org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                    .runtime(f.owner)));
+            try {
+                producer.start();
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                f.owner.onDeliveryResult(
+                        new ContextResult.TransportResult(
+                                f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+                assertFalse(f.settlement().isDone(), "real cleanup has not reached the worker yet");
+                assertTrue(f.prefillOwned.get());
+                assertFalse(
+                        f.decodeOwned.get(),
+                        "DecodeEndpoint already supplied exact terminal settlement");
+                f.owner.scheduleClose(f.context);
+                closer.start();
+                RequestProtocolTestSupport.awaitCondition(
+                        () -> closer.getState() == Thread.State.WAITING);
+                assertTrue(
+                        closer.isAlive(),
+                        "pre-registered cleanup blocks executor close before execute returns");
+                assertTrue(f.owner.repository.isCurrent(f.context));
+            } finally {
+                release.countDown();
+                producer.join(5_000);
+                closer.join(5_000);
+            }
+            assertFalse(closer.isAlive());
+            assertFalse(f.owner.repository.isCurrent(f.context));
+            f.settlement().get(2, TimeUnit.SECONDS);
+            assertFalse(f.prefillOwned.get());
+            assertFalse(f.decodeOwned.get());
+            verify(f.prefill, times(1)).releaseRequest(f.claim.route());
+        }
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(15)
+    void acceptedStatusBlocksCloseBeforeItsCleanupIsSubmitted() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            var delegate =
+                    SchedulerTestSupport.requestWorkers(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            var workers =
+                    observeWorkers(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            var entered = new java.util.concurrent.CountDownLatch(1);
+            var release = new java.util.concurrent.CountDownLatch(1);
+            doAnswer(
+                            call -> {
+                                assertFalse(Thread.holdsLock(f.context));
+                                entered.countDown();
+                                RequestProtocolTestSupport.await(release);
+                                delegate.execute(call.getArgument(0));
+                                return null;
+                            })
+                    .when(workers)
+                    .execute(any(Runnable.class));
+            var source = new Thread(f::applyDecodeTerminal);
+            var closer =
+                    new Thread(
+                            () ->
+                                    SchedulerTestSupport.closeRequestWork(
+                                            org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                    .runtime(f.owner)));
+            try {
+                source.start();
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                synchronized (f.context) {
+                    assertEquals(ContextResult.Phase.ENDING, f.context.snapshot().phase());
+                    assertEquals(
+                            ContextResult.EndKind.WORKER, f.context.snapshot().outcome().kind());
+                }
+                assertFalse(f.settlement().isDone());
+                closer.start();
+                RequestProtocolTestSupport.awaitCondition(
+                        () -> closer.getState() == Thread.State.WAITING);
+                assertTrue(
+                        closer.isAlive(),
+                        "the terminal action has an owner before worker submission");
+            } finally {
+                release.countDown();
+                source.join(5_000);
+                closer.join(5_000);
+            }
+            assertFalse(closer.isAlive());
+            assertTrue(f.settlement().isDone());
+            assertFalse(f.owner.repository.isCurrent(f.context));
+            verify(f.prefill, times(1)).releaseRequest(f.claim.route());
+        }
+    }
+
+    @Test
+    void cancellationBeforeCommitProducesNoRemoteCancel() throws Exception {
+        try (var f = new Fixture(false)) {
+            assertNull(f.context.snapshot().delivery());
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            assertNull(f.owner.commitDelivery(f.claim, Delivery.SendMode.BATCH_ENQUEUE, 51L));
+            assertFalse(f.context.data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
+            f.awaitArchive();
+            verifyNoInteractions(f.channel);
+            assertFalse(f.prefillOwned.get());
+            assertFalse(f.decodeOwned.get());
+            verify(f.prefill, times(1)).releaseRequest(f.claim.route());
+            verify(f.decode, times(1)).release(eq(f.reservation), any());
+            f.claim.close();
+        }
+    }
+
+    @Test
+    void earlyRemoteCleanupCannotReleaseTheSenderObligation() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            verify(f.channel, timeout(2_000))
+                    .cancelAsync(
+                            any(),
+                            anyInt(),
+                            eq(CancelReason.CLIENT_CANCELLED.toRequest(String.valueOf(41L))),
+                            anyLong());
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            assertFalse(f.settlement().isDone());
+            assertTrue(f.owner.repository.isCurrent(f.context));
+            SchedulerTestSupport.runtime(f.owner).requests().stopAccepting();
+
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            assertFalse(
+                    f.context.data().getFuture().join().isSuccess(),
+                    "late ACK cannot replace cancellation");
+            SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.owner));
+        }
+    }
+
+    @Test
+    void prefillFenceWaitsForExactDecodeSettlement() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_FENCED);
+            assertFalse(f.settlement().isDone());
+            f.recordDecodeStatus(
+                    RequestProtocolTestSupport.decodeEndpoint(),
+                    DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L));
+            f.owner.scheduleClose(f.claim.owner());
+            assertFalse(f.settlement().isDone(), "another endpoint is not proof");
+            f.recordDecodeStatus(
+                    f.decode,
+                    DecodeResources.DecodeRequestStatus.terminal(
+                            new DecodeResources.RequestReservation(1L, String.valueOf(41L), 99L),
+                            0L));
+            f.owner.scheduleClose(f.claim.owner());
+            assertFalse(f.settlement().isDone(), "another reservation is not proof");
+            f.applyDecodeTerminal();
+            f.settlement().get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void failedResponseDeliveryAfterSelectedSuccessStillCancelsEngine() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            assertTrue(f.context.data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
+            f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+            verify(f.channel, timeout(2_000))
+                    .cancelAsync(
+                            any(),
+                            anyInt(),
+                            eq(CancelReason.CLIENT_CANCELLED.toRequest(String.valueOf(41L))),
+                            anyLong());
+            assertTrue(
+                    f.context.data().getFuture().join().isSuccess(),
+                    "selected result remains immutable");
+            assertFalse(f.settlement().isDone());
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+        }
+    }
+
+    @Test
+    void rejectedRequestWorkerRecoversWithoutAnotherStopSubmission() throws Exception {
+        try (var f = new Fixture()) {
+            SchedulerTestSupport.requestWorkers(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner))
+                    .shutdown();
+            assertThrows(
+                    RuntimeException.class,
+                    () -> f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED));
+            assertTrue(f.owner.repository.isCurrent(f.context));
+            assertNull(f.cancel.getNow(null));
+            assertNotNull(SchedulerTestSupport.failure(f.owner));
+        }
+    }
+
+    @Test
+    void cleanupTimeoutWithoutProofKeepsTheResourceObligationPending() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+
+            assertAll(
+                    () ->
+                            assertFalse(
+                                    f.settlement().isDone(),
+                                    "cleanup execution failure is not resource settlement"),
+                    () -> assertTrue(f.owner.repository.isCurrent(f.context)),
+                    () -> assertNull(f.context.releaseReason()),
+                    () -> verify(f.prefill, never()).releaseRequest(any()),
+                    () -> verify(f.decode, never()).release(any(), any()));
+        }
+    }
+
+    @Test
+    void activeDecodeHeartbeatCannotPublishSuccessWhileNotSentEffectsArePending() throws Exception {
+        try (var f = new Fixture()) {
+            var original =
+                    SchedulerTestSupport.requestWorkers(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            var held = mock(java.util.concurrent.ExecutorService.class);
+            var accepted = new java.util.ArrayList<Runnable>();
+            var completions =
+                    SchedulerTestSupport.responseCompletions(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            var originalReplies = ReflectionTestUtils.getField(completions, "completionWorkers");
+            var heldReplies = mock(java.util.concurrent.ThreadPoolExecutor.class);
+            org.mockito.Mockito.doAnswer(
+                            call -> {
+                                accepted.add(call.getArgument(0));
+                                return null;
+                            })
+                    .when(held)
+                    .execute(any(Runnable.class));
+            doAnswer(
+                            call -> {
+                                accepted.add(call.getArgument(0));
+                                return null;
+                            })
+                    .when(heldReplies)
+                    .execute(any(Runnable.class));
+            ReflectionTestUtils.setField(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner).tasks(),
+                    "requestWorkers",
+                    held);
+            ReflectionTestUtils.setField(completions, "completionWorkers", heldReplies);
+            try {
+                f.owner.onDeliveryResult(
+                        new ContextResult.TransportResult(
+                                f.claim,
+                                Delivery.Result.notSent(new IllegalStateException("not sent")),
+                                System.currentTimeMillis()));
+                assertFalse(accepted.isEmpty(), "failure effects are deliberately paused");
+                f.owner.onWorkerRequestEvent(
+                        f.context,
+                        f.decodeEvidence(
+                                f.decode,
+                                DecodeResources.DecodeRequestStatus.active(f.reservation)));
+                assertFalse(
+                        f.context.data().getFuture().isDone(),
+                        "ACTIVE cannot replace the selected send failure");
+                assertFalse(
+                        f.settlement().isDone(),
+                        "NOT_SENT permits release but does not execute it");
+                assertTrue(f.prefillOwned.get());
+                assertTrue(f.decodeOwned.get());
+            } finally {
+                ReflectionTestUtils.setField(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner).tasks(),
+                        "requestWorkers",
+                        original);
+                ReflectionTestUtils.setField(completions, "completionWorkers", originalReplies);
+                for (Runnable work : accepted) {
+                    work.run();
+                }
+            }
+            f.awaitArchive();
+            f.settlement().get(2, TimeUnit.SECONDS);
+            assertFalse(f.prefillOwned.get());
+            assertFalse(f.decodeOwned.get());
+            assertFalse(f.context.data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
+        }
+    }
+
+    @Test
+    void notSentQueuesCleanupBeforePublishingTheSettlementBarrier() throws Exception {
+        try (var f = new Fixture()) {
+            var original =
+                    SchedulerTestSupport.requestWorkers(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            var held = mock(java.util.concurrent.ExecutorService.class);
+            var accepted = new java.util.ArrayList<Runnable>();
+            org.mockito.Mockito.doAnswer(
+                            call -> {
+                                assertFalse(
+                                        f.settlement().isDone(),
+                                        "cleanup must be accepted before the settlement barrier"
+                                                + " opens");
+                                accepted.add(call.getArgument(0));
+                                return null;
+                            })
+                    .when(held)
+                    .execute(any(Runnable.class));
+            ReflectionTestUtils.setField(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner).tasks(),
+                    "requestWorkers",
+                    held);
+            try {
+                f.owner.onDeliveryResult(
+                        new ContextResult.TransportResult(
+                                f.claim,
+                                Delivery.Result.notSent(new IllegalStateException("not sent")),
+                                System.currentTimeMillis()));
+                assertFalse(accepted.isEmpty(), "the failure must have a cleanup owner");
+                assertFalse(
+                        f.settlement().isDone(), "the held worker has not released either owner");
+                assertTrue(f.prefillOwned.get());
+                assertTrue(f.decodeOwned.get());
+            } finally {
+                ReflectionTestUtils.setField(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner).tasks(),
+                        "requestWorkers",
+                        original);
+                for (Runnable work : accepted) {
+                    work.run();
+                }
+            }
+            f.awaitArchive();
+            f.settlement().get(2, TimeUnit.SECONDS);
+            assertFalse(f.context.data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
+            assertNull(
+                    f.context.snapshot().delivery().abandonment(),
+                    "NOT_SENT needs no remote abandonment protocol");
+            assertFalse(f.prefillOwned.get());
+            assertFalse(f.decodeOwned.get());
+            verify(f.decode).release(f.reservation, DecodeResources.ReleaseReason.NOT_SENT);
+            verify(f.channel, never()).cancelAsync(any(), anyInt(), any(), anyLong());
+        }
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    @org.junit.jupiter.api.Timeout(15)
+    void failedReleaseRecoversWithOrWithoutConcurrentCleanupNotification(boolean repeatNotification)
+            throws Exception {
+        try (var f = new Fixture()) {
+            var entered = new java.util.concurrent.CountDownLatch(1);
+            var release = new java.util.concurrent.CountDownLatch(1);
+            var calls = new java.util.concurrent.atomic.AtomicInteger();
+            doAnswer(
+                            call -> {
+                                assertFalse(Thread.holdsLock(f.context));
+                                if (calls.incrementAndGet() == 1) {
+                                    entered.countDown();
+                                    RequestProtocolTestSupport.await(release);
+                                    throw new IllegalStateException("temporary release failure");
+                                }
+                                assertTrue(f.prefillOwned.compareAndSet(true, false));
+                                return true;
+                            })
+                    .when(f.prefill)
+                    .releaseRequest(f.claim.route());
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            try {
+                f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                if (repeatNotification) {
+                    f.owner.onDeliveryResult(
+                            new ContextResult.CleanupAcknowledgement(
+                                    f.claim,
+                                    ContextResult.CancelEvidenceKind.CLEANED,
+                                    System.currentTimeMillis()));
+                }
+                assertTrue(f.owner.repository.isCurrent(f.context));
+            } finally {
+                release.countDown();
+            }
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            assertFalse(f.prefillOwned.get());
+            assertFalse(f.decodeOwned.get());
+            verify(f.prefill, times(2)).releaseRequest(f.claim.route());
+            f.assertDecodeOwnershipReleasedOnce();
+            assertEquals(
+                    2,
+                    calls.get(),
+                    "a failed release must recover even without another notification");
+            assertNotNull(
+                    SchedulerTestSupport.failure(f.owner), "the first failure remains observable");
+        }
+    }
+
+    @Test
+    void lateCleanedAckAfterTimeoutArchivesOnlyTheOriginalRequest() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            Response selected = f.context.data().getFuture().get(2, TimeUnit.SECONDS);
+
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.assertArchivedAfterCleanup();
+            assertSame(
+                    selected,
+                    f.context.data().getFuture().join(),
+                    "cleanup cannot replace the selected response");
+
+            var terminal = f.owner.repository.findTerminal("41");
+            assertTrue(f.owner.repository.removeExactTerminal(terminal, Long.MAX_VALUE));
+            var replacement = RequestProtocolTestSupport.context(f.context.data().getConfig(), 41L);
+            var replacementFuture =
+                    RequestProtocolTestSupport.submitForManualPlacement(f.owner, replacement);
+            try {
+                f.owner.onDeliveryResult(
+                        new ContextResult.CleanupAcknowledgement(
+                                f.claim,
+                                ContextResult.CancelEvidenceKind.CLEANED,
+                                System.currentTimeMillis()));
+                f.applyDecodeTerminal();
+                f.owner.onEndpointRetired(
+                        f.claim.route().ctx(),
+                        new ContextResult.EndpointRetirement(
+                                (f.claim.route().prefillEndpoint() == f.prefill
+                                        ? f.claim.route()
+                                        : null),
+                                null,
+                                org.flexlb.dao.route.RoleType.PREFILL,
+                                f.prefill,
+                                "Prefill generation retired",
+                                System.currentTimeMillis()));
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+
+                assertSame(replacement, f.owner.repository.findActive("41"));
+                assertFalse(
+                        replacementFuture.isDone(),
+                        "old cleanup facts cannot finish a reused request identity");
+                verify(f.prefill, times(1)).releaseRequest(f.claim.route());
+                f.assertDecodeOwnershipReleasedOnce();
+            } finally {
+                replacementFuture.completeExceptionally(new IllegalStateException("test cleanup"));
+            }
+        }
+    }
+
+    @Test
+    void endpointRetirementAfterCleanupTimeoutStillArchivesTheRequest() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            f.retirePrefill();
+            f.retireDecode();
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+
+            assertTrue(
+                    f.context.snapshot().delivery().prefillProof()
+                            && f.context.snapshot().delivery().decodeProof(),
+                    "both exact generations have retired");
+            f.assertArchivedAfterCleanup();
+        }
+    }
+
+    @Test
+    void lateFenceAfterTimeoutWaitsForTheExactDecodeTerminal() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_FENCED);
+            f.owner.onWorkerRequestEvent(
+                    f.context,
+                    new ContextResult.WorkerRequestEvent(
+                            (f.context.snapshot().route() != null
+                                            && f.context.snapshot().route().decodeEndpoint()
+                                                    == RequestProtocolTestSupport.decodeEndpoint()
+                                    ? f.context.snapshot().route()
+                                    : null),
+                            DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L)
+                                    .reservation(),
+                            org.flexlb.dao.route.RoleType.DECODE,
+                            (DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L).kind()
+                                            == DecodeResources.DecodeRequestStatus.Kind.ACTIVE
+                                    ? ContextResult.WorkerRequestEventType.ACTIVE
+                                    : DecodeResources.DecodeRequestStatus.terminal(
+                                                                    f.reservation, 0L)
+                                                            .errorCode()
+                                                    == 0L
+                                            ? ContextResult.WorkerRequestEventType.COMPLETED
+                                            : ContextResult.WorkerRequestEventType.FAILED),
+                            DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L)
+                                    .errorCode(),
+                            null,
+                            System.currentTimeMillis()));
+            f.owner.onWorkerRequestEvent(
+                    f.context,
+                    new ContextResult.WorkerRequestEvent(
+                            (f.context.snapshot().route() != null
+                                            && f.context.snapshot().route().decodeEndpoint()
+                                                    == f.decode
+                                    ? f.context.snapshot().route()
+                                    : null),
+                            DecodeResources.DecodeRequestStatus.terminal(
+                                            new DecodeResources.RequestReservation(
+                                                    1L, String.valueOf(41L), 99L),
+                                            0L)
+                                    .reservation(),
+                            org.flexlb.dao.route.RoleType.DECODE,
+                            (DecodeResources.DecodeRequestStatus.terminal(
+                                                            new DecodeResources.RequestReservation(
+                                                                    1L, String.valueOf(41L), 99L),
+                                                            0L)
+                                                    .kind()
+                                            == DecodeResources.DecodeRequestStatus.Kind.ACTIVE
+                                    ? ContextResult.WorkerRequestEventType.ACTIVE
+                                    : DecodeResources.DecodeRequestStatus.terminal(
+                                                                    new DecodeResources
+                                                                            .RequestReservation(
+                                                                            1L,
+                                                                            String.valueOf(41L),
+                                                                            99L),
+                                                                    0L)
+                                                            .errorCode()
+                                                    == 0L
+                                            ? ContextResult.WorkerRequestEventType.COMPLETED
+                                            : ContextResult.WorkerRequestEventType.FAILED),
+                            DecodeResources.DecodeRequestStatus.terminal(
+                                            new DecodeResources.RequestReservation(
+                                                    1L, String.valueOf(41L), 99L),
+                                            0L)
+                                    .errorCode(),
+                            null,
+                            System.currentTimeMillis()));
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            assertFalse(
+                    f.settlement().isDone(),
+                    "Prefill fencing and foreign Decode facts do not settle the request");
+            assertTrue(f.owner.repository.isCurrent(f.context));
+            verify(f.decode, never()).release(any(), any());
+
+            f.applyDecodeTerminal();
+            f.assertArchivedAfterCleanup();
+        }
+    }
+
+    @Test
+    void lateCleanedAckAfterTimeoutStillWaitsForSenderExit() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            assertFalse(f.settlement().isDone(), "remote cleanup cannot settle an active sender");
+            assertTrue(f.owner.repository.isCurrent(f.context));
+            verify(f.prefill, never()).releaseRequest(any());
+            verify(f.decode, never()).release(any(), any());
+
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            f.assertArchivedAfterCleanup();
+        }
+    }
+
+    @Test
+    void remoteCleanedStopResultDoesNotMeanDecodeLedgerReleased() throws Exception {
+        try (var f = new Fixture()) {
+            when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
+                    .thenReturn(
+                            CompletableFuture.completedFuture(
+                                    EngineGrpcClient.CancelReply.REQUEST_CLEANED));
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+
+            assertEquals(
+                    DeliveryDispatcher.StopResult.REMOTE_CLEANED,
+                    f.driver().get(2, TimeUnit.SECONDS));
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+
+            assertFalse(
+                    f.settlement().isDone(),
+                    "remote cleanup acknowledgement is not Decode ledger release");
+            assertTrue(f.owner.repository.isCurrent(f.context));
+            assertTrue(f.decodeOwned.get(), "Decode ownership still needs its ledger fact");
+            verify(f.prefill, never()).releaseRequest(any());
+            verify(f.decode, never()).release(any(), any());
+
+            // Keep the sender open until the Worker fact has removed its exact Decode ownership.
+            f.applyDecodeTerminal();
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            f.assertArchivedAfterCleanup();
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(
+            value = EngineGrpcClient.CancelReply.class,
+            names = {"ACCEPTED", "NOT_FOUND", "FAILED"})
+    void acknowledgementWithoutCleanupProofCannotReleaseAnUncertainSend(
+            EngineGrpcClient.CancelReply ack) throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+            f.cancel.complete(ack);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            assertNull(
+                    f.owner.commitDelivery(
+                            new Delivery.Member(f.claim.route(), null),
+                            Delivery.SendMode.BATCH_ENQUEUE,
+                            51L),
+                    "uncertain delivery must not be sent again");
+            assertFalse(f.settlement().isDone());
+            assertTrue(f.owner.repository.isCurrent(f.context));
+            assertNull(f.context.releaseReason());
+            verify(f.prefill, never()).releaseRequest(any());
+            verify(f.decode, never()).release(any(), any());
+
+            f.owner.onDeliveryResult(
+                    new ContextResult.CleanupAcknowledgement(
+                            f.claim,
+                            ContextResult.CancelEvidenceKind.CLEANED,
+                            System.currentTimeMillis()));
+            f.assertArchivedAfterCleanup();
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,true", "true,false", "false,true", "false,false"})
+    void fenceDecodeProofAndSenderExitSettleInAnyOrder(boolean decodeFirst, boolean senderFirst)
+            throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            if (senderFirst) {
+                f.owner.onDeliveryResult(
+                        new ContextResult.TransportResult(
+                                f.claim,
+                                Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                                System.currentTimeMillis()));
+            }
+            Runnable decodeProof = f::applyDecodeTerminal;
+            if (decodeFirst) {
+                decodeProof.run();
+            } else {
+                f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_FENCED);
+            }
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            assertFalse(
+                    f.settlement().isDone(),
+                    "one side of the cleanup proof cannot settle delivery");
+            verify(f.prefill, never()).releaseRequest(any());
+
+            if (decodeFirst) {
+                f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_FENCED);
+            } else {
+                decodeProof.run();
+            }
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            if (!senderFirst) {
+                assertFalse(
+                        f.settlement().isDone(), "complete remote proof still needs sender exit");
+                f.owner.onDeliveryResult(
+                        new ContextResult.TransportResult(
+                                f.claim,
+                                Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                                System.currentTimeMillis()));
+            }
+            f.assertArchivedAfterCleanup();
+            f.owner.onDeliveryResult(
+                    new ContextResult.CleanupAcknowledgement(
+                            f.claim,
+                            ContextResult.CancelEvidenceKind.CLEANED,
+                            System.currentTimeMillis()));
+            decodeProof.run();
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            verify(f.prefill, times(1)).releaseRequest(f.claim.route());
+            f.assertDecodeOwnershipReleasedOnce();
+        }
+    }
+
+    @Test
+    void repeatedCancellationPreservesFirstReasonAndStartsOneCleanup() throws Exception {
+        try (var f = new Fixture()) {
+            assertNull(
+                    f.owner.commitDelivery(
+                            new Delivery.Member(f.claim.route(), null),
+                            Delivery.SendMode.BATCH_ENQUEUE,
+                            51L),
+                    "send qualification is consumed once");
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.SHUTDOWN);
+            f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            verify(f.channel, timeout(1000).times(1))
+                    .cancelAsync(
+                            any(),
+                            anyInt(),
+                            eq(CancelReason.CLIENT_CANCELLED.toRequest(String.valueOf(41L))),
+                            anyLong());
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.assertArchivedAfterCleanup();
+            verify(f.channel, times(1))
+                    .cancelAsync(
+                            any(),
+                            anyInt(),
+                            eq(CancelReason.CLIENT_CANCELLED.toRequest(String.valueOf(41L))),
+                            anyLong());
+        }
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.MethodSource("cleanupEventOrders")
+    void everyCleanupEventPermutationRequiresAllProofAndReleasesOnce(String outcome, String order)
+            throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            for (int index = 0; index < order.length(); index++) {
+                switch (order.charAt(index)) {
+                    case 'S' ->
+                            f.owner.onDeliveryResult(
+                                    new ContextResult.TransportResult(
+                                            f.claim,
+                                            switch (outcome) {
+                                                case "DELIVERED" -> Delivery.Result.delivered();
+                                                case "REJECTED" ->
+                                                        Delivery.Result.prefillRejected(
+                                                                new IllegalStateException(
+                                                                        "rejected"));
+                                                case "UNKNOWN" ->
+                                                        Delivery.Result.uncertain(
+                                                                new IllegalStateException(
+                                                                        "reply lost"));
+                                                default -> throw new AssertionError(outcome);
+                                            },
+                                            System.currentTimeMillis()));
+                    case 'P' -> f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_FENCED);
+                    case 'D' -> f.applyDecodeTerminal();
+                    default -> throw new AssertionError(order);
+                }
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+                if (index < order.length() - 1) {
+                    assertFalse(
+                            f.settlement().isDone(),
+                            "partial evidence: " + order.substring(0, index + 1));
+                    assertTrue(f.owner.repository.isCurrent(f.context));
+                    verify(f.prefill, never()).releaseRequest(any());
+                }
+            }
+            f.assertArchivedAfterCleanup();
+            assertNull(
+                    f.owner.commitDelivery(
+                            new Delivery.Member(f.claim.route(), null),
+                            Delivery.SendMode.BATCH_ENQUEUE,
+                            51L));
+            var archived = f.context.snapshot();
+            var stale =
+                    org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                            f.context,
+                            observedRequest ->
+                                    observedRequest.recordDeliveryResult(
+                                            new ContextResult.TransportResult(
+                                                    f.claim,
+                                                    Delivery.Result.delivered(),
+                                                    System.currentTimeMillis())));
+            assertEquals(RequestChangeAssertions.UpdateKind.STALE, stale.kind());
+            assertSame(archived, stale.before());
+            assertSame(archived, stale.after());
+            f.owner.onDeliveryResult(
+                    new ContextResult.CleanupAcknowledgement(
+                            f.claim,
+                            ContextResult.CancelEvidenceKind.CLEANED,
+                            System.currentTimeMillis()));
+            f.applyDecodeTerminal();
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            verify(f.prefill, times(1)).releaseRequest(f.claim.route());
+            f.assertDecodeOwnershipReleasedOnce();
+        }
+    }
+
+    static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments>
+            cleanupEventOrders() {
+        return java.util.stream.Stream.of("DELIVERED", "REJECTED", "UNKNOWN")
+                .flatMap(
+                        outcome ->
+                                java.util.stream.Stream.of("SPD", "SDP", "PSD", "PDS", "DSP", "DPS")
+                                        .map(
+                                                order ->
+                                                        org.junit.jupiter.params.provider.Arguments
+                                                                .of(outcome, order)));
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(
+            strings = {
+                "foreignEndpoint",
+                "foreignToken",
+                "foreignGeneration",
+                "foreignRequest",
+                "notTerminal"
+            })
+    void foreignDecodeEvidenceCannotSettleTheExactDelivery(String mismatch) throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_FENCED);
+            DecodeEndpoint source =
+                    mismatch.equals("foreignEndpoint")
+                            ? RequestProtocolTestSupport.decodeEndpoint()
+                            : f.decode;
+            var reservation =
+                    switch (mismatch) {
+                        case "foreignToken" ->
+                                new DecodeResources.RequestReservation(1L, String.valueOf(41L), 2L);
+                        case "foreignGeneration" ->
+                                new DecodeResources.RequestReservation(2L, String.valueOf(41L), 1L);
+                        case "foreignRequest" ->
+                                new DecodeResources.RequestReservation(1L, String.valueOf(42L), 1L);
+                        default -> f.reservation;
+                    };
+            var requestStatus =
+                    mismatch.equals("notTerminal")
+                            ? DecodeResources.DecodeRequestStatus.active(reservation)
+                            : DecodeResources.DecodeRequestStatus.terminal(reservation, 0L);
+            f.recordDecodeStatus(source, requestStatus);
+            f.owner.scheduleClose(f.claim.owner());
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            assertFalse(f.settlement().isDone());
+            assertNull(f.context.releaseReason());
+            assertTrue(f.decodeOwned.get(), "foreign facts cannot release the exact Decode owner");
+            verify(f.prefill, never()).releaseRequest(any());
+            verify(f.decode, never()).release(any(), any());
+            f.applyDecodeTerminal();
+            f.assertArchivedAfterCleanup();
+        }
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(ints = {1, 2, 3, 4, 5, 6, 7, 8})
+    void cleanupCanSucceedAtEveryBoundedRetryAndCancelsItsDeadline(int successfulAttempt)
+            throws Exception {
+        try (var f = new Fixture()) {
+            var calls = new java.util.concurrent.atomic.AtomicInteger();
+            when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
+                    .thenAnswer(
+                            call -> {
+                                assertTrue(
+                                        Thread.currentThread()
+                                                .getName()
+                                                .startsWith("delivery-stop-"));
+                                assertFalse(Thread.holdsLock(f.context));
+                                return CompletableFuture.completedFuture(
+                                        calls.incrementAndGet() == successfulAttempt
+                                                ? EngineGrpcClient.CancelReply.REQUEST_CLEANED
+                                                : EngineGrpcClient.CancelReply.NOT_FOUND);
+                            });
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            f.assertArchivedAfterCleanup();
+            assertEquals(successfulAttempt, calls.get());
+            assertNull(SchedulerTestSupport.failure(f.owner));
+        }
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(15)
+    void receivedCleanupNeedsNoStopQueueAndPreventsFurtherRetries() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            var original =
+                    (java.util.concurrent.Executor)
+                            ReflectionTestUtils.getField(
+                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                    f.owner)
+                                            .tasks(),
+                                    "stopWorkers");
+            var queued = new java.util.concurrent.LinkedBlockingQueue<Runnable>();
+            var held = mock(java.util.concurrent.ExecutorService.class);
+            doAnswer(
+                            call -> {
+                                queued.add(call.getArgument(0));
+                                return null;
+                            })
+                    .when(held)
+                    .execute(any());
+            ReflectionTestUtils.setField(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner).tasks(),
+                    "stopWorkers",
+                    held);
+            CompletableFuture<DeliveryDispatcher.StopResult> driver;
+            try {
+                driver = f.driver();
+                f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+                verify(f.channel, timeout(2_000))
+                        .cancelAsync(
+                                any(),
+                                anyInt(),
+                                argThat(request -> request.getRequestId() == 41L),
+                                eq(500L));
+                verify(f.channel, after(900).times(1))
+                        .cancelAsync(
+                                any(),
+                                anyInt(),
+                                argThat(request -> request.getRequestId() == 41L),
+                                eq(500L));
+                assertTrue(f.settlement().isDone());
+                assertEquals(0, queued.size(), "reply application must not enqueue stop work");
+                verify(f.owner).onDeliveryResult(isA(ContextResult.CleanupAcknowledgement.class));
+            } finally {
+                ReflectionTestUtils.setField(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner).tasks(),
+                        "stopWorkers",
+                        original);
+                Runnable task;
+                while ((task = queued.poll()) != null) {
+                    task.run();
+                }
+            }
+            f.assertArchivedAfterCleanup();
+            driver.get(2, TimeUnit.SECONDS);
+            verify(f.channel, times(1))
+                    .cancelAsync(
+                            any(),
+                            anyInt(),
+                            argThat(request -> request.getRequestId() == 41L),
+                            anyLong());
+            assertNull(SchedulerTestSupport.failure(f.owner));
+        }
+    }
+
+    @Test
+    void timedOutAcknowledgementStillSuppliesLateCleanupProof() throws Exception {
+        try (var f = new Fixture()) {
+            var first = new CompletableFuture<EngineGrpcClient.CancelReply>();
+            when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
+                    .thenReturn(first, new CompletableFuture<>());
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            verify(f.channel, timeout(2_000).times(2))
+                    .cancelAsync(
+                            any(),
+                            anyInt(),
+                            argThat(request -> request.getRequestId() == 41L),
+                            eq(500L));
+            assertFalse(f.settlement().isDone());
+            first.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.assertArchivedAfterCleanup();
+            verify(f.channel, times(2))
+                    .cancelAsync(
+                            any(),
+                            anyInt(),
+                            argThat(request -> request.getRequestId() == 41L),
+                            eq(500L));
+        }
+    }
+
+    @Test
+    void overallTimeoutStopsAnAlreadyScheduledRetry() throws Exception {
+        try (var f = new Fixture()) {
+            when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
+                    .thenAnswer(call -> new CompletableFuture<>());
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            var driver = f.driver();
+            assertEquals(DeliveryDispatcher.StopResult.UNRESOLVED, driver.get(6, TimeUnit.SECONDS));
+            int count = mockingDetails(f.channel).getInvocations().size();
+            assertSame(
+                    driver,
+                    f.driver(),
+                    "a stopped driver must not restart the same unsettled claim");
+            assertTrue(count <= 8);
+            assertFalse(f.settlement().isDone());
+            assertNotNull(SchedulerTestSupport.failure(f.owner));
+        }
+    }
+
+    @Test
+    void retryExhaustionStillAcceptsAnEarlierTimedOutAttemptProof() throws Exception {
+        try (var f = new Fixture()) {
+            var first = new CompletableFuture<EngineGrpcClient.CancelReply>();
+            var calls = new java.util.concurrent.atomic.AtomicInteger();
+            when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
+                    .thenAnswer(
+                            call ->
+                                    calls.incrementAndGet() == 1
+                                            ? first
+                                            : CompletableFuture.completedFuture(
+                                                    EngineGrpcClient.CancelReply.NOT_FOUND));
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            assertEquals(8, calls.get());
+            assertFalse(f.settlement().isDone());
+            first.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.assertArchivedAfterCleanup();
+            assertEquals(8, calls.get());
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(
+            value = EngineGrpcClient.CancelReply.class,
+            names = {"ACCEPTED", "NOT_FOUND", "FAILED"})
+    void retryExhaustionCannotInventResourceRelease(EngineGrpcClient.CancelReply ack)
+            throws Exception {
+        try (var f = new Fixture()) {
+            when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
+                    .thenAnswer(call -> CompletableFuture.completedFuture(ack));
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            verify(f.channel, times(8))
+                    .cancelAsync(
+                            any(),
+                            anyInt(),
+                            argThat(request -> request.getRequestId() == 41L),
+                            anyLong());
+            assertTrue(f.owner.repository.isCurrent(f.context));
+            assertNull(f.context.releaseReason());
+            verify(f.prefill, never()).releaseRequest(any());
+            verify(f.decode, never()).release(any(), any());
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(
+            value = EngineGrpcClient.CancelReply.class,
+            names = {"NOT_FOUND", "ACCEPTED", "FAILED"})
+    void lateReplyWithoutProofCannotScheduleDuplicateRetry(EngineGrpcClient.CancelReply ack)
+            throws Exception {
+        try (var f = new Fixture()) {
+            var first = new CompletableFuture<EngineGrpcClient.CancelReply>();
+            when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
+                    .thenReturn(first, new CompletableFuture<>());
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            var driver = f.driver();
+            verify(f.channel, timeout(2_000).times(2))
+                    .cancelAsync(
+                            any(),
+                            anyInt(),
+                            argThat(request -> request.getRequestId() == 41L),
+                            anyLong());
+            first.complete(ack);
+            assertSame(driver, f.driver());
+            assertFalse(f.settlement().isDone());
+            f.owner.onDeliveryResult(
+                    new ContextResult.CleanupAcknowledgement(
+                            f.claim,
+                            ContextResult.CancelEvidenceKind.CLEANED,
+                            System.currentTimeMillis()));
+            f.assertArchivedAfterCleanup();
+            driver.get(2, TimeUnit.SECONDS);
+            verify(f.channel, times(2))
+                    .cancelAsync(
+                            any(),
+                            anyInt(),
+                            argThat(request -> request.getRequestId() == 41L),
+                            anyLong());
+        }
+    }
+
+    @Test
+    void committedSendStopTimeoutRetainsResponsibilityUntilSenderExits() throws Exception {
+        try (var f = new Fixture()) {
+            f.cancel.complete(EngineGrpcClient.CancelReply.ACCEPTED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            SchedulerTestSupport.dispatcher(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner))
+                    .awaitStops();
+            assertFalse(f.settlement().isDone());
+            verify(f.channel, times(1)).cancelAsync(any(), anyInt(), any(), anyLong());
+            assertEquals(ContextResult.SendState.SENDING, f.context.snapshot().delivery().send());
+            assertTrue(f.prefillOwned.get());
+            assertTrue(f.decodeOwned.get());
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.notSent(
+                                    new IllegalStateException("cancelled before send")),
+                            System.currentTimeMillis()));
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            assertFalse(f.prefillOwned.get());
+            assertFalse(f.decodeOwned.get());
+        }
+    }
+
+    @Test
+    void unsentVictimCancellationClosesPreemptionAfterLocalRelease() throws Exception {
+        try (var f = new Fixture()) {
+            var claim =
+                    f.context.beginPreemption(
+                            f.reservation,
+                            92L,
+                            new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
+            var registration = claim;
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            Delivery.Result.notSent(
+                                    new IllegalStateException("cancelled before send")),
+                            System.currentTimeMillis()));
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            assertNotNull(registration.result());
+            verifyNoInteractions(f.channel);
+        }
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void senderCompletionAdvancesTheSameStopRecordAfterItsInitialWaitExpires(boolean duringExit)
+            throws Exception {
+        try (var f = new Fixture()) {
+            when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
+                    .thenReturn(
+                            CompletableFuture.completedFuture(
+                                    EngineGrpcClient.CancelReply.NOT_FOUND),
+                            CompletableFuture.completedFuture(
+                                    EngineGrpcClient.CancelReply.REQUEST_CLEANED));
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            var record = f.stopRecord();
+            var dispatcher =
+                    SchedulerTestSupport.dispatcher(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            Runnable report =
+                    () ->
+                            ReflectionTestUtils.invokeMethod(
+                                    dispatcher,
+                                    "report",
+                                    51L,
+                                    java.util.List.of(f.claim),
+                                    java.util.List.of(Delivery.Result.delivered()));
+            var driver = f.driver();
+            var reported =
+                    duringExit ? driver.thenRun(report) : CompletableFuture.completedFuture(null);
+            assertEquals(DeliveryDispatcher.StopResult.UNRESOLVED, driver.get(6, TimeUnit.SECONDS));
+            if (!duringExit) {
+                assertSame(record, f.stopRecord());
+                assertFalse(f.settlement().isDone());
+                report.run();
+            }
+            reported.get(2, TimeUnit.SECONDS);
+            f.assertArchivedAfterCleanup();
+            verify(f.channel, times(2)).cancelAsync(any(), anyInt(), any(), anyLong());
+            assertFalse(f.context.data().getFuture().join().isSuccess());
+        }
+    }
+
+    @Test
+    void ordinaryCancellationSharesTheOutstandingPreemptionRpc() throws Exception {
+        try (var f = new Fixture()) {
+            var granted =
+                    f.context.beginPreemption(
+                            f.reservation,
+                            91L,
+                            new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
+            var registration = granted;
+            var preemptionReply =
+                    SchedulerTestSupport.dispatcher(
+                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                            f.owner))
+                            .preempt(registration, f.decode, "priority preemption", 500L);
+            verify(f.channel, timeout(2000)).cancelAsync(any(), anyInt(), any(), anyLong());
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            assertEquals(
+                    PreemptionRegistration.Reply.UNKNOWN, preemptionReply.get(2, TimeUnit.SECONDS));
+            f.assertArchivedAfterCleanup();
+            verify(f.channel, times(1)).cancelAsync(any(), anyInt(), any(), anyLong());
+        }
+    }
+
+    @Test
+    void combinedReceiptRecordsBothFactsBeforeItsOnlyContinuation() throws Exception {
+        try (var f = new Fixture()) {
+            var grant =
+                    f.context.beginPreemption(
+                            f.reservation,
+                            91L,
+                            new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
+            var registration = grant;
+            f.owner.onPreemption(
+                    registration,
+                    new AbstractRequestScheduler.PreemptionEvent(
+                            org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_IN_FLIGHT,
+                            false,
+                            null,
+                            null,
+                            null));
+            var timer =
+                    org.mockito.Mockito.spy(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner)
+                                    .deadlines());
+            org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner),
+                    "timer",
+                    timer);
+            doAnswer(
+                            call -> {
+                                assertFalse(Thread.holdsLock(f.context));
+                                var state = f.context.snapshot();
+                                assertEquals(
+                                        org.flexlb.balance.preemption.PreemptionCancelPhase
+                                                .CANCEL_REQUESTED,
+                                        state.preemption().phase());
+                                assertTrue(
+                                        state.delivery().prefillProof(),
+                                        "proof must precede continuation");
+                                assertFalse(
+                                        state.delivery().decodeProof(),
+                                        "FENCED is not Decode release proof");
+                                return call.callRealMethod();
+                            })
+                    .when(timer)
+                    .needsUpdate(eq(f.context), any());
+            try {
+                var response =
+                        SchedulerTestSupport.dispatcher(
+                                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                f.owner))
+                                .preempt(registration, f.decode, "priority preemption", 1000L);
+                verify(f.channel, timeout(2000)).cancelAsync(any(), anyInt(), any(), anyLong());
+                f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_FENCED);
+                assertEquals(
+                        PreemptionRegistration.Reply.WAITING, response.get(2, TimeUnit.SECONDS));
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+                verify(timer, times(1)).needsUpdate(eq(f.context), any());
+                verify(timer, never()).update(eq(f.context), any());
+                verify(f.owner, never())
+                        .onDeliveryResult(isA(ContextResult.CleanupAcknowledgement.class));
+                assertFalse(f.context.data().getFuture().isDone());
+                assertTrue(f.decodeOwned.get());
+            } finally {
+                org.mockito.Mockito.doCallRealMethod().when(timer).needsUpdate(any(), any());
+                f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+                f.owner.onDeliveryResult(
+                        new ContextResult.TransportResult(
+                                f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+                f.owner.onDeliveryResult(
+                        new ContextResult.CleanupAcknowledgement(
+                                f.claim,
+                                ContextResult.CancelEvidenceKind.CLEANED,
+                                System.currentTimeMillis()));
+                f.assertArchivedAfterCleanup();
+            }
+        }
+    }
+
+    @Test
+    void staleAttemptStillRecordsCleanupForTheCurrentDelivery() throws Exception {
+        try (var f = new Fixture()) {
+            var stale =
+                    new PreemptionRegistration(
+                            f.context,
+                            91L,
+                            f.reservation,
+                            new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
+            var response =
+                    SchedulerTestSupport.dispatcher(
+                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                            f.owner))
+                            .preempt(stale, f.decode, "priority preemption", 1000L);
+            verify(f.channel, timeout(2000)).cancelAsync(any(), anyInt(), any(), anyLong());
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            assertEquals(PreemptionRegistration.Reply.UNKNOWN, response.get(2, TimeUnit.SECONDS));
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            assertNull(f.context.snapshot().preemption());
+            assertTrue(f.context.snapshot().delivery().prefillProof());
+            assertTrue(f.context.snapshot().delivery().decodeProof());
+            assertFalse(f.settlement().isDone(), "sender has not exited");
+            verify(f.decode, never()).updatePreemption(anyLong(), any());
+            verify(f.owner, never())
+                    .onDeliveryResult(isA(ContextResult.CleanupAcknowledgement.class));
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            f.assertArchivedAfterCleanup();
+        }
+    }
+
+    @Test
+    void lateCleanedReplyFromOldAttemptCannotSettleNewAttempt() throws Exception {
+        try (var f = new Fixture()) {
+            var oldAttempt = f.preempt();
+
+            // The old cancellation is withdrawn before a new attempt is registered.
+            assertTrue(
+                    f.owner.onPreemption(
+                            oldAttempt,
+                            new AbstractRequestScheduler.PreemptionEvent(
+                                    null, true, null, null, null)));
+            var newAttempt = f.owner.tryClaim(f.reservation, 92L).orElseThrow();
+            assertTrue(oldAttempt != newAttempt);
+            assertSame(newAttempt, f.context.snapshot().preemption().identity());
+
+            var event =
+                    new AbstractRequestScheduler.PreemptionEvent(
+                            null,
+                            false,
+                            f.decode,
+                            oldAttempt.reservation(),
+                            "late reply from old attempt",
+                            new ContextResult.CleanupAcknowledgement(
+                                    f.claim,
+                                    ContextResult.CancelEvidenceKind.CLEANED,
+                                    System.currentTimeMillis()));
+            var progress = event.progress(f.owner.onPreemption(oldAttempt, event));
+
+            assertEquals(PreemptionRegistration.Reply.UNKNOWN, progress);
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            assertSame(
+                    newAttempt,
+                    f.context.snapshot().preemption().identity(),
+                    "an old cleanup reply must not advance the new preemption");
+            assertTrue(f.context.snapshot().delivery().prefillProof());
+            assertTrue(f.context.snapshot().delivery().decodeProof());
+            verify(f.decode, never()).updatePreemption(anyLong(), any());
+            verify(f.decode, never()).release(any(), any());
+            assertFalse(f.settlement().isDone(), "remote cleanup is not sender completion");
+            assertTrue(
+                    f.owner.onPreemption(
+                            newAttempt,
+                            new AbstractRequestScheduler.PreemptionEvent(
+                                    null, true, null, null, null)));
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            f.assertArchivedAfterCleanup();
+        }
+    }
+
+    @Test
+    void cancellationQueuedBehindPreemptionInitializesItsOwnDeadlineBeforeAdvancing()
+            throws Exception {
+        try (var f = new Fixture()) {
+            var original =
+                    (java.util.concurrent.Executor)
+                            ReflectionTestUtils.getField(
+                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                    f.owner)
+                                            .tasks(),
+                                    "stopWorkers");
+            var queued = new java.util.concurrent.ConcurrentLinkedQueue<Runnable>();
+            var paused = mock(java.util.concurrent.ExecutorService.class);
+            doAnswer(
+                            call -> {
+                                queued.add(call.getArgument(0));
+                                return null;
+                            })
+                    .when(paused)
+                    .execute(any(Runnable.class));
+            ReflectionTestUtils.setField(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner).tasks(),
+                    "stopWorkers",
+                    paused);
+            try {
+                var registration =
+                        new PreemptionRegistration(
+                                f.context,
+                                91L,
+                                f.reservation,
+                                new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
+                var dispatcher =
+                        SchedulerTestSupport.dispatcher(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+                dispatcher.preempt(registration, f.decode, "priority preemption", 500L);
+                var record = f.stopRecord();
+                f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+                var stopping = f.driver();
+                Runnable task;
+                while ((task = queued.poll()) != null) {
+                    Thread.ofVirtual().start(task);
+                }
+                verify(f.channel, timeout(2000)).cancelAsync(any(), anyInt(), any(), anyLong());
+                assertFalse(
+                        stopping.isDone(),
+                        "queued cancellation must not see an uninitialized deadline");
+                assertNull(SchedulerTestSupport.failure(f.owner));
+                assertSame(record, f.stopRecord());
+            } finally {
+                ReflectionTestUtils.setField(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner).tasks(),
+                        "stopWorkers",
+                        original);
+                Runnable task;
+                while ((task = queued.poll()) != null) {
+                    task.run();
+                }
+            }
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.assertArchivedAfterCleanup();
+            verify(f.channel, times(1)).cancelAsync(any(), anyInt(), any(), anyLong());
+        }
+    }
+
+    @Test
+    void nextPreemptionDoesNotReuseAnEarlierNotFoundDuringCallbackExit() throws Exception {
+        try (var f = new Fixture()) {
+            var target = new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000);
+            var first = new PreemptionRegistration(f.context, 91L, f.reservation, target);
+            var next = new PreemptionRegistration(f.context, 92L, f.reservation, target);
+            when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
+                    .thenReturn(
+                            f.cancel,
+                            CompletableFuture.completedFuture(
+                                    EngineGrpcClient.CancelReply.REQUEST_CLEANED));
+            var dispatcher =
+                    SchedulerTestSupport.dispatcher(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+            var result =
+                    dispatcher
+                            .preempt(first, f.decode, "priority preemption", 500L)
+                            .thenCompose(
+                                    reply ->
+                                            dispatcher.preempt(
+                                                    next, f.decode, "priority preemption", 500L));
+            var record = f.stopRecord();
+            f.cancel.complete(EngineGrpcClient.CancelReply.NOT_FOUND);
+            assertEquals(PreemptionRegistration.Reply.UNKNOWN, result.get(2, TimeUnit.SECONDS));
+            assertSame(
+                    record,
+                    f.stopRecord(),
+                    "a new preemption advances the existing delivery record");
+            verify(f.channel, times(2)).cancelAsync(any(), anyInt(), any(), anyLong());
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            f.assertArchivedAfterCleanup();
+        }
+    }
+
+    @Test
+    void failedFactAcceptanceLeavesRemoteRetryWithTheStopOwner() throws Exception {
+        try (var f = new Fixture()) {
+            var failure = new IllegalStateException("temporary fact acceptance failure");
+            doThrow(failure)
+                    .doCallRealMethod()
+                    .when(f.owner)
+                    .onDeliveryResult(isA(ContextResult.CleanupAcknowledgement.class));
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.assertArchivedAfterCleanup();
+            verify(f.channel, times(2)).cancelAsync(any(), anyInt(), any(), anyLong());
+            verify(f.owner, times(2))
+                    .onDeliveryResult(isA(ContextResult.CleanupAcknowledgement.class));
+            assertSame(failure, SchedulerTestSupport.failure(f.owner));
+        }
+    }
+
+    @Test
+    void concurrentWakeupsRetainOneStopOwnerWithoutHoldingTheContextLock() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            var record = f.stopRecord();
+            var driver = f.driver();
+            var done = new java.util.concurrent.CountDownLatch(1_000);
+            try (var producers = java.util.concurrent.Executors.newFixedThreadPool(8)) {
+                for (int i = 0; i < 1_000; i++) {
+                    producers.submit(
+                            () -> {
+                                assertSame(driver, f.driver());
+                                ReflectionTestUtils.invokeMethod(record, "signal");
+                                done.countDown();
+                            });
+                }
+            }
+            assertTrue(done.await(3, TimeUnit.SECONDS));
+            assertSame(record, f.stopRecord());
+            verify(f.channel, times(1)).cancelAsync(any(), anyInt(), any(), anyLong());
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.assertArchivedAfterCleanup();
+        }
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void ordinaryStopDoesNotNeedRetryTimerSubmissions(boolean permanent) throws Exception {
+        try (var f = new Fixture()) {
+            var original =
+                    (java.util.concurrent.ScheduledThreadPoolExecutor)
+                            ReflectionTestUtils.getField(
+                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                    f.owner)
+                                            .taskTimer(),
+                                    "executor");
+            var rejecting = mock(java.util.concurrent.ScheduledThreadPoolExecutor.class);
+            var submissions = new java.util.concurrent.atomic.AtomicInteger();
+            doAnswer(
+                            call -> {
+                                if (submissions.incrementAndGet() <= 2 || permanent) {
+                                    throw new java.util.concurrent.RejectedExecutionException(
+                                            "timer unavailable");
+                                }
+                                return original.schedule(
+                                        call.getArgument(0, Runnable.class),
+                                        call.getArgument(1, Long.class),
+                                        call.getArgument(2, TimeUnit.class));
+                            })
+                    .when(rejecting)
+                    .schedule(any(Runnable.class), anyLong(), any(TimeUnit.class));
+            ReflectionTestUtils.setField(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner).taskTimer(),
+                    "executor",
+                    rejecting);
+            try {
+                f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+                var record = f.stopRecord();
+                SchedulerTestSupport.awaitRequestWork(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+                assertEquals(0, submissions.get());
+                assertFalse(f.driver().isCompletedExceptionally());
+                assertFalse(f.settlement().isDone());
+                assertSame(record, f.stopRecord());
+                ReflectionTestUtils.setField(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner)
+                                .taskTimer(),
+                        "executor",
+                        original);
+                f.owner.onDeliveryResult(
+                        new ContextResult.TransportResult(
+                                f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+                f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+                f.assertArchivedAfterCleanup();
+                verify(f.channel, times(1)).cancelAsync(any(), anyInt(), any(), anyLong());
+            } finally {
+                ReflectionTestUtils.setField(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner)
+                                .taskTimer(),
+                        "executor",
+                        original);
+            }
+        }
+    }
+
+    @Test
+    void immediateRpcReplyAndSettlementReentryDoNotHoldStopRecordMonitor() throws Exception {
+        try (var f = new Fixture()) {
+            when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
+                    .thenReturn(
+                            CompletableFuture.completedFuture(
+                                    EngineGrpcClient.CancelReply.REQUEST_CLEANED));
+            var callbacks = new java.util.concurrent.atomic.AtomicInteger();
+            doAnswer(
+                            call -> {
+                                assertFalse(Thread.holdsLock(f.context));
+                                assertFalse(Thread.holdsLock(f.stopRecord()));
+                                callbacks.incrementAndGet();
+                                return call.callRealMethod();
+                            })
+                    .when(f.owner)
+                    .onDeliveryResult(isA(ContextResult.CleanupAcknowledgement.class));
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+            f.assertArchivedAfterCleanup();
+            assertEquals(1, callbacks.get());
+            verify(f.channel, times(1)).cancelAsync(any(), anyInt(), any(), anyLong());
+        }
+    }
+
+    private static void finishOwnershipRequest(Fixture f) throws Exception {
+        f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+        f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+        if (f.context.snapshot().delivery().send() == ContextResult.SendState.SENDING) {
+            f.owner.onDeliveryResult(
+                    new ContextResult.TransportResult(
+                            f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
+        }
+        f.settlement().get(2, TimeUnit.SECONDS);
+        f.awaitArchive();
+        SchedulerTestSupport.awaitRequestWork(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
+    }
+
+    private static java.util.concurrent.ExecutorService observeWorkers(
+            SchedulerTestServices runtime) {
+        var original = SchedulerTestSupport.requestWorkers(runtime);
+        var observed =
+                mock(
+                        java.util.concurrent.ExecutorService.class,
+                        org.mockito.AdditionalAnswers.delegatesTo(original));
+        ReflectionTestUtils.setField(runtime.tasks(), "requestWorkers", observed);
+        return observed;
+    }
+
+    private static final class CleanupLogs implements AutoCloseable {
+        private final ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger("flexlbLogger");
+        private final ch.qos.logback.classic.Level previousLevel = logger.getLevel();
+        private final ch.qos.logback.core.read.ListAppender<
+                        ch.qos.logback.classic.spi.ILoggingEvent>
+                appender = new ch.qos.logback.core.read.ListAppender<>();
+
+        CleanupLogs() {
+            logger.setLevel(ch.qos.logback.classic.Level.WARN);
+            appender.start();
+            logger.addAppender(appender);
+        }
+
+        public void close() {
+            logger.detachAppender(appender);
+            appender.stop();
+            logger.setLevel(previousLevel);
+        }
+
+        long count(ch.qos.logback.classic.Level level) {
+            return appender.list.stream()
+                    .filter(
+                            event ->
+                                    event.getLevel() == level
+                                            && event.getFormattedMessage()
+                                                    .contains("[delivery-cleanup]"))
+                    .count();
+        }
+    }
+
+    /**
+     * Runs request lifecycle transitions with explicit mock endpoint ownership and controlled RPC replies.
+     */
+    private static final class Fixture implements AutoCloseable {
+        final EngineGrpcClient channel = mock(EngineGrpcClient.class);
+        final CompletableFuture<EngineGrpcClient.CancelReply> cancel = new CompletableFuture<>();
+        final AbstractRequestScheduler owner;
+        final RequestContext context;
+        final PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        final java.util.concurrent.atomic.AtomicBoolean prefillOwned =
+                new java.util.concurrent.atomic.AtomicBoolean(true);
+        final java.util.concurrent.atomic.AtomicBoolean decodeOwned =
+                new java.util.concurrent.atomic.AtomicBoolean(true);
+        final java.util.concurrent.atomic.AtomicBoolean decodeClearedByState =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        final java.util.concurrent.atomic.AtomicBoolean prefillClearedByState =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        final DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
+        final DecodeResources.RequestReservation reservation =
+                new DecodeResources.RequestReservation(1L, String.valueOf(41L), 1L);
+        final Delivery.Member claim;
+
+        Fixture() {
+            this(Delivery.SendMode.BATCH_ENQUEUE);
+        }
+
+        Fixture(boolean commitDelivery) {
+            this(Delivery.SendMode.BATCH_ENQUEUE, commitDelivery);
+        }
+
+        Fixture(Delivery.SendMode kind) {
+            this(kind, true);
+        }
+
+        Fixture(Delivery.SendMode kind, boolean commitDelivery) {
+            var config = SchedulingTestConfig.batchConfig();
+            var service = mock(ConfigService.class);
+            when(service.loadBalanceConfig()).thenReturn(config);
+            owner =
+                    SchedulerTestSupport.create(
+                            service,
+                            mock(DeliveryMetricsReporter.class),
+                            mock(RequestSchedulerReporter.class),
+                            mock(TheoryCacheHitReporter.class));
+            ReflectionTestUtils.setField(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner).dispatcher,
+                    "grpcClient",
+                    channel);
+            when(channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(cancel);
+            context = RequestProtocolTestSupport.context(config, 41L);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(owner, context);
+            var response = new Response();
+            response.setSuccess(true);
+            var selectedPrefill = new org.flexlb.dao.loadbalance.ServerStatus();
+            selectedPrefill.setServerIp("127.0.0.1");
+            selectedPrefill.setGrpcPort(9000);
+            var item =
+                    org.flexlb.balance.scheduler.SchedulingTestConfig.createRoute(
+                            context,
+                            response,
+                            selectedPrefill,
+                            null,
+                            prefill,
+                            decode,
+                            reservation,
+                            System.currentTimeMillis());
+            when(prefill.releaseRequest(any()))
+                    .thenAnswer(
+                            call -> {
+                                assertFalse(
+                                        Thread.holdsLock(context),
+                                        "resource cleanup must run outside the request monitor");
+                                assertSame(
+                                        item,
+                                        call.getArgument(0),
+                                        "only this exact Prefill owner may be released");
+                                assertTrue(
+                                        prefillOwned.compareAndSet(true, false),
+                                        "Prefill ownership may be released only once");
+                                return true;
+                            });
+            when(decode.release(any(), any()))
+                    .thenAnswer(
+                            call -> {
+                                assertFalse(
+                                        Thread.holdsLock(context),
+                                        "Decode cleanup must run outside the request monitor");
+                                assertEquals(
+                                        reservation,
+                                        call.getArgument(0),
+                                        "only this exact Decode owner may be released");
+                                assertTrue(
+                                        decodeOwned.compareAndSet(true, false),
+                                        "Decode ownership may be released only once");
+                                return DecodeResources.ResourceChange.of(
+                                        DecodeResources.ReservationReleaseResult.RELEASED, true);
+                            });
+            RequestProtocolTestSupport.beginRoutePublication(
+                    owner, new RequestProtocolTestSupport.Registered(item, future));
+            claim =
+                    !commitDelivery
+                            ? new Delivery.Member(
+                                    item, RequestProtocolTestSupport.handoff(() -> true))
+                            : kind == Delivery.SendMode.BATCH_ENQUEUE
+                                    ? RequestProtocolTestSupport.claimBatch(
+                                            owner, item, 51L, () -> true)
+                                    : RequestProtocolTestSupport.claimRoute(
+                                            owner, item, () -> true);
+            assertNotNull(claim);
+            if (commitDelivery) {
+                assertEquals(
+                        kind == Delivery.SendMode.BATCH_ENQUEUE
+                                ? ContextResult.SendState.SENDING
+                                : ContextResult.SendState.NOT_STARTED,
+                        context.snapshot().delivery().send());
+            }
+        }
+
+        public void close() {
+            // End fake RPCs / Worker generations after assertions so accepted callbacks can drain.
+            cancel.complete(EngineGrpcClient.CancelReply.FAILED);
+            if (owner.repository.isCurrent(context)) {
+                var delivery = context.snapshot().delivery();
+                var send = delivery == null ? null : delivery.send();
+                if (send == ContextResult.SendState.SENDING) {
+                    owner.onDeliveryResult(
+                            new ContextResult.TransportResult(
+                                    claim,
+                                    Delivery.Result.notSent(
+                                            new IllegalStateException("fixture sender exited")),
+                                    System.currentTimeMillis()));
+                } else if (send == ContextResult.SendState.NOT_STARTED) {
+                    owner.onDeliveryResult(
+                            new ContextResult.Abandonment(
+                                    claim, CancelReason.SHUTDOWN, System.currentTimeMillis()));
+                }
+                retirePrefill();
+                retireDecode();
+            }
+            SchedulerTestSupport.runtime(owner).requests().stopAccepting();
+            ((QueuedRequestScheduler)
+                            org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(owner))
+                    .close();
+            SchedulerTestSupport.timer(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner))
+                    .close();
+            SchedulerTestSupport.closeRequestExecutors(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
+        }
+
+        PreemptionRegistration preempt() {
+            return owner.tryClaim(reservation, 4L).orElseThrow();
+        }
+
+        /**
+         * Freeze the outcome before the test controls submission of its closing effects.
+         */
+        void prepareClose() {
+            recordDecodeStatus(
+                    decode, DecodeResources.DecodeRequestStatus.terminal(reservation, 0L));
+            var closing =
+                    context.beginClose(context.snapshot().pendingEnd(), System.currentTimeMillis());
+            assertNotNull(closing.outcome());
+        }
+
+        void recordDecodeStatus(DecodeEndpoint source, DecodeResources.DecodeRequestStatus status) {
+            org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                    context,
+                    observedRequest ->
+                            observedRequest.recordWorkerRequestEvent(
+                                    decodeEvidence(source, status)));
+        }
+
+        ContextResult.WorkerRequestEvent decodeEvidence(
+                DecodeEndpoint source, DecodeResources.DecodeRequestStatus status) {
+            var current = context.snapshot().route();
+            var exact = current != null && current.decodeEndpoint() == source ? current : null;
+            var kind =
+                    status.kind() == DecodeResources.DecodeRequestStatus.Kind.ACTIVE
+                            ? ContextResult.WorkerRequestEventType.ACTIVE
+                            : status.errorCode() == 0L
+                                    ? ContextResult.WorkerRequestEventType.COMPLETED
+                                    : ContextResult.WorkerRequestEventType.FAILED;
+            return new ContextResult.WorkerRequestEvent(
+                    exact,
+                    status.reservation(),
+                    org.flexlb.dao.route.RoleType.DECODE,
+                    kind,
+                    status.errorCode(),
+                    null,
+                    System.currentTimeMillis());
+        }
+
+        void applyDecodeTerminal() {
+            clearDecodeResourceOwnership();
+            owner.onWorkerRequestEvent(
+                    context,
+                    decodeEvidence(
+                            decode, DecodeResources.DecodeRequestStatus.terminal(reservation, 0L)));
+        }
+
+        void retirePrefill() {
+            // Real Prefill retirement drops generation ownership before publishing this exact fact.
+            if (prefillOwned.getAndSet(false)) {
+                prefillClearedByState.set(true);
+            }
+            owner.onEndpointRetired(
+                    claim.route().ctx(),
+                    new ContextResult.EndpointRetirement(
+                            (claim.route().prefillEndpoint() == prefill ? claim.route() : null),
+                            null,
+                            org.flexlb.dao.route.RoleType.PREFILL,
+                            prefill,
+                            "Prefill generation retired",
+                            System.currentTimeMillis()));
+        }
+
+        void retireDecode() {
+            clearDecodeResourceOwnership();
+            when(decode.isRetired()).thenReturn(true);
+            var route = context.snapshot().route();
+            owner.onEndpointRetired(
+                    context,
+                    new ContextResult.EndpointRetirement(
+                            route != null && route.decodeEndpoint() == decode ? route : null,
+                            reservation,
+                            org.flexlb.dao.route.RoleType.DECODE,
+                            decode,
+                            "Decode generation retired",
+                            System.currentTimeMillis()));
+        }
+
+        CompletableFuture<DeliveryDispatcher.StopResult> driver() {
+            return SchedulerTestSupport.dispatcher(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner))
+                    .stop(claim);
+        }
+
+        Object stopRecord() throws InterruptedException {
+            var cleanup =
+                    SchedulerTestSupport.dispatcher(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
+            var records = (java.util.Map<?, ?>) ReflectionTestUtils.getField(cleanup, "sessions");
+            RequestProtocolTestSupport.awaitCondition(() -> records.containsKey(claim));
+            return java.util.Objects.requireNonNull(records.get(claim));
+        }
+
+        void assertArchivedAfterCleanup() throws Exception {
+            settlement().get(2, TimeUnit.SECONDS);
+            synchronized (context) {
+                assertEquals(
+                        CancelReason.CLIENT_CANCELLED, context.snapshot().delivery().abandonment());
+                assertTrue(context.snapshot().delivery().prefillProof());
+                assertTrue(context.snapshot().delivery().decodeProof());
+            }
+            awaitArchive();
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
+            assertFalse(context.data().getFuture().join().isSuccess());
+            assertFalse(prefillOwned.get(), "archival requires Prefill ownership to be released");
+            verify(prefill, times(prefillClearedByState.get() ? 0 : 1))
+                    .releaseRequest(claim.route());
+            assertDecodeOwnershipReleasedOnce();
+        }
+
+        CompletableFuture<Void> settlement() {
+            return claim.completion().toCompletableFuture();
+        }
+
+        void awaitArchive() throws InterruptedException {
+            RequestProtocolTestSupport.awaitCondition(() -> !owner.repository.isCurrent(context));
+        }
+
+        void assertDecodeOwnershipReleasedOnce() {
+            assertFalse(
+                    decodeOwned.get(),
+                    "archival requires physical Decode ownership to be released");
+            verify(decode, times(decodeClearedByState.get() ? 0 : 1))
+                    .release(reservation, DecodeResources.ReleaseReason.REMOTE_CLEANUP);
+        }
+
+        // DecodeEndpoint removes exact ownership before it publishes a terminal or retirement
+        // fact.
+        private void clearDecodeResourceOwnership() {
+            if (decodeOwned.getAndSet(false)) {
+                decodeClearedByState.set(true);
+            }
+        }
+    }
+}

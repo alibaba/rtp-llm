@@ -31,12 +31,6 @@ public final class DecisionPolicyConfig {
         return Math.max(MIN_REQUESTS, maxRequests);
     }
 
-    public static DecisionPolicyConfig single() {
-        DecisionPolicyConfig config = new DecisionPolicyConfig();
-        config.type = Type.SINGLE;
-        return config;
-    }
-
     public enum Type {
         SINGLE,
         FIXED_WINDOW

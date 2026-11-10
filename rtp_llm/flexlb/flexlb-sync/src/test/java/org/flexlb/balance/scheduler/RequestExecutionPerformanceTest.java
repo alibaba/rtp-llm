@@ -1,0 +1,394 @@
+package org.flexlb.balance.scheduler;
+
+import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.projection.RequestTimeEstimation;
+import org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.SchedulingMetadata;
+import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
+import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+import java.lang.management.ManagementFactory;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+
+/**
+ * Route-time queue capture regression on the final Prefill runtime boundary.
+ */
+@Tag("performance-regression")
+class RequestExecutionPerformanceTest {
+
+    private static final int[] QUEUE_DEPTHS = {0, 1, 32, 128, 512};
+    private static final int MEASUREMENT_ROUNDS = 5;
+
+    @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    void queueWaitSnapshotCaptureDoesNotScaleWithRequestCount() throws Throwable {
+        var capture =
+                MethodHandles.privateLookupIn(PrefillQueueScheduler.class, MethodHandles.lookup())
+                        .findVirtual(
+                                PrefillQueueScheduler.class,
+                                "recordQueueWait",
+                                MethodType.methodType(void.class, RouteResult.class, String.class));
+        var allocationBean =
+                ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean
+                                && bean.isThreadAllocatedMemorySupported()
+                        ? bean
+                        : null;
+        if (allocationBean != null) {
+            allocationBean.setThreadAllocatedMemoryEnabled(true);
+        }
+        long threadId = Thread.currentThread().threadId();
+        long shallowAllocation = 0;
+        int operations = 2_000;
+        // Both depths populate every priority bucket. Additional requests must not add capture
+        // work.
+        for (int depth : new int[] {128, 512, 4096}) {
+            PrefillQueueScheduler runtime = runtimeWithDepth(depth);
+            try {
+                RouteResult head = RequestExecutionTestSupport.capture(runtime).items().getFirst();
+                for (int i = 0; i < operations; i++) {
+                    capture.invokeExact(runtime, head, "Prefill capacity exhausted");
+                }
+                long before =
+                        allocationBean == null
+                                ? 0
+                                : allocationBean.getThreadAllocatedBytes(threadId);
+                long started = System.nanoTime();
+                for (int i = 0; i < operations; i++) {
+                    capture.invokeExact(runtime, head, "Prefill capacity exhausted");
+                }
+                long nsPerCapture = (System.nanoTime() - started) / operations;
+                long bytesPerCapture =
+                        allocationBean == null
+                                ? 0
+                                : (allocationBean.getThreadAllocatedBytes(threadId) - before)
+                                        / operations;
+                assertEquals(depth, runtime.getLatestQueueWaitSnapshot().get("queueDepth"));
+                System.out.printf(
+                        "FlexLB wait capture: depth=%d ns_per_capture=%d bytes_per_capture=%d%n",
+                        depth, nsPerCapture, bytesPerCapture);
+                if (depth == 128) {
+                    shallowAllocation = bytesPerCapture;
+                }
+                if (allocationBean != null) {
+                    assertTrue(
+                            bytesPerCapture < 1_024,
+                            "the scheduling loop must retain raw counters without materializing PV maps");
+                    assertTrue(
+                            bytesPerCapture <= shallowAllocation + 1_024,
+                            "capture allocation must be bounded by priority levels, not request count");
+                }
+            } finally {
+                runtime.stopAndAwait();
+            }
+        }
+    }
+
+    @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    void timeoutDiagnosticsReadDoesNotGrowWithQueueDepth() throws Throwable {
+        var allocationBean =
+                ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean
+                                && bean.isThreadAllocatedMemorySupported()
+                        ? bean
+                        : null;
+        if (allocationBean != null) {
+            allocationBean.setThreadAllocatedMemoryEnabled(true);
+        }
+        long threadId = Thread.currentThread().threadId();
+        int operations = 100_000;
+        for (int depth : QUEUE_DEPTHS) {
+            PrefillQueueScheduler runtime = runtimeWithDepth(depth);
+            try {
+                if (depth > 0) {
+                    var capture =
+                            MethodHandles.privateLookupIn(
+                                            PrefillQueueScheduler.class, MethodHandles.lookup())
+                                    .findVirtual(
+                                            PrefillQueueScheduler.class,
+                                            "recordQueueWait",
+                                            MethodType.methodType(
+                                                    void.class, RouteResult.class, String.class));
+                    RouteResult head =
+                            RequestExecutionTestSupport.capture(runtime).items().getFirst();
+                    capture.invokeExact(runtime, head, "Prefill capacity exhausted");
+                    assertEquals(depth, runtime.getLatestQueueWaitSnapshot().get("queueDepth"));
+                }
+                long checksum = 0;
+                for (int warmup = 0; warmup < operations; warmup++) {
+                    checksum += runtime.getLatestQueueWaitSnapshot().size();
+                }
+                long allocatedBefore =
+                        allocationBean == null
+                                ? 0
+                                : allocationBean.getThreadAllocatedBytes(threadId);
+                long started = System.nanoTime();
+                for (int operation = 0; operation < operations; operation++) {
+                    checksum += runtime.getLatestQueueWaitSnapshot().size();
+                }
+                long nsPerRead = (System.nanoTime() - started) / operations;
+                long bytesPerRead =
+                        allocationBean == null
+                                ? 0
+                                : (allocationBean.getThreadAllocatedBytes(threadId)
+                                                - allocatedBefore)
+                                        / operations;
+                System.out.printf(
+                        "FlexLB timeout diagnostics: depth=%d ns_per_read=%d bytes_per_read=%d checksum=%d%n",
+                        depth, nsPerRead, bytesPerRead, checksum);
+                assertTrue(
+                        nsPerRead < 10_000L,
+                        "timeout diagnostics must not traverse the request queue");
+                if (allocationBean != null) {
+                    assertEquals(
+                            0L,
+                            bytesPerRead,
+                            "timeout reads must reuse the queue's published snapshot");
+                }
+            } finally {
+                runtime.stopAndAwait();
+            }
+        }
+    }
+
+    @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    void immutableProjectionCaptureRemainsBoundedAtDeepQueueDepth() throws Exception {
+        int operations = Integer.getInteger("flexlb.perf.queue-capture.operations-per-round", 500);
+        long maxNsAtDepth512 =
+                Long.getLong("flexlb.perf.queue-capture.max-ns-at-depth-512", 2_000_000L);
+        long maxAllocatedBytesAtDepth512 =
+                Long.getLong(
+                        "flexlb.perf.queue-capture.max-allocated-bytes-at-depth-512",
+                        256L * 1_024L);
+        java.lang.management.ThreadMXBean baseThreadBean = ManagementFactory.getThreadMXBean();
+        com.sun.management.ThreadMXBean allocationBean =
+                baseThreadBean instanceof com.sun.management.ThreadMXBean bean ? bean : null;
+        if (allocationBean != null
+                && allocationBean.isThreadAllocatedMemorySupported()
+                && !allocationBean.isThreadAllocatedMemoryEnabled()) {
+            allocationBean.setThreadAllocatedMemoryEnabled(true);
+        }
+        boolean measuresAllocations =
+                allocationBean != null && allocationBean.isThreadAllocatedMemoryEnabled();
+        long threadId = Thread.currentThread().threadId();
+
+        for (int depth : QUEUE_DEPTHS) {
+            PrefillQueueScheduler runtime = runtimeWithDepth(depth);
+            PrefillEndpoint endpoint =
+                    (PrefillEndpoint)
+                            org.springframework.test.util.ReflectionTestUtils.getField(
+                                    runtime, "prefillEndpoint");
+            try {
+                for (int warmup = 0; warmup < 100; warmup++) {
+                    assertEquals(
+                            depth,
+                            endpoint.captureRouteProjectionInputs().queue().activeItems().size());
+                }
+
+                long[] elapsedRounds = new long[MEASUREMENT_ROUNDS];
+                long[] allocatedRounds = new long[MEASUREMENT_ROUNDS];
+                long checksum = 0L;
+                for (int round = 0; round < MEASUREMENT_ROUNDS; round++) {
+                    long allocatedBefore =
+                            measuresAllocations
+                                    ? allocationBean.getThreadAllocatedBytes(threadId)
+                                    : 0L;
+                    long started = System.nanoTime();
+                    for (int operation = 0; operation < operations; operation++) {
+                        RequestTimeEstimation.Inputs inputs =
+                                endpoint.captureRouteProjectionInputs();
+                        checksum += inputs.queue().activeItems().size();
+                        checksum += inputs.ownershipVersion();
+                    }
+                    elapsedRounds[round] = (System.nanoTime() - started) / operations;
+                    if (measuresAllocations) {
+                        allocatedRounds[round] =
+                                Math.max(
+                                                0L,
+                                                allocationBean.getThreadAllocatedBytes(threadId)
+                                                        - allocatedBefore)
+                                        / operations;
+                    }
+                }
+                Arrays.sort(elapsedRounds);
+                Arrays.sort(allocatedRounds);
+                long medianNs = elapsedRounds[MEASUREMENT_ROUNDS / 2];
+                long medianAllocatedBytes = allocatedRounds[MEASUREMENT_ROUNDS / 2];
+                System.out.printf(
+                        "FlexLB queue-capture performance: depth=%d "
+                                + "ns_per_op=%d allocated_bytes_per_op=%d "
+                                + "checksum=%d%n",
+                        depth, medianNs, medianAllocatedBytes, checksum);
+                if (depth == 512) {
+                    assertTrue(
+                            medianNs <= maxNsAtDepth512,
+                            () ->
+                                    "depth-512 immutable queue capture took "
+                                            + medianNs
+                                            + " ns/op, above ceiling "
+                                            + maxNsAtDepth512);
+                    if (measuresAllocations) {
+                        assertTrue(
+                                medianAllocatedBytes <= maxAllocatedBytesAtDepth512,
+                                () ->
+                                        "depth-512 immutable queue capture "
+                                                + "allocated "
+                                                + medianAllocatedBytes
+                                                + " bytes/op, above ceiling "
+                                                + maxAllocatedBytesAtDepth512);
+                    }
+                }
+            } finally {
+                runtime.stopAndAwait();
+            }
+        }
+    }
+
+    private static PrefillQueueScheduler runtimeWithDepth(int depth) throws InterruptedException {
+        FlexlbConfig config = SchedulingTestConfig.newConfig();
+        SchedulingTestConfig.usePriorityQueue(config);
+        SchedulingTestConfig.useSingleDecision(config);
+        WorkerStatus status =
+                WorkerStatus.createDiscovered(
+                        RoleType.PREFILL, "perf", "127.0.0.1", 8080, 8090, "perf-site");
+        config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.BATCH);
+        DeliveryDispatcher delivery =
+                new DeliveryDispatcher(
+                        null,
+                        DeliveryTestSupport.service(config),
+                        new org.flexlb.service.monitor.DeliveryMetricsReporter(null),
+                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
+                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                                .decodeAdmissionCapacity(DeliveryTestSupport.service(config)),
+                        org.mockito.Mockito.mock(
+                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+        AbstractRequestScheduler scheduler = mock(AbstractRequestScheduler.class);
+        var facilities = mock(SchedulerTestServices.class);
+        org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                facilities,
+                "deliveryReporter",
+                mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class));
+        var boundary = CapacityBoundary.unavailable(CapacityBoundary.Resource.DISPATCH_EXECUTOR);
+        var execution = mock(DeliveryExecution.class);
+        org.mockito.Mockito.when(facilities.deliveries()).thenReturn(execution);
+        org.mockito.Mockito.when(execution.tryReserveDelivery())
+                .thenReturn(CapacityBoundary.Attempt.rejected(boundary));
+        org.flexlb.balance.scheduler.SchedulerTestServices.bind(scheduler, facilities);
+        PrefillEndpoint endpoint =
+                org.flexlb.balance.endpoint.EndpointTestSupport.realPrefill(
+                        status,
+                        config,
+                        delivery,
+                        SchedulerTestSupport.repository(scheduler),
+                        mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class));
+        var settings =
+                QueueExecutionSettings.capture(
+                        config, org.flexlb.balance.planner.BuiltinGroupPlanner.from(config));
+        endpoint.enableQueue(settings);
+        PrefillQueueScheduler runtime =
+                org.flexlb.balance.endpoint.EndpointTestSupport.worker(
+                        endpoint.ipPort(), endpoint, settings, delivery, endpoint, execution);
+        endpoint.observeQueueWait(runtime::admissionBlock, runtime::getLatestQueueWaitSnapshot);
+        RequestExecutionTestSupport.start(runtime);
+        assertTrue(
+                !org.mockito.Mockito.mockingDetails(runtime).isMock(),
+                "allocation benchmark must measure the real queue runner");
+        long now = System.currentTimeMillis();
+        List<RouteResult> items = new ArrayList<>(depth);
+        for (int index = 0; index < depth; index++) {
+            items.add(
+                    item(
+                            config,
+                            endpoint,
+                            index + 1L,
+                            1 + (index * 37 % 100),
+                            now - depth + index,
+                            256L + (index % 32)));
+        }
+        for (RouteResult item : items) {
+            SchedulerTestSupport.bindOwner(item.ctx(), scheduler);
+            var context = item.ctx();
+            context.register(
+                    item.requestId(),
+                    now,
+                    Long.MAX_VALUE,
+                    60_000L,
+                    org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
+            var placement = (PlacementOperation) context.beginPlacement(null);
+            context.publishRoute(placement, item);
+            org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                    context,
+                    observedRequest ->
+                            observedRequest.completePlacement(
+                                    placement, ContextResult.PublicationResult.PUBLISHED, now));
+            assertTrue(RequestExecutionTestSupport.offer(runtime, item));
+        }
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (RequestExecutionTestSupport.state(runtime).progress().queueDepth() != depth
+                && System.nanoTime() < deadline) {
+            TimeUnit.MILLISECONDS.sleep(1L);
+        }
+        assertEquals(depth, RequestExecutionTestSupport.state(runtime).progress().queueDepth());
+        return runtime;
+    }
+
+    private static RouteResult item(
+            FlexlbConfig config,
+            PrefillEndpoint endpoint,
+            long requestId,
+            int priority,
+            long enqueuedAtMs,
+            long seqLen) {
+        Request request =
+                Request.builder()
+                        .requestId(String.valueOf(requestId))
+                        .seqLen(seqLen)
+                        .rawPriority(priority)
+                        .build();
+        RequestContext context = new RequestContext(config);
+        context.data().setRequest(request);
+        context.data().setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
+        context.data().setFuture(new CompletableFuture<Response>());
+        context.data().initializeExecutionOrder(enqueuedAtMs, requestId);
+        var input =
+                new org.flexlb.balance.planner.GroupPlanner.Item(
+                        context.data().getRequestId(),
+                        priority,
+                        requestId,
+                        enqueuedAtMs,
+                        Long.MAX_VALUE,
+                        seqLen,
+                        0L);
+        var registration =
+                endpoint.tryRegisterSelection(
+                        input, endpoint.captureRouteProjectionInputs(), 0L, true);
+        assertEquals(
+                org.flexlb.balance.PlacementResult.Registration.REGISTERED, registration.status());
+        var metadata =
+                org.flexlb.dao.loadbalance.ServerStatus.forWorker(
+                        RoleType.PREFILL,
+                        context.data().getRequestId(),
+                        endpoint.getStatus().topologySnapshot(),
+                        endpoint.getStatus().committedEngineObservation());
+        return new RouteResult(
+                context,
+                List.of(new RoleSelection.Prefill(endpoint, metadata, 0L, registration.record())));
+    }
+}

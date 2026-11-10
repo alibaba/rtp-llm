@@ -1,10 +1,5 @@
 package org.flexlb.exception;
 
-import org.flexlb.enums.StatusEnum;
-
-/**
- * Reports a backend stream that ended before its expected completion.
- */
 public class EngineAbnormalDisconnectException extends FlexLBException {
 
     public EngineAbnormalDisconnectException(
@@ -14,9 +9,5 @@ public class EngineAbnormalDisconnectException extends FlexLBException {
 
     public EngineAbnormalDisconnectException(int code, String name, String message) {
         super(code, name, message);
-    }
-
-    public EngineAbnormalDisconnectException(StatusEnum statusEnum) {
-        super(statusEnum);
     }
 }

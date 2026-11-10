@@ -1,11 +1,11 @@
 package org.flexlb.service;
 
+import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.cache.match.theory.RecentCacheKeyWindow;
 import org.flexlb.cache.match.theory.TheoryCacheKeyHistory;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -75,19 +75,20 @@ public class TheoryCacheHitReporter {
                     },
                     new ThreadPoolExecutor.AbortPolicy());
 
-    public void report(BalanceContext balanceContext) {
-        if (balanceContext == null) {
+    public void report(RequestContext context) {
+        if (context == null) {
             return;
         }
+        Request request = context.data().getRequest();
         try {
             theoryHitReportExecutor.execute(
                     () -> {
                         try {
-                            reportRequest(balanceContext);
+                            reportRequest(context, request);
                         } catch (RuntimeException failure) {
                             Logger.warn(
                                     "Theory cache-hit report failed: request_id={}",
-                                    balanceContext.getRequestId(),
+                                    context.data().getRequestId(),
                                     failure);
                         }
                     });
@@ -162,12 +163,11 @@ public class TheoryCacheHitReporter {
         }
     }
 
-    private void reportRequest(BalanceContext balanceContext) {
+    private void reportRequest(RequestContext context, Request request) {
         FlexlbConfig config = configService.loadBalanceConfig();
         if (!config.getObservability().getCacheHit().getRecentKeyWindow().isWriteEnabled()) {
             return;
         }
-        Request request = balanceContext.getRequest();
         if (request == null || theoryCacheKeyHistory == null) {
             return;
         }
@@ -183,11 +183,11 @@ public class TheoryCacheHitReporter {
                         inputTokens,
                         request.getCacheKeyBlockSize());
         if (config.getObservability().getCacheHit().isRequestTraceLogEnabled()) {
-            logTrace(balanceContext, snapshot, hitTokens, inputTokens);
+            logTrace(context, request, snapshot, hitTokens, inputTokens);
         }
         if (theoryLogEnabled(config) && inputTokens > 0L) {
             writeTheoryLogLine(
-                    formatTheoryLogLine(balanceContext, hitTokens, inputTokens),
+                    formatTheoryLogLine(context, request, hitTokens, inputTokens),
                     config.getObservability().getCacheHit().getTheoryLog().getPath());
         }
         if (cacheMetricsReporter != null
@@ -201,7 +201,8 @@ public class TheoryCacheHitReporter {
         if (hitKeyCount <= 0L || inputTokens <= 0L || cacheKeyBlockSize <= 0L) {
             return 0L;
         }
-        long hitTokens = hitKeyCount * cacheKeyBlockSize;
+        long hitTokens =
+                com.google.common.math.LongMath.saturatedMultiply(hitKeyCount, cacheKeyBlockSize);
         if (hitTokens < 0L) {
             return inputTokens;
         }
@@ -209,17 +210,17 @@ public class TheoryCacheHitReporter {
     }
 
     private void logTrace(
-            BalanceContext balanceContext,
+            RequestContext context,
+            Request request,
             RecentCacheKeyWindow.Snapshot snapshot,
             long hitTokens,
             long inputTokens) {
-        Request request = balanceContext.getRequest();
         List<Long> cacheKeys = request.getBlockCacheKeys();
         Logger.info(
                 "Master cache-key trace: requestId={}, "
                         + "seqLen={}, requestCacheKeys={}, hitCacheKeys={}, hitRatio={}, "
                         + "hitTokens={}, inputTokens={}, tokenHitRatio={}, cacheKeyDigest={}, cacheKeys={}",
-                balanceContext.getRequestId(),
+                context.data().getRequestId(),
                 request.getSeqLen(),
                 snapshot.getRequestOccurrences(),
                 snapshot.getRequestHitOccurrences(),
@@ -308,8 +309,7 @@ public class TheoryCacheHitReporter {
     }
 
     private static String formatTheoryLogLine(
-            BalanceContext balanceContext, long hitTokens, long inputTokens) {
-        Request request = balanceContext.getRequest();
+            RequestContext context, Request request, long hitTokens, long inputTokens) {
         long nowMs = System.currentTimeMillis();
         return String.format(
                 Locale.ROOT,
@@ -317,7 +317,7 @@ public class TheoryCacheHitReporter {
                         + "cache_key_block_size=%d request_hit_tokens=%d request_input_tokens=%d request_ratio=%.6f",
                 formatTimestamp(nowMs),
                 nowMs,
-                balanceContext.getRequestId(),
+                context.data().getRequestId(),
                 request.getSeqLen(),
                 request.getCacheKeyBlockSize(),
                 hitTokens,

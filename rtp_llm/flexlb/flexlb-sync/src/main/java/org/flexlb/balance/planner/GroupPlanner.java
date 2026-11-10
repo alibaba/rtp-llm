@@ -1,10 +1,14 @@
 package org.flexlb.balance.planner;
 
-import java.util.ArrayList;
-import java.util.Iterator;
+import org.flexlb.balance.endpoint.PrefillRequestQueue;
+import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
+
 import java.util.List;
+import java.util.Objects;
 import java.util.OptionalDouble;
-import java.util.function.ToDoubleFunction;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.math.LongMath.saturatedAdd;
 
 /**
  * Pure fixed-window decision-group planning.
@@ -15,73 +19,10 @@ import java.util.function.ToDoubleFunction;
  * route-time projection instead uses {@link Item}s, including a
  * virtual incoming probe that has never entered the live queue.
  */
-public final class GroupPlanner {
-    /** Allocation hint only; {@link Constraints#maxRequests()} is authoritative. */
-    private static final int INITIAL_SELECTION_CAPACITY = 32;
-
-    public static final String PREDICTED_EXECUTION_CAP = "predicted_execution_cap";
-    public static final String BATCH_FULL = "batch_full";
-    public static final String FIXED_WINDOW_TIMEOUT = "fixed_window_timeout";
-    private static final ItemAccess<Item> ITEM_ACCESS =
-            new ItemAccess<>() {
-                @Override
-                public long enqueuedAtMs(Item item) {
-                    return item.enqueuedAtMs();
-                }
-
-                @Override
-                public long seqLen(Item item) {
-                    return item.seqLen();
-                }
-            };
-
-    private GroupPlanner() {}
-
-    /** Item adapter for immutable route-time {@link Item}s. */
-    public static ItemAccess<Item> itemAccess() {
-        return ITEM_ACCESS;
-    }
-
-    /** Convenience entry point for projections whose clock is already frozen. */
-    public static <T> Plan<T> plan(
-            Iterable<T> orderedItems,
-            ItemAccess<T> access,
-            Constraints constraints,
-            long nowMs,
-            ToDoubleFunction<List<T>> predictor) {
-        return evaluateReadiness(
-                select(orderedItems, access, constraints, predictor), constraints, nowMs);
-    }
-
-    /** Evaluate one selection against an explicit clock value. */
-    public static <T> Plan<T> evaluateReadiness(
-            Selection<T> selection, Constraints constraints, long nowMs) {
-        long deadlineMs =
-                collectionDeadlineMs(
-                        selection.windowOpenedAtMs(), constraints.collectionWindowMs());
-        String reason = null;
-        if (selection.predictionBoundaryTriggered()) {
-            reason = PREDICTED_EXECUTION_CAP;
-        } else if (!selection.items().isEmpty()
-                && selection.items().size() >= constraints.maxRequests()) {
-            reason = BATCH_FULL;
-        } else if (windowElapsed(
-                selection.windowOpenedAtMs(), nowMs, constraints.collectionWindowMs())) {
-            reason = FIXED_WINDOW_TIMEOUT;
-        }
-        return new Plan<>(
-                selection.items(),
-                selection.shape(),
-                selection.windowOpenedAtMs(),
-                deadlineMs,
-                selection.predictionBoundaryTriggered(),
-                selection.selectedPredictionMs(),
-                reason);
-    }
-
-    public static long collectionDeadlineMs(long windowOpenedAtMs, long collectionWindowMs) {
-        return saturatedAdd(windowOpenedAtMs, Math.max(0L, collectionWindowMs));
-    }
+public interface GroupPlanner {
+    String PREDICTED_EXECUTION_CAP = "predicted_execution_cap";
+    String BATCH_FULL = "batch_full";
+    String FIXED_WINDOW_TIMEOUT = "fixed_window_timeout";
 
     public static boolean windowElapsed(
             long windowOpenedAtMs, long nowMs, long collectionWindowMs) {
@@ -91,137 +32,34 @@ public final class GroupPlanner {
                 && nowMs - windowOpenedAtMs >= boundedWindowMs;
     }
 
-    /**
-     * Select the largest feasible homogeneous prefix. This is the production
-     * FixedWindow picking rule without readiness or side effects.
-     */
-    public static <T> Selection<T> select(
-            Iterable<T> orderedItems,
-            ItemAccess<T> access,
-            Constraints constraints,
-            ToDoubleFunction<List<T>> predictor) {
-        return selectWithPrediction(
-                orderedItems,
-                access,
-                constraints,
-                predictor == null ? null : (added, prefix) -> predictor.applyAsDouble(prefix));
+    public static long collectionDeadlineMs(long windowOpenedAtMs, long collectionWindowMs) {
+        return saturatedAdd(windowOpenedAtMs, Math.max(0L, collectionWindowMs));
     }
 
-    public static <T> Selection<T> selectWithPrediction(
-            Iterable<T> orderedItems,
-            ItemAccess<T> access,
-            Constraints constraints,
-            PrefixPrediction<T> predictor) {
-        Iterator<T> ordered = orderedItems.iterator();
-        if (!ordered.hasNext()) {
-            return new Selection<>(
-                    List.of(), Shape.empty(), Long.MAX_VALUE, false, OptionalDouble.empty());
-        }
+    <T extends Input> Selection<T> select(
+            Iterable<T> ordered, Constraints constraints, PrefixPrediction<T> predictor);
 
-        int maxRequests = constraints.maxRequests();
-        T head = ordered.next();
-        boolean mayGrow = maxRequests > 1 && ordered.hasNext();
-        List<T> picked;
-        if (mayGrow) {
-            picked = new ArrayList<>(Math.min(maxRequests, INITIAL_SELECTION_CAPACITY));
-            picked.add(head);
-        } else {
-            picked = List.of(head);
-        }
-        long headTokens = Math.max(0L, access.seqLen(head));
-        long maxSeqLen = headTokens;
-        long paddedTokens = headTokens;
-        long kvTokens = headTokens;
-        long windowOpenedAtMs = access.enqueuedAtMs(head);
-        boolean predictionEnabled =
-                predictor != null && constraints.predictedExecutionBudgetMs() > 0L;
-        double selectedPredictionMs = 0.0;
-        boolean predictionBoundaryTriggered = false;
-        if (predictionEnabled) {
-            selectedPredictionMs = requireValidPrediction(predictor.append(head, picked));
-            predictionBoundaryTriggered =
-                    predictionDispatchBoundaryReached(
-                            selectedPredictionMs, constraints.predictedExecutionBudgetMs());
-        }
+    String dispatchReason(Selection<?> selection, Constraints constraints, long nowMs);
 
-        while (mayGrow
-                && ordered.hasNext()
-                && picked.size() < maxRequests
-                && !predictionBoundaryTriggered) {
-            T item = ordered.next();
-            long itemTokens = Math.max(0L, access.seqLen(item));
-            long nextMaxSeqLen = Math.max(maxSeqLen, itemTokens);
-            long nextPaddedTokens = Shape.saturatedMultiply(nextMaxSeqLen, picked.size() + 1);
-            long nextKvTokens = saturatedAdd(kvTokens, itemTokens);
-            if (constraints.batchTokenCapacity() <= 0L
-                    || nextPaddedTokens >= constraints.batchTokenCapacity()) {
-                break;
-            }
-            if (constraints.batchKvCapacity() != Long.MAX_VALUE
-                    && (constraints.batchKvCapacity() < 0L
-                            || nextKvTokens > constraints.batchKvCapacity())) {
-                break;
-            }
+    long nextCheckAtMs(Selection<?> selection, Constraints constraints);
 
-            picked.add(item);
-            if (predictionEnabled) {
-                double predictedMs = requireValidPrediction(predictor.append(item, picked));
-                if (predictionGrowthLimitExceeded(
-                        predictedMs, constraints.predictedExecutionBudgetMs())) {
-                    predictionBoundaryTriggered = true;
-                    // The head is indivisible. An additional over-budget member
-                    // stays queued for the following decision.
-                    picked.remove(picked.size() - 1);
-                    break;
-                }
-                selectedPredictionMs = predictedMs;
-                predictionBoundaryTriggered =
-                        predictionDispatchBoundaryReached(
-                                predictedMs, constraints.predictedExecutionBudgetMs());
-            }
-            maxSeqLen = nextMaxSeqLen;
-            paddedTokens = nextPaddedTokens;
-            kvTokens = nextKvTokens;
-            windowOpenedAtMs = Math.min(windowOpenedAtMs, access.enqueuedAtMs(item));
-        }
+    void validateConstraints(Constraints constraints);
 
-        return new Selection<>(
-                picked,
-                new Shape(picked.size(), maxSeqLen, paddedTokens, kvTokens),
-                windowOpenedAtMs,
-                predictionBoundaryTriggered,
-                predictionEnabled
-                        ? OptionalDouble.of(selectedPredictionMs)
-                        : OptionalDouble.empty());
-    }
-
-    private static boolean predictionGrowthLimitExceeded(double predictedMs, long thresholdMs) {
-        return predictedMs > thresholdMs;
+    static double requireValidPrediction(double predictedMs) {
+        checkArgument(
+                Double.isFinite(predictedMs) && !(predictedMs < 0.0d),
+                "group prediction must be finite and non-negative");
+        return predictedMs;
     }
 
     private static void validateSelectedPrediction(
             List<?> items, OptionalDouble selectedPredictionMs) {
-        if (items.isEmpty() && selectedPredictionMs.isPresent()) {
-            throw new IllegalArgumentException("empty decision group cannot carry a prediction");
-        }
+        checkArgument(
+                !items.isEmpty() || !selectedPredictionMs.isPresent(),
+                "empty decision group cannot carry a prediction");
         if (selectedPredictionMs.isPresent()) {
             requireValidPrediction(selectedPredictionMs.getAsDouble());
         }
-    }
-
-    private static double requireValidPrediction(double predictedMs) {
-        if (!Double.isFinite(predictedMs) || predictedMs < 0.0d) {
-            throw new IllegalArgumentException("group prediction must be finite and non-negative");
-        }
-        return predictedMs;
-    }
-
-    private static boolean predictionDispatchBoundaryReached(double predictedMs, long thresholdMs) {
-        return predictedMs >= thresholdMs;
-    }
-
-    private static long saturatedAdd(long left, long right) {
-        return right > 0L && left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
     }
 
     /**
@@ -235,62 +73,47 @@ public final class GroupPlanner {
             long enqueueSeq,
             long enqueuedAtMs,
             long expiresAtMs,
-            long seqLen,
-            long hitCache) {
+            PrefillBatchFeatures.Item features)
+            implements Input, PrefillRequestQueue.QueueItem {
 
         public Item {
-            if (seqLen < 0L) {
-                throw new IllegalArgumentException("seqLen must be non-negative");
-            }
-            if (hitCache < 0L || hitCache > seqLen) {
-                throw new IllegalArgumentException("hitCache must be in [0, seqLen]");
-            }
+            Objects.requireNonNull(features, "features");
+        }
+
+        public Item(
+                String requestId,
+                int priority,
+                long enqueueSeq,
+                long enqueuedAtMs,
+                long expiresAtMs,
+                long seqLen,
+                long hitCache) {
+            this(
+                    requestId,
+                    priority,
+                    enqueueSeq,
+                    enqueuedAtMs,
+                    expiresAtMs,
+                    new PrefillBatchFeatures.Item(seqLen, hitCache));
+        }
+
+        @Override
+        public long seqLen() {
+            return features.seqLen();
+        }
+
+        public long hitCache() {
+            return features.hitCache();
         }
     }
 
     /**
-     * Compute and KV resource shape of one planned group.
+     * Read-only request fields consumed by both live and projected planning.
      */
-    public record Shape(int size, long maxSeqLen, long paddedTokens, long kvTokens) {
+    public interface Input {
+        long enqueuedAtMs();
 
-        public static Shape empty() {
-            return new Shape(0, 0L, 0L, 0L);
-        }
-
-        public Shape add(long seqLen) {
-            int nextSize = size + 1;
-            long boundedSeqLen = Math.max(0L, seqLen);
-            long nextMaxSeqLen = Math.max(maxSeqLen, boundedSeqLen);
-            return new Shape(
-                    nextSize,
-                    nextMaxSeqLen,
-                    saturatedMultiply(nextMaxSeqLen, nextSize),
-                    saturatedAdd(kvTokens, boundedSeqLen));
-        }
-
-        public boolean fitsCompute(long capacity) {
-            return capacity > 0L && paddedTokens < capacity;
-        }
-
-        public boolean fitsKv(long capacity) {
-            return capacity == Long.MAX_VALUE || (capacity >= 0L && kvTokens <= capacity);
-        }
-
-        private static long saturatedMultiply(long value, int multiplier) {
-            if (value == 0L || multiplier == 0) {
-                return 0L;
-            }
-            return value > Long.MAX_VALUE / multiplier ? Long.MAX_VALUE : value * multiplier;
-        }
-    }
-
-    /**
-     * Adapter that lets the pure planner operate on either live or projected items.
-     */
-    public interface ItemAccess<T> {
-        long enqueuedAtMs(T item);
-
-        long seqLen(T item);
+        long seqLen();
     }
 
     /**
@@ -304,9 +127,7 @@ public final class GroupPlanner {
             long collectionWindowMs) {
 
         public Constraints {
-            if (maxRequests < 1) {
-                throw new IllegalArgumentException("maxRequests must be positive");
-            }
+            checkArgument(maxRequests >= 1, "maxRequests must be positive");
         }
     }
 
@@ -315,7 +136,8 @@ public final class GroupPlanner {
      */
     public record Selection<T>(
             List<T> items,
-            Shape shape,
+            long paddedTokens,
+            long kvTokens,
             long windowOpenedAtMs,
             boolean predictionBoundaryTriggered,
             OptionalDouble selectedPredictionMs) {
@@ -324,27 +146,13 @@ public final class GroupPlanner {
             items = items == null ? List.of() : List.copyOf(items);
             validateSelectedPrediction(items, selectedPredictionMs);
         }
-    }
 
-    /**
-     * Complete pure plan: selected group, shape, dispatch reason, and window state.
-     */
-    public record Plan<T>(
-            List<T> items,
-            Shape shape,
-            long windowOpenedAtMs,
-            long collectionDeadlineMs,
-            boolean predictionBoundaryTriggered,
-            OptionalDouble selectedPredictionMs,
-            String reason) {
-
-        public Plan {
-            items = items == null ? List.of() : List.copyOf(items);
-            validateSelectedPrediction(items, selectedPredictionMs);
+        public boolean fitsCompute(long capacity) {
+            return capacity > 0L && paddedTokens < capacity;
         }
 
-        public boolean ready() {
-            return reason != null;
+        public boolean fitsKv(long capacity) {
+            return capacity == Long.MAX_VALUE || (capacity >= 0L && kvTokens <= capacity);
         }
     }
 
