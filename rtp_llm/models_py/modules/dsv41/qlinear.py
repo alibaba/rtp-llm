@@ -181,12 +181,7 @@ class QuantizedLinear(nn.Module):
             # inside the captured region and the full expert set is not
             # duplicated in BF16 (which does not fit beside the KV pool).
             self._fp4_lut = _FP4_LUT.to(weight.device)
-            self._fp4_buf = torch.empty(
-                self.out_features,
-                self.in_features,
-                dtype=torch.bfloat16,
-                device=weight.device,
-            )
+            self._fp4_buf = None
             self.weight = weight
             self.scale = scale
             self.scale_gemm = None
@@ -270,10 +265,12 @@ class QuantizedLinear(nn.Module):
         if self.storage == "bf16":
             return F.linear(x, self.weight)
         if self.storage == "fp4":
+            if torch.version.hip is not None:
+                w = _fp4_unpack_to_fp32(self.weight, self.scale).to(torch.bfloat16)
+                return F.linear(x.to(torch.bfloat16), w).to(x.dtype)
             if self._fp4_buf is not None:
                 _fp4_unpack_into(self.weight, self.scale, self._fp4_lut, self._fp4_buf)
                 return F.linear(x.to(torch.bfloat16), self._fp4_buf).to(x.dtype)
-            if torch.version.hip is not None:
                 return self._fp4_forward_torch(x)
             return self._fp4_forward_deepgemm(x)
         # FP8: dequant to x's dtype on the fly.
