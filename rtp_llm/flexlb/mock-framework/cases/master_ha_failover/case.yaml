@@ -1,6 +1,6 @@
 id: master_ha_failover
 name: Master 滚动重启
-describe: DeepSeek 原始前缀流量按 0.1 倍速回放，贯穿 A/B 两次接管和重新加入；保守等待后检查近期完成请求成功率。
+describe: DeepSeek V4.1 多模态流量贯穿 A/B 两次接管和重新加入，检查近期完成请求成功率。
 environment:
   master:
     deployment:
@@ -9,15 +9,23 @@ environment:
   prefill:
     engine: rtp
     deployment:
-      replicas: 48
+      replicas: 55
     config: configs/prefill.yaml
   decode:
     engine: rtp
     deployment:
       replicas: 192
     config: configs/decode.yaml
+  vit:
+    deployment:
+      replicas: 160
+    config: configs/vit.yaml
   client:
-    config: {}
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: '4923373599811257905'
     deployment:
       replicas: 2
 phases:
@@ -49,15 +57,16 @@ phases:
   timeout: 600s
   steps:
   - id: start_client
-    describe: 按 0.1 倍速回放完整 DeepSeek trace，先等待 30 秒建立基线。
+    describe: 按 0.01 倍速启动 DeepSeek V4.1 回放（约 11 QPS），先等待 30 秒建立基线。
     interface: client/start
     args:
-      requests_file: data/traffic/deepseek.mckidx
+      requests_file: data/traffic/deepseek-v4.1.mckidx
+      reuse_cache: true
       total_concurrency: 4096
       queue_capacity: 4096
       request_timeout: 120s
       drain_timeout: 150s
-      replay_speed: 0.1
+      replay_speed: 0.01
     wait_after: 30s
     within: 300s
   - id: check_baseline_client_success_rate

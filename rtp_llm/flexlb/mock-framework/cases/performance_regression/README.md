@@ -2,7 +2,7 @@
 
 在开发机用 **2 Master、55 Prefill、192 Decode、160 ViT、4 Client** 回放 316,367 条采样请求。前 300 秒以 0.25 倍速播放原始流量的前约 75 秒，随后以 **1.0 倍速**接着播放余下约 225 秒。整份数据只播放一遍，预计用时约 525 秒，原速阶段平均目标约 1,055 QPS。
 
-按[框架 README](../../README.md)运行，设置 `CASE_FILE=cases/performance_regression/case.yaml`。将采样文件放到共享根的 `data/traffic/frontend-300s-paged.mckidx`，执行 `compile`、`launch` 和 `run` 时都传 `--shared-root <共享根>`。本次基准文件的 SHA-256 为 `14b96f91201044a3cbf9f453107fbc9cfe002c0b4f7050735fa1a28d7e44eda9`。
+按[框架 README](../../README.md)运行，设置 `CASE_FILE=cases/performance_regression/case.yaml`。Case 默认使用仓库内的 `data/traffic/deepseek-v4.1.mckidx`。基准文件的 SHA-256 为 `14b96f91201044a3cbf9f453107fbc9cfe002c0b4f7050735fa1a28d7e44eda9`。
 
 业务配置来自 2026-11-10 的 Whale 部署 `dsv41_mock_no_kvcm_align`。P/D/V 和 Master 副本数、计算公式、KV 容量、CP4 和 Master 调度参数按该部署设置。开发机使用本地发现和 ZooKeeper，由 Client 回放代替线上 Frontend。ViT 使用采样宽高走计算路径，省略图片下载。
 

@@ -49,7 +49,7 @@ phases:
     describe: 四个 Client 先以 0.25 倍速预热 300 秒，再以 1.0 倍速播放剩余流量。
     interface: client/start
     args:
-      requests_file: data/traffic/frontend-300s-paged.mckidx
+      requests_file: data/traffic/deepseek-v4.1.mckidx
       reuse_cache: true
       replay_speed: 1.0
       warmup:
