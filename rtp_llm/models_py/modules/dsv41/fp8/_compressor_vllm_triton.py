@@ -737,6 +737,181 @@ def run_save_partial_states(
     )
 
 
+
+
+def _torch_compress_supported() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    major, _ = torch.cuda.get_device_capability()
+    return major >= 9
+
+
+def _run_fused_compress_torch(
+    state_cache,
+    token_to_req_indices,
+    positions,
+    slot_mapping,
+    block_table,
+    rms_norm_weight,
+    rms_norm_eps,
+    cos_sin_cache,
+    kv_cache,
+    kv_slot_mapping,
+    kv_raw,
+    score_raw,
+    ape,
+    seq_start,
+    disable_raw_path,
+    head_dim,
+    rope_head_dim,
+    compress_ratio,
+    overlap,
+    seq_start_per_req,
+    cu_seq_per_req,
+    state_tokens_per_block,
+):
+    """SM80 reference for the fused compress -> norm -> rope -> FP8 write."""
+    cfg = _FUSED_CONSTEXPR_BY_HEAD_DIM[head_dim]
+    quant_block = cfg["quant_block"]
+    token_stride = cfg["token_stride"]
+    scale_dim = cfg["scale_dim"]
+    nope_dim = head_dim - rope_head_dim
+    half_rope = rope_head_dim // 2
+    state_width = int(state_cache.shape[-1] // 2)
+    state_ring = int(state_cache.shape[1])
+    kv_block_size = int(kv_cache.shape[1])
+    kv_block_stride = int(kv_cache.stride(0))
+    n_raw = 0 if disable_raw_path else int(kv_raw.shape[0])
+    batched = (
+        not disable_raw_path
+        and seq_start_per_req is not None
+        and cu_seq_per_req is not None
+    )
+
+    boundary = ((positions + 1) % compress_ratio == 0).nonzero().flatten()
+    if boundary.numel() == 0:
+        return
+    flat_kv = kv_cache.reshape(-1)
+    n_span = (1 + overlap) * compress_ratio
+    offsets = torch.arange(n_span, device=positions.device)
+
+    for token in boundary.tolist():
+        position = int(positions[token].item())
+        req = int(token_to_req_indices[token].item())
+        kv_slot = int(kv_slot_mapping[token].item())
+        if kv_slot < 0:
+            continue
+        start = position - n_span + 1
+        pos = start + offsets
+        valid_pos = pos >= 0
+        head_off = (offsets >= compress_ratio).to(torch.int64) * head_dim
+
+        if batched:
+            req_start = int(seq_start_per_req[req].item())
+            cu_lo = int(cu_seq_per_req[req].item())
+            cu_hi = int(cu_seq_per_req[req + 1].item())
+            raw_idx = pos - req_start
+            use_raw = valid_pos & (raw_idx >= 0) & (raw_idx < cu_hi - cu_lo)
+            raw_idx = cu_lo + raw_idx
+        else:
+            raw_idx = pos - int(seq_start)
+            use_raw = valid_pos & (raw_idx >= 0) & (raw_idx < n_raw)
+        raw_safe = raw_idx.clamp(min=0)
+
+        cols = torch.arange(head_dim, device=positions.device)
+        raw_gather = raw_safe[:, None] + head_off[:, None] + cols[None, :]
+        kv_raw_vals = kv_raw.reshape(kv_raw.shape[0], -1)[raw_gather]
+        score_raw_vals = score_raw.reshape(score_raw.shape[0], -1)[raw_gather]
+        ape_vals = ape.reshape(ape.shape[0], -1)[
+            (pos % compress_ratio)[:, None] + head_off[:, None] + cols[None, :]
+        ]
+        score_raw_vals = score_raw_vals + ape_vals
+
+        block_idx = (pos // state_tokens_per_block) % block_table.shape[1]
+        block_num = block_table[req, block_idx].to(torch.int64)
+        use_cache = valid_pos & ~use_raw
+        valid_block = (
+            use_cache
+            & (block_num > 0)
+            & (block_num < int(state_cache.shape[0]))
+        )
+        safe_block = torch.where(valid_block, block_num, torch.zeros_like(block_num))
+        ring_pos = pos % state_ring
+        row = state_cache[safe_block, ring_pos]
+        kv_cache_vals = row[:, :head_dim] + 0
+        score_cache_vals = row[
+            :, state_width : state_width + head_dim
+        ]
+        # Add the overlap half for the second raw segment.
+        if overlap:
+            off_mask = offsets >= compress_ratio
+            kv_cache_vals = torch.where(
+                off_mask[:, None],
+                row[:, head_dim : 2 * head_dim],
+                kv_cache_vals,
+            )
+            score_cache_vals = torch.where(
+                off_mask[:, None],
+                row[:, state_width + head_dim : state_width + 2 * head_dim],
+                score_cache_vals,
+            )
+
+        valid = use_raw | valid_block
+        kv = torch.where(use_raw[:, None], kv_raw_vals, kv_cache_vals)
+        score = torch.where(
+            use_raw[:, None],
+            score_raw_vals,
+            torch.where(valid_block[:, None], score_cache_vals, torch.full_like(score_cache_vals, float("-inf"))),
+        )
+        kv = torch.where(valid[:, None], kv, torch.zeros_like(kv))
+        score = torch.softmax(score, dim=0)
+        compressed = (kv * score).sum(dim=0)
+
+        variance = compressed.square().mean()
+        normed = compressed * torch.rsqrt(variance + rms_norm_eps)
+        normed = normed * rms_norm_weight.to(torch.float32)
+
+        quant_input = normed.to(torch.bfloat16).to(torch.float32)
+        groups = quant_input.reshape(-1, quant_block)
+        absmax = groups.abs().amax(dim=1).clamp_min(1e-4)
+        exponents = torch.ceil(torch.log2(absmax * (1.0 / 448.0)))
+        inv = torch.exp2(-exponents)
+        payload = (
+            (groups * inv[:, None])
+            .clamp(-448.0, 448.0)
+            .to(torch.float8_e4m3fn)
+            .view(torch.uint8)
+            .reshape(-1)
+        )
+        encoded = (exponents + 127.0).clamp(0, 255).to(torch.uint8)
+
+        kv_block = kv_slot // kv_block_size
+        kv_pos = kv_slot % kv_block_size
+        base = kv_block * kv_block_stride + kv_pos * token_stride
+        flat_kv[base : base + nope_dim] = payload[:nope_dim]
+
+        if rope_head_dim:
+            pairs = normed[nope_dim:].reshape(half_rope, 2).to(torch.float32)
+            even, odd = pairs[:, 0], pairs[:, 1]
+            compressed_pos = (position // compress_ratio) * compress_ratio
+            cos = cos_sin_cache[compressed_pos, :half_rope].to(torch.float32)
+            sin = cos_sin_cache[compressed_pos, half_rope:].to(torch.float32)
+            new_even = even * cos - odd * sin
+            new_odd = odd * cos + even * sin
+            rope = torch.stack((new_even, new_odd), dim=-1).reshape(-1)
+            rope_bytes = rope.to(torch.bfloat16).view(torch.uint8)
+            flat_kv[base + nope_dim : base + nope_dim + rope_bytes.numel()] = rope_bytes
+
+        n_nope_blocks = nope_dim // quant_block
+        scale_base = (
+            kv_block * kv_block_stride
+            + kv_block_size * token_stride
+            + kv_pos * scale_dim
+        )
+        flat_kv[scale_base : scale_base + n_nope_blocks] = encoded[:n_nope_blocks]
+        flat_kv[scale_base + n_nope_blocks] = 0
+
+
 def run_fused_compress_kv_write(
     state_cache: torch.Tensor,  # [num_blocks, block_size, 2*coff*head_dim] fp32
     token_to_req_indices: torch.Tensor,  # [N] int32
@@ -788,6 +963,32 @@ def run_fused_compress_kv_write(
     """
     N = int(slot_mapping.shape[0])
     if N == 0:
+        return
+    if not _torch_compress_supported():
+        _run_fused_compress_torch(
+            state_cache,
+            token_to_req_indices,
+            positions,
+            slot_mapping,
+            block_table,
+            rms_norm_weight,
+            rms_norm_eps,
+            cos_sin_cache,
+            kv_cache,
+            kv_slot_mapping,
+            kv_raw,
+            score_raw,
+            ape,
+            seq_start,
+            disable_raw_path,
+            head_dim,
+            rope_head_dim,
+            compress_ratio,
+            overlap,
+            seq_start_per_req,
+            cu_seq_per_req,
+            state_tokens_per_block,
+        )
         return
     cfg = _FUSED_CONSTEXPR_BY_HEAD_DIM[head_dim]
 
