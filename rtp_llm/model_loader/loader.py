@@ -264,6 +264,12 @@ class ModelLoader:
                 and not_same_name_tensors
                 and self._is_memory_enough_for_fastsafetensor()
                 and has_module("fastsafetensors")
+                # ROCm: the pinned fastsafetensors 0.1.19 cannot parse
+                # F8_E8M0 headers, and 0.1.20's copiers need the CUDA
+                # runtime / a newer native fast_safetensors than the ROCm
+                # build provides. The scratch path uses the safetensors
+                # python reader, which handles UE8M0 natively.
+                and torch.version.hip is None
             ):
                 load_method = LoadMethod.FASTSAFETENSORS
             else:
