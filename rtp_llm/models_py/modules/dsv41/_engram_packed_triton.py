@@ -99,8 +99,12 @@ def unpack_packed_rows(packed, heads: int, dim: int):
     width = heads * dim
     aligned_tokens = triton.cdiv(tokens, 4) * 4
     scale_columns = triton.cdiv(width // 32, 4)
-    values = torch.empty(
-        (tokens, width), dtype=torch.float8_e4m3fn, device=packed.device
+    # Allocate as uint8 and expose an E4M3 view: the kernel is a pure byte
+    # permutation (it already stores through a uint8 pointer cast), but an
+    # fp8-typed kernel argument puts float8e4nv in the triton signature,
+    # which does not lower on pre-sm89 GPUs. The view is bit-identical.
+    values_u8 = torch.empty(
+        (tokens, width), dtype=torch.uint8, device=packed.device
     )
     storage = torch.empty(
         (scale_columns, aligned_tokens), dtype=torch.int32, device=packed.device
@@ -111,7 +115,7 @@ def unpack_packed_rows(packed, heads: int, dim: int):
         grid = (triton.cdiv(aligned_tokens * scale_columns * 128, block),)
         _unpack_packed_rows_kernel[grid](
             packed,
-            values,
+            values_u8,
             scales,
             tokens,
             packed.stride(0),
@@ -121,4 +125,4 @@ def unpack_packed_rows(packed, heads: int, dim: int):
             BLOCK=block,
             num_warps=4,
         )
-    return values, scales
+    return values_u8.view(torch.float8_e4m3fn), scales
