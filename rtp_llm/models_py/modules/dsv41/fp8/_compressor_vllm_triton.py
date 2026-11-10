@@ -746,6 +746,178 @@ def _torch_compress_supported() -> bool:
     return major >= 9
 
 
+
+
+def _run_fused_compress_torch_bulk(
+    state_cache,
+    token_to_req_indices,
+    positions,
+    slot_mapping,
+    block_table,
+    rms_norm_weight,
+    rms_norm_eps,
+    cos_sin_cache,
+    kv_cache,
+    kv_slot_mapping,
+    kv_raw,
+    score_raw,
+    ape,
+    seq_start,
+    head_dim,
+    rope_head_dim,
+    compress_ratio,
+    overlap,
+    state_tokens_per_block,
+    boundary,
+):
+    """Vectorized no-prefix prefill path: all boundary rows at once."""
+    cfg = _FUSED_CONSTEXPR_BY_HEAD_DIM[head_dim]
+    quant_block = cfg["quant_block"]
+    token_stride = cfg["token_stride"]
+    scale_dim = cfg["scale_dim"]
+    nope_dim = head_dim - rope_head_dim
+    half_rope = rope_head_dim // 2
+    state_width = int(state_cache.shape[-1] // 2)
+    state_ring = int(state_cache.shape[1])
+    kv_block_size = int(kv_cache.shape[1])
+    kv_block_stride = int(kv_cache.stride(0))
+    n_raw = int(kv_raw.shape[0])
+    n_span = (1 + overlap) * compress_ratio
+    offsets = torch.arange(n_span, device=positions.device)
+    cols = torch.arange(head_dim, device=positions.device)
+    dev = positions.device
+
+    P = positions[boundary].to(torch.int64)
+    pos = P[:, None] - n_span + 1 + offsets[None, :]
+    valid_pos = pos >= 0
+    head_off = (offsets >= compress_ratio).to(torch.int64) * head_dim
+    raw_idx = pos - int(seq_start)
+    use_raw = valid_pos & (raw_idx >= 0) & (raw_idx < n_raw)
+    raw_safe = raw_idx.clamp(min=0)
+    raw_flat = kv_raw.reshape(-1) if kv_raw.is_contiguous() else kv_raw.flatten()
+    score_flat = score_raw.reshape(-1) if score_raw.is_contiguous() else score_raw.flatten()
+    raw_width = kv_raw.shape[1]
+    gather = (
+        raw_safe[:, :, None] * raw_width
+        + head_off[None, :, None]
+        + cols[None, None, :]
+    )
+    kv_raw_vals = raw_flat[gather]
+    score_raw_vals = score_flat[gather]
+    ape_flat = ape.reshape(-1) if ape.is_contiguous() else ape.flatten()
+    ape_gather = (
+        (pos % compress_ratio)[:, :, None] * ape.shape[1]
+        + head_off[None, :, None]
+        + cols[None, None, :]
+    )
+    score_raw_vals = score_raw_vals + ape_flat[ape_gather]
+
+    req = token_to_req_indices[boundary].to(torch.int64)
+    table_width = block_table.shape[1]
+    block_idx = (pos // state_tokens_per_block) % table_width
+    block_num = block_table[req[:, None], block_idx].to(torch.int64)
+    use_cache = valid_pos & ~use_raw
+    valid_block = (
+        use_cache & (block_num > 0) & (block_num < int(state_cache.shape[0]))
+    )
+    K, S = pos.shape
+    second = (head_off > 0)[None, :, None]
+    if bool(use_cache.any().item()):
+        safe_block = torch.where(valid_block, block_num, torch.zeros_like(block_num))
+        ring_pos = pos % state_ring
+        row = state_cache[safe_block, ring_pos]
+        kv_cache_vals = torch.where(
+            second,
+            row[:, :, head_dim : 2 * head_dim],
+            row[:, :, :head_dim],
+        )
+        score_cache_vals = torch.where(
+            second,
+            row[:, :, state_width + head_dim : state_width + 2 * head_dim],
+            row[:, :, state_width : state_width + head_dim],
+        )
+    else:
+        kv_cache_vals = torch.zeros((K, S, head_dim), dtype=torch.float32, device=dev)
+        score_cache_vals = torch.zeros_like(kv_cache_vals)
+
+    valid = use_raw | valid_block
+    kv = torch.where(use_raw[:, :, None], kv_raw_vals, kv_cache_vals)
+    score = torch.where(
+        use_raw[:, :, None],
+        score_raw_vals,
+        torch.where(
+            valid_block[:, :, None],
+            score_cache_vals,
+            torch.full_like(score_cache_vals, float("-inf")),
+        ),
+    )
+    kv = torch.where(valid[:, :, None], kv, torch.zeros_like(kv))
+    score = torch.softmax(score, dim=1)
+    compressed = (kv * score).sum(dim=1)
+
+    variance = compressed.square().mean(dim=1, keepdim=True)
+    normed = compressed * torch.rsqrt(variance + rms_norm_eps)
+    normed = normed * rms_norm_weight.to(torch.float32)
+
+    quant_input = normed.to(torch.bfloat16).to(torch.float32)
+    rows = quant_input.shape[0]
+    groups = quant_input.reshape(rows, -1, quant_block)
+    absmax = groups.abs().amax(dim=2).clamp_min(1e-4)
+    exponents = torch.ceil(torch.log2(absmax * (1.0 / 448.0)))
+    inv = torch.exp2(-exponents)
+    payload = (
+        (groups * inv[:, :, None])
+        .clamp(-448.0, 448.0)
+        .to(torch.float8_e4m3fn)
+        .view(torch.uint8)
+        .reshape(rows, -1)
+    )
+    encoded = (exponents + 127.0).clamp(0, 255).to(torch.uint8)
+
+    slots = kv_slot_mapping[boundary].to(torch.int64)
+    valid_slot = slots >= 0
+    kv_block = slots // kv_block_size
+    kv_pos = slots % kv_block_size
+    base = kv_block * kv_block_stride + kv_pos * token_stride
+    flat_kv = kv_cache.reshape(-1)
+    if valid_slot.any():
+        sel = valid_slot
+        row_idx = base[sel][:, None] + torch.arange(nope_dim, device=dev)[None, :]
+        flat_kv[row_idx] = payload[sel, :nope_dim]
+        if rope_head_dim:
+            pairs = normed[sel, nope_dim:].reshape(-1, half_rope, 2).to(torch.float32)
+            even, odd = pairs[..., 0], pairs[..., 1]
+            compressed_pos = (
+                positions[boundary][sel] // compress_ratio
+            ) * compress_ratio
+            cos = cos_sin_cache[compressed_pos, :half_rope].to(torch.float32)
+            sin = cos_sin_cache[compressed_pos, half_rope:].to(torch.float32)
+            new_even = even * cos - odd * sin
+            new_odd = odd * cos + even * sin
+            rope_bytes = (
+                torch.stack((new_even, new_odd), dim=-1)
+                .reshape(-1)
+                .to(torch.bfloat16)
+                .view(torch.uint8)
+            )
+            rope_idx = (
+                base[sel][:, None]
+                + nope_dim
+                + torch.arange(rope_bytes.shape[1], device=dev)[None, :]
+            )
+            flat_kv[rope_idx] = rope_bytes
+        n_nope_blocks = nope_dim // quant_block
+        scale_base = (
+            kv_block * kv_block_stride
+            + kv_block_size * token_stride
+            + kv_pos * scale_dim
+        )
+        if n_nope_blocks:
+            sidx = scale_base[sel][:, None] + torch.arange(n_nope_blocks, device=dev)[None, :]
+            flat_kv[sidx] = encoded[sel, :n_nope_blocks]
+        flat_kv[scale_base[sel] + n_nope_blocks] = 0
+
+
 def _run_fused_compress_torch(
     state_cache,
     token_to_req_indices,
@@ -790,6 +962,33 @@ def _run_fused_compress_torch(
 
     boundary = ((positions + 1) % compress_ratio == 0).nonzero().flatten()
     if boundary.numel() == 0:
+        return
+    if not any(
+        (int(p) - n_span + 1) < int(seq_start)
+        for p in positions[boundary].tolist()
+    ):
+        _run_fused_compress_torch_bulk(
+            state_cache,
+            token_to_req_indices,
+            positions,
+            slot_mapping,
+            block_table,
+            rms_norm_weight,
+            rms_norm_eps,
+            cos_sin_cache,
+            kv_cache,
+            kv_slot_mapping,
+            kv_raw,
+            score_raw,
+            ape,
+            seq_start,
+            head_dim,
+            rope_head_dim,
+            compress_ratio,
+            overlap,
+            state_tokens_per_block,
+            boundary,
+        )
         return
     flat_kv = kv_cache.reshape(-1)
     n_span = (1 + overlap) * compress_ratio
