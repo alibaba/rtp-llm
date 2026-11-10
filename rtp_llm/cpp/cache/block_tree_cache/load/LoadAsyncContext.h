@@ -112,10 +112,13 @@ public:
     bool                  settle(bool success, bool host_success = false);
     bool                  onTaskFail();
     void                  waitDone() override;
-    // Experiment 00028: a load is a LOCAL-ONLY reference adoption when every
-    // descriptor sources the device tier (no host/disk copy work), no descriptor
-    // joins an in-flight transfer, and no storage-backend match is pending. Such
-    // loads settle in ~ms (queue wait + settlement only) and can be completed
+    // Experiment 00029 (relaxing 00028): a load is a MOSTLY-LOCAL adoption when
+    // every descriptor sources the device tier by reference OR the host tier
+    // (host sources create small copy tasks that settle in ~ms on the transfer
+    // task pool; device sources create none), no descriptor joins an in-flight
+    // transfer, and no storage-backend match is pending. Disk/remote sources stay
+    // excluded and keep the async LOADING_CACHE path, as do every join, backend
+    // match, timeout, and failure. Such loads settle in ~ms and can be completed
     // inline by the admission pass instead of waiting for the next schedule()
     // round boundary in LOADING_CACHE.
     bool isLocalOnlyAdoption() const;

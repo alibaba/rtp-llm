@@ -1597,15 +1597,57 @@ TEST(LoadAsyncContextTest, LocalOnlyAdoptionPredicateAndBoundedInlineWait) {
     EXPECT_TRUE(local_only_context->waitDoneFor(std::chrono::milliseconds(1)));
     EXPECT_EQ(commits, 1u);
 
-    // Host-source descriptors carry copy work and are not local-only adoptions.
-    // Scoped so the pending context aborts on destruction before shutdown,
-    // mirroring PendingContextAbortsOnDestruction.
+    // Experiment 00029: host-source descriptors now count as a mostly-local
+    // adoption (their small copy tasks settle in ~ms on the transfer task pool;
+    // measured execution is 0.6-0.75ms for this workload's ~521 host tokens).
+    // Unlike the all-DEVICE case the context is NOT done at commit - it carries
+    // one copy transfer per HOST descriptor - so the bounded inline wait
+    // (waitDoneFor) must cover the settlement, exactly as the production
+    // admission pass does. Pending context is scoped so it aborts on
+    // destruction before shutdown, mirroring PendingContextAbortsOnDestruction.
     {
         TransferDescriptor host_descriptor;
         host_descriptor.source_tier = Tier::HOST;
         auto host_context = coordinator->create({host_descriptor}, {false}, 1);
         ASSERT_TRUE(coordinator->registerContext(host_context));
-        EXPECT_FALSE(host_context->isLocalOnlyAdoption());
+        EXPECT_TRUE(host_context->isLocalOnlyAdoption());
+        ASSERT_TRUE(host_context->commit());
+        EXPECT_FALSE(host_context->done());
+        EXPECT_FALSE(host_context->waitDoneFor(std::chrono::milliseconds(1)));
+        ASSERT_TRUE(host_context->completeTransfers(1, true));
+        EXPECT_TRUE(host_context->done());
+        EXPECT_TRUE(host_context->waitDoneFor(std::chrono::milliseconds(1)));
+        EXPECT_EQ(commits, 2u);
+    }
+
+    // Experiment 00029: a mixed DEVICE + HOST load is also mostly-local: the
+    // device descriptor contributes no transfer (remaining_transfer_count_ is
+    // 1), the host descriptor contributes one, and the whole context settles
+    // as soon as that single transfer completes.
+    {
+        TransferDescriptor device_descriptor;
+        TransferDescriptor host_tail_descriptor;
+        host_tail_descriptor.source_tier = Tier::HOST;
+        auto mixed_context =
+            coordinator->create({device_descriptor, host_tail_descriptor}, {false, false}, 2);
+        ASSERT_TRUE(coordinator->registerContext(mixed_context));
+        EXPECT_TRUE(mixed_context->isLocalOnlyAdoption());
+        ASSERT_TRUE(mixed_context->commit());
+        EXPECT_FALSE(mixed_context->done());
+        ASSERT_TRUE(mixed_context->completeTransfers(1, true));
+        EXPECT_TRUE(mixed_context->done());
+        EXPECT_TRUE(mixed_context->waitDoneFor(std::chrono::milliseconds(1)));
+        EXPECT_EQ(commits, 3u);
+    }
+
+    // Experiment 00029: disk-source descriptors still keep the async
+    // LOADING_CACHE path - they are not mostly-local.
+    {
+        TransferDescriptor disk_descriptor;
+        disk_descriptor.source_tier = Tier::DISK;
+        auto disk_context = coordinator->create({disk_descriptor}, {false}, 1);
+        ASSERT_TRUE(coordinator->registerContext(disk_context));
+        EXPECT_FALSE(disk_context->isLocalOnlyAdoption());
     }
 
     // Joined dependencies wait on foreign transfers and are not local-only.

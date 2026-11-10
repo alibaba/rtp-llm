@@ -551,7 +551,18 @@ bool LoadAsyncContext::isLocalOnlyAdoption() const {
         return false;
     }
     for (size_t index = 0; index < load_descs_.size(); ++index) {
-        if (joined_load_[index] || load_descs_[index].source_tier != Tier::DEVICE) {
+        if (joined_load_[index]) {
+            return false;
+        }
+        // Experiment 00029: accept HOST sources in addition to DEVICE sources.
+        // Host sources create small copy tasks (~ms on the transfer task pool:
+        // the workload carries ~521 host-tier tokens per stream alongside ~208k
+        // device tokens; measured transfer execution is 0.6-0.75ms), so the
+        // bounded inline wait still covers their settlement. Disk and remote
+        // sources (and every join / backend match) stay on the async
+        // LOADING_CACHE path unchanged.
+        const Tier tier = load_descs_[index].source_tier;
+        if (tier != Tier::DEVICE && tier != Tier::HOST) {
             return false;
         }
     }
