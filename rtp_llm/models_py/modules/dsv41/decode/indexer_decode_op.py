@@ -50,11 +50,14 @@ except Exception:  # pragma: no cover - non-cuda env
 
 
 def _fast_path_available() -> bool:
+    # DeepGEMM's paged MQA logits kernel JIT-compiles for SM90+ only; on
+    # lower architectures (e.g. Ada sm89) keep the Triton reference path.
     return (
         torch.cuda.is_available()
         and deep_gemm is not None
         and hasattr(deep_gemm, "fp8_paged_mqa_logits")
         and hasattr(deep_gemm, "get_paged_mqa_logits_metadata")
+        and torch.cuda.get_device_capability()[0] >= 9
     )
 
 

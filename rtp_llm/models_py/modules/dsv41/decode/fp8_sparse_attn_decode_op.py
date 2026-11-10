@@ -40,6 +40,13 @@ try:
             from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
 
             _FLASH_MLA_AVAILABLE = True
+            if (
+                torch.cuda.is_available()
+                and torch.cuda.get_device_capability()[0] < 9
+            ):
+                # FlashMLA's FP8-KV kernels are built for SM90+; keep the
+                # dequant reference path on lower architectures (sm89).
+                _FLASH_MLA_AVAILABLE = False
 except (ImportError, AttributeError, ValueError) as e:
     logging.warning(
         "[dsv4-fp8] flash_mla not available (%s); FP8 sparse attn fast path "

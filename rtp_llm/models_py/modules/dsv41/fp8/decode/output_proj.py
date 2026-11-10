@@ -55,7 +55,7 @@ def decode_output_proj(
     """
     rd = attn.rope_head_dim
 
-    if o.is_cuda and o.numel() > 0:
+    if o.is_cuda and o.numel() > 0 and getattr(attn, "_wo_a_stk_w", None) is not None:
         o_fp8, o_scale = fused_inv_rope_fp8_quant(
             o,
             freqs_cis,
@@ -75,8 +75,14 @@ def decode_output_proj(
                 inverse=True,
             )
         o = o.reshape(bsz, q_len, attn.n_groups, -1)
-        wo_a_bf16 = _fp8_dequant_to_fp32(attn.wo_a_w, attn.wo_a_s).to(o.dtype)
-        wo_a = wo_a_bf16.view(attn.n_groups, attn.o_lora_rank, -1)
+        wo_a = getattr(attn, "_wo_a_stk_bf16", None)
+        if wo_a is not None:
+            # Pre-SM100: reuse the exact bf16 dequantization cached at init
+            # instead of dequantizing per decode step.
+            wo_a = wo_a.to(o.dtype)
+        else:
+            wo_a_bf16 = _fp8_dequant_to_fp32(attn.wo_a_w, attn.wo_a_s).to(o.dtype)
+            wo_a = wo_a_bf16.view(attn.n_groups, attn.o_lora_rank, -1)
         o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
     out = attn._lin(attn.wo_b, o.flatten(2))
     if attn.tp_size > 1:

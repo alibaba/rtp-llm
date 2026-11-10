@@ -43,14 +43,27 @@ from rtp_llm.models_py.modules.dsv41.fp8._indexer_quant_triton import (
 try:
     import deep_gemm as _deep_gemm
 
-    _HAS_DEEP_GEMM = hasattr(_deep_gemm, "fp8_paged_mqa_logits") and hasattr(
-        _deep_gemm, "get_paged_mqa_logits_metadata"
+    # DeepGEMM MQA kernels JIT-compile for SM90+ (wgmma); the FP4 family is
+    # SM100+ only. On lower architectures (e.g. Ada sm89) ptxas rejects the
+    # generated PTX at first call, so treat the kernels as unavailable and
+    # let callers select the Triton/reference fallbacks.
+    _ARCH_MAJOR = (
+        torch.cuda.get_device_capability()[0] if torch.cuda.is_available() else 0
     )
-    _HAS_DEEP_GEMM_MQA = hasattr(_deep_gemm, "fp8_mqa_logits")
-    _HAS_DEEP_GEMM_FP4_MQA = hasattr(_deep_gemm, "fp8_fp4_mqa_logits")
-    _HAS_DEEP_GEMM_FP4_PAGED_MQA = hasattr(
-        _deep_gemm, "fp8_fp4_paged_mqa_logits"
-    ) and hasattr(_deep_gemm, "get_paged_mqa_logits_metadata")
+    _HAS_DEEP_GEMM = (
+        _ARCH_MAJOR >= 9
+        and hasattr(_deep_gemm, "fp8_paged_mqa_logits")
+        and hasattr(_deep_gemm, "get_paged_mqa_logits_metadata")
+    )
+    _HAS_DEEP_GEMM_MQA = _ARCH_MAJOR >= 9 and hasattr(_deep_gemm, "fp8_mqa_logits")
+    _HAS_DEEP_GEMM_FP4_MQA = _ARCH_MAJOR >= 10 and hasattr(
+        _deep_gemm, "fp8_fp4_mqa_logits"
+    )
+    _HAS_DEEP_GEMM_FP4_PAGED_MQA = (
+        _ARCH_MAJOR >= 10
+        and hasattr(_deep_gemm, "fp8_fp4_paged_mqa_logits")
+        and hasattr(_deep_gemm, "get_paged_mqa_logits_metadata")
+    )
 except ImportError:
     _deep_gemm = None
     _HAS_DEEP_GEMM = False

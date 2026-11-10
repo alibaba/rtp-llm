@@ -38,6 +38,11 @@ from rtp_llm.models_py.modules.dsv41._fused_rmsnorm_rope_triton import (
 )
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
+from rtp_llm.models_py.modules.dsv41.qlinear import (
+    _fp8_dequant_to_fp32,
+    native_fp4_gemm_supported,
+)
+from rtp_llm.models_py.modules.dsv41.rope import apply_rotary_emb
 from rtp_llm.models_py.modules.dsv41.chunk_env import (
     FLASH_MLA_SPARSE_Q_CHUNK as _FLASH_MLA_SPARSE_Q_CHUNK,
 )
@@ -839,11 +844,28 @@ class AttentionFP8(nn.Module):
         self.wo_a_w = wo_a_w
         self.wo_a_s = wo_a_s
         K_local = n_heads_local * head_dim // n_groups_local
-        _stk_w, _stk_s = _prepare_wo_a_stacked(
-            wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
+        # The packed UE8M0 layout transform and fp8_einsum are SM100+ JIT
+        # kernels. Pre-SM100 devices keep an exact bf16 dequantization of the
+        # stacked wo_a weight (FP8 e4m3 x 2^k is precise in bf16) and run the
+        # eager grouped-GEMM output-projection fallback instead.
+        self._wo_native = native_fp4_gemm_supported(
+            wo_a_w.device if wo_a_w.is_cuda else None
         )
+        _stk_bf16 = None
+        if self._wo_native:
+            _stk_w, _stk_s = _prepare_wo_a_stacked(
+                wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
+            )
+        else:
+            _stk_w, _stk_s = None, None
+            _stk_bf16 = (
+                _fp8_dequant_to_fp32(wo_a_w, wo_a_s)
+                .to(torch.bfloat16)
+                .view(n_groups_local, o_lora_rank, K_local)
+            )
         self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
         self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
+        self.register_buffer("_wo_a_stk_bf16", _stk_bf16, persistent=False)
         self.wo_b = _fp8_w_s(
             W.v4_attn_wo_b_w,
             W.v4_attn_wo_b_s,
@@ -1788,6 +1810,11 @@ class AttentionFP8(nn.Module):
         consumes, so the wo_a projection is a single einsum launch.
         Matches vLLM ``deepseek_v4_attention.py:325`` (same
         ``"bhr,hdr->bhd"`` + recipe ``(1, 1, 128)`` for SM100 UE8M0)."""
+        if self._wo_a_stk_w is None:
+            raise RuntimeError(
+                "wo_a fp8_einsum requires SM100+ packed UE8M0 scales; "
+                "pre-SM100 devices must use the eager output-projection path"
+            )
         M, G, _K = o_fp8.shape
         R = self.o_lora_rank
         out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o_fp8.device)
@@ -4721,6 +4748,20 @@ class AttentionFP8(nn.Module):
         """
         o_3d = o.view(-1, self.n_heads, self.head_dim)
         seqlen = o_3d.shape[0]
+        if self._wo_a_stk_w is None:
+            # Pre-SM100 exact eager path: in-place inverse RoPE on the rope
+            # slice, then the grouped wo_a GEMM against the bf16-dequantized
+            # stacked weight (same math as decode_output_proj's fallback).
+            rd = self.rope_head_dim
+            freqs = freqs_cis.reshape(-1, freqs_cis.shape[-1])
+            if freqs.shape[0] != seqlen:
+                freqs = freqs.repeat_interleave(seqlen // freqs.shape[0], dim=0)
+            apply_rotary_emb(o_3d[..., -rd:], freqs.contiguous(), inverse=True)
+            o_g = o_3d.reshape(seqlen, self.n_groups, -1)
+            o_proj = torch.einsum("mgk,grk->mgr", o_g, self._wo_a_stk_bf16)
+            with record_function_range("dsv4.fp8.attn.out.wo_b"):
+                self.wo_b(o_proj.reshape(seqlen, -1), out=out)
+            return
         with record_function_range("dsv4.fp8.attn.out.fused_inv_rope_quant"):
             o_fp8, o_scale = fused_inv_rope_fp8_quant(
                 o_3d,
