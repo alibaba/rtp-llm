@@ -555,7 +555,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputBuildsPositionSpec
               toVec<float>(sampler_inputs.temperature));
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testDSparkMixedTargetUsesFixedCandidateWidth) {
+TEST_F(MtpBatchStreamProcessorTest, testDSparkTargetUsesFixedCandidateWidth) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -594,15 +594,15 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkMixedTargetUsesFixedCandidateWidth
     second->generateConfig()->top_k = 8192;
     auto pure = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
     ASSERT_TRUE(pure.ok());
-    EXPECT_EQ(pure->all_probs.size(1), 8192);
-    EXPECT_FALSE(pure->all_probs_indices.defined());
+    EXPECT_EQ(pure->all_probs.size(1), speculative::dsparkForceTopK());
+    EXPECT_TRUE(pure->all_probs_indices.defined());
 
     first->generateConfig()->top_k  = 0;
     second->generateConfig()->top_k = 0;
     auto pure_no_k_p1 = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
     ASSERT_TRUE(pure_no_k_p1.ok());
-    EXPECT_EQ(pure_no_k_p1->all_probs.size(1), 8192);
-    EXPECT_FALSE(pure_no_k_p1->all_probs_indices.defined());
+    EXPECT_EQ(pure_no_k_p1->all_probs.size(1), speculative::dsparkForceTopK());
+    EXPECT_TRUE(pure_no_k_p1->all_probs_indices.defined());
 
     first->generateConfig()->top_p  = 0.95f;
     second->generateConfig()->top_p = 0.95f;
@@ -617,14 +617,14 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkMixedTargetUsesFixedCandidateWidth
     second->generateConfig()->top_k = 40;
     auto small_vocab_pure = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
     ASSERT_TRUE(small_vocab_pure.ok());
-    EXPECT_EQ(small_vocab_pure->all_probs.size(1), 8192);
-    EXPECT_FALSE(small_vocab_pure->all_probs_indices.defined());
+    EXPECT_EQ(small_vocab_pure->all_probs.size(1), speculative::dsparkForceTopK());
+    EXPECT_TRUE(small_vocab_pure->all_probs_indices.defined());
 
     second->generateConfig()->top_p = 1.0f - 5e-8f;
     auto equivalent_p = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
     ASSERT_TRUE(equivalent_p.ok());
-    EXPECT_EQ(equivalent_p->all_probs.size(1), 8192);
-    EXPECT_FALSE(equivalent_p->all_probs_indices.defined());
+    EXPECT_EQ(equivalent_p->all_probs.size(1), speculative::dsparkForceTopK());
+    EXPECT_TRUE(equivalent_p->all_probs_indices.defined());
 
     second->generateConfig()->top_p     = 1.0f;
     second->generateConfig()->do_sample = false;
@@ -686,8 +686,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkMixedTargetUsesFixedCandidateWidth
     auto one_draft    = torch::zeros({1, 1}, torch::kInt32);
     auto large_single = large_processor.gatherSpecSamplerInput(StreamGroups({large_first}), one_output, {}, one_draft);
     ASSERT_TRUE(large_single.ok());
-    EXPECT_EQ(large_single->all_probs.size(1), 129280);
-    EXPECT_FALSE(large_single->all_probs_indices.defined());
+    EXPECT_EQ(large_single->all_probs.size(1), speculative::dsparkForceTopK());
+    EXPECT_TRUE(large_single->all_probs_indices.defined());
 
     std::list<GenerateStreamPtr> pure_k_streams{large_first};
     for (int i = 0; i < 7; ++i) {
@@ -705,16 +705,16 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkMixedTargetUsesFixedCandidateWidth
     auto large_eight =
         large_processor.gatherSpecSamplerInput(StreamGroups(pure_k_streams), eight_output, {}, eight_draft);
     ASSERT_TRUE(large_eight.ok());
-    EXPECT_EQ(large_eight->all_probs.size(1), 129280);
-    EXPECT_FALSE(large_eight->all_probs_indices.defined());
+    EXPECT_EQ(large_eight->all_probs.size(1), speculative::dsparkForceTopK());
+    EXPECT_TRUE(large_eight->all_probs_indices.defined());
     for (const auto& stream : pure_k_streams) {
         stream->generateConfig()->top_p = 0.95f;
     }
     auto large_eight_joint =
         large_processor.gatherSpecSamplerInput(StreamGroups(pure_k_streams), eight_output, {}, eight_draft);
     ASSERT_TRUE(large_eight_joint.ok());
-    EXPECT_EQ(large_eight_joint->all_probs.size(1), 129280);
-    EXPECT_FALSE(large_eight_joint->all_probs_indices.defined());
+    EXPECT_EQ(large_eight_joint->all_probs.size(1), speculative::dsparkForceTopK());
+    EXPECT_TRUE(large_eight_joint->all_probs_indices.defined());
 }
 
 // Per-round logits are consumable; gathering does not clone them.
