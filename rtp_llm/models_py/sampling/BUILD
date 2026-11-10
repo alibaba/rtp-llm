@@ -17,6 +17,7 @@ py_library(
         "rejection_metadata.py",
         "rejection_graph.py",
         "rejection_native.py",
+        "rejection_compact.py",
         "vllm_gumbel.py",
         "vllm_rejection.py",
         "vllm_watermark.py",

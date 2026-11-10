@@ -81,11 +81,36 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     // directly, and callers that need CPU access should call .cpu() explicitly.
     auto all_success =
         torch::empty({(int64_t)inputs.batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
+    // Deferred verification does not sample tokens here; initialize its status
+    // before filtering so no status launch separates filtering and rejection.
+    if (inputs.defer_token_sampling) {
+        all_success.fill_(true);
+    }
     auto all_beam_indices =
         has_num_beams ? torch::empty({(int64_t)inputs.batch_size_out}, torch::kInt32) : torch::Tensor();
 
+    torch::Tensor verify_do_sample;
+    if (inputs.defer_token_sampling && inputs.rejection_rows > 0 && !inputs.rejection_generators.empty()) {
+        const int64_t batch = inputs.rejection_generators.size();
+        TORCH_CHECK(batch * inputs.rejection_rows == static_cast<int64_t>(inputs.batch_size),
+                    "rejection metadata must cover all target rows");
+        auto        mask   = torch::empty({batch}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
+        const auto* sample = inputs.do_sample.defined() ? inputs.do_sample.data_ptr<bool>() : nullptr;
+        const auto* top_k  = inputs.top_k.data_ptr<int32_t>();
+        for (int64_t b = 0; b < batch; ++b) {
+            const int64_t row        = b * inputs.rejection_rows;
+            mask.data_ptr<bool>()[b] = (!sample || sample[row]) && top_k[row] != 1;
+        }
+        buffer_holder_.hold_host(mask);
+        verify_do_sample = mask.to(inputs.logits.device(), true);
+    }
+
     torch::Tensor inputs_token_ids_cuda;
-    {
+    if (inputs.defer_token_sampling && !has_num_beams) {
+        // The deferred sampler uploads history only when a logits processor needs it.
+        inputs_token_ids_cuda = inputs.token_ids;
+        buffer_holder_.hold_host(inputs.token_ids);
+    } else {
         auto main_stream     = cuda_graph::graphGetCurrentStream();
         auto copy_done_event = cuda_graph::makeGraphEvent();
         {
@@ -108,6 +133,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     size_t from_batch_idx_in = 0, to_batch_idx_in = 0;
     size_t from_batch_idx_out = 0;
     bool   deferred_token_sampling = false;
+    torch::Tensor compact_logits, compact_ids, dense_fallback, fallback_rows, prepared_rejection_rng;
 
     while (from_batch_idx_in < inputs.batch_size) {
         auto cur_num_beams_in  = num_beams_in[from_batch_idx_in];
@@ -185,15 +211,27 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  mayOptNarrow(inputs.all_probs_indices, from_batch_idx_in, batch_size_in),
                  use_optimized_sampling_ && inputs.skip_logits_probs_restore,
                  inputs.defer_token_sampling,
-                 inputs.phase == LogitsProcessorPhase::MTP_VERIFY});
+                 inputs.phase == LogitsProcessorPhase::MTP_VERIFY,
+                 from_batch_idx_in == 0 && batch_size_in == inputs.batch_size,
+                 inputs.rejection_generators,
+                 from_batch_idx_in == 0 && batch_size_in == inputs.batch_size && !inputs.rejection_generators.empty() ?
+                     inputs.rejection_rows :
+                     0});
             deferred_token_sampling = greedy_output.deferred_token_sampling;
+            if (greedy_output.deferred_logits.defined()) {
+                compact_logits         = greedy_output.deferred_logits;
+                compact_ids            = greedy_output.deferred_token_ids;
+                dense_fallback         = greedy_output.deferred_dense_fallback;
+                fallback_rows          = greedy_output.deferred_fallback_rows;
+                prepared_rejection_rng = greedy_output.prepared_rejection_rng;
+            }
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
                 // TODO(zhangjianning.zjn): would be better to eliminate the copy
                 if (variable_num_beams) {
                     token_ids_out.copy_(token_ids_in);
                 }
-            } else {
+            } else if (!inputs.defer_token_sampling) {
                 success.fill_(true);
             }
         } else {
@@ -256,18 +294,24 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     }
 
     buffer_holder_.release();
-    return SamplerOutput({std::move(all_token_ids_out),
-                          std::move(all_cum_log_probs_out),
-                          std::move(inputs.all_probs),
-                          std::move(all_beam_indices),
-                          std::move(all_success),
-                          inputs.raw_logprobs_logits,
-                          inputs.raw_logprobs_row_indices,
-                          false,
-                          std::move(inputs.all_probs_indices),
-                          deferred_token_sampling,
-                          deferred_token_sampling ? inputs.logits : torch::Tensor(),
-                          inputs.spec_cap_gpu});
+    return SamplerOutput(
+        {std::move(all_token_ids_out),
+         std::move(all_cum_log_probs_out),
+         std::move(inputs.all_probs),
+         std::move(all_beam_indices),
+         std::move(all_success),
+         inputs.raw_logprobs_logits,
+         inputs.raw_logprobs_row_indices,
+         false,
+         std::move(inputs.all_probs_indices),
+         deferred_token_sampling,
+         deferred_token_sampling ? (compact_logits.defined() ? compact_logits : inputs.logits) : torch::Tensor(),
+         inputs.spec_cap_gpu,
+         compact_ids,
+         dense_fallback,
+         fallback_rows,
+         prepared_rejection_rng,
+         deferred_token_sampling ? verify_do_sample : torch::Tensor()});
 }
 
 void Sampler::preprocessLogits(const SamplerInputs& inputs) {

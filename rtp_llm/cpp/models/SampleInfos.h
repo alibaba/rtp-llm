@@ -89,6 +89,8 @@ public:
     bool                               allow_compact_target_probs = false;
     bool                               skip_logits_probs_restore  = false;
     bool                               defer_token_sampling = false;
+    std::vector<at::Generator>         rejection_generators       = {};
+    int64_t                            rejection_rows             = 0;
 };
 
 struct SamplerOutput {
@@ -107,6 +109,11 @@ public:
     bool          deferred_token_sampling = false;
     torch::Tensor verify_logits           = {};
     torch::Tensor acceptance_cap          = {};
+    torch::Tensor verify_candidate_ids    = {};
+    torch::Tensor verify_dense_fallback   = {};
+    torch::Tensor verify_fallback_rows    = {};
+    torch::Tensor prepared_rejection_rng  = {};
+    torch::Tensor verify_do_sample        = {};
 };
 
 struct MergedOutput {

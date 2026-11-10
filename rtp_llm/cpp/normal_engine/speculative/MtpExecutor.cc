@@ -2667,6 +2667,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                                  torch::minimum(sampler_input.spec_cap_gpu, adaptive_caps) :
                                                  adaptive_caps;
             }
+            if (sampler_input.defer_token_sampling && draft_sampler_output.draft_point_mass) {
+                // Filtering does not consume RNG. Reserve rejection state after its
+                // kernels are submitted, in the same order as batchSample below.
+                sampler_input.rejection_rows = propose_step_ + 1;
+                sampler_input.rejection_generators.reserve(streams.size());
+                for (const auto& stream : streams) {
+                    sampler_input.rejection_generators.push_back(stream->getGenerator());
+                }
+            }
             sampler_output           = std::move(sampler_->forward(sampler_input));
             RTP_LLM_CHECK_WITH_INFO(
                 !packed_verify || sampler_output.deferred_token_sampling,
@@ -2684,7 +2693,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 sampler_output.verify_logits =
                     sampler_output.verify_logits.reshape({static_cast<int64_t>(batch_size),
                                                           static_cast<int64_t>(propose_step_ + 1),
-                                                          sampler_input.logits.size(1)});
+                                                          sampler_output.verify_logits.size(-1)});
+                if (sampler_output.verify_candidate_ids.defined()) {
+                    sampler_output.verify_candidate_ids =
+                        sampler_output.verify_candidate_ids.reshape_as(sampler_output.verify_logits);
+                    sampler_output.verify_dense_fallback =
+                        sampler_output.verify_dense_fallback.reshape({static_cast<int64_t>(batch_size),
+                                                                      static_cast<int64_t>(propose_step_ + 1),
+                                                                      sampler_input.logits.size(1)});
+                }
             }
 
             // rejection sampling

@@ -158,26 +158,32 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     auto draft_token_ids_d_t = draft_token_ids.to(target_device, true);
 
     auto target_token_ids_d_t = target_sampler_output.token_ids;
-    if (!target_token_ids_d_t.is_cuda()) {
+    if (!target_sampler_output.deferred_token_sampling && !target_token_ids_d_t.is_cuda()) {
         buffer_holder_.hold_host(target_token_ids_d_t);
         target_token_ids_d_t = target_token_ids_d_t.to(target_device, true);
     }
 
-    auto do_sample =
-        torch::empty({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
-    int stream_idx = 0;
+    auto do_sample_d =
+        target_sampler_output.deferred_token_sampling ? target_sampler_output.verify_do_sample : torch::Tensor();
     [[maybe_unused]] bool all_greedy = true;
     [[maybe_unused]] bool has_forced_accept = false;
-    for (const GenerateStreamPtr& stream : streams) {
-        const auto& config                     = *stream->generateConfig();
-        const bool  sample                     = config.do_sample && config.top_k != 1;
-        do_sample.data_ptr<bool>()[stream_idx] = sample;
-        all_greedy                             = all_greedy && !sample;
-        has_forced_accept                      = has_forced_accept || stream->forceSpAccept();
-        stream_idx++;
+    if (!do_sample_d.defined()) {
+        auto do_sample =
+            torch::empty({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
+        int stream_idx = 0;
+        for (const GenerateStreamPtr& stream : streams) {
+            const auto& config                       = *stream->generateConfig();
+            const bool  sample                       = config.do_sample && config.top_k != 1;
+            do_sample.data_ptr<bool>()[stream_idx++] = sample;
+            all_greedy                               = all_greedy && !sample;
+            has_forced_accept                        = has_forced_accept || stream->forceSpAccept();
+        }
+        buffer_holder_.hold_host(do_sample);
+        do_sample_d = do_sample.to(target_device, true);
+    } else {
+        RTP_LLM_CHECK(do_sample_d.device() == target_device && do_sample_d.scalar_type() == torch::kBool
+                      && do_sample_d.dim() == 1 && do_sample_d.size(0) == batch_size && do_sample_d.is_contiguous());
     }
-    buffer_holder_.hold_host(do_sample);
-    auto do_sample_d = do_sample.to(target_device, true);
 
     auto          rand_options      = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
     torch::Tensor uniform_samples_d;
@@ -187,11 +193,11 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     // Override per-stream uniform samples with seeded generator when random_seed is set,
     // ensuring deterministic acceptance for reproducible iter_count.
-    {
+    if (!target_sampler_output.deferred_token_sampling) {
         int idx = 0;
         for (const auto& stream : streams) {
             auto gen = stream->getGenerator();
-            if (gen.defined() && !target_sampler_output.deferred_token_sampling) {
+            if (gen.defined()) {
                 uniform_samples_d[idx] = torch::rand({(long)propose_step_ + 1}, gen, std::nullopt, rand_options);
             }
             idx++;
@@ -203,14 +209,27 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     const auto output_options = torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false);
     // The CUDA rejection kernel writes every token slot and acceptance length,
     // including unused -1 tails, on both greedy and stochastic branches.
-    torch::Tensor output_token_ids_d          = mtpFusionEnabled() ?
-                                                    torch::empty({(long)batch_size, (long)propose_step_ + 1}, output_options) :
-                                                    torch::zeros({(long)batch_size, (long)propose_step_ + 1}, output_options);
-    torch::Tensor output_accepted_token_num_d = mtpFusionEnabled() ? torch::empty({(long)batch_size}, output_options) :
-                                                                     torch::zeros({(long)batch_size}, output_options);
+    torch::Tensor packed_output;
+    torch::Tensor output_token_ids_d;
+    torch::Tensor output_accepted_token_num_d;
+    if (target_sampler_output.deferred_token_sampling) {
+        const int64_t token_count = static_cast<int64_t>(batch_size) * (propose_step_ + 1);
+        packed_output             = torch::empty({token_count + batch_size}, output_options);
+        output_token_ids_d =
+            packed_output.as_strided({batch_size, (long)propose_step_ + 1}, {(long)propose_step_ + 1, 1}, 0);
+        output_accepted_token_num_d = packed_output.as_strided({batch_size}, {1}, token_count);
+    } else {
+        output_token_ids_d          = mtpFusionEnabled() ?
+                                          torch::empty({(long)batch_size, (long)propose_step_ + 1}, output_options) :
+                                          torch::zeros({(long)batch_size, (long)propose_step_ + 1}, output_options);
+        output_accepted_token_num_d = mtpFusionEnabled() ? torch::empty({(long)batch_size}, output_options) :
+                                                           torch::zeros({(long)batch_size}, output_options);
+    }
 
-    if (!draft_sampler_output.draft_point_mass && draft_token_probs_d_t.size(2) != target_token_probs_d_t.size(2)) {
-        const int64_t target_vocab_size = target_token_probs_d_t.size(2);
+    const int64_t target_vocab_size = target_sampler_output.verify_dense_fallback.defined() ?
+                                          target_sampler_output.verify_dense_fallback.size(-1) :
+                                          target_token_probs_d_t.size(2);
+    if (!draft_sampler_output.draft_point_mass && draft_token_probs_d_t.size(2) != target_vocab_size) {
         const int64_t num_spec          = draft_token_probs_d_t.size(1);
 
         // Reuse pre-allocated padding buffer to avoid per-forward GPU allocation.
@@ -245,8 +264,12 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         if (target_sampler_output.deferred_token_sampling) {
             std::vector<at::Generator> generators;
             std::vector<bool>          force_accept;
+            generators.reserve(batch_size);
+            force_accept.reserve(batch_size);
             for (const auto& stream : streams) {
-                generators.push_back(stream->getGenerator());
+                if (!target_sampler_output.prepared_rejection_rng.defined()) {
+                    generators.push_back(stream->getGenerator());
+                }
                 force_accept.push_back(stream->forceSpAccept());
             }
             execRejectionSampling({draft_token_probs_d_t,
@@ -264,7 +287,11 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                                    target_token_probs_d_t,
                                    target_sampler_output.acceptance_cap,
                                    force_accept,
-                                   target_sampler_output.cum_log_probs});
+                                   target_sampler_output.cum_log_probs,
+                                   target_sampler_output.verify_candidate_ids,
+                                   target_sampler_output.verify_dense_fallback,
+                                   target_sampler_output.verify_fallback_rows,
+                                   target_sampler_output.prepared_rejection_rng});
         } else if (mtpFusionEnabled() && draft_sampler_output.draft_point_mass && all_greedy && !has_forced_accept) {
             greedy_finalized = tryMtpGreedyFinalize(draft_token_ids_d_t, target_token_ids_d_t,
                                                    output_token_ids_d, output_accepted_token_num_d,
@@ -395,8 +422,18 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         }
     }
 
-    sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
-    sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
+    if (packed_output.defined()) {
+        auto host_output =
+            torch::empty(packed_output.sizes(), torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+        host_output.copy_(packed_output, true);
+        const int64_t token_count = static_cast<int64_t>(batch_size) * (propose_step_ + 1);
+        sample_output.accept_tokens_cpu =
+            host_output.as_strided({batch_size, (long)propose_step_ + 1}, {(long)propose_step_ + 1, 1}, 0);
+        sample_output.accept_len_cpu = host_output.as_strided({batch_size}, {1}, token_count);
+    } else {
+        sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
+        sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
+    }
     sample_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 
 }

@@ -66,7 +66,7 @@ public:
     static __device__ __forceinline__ uint32_t canonicalize_nan(uint32_t bits) {
         return (bits & 0x7fffffffu) > 0x7f800000u ? 0x7f800000u : bits;
     }
-    static_assert(MAX_TOPK == 512 || MAX_TOPK == 1024 || MAX_TOPK == 4096);
+    static_assert(MAX_TOPK == 512 || MAX_TOPK == 1024 || MAX_TOPK == 1536 || MAX_TOPK == 2048 || MAX_TOPK == 4096);
     static constexpr bool HAS_PARTIAL_ROUNDS = NUM_SEGS_PER_ROUND > NUM_TAIL_SEGS;
 
     struct SharedMemoryPlanFP32: SharedMemoryPlanBase {};
@@ -113,10 +113,10 @@ public:
             }
         };
         for (uint32_t base = 0; base < args.topk; base += NUM_THREADS) {
-            const uint64_t pair  = survivors[base + threadIdx.x];
+            const uint64_t pair  = base + threadIdx.x < args.topk ? survivors[base + threadIdx.x] : PLACEHOLDER_PAIR;
             const uint32_t index = static_cast<uint32_t>(pair);
             const uint32_t bits  = static_cast<uint32_t>(pair >> 32);
-            const bool     pick  = index < end_vocab_idx && canonicalize_nan(bits) != NEG_INF_BITS;
+            const bool     pick  = base + threadIdx.x < args.topk && index < end_vocab_idx && canonicalize_nan(bits) != NEG_INF_BITS;
             append(pick, index, pick ? __ldg(input + index) : 0.0f);
         }
         __syncthreads();
@@ -699,7 +699,7 @@ public:
                                                           + uint64_t(batch_idx) * args.stride_output_value_batch :
                                                       nullptr;
         if constexpr (!FILTER_FINITE) {
-            if (args.topk == 4096 && threshold_bits == NEG_INF_BITS) {
+            if ((args.topk == 4096 || args.topk == 1025) && threshold_bits == NEG_INF_BITS) {
                 select_sparse_row(args,
                                   batch_idx,
                                   end_vocab_idx,
@@ -752,8 +752,8 @@ void run_topk_select_kernel(const TopkSelectArgs& args) {
     KU_ASSERT(args.return_value == Config::return_value, "Dispatch failure");
     static_assert(cute::is_same_v<typename Config::ValueT, float>);
     static_assert(cute::is_same_v<typename Config::OutIdxT, int32_t>);
-    static_assert((Config::max_topk == 512 || Config::max_topk == 4096) && !Config::sorted_index
-                  && !Config::sorted_value);
+    static_assert((Config::max_topk == 512 || Config::max_topk == 1024 || Config::max_topk == 1536 || Config::max_topk == 2048 || Config::max_topk == 4096)
+                  && !Config::sorted_index && !Config::sorted_value);
     KU_ASSERT(args.vocab_size < MAX_VOCAB_SIZE, "`vocab_size` is too big");
 
     using Kernel = TopkSelectKernelFP32<Config, FILTER_FINITE>;

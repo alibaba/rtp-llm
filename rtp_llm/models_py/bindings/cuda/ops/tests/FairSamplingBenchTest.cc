@@ -23,8 +23,13 @@ class FairSamplingBench: public DeviceTestBase {};
 TEST_F(FairSamplingBench, TargetThroughFinalOutput) {
     const bool    trace_shape = std::getenv("FAIR_TRACE_SHAPE") != nullptr;
     const int64_t vocab       = trace_shape ? 129280 : 154880;
-    const int64_t steps = 5, rows = steps + 1, cap = 0;
-    const float   top_p = 1.0f;
+    const int64_t steps = 5, rows = steps + 1;
+    const int64_t cap   = std::getenv("FAIR_CANDIDATE_CAP") ? std::stoll(std::getenv("FAIR_CANDIDATE_CAP")) : 0;
+    const float   top_p = std::getenv("FAIR_TOP_P") ? std::stof(std::getenv("FAIR_TOP_P")) : 1.0f;
+    ASSERT_GE(cap, 0);
+    ASSERT_LE(cap, vocab);
+    ASSERT_GT(top_p, 0.0f);
+    ASSERT_LE(top_p, 1.0f);
 #ifdef FAIR_GUMBEL_BRANCH
     static pybind11::scoped_interpreter interpreter{};
     pybind11::exec(R"(
@@ -100,6 +105,7 @@ import torch
                 target.top_k.fill_(cap);
             }
             target.defer_token_sampling = true;
+            target.allow_compact_deferred_output = true;
             TensorHolder holder;
             target.buffer_holder           = &holder;
             reject.buffer_holder           = &holder;
@@ -111,6 +117,8 @@ import torch
                 g.set_current_seed(20261110 + i);
                 reject.generator.push_back(g);
             }
+            target.deferred_rejection_generators = reject.generator;
+            target.deferred_rejection_rows       = rows;
 #else
             auto probs         = torch::empty({batch * rows, cap ? cap : vocab}, fp);
             auto candidate_ids = torch::empty({batch * rows, cap ? cap : vocab}, ip);
@@ -147,6 +155,16 @@ import torch
                     auto sampled = execSampleGreedy(target);
 #ifdef FAIR_GUMBEL_BRANCH
                     TORCH_CHECK(sampled.deferred_token_sampling);
+                    reject.target_logits_d = (sampled.deferred_logits.defined() ? sampled.deferred_logits : logits)
+                                                 .reshape({batch, rows, -1});
+                    reject.target_candidate_ids_d  = sampled.deferred_token_ids.defined() ?
+                                                         sampled.deferred_token_ids.reshape({batch, rows, -1}) :
+                                                         torch::Tensor();
+                    reject.target_dense_fallback_d = sampled.deferred_dense_fallback.defined() ?
+                                                         sampled.deferred_dense_fallback.reshape({batch, rows, -1}) :
+                                                         torch::Tensor();
+                    reject.target_fallback_rows_d  = sampled.deferred_fallback_rows;
+                    reject.prepared_rejection_rng  = sampled.prepared_rejection_rng;
 #else
                     (void)sampled;
 #endif
@@ -224,12 +242,21 @@ import torch
                     }
                 }
             }
+            int64_t compact_width = 0, fallback_rows = 0;
+#ifdef FAIR_GUMBEL_BRANCH
+            if (reject.target_candidate_ids_d.defined()) {
+                compact_width = reject.target_logits_d.size(-1);
+                fallback_rows = reject.target_fallback_rows_d.sum().item<int64_t>();
+                ASSERT_EQ(compact_width, 1024);
+                ASSERT_EQ(fallback_rows, 0);
+            }
+#endif
             std::sort(times.begin(), times.end());
             std::ostringstream json;
             json << "{\"branch\":\"" << branch << "\",\"batch\":" << batch << ",\"steps\":5,\"vocab\":" << vocab
-                 << ",\"candidate_cap\":" << cap << ",\"top_p\":" << top_p
-                 << ",\"target_draft_probability\":" << probability << ",\"median_us\":" << times[2]
-                 << ",\"acceptance_among_reached\":" << accepted / reached
+                 << ",\"candidate_cap\":" << cap << ",\"top_p\":" << top_p << ",\"compact_width\":" << compact_width
+                 << ",\"fallback_rows\":" << fallback_rows << ",\"target_draft_probability\":" << probability
+                 << ",\"median_us\":" << times[2] << ",\"acceptance_among_reached\":" << accepted / reached
                  << ",\"mean_emitted\":" << emitted / (250 * batch) << ",\"sorted_repeat_us\":[";
             for (size_t i = 0; i < times.size(); ++i)
                 json << (i ? "," : "") << times[i];
@@ -242,7 +269,10 @@ import torch
             const std::set<tpi::ActivityType> activities{tpi::ActivityType::CPU, tpi::ActivityType::CUDA};
             tap::prepareProfiler(config, activities);
             tap::enableProfiler(config, activities);
-            for (int i = 0; i < 5; ++i) {
+            const int profile_rounds =
+                std::getenv("FAIR_PROFILE_REPEATS") ? std::stoi(std::getenv("FAIR_PROFILE_REPEATS")) : 5;
+            ASSERT_GT(profile_rounds, 0);
+            for (int i = 0; i < profile_rounds; ++i) {
                 prepare();
                 cudaStreamSynchronize(stream);
                 {

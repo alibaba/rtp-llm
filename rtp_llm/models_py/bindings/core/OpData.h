@@ -346,11 +346,19 @@ struct GreedyParams {
     bool                         skip_logits_probs_restore = false;
     bool                       defer_token_sampling              = false;
     bool                       sequence_lengths_are_token_counts = false;
+    bool                         allow_compact_deferred_output     = false;
+    std::vector<at::Generator>   deferred_rejection_generators     = {};
+    int64_t                      deferred_rejection_rows           = 0;
 };
 
 struct GreedyOutput {
     torch::Tensor success;
     bool          deferred_token_sampling = false;
+    torch::Tensor deferred_logits         = {};
+    torch::Tensor deferred_token_ids      = {};
+    torch::Tensor deferred_dense_fallback = {};
+    torch::Tensor deferred_fallback_rows  = {};
+    torch::Tensor prepared_rejection_rng  = {};
 };
 
 struct BeamSearchParams {
@@ -432,6 +440,13 @@ struct RejectionSamplingParams {
     torch::Tensor              acceptance_cap  = {};
     std::vector<bool>          force_accept    = {};
     torch::Tensor              cum_log_probs   = {};
+    torch::Tensor              target_candidate_ids_d  = {};
+    torch::Tensor              target_dense_fallback_d = {};
+    torch::Tensor              target_fallback_rows_d  = {};
+    // Single-consumption packet from the corresponding target producer. Native
+    // submission writes its address prefix before asynchronous H2D transfer;
+    // never share/reuse it across concurrent rejection calls.
+    torch::Tensor prepared_rejection_rng = {};
 };
 
 struct MappingDraft2TargetParams {

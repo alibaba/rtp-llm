@@ -1,9 +1,10 @@
 """Capacity-bucket workspaces and cold compilation for native eager submission.
 
-No CUDA Graph is created. The C++ bridge launches the same five Triton programs
+No CUDA Graph is created. The C++ bridge launches the dense or compact Triton programs
 and patches only runtime batch counts and grids between calls.
 """
 
+import traceback
 from collections import OrderedDict
 
 import torch
@@ -40,7 +41,13 @@ def _stage(
     bound = function.signature.bind(**arguments)
     bound.apply_defaults()
     args = tuple(bound.arguments[name] for name in function.arg_names)
-    kernel = function.warmup(*args, grid=(1, 1, 1), num_warps=num_warps)
+    try:
+        kernel = function.warmup(*args, grid=(1, 1, 1), num_warps=num_warps)
+    except Exception:
+        # The C++ bridge renders only the outer exception string; preserve the
+        # compiler's nested cause in the log before propagating the failure.
+        traceback.print_exc()
+        raise
     runner = kernel.run  # Load the module and configure shared memory; no launch.
     if (
         getattr(runner, "global_scratch_size", -1) != 0
@@ -104,7 +111,7 @@ def _stage(
 
 class _Plan:
     def __init__(self, key):
-        device, stream, forced, capacity, rows, vocab, has_cap = key
+        device, stream, forced, capacity, rows, vocab, has_cap = key[:7]
         self.key = key
         self.buffers = []
 
@@ -277,6 +284,46 @@ class _Plan:
         )
 
 
+class _CompactPlan:
+    def __init__(self, key):
+        from rtp_llm.models_py.sampling.rejection_compact import (
+            _compact_rejection_kernel,
+        )
+
+        device, stream, forced, capacity, rows, vocab, has_cap, dense_vocab = key
+        self.key = key
+        self.buffers = []
+
+        def empty(size, dtype):
+            tensor = torch.empty(size, dtype=dtype, device=torch.device("cuda", device))
+            self.buffers.append(tensor)
+            return tensor
+
+        self.addresses = empty((11 + 2 * capacity,), torch.int64)[:11]
+        kernel, descriptor = _stage(
+            _compact_rejection_kernel,
+            dict(
+                addresses=self.addresses,
+                float_ptr=empty((1,), torch.float32),
+                int_ptr=empty((1,), torch.int32),
+                long_ptr=empty((1,), torch.int64),
+                bool_ptr=empty((1,), torch.bool),
+                ROWS=rows,
+                DENSE_VOCAB=dense_vocab,
+                HAS_CAP=has_cap,
+                FORCED=forced,
+            ),
+            grid_factor=1,
+        )
+        self.kernels = [kernel]
+        self.bytes = sum(t.numel() * t.element_size() for t in self.buffers)
+        self.ready = torch.cuda.Event()
+        self.ready.record()
+        self.native_plan = _register_plan(
+            self, self.ready.cuda_event, self.addresses, key, [descriptor]
+        )
+
+
 def build_plan(key):
     if (
         _register_plan is None
@@ -297,7 +344,7 @@ def build_plan(key):
                 return False
             del _plans[old]
         try:
-            entry = _Plan(key)
+            entry = _CompactPlan(key) if key[7] else _Plan(key)
         except UnsupportedLaunch:
             return False
         used = sum(plan.bytes for old, plan in _plans.items() if old[0] == key[0])

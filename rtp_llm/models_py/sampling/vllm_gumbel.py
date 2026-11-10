@@ -180,6 +180,7 @@ def gumbel_noised_argmax(
     IS_DRAFTING: tl.constexpr,
     USE_FP64: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr = True,
+    RETURN_KEY: tl.constexpr = False,
 ):
     """Argmax of logits under Gumbel-max sampling, or plain argmax at temp 0.
 
@@ -210,7 +211,15 @@ def gumbel_noised_argmax(
             gumbel_noise = -tl.log(-_log1p_neg_stable(u))
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
 
-    return tl.max(logits, axis=0, return_indices=True)
+    if RETURN_KEY:
+        maximum = tl.max(logits, axis=0)
+        key = tl.min(
+            tl.where(mask & (logits == maximum), keys.to(tl.int64), 0x7FFFFFFFFFFFFFFF),
+            axis=0,
+        )
+        return maximum, key
+    else:
+        return tl.max(logits, axis=0, return_indices=True)
 
 
 @triton.jit
@@ -370,15 +379,15 @@ def gumbel_sample(
     if logits_cache is not None:
         if logits_cache_source is None:
             logits_cache_source = logits
-        assert logits_cache_source.shape == logits.shape, (
-            "logits cache source must match sampled logits shape"
-        )
-        assert logits_cache_source.device == logits.device, (
-            "logits cache source must be on the sampled logits device"
-        )
-        assert logits_cache_source.dtype == logits_cache.dtype, (
-            "logits cache source and destination must have the same dtype"
-        )
+        assert (
+            logits_cache_source.shape == logits.shape
+        ), "logits cache source must match sampled logits shape"
+        assert (
+            logits_cache_source.device == logits.device
+        ), "logits cache source must be on the sampled logits device"
+        assert (
+            logits_cache_source.dtype == logits_cache.dtype
+        ), "logits cache source and destination must have the same dtype"
         assert logits_cache.size(-1) >= vocab_size, (
             f"draft logits cache vocab dim ({logits_cache.size(-1)}) is narrower "
             f"than the sampled logits ({vocab_size}). Cached logits would be "

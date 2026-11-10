@@ -456,6 +456,378 @@ TEST_F(CudaSamplerTest, testDeferredPreparationPreservesHistoryAndPenalties) {
     EXPECT_TRUE(torch::equal(unfiltered.token_ids, history));
 }
 
+TEST_F(CudaSamplerTest, testDeferredLogitTopKTopPMatchesDense) {
+    initializeSamplerPython();
+    const auto* properties = at::cuda::getCurrentDeviceProperties();
+    if (properties->major != 10 || (properties->minor != 0 && properties->minor != 3))
+        GTEST_SKIP() << "DeepSelect requires SM100 or SM103";
+    constexpr int batch = 8, rows = 6, vocab = 129280, count = batch * rows;
+    auto          options  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto          top_k    = pinnedIntTensor(std::vector<int32_t>(count, 1024));
+    const auto    stream   = reinterpret_cast<int64_t>(at::cuda::getCurrentCUDAStream().stream());
+    auto          original = torch::randn({count, vocab}, options);
+    // Exact boundary ties, including more than K identical winners.
+    original.select(0, 1).zero_();
+    original.select(0, 2).fill_(-8);
+    original.select(0, 2).slice(0, 0, 1500).fill_(1);
+    original.select(0, 3).fill_(-8);
+    original.select(0, 3).slice(0, 0, 32).fill_(2);
+    original.select(0, 3).slice(0, 32, 1600).fill_(1);
+    // Nearly equal FP32 logits test probability-rounding boundaries explicitly.
+    original.select(0, 4).zero_();
+    original.select(0, 4).slice(0, 0, 1024).fill_(std::nextafter(1.0f, 2.0f));
+    original.select(0, 4).slice(0, 1024, 2048).fill_(1.0f);
+    for (float p : {1.0f, 0.9f, 0.5f}) {
+        SCOPED_TRACE("top_p=" + std::to_string(p));
+        auto probabilities = torch::softmax(original, -1);
+        auto temporary     = torch::empty_like(probabilities);
+        auto expected      = torch::empty_like(probabilities);
+        auto top_p         = pinnedFloatTensor(std::vector<float>(count, p));
+        top_k_renorm_probs(probabilities, temporary, top_k, 0, stream);
+        if (p == 1.0f)
+            expected.copy_(temporary);
+        else
+            top_p_renorm_probs(temporary, expected, top_p, 1.0, stream);
+        auto filtered = original.clone();
+        ASSERT_TRUE(torch_ext::deferred_topk_topp_filter(filtered, 1024, p));
+        auto actual = torch::softmax(filtered, -1);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        EXPECT_TRUE(torch::equal(actual > 0, expected > 0))
+            << "actual counts=" << (actual > 0).sum(-1).cpu() << " expected counts=" << (expected > 0).sum(-1).cpu();
+        EXPECT_TRUE(torch::allclose(actual, expected, 3e-5, 2e-7));
+
+        RejectionSamplingParams params;
+        params.draft_token_ids_d           = torch::zeros({batch, rows - 1}, options.dtype(torch::kInt32));
+        params.do_sample_d                 = torch::ones({batch}, options.dtype(torch::kBool));
+        params.output_token_ids_d          = torch::empty({batch, rows}, options.dtype(torch::kInt32));
+        params.output_accepted_token_num_d = torch::empty({batch}, options.dtype(torch::kInt32));
+        params.deferred_token_sampling     = true;
+        params.draft_point_mass            = true;
+        for (int i = 0; i < batch; ++i) {
+            params.generator.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+            params.generator.back().set_current_seed(12345 + i);
+            params.generator.back().set_offset(0);
+        }
+        params.target_logits_d = expected.log().reshape({batch, rows, vocab});
+        execRejectionSampling(params);
+        auto expected_ids     = params.output_token_ids_d.clone();
+        auto expected_lengths = params.output_accepted_token_num_d.clone();
+        for (auto& generator : params.generator) {
+            EXPECT_EQ(generator.get_offset(), 32u);
+            generator.set_offset(0);
+        }
+        params.target_logits_d = filtered.reshape({batch, rows, vocab});
+        execRejectionSampling(params);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        EXPECT_TRUE(torch::equal(params.output_token_ids_d, expected_ids));
+        EXPECT_TRUE(torch::equal(params.output_accepted_token_num_d, expected_lengths));
+        for (const auto& generator : params.generator)
+            EXPECT_EQ(generator.get_offset(), 32u);
+    }
+    auto unsupported = original.clone();
+    EXPECT_FALSE(torch_ext::deferred_topk_topp_filter(unsupported, 0, 0.9f));
+    EXPECT_TRUE(torch::equal(unsupported, original));
+}
+
+TEST_F(CudaSamplerTest, testCompactDeferredGumbelMatchesDense) {
+    initializeSamplerPython();
+    const auto* properties = at::cuda::getCurrentDeviceProperties();
+    if (properties->major != 10 || (properties->minor != 0 && properties->minor != 3))
+        GTEST_SKIP() << "DeepSelect requires SM100 or SM103";
+    auto mock        = pybind11::module_::import("unittest.mock");
+    auto environment = pybind11::module_::import("os").attr("environ");
+    auto patch =
+        mock.attr("patch").attr("dict")(environment,
+                                        pybind11::dict(pybind11::arg("RTP_LLM_GUMBEL_REJECTION_GRAPH")  = "0",
+                                                       pybind11::arg("RTP_LLM_GUMBEL_REJECTION_NATIVE") = "1"));
+    patch.attr("__enter__")();
+    struct RestorePatch {
+        pybind11::object patch;
+        ~RestorePatch() {
+            patch.attr("__exit__")(pybind11::none(), pybind11::none(), pybind11::none());
+        }
+    } restore_outer{patch};
+    auto eager = pybind11::module_::import("rtp_llm.models_py.sampling.adapter").attr("_rejection_sample_logits_eager");
+    auto materialize = pybind11::module_::import("rtp_llm.models_py.sampling.rejection_compact").attr("materialize");
+    auto native      = pybind11::module_::import("rtp_llm.models_py.sampling.rejection_native");
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    native.attr("_plans").attr("clear")();
+    constexpr int batch = 8, rows = 6, vocab = 129280;
+    auto          options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    for (int variant = 0; variant < 4; ++variant) {
+        SCOPED_TRACE("variant=" + std::to_string(variant));
+        auto original = torch::randn({batch * rows, vocab}, options) * 0.2;
+        original.select(1, vocab - 1).fill_(7.7);
+        if (variant == 1) {
+            original.select(0, 0).zero_();  // >K boundary ties require dense fallback.
+            original.select(0, 1).fill_(-INFINITY);
+            original.select(0, 1).index_put_({vocab - 1}, 1.0);  // Sparse selection.
+        }
+        auto dense    = original.clone();
+        auto selected = torch_ext::deferred_compact_topk_topp(dense, 1024, 0.9f);
+        if (variant == 0) {
+            GreedyParams producer;
+            producer.logits               = original.clone();
+            producer.input_lengths        = cudaIntTensor(std::vector<int32_t>(batch * rows, 1), {batch * rows});
+            producer.sequence_lengths     = producer.input_lengths;
+            producer.token_ids            = torch::zeros({batch * rows, 2}, options.dtype(torch::kInt32));
+            producer.step                 = 1;
+            producer.top_k                = pinnedIntTensor(std::vector<int32_t>(batch * rows, 1024));
+            producer.top_p                = pinnedFloatTensor(std::vector<float>(batch * rows, 0.9f));
+            producer.temperature          = pinnedFloatTensor(std::vector<float>(batch * rows, 1.0f));
+            producer.defer_token_sampling = true;
+            producer.allow_compact_deferred_output = true;
+            auto prepared                          = execSampleGreedy(producer);
+            ASSERT_TRUE(prepared.deferred_logits.defined());
+            EXPECT_TRUE(prepared.deferred_token_sampling);
+            EXPECT_TRUE(torch::equal(prepared.deferred_dense_fallback, original));
+            selected = {prepared.deferred_logits, prepared.deferred_token_ids, prepared.deferred_fallback_rows};
+            dense    = prepared.deferred_dense_fallback;
+        }
+        ASSERT_TRUE(std::get<0>(selected).defined());
+        if (variant == 0) {
+            EXPECT_EQ(std::get<2>(selected).sum().item<int64_t>(), 0);
+        }
+        if (variant == 1) {
+            EXPECT_GT(std::get<2>(selected).sum().item<int64_t>(), 0);
+        }
+        auto logits          = std::get<0>(selected).reshape({batch, rows, 1024});
+        auto ids             = std::get<1>(selected).reshape({batch, rows, 1024});
+        auto flags           = std::get<2>(selected);
+        dense                = dense.reshape({batch, rows, vocab});
+        auto expanded        = materialize(logits, ids, dense, flags).cast<torch::Tensor>();
+        auto expected_logits = original.clone();
+        ASSERT_TRUE(torch_ext::deferred_topk_topp_filter(expected_logits, 1024, 0.9f));
+        EXPECT_TRUE(torch::equal(expanded, expected_logits.reshape_as(expanded)));
+        RejectionSamplingParams params;
+        params.target_logits_d         = logits;
+        params.target_candidate_ids_d  = ids;
+        params.target_dense_fallback_d = dense;
+        params.target_fallback_rows_d  = flags;
+        params.draft_token_ids_d       = torch::full({batch, rows - 1}, vocab - 1, options.dtype(torch::kInt32));
+        params.draft_token_ids_d.select(0, 3).fill_(0);  // Candidate absent from random rows.
+        params.do_sample_d                 = torch::arange(batch, options.dtype(torch::kInt32)).remainder(2) == 0;
+        params.output_token_ids_d          = torch::empty({batch, rows}, options.dtype(torch::kInt32));
+        params.output_accepted_token_num_d = torch::empty({batch}, options.dtype(torch::kInt32));
+        params.deferred_token_sampling     = true;
+        params.draft_point_mass            = true;
+        if (variant >= 2)
+            params.acceptance_cap = torch::arange(batch, options.dtype(torch::kInt32)).remainder(rows);
+        if (variant == 3)
+            params.force_accept.assign(batch, true);
+        for (int i = 0; i < batch; ++i) {
+            auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+            generator.set_current_seed(12345 + i);
+            generator.set_offset(32 * variant);
+            params.generator.push_back(generator);
+        }
+        auto seeds     = torch::arange(batch, options.dtype(torch::kInt64)) + 12345;
+        auto positions = torch::full({batch}, variant * 32, options.dtype(torch::kInt64));
+        auto expected =
+            eager(expanded,
+                  pybind11::none(),
+                  params.draft_token_ids_d,
+                  seeds,
+                  positions,
+                  params.do_sample_d,
+                  variant == 3 ? pybind11::cast(params.force_accept) : pybind11::none(),
+                  params.acceptance_cap.defined() ? pybind11::cast(params.acceptance_cap) : pybind11::none(),
+                  pybind11::arg("clean_output") = true)
+                .cast<std::pair<torch::Tensor, torch::Tensor>>();
+        execRejectionSampling(params);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        EXPECT_TRUE(torch::equal(params.output_token_ids_d, expected.first));
+        EXPECT_TRUE(torch::equal(params.output_accepted_token_num_d, expected.second));
+        EXPECT_GT(pybind11::len(native.attr("_plans")), 0);
+        for (auto& generator : params.generator) {
+            EXPECT_EQ(generator.get_offset(), static_cast<uint64_t>(32 * (variant + 1)));
+            generator.set_offset(32 * variant);
+        }
+        // Same keys, shuffled storage: Gumbel noise and global-ID tie order must stay fixed.
+        params.target_logits_d        = logits.flip({2});
+        params.target_candidate_ids_d = ids.flip({2});
+        execRejectionSampling(params);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        EXPECT_TRUE(torch::equal(params.output_token_ids_d, expected.first));
+        EXPECT_TRUE(torch::equal(params.output_accepted_token_num_d, expected.second));
+        if (variant == 0) {
+            // Adjacent requests may share one generator: each consumes its own
+            // consecutive 32-counter interval, on native and materialized paths.
+            auto shared = torch::make_generator<at::CUDAGeneratorImpl>();
+            shared.set_current_seed(777);
+            shared.set_offset(0);
+            params.generator.assign(batch, shared);
+            auto shared_seeds     = torch::full({batch}, 777, options.dtype(torch::kInt64));
+            auto shared_positions = torch::arange(batch, options.dtype(torch::kInt64)) * 32;
+            auto shared_expected  = eager(expanded,
+                                         pybind11::none(),
+                                         params.draft_token_ids_d,
+                                         shared_seeds,
+                                         shared_positions,
+                                         params.do_sample_d,
+                                         pybind11::arg("clean_output") = true)
+                                       .cast<std::pair<torch::Tensor, torch::Tensor>>();
+            execRejectionSampling(params);
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            EXPECT_EQ(shared.get_offset(), static_cast<uint64_t>(32 * batch));
+            EXPECT_TRUE(torch::equal(params.output_token_ids_d, shared_expected.first));
+            EXPECT_TRUE(torch::equal(params.output_accepted_token_num_d, shared_expected.second));
+            shared.set_offset(0);
+            auto fallback_patch = mock.attr("patch").attr("dict")(
+                environment, pybind11::dict(pybind11::arg("RTP_LLM_GUMBEL_REJECTION_NATIVE") = "0"));
+            fallback_patch.attr("__enter__")();
+            RestorePatch restore{fallback_patch};
+            execRejectionSampling(params);
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            EXPECT_EQ(shared.get_offset(), static_cast<uint64_t>(32 * batch));
+            EXPECT_TRUE(torch::equal(params.output_token_ids_d, shared_expected.first));
+            EXPECT_TRUE(torch::equal(params.output_accepted_token_num_d, shared_expected.second));
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, testCompactPreparedRejectionRng) {
+    initializeSamplerPython();
+    const auto* properties = at::cuda::getCurrentDeviceProperties();
+    if (properties->major != 10 || (properties->minor != 0 && properties->minor != 3))
+        GTEST_SKIP() << "DeepSelect requires SM100 or SM103";
+    constexpr int batch = 4, rows = 6, vocab = 129280;
+    auto          options  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto          original = torch::randn({batch * rows, vocab}, options) * 0.2;
+    original.select(1, vocab - 1).fill_(7.7);
+    auto default_generator = at::cuda::detail::getDefaultCUDAGenerator();
+    struct RestoreGenerator {
+        at::Generator generator;
+        torch::Tensor state;
+        ~RestoreGenerator() {
+            generator.set_state(state);
+        }
+    } restore{default_generator, default_generator.get_state()};
+    for (int mode = 0; mode < 3; ++mode) {
+        SCOPED_TRACE(mode);
+        std::vector<at::Generator> generators;
+        for (int i = 0; i < batch; ++i) {
+            auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+            generator.set_current_seed(4567 + i);
+            generators.push_back(generator);
+        }
+        if (mode == 1)
+            generators.assign(batch, generators.front());
+        if (mode == 2)
+            generators.clear();  // The production helper supplies the default for missing entries.
+        auto reset = [&] {
+            default_generator.set_current_seed(9012);
+            default_generator.set_offset(64);
+            for (auto& generator : generators)
+                generator.set_offset(64);
+        };
+        auto offsets = [&] {
+            std::vector<uint64_t> result{default_generator.get_offset()};
+            for (auto& generator : generators)
+                result.push_back(generator.get_offset());
+            return result;
+        };
+        auto producer = [&](bool prepare) {
+            GreedyParams params;
+            params.logits                        = original.clone();
+            params.input_lengths                 = cudaIntTensor(std::vector<int32_t>(batch * rows, 1), {batch * rows});
+            params.sequence_lengths              = params.input_lengths;
+            params.token_ids                     = torch::zeros({batch * rows, 2}, options.dtype(torch::kInt32));
+            params.step                          = 1;
+            params.top_k                         = pinnedIntTensor(std::vector<int32_t>(batch * rows, 1024));
+            params.top_p                         = pinnedFloatTensor(std::vector<float>(batch * rows, 0.9f));
+            params.temperature                   = pinnedFloatTensor(std::vector<float>(batch * rows, 1.0f));
+            params.defer_token_sampling          = true;
+            params.allow_compact_deferred_output = true;
+            params.deferred_rejection_generators = generators;
+            params.deferred_rejection_rows       = prepare ? rows : 0;
+            return execSampleGreedy(params);
+        };
+        auto rejection = [&](const GreedyOutput& prepared) {
+            RejectionSamplingParams params;
+            params.target_logits_d         = prepared.deferred_logits.reshape({batch, rows, 1024});
+            params.target_candidate_ids_d  = prepared.deferred_token_ids.reshape({batch, rows, 1024});
+            params.target_dense_fallback_d = prepared.deferred_dense_fallback.reshape({batch, rows, vocab});
+            params.target_fallback_rows_d  = prepared.deferred_fallback_rows;
+            params.draft_token_ids_d       = torch::full({batch, rows - 1}, vocab - 1, options.dtype(torch::kInt32));
+            params.do_sample_d             = torch::ones({batch}, options.dtype(torch::kBool));
+            params.output_token_ids_d      = torch::empty({batch, rows}, options.dtype(torch::kInt32));
+            params.output_accepted_token_num_d = torch::empty({batch}, options.dtype(torch::kInt32));
+            params.generator                   = generators;
+            params.deferred_token_sampling     = true;
+            params.draft_point_mass            = true;
+            params.prepared_rejection_rng      = prepared.prepared_rejection_rng;
+            return params;
+        };
+        reset();
+        auto ordinary_output = producer(false);
+        ASSERT_FALSE(ordinary_output.prepared_rejection_rng.defined());
+        auto ordinary = rejection(ordinary_output);
+        execRejectionSampling(ordinary);
+        auto expected_offsets = offsets();
+        reset();
+        auto prepared_output = producer(true);
+        ASSERT_TRUE(prepared_output.prepared_rejection_rng.defined());
+        EXPECT_EQ(offsets(), expected_offsets);
+        auto prepared = rejection(prepared_output);
+        execRejectionSampling(prepared);
+        EXPECT_EQ(offsets(), expected_offsets);  // No second reservation in the consumer.
+        EXPECT_TRUE(torch::equal(prepared.output_token_ids_d, ordinary.output_token_ids_d));
+        EXPECT_TRUE(torch::equal(prepared.output_accepted_token_num_d, ordinary.output_accepted_token_num_d));
+        prepared.prepared_rejection_rng = prepared.prepared_rejection_rng.narrow(1, 0, batch - 1);
+        EXPECT_THROW(execRejectionSampling(prepared), c10::Error);
+        EXPECT_EQ(offsets(), expected_offsets);
+    }
+}
+
+TEST_F(CudaSamplerTest, testCompactProducerScratchLifetime) {
+    const auto* properties = at::cuda::getCurrentDeviceProperties();
+    if (properties->major != 10 || (properties->minor != 0 && properties->minor != 3))
+        GTEST_SKIP() << "DeepSelect requires SM100 or SM103";
+    constexpr int vocab       = 129280;
+    auto          options     = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto          materialize = [](const auto& result, const torch::Tensor& dense) {
+        auto expanded = torch::full_like(dense, -INFINITY);
+        expanded.scatter_(1, std::get<1>(result).to(torch::kInt64), std::get<0>(result));
+        return torch::where(std::get<2>(result).to(torch::kBool).unsqueeze(1), dense, expanded);
+    };
+    for (int stream_index = 0; stream_index < 2; ++stream_index) {
+        auto                       stream = at::cuda::getStreamFromPool();
+        c10::cuda::CUDAStreamGuard guard(stream);
+        for (int batch : {64, 8, 128}) {
+            auto a = torch::randn({batch, vocab}, options);
+            auto b = torch::randn({batch, vocab}, options);
+            b.select(0, 0).zero_();
+            auto expected_a = a.clone();
+            auto expected_b = b.clone();
+            // Queue both producers before reading either result; scratch reuse
+            // must not alias the compact logits, IDs or fallback flags.
+            auto output_a = torch_ext::deferred_compact_topk_topp(a, 1024, 0.9f);
+            auto output_b = torch_ext::deferred_compact_topk_topp(b, 1024, 0.9f);
+            ASSERT_TRUE(torch_ext::deferred_topk_topp_filter(expected_a, 1024, 0.9f));
+            ASSERT_TRUE(torch_ext::deferred_topk_topp_filter(expected_b, 1024, 0.9f));
+            EXPECT_TRUE(torch::equal(materialize(output_a, a), expected_a));
+            EXPECT_TRUE(torch::equal(materialize(output_b, b), expected_b));
+        }
+        auto input = torch::randn({8, vocab}, options);
+        torch_ext::deferred_compact_topk_topp(input, 1024, 0.9f);
+        ASSERT_EQ(cudaStreamSynchronize(stream.stream()), cudaSuccess);
+        at::cuda::CUDAGraph graph;
+        graph.capture_begin();
+        auto captured = torch_ext::deferred_compact_topk_topp(input, 1024, 0.9f);
+        graph.capture_end();
+        for (int replay = 0; replay < 3; ++replay) {
+            input.normal_();
+            if (replay == 1)
+                input.select(0, 0).zero_();
+            auto expected = input.clone();
+            graph.replay();
+            ASSERT_TRUE(torch_ext::deferred_topk_topp_filter(expected, 1024, 0.9f));
+            EXPECT_TRUE(torch::equal(materialize(captured, input), expected));
+        }
+    }
+}
+
 TEST_F(CudaSamplerTest, testDeferredRejectionBridge) {
     initializeSamplerPython();
     auto options = torch::TensorOptions().device(torch::kCUDA);
