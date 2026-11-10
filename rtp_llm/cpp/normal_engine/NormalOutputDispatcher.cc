@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -524,6 +525,9 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     RTP_LLM_LOG_DEBUG("stream [%ld], new_tokens size = [%ld]", stream->streamId(), new_tokens.numel());
 
+    RecordedTokenTiming* recorded_timings =
+        merge_outputs.recorded_batch ? merge_outputs.recorded_batch->sliceTimings(batch_idx_in, cur_batch_size) :
+                                       nullptr;
     StreamUpdateInfo update_info{has_beam_search ? batch_new_all_token_ids : new_tokens,
                                  1,
                                  batch_hidden_states,
@@ -541,7 +545,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                  stream->isContextStream() ? model_output.generation_prefill_cuda_graph_status :
                                                              GenerationPrefillCudaGraphStatus::NOT_REQUESTED,
                                  batch_custom_output};
-    stream->update(update_info);
+    stream->update(update_info, true, recorded_timings, cur_batch_size);
 }
 
 }  // namespace rtp_llm

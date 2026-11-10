@@ -37,6 +37,14 @@ enum class ParallelMode {
 // context batch is request for initial word, decoder batch is request for incremental word.
 // ids and lengths are int32_t
 struct GptModelInputs {
+    // Input-owner-only snapshot captured while assembling this exact batch.
+    // Not broadcast to TP peers and never read back from CUDA for recording.
+    struct RecordedLengths {
+        std::vector<int32_t> q_tokens;
+        std::vector<int32_t> kv_tokens_before;
+    };
+    std::optional<RecordedLengths> record_lengths;
+    int64_t                        record_execution_id = 0;
     torch::Tensor engram_token_windows;
     torch::Tensor mm_features_spans;
     // input_lengths holds original input length for requests,

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
+#include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
@@ -564,6 +565,41 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     }
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, tp_rank_);
+    // First instance() call may carry the arg+env resolved engine config; warmup
+    // engines and DSpARK commit-only PREFILL workers skip publishing metadata.
+    auto& recorder = ExecutionRecorder::instance(&params.profiling_debug_logging_config);
+    // Defensively clamp values arriving outside the arg parser (direct C++
+    // construction or older pickles use the config default).
+    record_decode_sample_rate_ = std::clamp(params.profiling_debug_logging_config.record_decode_sample_rate, 0.0, 1.0);
+    if (!warm_up_ && !dspark_prefill_commit_only_ && recorder.needsConfiguration()) {
+        ExecutionRecorder::Json metadata{{"tp_size", parallelism_config_.tp_size},
+                                         {"dp_size", parallelism_config_.dp_size},
+                                         {"world_size", parallelism_config_.world_size},
+                                         {"num_layers", params.model_config_.num_layers},
+                                         {"vocab_size", params.model_config_.vocab_size},
+                                         {"max_seq_len", params.model_config_.max_seq_len},
+                                         {"model_config", params.model_config_.to_string()},
+                                         {"record_decode_sample_rate", record_decode_sample_rate_},
+                                         {"decode_filter_policy", std::string("sp_verify_step_sampling")},
+                                         {"scope", std::string("mtp_executor")},
+                                         {"sp_type", SpeculativeExecutionConfig::to_string(propose_params->sp_type)},
+                                         {"propose_step", propose_step_},
+                                         {"is_dspark", is_dspark_},
+                                         {"draft_vocab_size", draft_vocab_size_},
+                                         {"model_fingerprint", ExecutionRecorder::JsonValue()}};
+        // Cache details are optional metadata; recording also supports executors without a cache manager.
+        if (cache_manager_) {
+            const auto& cache_config       = cache_manager_->cacheConfig();
+            metadata["cache_block_tokens"] = cache_config.seq_size_per_block;
+            metadata["cache_groups"]       = cache_config.groupNums();
+            metadata["cache_config"]       = cache_config.debugString();
+        }
+        const bool configured =
+            recorder.configure(parallelism_config_.world_rank, parallelism_config_.dp_rank, std::move(metadata));
+        if (!configured) {
+            RTP_LLM_LOG_WARNING("batch recorder initialization failed; configuration was not published");
+        }
+    }
     if (params.profiling_debug_logging_config.enable_model_inputs_log) {
         model_inputs_logger_ =
             std::make_shared<ModelInputsLogger>(params.parallelism_config.world_rank,
@@ -878,6 +914,7 @@ void MtpExecutor::collectPrefillMetrics(const StreamGroups&  stream_groups,
 absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& streams,
                                       MtpMetricsCollector&                metrics_collector,
                                       int64_t                             schedule_time_us) {
+    const int64_t step_start_us        = autil::TimeUtility::currentTimeInMicroSeconds();
     size_t total_prefix_length  = 0;
     size_t total_execute_length = 0;
     size_t total_length         = 0;
@@ -913,14 +950,36 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     speculative::FastTopKSamplerOutput fast_topk_sampler_output;
     int64_t                            model_forward_us = 0;
     bool                               target_only      = false;
+    std::shared_ptr<RecordedBatch>     batch_record;
+
+    // Phase-1 speculative recording: prefill batches only. decodeStep is not
+    // wired, so decode steps never allocate a record id regardless of the
+    // engine-wide decode sampling ratio.
+    auto&      execution_recorder = ExecutionRecorder::instance();
+    const bool record_owner = execution_recorder.enabled() && !warm_up_ && !dspark_prefill_commit_only_ && isTpRank0();
+    const bool has_request_stream =
+        std::any_of(streams.begin(), streams.end(), [](const GenerateStreamPtr& s) { return !s->isFakeStream(); });
+    const int64_t record_id = shouldRecordBatch(record_owner, has_request_stream, stream_groups.totalModelBatchSize()) ?
+                                  execution_recorder.nextId() :
+                                  0;
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(gather_model_input)");
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_);
+        auto    model_input_status =
+            batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_, record_id != 0);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
         model_input                              = std::move(model_input_status.value());
+        model_input.record_execution_id          = record_id;
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+    // Early exits (skip_run, target-only alignment) leave null TTFT rows: the
+    // RecordedBatch destructor still submits, matching NormalExecutor. A
+    // snapshot anomaly must degrade recording only, never the serving step.
+    try {
+        batch_record = record_id ? recordBatchInputs(model_input, stream_groups) : nullptr;
+    } catch (const std::exception& e) {
+        execution_recorder.reportSnapshotError(e.what());
     }
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(tp_sync_input)");
@@ -972,8 +1031,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    if (target_only && !is_dspark_
-        && canEarlyReturnTargetOnlyPrefill(parallelism_config_.dp_size)) {
+    if (target_only && !is_dspark_ && canEarlyReturnTargetOnlyPrefill(parallelism_config_.dp_size)) {
         if (metrics_reporter_) {
             collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
         }
@@ -989,6 +1047,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             return absl::OkStatus();
         }
         if (isTpRank0()) {
+            if (batch_record) {
+                batch_record->setStepDurationUs(autil::TimeUtility::currentTimeInMicroSeconds() - step_start_us);
+            }
             return batch_stream_processor_->dispatchPrefillOnly(stream_groups);
         }
         return absl::OkStatus();
@@ -1105,6 +1166,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         cudaSyncAndCheck();
         releaseAllModelBuffers();
         if (isTpRank0()) {
+            if (batch_record) {
+                batch_record->setStepDurationUs(autil::TimeUtility::currentTimeInMicroSeconds() - step_start_us);
+            }
             return batch_stream_processor_->dispatchPrefillOnly(stream_groups);
         }
         return absl::OkStatus();
@@ -1145,11 +1209,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // dispatch
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(dispatch_output)");
-        auto result =
-            batch_stream_processor_->dispatchPrefill(stream_groups,
-                                                     {std::move(model_output), std::move(sampler_output)},
-                                                     {std::move(draft_model_output), std::move(draft_sampler_output)},
-                                                     draft_last_hidden_states);
+        if (batch_record) {
+            batch_record->setStepDurationUs(autil::TimeUtility::currentTimeInMicroSeconds() - step_start_us);
+        }
+        auto result = batch_stream_processor_->dispatchPrefill(
+            stream_groups,
+            {std::move(model_output), std::move(sampler_output), std::move(batch_record)},
+            {std::move(draft_model_output), std::move(draft_sampler_output)},
+            draft_last_hidden_states);
         RTP_LLM_LOG_DEBUG("dispatch done");
 
         releaseAllModelBuffers();
@@ -1249,17 +1316,42 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     bool                          prev_bookkeeping_synced_for_spec_logits = false;
     bool                          spec_logits_async_launched              = false;
     bool                          spec_logits_processor_present           = false;
+    const int64_t                 step_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
     // StreamGroups snapshots scheduling metadata. Wait for any mutable
     // bookkeeping/KV-swap state that has not yet reached a safe snapshot.
     waitPreviousBookkeepingBeforeStreamPreparation(streams);
     StreamGroups stream_groups(streams);
 
+    // Phase-2 speculative recording: one record per decode step. The row
+    // builder runs on this thread before the gather. The bookkeeping wait is
+    // conditional: with a usable snapshot, the previous host update may still
+    // be running, so the builder follows StreamGroups' snapshot batch-size rule.
+    // decodeStep is always a decode batch, so the
+    // Bresenham sampling gate applies to every structurally recordable step;
+    // sampleDecodeStep() sits last in the short-circuit chain so warmup,
+    // commit-only or non-tp0 executors never spend credit. Early-exit paths
+    // below still submit: batch_record destructs at scope exit with null
+    // timing fields (omitted means unknown).
+    auto&      execution_recorder = ExecutionRecorder::instance();
+    const bool record_owner = execution_recorder.enabled() && !warm_up_ && !dspark_prefill_commit_only_ && isTpRank0();
+    const bool has_request_stream =
+        std::any_of(streams.begin(), streams.end(), [](const GenerateStreamPtr& s) { return !s->isFakeStream(); });
+    const int64_t record_id =
+        shouldRecordBatch(record_owner, has_request_stream, stream_groups.totalModelBatchSize()) && sampleDecodeStep() ?
+            execution_recorder.nextId() :
+            0;
+    std::shared_ptr<RecordedBatch> batch_record;
+    try {
+        batch_record = record_id ? buildSpVerifyRecord(record_id, stream_groups) : nullptr;
+    } catch (const std::exception& e) {
+        execution_recorder.reportSnapshotError(e.what());
+    }
+
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(gather_model_input)");
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto model_input_status =
-            batch_stream_processor_->gatherDecodeModelInput(stream_groups, buffer_holder_);
+        auto    model_input_status = batch_stream_processor_->gatherDecodeModelInput(stream_groups, buffer_holder_);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
         model_input = std::move(model_input_status.value());
         executor_collector.gather_model_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -1603,6 +1695,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             stream_groups, accept_len_ready_event, speculative_sampler_output, metrics_collector, model_forward_us);
     }
 
+    if (batch_record) {
+        batch_record->setStepDurationUs(autil::TimeUtility::currentTimeInMicroSeconds() - step_start_us);
+    }
     auto dispatch_result = dispatchDecodeOutput(stream_groups,
                                                 streams,
                                                 speculative_sampler_output,
@@ -1612,7 +1707,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                                 std::move(draft_prefill_model_output),
                                                 std::move(draft_prefill_sampler_output),
                                                 std::move(rejection_event),
-                                                std::move(draft_event));
+                                                std::move(draft_event),
+                                                std::move(batch_record));
     if (dispatch_result.ok() && engram_anchor_windows.defined()) {
         auto next_history = MtpBatchStreamProcessor::advanceEngramTokenWindows(
             engram_anchor_windows, speculative_sampler_output.accept_tokens, speculative_sampler_output.accept_len);
@@ -1622,6 +1718,49 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
     }
     return dispatch_result;
+}
+
+std::shared_ptr<RecordedBatch> MtpExecutor::buildSpVerifyRecord(int64_t record_id, const StreamGroups& groups) const {
+    auto& recorder = ExecutionRecorder::instance();
+    using Json     = ExecutionRecorder::Json;
+    // One row per request slot in updateStreams slice order (decode streams
+    // first, then context streams) so dispatch-side timing slices stay in
+    // bounds. Verify rows carry the engine-level verify width as q_len: the
+    // draft proposal loop stays invisible to replay, which only needs
+    // (kv_len, q_len, accept_len) to rebuild sequence advancement. Context
+    // streams riding a decode step (PD fusion) record immutable fields only;
+    // their slot lengths are unknown (omitted, not zero).
+    std::vector<Json> rows;
+    auto              append = [&](const auto& streams, const char* phase, bool sp_verify) {
+        for (const auto& stream : streams) {
+            const auto request = stream->recordedRequest();
+            // StreamGroups already validates one non-beam sequence for an active
+            // MTP cache snapshot. Avoid reading worker-owned token history via
+            // currentBatchSize() while the previous bookkeeping may still run.
+            const auto batch_size = stream->hasMtpCacheSnapshot() ? 1 : stream->currentBatchSize();
+            for (int i = 0; i < batch_size; ++i) {
+                Json row{{"phase", std::string(phase)}};
+                if (sp_verify)
+                    row["q_len"] = propose_step_ + 1;
+                else {
+                    row["input_len"] = stream->inputLength();
+                    row["reuse_len"] = stream->initialReuseLength();
+                }
+                if (request)
+                    row["request_id"] = "r" + std::to_string(request->id());
+                if (i != 0)
+                    row["sequence_id"] = i;
+                if (stream->isFakeStream())
+                    row["is_fake"] = true;
+                rows.push_back(std::move(row));
+            }
+        }
+    };
+    append(groups.decodeStreams(), "sp_verify", true);
+    append(groups.contextStreams(), "prefill", false);
+    // JSON numbers lose int64 precision in JavaScript and other double-based consumers.
+    Json record{{"schema_version", 1}, {"owner_id", recorder.owner()}, {"exec_id", std::to_string(record_id)}};
+    return std::make_shared<RecordedBatch>(recorder, std::move(record), std::move(rows));
 }
 
 void MtpExecutor::waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams) {
@@ -1798,7 +1937,6 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     model_input.is_target_verify = false;
     return model_output;
 }
-
 
 SpecLogitsVerifyRunner::LaunchResult
 MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
@@ -2069,23 +2207,28 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
                                                GptModelOutputs                              draft_prefill_model_output,
                                                SamplerOutput                 draft_prefill_sampler_output,
                                                std::shared_ptr<torch::Event> rejection_event,
-                                               std::shared_ptr<torch::Event> draft_event) {
+                                               std::shared_ptr<torch::Event>  draft_event,
+                                               std::shared_ptr<RecordedBatch> recorded_batch) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dispatch_output)");
     absl::Status result;
     if (useStreamAsync()) {
         // Hand off to a worker that waits on main-stream rejection/draft events
-        // via cudaStreamWaitEvent; the main thread returns immediately.
-        result = dispatchDecodeAsync(stream_groups,
-                                     speculative_sampler_output,
-                                     verify_position_ids,
-                                     kv_cache_block_id,
-                                     kv_cache_kernel_block_id,
-                                     {std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output)},
-                                     std::move(rejection_event),
-                                     std::move(draft_event));
+        // via cudaStreamWaitEvent; the main thread returns immediately. The
+        // recorded_batch shared_ptr travels with the merged output; the worker
+        // fills the timing fields in specUpdate and the destructor submits
+        // from whichever thread drops the last reference.
+        result = dispatchDecodeAsync(
+            stream_groups,
+            speculative_sampler_output,
+            verify_position_ids,
+            kv_cache_block_id,
+            kv_cache_kernel_block_id,
+            {std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output), std::move(recorded_batch)},
+            std::move(rejection_event),
+            std::move(draft_event));
     } else {
-        MergedOutput draft_prefill_output{std::move(draft_prefill_model_output),
-                                          std::move(draft_prefill_sampler_output)};
+        MergedOutput draft_prefill_output{
+            std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output), std::move(recorded_batch)};
         result =
             batch_stream_processor_->dispatchDecode(stream_groups, speculative_sampler_output, draft_prefill_output);
         if (result.ok() && useAsyncDeviceState()) {

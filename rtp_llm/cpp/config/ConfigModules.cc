@@ -186,7 +186,10 @@ std::string ProfilingDebugLoggingConfig::to_string() const {
         << "debug_start_fake_process: " << debug_start_fake_process << "\n"
         << "enable_detail_log: " << enable_detail_log << "\n"
         << "check_nan: " << check_nan << "\n"
-        << "enable_model_inputs_log: " << enable_model_inputs_log << "\n";
+        << "enable_model_inputs_log: " << enable_model_inputs_log << "\n"
+        << "enable_batch_record: " << enable_batch_record << "\n"
+        << "record_queue_size: " << record_queue_size << "\n"
+        << "record_decode_sample_rate: " << record_decode_sample_rate << "\n";
     return oss.str();
 }
 
@@ -557,7 +560,6 @@ void DashScGrpcConfig::from_json(const std::string& json_str) {
     server_config.clear();
     parse_grpc_client_server_maps_json(json_str, client_config, server_config);
 }
-
 
 // PDSepConfig
 std::string PDSepConfig::to_string() const {

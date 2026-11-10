@@ -1920,5 +1920,126 @@ class GenerateArgsFromEnvTest(TestCase):
                 read_env_value("ENABLE_CRC", True, str2bool)
 
 
+class BatchRecordArgsTest(TestCase):
+    ENV_BY_FIELD = {
+        "enable_batch_record": "RTP_LLM_ENABLE_BATCH_RECORD",
+        "record_queue_size": "RTP_LLM_RECORD_QUEUE_SIZE",
+        "record_decode_sample_rate": "RTP_LLM_RECORD_DECODE_SAMPLE_RATE",
+    }
+    DEFAULTS = {
+        "enable_batch_record": True,
+        "record_queue_size": 4096,
+        "record_decode_sample_rate": 0.1,
+    }
+    SAMPLES = {
+        "enable_batch_record": False,
+        "record_queue_size": 8192,
+        "record_decode_sample_rate": 0.25,
+    }
+
+    def parse_profile_config(self, args, env, use_sys_argv=False):
+        from rtp_llm.ops import ProfilingDebugLoggingConfig
+        from rtp_llm.server.server_args.profile_debug_logging_group_args import (
+            init_profile_debug_logging_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        config = ProfilingDebugLoggingConfig()
+        parser = EnvArgumentParser()
+        parser.set_root_config(config)
+        init_profile_debug_logging_group_args(parser, config)
+        argv = ["server", *args] if use_sys_argv else ["server"]
+        with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv):
+            parser.parse_args(None if use_sys_argv else args)
+        return config
+
+    def test_defaults(self):
+        for args in (None, []):
+            with self.subTest(args=args):
+                config = self.parse_profile_config(args, {})
+                for name, value in self.DEFAULTS.items():
+                    self.assertEqual(getattr(config, name), value, name)
+                # Byte budget removed: alog rotation (256MB x 160) is the cap.
+                self.assertFalse(hasattr(config, "record_total_bytes"))
+                # Decode follows enable_batch_record directly; only the
+                # sampling rate remains as a decode-side knob.
+                self.assertFalse(hasattr(config, "record_decode"))
+
+    def test_removed_record_total_bytes_is_rejected(self):
+        with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with self.assertRaises(SystemExit) as raised:
+                self.parse_profile_config(["--record_total_bytes", "1024"], {})
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn(
+                "unrecognized arguments: --record_total_bytes", stderr.getvalue()
+            )
+
+    def test_env_values_applied(self):
+        env = {
+            self.ENV_BY_FIELD[name]: str(value) for name, value in self.SAMPLES.items()
+        }
+        for args in (None, []):
+            with self.subTest(args=args):
+                config = self.parse_profile_config(args, env)
+                for name, value in self.SAMPLES.items():
+                    self.assertEqual(getattr(config, name), value, name)
+
+    def test_cli_overrides_environment(self):
+        env = {
+            self.ENV_BY_FIELD[name]: str(not value if isinstance(value, bool) else 0)
+            for name, value in self.SAMPLES.items()
+        }
+        for equals in (False, True):
+            args = []
+            for name, value in self.SAMPLES.items():
+                flag = f"--{name}"
+                args.extend([f"{flag}={value}"] if equals else [flag, str(value)])
+            for use_sys_argv in (False, True):
+                with self.subTest(equals=equals, use_sys_argv=use_sys_argv):
+                    config = self.parse_profile_config(args, env, use_sys_argv)
+                    for name, value in self.SAMPLES.items():
+                        self.assertEqual(getattr(config, name), value, name)
+
+    def test_invalid_bool_rejected(self):
+        for env_name in ("RTP_LLM_ENABLE_BATCH_RECORD",):
+            with self.subTest(env_name=env_name), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ) as stderr:
+                with self.assertRaises(SystemExit) as raised:
+                    self.parse_profile_config([], {env_name: "not-a-bool"})
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("Boolean value expected", stderr.getvalue())
+
+    def test_invalid_sample_rate_rejected(self):
+        for bad in ("1.5", "-0.1", "2", "nan", "inf", "not-a-ratio"):
+            with self.subTest(bad=bad), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ) as stderr:
+                with self.assertRaises(SystemExit) as raised:
+                    self.parse_profile_config(
+                        [], {"RTP_LLM_RECORD_DECODE_SAMPLE_RATE": bad}
+                    )
+                self.assertEqual(raised.exception.code, 2)
+                stderr_text = stderr.getvalue()
+                self.assertIn(
+                    "record_decode_sample_rate",
+                    stderr_text,
+                    f"missing field name for {bad}: {stderr_text}",
+                )
+                self.assertTrue(
+                    "Value must be within [0.0, 1.0]" in stderr_text
+                    or "Float value expected" in stderr_text,
+                    f"missing range/float error for {bad}: {stderr_text}",
+                )
+
+    def test_sample_rate_boundary_values_accepted(self):
+        for good in ("0.0", "1.0", "0.5"):
+            with self.subTest(good=good):
+                config = self.parse_profile_config(
+                    [], {"RTP_LLM_RECORD_DECODE_SAMPLE_RATE": good}
+                )
+                self.assertEqual(config.record_decode_sample_rate, float(good))
+
+
 if __name__ == "__main__":
     main()

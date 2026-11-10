@@ -28,6 +28,9 @@
 
 namespace rtp_llm {
 
+class RecordedRequest;
+struct RecordedTokenTiming;
+
 // GenerateStream-owned buffers stay on host by default; KV cache is the device-side exception.
 
 struct StreamUpdateInfo {
@@ -154,6 +157,10 @@ public:
         return is_fake_stream_;
     }
 
+    std::shared_ptr<RecordedRequest> recordedRequest() const {
+        return recorded_request_;
+    }
+
     // A positive wait_timeout_ms bounds only the consumer condition-variable
     // wait. Zero waits without a caller interval; a request deadline, when
     // configured, remains authoritative.
@@ -171,8 +178,14 @@ public:
     virtual GenerationPrefillCudaGraphStatus generationPrefillCudaGraphStatus() const {
         return GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
     }
-    void update(const StreamUpdateInfo& update_info, bool update_processor = true);
-    void specUpdate(const StreamSpecUpdateInfo& update_info, bool update_processor = true);
+    void update(const StreamUpdateInfo& update_info,
+                bool                    update_processor = true,
+                RecordedTokenTiming*    timings          = nullptr,
+                size_t                  timing_count     = 0);
+    void specUpdate(const StreamSpecUpdateInfo& update_info,
+                    bool                        update_processor = true,
+                    RecordedTokenTiming*        timings          = nullptr,
+                    size_t                      timing_count     = 0);
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
     virtual size_t scoreLen() const {
@@ -284,6 +297,9 @@ public:
     bool isLastChunk() const;      // current chunk reaches seqLength()
     bool isMiddleChunk() const;    // chunked + context + !last → no sample / no output row
     void advanceChunk();  // reuse_length_ += currentChunkLen()
+    bool hasAdvancedChunk() const {
+        return chunk_advanced_;
+    }
     int  cacheStorePublishStartToken() const {
         return chunk_advanced_ ? prefixLength() : 0;
     }
@@ -1041,6 +1057,7 @@ protected:
     bool perf_test_ = false;
     friend class StreamCacheResource;
     bool is_fake_stream_ = false;
+    std::shared_ptr<RecordedRequest> recorded_request_;
 
     // prefill TP size queried from prefill server (used for asymmetric TP)
     int prefill_tp_size_ = -1;

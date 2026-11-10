@@ -15,6 +15,24 @@ def str2bool(v):
     raise argparse.ArgumentTypeError("Boolean value expected.")
 
 
+def str2ratio(v):
+    """Parse a float restricted to [0.0, 1.0] (rejects nan/inf/out-of-range)."""
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        try:
+            value = float(v)
+        except (TypeError, ValueError):
+            raise argparse.ArgumentTypeError(f"Float value expected, got: {v!r}")
+    else:
+        value = float(v)
+    if not 0.0 <= value <= 1.0:
+        raise argparse.ArgumentTypeError(
+            f"Value must be within [0.0, 1.0], got: {value}"
+        )
+    return value
+
+
 def str2_cp_rotate_method(value):
     """Convert string to CPRotateMethod enum."""
     if value is None:

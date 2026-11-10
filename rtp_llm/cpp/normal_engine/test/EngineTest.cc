@@ -115,9 +115,9 @@ TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
             NormalBatchStreamProcessor(model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, config, false),
             mapping_(std::move(mapping)) {}
 
-        absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& groups,
-                                                        TensorHolder&       holder) const override {
-            auto result = NormalBatchStreamProcessor::gatherModelInput(groups, holder);
+        absl::StatusOr<GptModelInputs>
+        gatherModelInput(const StreamGroups& groups, TensorHolder& holder, bool record_lengths) const override {
+            auto result = NormalBatchStreamProcessor::gatherModelInput(groups, holder, record_lengths);
             if (!result.ok()) {
                 return result.status();
             }
@@ -1348,14 +1348,7 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupStartup) {
     // whole-segment shape runs once during warmup and once while constructing the system prompt.
     ASSERT_EQ(*config.forward_shapes,
               (std::vector<ForwardShape>{
-                  {4, 0, 1},
-                  {4, 4, 1},
-                  {4, 8, 1},
-                  {4, 12, 1},
-                  {3, 16, 1},
-                  {16, 14, 4},
-                  {7, 0, 1},
-                  {7, 0, 1}}));
+                  {4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {16, 14, 4}, {7, 0, 1}, {7, 0, 1}}));
     const auto& cache_config = engine->resourceContext().cache_manager->cacheConfig();
     ASSERT_EQ(cache_config.groups().size(), 1u);
     ASSERT_EQ(cache_config.groups().front().block_num, 100u);

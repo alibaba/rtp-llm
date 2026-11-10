@@ -307,6 +307,7 @@ def _download_http_content(
     cancellation_event=None,
 ) -> BytesIO:
     import requests
+    from urllib3.exceptions import ReadTimeoutError
 
     response = None
     try:
@@ -347,7 +348,10 @@ def _download_http_content(
         raise
     except (requests.exceptions.Timeout, TimeoutError):
         raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED)
-    except requests.exceptions.ConnectionError:
+    except requests.exceptions.ConnectionError as error:
+        # Response.iter_content wraps urllib3's read timeout in ConnectionError.
+        if error.args and isinstance(error.args[0], ReadTimeoutError):
+            raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED)
         raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
     except (
         requests.exceptions.InvalidURL,
