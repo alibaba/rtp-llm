@@ -4,7 +4,11 @@
 import base64
 import json
 import logging
+import os
+import signal
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -22,7 +26,11 @@ from rtp_llm.models_py.modules.dsv41.engram_distributed import (
     EngramStartup,
 )
 from rtp_llm.models_py.modules.dsv41.engram_distributed import config as topology
-from rtp_llm.models_py.modules.dsv41.engram_distributed import exchange, shard_publisher
+from rtp_llm.models_py.modules.dsv41.engram_distributed import (
+    exchange,
+    resident,
+    shard_publisher,
+)
 from rtp_llm.models_py.modules.dsv41.engram_distributed.placement import (
     plan_shards,
     segment_rows,
@@ -1646,6 +1654,126 @@ class RealStoreTest(StartupTestCase):
                     self.assertEqual(error.cause_code, "PERMISSION_DENIED")
                     self.assertNotIn("private", str(error))
                 self.assertIsNone(self.runtime.prepared())
+
+
+class ResidentStartupTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.group, self.documents = fixture(n=1, p=1)
+        self.env = {
+            "RTP_ENGRAM_STORAGE": "host_shared",
+            "ENGRAM_SHARD_COUNT": "1",
+            "RTP_ENGRAM_RESIDENT_DIR": str(self.root),
+            "RTP_ENGRAM_RESIDENT_GENERATION": self.group["generation"],
+            "RTP_ENGRAM_MODEL_REVISION": self.group["model_revision"],
+            "RTP_ENGRAM_CHECKPOINT": str(self.root),
+            "RTP_ENGRAM_COHORT_TIMEOUT": "3",
+        }
+        self.generation = resident.ResidentGeneration(self.env)
+
+    def child(self, code, *args):
+        process = subprocess.Popen(
+            [sys.executable, "-c", code, *args],
+            env={**os.environ, **self.env},
+            stdin=subprocess.PIPE,
+        )
+
+        def cleanup():
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)
+
+        self.addCleanup(cleanup)
+        return process
+
+    def wait_for_file(self, process, path):
+        deadline = time.monotonic() + 5
+        while (
+            not path.exists() and process.poll() is None and time.monotonic() < deadline
+        ):
+            time.sleep(0.02)
+        self.assertTrue(path.is_file())
+
+    def test_worker_signals_leave_owner_and_generation_available(self):
+        owner = self.child(
+            """
+import json, sys
+from rtp_llm.models_py.modules.dsv41.engram_distributed import resident
+
+document = json.loads(sys.argv[1])
+
+class Publisher:
+    def publish(self, *args, **kwargs):
+        return document
+
+    def release(self, generation):
+        return []
+
+resident.ShardPublisher = Publisher
+sys.argv = [sys.argv[0], "--shard", "0", "--host-id", "host-0"]
+resident.main()
+""",
+            json.dumps(self.documents[0]),
+        )
+        path = self.generation.directory / "shard-0" / "ready.json"
+        self.wait_for_file(owner, path)
+        original = path.read_bytes()
+        worker_code = """
+import sys
+from pathlib import Path
+from rtp_llm.models_py.modules.dsv41.engram_distributed import EngramRuntime, EngramStartup, resident
+
+resident.checkpoint_samples = lambda *_: {}
+runtime = EngramRuntime()
+EngramStartup(None, rank=0, world_size=4, publish=None, install=runtime.install).run()
+package, _ = runtime.prepared()
+assert package["generation"] == sys.argv[2] and len(package["capabilities"]) == 2
+Path(sys.argv[1]).touch()
+sys.stdin.readline()
+"""
+        survivor = self.child(
+            worker_code, str(self.root / "survivor"), self.group["generation"]
+        )
+        self.wait_for_file(survivor, self.root / "survivor")
+        for sig in (signal.SIGKILL, signal.SIGTERM):
+            with self.subTest(sig=sig):
+                ready = self.root / sig.name
+                worker = self.child(worker_code, str(ready), self.group["generation"])
+                self.wait_for_file(worker, ready)
+                worker.send_signal(sig)
+                self.assertEqual(worker.wait(timeout=5), -sig)
+                self.assertIsNone(survivor.poll())
+                self.assertIsNone(owner.poll())
+                self.assertEqual(path.read_bytes(), original)
+        with self.assertRaisesRegex(exchange.ExchangeError, "ALREADY_CLAIMED"):
+            self.generation.claim(0)
+        survivor.communicate(input=b"drain\n", timeout=5)
+        self.assertEqual(survivor.returncode, 0)
+        owner.terminate()
+        self.assertEqual(owner.wait(timeout=5), 0)
+        self.assertFalse(path.exists())
+        with self.assertRaisesRegex(exchange.ExchangeError, "ALREADY_CLAIMED"):
+            self.generation.claim(0)
+
+    def test_incomplete_and_incompatible_generations_fail_closed(self):
+        with self.assertRaisesRegex(topology.ShardConfigError, "REQUIRES_HOST_SHARED"):
+            resident.ResidentGeneration({**self.env, "RTP_ENGRAM_STORAGE": "host"})
+        missing = resident.ResidentGeneration(
+            {**self.env, "RTP_ENGRAM_COHORT_TIMEOUT": "0.01"}
+        )
+        with self.assertRaisesRegex(exchange.ExchangeError, "STARTUP_TIMEOUT"):
+            missing.load()
+        path = self.generation.claim(0)
+        resident._publish_descriptor(
+            path, dict(self.documents[0], generation=str(UUID(int=456)))
+        )
+        with self.assertRaisesRegex(ValueError, "generation/count/revision/hash"):
+            self.generation.load()
+        path.chmod(0o644)
+        with self.assertRaisesRegex(exchange.ExchangeError, "UNSAFE_RESIDENT"):
+            self.generation.load()
 
 
 if __name__ == "__main__":
