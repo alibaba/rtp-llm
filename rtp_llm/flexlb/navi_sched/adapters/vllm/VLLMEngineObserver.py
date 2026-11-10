@@ -1566,6 +1566,11 @@ class VLLMEngineObserver:
             and _read_bool_env("VLLM_NAVI_SCHED_PP_SUBMIT_AUDIT_ENABLED", False)
             and int(os.environ.get("NAVI_SCHED_PP_SIZE", "1")) > 1
         )
+        self._pp_workload_timing_enabled = (
+            self._native_ingress
+            and _read_bool_env("VLLM_NAVI_SCHED_PP_WORKLOAD_TIMING", False)
+            and int(os.environ.get("NAVI_SCHED_PP_SIZE", "1")) > 1
+        )
         _execution_timing_probe.install_gc_timing_audit()
         cache_config = vllm_config.cache_config
         if not cache_config.enable_prefix_caching:
@@ -1848,6 +1853,11 @@ class VLLMEngineObserver:
         self._bridge = naviSchedModule()._VLLMAgentBridge(
             self._agent, pd_separated=self._native_ingress
         )
+        if getattr(self, "_pp_workload_timing_enabled", False) and not hasattr(
+            self._bridge, "last_workload_report_duration_ns"
+        ):
+            logger.warning("NaviSched PP workload timing requires a matching C++ bridge")
+            self._pp_workload_timing_enabled = False
         if not self._bridge.enable_forwarding():
             self.shutdown()
             raise RuntimeError("failed to enable NaviSched Agent forwarding")
@@ -4001,12 +4011,27 @@ class VLLMEngineObserver:
         return None
 
     def _report_prepared_workload(self, reason, admitted_state=None) -> None:
-        with self._workload_report_lock:
-            workload = self._capture_arrival_workload()
-            if self._report_workload_locked(workload, reason, admitted_state):
-                if admitted_state is not None:
-                    with admitted_state.lock:
-                        admitted_state.admission_reported = True
+        timing = (
+            _execution_timing_probe.WorkloadReportTiming()
+            if getattr(self, "_pp_workload_timing_enabled", False)
+            else None
+        )
+        waiting_requests = -1
+        try:
+            with self._workload_report_lock:
+                if timing is not None:
+                    timing.mark("report_lock_wait")
+                workload = self._capture_arrival_workload()
+                waiting_requests = workload.waiting_request_count
+                if timing is not None:
+                    timing.mark("arrival_snapshot")
+                if self._report_workload_locked(workload, reason, admitted_state, timing):
+                    if admitted_state is not None:
+                        with admitted_state.lock:
+                            admitted_state.admission_reported = True
+        finally:
+            if timing is not None:
+                timing.finish(logger, reason, waiting_requests)
 
     def _refresh_and_report_workload(
         self,
@@ -4015,32 +4040,55 @@ class VLLMEngineObserver:
         reason,
         admitted_state=None,
     ) -> None:
-        with self._workload_report_lock:
-            with self._workload_lock:
-                workload = self._synchronize_workload_locked(scheduler, request_ids)
-                if workload is None:
-                    return
-                if admitted_state is not None:
-                    self._remove_prepared_workload(
-                        admitted_state, admitted_state.request_ids
+        timing = (
+            _execution_timing_probe.WorkloadReportTiming()
+            if getattr(self, "_pp_workload_timing_enabled", False)
+            else None
+        )
+        waiting_requests = -1
+        try:
+            with self._workload_report_lock:
+                if timing is not None:
+                    timing.mark("report_lock_wait")
+                with self._workload_lock:
+                    if timing is not None:
+                        timing.mark("workload_lock_wait")
+                    workload = self._synchronize_workload_locked(scheduler, request_ids)
+                    if workload is None:
+                        return
+                    if admitted_state is not None:
+                        self._remove_prepared_workload(
+                            admitted_state, admitted_state.request_ids
+                        )
+                        for request_id in admitted_state.request_ids:
+                            if (
+                                self._pending_forward_batches.get(request_id)
+                                is admitted_state
+                            ):
+                                self._pending_forward_batches.pop(request_id, None)
+                    reported_workload = self._workload_with_pending_admissions_locked(
+                        workload
                     )
-                    for request_id in admitted_state.request_ids:
-                        if (
-                            self._pending_forward_batches.get(request_id)
-                            is admitted_state
+                    waiting_requests = reported_workload.waiting_request_count
+                    if timing is not None:
+                        timing.mark("scheduler_snapshot")
+                pending_admissions = self._pending_admission_states(admitted_state)
+                if timing is not None:
+                    timing.mark("pending_admissions")
+                if pending_admissions:
+                    for state in pending_admissions:
+                        if self._report_workload_locked(
+                            reported_workload, reason, state, timing
                         ):
-                            self._pending_forward_batches.pop(request_id, None)
-                reported_workload = self._workload_with_pending_admissions_locked(
-                    workload
-                )
-            pending_admissions = self._pending_admission_states(admitted_state)
-            if pending_admissions:
-                for state in pending_admissions:
-                    if self._report_workload_locked(reported_workload, reason, state):
-                        with state.lock:
-                            state.admission_reported = True
-                return
-            self._report_workload_locked(reported_workload, reason)
+                            with state.lock:
+                                state.admission_reported = True
+                        if timing is not None:
+                            timing.mark("admission_bookkeeping")
+                    return
+                self._report_workload_locked(reported_workload, reason, timing=timing)
+        finally:
+            if timing is not None:
+                timing.finish(logger, reason, waiting_requests)
 
     def _pending_admission_states(self, preferred_state=None):
         candidates = []
@@ -4066,7 +4114,9 @@ class VLLMEngineObserver:
                 pending.append(state)
         return pending
 
-    def _report_workload_locked(self, workload, reason, admitted_state=None) -> bool:
+    def _report_workload_locked(
+        self, workload, reason, admitted_state=None, timing=None
+    ) -> bool:
         workload = self._advance_running_elapsed(workload)
         admitted_schedule_batch_id = 0
         admitted_local_batch_id = 0
@@ -4097,6 +4147,9 @@ class VLLMEngineObserver:
             waiting_request_options["waiting_request_ids"] = list(
                 workload.waiting_request_ids or ()
             )
+        if timing is not None:
+            waiting_request_options["record_timing"] = True
+            timing.mark("prepare_report")
         try:
             reported = self._bridge.report_workload(
                 time.time_ns() // 1000,
@@ -4148,6 +4201,11 @@ class VLLMEngineObserver:
                 admitted_local_batch_id,
             )
             return False
+        if timing is not None:
+            timing.mark("bridge")
+            timing.native_report_ns += self._bridge.last_workload_report_duration_ns()
+            timing.native_report_calls += 1
+            timing.mark("read_timing")
         if not reported:
             logger.error(
                 "NaviSched rejected vLLM workload: reason=%s "

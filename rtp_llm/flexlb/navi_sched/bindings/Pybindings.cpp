@@ -1,4 +1,5 @@
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <optional>
 #include <openssl/sha.h>
@@ -160,6 +161,30 @@ void registerAlogExitHandler()
         }
     });
 }
+
+thread_local int64_t lastWorkloadReportDurationNs = 0;
+
+class WorkloadReportTimer {
+public:
+    explicit WorkloadReportTimer(bool enabled)
+        : _enabled(enabled)
+        , _start(enabled ? Clock::now() : Clock::time_point())
+    {
+    }
+
+    ~WorkloadReportTimer()
+    {
+        if (_enabled) {
+            lastWorkloadReportDurationNs =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - _start).count();
+        }
+    }
+
+private:
+    using Clock = std::chrono::steady_clock;
+    bool _enabled;
+    Clock::time_point _start;
+};
 
 class VLLMAgentBridge {
 public:
@@ -923,8 +948,10 @@ public:
         int32_t runningDecodeRequestCount, int64_t runningDecodeGeneratedTokenCount,
         int64_t runningDecodeRemainingTokenBudget,
         const std::vector<int64_t> &coveredNativeBatchIds,
-        const std::optional<std::vector<uint64_t>> &waitingRequestIds) const
+        const std::optional<std::vector<uint64_t>> &waitingRequestIds,
+        bool recordTiming) const
     {
+        const WorkloadReportTimer timer(recordTiming);
         if (!_agent) {
             return false;
         }
@@ -1326,7 +1353,11 @@ void bindNaviSchedData(py::module_ &m)
              py::arg("running_decode_remaining_token_budget"),
              py::arg("covered_native_batch_ids") = std::vector<int64_t>(),
              py::arg("waiting_request_ids") = py::none(),
+             py::arg("record_timing") = false,
              py::call_guard<py::gil_scoped_release>())
+        .def("last_workload_report_duration_ns", [](const VLLMAgentBridge &) {
+            return lastWorkloadReportDurationNs;
+        })
         .def("report_cache_inserted", &VLLMAgentBridge::reportCacheInserted,
              py::arg("hashes"), py::arg("cache_key_type") = 0,
              py::call_guard<py::gil_scoped_release>())

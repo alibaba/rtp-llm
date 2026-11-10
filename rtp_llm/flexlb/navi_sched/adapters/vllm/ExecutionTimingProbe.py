@@ -1,5 +1,7 @@
 """Record distinct native Agent-label and backend-utilization clock brackets."""
 
+import itertools
+import json
 import math
 import time
 from functools import wraps
@@ -207,6 +209,50 @@ def _diagnostic_info(logger, message, *args):
     except Exception:
         _diagnostic_unprepared_loss = True
         return False
+
+
+class WorkloadReportTiming:
+    """Measure one PP workload report without logging under its locks."""
+
+    _sequence = itertools.count()
+
+    def __init__(self):
+        self.started_ns = self.previous_ns = time.perf_counter_ns()
+        self.cpu_started_ns = time.thread_time_ns()
+        self.stages_ns = {}
+        self.native_report_ns = 0
+        self.native_report_calls = 0
+
+    def mark(self, stage):
+        now = time.perf_counter_ns()
+        self.stages_ns[stage] = self.stages_ns.get(stage, 0) + now - self.previous_ns
+        self.previous_ns = now
+
+    def finish(self, logger, reason, waiting_requests):
+        self.mark("finish")
+        elapsed_ns = self.previous_ns - self.started_ns
+        sequence = next(self._sequence)
+        if elapsed_ns < 5_000_000 and sequence % 32 != 0:
+            return
+        cpu_ns = time.thread_time_ns() - self.cpu_started_ns
+        _diagnostic_info(
+            logger,
+            "[navi-pp-workload-timing] %s",
+            json.dumps(
+                dict(
+                    event_time_us=time.time_ns() // 1000,
+                    reason=reason,
+                    waiting_requests=waiting_requests,
+                    elapsed_ns=elapsed_ns,
+                    cpu_ns=cpu_ns,
+                    stages_ns=self.stages_ns,
+                    native_report_ns=self.native_report_ns,
+                    native_report_calls=self.native_report_calls,
+                    periodic_sample=sequence % 32 == 0,
+                ),
+                separators=(",", ":"),
+            ),
+        )
 
 
 class _DiagnosticLoggerProxy:
