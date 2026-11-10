@@ -2,3 +2,5 @@ interface:
   display_name: "FlexLB 开发规范"
   short_description: "规范 FlexLB 功能修改、类流程注释、成员组织、并发资源清理与验证提交"
   default_prompt: "使用 $flexlb-development，依据真实流程完成这次 FlexLB 修改，遵守可读性、成员组织、生命周期和验证规范。"
+policy:
+  allow_implicit_invocation: false
