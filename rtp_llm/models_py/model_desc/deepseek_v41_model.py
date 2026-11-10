@@ -303,7 +303,11 @@ class DeepSeekV41Model(DeepSeekV4Model):
         prefetch = None
         try:
             if self.kv_cache is not None:
+                if os.environ.get("DSV41_TRACE_CAPTURE"):
+                    print("[cap] prepare_engram start", flush=True)
                 self._prepare_engram(inputs)
+                if os.environ.get("DSV41_TRACE_CAPTURE"):
+                    print("[cap] prepare_engram done", flush=True)
                 attn = as_tagged_attention_inputs(inputs.attention_inputs)
                 if (
                     not self._is_decode_role
@@ -333,6 +337,8 @@ class DeepSeekV41Model(DeepSeekV4Model):
                         # lookup can safely run during those preceding steps.
             self.v4._engram_lookup_prefetch = prefetch
             self._prepare_image_features(inputs)
+            if os.environ.get("DSV41_TRACE_CAPTURE"):
+                print("[cap] super.forward start", flush=True)
             return super().forward(inputs, fmha_impl)
         finally:
             try:
