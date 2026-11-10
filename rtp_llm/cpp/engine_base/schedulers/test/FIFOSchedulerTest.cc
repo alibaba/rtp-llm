@@ -6186,4 +6186,16 @@ TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetValidatesFanoutReuseAndShortFinal
     ASSERT_EQ(short_stream->currentBatchSize(), 8);
 }
 
+TEST(FIFOSchedulerChunkGrantTest, testAlignedFinalSuffixGrant) {
+    ASSERT_EQ(computeChunkGrant(4096, 1, 2140, 256), 2140);
+    ASSERT_EQ(alignFinalChunkGrant(computeChunkGrant(4096, 1, 2140, 256), 2140, 256), 2048);
+    ASSERT_EQ(alignFinalChunkGrant(computeChunkGrant(4096, 1, 92, 256), 92, 256), 92);
+    ASSERT_EQ(alignFinalChunkGrant(computeChunkGrant(4096, 1, 2048, 256), 2048, 256), 2048);
+    ASSERT_EQ(alignFinalChunkGrant(computeChunkGrant(4096, 1, 1704, 256), 1704, 256), 1536);
+    ASSERT_EQ(alignFinalChunkGrant(computeChunkGrant(4096, 2, 1704, 256), 1704, 256), 1536);
+    ASSERT_EQ(alignFinalChunkGrant(computeChunkGrant(256, 1, 1704, 256), 1704, 256), 256);
+    // Budget-limited grants are already block-aligned and must not shrink.
+    ASSERT_EQ(alignFinalChunkGrant(computeChunkGrant(512, 1, 1704, 256), 1704, 256), 512);
+}
+
 }  // namespace rtp_llm
