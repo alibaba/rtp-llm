@@ -839,11 +839,24 @@ class AttentionFP8(nn.Module):
         self.wo_a_w = wo_a_w
         self.wo_a_s = wo_a_s
         K_local = n_heads_local * head_dim // n_groups_local
-        _stk_w, _stk_s = _prepare_wo_a_stacked(
-            wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
+        from rtp_llm.models_py.modules.dsv41.sm80_support import (
+            use_reference_gemm_paths,
         )
-        self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
-        self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
+
+        if use_reference_gemm_paths():
+            # The MN-major TMA-aligned packing is consumed only by the SM100
+            # fp8_einsum output projection, and its DeepGEMM JIT cannot target
+            # pre-sm90 archs (griddepcontrol). Reference output projection
+            # reads the raw wo_a_w/wo_a_s kept above; warmup consumers are
+            # None-safe / capability-gated.
+            self.register_buffer("_wo_a_stk_w", None, persistent=False)
+            self.register_buffer("_wo_a_stk_s", None, persistent=False)
+        else:
+            _stk_w, _stk_s = _prepare_wo_a_stacked(
+                wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
+            )
+            self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
+            self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
         self.wo_b = _fp8_w_s(
             W.v4_attn_wo_b_w,
             W.v4_attn_wo_b_s,

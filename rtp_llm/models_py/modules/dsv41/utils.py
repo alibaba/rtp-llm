@@ -193,6 +193,21 @@ def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors."""
     if _is_v41_fp8_scale(w, s):
         return V41MXFP8Linear(w, s)
+    from rtp_llm.models_py.modules.dsv41.sm80_support import (
+        use_reference_gemm_paths,
+    )
+
+    if use_reference_gemm_paths():
+        # Block-128 UE8M0 checkpoint scales: QuantizedLinear dequantizes
+        # exactly (e4m3 x 2^k) on the fly, avoiding both the SM100-only
+        # DeepGEMM scale repack (JIT emits sm90+ PTX) and its FP8 GEMM.
+        from rtp_llm.models_py.modules.dsv41.qlinear import QuantizedLinear
+
+        linear = QuantizedLinear(w.shape[1], w.shape[0], storage="fp8")
+        linear.weight = w
+        linear.scale = s
+        _FP8_LINEAR_REGISTRY.add(linear)
+        return linear
     raw_scale = s
     if s.dtype == torch.float8_e8m0fnu:
         s = _repack_v4_fp8_scale_to_int32(s)
@@ -209,7 +224,13 @@ def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
     s = weights[scale_key]
     if _is_v41_fp8_scale(w, s):
         return _v4_fp8_linear(w, s)
-    if s.dtype == torch.float8_e8m0fnu:
+    from rtp_llm.models_py.modules.dsv41.sm80_support import (
+        use_reference_gemm_paths,
+    )
+
+    # Reference GPUs keep raw UE8M0 scales (QuantizedLinear dequant path);
+    # the DeepGEMM int32 repack JIT cannot target pre-sm90 archs.
+    if s.dtype == torch.float8_e8m0fnu and not use_reference_gemm_paths():
         s = _repack_v4_fp8_scale_to_int32(s)
         weights[scale_key] = s
     return _v4_fp8_linear(w, s)
