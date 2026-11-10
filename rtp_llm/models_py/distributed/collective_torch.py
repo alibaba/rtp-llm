@@ -350,16 +350,32 @@ def _create_process_groups(
 def _register_process_groups_to_cpp():
     """Register Python comm op callbacks for C++ to call back into."""
     try:
+        # Canonical native-library load order: rtp_llm.ops preloads
+        # libth_transformer_config.so before librtp_compute_ops is importable.
+        # In spawned rank processes a bare import without that preload fails
+        # (and can crash standalone), silently skipping registration — which
+        # later trips the C++ execAllGather/execAllReduce "callback not
+        # registered" asserts during engine init. The import is idempotent.
+        import rtp_llm.ops  # noqa: F401
+    except Exception as e:
+        logging.warning(
+            "rtp_llm.ops preload failed before comm-ops registration: %r", e
+        )
+    try:
         import librtp_compute_ops
 
         if not hasattr(librtp_compute_ops, "register_comm_ops"):
-            logging.debug(
-                "register_comm_ops not available, skip C++ comm ops registration"
+            logging.warning(
+                "register_comm_ops not available on librtp_compute_ops (%s), "
+                "skip C++ comm ops registration",
+                getattr(librtp_compute_ops, "__file__", "unknown"),
             )
             return
-    except ImportError:
-        logging.debug(
-            "librtp_compute_ops not available, skip C++ comm ops registration"
+    except Exception as e:
+        logging.warning(
+            "librtp_compute_ops not available (%r), skip C++ comm ops "
+            "registration",
+            e,
         )
         return
 
