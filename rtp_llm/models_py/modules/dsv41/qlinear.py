@@ -77,6 +77,28 @@ def _fp4_unpack_to_fp32(
     return w_f * scale_f
 
 
+def _fp4_unpack_into(
+    weight_int8: torch.Tensor,
+    scale_ue8m0: torch.Tensor,
+    lut: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    """Capture-safe FP4 dequantization into a persistent BF16 workspace."""
+    out_dim, packed_in = weight_int8.shape
+    in_dim = packed_in * 2
+    w_uint = weight_int8.to(torch.int32) & 0xFF
+    low = w_uint & 0x0F
+    high = (w_uint >> 4) & 0x0F
+    interleaved = torch.empty(
+        out_dim, in_dim, dtype=torch.int64, device=weight_int8.device
+    )
+    interleaved[:, 0::2] = low.long()
+    interleaved[:, 1::2] = high.long()
+    w_f = lut[interleaved]
+    scale_f = scale_ue8m0.to(torch.float32).repeat_interleave(FP4_BLOCK, 1)[:, :in_dim]
+    torch.mul(w_f, scale_f, out=out)
+
+
 def _fp8_dequant_to_fp32(
     weight_fp8: torch.Tensor, scale_ue8m0: torch.Tensor
 ) -> torch.Tensor:
@@ -142,7 +164,8 @@ class QuantizedLinear(nn.Module):
         self.weight = None
         self.scale = None
         self.scale_gemm = None
-        self._weight_bf16 = None
+        self._fp4_lut = None
+        self._fp4_buf = None
 
     def bind_fp4_weight(
         self,
@@ -152,15 +175,20 @@ class QuantizedLinear(nn.Module):
     ) -> None:
         """Bind FP4 weight plus a prepacked DeepGEMM scale."""
         if torch.version.hip is not None:
-            # ROCm has no FP4 GEMM.  Materialize the exact dequantized BF16
-            # weight once, before graph capture; per-token dequant would both
-            # be far too slow and perform a host->device LUT copy inside the
-            # captured region.
-            self._weight_bf16 = _fp4_unpack_to_fp32(weight, scale).to(
-                torch.bfloat16
-            ).contiguous()
-            self.weight = None
-            self.scale = None
+            # ROCm has no FP4 GEMM.  Keep a per-linear BF16 workspace and
+            # dequantize into it during the forward.  The workspace and LUT
+            # are device-resident before capture, so no host copy happens
+            # inside the captured region and the full expert set is not
+            # duplicated in BF16 (which does not fit beside the KV pool).
+            self._fp4_lut = _FP4_LUT.to(weight.device)
+            self._fp4_buf = torch.empty(
+                self.out_features,
+                self.in_features,
+                dtype=torch.bfloat16,
+                device=weight.device,
+            )
+            self.weight = weight
+            self.scale = scale
             self.scale_gemm = None
             return
         self.weight = weight
@@ -182,8 +210,9 @@ class QuantizedLinear(nn.Module):
         with fused fp{4,8}_gemm that never materializes the dequantized weight.
         """
         if self.storage == "fp4":
-            if self._weight_bf16 is not None:
-                return self._weight_bf16.to(out_dtype)
+            if self._fp4_buf is not None:
+                _fp4_unpack_into(self.weight, self.scale, self._fp4_lut, self._fp4_buf)
+                return self._fp4_buf.to(out_dtype)
             return _fp4_unpack_to_fp32(self.weight, self.scale).to(out_dtype)
         if self.storage == "fp8":
             return _fp8_dequant_to_fp32(self.weight, self.scale).to(out_dtype)
@@ -241,8 +270,9 @@ class QuantizedLinear(nn.Module):
         if self.storage == "bf16":
             return F.linear(x, self.weight)
         if self.storage == "fp4":
-            if self._weight_bf16 is not None:
-                return F.linear(x.to(torch.bfloat16), self._weight_bf16).to(x.dtype)
+            if self._fp4_buf is not None:
+                _fp4_unpack_into(self.weight, self.scale, self._fp4_lut, self._fp4_buf)
+                return F.linear(x.to(torch.bfloat16), self._fp4_buf).to(x.dtype)
             if torch.version.hip is not None:
                 return self._fp4_forward_torch(x)
             return self._fp4_forward_deepgemm(x)
