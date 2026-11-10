@@ -1222,13 +1222,20 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
         """Check if ragged prefill implementation is supported.
 
         Returns True if:
-        1. Not running on SM 10.0 (Blackwell) architecture
+        1. Outside SM 10.0, or eager prefill without a KV block table. Engine
+           activation warmup runs before the production KV pool exists.
         2. The underlying ragged FMHA op supports the inputs
            (requires prefix_lengths to be empty or zero)
         3. MhaRotaryEmbeddingOp supports the inputs
         """
         return (
-            not is_sm_100()
+            (
+                not is_sm_100()
+                or (
+                    not attn_inputs.is_cuda_graph
+                    and attn_inputs.kv_cache_kernel_block_id_device is None
+                )
+            )
             and PyFlashinferPrefillAttnOp.support(attn_inputs)
             and attn_configs.rope_config.style != RopeStyle.Mrope
         )
