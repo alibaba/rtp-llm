@@ -452,6 +452,11 @@ void NaviSchedMasterSummary::Jsonize(JsonWrapper &json)
     json.Jsonize("execution_utilization_global_scaling",
                  executionUtilizationGlobalScaling);
     json.Jsonize("execution_utilization_integral", executionUtilizationIntegral);
+    json.Jsonize("execution_utilization_ingress_qps", executionUtilizationIngressQps, 0.0);
+    json.Jsonize("execution_utilization_latency_seconds", executionUtilizationLatencySeconds, 0.0);
+    json.Jsonize("execution_utilization_effective_kp", executionUtilizationEffectiveKp, 0.0);
+    json.Jsonize("execution_utilization_effective_ki_per_second",
+                 executionUtilizationEffectiveKiPerSecond, 0.0);
     json.Jsonize("execution_utilization_reporting_nodes",
                  executionUtilizationReportingNodes);
     json.Jsonize("scheduler_config_generation", schedulerConfigGeneration);
@@ -521,6 +526,11 @@ std::string NaviSchedMasterSummary::format() const
            << executionUtilizationGlobalScaling
            << "\n  execution_utilization_average: " << executionUtilizationAverage
            << "\n  execution_utilization_integral: " << executionUtilizationIntegral
+           << "\n  execution_utilization_ingress_qps: " << executionUtilizationIngressQps
+           << "\n  execution_utilization_latency_seconds: " << executionUtilizationLatencySeconds
+           << "\n  execution_utilization_effective_kp: " << executionUtilizationEffectiveKp
+           << "\n  execution_utilization_effective_ki_per_second: "
+           << executionUtilizationEffectiveKiPerSecond
            << "\n  execution_utilization_reporting_nodes: "
            << executionUtilizationReportingNodes
            << "\n  schedule_processing_request_count: " << scheduleProcessingRequestCount

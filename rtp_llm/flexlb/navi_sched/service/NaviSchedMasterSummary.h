@@ -142,6 +142,10 @@ public:
     bool executionUtilizationGlobalScaling = false;
     double executionUtilizationAverage = 0.0;
     double executionUtilizationIntegral = 0.0;
+    double executionUtilizationIngressQps = 0.0;
+    double executionUtilizationLatencySeconds = 0.0;
+    double executionUtilizationEffectiveKp = 0.0;
+    double executionUtilizationEffectiveKiPerSecond = 0.0;
     size_t executionUtilizationReportingNodes = 0;
     uint64_t schedulerConfigGeneration = 0;
     std::string schedulerConfigHash;

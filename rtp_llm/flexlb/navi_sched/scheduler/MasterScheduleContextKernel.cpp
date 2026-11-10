@@ -485,6 +485,38 @@ bool MasterScheduleContextKernel::prepareAdmission(
     return applyQueueOverloadLimit(contextData, randomDraw);
 }
 
+void MasterScheduleContextKernel::sampleExecutionUtilizationGainInputs(int64_t nowUs)
+{
+    constexpr int64_t windowUs = 2000000;
+    constexpr double latencyWeight = 0.25;
+    const int64_t elapsedUs = nowUs - _gainSampleTimeUs;
+    if (_gainSampleTimeUs > 0 && elapsedUs < windowUs) {
+        return;
+    }
+    const auto submitCount = _masterScheduleR->getSubmitCount();
+    const auto finished = _masterStateR->getAgentRequestStats();
+    if (_gainSampleTimeUs > 0 && submitCount >= _gainSampleSubmitCount) {
+        _gainIngressQps = (submitCount - _gainSampleSubmitCount) * 1e6 / elapsedUs;
+        _gainIngressQpsMeasured = true;
+        if (finished.finishedCount > _gainSampleFinishedCount &&
+            finished.totalLatencyUs > _gainSampleTotalLatencyUs) {
+            const double latency = (finished.totalLatencyUs - _gainSampleTotalLatencyUs) /
+                (1e6 * (finished.finishedCount - _gainSampleFinishedCount));
+            _gainLatencySeconds = _gainLatencySeconds > 0.0
+                                      ? _gainLatencySeconds + latencyWeight * (latency - _gainLatencySeconds)
+                                      : latency;
+            _gainLatencyUpdateTimeUs = nowUs;
+        }
+    } else {
+        _gainIngressQpsMeasured = false;
+        _gainIngressQps = 0.0;
+    }
+    _gainSampleTimeUs = nowUs;
+    _gainSampleSubmitCount = submitCount;
+    _gainSampleFinishedCount = finished.finishedCount;
+    _gainSampleTotalLatencyUs = finished.totalLatencyUs;
+}
+
 void MasterScheduleContextKernel::updateExecutionUtilization(
     const NaviSchedScheduleContext &context, bool enabled)
 {
@@ -524,10 +556,27 @@ void MasterScheduleContextKernel::updateExecutionUtilization(
         _averageExecutionUtilization = cluster.effective();
         _executionUtilizationReportingNodes = cluster.nodes;
     }
+    auto config = _executionUtilizationConfig;
+    double latencySeconds = 0.0;
+    bool belowCapacity = false;
     if (enabled) {
-        _executionUtilizationController.update(
-            _executionUtilizationConfig, _averageExecutionUtilization,
-            _executionUtilizationReportingNodes, autil::TimeUtility::monotonicTimeUs());
+        const auto nowUs = autil::TimeUtility::monotonicTimeUs();
+        if (config.adaptiveGains) {
+            sampleExecutionUtilizationGainInputs(nowUs);
+            constexpr int64_t maxLatencyAgeUs = 10000000;
+            latencySeconds =
+                nowUs - _gainLatencyUpdateTimeUs <= maxLatencyAgeUs ? _gainLatencySeconds : 0.0;
+            config = ExecutionUtilizationController::gainsForRound(config, _gainIngressQps,
+                                                                   latencySeconds);
+            belowCapacity = _gainIngressQpsMeasured &&
+                            _gainIngressQps <= config.capacityQps;
+        }
+        if (belowCapacity) {
+            _executionUtilizationController.reset();
+        } else {
+            _executionUtilizationController.update(
+                config, _averageExecutionUtilization, _executionUtilizationReportingNodes, nowUs);
+        }
     } else {
         _executionUtilizationController.reset();
     }
@@ -536,6 +585,10 @@ void MasterScheduleContextKernel::updateExecutionUtilization(
         _executionUtilizationReportingNodes, enabled,
         _clusterExecutionUtilization.average(), _clusterExecutionUtilization.running,
         _clusterExecutionUtilization.waiting, _executionUtilizationConfig.globalScaling);
+    _masterScheduleR->recordExecutionUtilizationGains(
+        enabled && config.adaptiveGains ? _gainIngressQps : 0.0, latencySeconds,
+        enabled && !belowCapacity ? config.proportionalGain : 0.0,
+        enabled && !belowCapacity ? config.integralGainPerSecond : 0.0);
 }
 
 bool MasterScheduleContextKernel::applyQueueOverloadLimit(

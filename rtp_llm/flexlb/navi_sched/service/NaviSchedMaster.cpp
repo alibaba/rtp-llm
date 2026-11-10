@@ -608,6 +608,10 @@ std::string NaviSchedMaster::makeSnapshot() const
         summary.executionUtilizationWaiting = execution.waiting;
         summary.executionUtilizationGlobalScaling = execution.globalScaling;
         summary.executionUtilizationIntegral = execution.integral;
+        summary.executionUtilizationIngressQps = execution.ingressQps;
+        summary.executionUtilizationLatencySeconds = execution.latencySeconds;
+        summary.executionUtilizationEffectiveKp = execution.kp;
+        summary.executionUtilizationEffectiveKiPerSecond = execution.kiPerSecond;
         summary.executionUtilizationReportingNodes = execution.reportingNodes;
         const auto overloadStats = _masterScheduleR->getQueueOverloadStats();
         summary.queueOverloadEvaluatedRoundCount =

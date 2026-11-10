@@ -137,6 +137,8 @@ void SchedulerConfigR::Config::Jsonize(JsonWrapper &json)
     json.Jsonize("execution_utilization_target", executionUtilization.target, executionUtilization.target);
     json.Jsonize("execution_utilization_kp", executionUtilization.proportionalGain, executionUtilization.proportionalGain);
     json.Jsonize("execution_utilization_ki_per_second", executionUtilization.integralGainPerSecond, executionUtilization.integralGainPerSecond);
+    json.Jsonize("execution_utilization_adaptive_gains", executionUtilization.adaptiveGains, executionUtilization.adaptiveGains);
+    json.Jsonize("execution_utilization_capacity_qps", executionUtilization.capacityQps, executionUtilization.capacityQps);
     agent.Jsonize(json);
 }
 
@@ -994,6 +996,8 @@ bool SchedulerConfigR::applyPatch(const Config &current,
         "execution_utilization_target",
         "execution_utilization_kp",
         "execution_utilization_ki_per_second",
+        "execution_utilization_adaptive_gains",
+        "execution_utilization_capacity_qps",
         "admission_timeout_ms",
         "batch_timeout_ms",
         "closed_batch_keep_ms",

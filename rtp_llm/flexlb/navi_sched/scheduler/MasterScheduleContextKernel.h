@@ -50,6 +50,7 @@ private:
         bool forceExecutionUtilization = false);
     void updateExecutionUtilization(const NaviSchedScheduleContext &context,
                                     bool enabled);
+    void sampleExecutionUtilizationGainInputs(int64_t nowUs);
     static double calculateQueueOverloadDropProbability(double averagePredictedLatencyMs,
                                                         int64_t scheduleCycleMs,
                                                         int64_t startCycleMultiplier,
@@ -69,6 +70,14 @@ private:
     ExecutionUtilizationController _executionUtilizationController;
     bool _executionUtilizationLimitEnabled = false;
     ExecutionUtilizationController::Config _executionUtilizationConfig;
+    int64_t _gainSampleTimeUs = 0;
+    uint64_t _gainSampleSubmitCount = 0;
+    uint64_t _gainSampleFinishedCount = 0;
+    int64_t _gainSampleTotalLatencyUs = 0;
+    int64_t _gainLatencyUpdateTimeUs = 0;
+    double _gainIngressQps = 0.0;
+    double _gainLatencySeconds = 0.0;
+    bool _gainIngressQpsMeasured = false;
     double _averageExecutionUtilization = 0.0;
     size_t _executionUtilizationReportingNodes = 0;
     navi::AsyncPipePtr _requestPipe;

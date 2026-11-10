@@ -71,14 +71,37 @@ public:
         double target = 1.10;
         double proportionalGain = 0.05;
         double integralGainPerSecond = 0.01;
+        bool adaptiveGains = false;
+        double capacityQps = 0.0;
 
         bool valid() const
         {
             return std::isfinite(target) && target > 0.0 &&
                    std::isfinite(proportionalGain) && proportionalGain >= 0.0 &&
-                   std::isfinite(integralGainPerSecond) && integralGainPerSecond >= 0.0;
+                   std::isfinite(integralGainPerSecond) && integralGainPerSecond >= 0.0 &&
+                   std::isfinite(capacityQps) && capacityQps >= 0.0;
         }
     };
+
+    static Config gainsForRound(Config config, double ingressQps, double latencySeconds)
+    {
+        constexpr double referenceQps = 5000.0;
+        constexpr double referenceLatencySeconds = 3.0;
+        constexpr double minLatencySeconds = 0.1;
+        constexpr double maxGainScale = 2.0;
+        if (!config.adaptiveGains || !std::isfinite(ingressQps) || ingressQps <= 0.0) {
+            return config;
+        }
+        const double latency = std::isfinite(latencySeconds) && latencySeconds > 0.0
+                                   ? std::max(minLatencySeconds, latencySeconds)
+                                   : referenceLatencySeconds;
+        const double qpsScale = referenceQps / ingressQps;
+        const double latencyScale = referenceLatencySeconds / latency;
+        config.proportionalGain *= std::min(maxGainScale, qpsScale * latencyScale);
+        config.integralGainPerSecond *=
+            std::min(maxGainScale, qpsScale * latencyScale * latencyScale);
+        return config;
+    }
 
     static double effectiveUtilization(double busyFraction, double executionCapacity,
                                        int32_t queuedRequests)

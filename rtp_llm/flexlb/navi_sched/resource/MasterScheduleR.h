@@ -28,6 +28,10 @@ public:
         bool globalScaling = false;
         double average = 0.0;
         double integral = 0.0;
+        double ingressQps = 0.0;
+        double latencySeconds = 0.0;
+        double kp = 0.0;
+        double kiPerSecond = 0.0;
         size_t reportingNodes = 0;
         bool enabled = false;
     };
@@ -88,6 +92,8 @@ public:
                                     double rawAverage = 0.0, uint64_t running = 0,
                                     uint64_t waiting = 0, bool globalScaling = false);
     ExecutionUtilizationStats getExecutionUtilizationStats() const;
+    void recordExecutionUtilizationGains(double ingressQps, double latencySeconds, double kp,
+                                         double kiPerSecond);
     void recordColdStartRouting(const NaviSchedColdStartRoutingStats &stats);
     ColdStartRoutingStats getColdStartRoutingStats() const;
     navi::SummaryErrorCode getSummary(const std::string &query,
@@ -130,6 +136,10 @@ private:
     std::atomic<bool> _executionGlobalScaling{false};
     std::atomic<double> _executionUtilizationAverage{0.0};
     std::atomic<double> _executionUtilizationIntegral{0.0};
+    std::atomic<double> _executionIngressQps{0.0};
+    std::atomic<double> _executionLatencySeconds{0.0};
+    std::atomic<double> _executionKp{0.0};
+    std::atomic<double> _executionKiPerSecond{0.0};
     std::atomic<size_t> _executionUtilizationReportingNodes{0};
     std::atomic<bool> _executionUtilizationEnabled{false};
     std::atomic<double> _queueOverloadLatestDropProbability{0.0};

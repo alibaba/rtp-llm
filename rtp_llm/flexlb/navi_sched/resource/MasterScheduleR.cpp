@@ -375,6 +375,15 @@ void MasterScheduleR::recordExecutionUtilization(double average, double integral
     _executionUtilizationEnabled.store(enabled, std::memory_order_relaxed);
 }
 
+void MasterScheduleR::recordExecutionUtilizationGains(double ingressQps, double latencySeconds,
+                                                      double kp, double kiPerSecond)
+{
+    _executionIngressQps.store(ingressQps, std::memory_order_relaxed);
+    _executionLatencySeconds.store(latencySeconds, std::memory_order_relaxed);
+    _executionKp.store(kp, std::memory_order_relaxed);
+    _executionKiPerSecond.store(kiPerSecond, std::memory_order_relaxed);
+}
+
 MasterScheduleR::ExecutionUtilizationStats MasterScheduleR::getExecutionUtilizationStats() const
 {
     ExecutionUtilizationStats stats;
@@ -384,6 +393,10 @@ MasterScheduleR::ExecutionUtilizationStats MasterScheduleR::getExecutionUtilizat
     stats.globalScaling = _executionGlobalScaling.load(std::memory_order_relaxed);
     stats.average = _executionUtilizationAverage.load(std::memory_order_relaxed);
     stats.integral = _executionUtilizationIntegral.load(std::memory_order_relaxed);
+    stats.ingressQps = _executionIngressQps.load(std::memory_order_relaxed);
+    stats.latencySeconds = _executionLatencySeconds.load(std::memory_order_relaxed);
+    stats.kp = _executionKp.load(std::memory_order_relaxed);
+    stats.kiPerSecond = _executionKiPerSecond.load(std::memory_order_relaxed);
     stats.reportingNodes = _executionUtilizationReportingNodes.load(std::memory_order_relaxed);
     stats.enabled = _executionUtilizationEnabled.load(std::memory_order_relaxed);
     return stats;
