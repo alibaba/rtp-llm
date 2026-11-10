@@ -379,6 +379,10 @@ def get_or_build_sched_meta(
     inside the graph so it re-runs (with fresh ``topk_length`` values) on every
     replay. See ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
     """
+    if torch.version.hip is not None:
+        # The FlashMLA tile planner is CUDA-only; the ROCm decode op
+        # (_rocm_sparse_decode) ignores sched_meta entirely.
+        return None
     from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
 
     capturing = False

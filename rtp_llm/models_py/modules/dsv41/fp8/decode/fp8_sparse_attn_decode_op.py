@@ -109,6 +109,27 @@ class SparseAttnV4DecodeFp8Op:
         by ``attn_sink``). Empty rows report ``+inf`` and must be guarded
         by the consumer.
         """
+        if torch.version.hip is not None:
+            # FlashMLA is CUDA-only; ROCm gathers the selected packed slots
+            # through the verified Triton dequant codecs and runs the
+            # reference joint-softmax FMHA (graph-capture safe, sched_meta
+            # unused).
+            from rtp_llm.models_py.modules.dsv41.fp8.decode._rocm_sparse_decode import (
+                rocm_sparse_decode_fwd,
+            )
+
+            return rocm_sparse_decode_fwd(
+                q,
+                kv_cache,
+                attn_sink,
+                topk_idxs,
+                sm_scale=self.softmax_scale,
+                topk_length=topk_length,
+                extra_k_cache=extra_k_cache,
+                extra_topk_idxs=extra_topk_idxs,
+                extra_topk_length=extra_topk_length,
+                return_lse=return_lse,
+            )
         return self._forward_flash_mla(
             q,
             kv_cache,
