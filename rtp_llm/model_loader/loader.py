@@ -700,6 +700,9 @@ class ModelLoader:
         )  # choose convert device to avoid out of mem
         logging.info(f"load weight by device: {convert_device}")
 
+        import os as _os
+        _debug = _os.environ.get("DSV41_DEBUG_MEM") == "1"
+        _prev = torch.cuda.memory_allocated() if _debug else 0
         for layer_id, name, tensor in self.prepare_weights(convert_device):
             if convert_device != device:
                 tensor = tensor.to(device)
@@ -707,6 +710,17 @@ class ModelLoader:
                 weights.set_layer_weight(layer_id, name, tensor)
             else:
                 weights.set_global_weight(name, tensor)
+            if _debug:
+                _now = torch.cuda.memory_allocated()
+                if _now - _prev > 512 * 2**20:
+                    print(
+                        f"[mem] scratch load {name} layer={layer_id} "
+                        f"delta={( _now - _prev) / 2**30:.2f} GiB "
+                        f"allocated={_now / 2**30:.2f} GiB "
+                        f"tensor={(tensor.numel() * tensor.element_size()) / 2**30:.2f} GiB",
+                        flush=True,
+                    )
+                    _prev = _now
         return weights
 
     def _load_layer_weights(self, layer_id: int, device: str):
