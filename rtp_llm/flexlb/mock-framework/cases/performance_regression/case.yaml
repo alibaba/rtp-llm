@@ -69,6 +69,8 @@ phases:
     within: 95s
     wait_after: 65s
 - id: performance
+  # 为简化配置，各性能门禁以自己的步骤开始时间为基准，查询 [-65s, -5s] 的 60 秒窗口。
+  # 各窗口允许错开，无需完全重叠。
   describe: 检查缓存稳定后完整 60 秒的吞吐、延迟和成功率。
   timeout: 360s
   steps:
