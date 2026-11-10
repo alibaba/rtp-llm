@@ -25,6 +25,7 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 #include <algorithm>
 #include <cstring>
 #include <exception>
@@ -1065,6 +1066,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
         maybePrintModelInput(model_input, "prefill target model");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        if (telemetry::TelemetryRuntime::isActive()) {
+            const auto forward_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            for (const auto& stream : streams) {
+                if (stream->isContextStream()) {
+                    stream->recordPrefillForwardTime(forward_time_us);
+                }
+            }
+        }
         model_output          = std::move(forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET));
         mtp::maybeOverrideLastHiddenWithMtpBuffer(
             model_output, *model_, cp_enabled ? -1 : model_input.combo_tokens.numel());

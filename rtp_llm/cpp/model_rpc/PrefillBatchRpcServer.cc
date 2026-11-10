@@ -335,15 +335,22 @@ void DeferredPrefillContext::finishLogicalTrace(const GenerateStream::TimeInfo* 
         context->closeGrpcStream();
         if (has_stream) {
             telemetry::PhaseTiming phase_timing;
-            phase_timing.begin_time_us           = time_info.begin_time_us;
-            phase_timing.running_started         = time_info.running_started;
-            phase_timing.running_started_time_us = time_info.running_started_time_us;
-            phase_timing.first_token_committed   = time_info.first_token_committed;
-            phase_timing.first_token_time_us     = time_info.first_token_time_us;
-            phase_timing.generation_done         = time_info.generation_done;
-            phase_timing.generation_done_time_us = time_info.generation_done_time_us;
-            phase_timing.synthesis_end_time_us   = currentTimeUs();
-            phase_timing.request_id              = context->request_id;
+            phase_timing.begin_time_us               = time_info.begin_time_us;
+            phase_timing.running_started             = time_info.running_started;
+            phase_timing.running_started_time_us     = time_info.running_started_time_us;
+            phase_timing.first_token_committed       = time_info.first_token_committed;
+            phase_timing.first_token_time_us         = time_info.first_token_time_us;
+            phase_timing.generation_done             = time_info.generation_done;
+            phase_timing.generation_done_time_us     = time_info.generation_done_time_us;
+            phase_timing.synthesis_end_time_us       = currentTimeUs();
+            phase_timing.request_id                  = context->request_id;
+            phase_timing.scheduler_enqueue_time_us   = time_info.scheduler_enqueue_time_us;
+            phase_timing.can_run_time_us             = time_info.can_run_time_us;
+            phase_timing.kv_ready_time_us            = time_info.kv_ready_time_us;
+            phase_timing.prefill_previous_release_us = time_info.prefill_previous_release_us;
+            phase_timing.prefill_dispatch_time_us    = time_info.prefill_dispatch_time_us;
+            phase_timing.prefill_forward_time_us     = time_info.prefill_forward_time_us;
+            phase_timing.cache_exposed_wait_us       = time_info.cache_exposed_wait_us;
             phase_timing.error_type =
                 request_ok ? nullptr :
                              (batchErrorCode(logical_status) == static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED) ?
