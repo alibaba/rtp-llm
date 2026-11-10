@@ -623,6 +623,7 @@ def status(config, role):
                 last_n_checkpoints=config.get("last_n_checkpoints"),
                 last_n_page_tokens=config.get("last_n_page_tokens"),
                 prefill_tail_blocks=config[role].get("reuse_cache_tail_blocks"),
+                prefill_test_block_num=config["prefill"].get("test_block_num"),
                 calibration=config.get("last_n_calibration", False),
             )
             result["fastsafetensors_rank_log_lines"] = fastsafetensors_proof(directory / "logs")

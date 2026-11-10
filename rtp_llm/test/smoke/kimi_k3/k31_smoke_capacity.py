@@ -52,7 +52,8 @@ def fastsafetensors_proof(logs):
 
 
 def cache_geometry(engine_log, role, local_tp, *, long_case, last_n_checkpoints=None,
-                   last_n_page_tokens=None, calibration=False, prefill_tail_blocks=None):
+                   last_n_page_tokens=None, calibration=False, prefill_tail_blocks=None,
+                   prefill_test_block_num=None):
     if prefill_tail_blocks is not None and (
         role != "prefill" or type(prefill_tail_blocks) is not int
         or not 1 <= prefill_tail_blocks <= 5 or last_n_checkpoints is not None
@@ -66,6 +67,10 @@ def cache_geometry(engine_log, role, local_tp, *, long_case, last_n_checkpoints=
         raise ValueError("Last-N geometry requires N=1..5 and eight local shards")
     if last_n_page_tokens is not None and (last_n_checkpoints is None or last_n_page_tokens not in (64, 128)):
         raise ValueError("Last-N page size requires an explicit Last-N smoke and 64 or 128 tokens")
+    if prefill_test_block_num is not None and (
+        type(prefill_test_block_num) is not int or prefill_test_block_num < 2
+    ):
+        raise ValueError("Prefill test_block_num must be an integer of at least 2")
     kernel_tokens = last_n_page_tokens or 128
     page_tokens = kernel_tokens if last_n_checkpoints is not None else 1024
     checkpoint_tokens = page_tokens * local_tp
@@ -176,8 +181,14 @@ def cache_geometry(engine_log, role, local_tp, *, long_case, last_n_checkpoints=
             if (min(usable["full"], usable["indexer_kv"]) < paged_minimum
                     or usable["linear"] < linear_minimum):
                 raise ValueError(f"{role} rank {rank}: 1M cache capacity is insufficient: {usable}")
-        elif role == "prefill" and usable["full"] != 95:
-            raise ValueError(f"{role} rank {rank}: expected 95 usable pages for cache pressure")
+        elif role == "prefill":
+            # The launch profile sets physical blocks, including reserved block zero.
+            expected = (prefill_test_block_num if prefill_test_block_num is not None else 96) - 1
+            if usable["full"] != expected:
+                raise ValueError(
+                    f"{role} rank {rank}: expected {expected} usable pages for cache pressure, "
+                    f"got {usable['full']}"
+                )
         capacity[rank] = usable
 
     return dict(

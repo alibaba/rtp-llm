@@ -132,6 +132,14 @@ time.sleep(120)
                 path.write_text(text)
                 with self.assertRaisesRegex(ValueError, "eight-page"):
                     cache_geometry(path, "prefill", 8, long_case=False)
+            path.write_text(log(blocks=140, linear_blocks=128))
+            proof = cache_geometry(path, "prefill", 8, long_case=False, prefill_test_block_num=140)
+            self.assertEqual({row["full"] for row in proof["usable_pages"].values()}, {139})
+            path.write_text(log(blocks=140, linear_blocks=128).replace(
+                "group_block_nums=140,140,128", "group_block_nums=139,140,128", 1,
+            ))
+            with self.assertRaisesRegex(ValueError, "rank 0: expected 139 usable pages.*got 138"):
+                cache_geometry(path, "prefill", 8, long_case=False, prefill_test_block_num=140)
             path.write_text(log(blocks=140, linear_blocks=1032))
             proof = cache_geometry(path, "prefill", 8, long_case=True)
             self.assertEqual(proof["usable_pages"]["0"]["linear"], 1031)
