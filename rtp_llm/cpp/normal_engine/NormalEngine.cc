@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
+#include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
@@ -1311,6 +1312,16 @@ absl::Status NormalEngine::step() try {
         }
     }
 
+    if (telemetry::TelemetryRuntime::isActive()) {
+        const auto dispatch_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        for (const auto& stream : streams) {
+            if (stream->isContextStream()) {
+                stream->recordPrefillDispatchTime(dispatch_time_us);
+                stream->recordPrefillPreviousReleaseTime(previous_execution_release_us_);
+            }
+        }
+    }
+
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     const bool   report_metrics     = isKmonMetricReportingEnabled();
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -1334,6 +1345,10 @@ absl::Status NormalEngine::step() try {
         // after TP input synchronization has rejected idle steps.
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(schedule_output, tps_schedule_time_us);
+    }
+
+    if (!streams.empty()) {
+        previous_execution_release_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
     }
 
     // report step metrics
