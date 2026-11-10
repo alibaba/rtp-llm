@@ -642,6 +642,11 @@ def main():
 
 def start_server(py_env_configs: PyEnvConfigs):
     logging.info(f"[PROCESS_START]Start server")
+    # AWI: count outbound network fetches in the frontend/parent process;
+    # spawned backend ranks install their own probe in local_rank_start.
+    from rtp_llm.utils.awi_startup import install_startup_network_probe
+
+    install_startup_network_probe()
     configure_warmup(
         py_env_configs.runtime_config.warm_up,
         py_env_configs.runtime_config.model_warm_up,

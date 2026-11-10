@@ -145,6 +145,7 @@ cc_library(
     ],
     deps = [
         "//rtp_llm/cpp/api_server:http_api_server",
+        "//rtp_llm/cpp/awi:awi_collector",
         "//rtp_llm/cpp/model_rpc:model_rpc_server",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/cache:cache",

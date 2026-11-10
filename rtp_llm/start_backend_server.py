@@ -68,6 +68,10 @@ def local_rank_start(
     if expected_parent_pid is not None:
         arm_parent_death_sigkill(expected_parent_pid)
     _install_hot_hook_runtime(f"backend_rank_{world_rank}")
+    # AWI: count outbound network fetches from the earliest rank-process point.
+    from rtp_llm.utils.awi_startup import install_startup_network_probe
+
+    install_startup_network_probe()
     backend_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
 
@@ -102,6 +106,10 @@ def local_rank_start(
 
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
+        # AWI: publish measured startup facts to this rank's C++ collector.
+        from rtp_llm.utils.awi_startup import publish_startup_facts
+
+        publish_startup_facts(py_env_configs, getattr(backend_manager, "engine", None))
         # Defer these handlers until model loading completes.
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
