@@ -12,6 +12,7 @@ from rtp_llm.models_py.model_desc.deepseek_v41_base_model import (
     DeepSeekV4Model,
     _is_decode_fmha,
 )
+from rtp_llm.ops.compute_ops import PyModelOutputs
 from rtp_llm.models_py.modules.dsv41.engram_distributed import (
     EngramModelAttachment,
     EngramRuntime,
@@ -258,6 +259,20 @@ class DeepSeekV41Model(DeepSeekV4Model):
 
     @torch.inference_mode()
     def forward(self, inputs, fmha_impl: Any = None):
+        if os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1":
+            # Diagnostic: the C++ capture path runs one eager datatype probe at
+            # max_seq_len before capturing. On ROCm that probe walks a 1M-token
+            # context and aborts. The probe result is only used for optional
+            # MTP/DSpARK outputs, so return a shaped placeholder.
+            print("[cap] skip eager probe forward", flush=True)
+            tokens = max(1, int(inputs.input_ids.numel()))
+            return PyModelOutputs(
+                torch.zeros(
+                    (tokens, 1),
+                    dtype=torch.float32,
+                    device=inputs.input_ids.device,
+                )
+            )
         attn = as_tagged_attention_inputs(getattr(inputs, "attention_inputs", None))
         attachment = self._engram_attachment
         layer_indices = attachment.layer_indices if attachment is not None else ()
