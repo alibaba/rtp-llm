@@ -35,32 +35,46 @@ class V41MXFP8Linear(torch.nn.Module):
         super().__init__()
         from rtp_llm.models_py.modules.dsv41.qlinear import native_fp4_gemm_supported
 
-        self.weight = weight
         self.N, self.K = weight.shape
         self.native_fp4_gemm = native_fp4_gemm_supported(
             weight.device if weight.is_cuda else None
         )
         if self.native_fp4_gemm:
+            self.weight = weight
             self.weight_scales = self.pack_scales(scales)
             self._dequant_bf16 = None
         else:
-            self.weight_scales = scales
+            # Exact bf16 becomes the canonical weight; the FP8 original is
+            # released so the fallback does not double the linear's footprint
+            # (weight-residency policy is satisfied by the bf16 view, which
+            # is reported with its checkpoint provenance).
             self._dequant_bf16 = self._dequant_weight_bf16(weight, scales)
+            self.weight = self._dequant_bf16
+            self.weight_scales = scales
 
     @staticmethod
     def _dequant_weight_bf16(weight: torch.Tensor, scales: torch.Tensor):
-        """Exact bf16 view of FP8 e4m3 weights with UE8M0 32x32 scales."""
+        """Exact bf16 view of FP8 e4m3 weights with UE8M0 32x32 scales.
+
+        Chunked over scale-row blocks so peak temporaries stay at one
+        [32, K] bf16 block: e4m3 -> bf16 is exact and multiplying by a
+        power-of-two scale keeps <=4 significand bits, so the bf16 product
+        is exact (no fp32 intermediate, which OOMs a nearly-full card).
+        """
         if scales.dtype != torch.float8_e8m0fnu:
             raise ValueError(f"unsupported V4.1 FP8 scale dtype {scales.dtype}")
         n, k = weight.shape
         if scales.shape != ((n + 31) // 32, (k + 31) // 32):
             raise ValueError(f"Invalid V4.1 FP8 scales: {(n, k)}, {scales.shape}")
-        expanded = (
-            scales.to(torch.float32)
-            .repeat_interleave(32, 0)
-            .repeat_interleave(32, 1)[:n, :k]
-        )
-        return (weight.to(torch.float32) * expanded).to(torch.bfloat16)
+        out = torch.empty((n, k), dtype=torch.bfloat16, device=weight.device)
+        scales_f32 = scales.to(torch.float32)
+        for i in range(scales_f32.shape[0]):
+            rows = slice(i * 32, min((i + 1) * 32, n))
+            col_scale = (
+                scales_f32[i].repeat_interleave(32)[:k].to(torch.bfloat16)
+            )
+            out[rows] = weight[rows].to(torch.bfloat16) * col_scale
+        return out
 
     def pack_scales(self, scales: torch.Tensor) -> torch.Tensor:
         if scales.shape != ((self.N + 31) // 32, (self.K + 31) // 32):
