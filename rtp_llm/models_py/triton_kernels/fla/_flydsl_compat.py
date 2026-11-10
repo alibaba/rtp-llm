@@ -13,7 +13,7 @@ try:
 except ImportError as exc:
     raise ImportError(
         "RTP-LLM FlyDSL FLA kernels require the pinned AITER wheel with "
-        "flydsl==0.3.2; the AITER FlyDSL compatibility helper "
+        "flydsl==0.3.4.1; the AITER FlyDSL compatibility helper "
         "aiter.ops.flydsl.kernels.buffer_ops is unavailable"
     ) from exc
 
