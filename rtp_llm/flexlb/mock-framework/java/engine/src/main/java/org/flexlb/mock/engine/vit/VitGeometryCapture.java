@@ -38,7 +38,7 @@ final class VitGeometryCapture {
         long start = Long.parseLong(value);
         long end = Long.parseLong(System.getenv("MOCK_CAPTURE_END_MS"));
         byte[] key = HexFormat.of().parseHex(System.getenv("MOCK_CAPTURE_KEY"));
-        if (key.length != 32 || end <= start || end - start > 60_000) {
+        if (key.length != 32 || end <= start || end - start > 300_000) {
             throw new IllegalArgumentException("Invalid ViT capture window");
         }
         return end + DRAIN_MS > System.currentTimeMillis() ? new VitGeometryCapture(start, end, key) : null;
