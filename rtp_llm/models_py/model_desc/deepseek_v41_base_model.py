@@ -271,6 +271,10 @@ def _args_from_model_config(
         max_batch_size=max_generate_batch_size,
         max_seq_len=int(model_config.max_seq_len) or 4096,
         max_tokens_per_rank=int(model_config.max_seq_len) or 4096,
+        # Largest rank-local token count one prefill forward can carry; the
+        # scheduler budget here is max_seq_len itself.  Under CUDA graphs
+        # the MoE chunk count is derived from it deterministically.
+        graph_chunk_token_bound=int(model_config.max_seq_len) or 4096,
         fp8_kv_cache=fp8_kv_cache,
     )
 
@@ -334,6 +338,17 @@ class DeepSeekV4Model(GptModelBase):
             args.dp_rank = int(getattr(parallelism_config, "dp_rank", 0) or 0)
             args.world_size = int(getattr(parallelism_config, "world_size", 1) or 1)
             args.world_rank = int(getattr(parallelism_config, "world_rank", 0) or 0)
+            # The fused-MoE runtime config consumes the real object; without
+            # it the layer falls back to tp_size=1 and TP-sharded weights
+            # silently skip their Group.TP reduction.
+            args.parallelism_config = parallelism_config
+        # Mirror the dsv4 wiring: the MoEConfig and engine graph flag drive
+        # the same runtime-config gates (DeepEP selection, graph-safety
+        # skips) instead of per-layer invented fallbacks.
+        args.moe_config = moe_config
+        args.enable_cuda_graph = bool(
+            getattr(py_hw_kernel_config, "enable_cuda_graph", False)
+        )
         if args.world_size > 1:
             logging.info(
                 "[DeepSeekV4Model] parallelism: world=%d tp=%d/%d ep=%d/%d dp=%d/%d (scaffold only — V4 sharding not yet implemented; see docs/dsv4/parallel_design.md)",

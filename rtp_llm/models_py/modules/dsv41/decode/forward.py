@@ -43,6 +43,10 @@ from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
     as_tagged_attention_inputs,
     swa_region_for_layer,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+    _COLLECTIVE_CHUNK_STRATEGIES,
+    synchronized_moe_chunk_plan,
+)
 
 
 def _dsv4_kernel_tokens_per_block(kv_cache: Any) -> int:
@@ -315,23 +319,26 @@ def forward_layers(
         _rt.record("decode_embed_hc_expanded", h)
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     layer_forward_range = _profiler.make_layer_forward_range()
-    for layer_idx, layer in enumerate(v4.layers):
-        with layer_forward_range(layer_idx):
-            h = forward_decode_layer(
-                layer,
-                h,
-                attn_metadata,
-                input_ids,
-                next_layer=(
-                    v4.layers[layer_idx + 1] if layer_idx + 1 < len(v4.layers) else None
-                ),
-                preserve_output=layer_idx in capture_ids or _rt_on,
-                kv_cache=kv_cache,
-            )
-            if layer_idx in capture_ids:
-                v4.capture_aux_hidden(layer_idx, h)
-            if _rt_on:
-                _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
+    with synchronized_moe_chunk_plan(v4.layers, input_ids.numel(), input_ids.device):
+        for layer_idx, layer in enumerate(v4.layers):
+            with layer_forward_range(layer_idx):
+                h = forward_decode_layer(
+                    layer,
+                    h,
+                    attn_metadata,
+                    input_ids,
+                    next_layer=(
+                        v4.layers[layer_idx + 1]
+                        if layer_idx + 1 < len(v4.layers)
+                        else None
+                    ),
+                    preserve_output=layer_idx in capture_ids or _rt_on,
+                    kv_cache=kv_cache,
+                )
+                if layer_idx in capture_ids:
+                    v4.capture_aux_hidden(layer_idx, h)
+                if _rt_on:
+                    _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
     if v4._mtp_hidden_buffer is not None:
         if capture_ids:
             # DSpARK mode: the buffer already holds this forward's aux rows
@@ -443,7 +450,27 @@ def forward_decode(
             fp8_kv_cache=bool(getattr(v4, "fp8_kv_cache", False)),
         )
         if meta is None:
-            # Empty batch (B == 0) — short-circuit with zero-row hidden.
+            # Empty DP ranks still have to enter each routed-MoE collective
+            # when another rank is processing a prefill.  Calling the block's
+            # attention path would require decode metadata, so exercise only
+            # the empty FFN route under the same forward-level chunk plan.
+            empty_hidden = torch.empty(
+                (0, v4_args.dim), dtype=v4.embed.weight.dtype, device=param_dev
+            )
+            empty_ids = torch.empty((0,), dtype=torch.long, device=param_dev)
+            with synchronized_moe_chunk_plan(v4.layers, 0, param_dev):
+                for layer in v4.layers:
+                    ffn = getattr(layer, "ffn", None)
+                    if (
+                        ffn is not None
+                        and getattr(ffn, "strategy_name", None)
+                        in _COLLECTIVE_CHUNK_STRATEGIES
+                    ):
+                        ffn(
+                            empty_hidden,
+                            empty_ids,
+                            is_decode_forward=True,
+                        )
             return PyModelOutputs(
                 torch.zeros((0, v4_args.dim), dtype=torch.bfloat16, device=param_dev)
             )

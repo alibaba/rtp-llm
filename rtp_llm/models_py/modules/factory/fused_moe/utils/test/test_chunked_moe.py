@@ -265,6 +265,238 @@ class ChunkedMoeTest(unittest.TestCase):
             )
         self.assertEqual(layer._moe.token_chunks, [])
 
+    def test_planned_decode_emits_empty_chunks_for_collective_alignment(self):
+        layer = _fake_layer(capacity=4)
+        layer.strategy_name = "fp8_per_block_pure_dp"
+
+        def set_remote_max(token_count, **_):
+            token_count[0] = 9
+            token_count[1] = 3
+
+        with (
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_available",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_initialized",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.all_reduce",
+                side_effect=set_remote_max,
+            ) as all_reduce,
+        ):
+            with synchronized_moe_chunk_plan(
+                [SimpleNamespace(ffn=layer)], 3, torch.device("cpu")
+            ):
+                output = layer(
+                    torch.ones(3, 4),
+                    torch.arange(3),
+                    is_decode_forward=True,
+                )
+
+        all_reduce.assert_called_once()
+        self.assertEqual(layer._moe.token_chunks, [3, 0, 0])
+        self.assertTrue(torch.equal(output, torch.full((3, 4), 3.0)))
+
+    def test_all_forwards_skip_plan_when_cuda_graphs_enabled(self):
+        # A graph-replaying rank never executes the plan all-reduce (capture
+        # short-circuits it), so every eager forward must skip it too — a
+        # decode fallback and a mixed-phase prefill alike.  Skipping only
+        # decode would leave the prefill all-reduce without a counterpart.
+        for is_decode_forward in (False, True):
+            with self.subTest(is_decode_forward=is_decode_forward):
+                layer = _fake_layer(capacity=4)
+                layer.strategy_name = "fp8_per_block_pure_dp"
+                layer.enable_cuda_graph = True
+
+                with (
+                    mock.patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_available",
+                        return_value=True,
+                    ),
+                    mock.patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_initialized",
+                        return_value=True,
+                    ),
+                    mock.patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.all_reduce",
+                    ) as all_reduce,
+                ):
+                    with synchronized_moe_chunk_plan(
+                        [SimpleNamespace(ffn=layer)], 3, torch.device("cpu")
+                    ):
+                        output = layer(
+                            torch.ones(3, 4),
+                            torch.arange(3),
+                            is_decode_forward=is_decode_forward,
+                        )
+
+                all_reduce.assert_not_called()
+                self.assertEqual(layer._moe.token_chunks, [3])
+                self.assertTrue(torch.equal(output, torch.full((3, 4), 3.0)))
+
+    def test_prefill_forward_keeps_plan_when_graphs_disabled(self):
+        # Without CUDA graphs every rank is eager, so the plan collective
+        # stays required for the cross-phase chunk alignment.
+        layer = _fake_layer(capacity=4)
+        layer.strategy_name = "fp8_per_block_pure_dp"
+
+        def set_remote_max(plan, **_):
+            plan[0] = 9
+            plan[1] = 3
+
+        with (
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_available",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_initialized",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.all_reduce",
+                side_effect=set_remote_max,
+            ) as all_reduce,
+        ):
+            with synchronized_moe_chunk_plan(
+                [SimpleNamespace(ffn=layer)], 3, torch.device("cpu")
+            ):
+                output = layer(torch.ones(3, 4), torch.arange(3))
+
+        all_reduce.assert_called_once()
+        self.assertEqual(layer._moe.token_chunks, [3, 0, 0])
+        self.assertTrue(torch.equal(output, torch.full((3, 4), 3.0)))
+
+    def test_graph_enabled_collective_prefill_runs_fixed_chunk_count(self):
+        # Under graphs the plan sync is skipped, so a collective-strategy
+        # prefill runs the construction-time fixed chunk count on every
+        # rank: the same invocation count regardless of the local token
+        # count, with empty chunks keeping the peer collectives paired.
+        layer = _fake_layer(capacity=4)
+        layer.strategy_name = "fp8_per_block_pure_dp"
+        layer.enable_cuda_graph = True
+        layer._graph_fixed_chunks = 3
+
+        output = layer(torch.ones(9, 4), torch.arange(9))
+        self.assertEqual(layer._moe.token_chunks, [4, 4, 1])
+        self.assertTrue(torch.equal(output, torch.full((9, 4), 3.0)))
+
+        # A small prefill still runs the full count, padded with empty
+        # chunks — the deterministic-alignment contract.
+        layer._moe.token_chunks.clear()
+        output = layer(torch.ones(3, 4), torch.arange(3))
+        self.assertEqual(layer._moe.token_chunks, [3, 0, 0])
+        self.assertTrue(torch.equal(output, torch.full((3, 4), 3.0)))
+
+    def test_graph_enabled_collective_fixed_count_never_drops_tokens(self):
+        # A token count beyond the fixed count's coverage (a scheduler
+        # contract violation) extends the count instead of dropping rows.
+        layer = _fake_layer(capacity=4)
+        layer.strategy_name = "fp8_per_block_pure_dp"
+        layer.enable_cuda_graph = True
+        layer._graph_fixed_chunks = 1
+
+        output = layer(torch.ones(9, 4), torch.arange(9))
+        self.assertEqual(layer._moe.token_chunks, [4, 4, 1])
+        self.assertTrue(torch.equal(output, torch.full((9, 4), 3.0)))
+
+    def test_graph_enabled_non_collective_prefill_still_chunks(self):
+        # No per-invocation peer collectives, so local chunking stays safe.
+        layer = _fake_layer(capacity=4)
+        layer.strategy_name = "fp8_per_block_no_dp"
+        layer.enable_cuda_graph = True
+        output = layer(torch.ones(9, 4), torch.arange(9))
+        self.assertEqual(layer._moe.token_chunks, [4, 4, 1])
+        self.assertTrue(torch.equal(output, torch.full((9, 4), 3.0)))
+
+    def test_graph_disabled_collective_prefill_still_chunks(self):
+        # Without graphs the plan aligns chunk counts across ranks, so
+        # oversized prefill keeps its chunked behavior.
+        layer = _fake_layer(capacity=4)
+        layer.strategy_name = "fp8_per_block_pure_dp"
+        output = layer(torch.ones(9, 4), torch.arange(9))
+        self.assertEqual(layer._moe.token_chunks, [4, 4, 1])
+        self.assertTrue(torch.equal(output, torch.full((9, 4), 3.0)))
+
+    def test_layer_derives_fixed_chunk_count_from_token_bound(self):
+        import rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer as chunked_module
+
+        def _layer(**kwargs):
+            with mock.patch.object(chunked_module, "Fp8Fp4MoeLayer") as moe_ctor:
+                moe_ctor.return_value.strategy_name = "fp8_per_block_pure_dp"
+                return ChunkedFp8Fp4MoeLayer(
+                    layer_id=0,
+                    dim=4,
+                    moe_inter_dim=8,
+                    n_routed_experts=4,
+                    n_activated_experts=2,
+                    n_shared_experts=0,
+                    score_func="sigmoid",
+                    route_scale=1.0,
+                    swiglu_limit=1.0,
+                    n_hash_layers=3,
+                    vocab_size=16,
+                    layer_weights={"opaque": torch.zeros(1)},
+                    **kwargs,
+                )
+
+        # ceil(bound / capacity), at least one chunk.
+        layer = _layer(
+            enable_cuda_graph=True,
+            max_tokens_per_rank=4,
+            graph_chunk_token_bound=12,
+        )
+        self.assertEqual(layer._graph_fixed_chunks, 3)
+        layer = _layer(
+            enable_cuda_graph=True,
+            max_tokens_per_rank=4,
+            graph_chunk_token_bound=1,
+        )
+        self.assertEqual(layer._graph_fixed_chunks, 1)
+
+        # Graphs disabled or no bound configured: no fixed count.
+        layer = _layer(
+            enable_cuda_graph=False,
+            max_tokens_per_rank=4,
+            graph_chunk_token_bound=12,
+        )
+        self.assertIsNone(layer._graph_fixed_chunks)
+        layer = _layer(
+            enable_cuda_graph=True,
+            max_tokens_per_rank=4,
+        )
+        self.assertIsNone(layer._graph_fixed_chunks)
+
+    def test_layer_forwards_parallelism_config_to_the_moe_layer(self):
+        # TP-sharded weights need the runtime config to see the real
+        # parallelism object; a None fallback would assume tp_size=1 and
+        # skip the Group.TP reduction.
+        import rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer as chunked_module
+
+        config = object()
+        with mock.patch.object(chunked_module, "Fp8Fp4MoeLayer") as moe_ctor:
+            moe_ctor.return_value.strategy_name = "fp8_per_block_no_dp"
+            ChunkedFp8Fp4MoeLayer(
+                layer_id=0,
+                dim=4,
+                moe_inter_dim=8,
+                n_routed_experts=4,
+                n_activated_experts=2,
+                n_shared_experts=0,
+                score_func="sigmoid",
+                route_scale=1.0,
+                swiglu_limit=1.0,
+                n_hash_layers=3,
+                vocab_size=16,
+                layer_weights={"opaque": torch.zeros(1)},
+                parallelism_config=config,
+            )
+        moe_ctor.assert_called_once()
+        self.assertIs(moe_ctor.call_args.kwargs["parallelism_config"], config)
+
     def test_input_ids_are_optional(self):
         layer = _fake_layer(dim=3, capacity=5)
         x = torch.arange(7 * 3, dtype=torch.float32).view(7, 3)
@@ -302,7 +534,8 @@ class ChunkedMoeTest(unittest.TestCase):
         layers = [SimpleNamespace(ffn=first), SimpleNamespace(ffn=second)]
 
         def set_remote_max(token_count, **_):
-            token_count.fill_(9)
+            token_count[0] = 9
+            token_count[1] = 3
 
         with (
             mock.patch(
@@ -328,6 +561,65 @@ class ChunkedMoeTest(unittest.TestCase):
 
         all_reduce.assert_called_once()
 
+    def test_collective_fp8_strategies_match_remote_chunk_count(self):
+        for strategy in (
+            "fp8_per_block_pure_dp",
+            "fp8_per_block_ep_normal",
+        ):
+            with self.subTest(strategy=strategy):
+                layer = _fake_layer(capacity=5)
+                layer.strategy_name = strategy
+
+                def set_remote_max(token_count, **_):
+                    token_count[0] = 12
+                    token_count[1] = 3
+
+                with (
+                    mock.patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_available",
+                        return_value=True,
+                    ),
+                    mock.patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_initialized",
+                        return_value=True,
+                    ),
+                    mock.patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.all_reduce",
+                        side_effect=set_remote_max,
+                    ) as all_reduce,
+                ):
+                    with synchronized_moe_chunk_plan(
+                        [SimpleNamespace(ffn=layer)], 3, torch.device("cpu")
+                    ):
+                        layer(torch.ones(3, 4))
+
+                all_reduce.assert_called_once()
+                self.assertEqual(layer._moe.token_chunks, [3, 0, 0])
+
+    def test_low_latency_strategy_rejects_prefill_before_dispatch(self):
+        layer = _fake_layer()
+        layer.strategy_name = "fp8_per_block_ep_low_latency"
+        with self.assertRaisesRegex(RuntimeError, "only supported for decode"):
+            layer(torch.ones(3, 4))
+        self.assertEqual(layer._moe.token_chunks, [])
+
+        layer(torch.ones(3, 4), is_decode_forward=True)
+        self.assertEqual(layer._moe.token_chunks, [3])
+
+    def test_low_latency_strategy_rejects_non_decode_role_at_construction(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+            _validate_strategy_role,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "only supported for the decode role"
+        ):
+            _validate_strategy_role("fp8_per_block_ep_low_latency", False)
+        # Decode-role workers and every other strategy stay constructible.
+        _validate_strategy_role("fp8_per_block_ep_low_latency", True)
+        _validate_strategy_role("fp8_per_block_pure_dp", False)
+        _validate_strategy_role("fp8_per_block_ep_normal", False)
+
     def test_mixed_non_mega_layer_ignores_synchronized_token_count(self):
         mega = _fake_layer()
         local = _fake_layer()
@@ -336,7 +628,8 @@ class ChunkedMoeTest(unittest.TestCase):
         layers = [SimpleNamespace(ffn=mega), SimpleNamespace(ffn=local)]
 
         def set_remote_max(token_count, **_):
-            token_count.fill_(9)
+            token_count[0] = 9
+            token_count[1] = 2
 
         with (
             mock.patch(

@@ -122,6 +122,9 @@ from rtp_llm.models_py.modules.dsv41.prefill_workspace import (
     PrefillWorkspace,
     prefill_q_workspace_rows,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+    synchronized_moe_chunk_plan,
+)
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
@@ -566,6 +569,15 @@ def forward_layers(
     layer_forward_range = _profiler.make_layer_forward_range()
     ced_tail = None
     original_cp_ctx = cp_ctx
+    # The decode arm enters this forward-level chunk plan; the prefill arm
+    # must enter the same plan or a mixed-phase step pairs the plan's
+    # two-element all-reduce against the per-layer one-element fallback and
+    # the group deadlocks.  The loop body is large, so the context manager is
+    # entered manually and released in the shared finally below.
+    chunk_plan = synchronized_moe_chunk_plan(
+        v4.layers, int(input_ids.size(0)), input_ids.device
+    )
+    chunk_plan.__enter__()
     try:
         if shared_prefill is not None and _env_flag("RTP_V41_BATCHED_PRODUCER"):
             host_tables = host_block_tables(kv_cache, attn_inputs)
@@ -706,6 +718,7 @@ def forward_layers(
                             )
                         _rt.record(f"layer{layer_idx:02d}_last", layer_last)
     finally:
+        chunk_plan.__exit__(None, None, None)
         prefill_write_by_region = None
         # Always drop the per-layer ``common.workspace`` references, even if a
         # layer raises mid-prefill (e.g. a CUDA OOM under memory pressure —

@@ -109,6 +109,14 @@ py_test(
     data = ["//rtp_llm/models_py:modules/dsv4/ppu/manifest.py"],
 )
 
+py_test(
+    name = "block_kwargs_test",
+    srcs = ["test_block_kwargs.py"],
+    main = "test_block_kwargs.py",
+    data = ["//rtp_llm/models_py:ppu_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"] + select({"@//:using_ppu": [":ppu_test_runtime"], "//conditions:default": []}),
+)
+
 
 
 py_test(
@@ -242,7 +250,7 @@ _COMMON_CONTRACT_TESTS = [
     ":platform_boundary_test", ":dsv4_config_test", ":indexer_cache_test",
     ":ep_chunk_rounds_test", ":isolated_metadata", ":rich_contract",
     ":chunk_options", ":platform_provider", ":prefill_communication",
-    ":tp_prefill_workspace_dims", ":fp8_contract_test",
+    ":tp_prefill_workspace_dims", ":fp8_contract_test", ":block_kwargs_test",
 ]
 
 # These validate PPU imports and mocked contracts, not M890P kernel numerics.

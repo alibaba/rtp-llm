@@ -133,11 +133,13 @@ class StrategyRegistry:
             logger.error(
                 "No suitable MOE strategy found. Config details: "
                 "quant_config=%r, ep_size=%r, world_size=%r, tp_size=%r, "
-                "use_deepep_low_latency=%r, skipped_for_missing_deps=%r",
+                "enable_cuda_graph=%r, use_deepep_low_latency=%r, "
+                "skipped_for_missing_deps=%r",
                 quant_config,
                 getattr(config, "ep_size", None),
                 getattr(config, "world_size", None),
                 getattr(config, "tp_size", None),
+                getattr(config, "enable_cuda_graph", False),
                 getattr(
                     getattr(config, "moe_config", None),
                     "use_deepep_low_latency",
@@ -170,10 +172,23 @@ class StrategyRegistry:
                     "a missing-dependency problem rather than a configuration one. "
                     f"Skipped: {skipped}. {_requested_strategy_context(config)}"
                 )
+            graph_hint = ""
+            if getattr(config, "enable_cuda_graph", False):
+                from rtp_llm.models_py.utils.arch import get_sm, is_cuda
+
+                sm = get_sm() if is_cuda() else "unavailable"
+                graph_hint = (
+                    f" enable_cuda_graph=True with get_sm()={sm}: below SM12 "
+                    "single-card auto falls back to "
+                    "fp8_per_block_no_dp_masked, SM12 keeps the hybrid-backed "
+                    "fp8_per_block_no_dp; other graph-enabled topologies need "
+                    "an explicit strategy, DeepEP low latency on a decode role, "
+                    "graphs disabled, or SM120."
+                )
             raise ValueError(
                 "No suitable MOE strategy found for configuration. "
                 "Please check quant_config, ep_size, and parallelism settings. "
-                f"{_requested_strategy_context(config)}"
+                f"{graph_hint}{_requested_strategy_context(config)}"
             )
 
         # get_attributes() is not a plain accessor -- it does lazy imports and

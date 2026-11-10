@@ -9,7 +9,7 @@ mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -25,6 +25,9 @@ from rtp_llm.models_py.modules.dsv41.bounded_replay import (
 )
 from rtp_llm.models_py.modules.dsv41.cp import CPContext, build_cp_context
 from rtp_llm.models_py.modules.dsv41.hc import build_hc_head
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+    synchronized_moe_chunk_plan,
+)
 
 
 @dataclass
@@ -92,6 +95,17 @@ class V4Args:
     dp_rank: int = 0
     world_size: int = 1
     world_rank: int = 0
+    # The real ParallelismConfig: the fused-MoE runtime config must see the
+    # true tp_size or TP-sharded weights skip their Group.TP reduction.
+    parallelism_config: Optional[Any] = None
+    # The MoEConfig and engine graph flag feed the same runtime config, so
+    # the DeepEP/strategy choices and the graph-safety gates match the dsv4
+    # chain instead of running on invented fallbacks.
+    moe_config: Optional[Any] = None
+    enable_cuda_graph: bool = False
+    # Largest rank-local token count one prefill forward can carry; under
+    # CUDA graphs the MoE chunk count is derived from it deterministically.
+    graph_chunk_token_bound: int = 0
     is_decode_role: bool = False
     # Dedicated DSpARK prefill workers execute only the commit side: target
     # features are projected into the draft SWA pools and no query/FFN/mHC
@@ -161,6 +175,10 @@ def _block_kwargs(
         tp_rank=args.tp_rank,
         ep_size=args.ep_size,
         ep_rank=args.ep_rank,
+        parallelism_config=args.parallelism_config,
+        moe_config=args.moe_config,
+        enable_cuda_graph=args.enable_cuda_graph,
+        graph_chunk_token_bound=args.graph_chunk_token_bound,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
         moe_strategy=args.moe_strategy,
@@ -495,11 +513,14 @@ class V4Transformer(nn.Module):
         h = self.embed(input_ids_2d)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
         layer_forward_range = _profiler.make_layer_forward_range()
-        for layer_idx, layer in enumerate(self.layers):
-            with layer_forward_range(layer_idx):
-                h = layer.forward_decode(
-                    h, attn_metadata, input_ids_2d, kv_cache=kv_cache
-                )
+        with synchronized_moe_chunk_plan(
+            self.layers, input_ids_2d.numel(), input_ids_2d.device
+        ):
+            for layer_idx, layer in enumerate(self.layers):
+                with layer_forward_range(layer_idx):
+                    h = layer.forward_decode(
+                        h, attn_metadata, input_ids_2d, kv_cache=kv_cache
+                    )
         h = self._hc_head_reduce(h)  # [B, q_len, dim]
         # Framework RMSNorm wants 2D — flatten to [T_total, dim] and
         # return that directly (the next reshape would no-op anyway).
@@ -610,18 +631,19 @@ class V4Transformer(nn.Module):
             [0, S], dtype=torch.int64, device=input_ids.device
         )  # [2]
         layer_forward_range = _profiler.make_layer_forward_range()
-        for li, layer in enumerate(self.layers):
-            with layer_forward_range(li):
-                h_flat = layer(
-                    h_flat,
-                    input_ids_flat,
-                    positions,
-                    cu_seqlens,
-                    kv_cache=kv_cache,
-                    block_tables_by_type=block_tables_by_type,
-                )
-                if _rt_on:
-                    _rt.record(f"layer{li:02d}_out", h_flat)
+        with synchronized_moe_chunk_plan(self.layers, S, input_ids.device):
+            for li, layer in enumerate(self.layers):
+                with layer_forward_range(li):
+                    h_flat = layer(
+                        h_flat,
+                        input_ids_flat,
+                        positions,
+                        cu_seqlens,
+                        kv_cache=kv_cache,
+                        block_tables_by_type=block_tables_by_type,
+                    )
+                    if _rt_on:
+                        _rt.record(f"layer{li:02d}_out", h_flat)
         h = h_flat.unsqueeze(0)  # [1, S, hc, d]
         h = self._hc_head_reduce(h)  # [B, S, d]
         if _rt_on:

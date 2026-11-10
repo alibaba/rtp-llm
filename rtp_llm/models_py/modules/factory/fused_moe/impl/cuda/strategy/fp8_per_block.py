@@ -60,10 +60,27 @@ class CudaFp8PerBlockNoDPMaskedStrategy(MoeStrategy):
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        from rtp_llm.models_py.utils.arch import get_sm
+
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "FP8_PER_BLOCK")
-        checker.check(config.moe_strategy == "fp8_per_block_no_dp_masked")
+        # auto + CUDA graphs on a single card below SM12 has no other
+        # executable strategy (the hybrid executor refuses graphs below
+        # SM12), so fall back to the masked backend: the one MoE form the
+        # C++ graph-eligibility whitelist supports for single-device
+        # generation-prefill graphs.
+        auto_graph_fallback = (
+            config.moe_strategy == "auto"
+            and config.enable_cuda_graph
+            and config.ep_size == 1
+            and config.tp_size == 1
+            and 9 <= get_sm()[0] < 12
+        )
+        checker.check(
+            config.moe_strategy == "fp8_per_block_no_dp_masked"
+            or auto_graph_fallback
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor_v2 import (

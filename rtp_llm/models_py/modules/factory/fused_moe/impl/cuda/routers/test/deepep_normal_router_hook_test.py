@@ -16,6 +16,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal
 class _TupleDispatchBuffer:
     def get_dispatch_layout(self, topk_ids, expert_num):
         del expert_num
+        self.layout_topk_ids = topk_ids.clone()
         token_count = topk_ids.shape[0]
         counts = torch.tensor([token_count], dtype=torch.int32)
         return counts, None, counts, torch.ones(token_count, dtype=torch.bool), None
@@ -25,6 +26,8 @@ class _TupleDispatchBuffer:
         self.expert_input = expert_input
         topk_ids = args[5]
         topk_weights = args[6]
+        self.topk_ids = topk_ids.clone()
+        self.topk_weights = topk_weights.clone()
         token_count = (
             expert_input[0].shape[0]
             if isinstance(expert_input, tuple)
@@ -98,6 +101,24 @@ class DeepepNormalRouterHookTest(TestCase):
 
         with self.assertRaisesRegex(ValueError, "must return"):
             router.prepare(a1, None, None, topk_weights, topk_ids)
+
+    def test_invalid_top_p_slots_are_dropped_before_dispatch(self):
+        router, buffer = self._new_router(_TupleDispatchRouter, torch.int8)
+        a1 = torch.randn((3, 4), dtype=torch.bfloat16)
+        topk_ids = torch.tensor([[0, 2], [1, -7], [3, 1]], dtype=torch.int64)
+        topk_weights = torch.tensor(
+            [[0.6, 0.4], [0.7, 0.3], [0.2, 0.8]], dtype=torch.float32
+        )
+
+        router.prepare(a1, None, None, topk_weights, topk_ids)
+
+        expected_ids = torch.tensor([[0, -1], [1, -1], [-1, 1]])
+        expected_weights = torch.tensor(
+            [[0.6, 0.0], [0.7, 0.0], [0.0, 0.8]], dtype=torch.float32
+        )
+        torch.testing.assert_close(buffer.layout_topk_ids, expected_ids)
+        torch.testing.assert_close(buffer.topk_ids, expected_ids)
+        torch.testing.assert_close(buffer.topk_weights, expected_weights)
 
 
 if __name__ == "__main__":

@@ -53,6 +53,41 @@ class PureTpRouterSkipAllreduceTest(TestCase):
         self.assertTrue(_make_router().supports_skip_tp_allreduce)
 
     @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router.recompute_topk_ids_sum_expert_count"
+    )
+    def test_recompute_uses_invalid_slot_sentinel(self, mock_recompute):
+        """Dropped Top-p slots must not be counted as expert zero."""
+
+        router = _make_router(tp_size=1)
+        router.do_recompute_topk = True
+        adjusted_ids = torch.tensor([[3, -1], [1, -1]], dtype=torch.int32)
+        expert_counts = torch.zeros(8, dtype=torch.int32)
+        mock_recompute.return_value = (adjusted_ids, expert_counts)
+
+        topk_ids = torch.tensor([[3, 256], [1, -1]], dtype=torch.int32)
+        topk_weights = torch.tensor(
+            [[0.75, 0.25], [0.4, 0.6]], dtype=torch.float32
+        )
+        payload = router.prepare(
+            a1=torch.randn(2, 8, dtype=torch.bfloat16),
+            a1_scale=None,
+            a2_scale=None,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+        )
+
+        expected_recompute_ids = torch.tensor(
+            [[3, -1], [1, -1]], dtype=torch.int32
+        )
+        torch.testing.assert_close(
+            mock_recompute.call_args.args[0], expected_recompute_ids
+        )
+        torch.testing.assert_close(
+            payload.expert_topk_weights,
+            torch.tensor([[0.75, 0.0], [0.4, 0.0]], dtype=torch.float32),
+        )
+
+    @patch(
         "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router.all_reduce"
     )
     def test_finalize_reduction_matrix(self, mock_all_reduce):
