@@ -42,7 +42,9 @@ struct BlockPoolConfigBase {
     BlockPoolType pool_type{BlockPoolType::DEVICE};
     std::string   pool_name;
     size_t        physical_block_count{0};
-    double        frozen_block_abort_ratio{0.3};
+    // Sample once per process in [lower, upper); equal bounds fix the threshold, and lower=0 disables it.
+    double        frozen_block_abort_lower_ratio{0.3};
+    double        frozen_block_abort_upper_ratio{0.4};
 };
 
 // IBlockPool owns allocation and Tree-internal lifetime shared by Device, Host, and Disk.

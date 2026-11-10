@@ -504,7 +504,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("block_tree_transfer_worker_count", &KVCacheConfig::block_tree_transfer_worker_count)
         .def_readwrite("block_tree_business_queue_max_size", &KVCacheConfig::block_tree_business_queue_max_size)
         .def_readwrite("block_tree_transfer_queue_max_size", &KVCacheConfig::block_tree_transfer_queue_max_size)
-        .def_readwrite("block_tree_device_frozen_abort_ratio", &KVCacheConfig::block_tree_device_frozen_abort_ratio)
+        .def_readwrite("block_pool_frozen_abort_lower_ratio", &KVCacheConfig::block_pool_frozen_abort_lower_ratio)
+        .def_readwrite("block_pool_frozen_abort_upper_ratio", &KVCacheConfig::block_pool_frozen_abort_upper_ratio)
         .def_readwrite("block_tree_device_evict_low_watermark_ratio",
                        &KVCacheConfig::block_tree_device_evict_low_watermark_ratio)
         .def_readwrite("block_tree_device_evict_high_watermark_ratio",
@@ -604,7 +605,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      17,
+                                      18,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -688,18 +689,20 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.block_tree_full_disk_evict_high_watermark_ratio,
                                       self.kvcm_task_timeout_ms,
                                       self.disk_cache_evict_timeout_ms,
-                                      self.block_tree_device_frozen_abort_ratio,
+                                      self.block_pool_frozen_abort_lower_ratio,
                                       self.btc_crc_slot_count,
                                       self.btc_transfer_engine_async,
                                       self.disk_cache_read_thread_count,
-                                      self.disk_cache_write_thread_count);
+                                      self.disk_cache_write_thread_count,
+                                      self.block_pool_frozen_abort_upper_ratio);
             },
             [](py::tuple t) {
                 if (t.size() < 2 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
                     || t[0].cast<std::string>() != "KVCacheConfig"
                     || !((t.size() == 83 && t[1].cast<int>() == 13) || (t.size() == 84 && t[1].cast<int>() == 14)
                          || (t.size() == 85 && t[1].cast<int>() == 15) || (t.size() == 86 && t[1].cast<int>() == 16)
-                         || (t.size() == 90 && t[1].cast<int>() == 17))) {
+                         || (t.size() == 90 && t[1].cast<int>() == 17)
+                         || (t.size() == 91 && t[1].cast<int>() == 18))) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
@@ -792,13 +795,20 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.disk_cache_evict_timeout_ms = t[84].cast<int64_t>();
                 }
                 if (t.size() >= 86) {
-                    c.block_tree_device_frozen_abort_ratio = t[85].cast<double>();
+                    c.block_pool_frozen_abort_lower_ratio = t[85].cast<double>();
                 }
-                if (!std::isfinite(c.block_tree_device_frozen_abort_ratio)
-                    || c.block_tree_device_frozen_abort_ratio < 0.0 || c.block_tree_device_frozen_abort_ratio > 1.0) {
-                    throw std::runtime_error("invalid KVCacheConfig device frozen abort ratio");
+                if (t.size() >= 91) {
+                    c.block_pool_frozen_abort_upper_ratio = t[90].cast<double>();
                 }
-                if (t.size() == 90) {
+                if (!std::isfinite(c.block_pool_frozen_abort_lower_ratio)
+                    || !std::isfinite(c.block_pool_frozen_abort_upper_ratio)
+                    || c.block_pool_frozen_abort_lower_ratio < 0.0
+                    || c.block_pool_frozen_abort_lower_ratio > c.block_pool_frozen_abort_upper_ratio
+                    || c.block_pool_frozen_abort_upper_ratio > 1.0) {
+                    throw std::runtime_error("invalid KVCacheConfig block pool frozen abort ratio range: expected finite "
+                                             "0 <= lower <= upper <= 1");
+                }
+                if (t.size() >= 90) {
                     c.btc_crc_slot_count            = t[86].cast<int64_t>();
                     c.btc_transfer_engine_async     = t[87].cast<bool>();
                     c.disk_cache_read_thread_count  = t[88].cast<int64_t>();

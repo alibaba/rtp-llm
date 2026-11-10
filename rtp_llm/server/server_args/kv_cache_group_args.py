@@ -9,11 +9,11 @@ def _frozen_abort_ratio(value):
         ratio = float(value)
     except (TypeError, ValueError) as error:
         raise argparse.ArgumentTypeError(
-            "device frozen abort ratio must be a finite number in [0, 1]"
+            "block pool frozen abort ratio must be a finite number in [0, 1]"
         ) from error
     if not math.isfinite(ratio) or not 0 <= ratio <= 1:
         raise argparse.ArgumentTypeError(
-            "device frozen abort ratio must be a finite number in [0, 1]"
+            "block pool frozen abort ratio must be a finite number in [0, 1]"
         )
     return ratio
 
@@ -401,12 +401,20 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="各传输方向共用的最大 descriptor 批大小；Disk->Device 还受 staging 容量限制，Device->Disk 保留单项提交。",
     )
     kv_cache_group.add_argument(
-        "--block_tree_device_frozen_abort_ratio",
-        env_name="BLOCK_TREE_DEVICE_FROZEN_ABORT_RATIO",
-        bind_to=(kv_cache_config, "block_tree_device_frozen_abort_ratio"),
+        "--block_pool_frozen_abort_lower_ratio",
+        env_name="BLOCK_POOL_FROZEN_ABORT_LOWER_RATIO",
+        bind_to=(kv_cache_config, "block_pool_frozen_abort_lower_ratio"),
         type=_frozen_abort_ratio,
         default=0.3,
-        help="单个 DEVICE/HOST/DISK pool 的冻结 block 占比严格超过实际阈值时 core。配置范围 [0, 1]，默认 0.3；(0, 1) 内的配置会增加 [0, 0.10) 范围内的进程级固定随机扰动，接近 1 时缩小扰动范围，实际阈值始终小于 1；0 和 1 不加扰动，0 关闭保护。沿用原 device 配置名，启动时配置。",
+        help="单个 DEVICE/HOST/DISK pool 的冻结 block abort 阈值下限，默认 0.3。实际阈值在 [下限, 上限) 均匀采样，进程内固定；上下限相等时使用固定值。下限为 0 关闭保护，否则冻结占比严格超过实际阈值时 core。要求 0 <= 下限 <= 上限 <= 1；启动时配置。",
+    )
+    kv_cache_group.add_argument(
+        "--block_pool_frozen_abort_upper_ratio",
+        env_name="BLOCK_POOL_FROZEN_ABORT_UPPER_RATIO",
+        bind_to=(kv_cache_config, "block_pool_frozen_abort_upper_ratio"),
+        type=_frozen_abort_ratio,
+        default=0.4,
+        help="DEVICE/HOST/DISK pool 的冻结 block abort 阈值上限，默认 0.4，必须不小于 block_pool_frozen_abort_lower_ratio 且不超过 1。上下限不相等时实际阈值严格小于上限。",
     )
     kv_cache_group.add_argument(
         "--btc_transfer_engine_async",

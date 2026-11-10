@@ -508,7 +508,8 @@ std::string CacheConfig::debugString(size_t indent) const {
 
     os << indent1 << "# Block Configuration:\n";
     OUTPUT_FIELD(seq_size_per_block);
-    OUTPUT_FIELD(block_tree_device_frozen_abort_ratio);
+    OUTPUT_FIELD(block_pool_frozen_abort_lower_ratio);
+    OUTPUT_FIELD(block_pool_frozen_abort_upper_ratio);
     os << "\n";
 
     os << indent1 << "# Block Sizing Information:\n";
