@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import sys
 
-GUARD_SHA256 = '8bbfcd82128c1c2ac4018ec1f9fd101547389523077acbbd4c3435c5321f9e0e'
+GUARD_SHA256 = 'd6faa983a2d404a33d106fec026f1049cc68aa0ceb392e0a6e948cdd7185197c'
 
 
 def load_guard():

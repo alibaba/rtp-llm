@@ -36,8 +36,7 @@ class ClaimWriterTest(unittest.TestCase):
                         'gcs_address': '10.44.49.51:31100', 'cluster_id': 'ClusterID(1234)'}
 
     def ray(self):
-        ctx = types.SimpleNamespace(get_session_name=lambda: self.session['name'],
-             address_info={'session_dir': self.session['session_dir'], 'gcs_address': self.session['gcs_address']})
+        ctx = types.SimpleNamespace(get_session_name=lambda: self.session['name'])
         class Task:
             def __init__(self, fn): self.fn = fn
             def options(self, **kwargs): return self
@@ -50,7 +49,9 @@ class ClaimWriterTest(unittest.TestCase):
                     'claim_sha256': args[3]}
         return types.SimpleNamespace(nodes=lambda: self.nodes, get_runtime_context=lambda: ctx,
             _private=types.SimpleNamespace(worker=types.SimpleNamespace(global_worker=types.SimpleNamespace(
-                node=types.SimpleNamespace(cluster_id=self.session['cluster_id'])))),
+                node=types.SimpleNamespace(cluster_id=self.session['cluster_id'],
+                    address_info={'session_dir': self.session['session_dir'],
+                                  'gcs_address': self.session['gcs_address']})))),
             remote=lambda **kwargs: lambda fn: Task(fn), get=get)
 
     def run_writer(self, ray=None):

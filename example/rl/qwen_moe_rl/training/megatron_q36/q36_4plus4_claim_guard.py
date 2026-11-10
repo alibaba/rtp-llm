@@ -76,7 +76,7 @@ def load_claim(env=None):
 def verify_attached_session(ray, claim):
     ctx = ray.get_runtime_context()
     session = claim['session']
-    address = ctx.address_info
+    address = ray._private.worker.global_worker.node.address_info
     if (ctx.get_session_name() != session['name'] or address.get('session_dir') != session['session_dir'] or
         address.get('gcs_address') != session['gcs_address'] or
         str(ray._private.worker.global_worker.node.cluster_id) != session['cluster_id']):

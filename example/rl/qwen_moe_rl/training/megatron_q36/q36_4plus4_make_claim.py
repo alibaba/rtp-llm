@@ -100,8 +100,9 @@ def make_claim(ray, guard, env):
     if len(nodes) != 2 or set(by_ip) != set(expected_ips.values()):
         raise RuntimeError('Ray allocation has unexpected nodes')
     ctx = ray.get_runtime_context()
-    session = {'name': ctx.get_session_name(), 'session_dir': ctx.address_info['session_dir'],
-               'gcs_address': ctx.address_info['gcs_address'],
+    address = ray._private.worker.global_worker.node.address_info
+    session = {'name': ctx.get_session_name(), 'session_dir': address['session_dir'],
+               'gcs_address': address['gcs_address'],
                'cluster_id': str(ray._private.worker.global_worker.node.cluster_id)}
     task = ray.remote(num_cpus=0)(inspect_node)
     refs = []

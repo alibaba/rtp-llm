@@ -45,9 +45,9 @@ class ClaimTest(unittest.TestCase):
 
     def fake_ray(self, name=None, cluster=None, nodes=None):
         session = self.claim['session']
-        ctx = types.SimpleNamespace(get_session_name=lambda: name or session['name'],
-            address_info={'session_dir': session['session_dir'], 'gcs_address': session['gcs_address']})
-        worker = types.SimpleNamespace(node=types.SimpleNamespace(cluster_id=cluster or session['cluster_id']))
+        ctx = types.SimpleNamespace(get_session_name=lambda: name or session['name'])
+        worker = types.SimpleNamespace(node=types.SimpleNamespace(cluster_id=cluster or session['cluster_id'],
+            address_info={'session_dir': session['session_dir'], 'gcs_address': session['gcs_address']}))
         if nodes is None:
             nodes = [{'Alive': True, 'NodeManagerAddress': self.claim[k]['ip'],
                       'NodeID': self.claim[k]['node_id'], 'Resources': {'GPU': 4}}
