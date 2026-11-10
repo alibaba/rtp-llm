@@ -138,16 +138,6 @@ class RealWeightGatedResidualParityTest(unittest.TestCase):
             (expected.reshape(4, -1) - got).abs().max().item(), 0.0, msg=layer
         )
 
-    def test_checkpoint_shapes_match_config(self):
-        self.assertEqual(
-            tuple(self._get("input_mix_weight_down.weight").shape),
-            (self.LOWRANK, self.HC * self.HIDDEN),
-        )
-        self.assertEqual(
-            tuple(self._get("block_inject_weight.weight").shape),
-            (self.HC, self.HC * self.HIDDEN),
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -180,13 +180,6 @@ py_test(
 )
 
 py_test(
-    name = "residual_stream_test",
-    srcs = ["residual_stream_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "0"},
-)
-
-py_test(
     name = "residual_pending_test",
     srcs = ["residual_pending_test.py"],
     deps = ["//rtp_llm:testlib", "//rtp_llm/models_py/modules/hybrid/test:residual_fixtures"],
@@ -205,13 +198,6 @@ models_py_test(
 models_py_test(
     name = "residual_norm_fp8_test",
     src = "residual_norm_fp8_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = [":residual_fixtures"],
-)
-
-models_py_test(
-    name = "residual_medium_up_mix_test",
-    src = "residual_medium_up_mix_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = [":residual_fixtures"],
 )

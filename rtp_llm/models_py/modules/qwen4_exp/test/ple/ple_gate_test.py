@@ -1,9 +1,7 @@
-import gc
 import json
 import math
 import os
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -11,49 +9,15 @@ import torch.nn.functional as F
 
 from rtp_llm.models_py.kernels.cuda.qwen4_ple.conv import try_ple_conv
 from rtp_llm.models_py.kernels.cuda.qwen4_ple.gate import try_ple_gate
-from rtp_llm.models_py.modules.base.common.fp8_linear import (
-    make_projection,
-    project_fp8_pair,
-)
 from rtp_llm.models_py.modules.hybrid.gated_residual import grouped_rms_norm
 from rtp_llm.models_py.modules.qwen4_exp.test.support.ple_gate import (
-    PLEProjectionFixture,
+    PLESourceBf16Fixture,
 )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
-class PleSourceBf16BatchRouteTest(unittest.TestCase):
-    """The real BF16 producer contract, independent of the FP8 fixture above."""
-
-    @classmethod
-    def setUpClass(cls):
-        if torch.version.hip is not None or torch.cuda.get_device_capability() != (
-            12,
-            0,
-        ):
-            raise unittest.SkipTest("The candidate is restricted to SM120")
-
-    def layer(self):
-        from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpPLELayer
-
-        torch.manual_seed(81420)
-        layer = Qwen4ExpPLELayer(
-            SimpleNamespace(ngram_size=3, context_len=2),
-            torch.randn(10240, 2560, device="cuda", dtype=torch.bfloat16) * 0.02,
-            torch.randn(2560, 2560, device="cuda", dtype=torch.bfloat16) * 0.02,
-            torch.randn(10240, 1, 4, device="cuda", dtype=torch.bfloat16) * 0.1,
-            *[
-                torch.randn(10240, device="cuda", dtype=torch.bfloat16) * 0.07
-                for _ in range(3)
-            ],
-            hc_mult=4,
-            hidden_size=2560,
-            conv_kernel_size=4,
-            norm_eps=1e-6,
-        )
-        self.assertIsNone(layer.key_projection)
-        self.assertIsNone(layer.value_projection)
-        return layer
+class PleSourceBf16BatchRouteTest(PLESourceBf16Fixture, unittest.TestCase):
+    """The real BF16 producer contract."""
 
     def tensor_formula_reference(self, layer, hidden, embeddings, initial):
         # Existing GPU grouped_rms_norm helper plus unfused BF16 tensor formula.
@@ -408,136 +372,6 @@ class PleSourceBf16BatchRouteTest(unittest.TestCase):
             initial = snapshots[-1].clone()
             context_ids = tokens[:, -2:].clone()
             del formula, old, candidate, before, output, snapshots, hidden, embeddings
-
-    @unittest.skipUnless(
-        os.environ.get("RTP_QWEN4_PLE_BATCH_BENCH", "0") == "1",
-        "Optional unmocked CUDA-event/allocator receipt; requires the GPU lock",
-    )
-    def test_unmocked_component_timing_and_allocator_receipt(self):
-        gc.collect()
-        torch.cuda.current_stream().synchronize()
-        gc_was_enabled = gc.isenabled()
-        gc.disable()
-        try:
-            layer = self.layer()
-            torch.manual_seed(81500)
-            hidden = torch.randn(1, 8192, 10240, device="cuda", dtype=torch.bfloat16)
-            embedding = torch.randn(1, 8192, 2560, device="cuda", dtype=torch.bfloat16)
-            initial = torch.randn(1, 9, 10240, device="cuda", dtype=torch.bfloat16)
-            tokens = torch.zeros((1, 8194), device="cuda", dtype=torch.int64)
-            # Strong local references keep every persistent fixture allocation alive.
-            persistent = (layer, hidden, embedding, initial, tokens)
-            receipt = {
-                "scope": "unmocked complete PLE component; synthetic source-BF16; not E2E",
-                "shape": [1, 8192, 10240],
-                "page_size": 128,
-                "state_dtype": "bfloat16",
-                "ngram_context_dtype": "int64",
-                "warmup_runs": 3,
-                "measure_runs": 7,
-                "variant_order": ["0", "1"],
-                "gc_initially_enabled": gc_was_enabled,
-                "gc_disabled_during_warmup_measurement": True,
-                "gc_explicit_before_each_sample": True,
-                "gpu": torch.cuda.get_device_name(),
-                "torch": torch.__version__,
-                "cuda": torch.version.cuda,
-                "allow_bf16_reduced_precision_reduction": torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction,
-                "variants": {},
-            }
-            for enabled in ("0", "1"):
-                with patch.dict(os.environ, {"RTP_QWEN4_BF16_PLE_BATCH": enabled}):
-                    gc.collect()
-                    torch.cuda.current_stream().synchronize()
-                    for _ in range(3):
-                        output, snapshots = layer.prefill_page_snapshots(
-                            hidden,
-                            tokens,
-                            128,
-                            initial,
-                            embeddings=embedding,
-                            add_residual=True,
-                        )
-                        del output, snapshots
-                    torch.cuda.current_stream().synchronize()
-                    samples = []
-                    for _ in range(7):
-                        gc.collect()
-                        torch.cuda.current_stream().synchronize()
-                        before_allocated = torch.cuda.memory_allocated()
-                        before_reserved = torch.cuda.memory_reserved()
-                        torch.cuda.reset_peak_memory_stats()
-                        start, end = torch.cuda.Event(
-                            enable_timing=True
-                        ), torch.cuda.Event(enable_timing=True)
-                        start.record()
-                        output, snapshots = layer.prefill_page_snapshots(
-                            hidden,
-                            tokens,
-                            128,
-                            initial,
-                            embeddings=embedding,
-                            add_residual=True,
-                        )
-                        end.record()
-                        end.synchronize()
-                        after_return_allocated = torch.cuda.memory_allocated()
-                        snapshot_storages = {
-                            s.untyped_storage().data_ptr(): s.untyped_storage().nbytes()
-                            for s in snapshots
-                        }
-                        sample = {
-                            "cuda_event_ms": start.elapsed_time(end),
-                            "allocated_after_return_bytes": after_return_allocated,
-                            "retained_allocated_delta_bytes": after_return_allocated
-                            - before_allocated,
-                            "snapshot_payload_bytes": sum(
-                                s.numel() * s.element_size() for s in snapshots
-                            ),
-                            "snapshot_unique_storage_bytes": sum(
-                                snapshot_storages.values()
-                            ),
-                            "snapshot_unique_storage_count": len(snapshot_storages),
-                            "allocated_before_bytes": before_allocated,
-                            "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
-                            "peak_allocated_delta_bytes": torch.cuda.max_memory_allocated()
-                            - before_allocated,
-                            "reserved_before_bytes": before_reserved,
-                            "peak_reserved_bytes": torch.cuda.max_memory_reserved(),
-                        }
-                        self.assertEqual(len(snapshots), 64)
-                        del output, snapshots
-                        torch.cuda.current_stream().synchronize()
-                        after_delete_allocated = torch.cuda.memory_allocated()
-                        sample.update(
-                            allocated_after_delete_bytes=after_delete_allocated,
-                            allocated_after_delete_delta_bytes=after_delete_allocated
-                            - before_allocated,
-                            memory_sample_valid=(
-                                after_return_allocated >= before_allocated
-                                and after_delete_allocated == before_allocated
-                            ),
-                        )
-                        samples.append(sample)
-                    receipt["variants"][enabled] = samples
-            self.assertEqual(len(persistent), 5)
-            receipt["all_memory_samples_valid"] = all(
-                s["memory_sample_valid"]
-                for samples in receipt["variants"].values()
-                for s in samples
-            )
-            print(
-                "PLE_BF16_BATCH_COMPONENT_BENCH=" + json.dumps(receipt, sort_keys=True)
-            )
-            self.assertTrue(
-                receipt["all_memory_samples_valid"],
-                "Allocator receipt is contaminated or retains unexpected allocations",
-            )
-        finally:
-            if gc_was_enabled:
-                gc.enable()
-            gc.collect()
-            torch.cuda.current_stream().synchronize()
 
     def test_default_off_tail_and_graph_fallback(self):
         layer = self.layer()

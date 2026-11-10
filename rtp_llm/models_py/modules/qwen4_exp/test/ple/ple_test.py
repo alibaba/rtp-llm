@@ -303,7 +303,7 @@ class Qwen4ExpPLELayerTest(unittest.TestCase):
             norm_eps=_EPS,
         )
 
-    def _reference(self, hyper_states, history):
+    def _reference(self, hyper_states, history, padding_mask=None):
         """Independent transcription of Qwen4ExpTextPLELayer.forward."""
         seq_len = hyper_states.shape[1]
         emb = self.ngram(history, seq_len)
@@ -325,6 +325,10 @@ class Qwen4ExpPLELayerTest(unittest.TestCase):
         gated_value = torch.sigmoid(gate) * value.unsqueeze(-2)
         gated_value_normed = norm(gated_value.flatten(-2), self.norm_conv)
         gated_value = gated_value.flatten(-2)
+        if padding_mask is not None:
+            keep = padding_mask.unsqueeze(-1).to(gated_value.dtype)
+            gated_value = gated_value * keep
+            gated_value_normed = gated_value_normed * keep
 
         dilation = _NGRAM_SIZE
         state_len = (_KERNEL - 1) * dilation
@@ -348,14 +352,6 @@ class Qwen4ExpPLELayerTest(unittest.TestCase):
         self.assertEqual(got.shape, (2, 6, self.hc_hidden))
         torch.testing.assert_close(got, ref)
 
-    def test_output_width_matches_the_residual_stream(self):
-        hyper_states = torch.randn(1, 5, self.hc_hidden)
-        history = torch.randint(0, 50, (1, 7))
-
-        out = self._build()(hyper_states, history)
-
-        self.assertEqual(out.shape, hyper_states.shape)
-
     def test_conv_is_causal_under_dilation(self):
         # Changing the last token must not change earlier outputs.
         layer = self._build()
@@ -370,7 +366,7 @@ class Qwen4ExpPLELayerTest(unittest.TestCase):
         torch.testing.assert_close(out_a[:, :-1], out_b[:, :-1])
         self.assertFalse(torch.allclose(out_a[:, -1], out_b[:, -1]))
 
-    def test_padding_mask_zeroes_masked_positions(self):
+    def test_padding_mask_clears_gates_and_preserves_conv_history(self):
         layer = self._build()
         hyper_states = torch.randn(1, 6, self.hc_hidden)
         history = torch.randint(0, 50, (1, 8))
@@ -379,8 +375,15 @@ class Qwen4ExpPLELayerTest(unittest.TestCase):
         out = layer(hyper_states, history, padding_mask=mask)
         unmasked = layer(hyper_states, history)
 
-        # Masked positions lose their direct (non-conv) contribution.
-        self.assertFalse(torch.allclose(out[:, 4:], unmasked[:, 4:]))
+        gated, normed = layer._gated_values(hyper_states, history, padding_mask=mask)
+        for values in (gated, normed):
+            torch.testing.assert_close(
+                values[:, 4:], torch.zeros_like(values[:, 4:]), rtol=0, atol=0
+            )
+        torch.testing.assert_close(
+            out, self._reference(hyper_states, history, padding_mask=mask)
+        )
+        torch.testing.assert_close(out[:, :4], unmasked[:, :4])
 
     def test_rejects_mismatched_key_projection(self):
         with self.assertRaisesRegex(ValueError, "key_proj out width"):

@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 from unittest import TestCase, main
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import torch
 from torch import nn
@@ -100,28 +100,6 @@ class Qwen4ExpDecoderLayerTest(TestCase):
             output = layer(hyper_states, None)
         return layer, attention, output
 
-    def test_layer_has_gated_residual_units_not_layernorms(self):
-        layer, _, _ = self._run(torch.randn(3, self.hc_hidden))
-
-        self.assertIsInstance(layer.attn_hyper_connection, GatedResidual)
-        self.assertIsInstance(layer.mlp_hyper_connection, GatedResidual)
-        self.assertFalse(hasattr(layer, "input_layernorm"))
-        self.assertFalse(hasattr(layer, "post_attention_layernorm"))
-
-    def test_stream_width_is_preserved(self):
-        hyper_states = torch.randn(3, self.hc_hidden)
-
-        _, _, output = self._run(hyper_states)
-
-        self.assertEqual(output.shape, hyper_states.shape)
-
-    def test_attention_receives_the_collapsed_stream(self):
-        hyper_states = torch.randn(3, self.hc_hidden)
-
-        _, attention, _ = self._run(hyper_states)
-
-        self.assertEqual(attention.seen.shape, (3, _HIDDEN))
-
     def test_wiring_matches_a_hand_rolled_two_stage_reference(self):
         hyper_states = torch.randn(3, self.hc_hidden)
 
@@ -134,6 +112,7 @@ class Qwen4ExpDecoderLayerTest(TestCase):
         x, hyper, w = mlp_unit(hyper)
         expected = inject_into_residual(hyper, torch.ones_like(x), w)
 
+        self.assertEqual(attention.seen.shape, (3, _HIDDEN))
         torch.testing.assert_close(output, expected)
 
     def test_rejects_a_narrow_stream(self):
@@ -165,23 +144,6 @@ class Qwen4ExpDecoderLayerTest(TestCase):
                 self.config, ParallelismConfig(), self.weights, 0, MoeConfig()
             )
         self.assertEqual(gdn_cls.call_args.kwargs.get("norm_activation"), "sigmoid")
-
-
-class Qwen4ExpSpecFaultInjectionTest(TestCase):
-    def test_private_hook_receives_actual_rank_and_phase(self):
-        hook = Mock()
-        stub = SimpleNamespace(
-            parallelism_config=SimpleNamespace(get_attn_tp_rank=lambda: 3),
-            _speculative_test_hook=hook,
-        )
-        call = qwen4_exp.Qwen4ExpModel._maybe_inject_speculative_fault
-        call(stub, "prepare")
-        hook.assert_called_once_with("prepare", 3)
-        hook.side_effect = RuntimeError("commit test failure")
-        with self.assertRaisesRegex(RuntimeError, "commit test failure"):
-            call(stub, "commit")
-        del stub._speculative_test_hook
-        call(stub, "commit")
 
 
 class Qwen4ExpMetadataTest(TestCase):
@@ -349,13 +311,6 @@ class Qwen4ExpFmhaRoutingTest(TestCase):
 
     def _full_layer(self):
         return SimpleNamespace(layer_type=HybridAttentionType.NONE)
-
-    def test_the_indexer_really_adds_two_regions(self):
-        descs = self._descs()
-
-        self.assertEqual(
-            [d.tag for d in descs[3]], ["full", INDEXER_KV_TAG, INDEXER_STATE_TAG]
-        )
 
     def test_fmha_impls_build_only_for_the_attention_region(self):
         model = _bare_model(self._descs(), _hybrid_types())

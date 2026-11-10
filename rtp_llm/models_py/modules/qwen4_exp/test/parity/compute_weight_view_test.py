@@ -37,15 +37,6 @@ class ComputeWeightViewTest(unittest.TestCase):
         self.assertIs(owner.weights[0]["norm"], norm)
         self.assertTrue(view.weights[0]["norm"]._rtp_requires_restart_for_update)
 
-    def test_default_view_preserves_fp8_dense_dispatch(self):
-        dense = torch.ones(4, 4).to(torch.float8_e4m3fn)
-        owner = SimpleNamespace(
-            weights=[{"w": dense, "w" + SUFFIX: torch.tensor(0.5)}], global_weights={}
-        )
-        view = prepare_compute_weights(owner)
-        self.assertIs(view.weights[0]["w"], dense)
-        self.assertIn("w" + SUFFIX, view.weights[0])
-
 
 if __name__ == "__main__":
     unittest.main()

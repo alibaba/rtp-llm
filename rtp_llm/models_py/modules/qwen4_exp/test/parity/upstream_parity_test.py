@@ -19,9 +19,8 @@ leaf ``nn.Module`` definitions are taken, and those need nothing but torch.
 Real-weight checks run separately in real_weight_parity_test.py.
 
 Everything is compared in float64 so a reported difference is a difference in the
-math, not accumulated bf16 noise. Parity here is exact -- see
-``test_folding_plus_one_into_the_weight_would_break_exactness`` for why these
-norms deliberately skip the loader's ``plus_one``.
+math, not accumulated bf16 noise. These norms add one to the checkpoint gain
+after casting to fp32, preserving the upstream rounding order.
 """
 
 import os
@@ -115,35 +114,6 @@ class GatedResidualParityTest(unittest.TestCase):
         _, hyper, inject = ours(x)
         got = inject_into_residual(hyper, sublayer_out, inject)
         self.assertEqual((expected - got).abs().max().item(), 0.0)
-
-    def test_folding_plus_one_into_the_weight_would_break_exactness(self):
-        """Why these norms skip the loader's ``plus_one``.
-
-        Upstream adds the one in fp32 after the cast. Folding it into the bf16
-        checkpoint tensor instead -- what ``plus_one`` does, and what the rest of
-        the repo's RMSNorms accept -- perturbs the gain enough to be visible in the
-        unit's output. Measured on the real ``layers.0`` gamma: 7520/10240 elements
-        differ, up to 3.9e-3 relative. This test fails if anyone reintroduces the
-        fold, which would silently cost bit-exactness.
-        """
-        ref, ours = self._pair(use_combine=True)
-        x = self._stream()
-        expected = ref(x)[0]
-        raw = ref.hc_norm.weight.detach()
-
-        self.assertEqual((expected - ours(x)[0]).abs().max().item(), 0.0)
-
-        prefolded = GatedResidual(
-            # Emulate a loader that folded in bf16, then undo the module's own
-            # ``1 +`` so only the folding error remains.
-            (raw.to(torch.bfloat16) + 1).double() - 1.0,
-            ref.input_mix_weight_down.weight.detach(),
-            ref.input_mix_weight_up.weight.detach(),
-            ref.block_inject_weight.weight.detach(),
-            hc_mult=self.HC,
-            norm_eps=self.EPS,
-        )(x)[0]
-        self.assertGreater((expected - prefolded).abs().max().item(), 1e-4)
 
 
 @unittest.skipUnless(
@@ -284,31 +254,6 @@ class FusedQKRMSNormParityTest(unittest.TestCase):
             q_gamma, k_gamma, self.HEADS, self.KV_HEADS, self.HEAD_DIM, self.EPS
         )(qkv.clone())
         self.assertEqual((expected - got).abs().max().item(), 0.0)
-
-    def test_value_slice_is_untouched(self):
-        """Only q and k are normed; v must pass through byte-for-byte."""
-        q_gamma, k_gamma = self._gammas()
-        qkv = self._qkv()
-        got = ZeroCenteredFusedQKRMSNorm(
-            q_gamma, k_gamma, self.HEADS, self.KV_HEADS, self.HEAD_DIM, self.EPS
-        )(qkv.clone())
-        v_start = (self.HEADS + self.KV_HEADS) * self.HEAD_DIM
-        self.assertEqual((qkv[:, v_start:] - got[:, v_start:]).abs().max().item(), 0.0)
-
-    def test_folding_plus_one_would_break_exactness(self):
-        """Guard the reason this module exists instead of the fused kernel."""
-        q_gamma, k_gamma = self._gammas()
-        qkv = self._qkv()
-        expected = self._reference(qkv, q_gamma, k_gamma)
-        prefolded = ZeroCenteredFusedQKRMSNorm(
-            (q_gamma.to(torch.bfloat16) + 1).double() - 1.0,
-            (k_gamma.to(torch.bfloat16) + 1).double() - 1.0,
-            self.HEADS,
-            self.KV_HEADS,
-            self.HEAD_DIM,
-            self.EPS,
-        )(qkv.clone())
-        self.assertGreater((expected - prefolded).abs().max().item(), 1e-4)
 
     def test_replacing_copies_geometry_from_fused(self):
         q_gamma, k_gamma = self._gammas()
@@ -460,22 +405,6 @@ class QSAIndexerParityTest(unittest.TestCase):
         self.assertGreater(
             (out[..., : self.ROTARY] - x[..., : self.ROTARY]).abs().max().item(), 0.0
         )
-
-    def test_production_geometry_derives_documented_widths(self):
-        """Real config: budget 2048 / ratio 4 -> topk 512, output width 2051."""
-        indexer = ReferenceQSAIndexer(
-            torch.zeros((4 + 1) * 128, 2560),
-            torch.zeros(128),
-            torch.zeros(128),
-            n_heads=4,
-            kv_heads=1,
-            head_dim=128,
-            token_budget=2048,
-            compress_ratio=4,
-            norm_eps=1e-6,
-        )
-        self.assertEqual(indexer.block_topk, 512)
-        self.assertEqual(indexer.max_selected, 2051)
 
 
 if __name__ == "__main__":

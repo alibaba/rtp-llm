@@ -68,5 +68,5 @@ py_test(
 models_py_test(
     name = "epilogue_mix_test",
     src = "epilogue_mix_test.py",
-    gpu = "L20_CU13",
+    gpu = "RTX_5000_PRO_CU13",
 )

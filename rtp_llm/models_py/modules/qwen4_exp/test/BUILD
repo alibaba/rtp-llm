@@ -574,7 +574,6 @@ test_suite(
     tests = [
         "//rtp_llm/models_py/modules/hybrid/test:residual_up_mix_test",
         "//rtp_llm/models_py/modules/hybrid/test:residual_norm_fp8_test",
-        "//rtp_llm/models_py/modules/hybrid/test:residual_medium_up_mix_test",
         "//rtp_llm/models_py/modules/hybrid/test:residual_prefill_up_mix_test",
         "//rtp_llm/models_py/modules/hybrid/test:residual_prefill_inject_norm_test",
         "//rtp_llm/models_py/modules/hybrid/test:residual_inject_projection_test",

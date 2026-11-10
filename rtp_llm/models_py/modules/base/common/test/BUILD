@@ -23,12 +23,9 @@ py_test (
     tags = ["L20_CU13"],
 )
 
-py_test(
+models_py_test(
     name = "common_components_test",
-    srcs = ["common_components_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    tags = ["L20_CU13"],
-    exec_properties = {"gpu": "L20_CU13"},
+    src = "common_components_test.py",
 )
 
 py_test(
