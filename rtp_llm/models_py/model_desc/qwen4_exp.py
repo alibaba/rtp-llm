@@ -623,7 +623,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             from rtp_llm.models_py.modules.qwen4_exp.moe.topk import Qwen4ExpMoeTopk
 
             self.mlp.select_topk = Qwen4ExpMoeTopk(self.mlp.select_topk)
-            self.mlp.prepare_shared_expert_overlap()
+            self.mlp.prepare_shared_expert_overlap(layer_idx=layer_idx)
         from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import (
             install_target_graph_all_reduce,
         )
