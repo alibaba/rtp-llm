@@ -10,6 +10,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
     IncrementDecodingUtils,
 )
+from rtp_llm.frontend.tokenizer_prefix_cache import TokenizerPrefixCache
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.utils.word_util import (
     get_stop_word_slices,
@@ -21,9 +22,23 @@ from rtp_llm.utils.word_util import (
 
 
 class TokenProcessor:
+    # Append-only prefix tokenization cache for the inference prompt path.  Agent-style
+    # callers resend the whole conversation every step while only appending a suffix,
+    # so re-encoding the full text is O(history) CPU per request; the cache splices
+    # the previously encoded prefix (boundary-verified, full-encode fallback) and only
+    # encodes the appended suffix.  Sizing: 32 entries covers the concurrent session
+    # count with margin; 8M cached ids bounds memory while holding ~16 full histories.
+    _PREFIX_CACHE_MAX_ENTRIES = 32
+    _PREFIX_CACHE_MAX_CACHED_IDS = 8_000_000
+
     def __init__(self, tokenizer, special_tokens):
         self.tokenizer = tokenizer
         self.special_tokens = special_tokens
+        self.prefix_cache = TokenizerPrefixCache(
+            tokenizer,
+            max_entries=self._PREFIX_CACHE_MAX_ENTRIES,
+            max_cached_ids=self._PREFIX_CACHE_MAX_CACHED_IDS,
+        )
 
     def __call__(self, prompt: str) -> Any:
         return self.tokenizer(
@@ -37,8 +52,10 @@ class TokenProcessor:
         try:
             if isinstance(prompt, bytes):
                 prompt = prompt.decode("utf-8", errors="ignore")
-            th = self.tokenizer.encode(prompt)
-            return th
+            # Returns ids identical to a full encode; falls back to a full encode
+            # whenever the boundary is not verified, so correctness never depends
+            # on the cache.  Returns List[int] as the C++ layer expects.
+            return self.prefix_cache.encode(prompt)
         except Exception as e:
             raise e
 
