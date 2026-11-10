@@ -2222,6 +2222,50 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     EXPECT_GT(cache_manager->getKVCacheInfo(-1, true).total_kv_cache, 0);
 }
 
+TEST_F(MtpExecutorTest, testProfileWindowSkipsIdleAndClosesOnPrefillFailure) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    int starts = 0;
+    int finishes = 0;
+    bool active = false;
+    components.executor->profile_step_start_ = [&]() {
+        EXPECT_FALSE(active);
+        active = true;
+        ++starts;
+    };
+    components.executor->profile_step_finish_ = [&]() {
+        EXPECT_TRUE(active);
+        active = false;
+        ++finishes;
+    };
+    EXPECT_TRUE(components.executor->process({}).ok());
+    EXPECT_TRUE(components.executor->process({}).ok());
+    EXPECT_EQ(starts, 0);
+    EXPECT_EQ(finishes, 0);
+
+    auto stream = createContextStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3});
+    GptModelInputs input;
+    input.combo_tokens = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+    input.input_lengths = torch::tensor({4}, torch::kInt32);
+    input.prefix_lengths = torch::tensor({0}, torch::kInt32);
+    input.lm_output_indexes = torch::tensor({3}, torch::kInt32);
+    components.fake_target_model->setInputs({input});
+    components.fake_target_model->setForwardCallback([&]() {
+        EXPECT_TRUE(active);
+        throw std::runtime_error("profile-window-forward-failure");
+    });
+    setupFakeModels(components.executor.get(),
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler));
+    EXPECT_THROW(components.executor->process({stream}), std::runtime_error);
+    EXPECT_EQ(starts, 1);
+    EXPECT_EQ(finishes, 1);
+    EXPECT_FALSE(active);
+}
+
 TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
     MtpExecutorTestConfig test_config;
     test_config.gen_num_per_cycle = 4;
@@ -2316,6 +2360,15 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     test_config.gen_num_per_cycle   = propose_step;
     test_config.vocab_size_override = 4;
     auto components                 = createMtpExecutorComponents(test_config);
+
+    int profile_starts = 0;
+    int profile_finishes = 0;
+    components.executor->profile_step_start_ = [&]() { ++profile_starts; };
+    components.executor->profile_step_finish_ = [&]() { ++profile_finishes; };
+    components.fake_target_model->setForwardCallback([&]() {
+        EXPECT_EQ(profile_starts, 1);
+        EXPECT_EQ(profile_finishes, 0);
+    });
 
     size_t batch_size = 1;
 
@@ -2454,6 +2507,8 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 2, 0}, {0, 1}, {0.0, 1.0, 0.0, 0.0}, {0.3, 0.33});
+    EXPECT_EQ(profile_starts, 1);
+    EXPECT_EQ(profile_finishes, 1);
 }
 
 TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetToken) {

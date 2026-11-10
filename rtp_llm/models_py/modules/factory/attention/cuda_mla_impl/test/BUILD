@@ -244,6 +244,27 @@ py_test(
 )
 
 py_test(
+    name = "cp_plan_upload_cuda_test",
+    srcs = ["cp_plan_upload_cuda_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+[
+    py_test(
+        name = "cp_profile_stages_" + mode + "_test",
+        srcs = ["cp_profile_stages_test.py"],
+        main = "cp_profile_stages_test.py",
+        deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+        env = {"RTP_LLM_CP_PROFILE_STAGES": enabled},
+        tags = ["SM103_CU13"],
+        exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    )
+    for mode, enabled in [("enabled", "1"), ("disabled", "0")]
+]
+
+py_test(
     name = "cp_kv_prefetch_gpu_test",
     srcs = ["cp_kv_prefetch_gpu_test.py"],
     deps = [
@@ -251,4 +272,25 @@ py_test(
         "//rtp_llm:testlib",
     ],
     tags = ["manual", "H20", "open_skip"],
+)
+
+py_test(
+    name = "cp_kv_prefetch_sm103_test",
+    srcs = ["cp_kv_prefetch_gpu_test.py"],
+    main = "cp_kv_prefetch_gpu_test.py",
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
+    env = {
+        "WORLD_SIZE": "8",
+        "GPU_COUNT": "8",
+        "KV_TEST_WORLD_SIZE": "8",
+        "KV_TEST_PROFILE": "1",
+        "RTP_GLM5_PREFILL_OPTIMIZE": "1",
+        "RTP_LLM_CP_PREFILL_PIPELINE_OPT": "1",
+        "RTP_LLM_CP_PROFILE_STAGES": "1",
+    },
+    tags = ["manual", "SM103_CU13", "open_skip"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "8"},
 )

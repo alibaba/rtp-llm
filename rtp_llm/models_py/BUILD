@@ -110,6 +110,17 @@ py_test(
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )
 
+
+py_test(
+    name = "hy4_ihc_fast_launch_test",
+    srcs = ["modules/hy_v4/test_ihc_fast_launch.py"],
+    main = "modules/hy_v4/test_ihc_fast_launch.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1", "RTP_GLM5_PREFILL_OPTIMIZE": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
 py_test(
     name = "hy4_ihc_test",
     srcs = ["modules/hy_v4/test_ihc.py"],

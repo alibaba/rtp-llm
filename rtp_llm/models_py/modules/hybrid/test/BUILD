@@ -8,6 +8,14 @@ py_test(
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )
 
+py_test(
+    name = "decoder_cache_diagnostics_test",
+    srcs = ["decoder_cache_diagnostics_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
 flashinfer_test_envs = {
     "FLASHINFER_JIT_VERBOSE": "1",  # Enable verbose JIT compilation logs
 }

@@ -15,8 +15,19 @@ from rtp_llm.models_py.distributed.pynccl_cp import (
     all_gather_kv_overlap,
     registered_kv_overlap_buffers,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.cp_profile import (
+    PROFILE_STAGES,
+    profile_stage,
+)
 from rtp_llm.models_py.triton_kernels.sparse_mla.cp_kv_patch import restore_patch_kv
 from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+_full_collective = profile_stage("cp.full.collective")(all_gather_kv_overlap)
+_new_collective = profile_stage("cp.new.collective")(all_gather_kv_overlap)
+_history_collective = profile_stage("cp.history.collective")(all_gather_kv_overlap)
+_full_reorder = profile_stage("cp.full.reorder")(torch.index_select)
+_history_reorder = profile_stage("cp.history.reorder")(torch.index_select)
+_new_reorder = profile_stage("cp.new.reorder")(restore_patch_kv)
 
 
 def prefix_plan(prefixes, lengths, size, rank, owner):
@@ -128,6 +139,7 @@ def _upload_immutable_plan(plan, device):
 
 
 class CrossLayerKvPrefetch:
+    @profile_stage("cp.metadata_and_workspace")
     def __init__(self, fmha, cache):
         self.fmha = fmha
         self.op = fmha.fmha_impl
@@ -135,6 +147,8 @@ class CrossLayerKvPrefetch:
         self.stream = fmha._kv_overlap_stream
         self.device = self.op.block_table.device
         self.compute = torch.cuda.current_stream(self.device)
+        self.capture_timing = getattr(cache, "capture_timing", False)
+        self.timing_rows = {}
         self.original_table = self.op.block_table
         prefixes = self.op.attn_inputs.prefix_lengths.reshape(-1).tolist()
         lengths = self.op.cp_info.prefill_actual_input_lengths_cpu.reshape(-1).tolist()
@@ -162,7 +176,7 @@ class CrossLayerKvPrefetch:
             mapping[plan.pop("new_dest")] = self.history_rows + plan.pop("new_restore")
             plan["rank_major_restore"] = mapping
         batch_upload = (
-            prefill_optimization_setting("RTP_LLM_CP_BATCH_PLAN_UPLOAD", "0") == "1"
+            prefill_optimization_setting("RTP_LLM_CP_BATCH_PLAN_UPLOAD", "1") == "1"
         )
         self._plan_host_snapshots = []
         if batch_upload:
@@ -255,6 +269,7 @@ class CrossLayerKvPrefetch:
         # forward. Subsequent submissions wait only on their own slot events.
         self.stream.wait_stream(self.compute)
 
+    @profile_stage("cp.new.prepare", layer_arg=1)
     def prepare(self, layer, kv_cache):
         if layer == 0:
             # First layer follows the existing full-KV path, after its KV write.
@@ -269,13 +284,19 @@ class CrossLayerKvPrefetch:
             self.first_buffers = (local, gathered)
             self.stream.wait_stream(self.compute)
             with torch.cuda.stream(self.stream):
-                all_gather_kv_overlap(local, Group.TP, output=gathered)
-                torch.index_select(
+                (_full_collective if PROFILE_STAGES else all_gather_kv_overlap)(
+                    local, Group.TP, output=gathered
+                )
+                if self.capture_timing:
+                    self.record_timing(layer, "full_reorder_begin", self.stream)
+                (_full_reorder if PROFILE_STAGES else torch.index_select)(
                     gathered,
                     0,
                     self.op.sharded_kv_restore_indices,
                     out=self.buffers[0][: self.logical_rows],
                 )
+                if self.capture_timing:
+                    self.record_timing(layer, "full_reorder_end", self.stream)
                 self._record_ready(0)
         else:
             if self.owners[layer % 2] != layer:
@@ -321,14 +342,20 @@ class CrossLayerKvPrefetch:
                         dtype=local.dtype,
                         device=self.device,
                     )
-                all_gather_kv_overlap(local, Group.TP, output=gathered)
+                (_new_collective if PROFILE_STAGES else all_gather_kv_overlap)(
+                    local, Group.TP, output=gathered
+                )
                 if not self.rank_major:
-                    restore_patch_kv(
+                    if self.capture_timing:
+                        self.record_timing(layer, "new_reorder_begin", self.stream)
+                    (_new_reorder if PROFILE_STAGES else restore_patch_kv)(
                         gathered,
                         self.plan["new_restore"],
                         self.plan["new_dest"],
                         self.buffers[layer % 2],
                     )
+                    if self.capture_timing:
+                        self.record_timing(layer, "new_reorder_end", self.stream)
                 # The consumer must join both prefetched history and this
                 # patch, not the older history-only event.
                 self._record_ready(layer)
@@ -346,6 +373,13 @@ class CrossLayerKvPrefetch:
         else:
             values = values[: self.logical_rows]
         return values, self.ready[layer % 2]
+
+    def record_timing(self, layer: int, name: str, stream) -> None:
+        if not self.capture_timing:
+            return
+        event = torch.cuda.Event(enable_timing=True)
+        event.record(stream)
+        self.timing_rows.setdefault(layer, {})[name] = event
 
     def _record_ready(self, layer):
         slot = layer % 2
@@ -368,6 +402,7 @@ class CrossLayerKvPrefetch:
             # allocations can now return to the allocator before MoE.
             self.first_buffers = None
 
+    @profile_stage("cp.history.prepare", layer_arg=1)
     def prefetch(self, layer):
         if layer == len(self.cache.backing):
             return
@@ -414,12 +449,18 @@ class CrossLayerKvPrefetch:
                 if self.rank_major
                 else self.gathered
             )
-            all_gather_kv_overlap(self.local, Group.TP, output=gathered)
+            (_history_collective if PROFILE_STAGES else all_gather_kv_overlap)(
+                self.local, Group.TP, output=gathered
+            )
             if not self.rank_major:
                 # New-token holes are patched before the final ready event.
-                torch.index_select(
+                if self.capture_timing:
+                    self.record_timing(layer, "history_reorder_begin", self.stream)
+                (_history_reorder if PROFILE_STAGES else torch.index_select)(
                     gathered, 0, self.plan["history_restore"], out=self.buffers[slot]
                 )
+                if self.capture_timing:
+                    self.record_timing(layer, "history_reorder_end", self.stream)
             # The direct receive slot is protected by the same free event as
             # restored storage. TopK remapping never selects padding; fresh
             # rows are appended and patched before the consumer-ready event.
@@ -430,6 +471,7 @@ class CrossLayerKvPrefetch:
             self.free[layer % 2] = torch.cuda.Event()
         self.free[layer % 2].record(self.compute)
 
+    @profile_stage("cp.collective.wait_before_moe")
     def wait_before_moe(self):
         # AllGather and Mega-MoE share NVLink. Use Attention/V BMM/O as the
         # overlap window, then drain its tail before launching Mega-MoE.

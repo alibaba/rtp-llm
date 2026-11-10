@@ -1,14 +1,13 @@
 import json
 import logging
 import os
-import signal
 import socket
 import subprocess
 import sys
 import time
 import traceback
 from contextlib import ExitStack
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List
 
 from filelock import FileLock, Timeout
 
@@ -139,17 +138,7 @@ class DeviceResource:
         return all(not self._pid_alive(p) for p in pids)
 
     def _ensure_gpus_released(self, timeout: int = 30):
-        """Wait until acquired GPUs have no stale compute processes.
-
-        Uses SIGTERM first to allow graceful CUDA cleanup, then SIGKILL
-        as a last resort. Detects zombie GPU contexts (dead processes that
-        still hold GPU memory) which indicate unrecoverable state.
-
-        Returns True if GPUs are clean, False if zombie contexts detected.
-        """
         my_pid = os.getpid()
-        sigterm_sent: Set[int] = set()
-        sigkill_sent: Set[int] = set()
         deadline = time.time() + timeout
 
         while time.time() < deadline:
@@ -170,21 +159,6 @@ class DeviceResource:
                     return False
 
                 all_clear = False
-                for pid in live_stale:
-                    if pid not in sigterm_sent:
-                        try:
-                            os.kill(pid, signal.SIGTERM)
-                            logging.info(f"SIGTERM pid {pid} on GPU {gpu_id}")
-                            sigterm_sent.add(pid)
-                        except (ProcessLookupError, PermissionError):
-                            pass
-                    elif pid not in sigkill_sent:
-                        try:
-                            os.kill(pid, signal.SIGKILL)
-                            logging.info(f"SIGKILL pid {pid} on GPU {gpu_id}")
-                            sigkill_sent.add(pid)
-                        except (ProcessLookupError, PermissionError):
-                            pass
                 break
 
             if all_clear:
@@ -204,13 +178,18 @@ class DeviceResource:
                 with ExitStack() as group_stack:
                     for id in group:
                         if self._has_zombie_gpu_contexts(str(id)):
-                            logging.info(f"skip GPU {id}: zombie CUDA contexts detected")
+                            logging.info(
+                                f"skip GPU {id}: zombie CUDA contexts detected"
+                            )
                             break
                         lock_device = FileLock(f"{self.gpu_status_root_path}/{id}")
                         try:
                             group_stack.enter_context(lock_device.acquire(timeout=1))
                         except Timeout as _:
                             logging.info(f"lock device {id} failed")
+                            break
+                        if self._get_gpu_pids(str(id)):
+                            logging.info(f"skip GPU {id}: active compute processes")
                             break
                         gpu_ids.append(str(id))
                         logging.info(f"{get_ip()} lock device {id} done")

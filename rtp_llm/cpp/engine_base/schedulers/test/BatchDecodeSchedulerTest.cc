@@ -33,6 +33,47 @@ private:
 
 class BatchDecodeSchedulerTest: public DeviceTestBase {};
 
+TEST_F(BatchDecodeSchedulerTest, StartupWarmupModePreservesContextAndAllowsOverride) {
+    ScopedPerfLocalEnv env("0");
+    for (const int warmup_type : {0, 1}) {
+        for (const bool switch_mode : {false, true}) {
+            SCOPED_TRACE(warmup_type);
+            SCOPED_TRACE(switch_mode);
+            auto config = makeMhaCacheConfig(1, 32, 1, 4, 8, DataType::TYPE_FP16);
+            auto cache = std::make_shared<KVCacheManager>(config);
+            ASSERT_TRUE(cache->init());
+            ResourceContext resources;
+            resources.cache_manager = cache;
+            resources.role_type = RoleType::PREFILL;
+            ModelConfig model;
+            model.max_seq_len = 8192;
+            RuntimeConfig runtime;
+            runtime.use_batch_decode_scheduler = true;
+            runtime.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 1;
+            runtime.batch_decode_scheduler_config.batch_decode_scheduler_warmup_type = warmup_type;
+            BatchDecodeScheduler scheduler(runtime, cache, nullptr);
+            const bool expected_prefill = (warmup_type != 0) != switch_mode;
+            if (switch_mode) {
+                scheduler.updateSchedulerInfo(expected_prefill ? "{\"batch_size\":1,\"mode\":\"prefill\"}" :
+                                                                 "{\"batch_size\":1,\"mode\":\"decode\"}");
+            }
+            auto input = std::make_shared<GenerateInput>();
+            input->input_ids = torch::zeros({2}, torch::kInt32);
+            input->generate_config = std::make_shared<GenerateConfig>();
+            input->generate_config->max_new_tokens = 1;
+            auto stream = std::make_shared<NormalGenerateStream>(input, model, runtime, resources, nullptr);
+            ASSERT_TRUE(scheduler.enqueue(stream).ok());
+
+            const auto result = scheduler.schedule();
+
+            ASSERT_TRUE(result.ok());
+            ASSERT_EQ(result->size(), 1);
+            EXPECT_EQ(stream->isContextStream(), expected_prefill);
+            ASSERT_TRUE(scheduler.stop().ok());
+        }
+    }
+}
+
 TEST_F(BatchDecodeSchedulerTest, PerfLocalDecodeAllocatesAndReleasesRealBlocks) {
     ScopedPerfLocalEnv env("1");
     auto config = makeMhaCacheConfig(1, 32, 1, 4, 8, DataType::TYPE_FP16);

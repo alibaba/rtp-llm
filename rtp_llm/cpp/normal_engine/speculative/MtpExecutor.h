@@ -49,7 +49,9 @@ public:
                          int32_t                                        kv_cache_group_num      = 1,
                          const std::vector<int32_t>&                    kv_cache_layer_to_group = {},
                          bool                                           warm_up                 = false,
-                         CacheStatusSnapshotRefreshCallback             cache_status_snapshot_refresh_callback = {});
+                         CacheStatusSnapshotRefreshCallback             cache_status_snapshot_refresh_callback = {},
+                         std::function<void()>                          profile_step_start = {},
+                         std::function<void()>                          profile_step_finish = {});
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
@@ -269,6 +271,8 @@ private:
     bool                               warm_up_;
     RoleType                           role_type_;
     CacheStatusSnapshotRefreshCallback cache_status_snapshot_refresh_callback_;
+    std::function<void()>              profile_step_start_;
+    std::function<void()>              profile_step_finish_;
 
     // True when any KV-cache group is CacheGroupType::LINEAR (RWKV / Mamba /
     // hybrid linear+full). Per-step state advances every token, so the page

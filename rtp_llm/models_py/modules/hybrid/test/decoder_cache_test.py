@@ -36,9 +36,12 @@ class RecordingCache:
 
 class DecoderCacheTest(unittest.TestCase):
     def setUp(self):
+        diagnostics_env = patch.dict(os.environ, {"RTP_LLM_PREFILL_CACHE_STATS": "0"})
+        diagnostics_env.start()
+        self.addCleanup(diagnostics_env.stop)
         self.events = []
         self.cache = RecordingCache(self.events)
-        self.fmha = SimpleNamespace()
+        self.fmha = SimpleNamespace(attn_inputs=SimpleNamespace(is_prefill=True))
         self.model = SimpleNamespace(
             layered_prefill_cache=self.cache,
             pinned_mla_groups={3: (self.cache, 1)},
@@ -85,13 +88,47 @@ class DecoderCacheTest(unittest.TestCase):
 
     def test_diagnostics_finish_after_cache_release(self):
         self.model._prefill_cache_diagnostics = SimpleNamespace(
+            begin=lambda fmha: self.events.append(("diagnostics_begin", fmha)),
             finish=lambda cache, failed: self.events.append(("diagnostics", failed))
         )
-        with decoder_cache_forward(self.model, None):
-            pass
+        with patch.dict(os.environ, {"RTP_LLM_PREFILL_CACHE_STATS": "1"}):
+            with decoder_cache_forward(self.model, None):
+                pass
         self.assertEqual(
-            self.events, ["begin", ("end", False), ("diagnostics", False)]
+            self.events,
+            [
+                "begin",
+                ("diagnostics_begin", self.fmha),
+                ("end", False),
+                ("diagnostics", False),
+            ],
         )
+
+    def test_diagnostics_failure_is_finished_once_after_transfer_cleanup(self):
+        self.model._prefill_cache_diagnostics = SimpleNamespace(
+            begin=lambda fmha: self.events.append("diagnostics_begin"),
+            finish=lambda cache, failed: self.events.append(("diagnostics", failed)),
+        )
+        with patch.dict(os.environ, {"RTP_LLM_PREFILL_CACHE_STATS": "1"}):
+            with self.assertRaisesRegex(TransferFailure, "decoder failed"):
+                with decoder_cache_forward(self.model, None):
+                    raise TransferFailure("decoder failed")
+        self.assertEqual(
+            self.events,
+            ["begin", "diagnostics_begin", ("end", True), ("diagnostics", True)],
+        )
+
+    def test_disabled_or_decode_does_not_reuse_old_diagnostics(self):
+        self.model._prefill_cache_diagnostics = SimpleNamespace(
+            begin=lambda fmha: self.fail("unexpected diagnostics begin"),
+            finish=lambda cache, failed: self.fail("unexpected diagnostics finish"),
+        )
+        for enabled, prefill in (("0", True), ("1", False)):
+            with self.subTest(enabled=enabled, prefill=prefill):
+                self.fmha.attn_inputs.is_prefill = prefill
+                with patch.dict(os.environ, {"RTP_LLM_PREFILL_CACHE_STATS": enabled}):
+                    with decoder_cache_forward(self.model, None):
+                        pass
 
     def test_wrapped_and_direct_impl_wait_for_nonzero_group_offset(self):
         for wrapped in (False, True):

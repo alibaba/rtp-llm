@@ -84,3 +84,13 @@ cc_test(
     env = {"TEST_USING_DEVICE": "CUDA"},
     exec_properties = {"gpu": "H20"},
 )
+
+cc_test(
+    name = "batch_decode_scheduler_sm103_test",
+    srcs = ["BatchDecodeSchedulerTest.cc"],
+    copts = copts() + ["-fno-access-control"],
+    deps = test_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)

@@ -13,7 +13,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 
-def run_case(rank, prefixes, lengths, producer):
+def run_case(rank, prefixes, lengths, producer, capture_profile=False):
     from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.cp_kv_prefetch import (
         CrossLayerKvPrefetch,
         prefix_plan,
@@ -110,6 +110,9 @@ def run_case(rank, prefixes, lengths, producer):
         ),
         block_table=table.cuda(),
         kv_cache_sharded=True,
+        kv_owner_tokens_per_block=owner,
+        prefill_cp_size=size,
+        prefill_cp_rank=rank,
         sharded_slot_mapping=slots_cpu.cuda(),
         write_cache_store_impl=None,
         _gather=SimpleNamespace(batch_size=len(totals)),
@@ -145,6 +148,13 @@ def run_case(rank, prefixes, lengths, producer):
     op.attn_inputs = inputs
     fmha = SimpleNamespace(
         fmha_impl=op,
+        fmha_params=SimpleNamespace(
+            prefill_ragged_kv_len_indptr_h=torch.tensor(
+                [0] + [sum(totals[: i + 1]) for i in range(len(totals))],
+                dtype=torch.int32,
+                device="cpu",
+            ),
+        ),
         attn_inputs=inputs,
         _cp_size=size,
         _cp_rank=rank,
@@ -219,14 +229,18 @@ def run_case(rank, prefixes, lengths, producer):
                         )
                     )
                 torch.cuda._sleep(100_000)  # independent Q work
+                if getattr(pipeline, "capture_timing", False):
+                    pipeline.record_timing(layer, "cp_ready_wait_begin", compute)
                 compute.wait_event(ready)
+                if getattr(pipeline, "capture_timing", False):
+                    pipeline.record_timing(layer, "cp_ready_wait_end", compute)
                 pipeline.consume(layer)
                 if isinstance(fused, torch.Tensor):
                     results.append(fused.clone())
                 else:
                     # Consume selected rows on compute before releasing the slot.
                     results.append(fused.values.index_select(0, fused.restore_indices))
-                if pipeline.rank_major:
+                if pipeline.rank_major or capture_profile:
                     # Exercise the production index-remap + sparse-attention
                     # consumer, including per-request offsets and -1 padding.
                     attention_pairs.append(
@@ -254,6 +268,8 @@ def run_case(rank, prefixes, lengths, producer):
         cache.end_forward(failed=True)
         raise
     torch.cuda.synchronize()
+    if capture_profile:
+        cache.flush_timings()
     if pipeline.reuse_events:
         assert len(ready_ids) <= 2 and len(free_ids) <= 2
     if pipeline.reuse_workspace:
@@ -280,12 +296,14 @@ def run_case(rank, prefixes, lengths, producer):
             atol=0,
         )
     assert fmha._cross_layer_prefetch is None
-    return {
+    result = {
         "prefixes": prefixes,
         "new_lengths": lengths,
         "layers": layers,
         "zero_owned_new": not bool(len(fresh_owned)),
         "bit_exact": True,
+        "batch_plan_upload": bool(pipeline._plan_host_snapshots),
+        "batch_plan_host_snapshot_count": len(pipeline._plan_host_snapshots),
         "registered": pipeline.registered,
         "reuse_events": pipeline.reuse_events,
         "reuse_workspace": pipeline.reuse_workspace,
@@ -293,6 +311,20 @@ def run_case(rank, prefixes, lengths, producer):
         "rank_major": pipeline.rank_major,
         "attention_pairs_bit_exact": len(attention_pairs),
     }
+    if capture_profile:
+        result["rank"] = rank
+        result["world_size"] = size
+        result["ready_to_moe_ms"] = [
+            producer_end.elapsed_time(before_moe) for producer_end, before_moe in timing
+        ]
+        result["copy_stats"] = cache.copy_stats
+        result["synthetic_compute_sleep_cycles"] = {
+            "query": 100_000,
+            "attention_window": 200_000,
+            "output_projection": 100_000,
+            "moe": 200_000,
+        }
+    return result
 
 
 def check_registered_buffer_growth(rank, producer):
@@ -503,6 +535,8 @@ def worker(rank, port):
     torch.set_num_threads(1)
     torch.cuda.set_device(rank)
     torch.set_default_device(f"cuda:{rank}")
+    if os.environ.get("KV_TEST_PROFILE") == "1":
+        os.environ["WORLD_RANK"] = str(rank)
     dist.init_process_group(
         "nccl",
         init_method=f"tcp://127.0.0.1:{port}",
@@ -542,17 +576,117 @@ def worker(rank, port):
         for direct in (False, True):
             pynccl_cp._OPT_ENABLED = direct
             for index_opt in (False, True):
-                with patch.dict(
-                    os.environ, {"RTP_LLM_CP_KV_INDEX_OPT": str(int(index_opt))}
-                ):
-                    for p, q in cases:
-                        result = run_case(rank, p, q, producer)
-                        result["direct_main_communicator"] = direct
-                        result["symmetric_initialized"] = (
-                            os.environ.get("RTP_LLM_CP_TORCH_SYMM_GATHER", "0") == "1"
-                        )
-                        result["index_opt"] = index_opt
-                        results.append(result)
+                for batch_plan in (False, True):
+                    with patch.dict(
+                        os.environ,
+                        {
+                            "RTP_LLM_CP_KV_INDEX_OPT": str(int(index_opt)),
+                            "RTP_LLM_CP_BATCH_PLAN_UPLOAD": str(int(batch_plan)),
+                        },
+                    ):
+                        for p, q in cases:
+                            result = run_case(rank, p, q, producer)
+                            result["direct_main_communicator"] = direct
+                            result["symmetric_initialized"] = (
+                                os.environ.get("RTP_LLM_CP_TORCH_SYMM_GATHER", "0")
+                                == "1"
+                            )
+                            result["index_opt"] = index_opt
+                            assert result["batch_plan_upload"] == batch_plan
+                            results.append(result)
+        if os.environ.get("KV_TEST_PROFILE") == "1":
+            output_root = Path(os.environ["TEST_UNDECLARED_OUTPUTS_DIR"])
+            profile_prefixes, profile_lengths = cases[2]
+            with patch.dict(os.environ, {"RTP_LLM_CP_BATCH_PLAN_UPLOAD": "1"}):
+                run_case(
+                    rank,
+                    profile_prefixes,
+                    profile_lengths,
+                    producer,
+                    capture_profile=True,
+                )
+            if rank == 0:
+                (output_root / "prefill_copy_timing.enable").touch()
+            dist.barrier()
+            with patch.dict(
+                os.environ, {"RTP_LLM_CP_BATCH_PLAN_UPLOAD": "1"}
+            ), torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ]
+            ) as profiler:
+                profile_result = run_case(
+                    rank,
+                    profile_prefixes,
+                    profile_lengths,
+                    producer,
+                    capture_profile=True,
+                )
+            profiler.export_chrome_trace(
+                str(output_root / f"prefetch_profile_rank{rank}.json")
+            )
+            names = [
+                event.name
+                for event in profiler.events()
+                if event.device_type == torch.autograd.DeviceType.CPU
+            ]
+            profile_result["full_case_h2d_copy_count"] = sum(
+                event.device_type == torch.autograd.DeviceType.CUDA
+                and "Memcpy HtoD" in event.name
+                for event in profiler.events()
+            )
+            assert profile_result["batch_plan_upload"]
+            assert profile_result["full_case_h2d_copy_count"] > 0
+            expected_counts = {
+                "cp.metadata_and_workspace": 1,
+                "cp.full.collective": 1,
+                "cp.history.collective": profile_result["layers"] - 1,
+                "cp.new.collective": profile_result["layers"] - 1,
+                "cp.full.reorder": 1,
+            }
+            if not profile_result["rank_major"]:
+                expected_counts.update(
+                    {
+                        "cp.history.reorder": profile_result["layers"] - 1,
+                        "cp.new.reorder": profile_result["layers"] - 1,
+                    }
+                )
+            stage_counts = {name: names.count(name) for name in expected_counts}
+            assert stage_counts == expected_counts, stage_counts
+            profile_result["stage_counts"] = stage_counts
+            trace_events = json.loads(
+                (output_root / f"prefetch_profile_rank{rank}.json").read_text()
+            )["traceEvents"]
+            profile_result["cuda_activity_count"] = sum(
+                event.get("cat") == "kernel" for event in trace_events
+            )
+            assert profile_result["cuda_activity_count"] > 0
+            timing_path = output_root / f"prefill_copy_timing_rank{rank}.jsonl"
+            assert timing_path.is_file() and timing_path.stat().st_size > 0
+            timing_layers = json.loads(timing_path.read_text().splitlines()[-1])[
+                "layers"
+            ]
+            assert len(timing_layers) == profile_result["layers"]
+            for row in timing_layers:
+                assert row["cp_ready_wait_ms"] is not None
+                assert row["cp_ready_wait_ms"] >= 0
+                if row["layer"] == 0:
+                    assert row["full_reorder_span_ms"] >= 0
+                elif not profile_result["rank_major"]:
+                    assert row["history_reorder_span_ms"] >= 0
+                    assert row["new_reorder_span_ms"] >= 0
+            profile_result["copy_timing_file"] = timing_path.name
+            assert profile_result["bit_exact"]
+            assert (
+                profile_result["attention_pairs_bit_exact"] == profile_result["layers"]
+            )
+            (output_root / f"prefetch_profile_summary_rank{rank}.json").write_text(
+                json.dumps(profile_result, indent=2)
+            )
+            dist.barrier()
+            if rank == 0:
+                (output_root / "prefill_copy_timing.enable").unlink()
     Path(os.environ["TEST_UNDECLARED_OUTPUTS_DIR"]).joinpath(
         f"prefetch_rank{rank}.json"
     ).write_text(json.dumps(results, indent=2))

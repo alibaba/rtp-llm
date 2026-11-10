@@ -601,6 +601,7 @@ class ModelFactory:
             kv_cache_config=engine_config.kv_cache_config,
             profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
             embedding_config=None,  # Propose model doesn't need embedding_config
+            apply_layer_override=False,
         )
 
         return propose_model_config

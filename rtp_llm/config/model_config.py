@@ -882,6 +882,7 @@ def build_model_config(
     quantization_config: Optional[
         Any
     ] = None,  # QuantizationConfig (optional, for quantization)
+    apply_layer_override: bool = True,
 ) -> None:
     """Build and initialize ModelConfig from model_args.
 
@@ -951,7 +952,7 @@ def build_model_config(
 
     # Apply hack_layer_num if needed
     hack_layer_num = profiling_debug_logging_config.hack_layer_num
-    if hack_layer_num:
+    if apply_layer_override and hack_layer_num:
         logging.info(f"hack layernum to {hack_layer_num}")
         model_config.num_layers = hack_layer_num
 

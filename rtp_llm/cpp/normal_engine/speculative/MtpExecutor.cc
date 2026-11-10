@@ -49,6 +49,24 @@ namespace rtp_llm {
 
 namespace {
 
+class ProfileStepGuard {
+public:
+    ProfileStepGuard(const std::function<void()>& start, const std::function<void()>& finish): finish_(finish) {
+        if (start) {
+            start();
+        }
+    }
+
+    ~ProfileStepGuard() {
+        if (finish_) {
+            finish_();
+        }
+    }
+
+private:
+    const std::function<void()>& finish_;
+};
+
 struct CachedEnvFlag {
     const char* env_name;
     const char* log_tag;
@@ -1421,7 +1439,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          int32_t                                        kv_cache_group_num,
                          const std::vector<int32_t>&                    kv_cache_layer_to_group,
                          bool                                           warm_up,
-                         CacheStatusSnapshotRefreshCallback             cache_status_snapshot_refresh_callback):
+                         CacheStatusSnapshotRefreshCallback             cache_status_snapshot_refresh_callback,
+                         std::function<void()>                          profile_step_start,
+                         std::function<void()>                          profile_step_finish):
     Executor(),
     cache_manager_(cache_manager),
     metrics_reporter_(warm_up ? nullptr : params.metrics_reporter),
@@ -1432,6 +1452,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type),
     cache_status_snapshot_refresh_callback_(std::move(cache_status_snapshot_refresh_callback)),
+    profile_step_start_(std::move(profile_step_start)),
+    profile_step_finish_(std::move(profile_step_finish)),
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
     // These runners intentionally do not inherit PyTorch profiler TLS from the
     // engine loop. Kineto callbacks are thread-affine; propagating an active
@@ -1872,6 +1894,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     metrics_collector.not_skip = true;
 
     // release model input before forward
+    ProfileStepGuard profile_guard(profile_step_start_, profile_step_finish_);
     releaseAllModelBuffers();
 
     // CP+MTP: PyWrappedModel's CP processor (handleInputs) MUTATES
@@ -2368,6 +2391,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
         ensureModelInputsOnCuda(model_input, "decode.after_tp_sync");
     }
+    ProfileStepGuard profile_guard(profile_step_start_, profile_step_finish_);
     size_t batch_size             = model_input.input_lengths.size(0);
     spec_logits_processor_present = isTpRank0() && !model_input.is_fake_stream && hasSpecLogitsProcessor(streams);
     if (isTpRank0() && !model_input.is_fake_stream && hasUnsupportedMtpStatefulLogitsProcessor(streams)) {

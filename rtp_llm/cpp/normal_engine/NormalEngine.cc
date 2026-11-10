@@ -300,7 +300,9 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
             kv_cache_group_num_,
             kv_cache_layer_to_group_,
             /*warm_up=*/false,
-            [this](const std::list<GenerateStreamPtr>& streams) { maybeRefreshCacheStatusSnapshot(streams); }));
+            [this](const std::list<GenerateStreamPtr>& streams) { maybeRefreshCacheStatusSnapshot(streams); },
+            [this]() { step_profiler_.startStep(); },
+            [this]() { step_profiler_.finishStep(); }));
     } else {
         executor_.reset(new NormalExecutor(
             params,
@@ -994,9 +996,6 @@ absl::Status NormalEngine::step() {
     const bool   report_metrics     = isKmonMetricReportingEnabled();
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
-    if (propose_params_) {
-        step_profiler_.tick();
-    }
     {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(streams, tps_schedule_time_us);

@@ -1381,9 +1381,10 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
 
     // The next verification starts with the emitted target token. Own its
     // storage because subsequent sampler calls can reuse token_ids buffers.
-    auto target_tokens_gpu = new_all_token_ids.select(1, token_stride - 1)
-                                 .to(torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32))
-                                 .clone();
+    const auto target_tokens_gpu = new_all_token_ids.select(1, token_stride - 1)
+                                       .to(torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA),
+                                           /*non_blocking=*/new_all_token_ids.is_cuda(),
+                                           /*copy=*/true);
 
     // TODO(async): stream bookkeeping below still iterates token_ids/success
     // on CPU. Keep the .cpu() explicit until spec-update assembly is

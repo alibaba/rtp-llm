@@ -26,6 +26,7 @@ from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
     _ue8m0_to_inv_scale,
     create_mxfp8_packed_scale,
 )
+from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 _IHC_PRE_BACKEND_ENV = "RTP_LLM_HY4_IHC_PRE_BACKEND"
 _HC_MULT = 4
@@ -736,33 +737,37 @@ def _maybe_deepgemm_ihc_pre(
                 num_stages=2,
             )
         else:
-            _ihc_deepgemm_pre_rmsnorm_kernel[(m,)](
-                channels,
-                projection_partials,
-                square_sum_partials,
-                scale,
-                base,
-                norm_weight,
-                read,
-                post_gate,
-                mxfp8_out if emit_mxfp8 else read,
-                mxfp8_scale_out if emit_mxfp8 else read,
-                M=m,
-                stride_mxfp8_m=(mxfp8_out.stride(0) if emit_mxfp8 else 0),
-                stride_mxfp8_scale_m=(mxfp8_scale_out.stride(0) if emit_mxfp8 else 0),
-                stride_mxfp8_scale_k=(mxfp8_scale_out.stride(1) if emit_mxfp8 else 0),
-                HC=_HC_MULT,
-                H=hidden_size,
-                K=flat_size,
-                NUM_SPLITS=num_splits,
-                BLOCK_SPLITS=block_splits,
-                IHC_NORM_EPS=norm_eps,
-                READ_NORM_EPS=read_norm_eps,
-                HC_EPS=hc_eps,
-                MAGNITUDE=magnitude,
-                BLOCK_H=triton.next_power_of_2(hidden_size),
-                MX_GROUP_SIZE=MX_BLOCK,
-                HAS_MXFP8_OUTPUT=emit_mxfp8,
+            _cpu_launch.launch(
+                _ihc_deepgemm_pre_rmsnorm_kernel,
+                (m,),
+                (
+                    channels,
+                    projection_partials,
+                    square_sum_partials,
+                    scale,
+                    base,
+                    norm_weight,
+                    read,
+                    post_gate,
+                    mxfp8_out if emit_mxfp8 else read,
+                    mxfp8_scale_out if emit_mxfp8 else read,
+                    m,
+                    mxfp8_out.stride(0) if emit_mxfp8 else 0,
+                    mxfp8_scale_out.stride(0) if emit_mxfp8 else 0,
+                    mxfp8_scale_out.stride(1) if emit_mxfp8 else 0,
+                    _HC_MULT,
+                    hidden_size,
+                    flat_size,
+                    num_splits,
+                    block_splits,
+                    norm_eps,
+                    read_norm_eps,
+                    hc_eps,
+                    magnitude,
+                    triton.next_power_of_2(hidden_size),
+                    MX_BLOCK,
+                    emit_mxfp8,
+                ),
                 num_warps=8,
                 num_stages=2,
             )
@@ -832,8 +837,9 @@ def maybe_fused_ihc_pre_normed_grouped(
         groups.append((full_chunk_tokens, m, m - full_chunk_tokens))
 
     for start, end, split_reference_m in groups:
+        whole_tensor = start == 0 and end == m
         result = _maybe_deepgemm_ihc_pre(
-            channels[start:end],
+            channels if whole_tensor else channels[start:end],
             fn_weight,
             scale,
             base,
@@ -843,10 +849,16 @@ def maybe_fused_ihc_pre_normed_grouped(
             norm_weight,
             read_norm_eps,
             split_reference_m=split_reference_m,
-            read_out=read[start:end],
-            post_gate_out=post_gate[start:end],
-            mxfp8_out=(mxfp8_out[start:end] if emit_mxfp8 else None),
-            mxfp8_scale_out=(mxfp8_scale[start:end] if emit_mxfp8 else None),
+            read_out=read if whole_tensor else read[start:end],
+            post_gate_out=post_gate if whole_tensor else post_gate[start:end],
+            mxfp8_out=(
+                mxfp8_out if whole_tensor or not emit_mxfp8 else mxfp8_out[start:end]
+            ),
+            mxfp8_scale_out=(
+                mxfp8_scale
+                if whole_tensor or not emit_mxfp8
+                else mxfp8_scale[start:end]
+            ),
         )
         if result is None:
             return None
@@ -954,16 +966,20 @@ def maybe_fused_ihc_post(
     flat_size = _HC_MULT * hidden_size
     output = torch.empty_like(channels)
     with torch.cuda.device(channels.device.index):
-        _ihc_post_kernel[(m, triton.cdiv(hidden_size, _POST_BLOCK_H))](
-            block_output,
-            channels,
-            post_gate,
-            output,
-            M=m,
-            HC=_HC_MULT,
-            H=hidden_size,
-            K=flat_size,
-            BLOCK_H=_POST_BLOCK_H,
+        _cpu_launch.launch(
+            _ihc_post_kernel,
+            (m, triton.cdiv(hidden_size, _POST_BLOCK_H)),
+            (
+                block_output,
+                channels,
+                post_gate,
+                output,
+                m,
+                _HC_MULT,
+                hidden_size,
+                flat_size,
+                _POST_BLOCK_H,
+            ),
             num_warps=4,
             num_stages=2,
         )

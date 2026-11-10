@@ -1847,6 +1847,56 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
     }
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchOwnsTargetGpuTokenSnapshot) {
+    for (const bool cuda_sampler : {false, true}) {
+        SCOPED_TRACE(cuda_sampler);
+        ModelConfig                 model_config;
+        RuntimeConfig               runtime_config;
+        SpeculativeExecutionConfig  sp_config;
+        PDSepConfig                 pd_sep_config;
+        ProfilingDebugLoggingConfig profiling_debug_logging_config;
+        CacheConfig                 cache_config;
+        cache_config.group_types    = {CacheGroupType::FULL};
+        model_config.max_seq_len    = 2048;
+        model_config.vocab_size     = 4;
+        model_config.num_layers     = 1;
+        sp_config.gen_num_per_cycle = 4;
+        ResourceContext resource_context;
+        auto stream1 = createContextStream(model_config, runtime_config, resource_context, {2}, 1);
+        auto stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
+        StreamGroups stream_groups(std::list<GenerateStreamPtr>{stream1, stream2});
+        MtpBatchStreamProcessor processor(
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+        MergedOutput target_output;
+        target_output.sampler_output.token_ids = torch::tensor({2, -1, 1, 1, 2, 3}, torch::kInt32).reshape({2, 3});
+        if (cuda_sampler) {
+            target_output.sampler_output.token_ids = target_output.sampler_output.token_ids.to(torch::kCUDA);
+        }
+        MergedOutput draft_output;
+        draft_output.model_output.all_hidden_states =
+            torch::tensor({0.3f, 0.4f, 1.5f, 1.6f, 1.7f, 1.8f}, torch::kFloat32).reshape({3, 2});
+        draft_output.sampler_output.token_ids = torch::tensor({2L, 0L}, torch::kInt64).reshape({2, 1});
+
+        ASSERT_TRUE(processor.dispatchPrefill(stream_groups, target_output, draft_output).ok());
+
+        const auto target1 = stream1->getSPOutputBuffer()->target_token_gpu;
+        const auto target2 = stream2->getSPOutputBuffer()->target_token_gpu;
+        ASSERT_TRUE(target1.defined());
+        ASSERT_TRUE(target2.defined());
+        EXPECT_TRUE(target1.is_cuda());
+        EXPECT_TRUE(target2.is_cuda());
+        EXPECT_EQ(target1.scalar_type(), torch::kInt32);
+        EXPECT_EQ(target2.scalar_type(), torch::kInt32);
+        EXPECT_EQ(target1.numel(), 1);
+        EXPECT_EQ(target2.numel(), 1);
+        EXPECT_EQ(target1.item<int32_t>(), 1);
+        EXPECT_EQ(target2.item<int32_t>(), 3);
+        target_output.sampler_output.token_ids.zero_();
+        EXPECT_EQ(target1.item<int32_t>(), 1);
+        EXPECT_EQ(target2.item<int32_t>(), 3);
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchUsesDraftLastHiddenOverride) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;

@@ -33,14 +33,11 @@ this_copts = cuda_default_copts_without_arch() + [
 # symbol table with hidden visibility.  Without explicitly linking the static
 # device archive here, ld can't resolve the reference emitted by cudaGetSymbolAddress
 # in csrc/kernels/runtime.cu.
-this_linkopts = [
-    "-L/usr/lib64",
-    "-l:libnvshmem_device.a",
-    "-l:libnvshmem.a",
-]
+this_linkopts = []
 
 cc_library(
     name = "runtime_cu",
+    linkstatic = True,
     srcs = ["csrc/kernels/runtime.cu"],
     deps = deps,
     copts = this_copts,
@@ -49,6 +46,7 @@ cc_library(
 
 cc_library(
     name = "internode_cu",
+    linkstatic = True,
     srcs = ["csrc/kernels/internode.cu"],
     deps = deps,
     copts = this_copts,
@@ -57,6 +55,7 @@ cc_library(
 
 cc_library(
     name = "internode_ll_cu",
+    linkstatic = True,
     srcs = ["csrc/kernels/internode_ll.cu"],
     deps = deps,
     copts = this_copts,
@@ -65,6 +64,7 @@ cc_library(
 
 cc_library(
     name = "intranode_cu",
+    linkstatic = True,
     srcs = ["csrc/kernels/intranode.cu"],
     deps = deps,
     copts = this_copts,
@@ -78,6 +78,8 @@ genrule(
         ":intranode_cu",
         ":internode_cu",
         ":internode_ll_cu",
+        "@nvshmem//:nvshmem_device_archive",
+        "@nvshmem//:nvshmem_host_archive",
     ],
     outs = ["libdeep_ep_cu.so"],
     cmd = """
@@ -91,8 +93,10 @@ genrule(
     # --device-link step (nvlink) and the final shared-library link (host ld)
     # so both layers resolve.  Extract the archive objects first so nvlink
     # considers every TU even if it appears unused at that point.
-    mkdir -p nvshmem_device_objs && (cd nvshmem_device_objs && ar x /usr/lib64/libnvshmem_device.a)
-    /usr/local/cuda/bin/nvcc --compiler-options "-fPIC" -gencode=arch=compute_90,code=sm_90 --device-link $$o1 $$o2 $$o3 $$o4 nvshmem_device_objs/*.o -L/usr/lib64 -l:libnvshmem.a -o tmp.o && /usr/local/cuda/bin/nvcc -shared $$o1 $$o2 $$o3 $$o4 tmp.o nvshmem_device_objs/*.o -L/usr/lib64 -l:libnvshmem.a -o $(OUTS)
+    archive=$$(realpath $(location @nvshmem//:nvshmem_device_archive))
+    mkdir -p nvshmem_device_objs && (cd nvshmem_device_objs && ar x "$$archive")
+    /usr/local/cuda/bin/nvcc --compiler-options "-fPIC" -gencode=arch=compute_90,code=sm_90 --device-link $$o1 $$o2 $$o3 $$o4 nvshmem_device_objs/*.o -o tmp.o
+    g++ -shared $$o1 $$o2 $$o3 $$o4 tmp.o nvshmem_device_objs/*.o $(location @nvshmem//:nvshmem_host_archive) -L/usr/local/cuda/lib64 -lcudart -L/usr/local/cuda/lib64/stubs -lcuda -ldl -lpthread -lrt -o $(OUTS)
     """,
     visibility = ["//visibility:public"],
 )
@@ -116,9 +120,6 @@ cc_library(
     copts = copts() + [
         '-Wno-reorder',
         '-Wno-unused-variable',
-    ],
-    linkopts = [
-        "-l:nvshmem_bootstrap_uid.so",
     ],
     visibility = ["//visibility:public"],
 )

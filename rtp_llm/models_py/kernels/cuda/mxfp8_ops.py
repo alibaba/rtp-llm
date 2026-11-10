@@ -13,11 +13,55 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_fp4_gemm_nt
+from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 MX_BLOCK = 32
 _FLASHINFER_CUTE_DSL_MAX_NUMEL = 2**31 - 1
 _FUSED_QUANT_ENV = "RTP_LLM_MXFP8_FUSED_QUANT"
 _FUSED_QUANT_AUTO_MAX_M = 64
+
+
+class Mxfp8QuantWorkspace:
+    """One-forward scratch, reusable only after its same-stream consumer.
+
+    Quantized views are borrowed until the next quantization. GEMM outputs
+    never alias this storage. Each eager forward or graph capture owns a
+    separate instance; instances must not be cached on a model or shared.
+    """
+
+    def __init__(self, device: torch.device):
+        self.device = device
+        self._stream = torch.cuda.current_stream(device)
+        self._q: Optional[torch.Tensor] = None
+        self._scale: Optional[torch.Tensor] = None
+
+    def _check_stream(self) -> None:
+        if torch.cuda.current_stream(self.device) != self._stream:
+            raise RuntimeError("MXFP8 scratch cannot move between CUDA streams")
+
+    def quantized(self, m: int, k: int) -> torch.Tensor:
+        self._check_stream()
+        if self._q is None or self._q.numel() < m * k:
+            self._q = torch.empty(
+                (m, k), device=self.device, dtype=torch.float8_e4m3fn
+            )
+        return self._q.as_strided((m, k), (k, 1))
+
+    def retain_quantized(self, q: torch.Tensor) -> None:
+        self._check_stream()
+        assert q.device == self.device and q.is_contiguous()
+        self._q = q
+
+    def packed_scale(self, m: int, k: int) -> torch.Tensor:
+        import deep_gemm
+
+        self._check_stream()
+        aligned_m = deep_gemm.get_tma_aligned_size(m, 4)
+        k_packed = k // (4 * MX_BLOCK)
+        size = aligned_m * k_packed
+        if self._scale is None or self._scale.numel() < size:
+            self._scale = torch.empty(size, device=self.device, dtype=torch.int32)
+        return self._scale.as_strided((m, k_packed), (1, max(1, aligned_m)))
 
 
 @triton.jit
@@ -42,7 +86,15 @@ def _ue8m0_to_inv_scale(exponent):
     return tl.where(exponent == 0, 0.0, inv_scale)
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "M",
+        "stride_x_m",
+        "stride_q_m",
+        "stride_scale_m",
+        "stride_scale_k",
+    ]
+)
 def _mxfp8_quant_act_packed_kernel(
     x_ptr,
     q_ptr,
@@ -96,7 +148,14 @@ def _mxfp8_quant_act_packed_kernel(
     )
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "M",
+        "input_stride_m",
+        "output_q_stride_m",
+        "output_scale_stride_k",
+    ]
+)
 def _silu_mul_mxfp8_quant_act_packed_kernel(
     input_ptr,
     output_q_ptr,
@@ -194,14 +253,14 @@ def _silu_mul_mxfp8_quant_act_packed_kernel(
         row_start += row_step
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M", "ALIGNED_MN"])
 def _pack_flashinfer_mxfp8_scale_kernel(
     scale_u8_ptr,
     packed_ptr,
-    M: tl.constexpr,
+    M,
     K_GROUPS: tl.constexpr,
     K_PACKED: tl.constexpr,
-    ALIGNED_MN: tl.constexpr,
+    ALIGNED_MN,
     BLOCK_M: tl.constexpr,
     BLOCK_K_PACKED: tl.constexpr,
 ):
@@ -226,35 +285,42 @@ def _pack_flashinfer_mxfp8_scale_kernel(
 
 
 def _pack_flashinfer_mxfp8_scale(
-    scale_u8: torch.Tensor, m: int, k: int
+    scale_u8: torch.Tensor,
+    m: int,
+    k: int,
+    workspace: Optional[Mxfp8QuantWorkspace] = None,
 ) -> torch.Tensor:
     """Pack FlashInfer uint8 UE8M0 scales into DeepGEMM's int32 TMA layout."""
     assert scale_u8.dtype == torch.uint8
     assert scale_u8.numel() == m * (k // MX_BLOCK)
-    import deep_gemm
+    assert workspace is None or workspace.device == scale_u8.device
 
     k_groups = k // MX_BLOCK
     assert k_groups % 4 == 0
     k_packed = k_groups // 4
-    aligned_mn = deep_gemm.get_tma_aligned_size(m, 4)
-    storage = torch.empty(
-        (k_packed, aligned_mn), device=scale_u8.device, dtype=torch.int32
+    packed = (
+        create_mxfp8_packed_scale(m, k, scale_u8.device)
+        if workspace is None
+        else workspace.packed_scale(m, k)
     )
-    packed = storage.transpose(0, 1)
     grid = (triton.cdiv(m, 64), triton.cdiv(k_packed, 32))
     with torch.cuda.device(scale_u8.device):
-        _pack_flashinfer_mxfp8_scale_kernel[grid](
-            scale_u8,
-            packed,
-            M=m,
-            K_GROUPS=k_groups,
-            K_PACKED=k_packed,
-            ALIGNED_MN=aligned_mn,
-            BLOCK_M=64,
-            BLOCK_K_PACKED=32,
+        _cpu_launch.launch(
+            _pack_flashinfer_mxfp8_scale_kernel,
+            grid,
+            (
+                scale_u8,
+                packed,
+                m,
+                k_groups,
+                k_packed,
+                packed.stride(1),
+                64,
+                32,
+            ),
             num_warps=8,
         )
-    return packed[:m, :]
+    return packed
 
 
 def _mxfp8_quant_flashinfer_backend(x: torch.Tensor) -> str:
@@ -277,6 +343,7 @@ def create_mxfp8_packed_scale(m: int, k: int, device: torch.device) -> torch.Ten
 
 def mxfp8_quant_act_packed_fused(
     x: torch.Tensor,
+    workspace: Optional[Mxfp8QuantWorkspace] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """One-launch MXFP8 activation quantization with DeepGEMM-ready scales.
 
@@ -289,29 +356,42 @@ def mxfp8_quant_act_packed_fused(
     assert k % (4 * MX_BLOCK) == 0, f"K={k} must be a multiple of {4 * MX_BLOCK}"
     assert x.is_cuda, "fused MXFP8 quant requires CUDA input"
     assert x.is_contiguous(), "input must be contiguous"
+    assert workspace is None or workspace.device == x.device
     assert x.dtype in (
         torch.bfloat16,
         torch.float16,
     ), f"fused MXFP8 quant expects bf16/fp16 input, got {x.dtype}"
 
-    q = torch.empty_like(x, dtype=torch.float8_e4m3fn)
-    packed_scale = create_mxfp8_packed_scale(m, k, x.device)
+    q = (
+        torch.empty_like(x, dtype=torch.float8_e4m3fn)
+        if workspace is None
+        else workspace.quantized(m, k)
+    )
+    packed_scale = (
+        create_mxfp8_packed_scale(m, k, x.device)
+        if workspace is None
+        else workspace.packed_scale(m, k)
+    )
     if m == 0:
         return q, packed_scale
 
     k_packed = k // (4 * MX_BLOCK)
     with torch.cuda.device(x.device):
-        _mxfp8_quant_act_packed_kernel[(m, k_packed)](
-            x,
-            q,
-            packed_scale,
-            m,
-            x.stride(0),
-            q.stride(0),
-            packed_scale.stride(0),
-            packed_scale.stride(1),
-            GROUP_SIZE=MX_BLOCK,
-            K_PACKED=k_packed,
+        _cpu_launch.launch(
+            _mxfp8_quant_act_packed_kernel,
+            (m, k_packed),
+            (
+                x,
+                q,
+                packed_scale,
+                m,
+                x.stride(0),
+                q.stride(0),
+                packed_scale.stride(0),
+                packed_scale.stride(1),
+                MX_BLOCK,
+                k_packed,
+            ),
             num_warps=1,
             num_stages=1,
         )
@@ -320,6 +400,7 @@ def mxfp8_quant_act_packed_fused(
 
 def silu_mul_mxfp8_quant_act_packed_fused(
     gate_up: torch.Tensor,
+    workspace: Optional[Mxfp8QuantWorkspace] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fuse SiLU/mul and HY4's 1x32 MXFP8 activation quantization.
 
@@ -332,6 +413,7 @@ def silu_mul_mxfp8_quant_act_packed_fused(
     assert gate_up.dim() == 2, f"expected 2D activation, got {gate_up.shape}"
     assert gate_up.is_cuda, "fused SiLU/MXFP8 quant requires CUDA input"
     assert gate_up.is_contiguous(), "gate_up must be contiguous"
+    assert workspace is None or workspace.device == gate_up.device
     # HY4's MXFP8 down-projection input is BF16.  The fused path intentionally
     # reproduces the legacy BF16 materialization before FlashInfer quantizes;
     # do not silently route FP16 callers through a numerically different path.
@@ -345,10 +427,18 @@ def silu_mul_mxfp8_quant_act_packed_fused(
         hidden_size % (4 * MX_BLOCK) == 0
     ), f"hidden size {hidden_size} must be a multiple of {4 * MX_BLOCK}"
 
-    output_q = torch.empty(
-        (m, hidden_size), dtype=torch.float8_e4m3fn, device=gate_up.device
+    output_q = (
+        torch.empty(
+            (m, hidden_size), dtype=torch.float8_e4m3fn, device=gate_up.device
+        )
+        if workspace is None
+        else workspace.quantized(m, hidden_size)
     )
-    output_scale = create_mxfp8_packed_scale(m, hidden_size, gate_up.device)
+    output_scale = (
+        create_mxfp8_packed_scale(m, hidden_size, gate_up.device)
+        if workspace is None
+        else workspace.packed_scale(m, hidden_size)
+    )
     if m == 0:
         return output_q, output_scale
 
@@ -363,20 +453,24 @@ def silu_mul_mxfp8_quant_act_packed_fused(
         min(triton.cdiv(m, block_m), 4096),
     )
     with torch.cuda.device(gate_up.device):
-        _silu_mul_mxfp8_quant_act_packed_kernel[grid](
-            gate_up,
-            output_q,
-            output_scale,
-            m,
-            gate_up.stride(0),
-            output_q.stride(0),
-            output_scale.stride(1),
-            N=n,
-            GROUPS_PER_ROW=groups_per_row,
-            PACKS_PER_ROW=packs_per_row,
-            PACKS_PER_CTA=packs_per_cta,
-            BLOCK_M=block_m,
-            GROUP_SIZE=MX_BLOCK,
+        _cpu_launch.launch(
+            _silu_mul_mxfp8_quant_act_packed_kernel,
+            grid,
+            (
+                gate_up,
+                output_q,
+                output_scale,
+                m,
+                gate_up.stride(0),
+                output_q.stride(0),
+                output_scale.stride(1),
+                n,
+                groups_per_row,
+                packs_per_row,
+                packs_per_cta,
+                block_m,
+                MX_BLOCK,
+            ),
             num_warps=4,
             num_stages=2,
         )
@@ -399,7 +493,9 @@ def _use_fused_quant(x: torch.Tensor) -> bool:
     return requested not in ("", "auto") or x.shape[0] <= _FUSED_QUANT_AUTO_MAX_M
 
 
-def mxfp8_quant_act_packed(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def mxfp8_quant_act_packed(
+    x: torch.Tensor, workspace: Optional[Mxfp8QuantWorkspace] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Quantize a 2D activation and return e4m3 data plus packed UE8M0 scale."""
     assert x.dim() == 2, f"expected 2D activation, got {x.shape}"
     k = x.shape[1]
@@ -408,7 +504,7 @@ def mxfp8_quant_act_packed(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]
     assert x.is_contiguous(), "input must be contiguous"
 
     if _use_fused_quant(x):
-        return mxfp8_quant_act_packed_fused(x)
+        return mxfp8_quant_act_packed_fused(x, workspace)
 
     import flashinfer
 
@@ -418,7 +514,9 @@ def mxfp8_quant_act_packed(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]
         alignment=MX_BLOCK,
         backend=_mxfp8_quant_flashinfer_backend(x),
     )
-    return q, _pack_flashinfer_mxfp8_scale(scale_u8, x.shape[0], k)
+    if workspace is not None:
+        workspace.retain_quantized(q)
+    return q, _pack_flashinfer_mxfp8_scale(scale_u8, x.shape[0], k, workspace)
 
 
 def pack_mxfp8_scale(
@@ -443,12 +541,27 @@ def mxfp8_linear(
     weight_scale_packed: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
     out_dtype: torch.dtype = torch.bfloat16,
+    workspace: Optional[Mxfp8QuantWorkspace] = None,
 ) -> torch.Tensor:
     """Compute ``x @ weight.T`` with MXFP8 activations and weights."""
-    m, n = x.shape[0], weight_e4m3.shape[0]
-    a_q, a_s_packed = mxfp8_quant_act_packed(x)
-    out = torch.empty(m, n, device=x.device, dtype=out_dtype)
-    with torch.cuda.device(x.device):
+    a_q, a_s_packed = mxfp8_quant_act_packed(x, workspace)
+    return mxfp8_gemm(a_q, a_s_packed, weight_e4m3, weight_scale_packed, bias, out_dtype)
+
+
+def mxfp8_gemm(
+    a_q: torch.Tensor,
+    a_s_packed: torch.Tensor,
+    weight_e4m3: torch.Tensor,
+    weight_scale_packed: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Consume borrowed quantized activations and return independently owned output."""
+    m, n = a_q.shape[0], weight_e4m3.shape[0]
+    out = torch.empty(m, n, device=a_q.device, dtype=out_dtype)
+    if m == 0:
+        return out
+    with torch.cuda.device(a_q.device):
         fp8_fp4_gemm_nt(
             (a_q, a_s_packed),
             (weight_e4m3, weight_scale_packed),

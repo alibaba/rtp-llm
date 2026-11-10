@@ -12,6 +12,8 @@ import torch
 
 from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
     MX_BLOCK,
+    Mxfp8QuantWorkspace,
+    mxfp8_gemm,
     mxfp8_linear,
     pack_mxfp8_scale,
 )
@@ -95,30 +97,20 @@ class CudaMxfp8Linear(LinearBase):
         self,
         input: torch.Tensor,
         input_scales: Optional[torch.Tensor] = None,
+        workspace: Optional[Mxfp8QuantWorkspace] = None,
     ) -> torch.Tensor:
         orig_shape = input.shape
         x = input.reshape(-1, orig_shape[-1])
         if input_scales is not None:
-            from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_fp4_gemm_nt
-
             M = x.shape[0]
             if M == 0:
                 return torch.empty(
                     *orig_shape[:-1], self.N, device=x.device, dtype=torch.bfloat16
                 )
             input_scales = self._packed_input_scale(input_scales, M, x.shape[1])
-            out = torch.empty(M, self.N, device=x.device, dtype=torch.bfloat16)
-            with torch.cuda.device(x.device):
-                fp8_fp4_gemm_nt(
-                    (x, input_scales),
-                    (self.weight, self._packed_weight_scale()),
-                    out,
-                    recipe_a=(1, MX_BLOCK),
-                    recipe_b=(1, MX_BLOCK),
-                    disable_ue8m0_cast=True,
-                )
-            if self.bias is not None:
-                out = out + self.bias.to(out.dtype)
+            out = mxfp8_gemm(
+                x, input_scales, self.weight, self._packed_weight_scale(), self.bias
+            )
         else:
             out = mxfp8_linear(
                 x,
@@ -126,5 +118,6 @@ class CudaMxfp8Linear(LinearBase):
                 self._packed_weight_scale(),
                 self.bias,
                 out_dtype=torch.bfloat16,
+                workspace=workspace,
             )
         return out.reshape(*orig_shape[:-1], out.shape[-1])

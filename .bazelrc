@@ -3,6 +3,7 @@ fetch:downloader --experimental_remote_downloader=grpc://com.taobao.search.bazel
 
 
 build --python_top=//:python310 --incompatible_use_python_toolchains=false # force use /opt/conda310/bin/python3
+test --run_under=//tools:nvidia_wheel_env
 
 build --spawn_strategy=local # avoid nvcc conflicts
 build --action_env PYTHON_BIN_PATH="/opt/conda310/bin/python3"
@@ -106,6 +107,8 @@ build:cuda12_9 --define=using_cuda12_9_x86=true
 build:cuda13_base --config=cuda12
 build:cuda13_base --action_env PATH="/opt/rh/gcc-toolset-13/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 build:cuda13_base --host_action_env PATH="/opt/rh/gcc-toolset-13/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+build:cuda13_base --action_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-13/root/usr/lib64:/lib64:/opt/conda310/lib:/usr/local/cuda/compat:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:/usr/local/cuda/extras/CUPTI/lib64"
+build:cuda13_base --host_action_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-13/root/usr/lib64:/lib64:/opt/conda310/lib:/usr/local/cuda/compat:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:/usr/local/cuda/extras/CUPTI/lib64"
 # GCC 13 adds overloaded-virtual to -Wall; attention parameter helpers
 # intentionally overload the base fillParams signature.
 build:cuda13_base --cxxopt=-Wno-overloaded-virtual
@@ -154,6 +157,10 @@ build:cuda13 --copt=-Wno-array-bounds
 build:cuda13 --copt=-Wno-unused-result
 build:cuda13 --copt=-Wno-array-parameter
 build:cuda13 --copt=-Wno-narrowing
+build:cuda13 --cxxopt=--param=destructive-interference-size=64
+
+build:cuda13_ci_gcc12 --repo_env=GCC_HOST_COMPILER_PATH=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
+build:cuda13_ci_gcc12 --repo_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
 # cuda13 owns its own dep chain: torch 2.11+cu130, triton 3.6.0, dedicated
 # pip_gpu_cuda13_torch / torch_2.11_py310_cuda repos and a dedicated whl_deps
 # branch in arch_select.bzl.  Selects that need to treat cu13 the same as

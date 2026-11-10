@@ -855,6 +855,7 @@ class LayeredPrefillCacheTest(unittest.TestCase):
                 cache.wait_prefetch_complete()
             cache.end_forward()
             torch.cuda.synchronize()
+
             cache.flush_timings()
             rows = json.loads(
                 Path(root, "prefill_copy_timing_rank0.jsonl").read_text()
@@ -865,6 +866,22 @@ class LayeredPrefillCacheTest(unittest.TestCase):
             Path(root, "prefill_copy_timing.enable").unlink()
             cache.begin_forward(fmha)
             self.assertFalse(cache.capture_timing)
+            cache.end_forward()
+            torch.cuda.synchronize()
+
+    def test_contiguous_timing_env_without_marker_file(self):
+        with tempfile.TemporaryDirectory() as root, patch.dict(
+            os.environ,
+            {
+                "TEST_UNDECLARED_OUTPUTS_DIR": root,
+                "RTP_LLM_PREFILL_COPY_TIMING": "1",
+            },
+        ):
+            cache = self.make_contiguous_cache(prefix=1, layers=2, slots=1)
+            fmha = self.make_fmha(True)
+            cache.begin_forward(fmha)
+            self.assertTrue(cache.capture_timing)
+            self.assertFalse(Path(root, "prefill_copy_timing.enable").exists())
             cache.end_forward()
             torch.cuda.synchronize()
 

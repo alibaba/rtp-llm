@@ -18,6 +18,7 @@ from rtp_llm.utils.model_weight import W
 _DEVICE_TYPE = get_device_type()
 if _DEVICE_TYPE == DeviceType.Cuda:
     from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
+        Mxfp8QuantWorkspace,
         silu_mul_mxfp8_quant_act_packed_fused,
     )
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
@@ -157,12 +158,22 @@ class DenseMLP(nn.Module):
         x_scale: "Optional[torch.Tensor]" = None,
         skip_allreduce: bool = False,
     ):
+        workspace = None
         if (
             x_fp8 is not None
             and x_scale is not None
             and (self.accepts_fp8_input or self.accepts_mxfp8_input)
         ):
             up = self.up_proj(x_fp8, input_scales=x_scale)
+        elif (
+            self._fuse_silu_mxfp8_quant
+            and isinstance(self.up_proj, CudaMxfp8Linear)
+            and x.dim() == 2
+            and x.is_cuda
+            and x.dtype == torch.bfloat16
+        ):
+            workspace = Mxfp8QuantWorkspace(x.device)
+            up = self.up_proj(x, workspace=workspace)
         else:
             up = self.up_proj(x)
         if (
@@ -172,7 +183,9 @@ class DenseMLP(nn.Module):
             and up.dtype == torch.bfloat16
             and up.shape[-1] == 2 * self.down_proj.K
         ):
-            fp8_out, scale_out = silu_mul_mxfp8_quant_act_packed_fused(up.contiguous())
+            fp8_out, scale_out = silu_mul_mxfp8_quant_act_packed_fused(
+                up.contiguous(), workspace=workspace
+            )
             output = self.down_proj(fp8_out, input_scales=scale_out)
         elif self._fuse_silu_quant and up.dim() == 2:
             scale_ue8m0 = self.down_proj.scale_ue8m0

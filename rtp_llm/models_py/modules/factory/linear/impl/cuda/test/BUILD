@@ -3,6 +3,14 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "mxfp8_cold_transition_test",
+    srcs = ["mxfp8_cold_transition_test.py"],
+    deps = py_test_deps + ["//rtp_llm:nvidia-cutlass-dsl"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "fp8_deepgemm_linear_test",
     srcs = ["fp8_deepgemm_linear_test.py"],
     deps = py_test_deps,
@@ -60,7 +68,39 @@ py_test(
 py_test(
     name = "mxfp8_linear_test",
     srcs = ["mxfp8_linear_test.py"],
-    deps = py_test_deps,
+    deps = py_test_deps + ["//rtp_llm:nvidia-cutlass-dsl"],
+    tags = ["SM103_CU13"],
+    exec_properties = {'gpu': "SM103_CU13", 'gpu_count': '1'},
+)
+
+py_test(
+    name = "mxfp8_prefill_quant_test",
+    srcs = ["mxfp8_prefill_quant_test.py"],
+    deps = py_test_deps + ["//rtp_llm:nvidia-cutlass-dsl"],
+    tags = ["SM103_CU13"],
+    exec_properties = {'gpu': "SM103_CU13", 'gpu_count': '1'},
+)
+
+py_test(
+    name = "mxfp8_launch_test",
+    srcs = ["mxfp8_launch_test.py", "mxfp8_prefill_quant_test.py"],
+    deps = py_test_deps + ["//rtp_llm:nvidia-cutlass-dsl"],
+    tags = ["SM103_CU13"],
+    exec_properties = {'gpu': "SM103_CU13", 'gpu_count': '1'},
+)
+
+py_test(
+    name = "mxfp8_dispatch_test",
+    srcs = ["mxfp8_dispatch_test.py", "mxfp8_prefill_quant_test.py"],
+    deps = py_test_deps + ["//rtp_llm:nvidia-cutlass-dsl"],
+    tags = ["SM103_CU13"],
+    exec_properties = {'gpu': "SM103_CU13", 'gpu_count': '1'},
+)
+
+py_test(
+    name = "mxfp8_workspace_test",
+    srcs = ["mxfp8_workspace_test.py"],
+    deps = py_test_deps + ["//rtp_llm:nvidia-cutlass-dsl"],
     tags = ["SM103_CU13"],
     exec_properties = {'gpu': "SM103_CU13", 'gpu_count': '1'},
 )

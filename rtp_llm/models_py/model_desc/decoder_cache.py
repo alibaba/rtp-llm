@@ -20,6 +20,7 @@ def decoder_cache_forward(
 ) -> Iterator["FMHAImplBase"]:
     """Bind this model's caches and release active transfers on every exit."""
     failed = True
+    diagnostics = None
     try:
         if fmha_impl is None:
             fmha_impl = model.prepare_fmha_impl(inputs)
@@ -27,6 +28,19 @@ def decoder_cache_forward(
         fmha_impl.layered_prefill_cache = model.layered_prefill_cache
         if model.layered_prefill_cache is not None:
             model.layered_prefill_cache.begin_forward(fmha_impl)
+        if (
+            os.environ.get("RTP_LLM_PREFILL_CACHE_STATS") == "1"
+            and fmha_impl.attn_inputs.is_prefill
+        ):
+            diagnostics = getattr(model, "_prefill_cache_diagnostics", None)
+            if diagnostics is None:
+                from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.prefill_cache_diagnostics import (
+                    PrefillCacheDiagnostics,
+                )
+
+                diagnostics = PrefillCacheDiagnostics(model.parallelism_config.tp_rank)
+                model._prefill_cache_diagnostics = diagnostics
+            diagnostics.begin(fmha_impl)
         yield fmha_impl
         failed = False
     finally:
@@ -35,7 +49,6 @@ def decoder_cache_forward(
             and model.layered_prefill_cache.active
         ):
             model.layered_prefill_cache.end_forward(failed=failed)
-        diagnostics = getattr(model, "_prefill_cache_diagnostics", None)
         if diagnostics is not None:
             diagnostics.finish(model.layered_prefill_cache, failed)
 

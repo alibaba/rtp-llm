@@ -38,7 +38,8 @@ public:
         cache_manager_    = cache_manager;
         metrics_reporter_ = metrics_reporter;
         batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
-        scheduler_type_   = SchedulerType::kBatchDecode;
+        scheduler_type_   = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_warmup_type == 0 ?
+                                SchedulerType::kBatchDecode : SchedulerType::kBatchPrefill;
         dp_rank_          = dp_rank;
         perf_local_requests_ = runtime_config.use_batch_decode_scheduler
                                && autil::EnvUtil::getEnv("RTP_LLM_PERF_LOCAL_REQUESTS", false);

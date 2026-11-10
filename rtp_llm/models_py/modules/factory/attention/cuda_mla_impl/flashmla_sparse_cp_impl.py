@@ -2888,8 +2888,14 @@ class SparseMlaCpImpl(SparseMlaImpl):
         fused_kv = None
         if prepared_kv is not None:
             fused_kv, ready = prepared_kv
-            torch.cuda.current_stream(q.device).wait_event(ready)
             pipeline = getattr(self, "_cross_layer_prefetch", None)
+            compute = torch.cuda.current_stream(q.device)
+            capture_timing = getattr(pipeline, "capture_timing", False)
+            if capture_timing:
+                pipeline.record_timing(layer_id, "cp_ready_wait_begin", compute)
+            compute.wait_event(ready)
+            if capture_timing:
+                pipeline.record_timing(layer_id, "cp_ready_wait_end", compute)
             if pipeline is not None:
                 pipeline.consume(layer_id)
         attn_output = self.fmha_impl.forward(

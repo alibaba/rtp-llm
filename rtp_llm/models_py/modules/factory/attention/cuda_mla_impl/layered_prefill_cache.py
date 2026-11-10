@@ -16,6 +16,9 @@ from typing import Sequence
 import torch
 
 from rtp_llm.config.prefill_optimization import PREFILL_OPTIMIZATIONS_ENABLED
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.cp_profile import (
+    profile_stage,
+)
 
 
 def contiguous_runs(pairs: Sequence[tuple[int, int]]) -> list[tuple[int, int, int]]:
@@ -193,6 +196,7 @@ class _PrefillStaging:
         self.page_bytes = self.backing[0][0].numel() * self.backing[0].element_size()
 
     @staticmethod
+    @profile_stage("cp.staging.copy")
     def _copy_runs(source, dest, runs) -> None:
         from rtp_llm.ops.compute_ops import copy_paged_kv_cache_async
 
@@ -497,8 +501,11 @@ class ContiguousPrefillCache(_PrefillStaging):
     def begin_forward(self, fmha):
         self.flush_timings()
         self.timing_root = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "")
-        self.capture_timing = bool(self.timing_root) and os.path.exists(
-            os.path.join(self.timing_root, "prefill_copy_timing.enable")
+        self.capture_timing = bool(self.timing_root) and (
+            os.environ.get("RTP_LLM_PREFILL_COPY_TIMING") == "1"
+            or os.path.exists(
+                os.path.join(self.timing_root, "prefill_copy_timing.enable")
+            )
         )
         self.timing_rows = []
         self.kv_prefetch = None
@@ -668,6 +675,7 @@ class ContiguousPrefillCache(_PrefillStaging):
                 )
                 self.copy_stats[key] += copied
 
+    @profile_stage("cp.staging.submit", layer_arg=1)
     def _submit(self, layer, chunk):
         runs, pages = chunk
         slot = self.host_layers[layer]
@@ -770,6 +778,7 @@ class ContiguousPrefillCache(_PrefillStaging):
             event.record(torch.cuda.current_stream(self.device))
             self.timing_rows[-1][name] = event
 
+    @profile_stage("cp.staging.wait", layer_attr="current_layer")
     def _wait_ready(self, slot, compute):
         self._timing_event("kv_wait_begin")
         super()._wait_ready(slot, compute)
@@ -796,6 +805,21 @@ class ContiguousPrefillCache(_PrefillStaging):
                         if first in row and last in row
                         else 0
                     )
+                for label, first, last in (
+                    ("cp_ready_wait_ms", "cp_ready_wait_begin", "cp_ready_wait_end"),
+                    ("full_reorder_span_ms", "full_reorder_begin", "full_reorder_end"),
+                    (
+                        "history_reorder_span_ms",
+                        "history_reorder_begin",
+                        "history_reorder_end",
+                    ),
+                    ("new_reorder_span_ms", "new_reorder_begin", "new_reorder_end"),
+                ):
+                    record[label] = (
+                        row[first].elapsed_time(row[last])
+                        if first in row and last in row
+                        else None
+                    )
                 result.append(record)
             rank = os.environ.get("WORLD_RANK", "0")
             with open(
@@ -809,6 +833,7 @@ class ContiguousPrefillCache(_PrefillStaging):
         self.prefetch_owner(layer)
         return self.host_layers.get(layer)
 
+    @profile_stage("cp.staging.moe_fence", layer_attr="current_layer")
     def wait_prefetch_complete(self):
         if not self.active:
             raise RuntimeError("begin_forward must precede wait_prefetch_complete")
@@ -843,6 +868,11 @@ class ContiguousPrefillCache(_PrefillStaging):
     def end_forward(self, failed=False):
         pipeline = getattr(self, "kv_prefetch", None)
         if pipeline is not None:
+            if self.capture_timing:
+                for row in self.timing_rows:
+                    row.update(
+                        getattr(pipeline, "timing_rows", {}).get(row["layer"], {})
+                    )
             pipeline.close()
             self.kv_prefetch = None
         # The final layer's dirty pages have no following attention window.

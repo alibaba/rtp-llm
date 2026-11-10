@@ -217,7 +217,7 @@ class CudaMxfp8LinearTest(unittest.TestCase):
         self.assertLess(float(relative_l2), 0.01)
 
     def test_hy4_hidden_size_grid(self):
-        for m in (1, 8, 32):
+        for m in (1, 8, 32, 1368):
             with self.subTest(m=m):
                 self._run(m)
 
@@ -244,27 +244,29 @@ class CudaMxfp8LinearTest(unittest.TestCase):
         self.assertTrue(torch.equal(actual, expected))
 
     def test_quant_and_linear_cuda_graph_replay(self):
-        static_x = torch.randn(4, self.K, dtype=torch.bfloat16, device=self.device)
-        replay_x = torch.randn_like(static_x)
+        for m in (4, 1368):
+            with self.subTest(m=m):
+                static_x = torch.randn(
+                    m, self.K, dtype=torch.bfloat16, device=self.device
+                )
+                replay_x = torch.randn_like(static_x)
 
-        # Compile Triton/DeepGEMM and materialize the lazily packed weight
-        # scale before capture.
-        for _ in range(3):
-            q, scale = mxfp8_quant_act_packed_fused(static_x)
-            self.linear(q, input_scales=scale)
-        ref_q, ref_scale = mxfp8_quant_act_packed_fused(replay_x)
-        expected = self.linear(ref_q, input_scales=ref_scale)
-        torch.cuda.synchronize()
+                for _ in range(3):
+                    q, scale = mxfp8_quant_act_packed_fused(static_x)
+                    self.linear(q, input_scales=scale)
+                ref_q, ref_scale = mxfp8_quant_act_packed_fused(replay_x)
+                expected = self.linear(ref_q, input_scales=ref_scale)
+                torch.cuda.synchronize()
 
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            graph_q, graph_scale = mxfp8_quant_act_packed_fused(static_x)
-            graph_output = self.linear(graph_q, input_scales=graph_scale)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    graph_q, graph_scale = mxfp8_quant_act_packed_fused(static_x)
+                    graph_output = self.linear(graph_q, input_scales=graph_scale)
 
-        static_x.copy_(replay_x)
-        graph.replay()
-        torch.cuda.synchronize()
-        self.assertTrue(torch.equal(graph_output, expected))
+                static_x.copy_(replay_x)
+                graph.replay()
+                torch.cuda.synchronize()
+                self.assertTrue(torch.equal(graph_output, expected))
 
 
 if __name__ == "__main__":

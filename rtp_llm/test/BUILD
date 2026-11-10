@@ -30,6 +30,14 @@ py_test(
 )
 
 py_test(
+    name = "model_factory_layer_override_test",
+    srcs = ["model_factory_layer_override_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM103_CU13"],
+    exec_properties = {'gpu': 'SM103_CU13', 'gpu_count': '1'},
+)
+
+py_test(
     name = "slice_stop_word_list_test",
     srcs = [
         "slice_stop_word_list_test.py",
