@@ -1175,7 +1175,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     auto int_out_options      = torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false);
     const int64_t token_count = static_cast<int64_t>(batch_size) * (propose_step_ + 1);
     auto          result_d    = finalize_in_kernel ?
-                                    torch::empty({static_cast<int64_t>(batch_size) * (propose_step_ + 3)}, int_out_options) :
+                                    torch::empty({static_cast<int64_t>(batch_size) * static_cast<int64_t>(propose_step_ + 3)}, int_out_options) :
                                     torch::Tensor();
     auto          output_token_ids_d =
         finalize_in_kernel ?
