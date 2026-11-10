@@ -16,7 +16,12 @@ _FP8_LINEAR_REGISTRY = weakref.WeakSet()
 # Pre-SM100 fallback caches an exact bf16 weight view only for linears at or
 # below this element count (16MB bf16); larger (typically replicated) weights
 # dequantize per call to keep the resident footprint at FP8 size.
-_V41_MXFP8_BF16_CACHE_MAX_NUMEL = 8_000_000
+# Weights up to this size keep a cached exact bf16 dequantization; larger
+# ones dequantize per call. Set to 0 to free the cache entirely (memory-
+# bound deployments trade dequant work for ~bytes-worth of headroom).
+_V41_MXFP8_BF16_CACHE_MAX_NUMEL = int(
+    os.environ.get("DSV41_MXFP8_BF16_CACHE_MAX_NUMEL", "8000000")
+)
 # Decode-sized batches dequantize weight-block-by-block instead of
 # materializing the whole bf16 weight (graph-capture pools stay small).
 _V41_MXFP8_CHUNKED_GEMM_MAX_ROWS = int(
