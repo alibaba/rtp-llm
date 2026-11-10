@@ -121,18 +121,28 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         self._W2_s = stacked_routed["w2_s"]
         self._W3_w = stacked_routed["w3_w"]
         self._W3_s = stacked_routed["w3_s"]
-        self._W1_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W1_s, cfg.moe_inter_dim, cfg.dim, self._W1_s.shape[0]
-        )
-        self._W2_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W2_s, cfg.dim, cfg.moe_inter_dim, self._W2_s.shape[0]
-        )
-        self._W3_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W3_s, cfg.moe_inter_dim, cfg.dim, self._W3_s.shape[0]
-        )
-        self._W1_s_gemm_t = self._W1_s_gemm.transpose(-1, -2)
-        self._W2_s_gemm_t = self._W2_s_gemm.transpose(-1, -2)
-        self._W3_s_gemm_t = self._W3_s_gemm.transpose(-1, -2)
+        if torch.version.hip is None:
+            self._W1_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W1_s, cfg.moe_inter_dim, cfg.dim, self._W1_s.shape[0]
+            )
+            self._W2_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W2_s, cfg.dim, cfg.moe_inter_dim, self._W2_s.shape[0]
+            )
+            self._W3_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W3_s, cfg.moe_inter_dim, cfg.dim, self._W3_s.shape[0]
+            )
+            self._W1_s_gemm_t = self._W1_s_gemm.transpose(-1, -2)
+            self._W2_s_gemm_t = self._W2_s_gemm.transpose(-1, -2)
+            self._W3_s_gemm_t = self._W3_s_gemm.transpose(-1, -2)
+        else:
+            # ROCm uses the exact torch dequant fallback in QuantizedLinear,
+            # which reads the raw UE8M0 scale; no DeepGEMM packing exists.
+            self._W1_s_gemm = None
+            self._W2_s_gemm = None
+            self._W3_s_gemm = None
+            self._W1_s_gemm_t = None
+            self._W2_s_gemm_t = None
+            self._W3_s_gemm_t = None
 
         def _expert_at(global_idx: int) -> Optional[Expert]:
             if not cfg.local_expert_start <= global_idx < cfg.local_expert_end:
