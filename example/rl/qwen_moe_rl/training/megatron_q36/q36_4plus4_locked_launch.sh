@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Detached content lock: run via bash only after checking this wrapper's SHA.
 set -euo pipefail
-expected=1a583db884078ec85e76429d98bbe0118eb540d7934af10cd252cd9ee5c98aec
+expected=13de1024f29dcb8f25d21f60e2a2d231cb7236e6fb8208680d49868329b7a639
 launcher="${Q36_CODE_DIR:?}/q36_4plus4_launch_candidate.py"
 python="${Q36_LOCKED_PYTHON:?}"
 [[ $# == 1 && ( $1 == preflight || $1 == run ) ]] || { echo 'expected preflight or run' >&2; exit 2; }

@@ -22,6 +22,20 @@ def _load_v5():
     return standalone_bootstrap_v5
 
 
+def _install_package_guard(source):
+    guard_name = 'q36_rpc_only_package_guard'
+    guard = Path(os.environ['Q36_CODE_DIR']).resolve(strict=True) / (guard_name + '.py')
+    guard_spec = importlib.machinery.PathFinder.find_spec(guard_name, sys.path)
+    guard_loaded = sys.modules.get(guard_name)
+    if (guard.is_symlink() or not guard.is_file() or
+        hashlib.sha256(guard.read_bytes()).hexdigest() != 'dee815344562108bdefae071cfd439435e854c0e8e2b9bd2816f566ee31c4843' or
+        guard_spec is None or not guard_spec.origin or Path(guard_spec.origin).resolve() != guard or
+        guard_loaded is not None and Path(getattr(guard_loaded, '__file__', '')).resolve() != guard):
+        raise RuntimeError('RPC-only RTP package guard source identity mismatch')
+    import q36_rpc_only_package_guard
+    q36_rpc_only_package_guard.install(source)
+
+
 def _install_proto():
     node = socket.gethostbyname(socket.gethostname())
     choices = {
@@ -37,6 +51,7 @@ def _install_proto():
     os.environ['Q36_PROTO_REPO'] = source
     if source not in sys.path:
         sys.path.insert(0, source)
+    _install_package_guard(source)
     name = 'q36_proto_overlay_candidate'
     overlay = Path(os.environ['Q36_PROTO_OVERLAY_DIR']).resolve(strict=True) / (name + '.py')
     spec = importlib.machinery.PathFinder.find_spec(name, sys.path)

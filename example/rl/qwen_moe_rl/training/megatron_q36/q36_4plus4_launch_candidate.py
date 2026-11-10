@@ -21,8 +21,9 @@ SOURCES = {
   'onpolicy_standalone_candidate.py': '8c36ff1bb662fa5ba5177c1f4e17646664c81fe93790087f00d3c10178f468a8',
   'q36_4plus4_claim_loader.py': 'a735df08ee8ff64f71bb681d6acbaf40af82cfb7f4046f0085f8ca9dab347ad2',
   'q36_4plus4_claim_guard.py': 'd6faa983a2d404a33d106fec026f1049cc68aa0ceb392e0a6e948cdd7185197c',
-  'q36_standalone_bootstrap_selector.py': 'aa779b2daae6b5929670d8a9821669eb8ef2c3b58da7da545e092cac0d49f19b',
-  'standalone_bootstrap_rpc_v6.py': 'b0befdc9c0283f32e21e21234cbb72530860f05ba1a053767a7e948117c2af75',
+  'q36_standalone_bootstrap_selector.py': 'd1a66ff3eab064ab416d0eda08cc3f08480ad1dd1504fdd6b076706e9b6236ea',
+  'standalone_bootstrap_rpc_v6.py': '6fe866ff96c69bcc9c02e64519c10d5aa55054b4fc1281f536f2377b34d9a585',
+  'q36_rpc_only_package_guard.py': 'dee815344562108bdefae071cfd439435e854c0e8e2b9bd2816f566ee31c4843',
   'standalone_bootstrap_v4.py': 'd3c993deb80505b578b97fd5222ff396dec4f0b5362dc6937aa503ff211e66a8'},
  'Q36_ADAPTER_DIR': {
   'standalone_rtp_adapter_v3.py': 'c9ca358974ba6d3048a9d98d4c33bb2d0bc45652ba805b588f1690a28d449307',

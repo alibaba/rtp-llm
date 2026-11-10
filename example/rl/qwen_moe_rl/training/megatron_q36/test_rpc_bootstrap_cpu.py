@@ -32,5 +32,23 @@ class RpcBootstrapTest(unittest.TestCase):
             with patch.dict(os.environ,{'Q36_CODE_DIR':tmp}),patch.object(sys,'path',[tmp]+sys.path):
                 with self.assertRaisesRegex(RuntimeError,'source identity'):module._load_v5()
 
+    def test_package_guard_hash_and_origin_are_locked(self):
+        root=Path(__file__).resolve().parent
+        source=root/'q36_rpc_only_package_guard.py'
+        called=[]
+        fake=types.ModuleType('q36_rpc_only_package_guard')
+        fake.__file__=str(source)
+        fake.install=lambda repo: called.append(repo)
+        with patch.dict(os.environ,{'Q36_CODE_DIR':str(root)}), \
+             patch.object(sys,'path',[str(root)]+sys.path), \
+             patch.dict(sys.modules,{'q36_rpc_only_package_guard':fake}):
+            module._install_package_guard('/verified/repo')
+        self.assertEqual(called,['/verified/repo'])
+        with tempfile.TemporaryDirectory() as tmp:
+            altered=Path(tmp)/source.name;altered.write_bytes(source.read_bytes()+b'\n# tampered\n')
+            with patch.dict(os.environ,{'Q36_CODE_DIR':tmp}),patch.object(sys,'path',[tmp]+sys.path):
+                with self.assertRaisesRegex(RuntimeError,'guard source identity'):
+                    module._install_package_guard('/verified/repo')
+
 
 if __name__=='__main__':unittest.main()
