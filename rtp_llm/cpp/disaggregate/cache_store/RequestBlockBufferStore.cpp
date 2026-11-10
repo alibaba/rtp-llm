@@ -3,6 +3,9 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+
+#include <algorithm>
+#include <limits>
 #include <torch/torch.h>
 
 namespace rtp_llm {
@@ -154,44 +157,87 @@ RequestBlockBufferStore::makeValidBlocks(const std::vector<std::shared_ptr<Block
     // One pinned allocation for the whole submission: page-locking host memory is a
     // device-synchronizing driver call, so a per-block allocation turns a multi-GB
     // publication into hundreds of thousands of them.
-    constexpr size_t    alignment = 256;
-    std::vector<size_t> offsets;
-    offsets.reserve(blocks.size());
-    size_t total_len = 0;
-    for (const auto& block : blocks) {
-        offsets.push_back(total_len);
-        total_len += (block->len + alignment - 1) / alignment * alignment;
+    constexpr size_t alignment             = 256;
+    constexpr size_t max_tensor_size       = std::numeric_limits<int64_t>::max();
+    const bool       rdma                  = memory_util_->isRdmaMode();
+    const auto       min_registration_size = rdma ? memory_util_->minRegistrationSize() : 0;
+    if (min_registration_size > max_tensor_size) {
+        RTP_LLM_LOG_WARNING("minimum staging registration size is out of range: %lu", min_registration_size);
+        return {};
     }
 
-    auto tensor = torch::empty({(int64_t)total_len}, torch::TensorOptions().dtype(torch::kUInt8)).pin_memory();
+    struct StagingBlock {
+        const BlockBuffer* block;
+        size_t             stride;
+    };
+    std::vector<StagingBlock> layout;
+    layout.reserve(blocks.size());
+    size_t total_len = 0;
+    for (const auto& block : blocks) {
+        const size_t bytes  = std::max<size_t>(block->len, min_registration_size);
+        const size_t stride = (bytes + alignment - 1) / alignment * alignment;
+        if (stride > max_tensor_size - total_len) {
+            RTP_LLM_LOG_WARNING("staging allocation is too large, block count %zu", blocks.size());
+            return {};
+        }
+        layout.push_back({block.get(), stride});
+        total_len += stride;
+    }
+    if (rdma) {
+        std::sort(layout.begin(), layout.end(), [](const StagingBlock& a, const StagingBlock& b) {
+            return a.stride < b.stride;
+        });
+    }
+
+    auto tensor =
+        torch::empty({static_cast<int64_t>(total_len)}, torch::TensorOptions().dtype(torch::kUInt8)).pin_memory();
     if (!tensor.defined()) {
         RTP_LLM_LOG_WARNING(
             "make valid blocks failed, alloc %zu bytes failed, block count %zu", total_len, blocks.size());
         return {};
     }
-    auto* base = static_cast<char*>(tensor.data_ptr());
-
-    if (!memory_util_->isMemoryMr(base, total_len, false, false) && !memory_util_->regUserMr(base, total_len, false)) {
-        RTP_LLM_LOG_WARNING("make valid blocks failed to reg mr, size %zu, block count %zu", total_len, blocks.size());
-        return {};
-    }
-
     std::vector<std::shared_ptr<BlockBuffer>> staged_blocks;
     staged_blocks.reserve(blocks.size());
     MultiCopyParams copy_params;
     copy_params.multi_dst.reserve(blocks.size());
     copy_params.multi_src.reserve(blocks.size());
-    for (size_t i = 0; i < blocks.size(); ++i) {
-        const auto& block = blocks[i];
-        auto*       dst   = base + offsets[i];
-        // Every alias keeps the backing pinned tensor alive.
-        auto addr = std::shared_ptr<void>(dst, [tensor](void*) {});
-        staged_blocks.push_back(std::make_shared<BlockBuffer>(block->key, addr, block->len, false, true));
+    const auto options = torch::TensorOptions().dtype(torch::kUInt8);
+    auto*      cursor  = static_cast<char*>(tensor.data_ptr());
+    for (auto slot = layout.begin(); slot != layout.end();) {
+        const size_t stride = slot->stride;
+        // RDMA can split a registration at multiples of its alignment. Equal
+        // strides ensure each split falls between blocks.
+        auto end = layout.end();
+        if (rdma) {
+            end = std::find_if(slot, end, [stride](const StagingBlock& entry) { return entry.stride != stride; });
+        }
+        const size_t bytes              = rdma ? (end - slot) * stride : total_len;
+        const bool   needs_registration = rdma || !memory_util_->isMemoryMr(cursor, bytes, false, false);
+        if (needs_registration && !memory_util_->regUserMr(cursor, bytes, false, rdma ? stride : 0)) {
+            RTP_LLM_LOG_WARNING("make valid blocks failed to reg mr, size %zu, block count %td", bytes, end - slot);
+            return {};
+        }
 
-        const auto options = torch::TensorOptions().dtype(torch::kUInt8);
-        copy_params.multi_dst.push_back(torch::from_blob(dst, {(int64_t)block->len}, options.device(torch::kCPU)));
-        copy_params.multi_src.push_back(torch::from_blob(
-            block->addr.get(), {(int64_t)block->len}, options.device(block->gpu_mem ? torch::kCUDA : torch::kCPU)));
+        // Readers can outlive the request. Release the registration before
+        // dropping the pinned allocation, including on an early return.
+        auto region = std::shared_ptr<void>(
+            cursor, [tensor, registration = needs_registration ? memory_util_ : nullptr](void* ptr) {
+                if (registration) {
+                    registration->deregUserMr(ptr, false);
+                }
+            });
+        for (; slot != end; ++slot) {
+            const auto* block = slot->block;
+            auto        addr  = std::shared_ptr<void>(region, cursor);
+            staged_blocks.push_back(std::make_shared<BlockBuffer>(block->key, addr, block->len, false, true));
+            copy_params.multi_dst.push_back(
+                torch::from_blob(cursor, {static_cast<int64_t>(block->len)}, options.device(torch::kCPU)));
+            copy_params.multi_src.push_back(
+                torch::from_blob(block->addr.get(),
+                                 {static_cast<int64_t>(block->len)},
+                                 options.device(block->gpu_mem ? torch::kCUDA : torch::kCPU)));
+            cursor += slot->stride;
+        }
     }
 
     const auto copy_begin_us = currentTimeUs();
