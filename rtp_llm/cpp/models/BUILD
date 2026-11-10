@@ -183,13 +183,21 @@ cc_library(
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
         "//rtp_llm/cpp/utils:tensor_debug_utils",
-        "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/cpp/cuda_graph:prepared_attention_inputs_guard",
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
     ] + select({
+        # The graph runner is CUDA/ROCm-only, matching pybind/BUILD and
+        # normal_engine/BUILD. PyWrappedModel.h already guards every
+        # CudaGraphRunner use with `#if USING_CUDA || USING_ROCM`; this dep was
+        # the one unconditional edge that made non-GPU configs compile
+        # cuda_graph_runner.cc anyway.
+        "//:using_cuda": ["//rtp_llm/cpp/cuda_graph:cuda_graph_impl"],
+        "//:using_rocm": ["//rtp_llm/cpp/cuda_graph:cuda_graph_impl"],
+        "//conditions:default": [],
+    }) + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/kernels:attention_input_metadata",
             "//rtp_llm/models_py/bindings/cuda:bf16_gemm_op",
