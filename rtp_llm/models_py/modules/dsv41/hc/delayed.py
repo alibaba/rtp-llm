@@ -35,7 +35,17 @@ def _tile_ops():
 
 def collapse_delayed(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
     """Read residual streams using FP32 coefficients and accumulation."""
-    if x.is_cuda and x.dtype == torch.bfloat16:
+    from rtp_llm.models_py.modules.dsv41.sm80_support import (
+        use_reference_gemm_paths,
+    )
+
+    # mhc_pre_apply_mix is a vendored TileLang kernel (SM100); reference GPUs
+    # take the equivalent pure-torch reduction below.
+    if (
+        x.is_cuda
+        and x.dtype == torch.bfloat16
+        and not use_reference_gemm_paths()
+    ):
         ops = _tile_ops()
         shape = x.shape
         return ops.mhc_pre_apply_mix(
@@ -161,7 +171,19 @@ class DelayedHCUnit(HCUnitBase):
         return y, post, comb
 
     def _post_impl(self, x, residual, post, comb):
-        if residual.is_cuda and residual.dtype == torch.bfloat16:
+        from rtp_llm.models_py.modules.dsv41.sm80_support import (
+            use_reference_gemm_paths,
+        )
+
+        # The TileLang post kernel is SM100-only (it returns None pre-Blackwell
+        # even when DSV4_HC_IMPL=fallback, because this hard route bypasses the
+        # factory). Reference GPUs take the pure-torch formula below — the same
+        # expression FallbackHCUnit uses.
+        if (
+            residual.is_cuda
+            and residual.dtype == torch.bfloat16
+            and not use_reference_gemm_paths()
+        ):
             return TileLangHCUnit._post_impl(self, x, residual, post, comb)
         return (
             post.float() * x.float().unsqueeze(-2)
