@@ -1,5 +1,4 @@
 import logging
-import os
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, Optional
@@ -1181,8 +1180,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             linear_attn_config, parallelism_config, weights
         )
         if (
-            os.getenv("QWEN4_GDN_DECODE_CONV_GATE", "0") == "1"
-            and self._qkvz_ba_fused
+            self._qkvz_ba_fused
             and norm_activation == "sigmoid"
             and (attn_tp_size, self.local_num_k_heads, self.local_num_v_heads)
             in ((1, 16, 48), (2, 8, 24), (4, 4, 12), (8, 2, 6))

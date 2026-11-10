@@ -14,7 +14,6 @@ from rtp_llm.models_py.triton_kernels.fla.index import (
 )
 from rtp_llm.models_py.triton_kernels.fla.op import exp, exp2, safe_exp
 from rtp_llm.models_py.triton_kernels.fla.utils import (
-    env_flag,
     is_amd,
     is_amd_cdna3,
     is_amd_cdna4,
@@ -34,10 +33,9 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
 
 
 def _use_sm90_bv16_chunk_h(k, w, u, gk, state_dtype, num_sequences):
-    """Opt in for Qwen4 TP1/2/4/8 SM90 single-sequence prefill."""
+    """Select BV16 for Qwen4 TP1/2/4/8 SM90 single-sequence prefill."""
     return (
-        env_flag("QWEN4_GDN_SM90_BV16")
-        and not is_amd
+        not is_amd
         and num_sequences == 1
         and k.is_cuda
         and (k.shape[-2], u.shape[-2], k.shape[-1], u.shape[-1])

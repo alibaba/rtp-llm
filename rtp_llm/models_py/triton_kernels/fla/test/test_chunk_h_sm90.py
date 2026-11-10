@@ -1,6 +1,5 @@
 """Explicit SM90 BV16 dispatch and exact wrapper parity with the BV32 path."""
 
-import os
 import unittest
 from unittest.mock import patch
 
@@ -75,16 +74,16 @@ class ChunkHSM90Test(unittest.TestCase):
                 name,
             )
 
-    def test_opt_in_dispatch_and_exact_long_sequence_outputs(self):
+    def test_default_dispatch_and_exact_long_sequence_outputs(self):
         self.check_exact_long_sequences((2, 6), (65, 8192, 32768))
 
-    def test_tp2_opt_in_dispatch_and_exact_long_sequence_outputs(self):
+    def test_tp2_default_dispatch_and_exact_long_sequence_outputs(self):
         self.check_exact_long_sequences((8, 24), (8192, 32768))
 
-    def test_tp1_opt_in_dispatch_and_exact_long_sequence_outputs(self):
+    def test_tp1_default_dispatch_and_exact_long_sequence_outputs(self):
         self.check_exact_long_sequences((16, 48), (65, 8192, 32768))
 
-    def test_tp4_opt_in_dispatch_and_exact_long_sequence_outputs(self):
+    def test_tp4_default_dispatch_and_exact_long_sequence_outputs(self):
         self.check_exact_long_sequences((4, 12), (65, 8192, 32768))
 
     def check_exact_long_sequences(self, heads, lengths):
@@ -99,15 +98,14 @@ class ChunkHSM90Test(unittest.TestCase):
             for length in lengths:
                 with self.subTest(length=length):
                     inputs = self.inputs(length, 7000 + length, heads)
-                    with patch.dict(os.environ, {"QWEN4_GDN_SM90_BV16": "0"}):
+                    with patch.object(
+                        chunk_delta_h, "_use_sm90_bv16_chunk_h", return_value=False
+                    ):
                         expected = chunk_delta_h.chunk_gated_delta_rule_fwd_h(
                             **inputs
                         )
                     self.assertEqual(recorder.tiles[-1], 32)
-                    with patch.dict(os.environ, {"QWEN4_GDN_SM90_BV16": "1"}):
-                        actual = chunk_delta_h.chunk_gated_delta_rule_fwd_h(
-                            **inputs
-                        )
+                    actual = chunk_delta_h.chunk_gated_delta_rule_fwd_h(**inputs)
                     self.assertEqual(recorder.tiles[-1], 16)
                     self.assert_exact(actual, expected)
 
@@ -115,29 +113,23 @@ class ChunkHSM90Test(unittest.TestCase):
         inputs = self.inputs(64, 34)
         k, w, u = (inputs[name] for name in ("k", "w", "u"))
         supported = chunk_delta_h._use_sm90_bv16_chunk_h
-        with patch.dict(os.environ):
-            os.environ.pop("QWEN4_GDN_SM90_BV16", None)
-            self.assertFalse(supported(k, w, u, None, torch.float32, 1))
-        with patch.dict(os.environ, {"QWEN4_GDN_SM90_BV16": "0"}):
-            self.assertFalse(supported(k, w, u, None, torch.float32, 1))
-        with patch.dict(os.environ, {"QWEN4_GDN_SM90_BV16": "1"}):
-            self.assertTrue(supported(k, w, u, None, torch.float32, 1))
-            self.assertFalse(supported(k, w, u, None, torch.float32, 2))
-            self.assertFalse(supported(k, w, u, None, torch.bfloat16, 1))
-            self.assertFalse(supported(k, w, u, inputs["g"], torch.float32, 1))
-            self.assertFalse(supported(k.cpu(), w, u, None, torch.float32, 1))
-            self.assertFalse(supported(k.float(), w, u, None, torch.float32, 1))
-            self.assertFalse(supported(k, w.float(), u, None, torch.float32, 1))
-            self.assertFalse(supported(k, w, u.float(), None, torch.float32, 1))
-            self.assertFalse(supported(k[:, :, :1], w, u, None, torch.float32, 1))
-            self.assertFalse(supported(k, w, u[:, :, :3], None, torch.float32, 1))
-            for capability in ((8, 0), (10, 0), (12, 0)):
-                with patch.object(
-                    chunk_delta_h.torch.cuda,
-                    "get_device_capability",
-                    return_value=capability,
-                ):
-                    self.assertFalse(supported(k, w, u, None, torch.float32, 1))
+        self.assertTrue(supported(k, w, u, None, torch.float32, 1))
+        self.assertFalse(supported(k, w, u, None, torch.float32, 2))
+        self.assertFalse(supported(k, w, u, None, torch.bfloat16, 1))
+        self.assertFalse(supported(k, w, u, inputs["g"], torch.float32, 1))
+        self.assertFalse(supported(k.cpu(), w, u, None, torch.float32, 1))
+        self.assertFalse(supported(k.float(), w, u, None, torch.float32, 1))
+        self.assertFalse(supported(k, w.float(), u, None, torch.float32, 1))
+        self.assertFalse(supported(k, w, u.float(), None, torch.float32, 1))
+        self.assertFalse(supported(k[:, :, :1], w, u, None, torch.float32, 1))
+        self.assertFalse(supported(k, w, u[:, :, :3], None, torch.float32, 1))
+        for capability in ((8, 0), (10, 0), (12, 0)):
+            with patch.object(
+                chunk_delta_h.torch.cuda,
+                "get_device_capability",
+                return_value=capability,
+            ):
+                self.assertFalse(supported(k, w, u, None, torch.float32, 1))
 
     def test_multiple_sequences_keep_bv32(self):
         inputs = self.inputs(64, 35)
@@ -148,7 +140,7 @@ class ChunkHSM90Test(unittest.TestCase):
         recorder = KernelRecorder(
             chunk_delta_h.chunk_gated_delta_rule_fwd_kernel_h_blockdim64
         )
-        with patch.dict(os.environ, {"QWEN4_GDN_SM90_BV16": "1"}), patch.object(
+        with patch.object(
             chunk_delta_h,
             "chunk_gated_delta_rule_fwd_kernel_h_blockdim64",
             recorder,

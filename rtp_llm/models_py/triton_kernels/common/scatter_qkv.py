@@ -4,7 +4,6 @@
 # torch.split + view triggers when the slice stride doesn't match the target
 # contig stride.
 
-import os
 from typing import Optional, Tuple
 
 import torch
@@ -145,8 +144,7 @@ def try_scatter_qkv_l2norm_sm90(
 ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Return normalized Q/K and raw V for qualified Qwen4 prefill geometry."""
     if not (
-        os.environ.get("QWEN4_GDN_SM90_FUSED_SCATTER_NORM") == "1"
-        and gluon is not None
+        gluon is not None
         # TP1/2/4/8 keeps three consecutive V heads per Q/K head. The
         # four-head CTA indexing depends on this ratio, not on the TP size.
         and (num_k_heads, num_v_heads) in ((16, 48), (8, 24), (4, 12), (2, 6))

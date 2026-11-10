@@ -1,4 +1,3 @@
-import os
 import unittest
 from functools import partial
 from types import SimpleNamespace
@@ -236,16 +235,19 @@ class GdnDecodeConvGateSM90Test(unittest.TestCase):
             W.linear_attn_out_w: weight(6144 // tp, 2560, scale=(6144 // tp)**-0.5),
         }
         layers = []
-        for fuse in ("0", "1"):
-            with patch.dict(os.environ, {"QWEN4_GDN_DECODE_CONV_GATE": fuse}):
-                layer = Qwen3NextGatedDeltaNet(
-                    linear, parallelism, dict(weights), 1e-6, norm_activation="sigmoid"
-                ).eval()
+        for _ in range(2):
+            layer = Qwen3NextGatedDeltaNet(
+                linear, parallelism, dict(weights), 1e-6, norm_activation="sigmoid"
+            ).eval()
             # The check ends at the rank-local output, before TP reduction.
             layer.tp_all_reduce = lambda x, group: x
             layers.append(layer)
         for layer in layers:
             assert tuple(layer.in_proj_fused.weight.shape) == (16480 // tp, 2560)
+            assert callable(layer.decode_gdn._decode_conv_gate)
+        # Disable the fusion only on the reference instance; the candidate
+        # exercises normal construction without an experimental opt-in.
+        layers[0].decode_gdn._decode_conv_gate = None
         return tuple(layers)
 
     @staticmethod
