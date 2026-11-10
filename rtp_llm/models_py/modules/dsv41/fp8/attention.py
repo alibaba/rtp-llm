@@ -21,11 +21,20 @@ from contextlib import contextmanager, suppress
 from functools import lru_cache
 from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 
-import deep_gemm
+try:
+    import deep_gemm
+    from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+except ImportError:  # ROCm images do not ship DeepGEMM.
+    deep_gemm = None
+
+    def get_mn_major_tma_aligned_packed_ue8m0_tensor(*args, **kwargs):
+        raise NotImplementedError(
+            "DeepGEMM UE8M0 layout packing is not available on this ROCm image"
+        )
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
 from rtp_llm.models_py.modules.dsv41._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
@@ -1799,6 +1808,10 @@ class AttentionFP8(nn.Module):
         M, G, _K = o_fp8.shape
         R = self.o_lora_rank
         out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o_fp8.device)
+        if deep_gemm is None:
+            raise NotImplementedError(
+                "deep_gemm.fp8_einsum is not available on this ROCm image"
+            )
         deep_gemm.fp8_einsum(
             "bhr,hdr->bhd",
             (o_fp8, o_scale),
