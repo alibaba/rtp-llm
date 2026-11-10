@@ -8,6 +8,7 @@
 #include "aios/navi_sched/resource/ReplayClientR.h"
 #include "aios/navi_sched/resource/ClientResponseR.h"
 #include "aios/navi_sched/service/NaviSchedClientSummary.h"
+#include "autil/EnvUtil.h"
 #include "autil/NetUtil.h"
 #include "autil/TimeUtility.h"
 #include "autil/HashAlgorithm.h"
@@ -369,7 +370,17 @@ bool NaviSchedClient::init()
         kernelConfigs["navi_sched.client_forward_k"] =
             autil::legacy::ToJsonString(forwardConfig, true);
     }
-    auto configStr = NaviSchedConfigBuilder::build(config, kernels, true, kernelConfigs);
+    constexpr int MAX_GRPC_CLIENT_IO_THREADS = 64;
+    int grpcClientIoThreads = 0;
+    if (autil::EnvUtil::hasEnv("NAVI_SCHED_CLIENT_GRPC_IO_THREADS") &&
+        (!autil::EnvUtil::getEnvWithoutDefault("NAVI_SCHED_CLIENT_GRPC_IO_THREADS",
+                                               grpcClientIoThreads) ||
+         grpcClientIoThreads < 1 || grpcClientIoThreads > MAX_GRPC_CLIENT_IO_THREADS)) {
+        AUTIL_LOG(WARN, "invalid NAVI_SCHED_CLIENT_GRPC_IO_THREADS, using GIG default");
+        grpcClientIoThreads = 0;
+    }
+    auto configStr = NaviSchedConfigBuilder::build(
+        config, kernels, true, kernelConfigs, {}, {}, grpcClientIoThreads);
     auto resourceMap = std::make_shared<navi::ResourceMap>();
     if ((_enableAgentForward && !resourceMap->addResource(_responseR)) ||
         !resourceMap->addResource(_replayClientR) ||
