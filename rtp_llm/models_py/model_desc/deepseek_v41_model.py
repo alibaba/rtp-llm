@@ -259,6 +259,12 @@ class DeepSeekV41Model(DeepSeekV4Model):
 
     @torch.inference_mode()
     def forward(self, inputs, fmha_impl: Any = None):
+        if os.environ.get("DSV41_TRACE_CAPTURE"):
+            print(
+                f"[cap] v41 forward entry capture={torch.cuda.is_current_stream_capturing()} "
+                f"warmup={os.environ.get('RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD')}",
+                flush=True,
+            )
         if os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1":
             # Diagnostic: the C++ capture path runs one eager datatype probe at
             # max_seq_len before capturing. On ROCm that probe walks a 1M-token
