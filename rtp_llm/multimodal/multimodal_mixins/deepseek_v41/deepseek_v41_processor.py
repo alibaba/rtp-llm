@@ -160,22 +160,17 @@ def load_image_source(
                 ) from error
             remaining = deadline - time.monotonic()
             if attempt == 2 or remaining <= 0:
-                code = (
-                    ExceptionType.CONNECT_TIMEOUT
-                    if isinstance(
-                        error, (requests.Timeout, ReadTimeoutError, TimeoutError)
-                    )
-                    else ExceptionType.MM_DOWNLOAD_FAILED
-                )
                 raise FtRuntimeException(
-                    code, "Temporary multimodal download failure"
+                    ExceptionType.MM_DOWNLOAD_FAILED,
+                    "Temporary multimodal download failure",
                 ) from error
             delay = min(0.2 * 2**attempt, remaining)
             if cancellation_event is not None:
                 cancellation_event.wait(delay)
-                _check_download(deadline, cancellation_event)
             else:
                 time.sleep(delay)
+            # The next attempt checks cancellation/deadline inside the try, so
+            # backoff deadline expiry keeps the same download error contract.
         finally:
             if not download_recorded:
                 _record_download_time(started)

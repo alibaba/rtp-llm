@@ -8,6 +8,7 @@ import os
 import sys
 import threading
 import unittest
+from concurrent.futures import CancelledError
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -16,6 +17,7 @@ import numpy as np
 import requests
 import torch
 from PIL import Image
+from urllib3.exceptions import ReadTimeoutError
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
@@ -134,7 +136,15 @@ class V41BackendProcessorParityTest(unittest.TestCase):
 
 
 class V41ImageDownloadTimingTest(unittest.TestCase):
-    def run_loader(self, statuses, *, repeats=1):
+    def run_loader(
+        self,
+        statuses,
+        *,
+        repeats=1,
+        deadline=None,
+        cancellation_event=None,
+        chunk_error=None,
+    ):
         from rtp_llm.multimodal.multimodal_util import collect_download_timing
 
         processor = (
@@ -155,6 +165,9 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
         def sleep(seconds):
             clock[0] += seconds
 
+        if cancellation_event is not None:
+            cancellation_event.wait.side_effect = sleep
+
         from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
             load_image_source,
         )
@@ -167,11 +180,17 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
         ), patch(
             "rtp_llm.multimodal.multimodal_util.request_get", side_effect=get_response
         ) as get, patch(
-            processor + "._image_download_chunks", return_value=[b"image"]
+            processor + "._image_download_chunks",
+            return_value=[b"image"],
+            side_effect=chunk_error,
         ), collect_download_timing() as timing:
             try:
                 result = [
-                    load_image_source("https://example.invalid/image.png").getvalue()
+                    load_image_source(
+                        "https://example.invalid/image.png",
+                        deadline=deadline,
+                        cancellation_event=cancellation_event,
+                    ).getvalue()
                     for _ in range(repeats)
                 ]
             except FtRuntimeException as error:
@@ -209,15 +228,55 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
         self.assertEqual(attempts, 1)
         self.assertEqual(elapsed_ms, 125.0)
 
-    def test_network_timeouts_keep_timeout_code_and_exclude_retry_backoff(self):
-        result, elapsed_ms, attempts = self.run_loader(
-            [requests.Timeout("download timeout") for _ in range(3)]
-        )
-        self.assertIsInstance(result, FtRuntimeException)
-        self.assertEqual(result.exception_type, ExceptionType.CONNECT_TIMEOUT)
-        self.assertEqual(result.message, "Temporary multimodal download failure")
+    def test_network_timeouts_are_download_errors_and_exclude_retry_backoff(self):
+        for error in (
+            requests.ConnectTimeout("connect timeout"),
+            requests.ReadTimeout("read timeout"),
+            ReadTimeoutError(None, "/image.png", "read timeout"),
+            TimeoutError("download deadline exceeded"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                result, elapsed_ms, attempts = self.run_loader([error] * 3)
+                self.assertIsInstance(result, FtRuntimeException)
+                self.assertEqual(
+                    result.exception_type, ExceptionType.MM_DOWNLOAD_FAILED
+                )
+                self.assertEqual(
+                    result.message, "Temporary multimodal download failure"
+                )
+                self.assertIs(result.__cause__, error)
+                self.assertEqual(attempts, 3)
+                self.assertEqual(elapsed_ms, 375.0)
+
+    def test_streaming_read_timeout_is_a_download_error(self):
+        error = ReadTimeoutError(None, "/image.png", "stream timeout")
+        result, elapsed_ms, attempts = self.run_loader([200] * 3, chunk_error=error)
+        self.assertEqual(result.exception_type, ExceptionType.MM_DOWNLOAD_FAILED)
+        self.assertIs(result.__cause__, error)
         self.assertEqual(attempts, 3)
         self.assertEqual(elapsed_ms, 375.0)
+
+    def test_download_deadline_expiring_during_backoff_is_a_download_error(self):
+        for cancellable in (False, True):
+            with self.subTest(cancellable=cancellable):
+                event = MagicMock() if cancellable else None
+                if event is not None:
+                    event.is_set.return_value = False
+                result, elapsed_ms, attempts = self.run_loader(
+                    [503], deadline=100.2, cancellation_event=event
+                )
+                self.assertEqual(
+                    result.exception_type, ExceptionType.MM_DOWNLOAD_FAILED
+                )
+                self.assertIsInstance(result.__cause__, TimeoutError)
+                self.assertEqual(attempts, 1)
+                self.assertEqual(elapsed_ms, 125.0)
+
+    def test_cancellation_during_backoff_is_not_a_download_error(self):
+        event = MagicMock()
+        event.is_set.side_effect = lambda: event.wait.called
+        with self.assertRaises(CancelledError):
+            self.run_loader([503], cancellation_event=event)
 
 
 class V41BackendPreprocessContractTest(unittest.TestCase):
