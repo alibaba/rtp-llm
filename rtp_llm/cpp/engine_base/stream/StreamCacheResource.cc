@@ -92,6 +92,7 @@ public:
             routing.prefill_addr    = stream->prefillAddr();
             routing.prefill_tp_size = stream->getPrefillTpSize();
             routing.prefill_cp_size = stream->getPrefillCpSize();
+            routing.decode_needs_compute = stream->needsDecodeAfterPrefill();
         }
     }
 
@@ -110,7 +111,7 @@ namespace {
 
 torch::Tensor buildFirstTokenUpdateTokens(GenerateStream* stream, int32_t first_token_id) {
     const auto next_batch_size = static_cast<int64_t>(stream->nextBatchSize());
-    if (!stream->hasNumBeams()) {
+    if (!stream->usesBeamSearchTokenLayoutForCurrentStep()) {
         auto tokens = torch::empty({next_batch_size, 1}, torch::kInt32);
         std::fill(tokens.data_ptr<int32_t>(), tokens.data_ptr<int32_t>() + next_batch_size, first_token_id);
         return tokens;
@@ -141,7 +142,7 @@ bool p2pLoadSafeToRelease(const std::shared_ptr<AsyncContext>& context) {
     return !p2p || !p2p->resourceHoldPending();
 }
 
-void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* stream, int reuse_block_tokens) {
+void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* stream) {
 #if defined(USING_CUDA)
     auto generator = stream->getGenerator();
     if (stream->generateConfig()->random_seed.has_value() || payload.has_rng_state) {
@@ -161,24 +162,25 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
         }
     }
 #endif
-    // Independent pools expose the resident Decode prefix after StartLoad.
-    // Single-pool reuse continues to count allocator/cache hits only; receiving
-    // newly computed Prefill KV is not an additional cache hit in that contract.
-    // Count only complete logical blocks, using the same CP/group geometry as
-    // allocator reuse. This is Decode remote reuse, not a Prefill cache hit.
-    // Preserve execution positions: only the published usage counters change.
-    if (payload.prefill_use_independent_block_pools && reuse_block_tokens > 0) {
-        const int resident_prefix = std::max(0, stream->inputLength() - 1) / reuse_block_tokens * reuse_block_tokens;
-        const int added_remote    = std::max(0, resident_prefix - stream->initialReuseLength());
-        stream->setInitialReuseLength(stream->initialReuseLength() + added_remote);
-        stream->setRemoteReuseLength(stream->remoteReuseLength() + added_remote);
-    }
+    // StartLoad transfers newly computed Prefill KV; it does not create a Decode cache hit.
+    // Preserve the reuse counters established by Decode cache lookup for every pool layout.
     stream->generateInput()->handoff_multimodal_lengths = payload.multimodal_lengths;
     if (payload.has_first_token) {
         const auto output_tensor = [&](const char* name) {
             const auto it = payload.first_token_tensors.find(name);
             return it == payload.first_token_tensors.end() ? torch::Tensor{} : TensorPbConvert::pbToTorch(it->second);
         };
+        std::optional<PromptLogitsOutput> prompt_logits;
+        if (payload.prompt_logits.has_value()) {
+            const auto& pb                = *payload.prompt_logits;
+            prompt_logits                 = PromptLogitsOutput{};
+            prompt_logits->topk_logprobs  = TensorPbConvert::pbToTorch(pb.topk_logprobs());
+            prompt_logits->topk_token_ids = TensorPbConvert::pbToTorch(pb.topk_token_ids());
+            if (pb.has_target_logprobs())
+                prompt_logits->target_logprobs = TensorPbConvert::pbToTorch(pb.target_logprobs());
+            prompt_logits->start_pos = pb.start_pos();
+            prompt_logits->end_pos   = pb.end_pos();
+        }
         stream->setIsContextStream(false);
         stream->step();
         stream->updateWithoutLock(
@@ -194,6 +196,7 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
              .all_hidden_states = output_tensor("first_token_all_hidden_states"),
              .update_remote_generate = false,
              .force_update_info      = false,
+             .prompt_logits          = std::move(prompt_logits),
              .generation_prefill_cuda_graph_status =
                  static_cast<GenerationPrefillCudaGraphStatus>(payload.generation_prefill_cuda_graph_status)});
         // DSpARK resumes from the prompt tail without a Prefill proposal.
@@ -290,6 +293,40 @@ void StreamCacheResource::init(int batch_size) {
                               warmupCacheTopology();
     batch_kv_cache_resource_->initGroups(topology);
     resource_released_ = false;
+}
+
+bool StreamCacheResource::copyChunkKernelBlocks(int batch, const std::string& tag, int32_t* dst) const {
+    if (!stream_->useChunkWindow() || stream_->isFakeStream()) {
+        return false;
+    }
+    const auto& context = resource_context_;
+    const auto& group   = context.cache_manager->cacheConfig().group(tag);
+    const auto  tail    = static_cast<size_t>(stream_->seqLength() - 1) / group.seqSizePerBlock();
+    const auto& ids     = batch_kv_cache_resource_->cacheResource(batch).blockIds(tag);
+    if (group.policy.shared_chunk_state) {
+        // HCA has no overlap. Aligned chunks start a new 128-token compression interval.
+        RTP_LLM_CHECK_WITH_INFO(stream_->seqSizePerBlock() % 128 == 0 && stream_->prefixLength() % 128 == 0
+                                    && group.seqSizePerBlock() % 128 == 0,
+                                "shared HCA state requires compression-aligned chunks");
+        // Completed intervals use this forward's raw KV; only the tail needs persistent state.
+        const auto chunk_tail =
+            static_cast<size_t>(stream_->prefixLength() + stream_->currentChunkLen() - 1) / group.seqSizePerBlock();
+        ids.copySharedKernelBlocks(tail, chunk_tail, dst);
+        return true;
+    }
+    const bool reuse = reuseCache();
+    const auto banks =
+        group.chunkCacheBlockCount(stream_->seqLength(), stream_->maxChunkSize(), reuse, stream_->reserveStep());
+    if (banks == 0) {
+        return false;
+    }
+    RTP_LLM_CHECK_WITH_INFO(
+        stream_->prefixLength() % group.seqSizePerBlock() == 0 && stream_->currentChunkLen() <= stream_->maxChunkSize()
+            && (!stream_->isMiddleChunk()
+                || (stream_->prefixLength() + stream_->currentChunkLen()) % group.seqSizePerBlock() == 0),
+        "cyclic chunk cache requires aligned prefixes and bounded grants");
+    ids.copyCyclicKernelBlocks(tail, banks, dst);
+    return true;
 }
 
 bool StreamCacheResource::p2pReleasePending() const {
@@ -461,6 +498,8 @@ absl::Status StreamCacheResource::initKVBlock() {
         malloc_info.enable_cache_lookup = enableCacheLookup();
     }
     malloc_info.enable_remove_skipped_blocks = false;
+    malloc_info.max_chunk_tokens =
+        stream_->chunkedPrefillEnabled() && stream_->isContextStream() ? stream_->maxChunkSize() : 0;
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
     recordCacheReuseMallocResult(result);
@@ -516,11 +555,11 @@ void StreamCacheResource::clearCacheReuseState() {
 }
 
 void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& result) {
-    cache_reuse_metrics_.block_aligned_input_length = result.block_aligned_input_length;
-    cache_reuse_metrics_.match_latency_us           = result.match_cost_time_us;
-    cache_reuse_metrics_.report_match_latency       = result.match_end_time_us > 0;
-    malloc_begin_time_us_                           = result.malloc_begin_time_us;
-    cache_reuse_metrics_.load_attempted             = result.load_attempted;
+    cache_reuse_metrics_.device_input_length    = result.device_input_length;
+    cache_reuse_metrics_.match_cost_time_us     = result.match_cost_time_us;
+    cache_reuse_metrics_.report_match_cost_time = result.match_end_time_us > 0;
+    malloc_begin_time_us_                       = result.malloc_begin_time_us;
+    cache_reuse_metrics_.load_attempted         = result.load_attempted;
     if (!result.load_attempted) {
         if (result.match_end_time_us > 0) {
             cache_reuse_metrics_.match_to_ready_latency_us =
@@ -553,7 +592,7 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     const bool load_success  = allocator_load_context_->success();
     const auto error         = allocator_load_context_->errorInfo();
     const auto load_context  = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
-    const auto malloc_status = load_context == nullptr ? MallocStatus::NONE : load_context->mallocStatus();
+    auto       malloc_status = load_context == nullptr ? MallocStatus::NONE : load_context->mallocStatus();
     if (load_success) {
         RTP_LLM_CHECK(load_context != nullptr);
         const size_t total = load_context->matchedBlocks();
@@ -581,6 +620,14 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     } else if (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
         stream_->setHostReuseLength(0);
         stream_->setDiskReuseLength(0);
+        if (!resource_context_.cache_manager->detachSharedBlocksForRecompute(batch_kv_cache_resource_,
+                                                                             stream_->reuseLength())) {
+            // Re-enter admission with no request refs if detaching the writable
+            // suffix cannot fit. Never compute into cache/other-request blocks.
+            resource_context_.cache_manager->free({batch_kv_cache_resource_, stream_->completeTokenIdsPtr()});
+            clearCacheReuseState();
+            malloc_status = MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
+        }
     } else {
         clearCacheReuseState();
     }
@@ -625,14 +672,11 @@ void StreamCacheResource::reportCacheReuseMetrics() {
             std::clamp<int64_t>(stream_->writebackFirstUseLength(), 0, std::max(0, stream_->initialReuseLength())) :
             -1;
     cache_reuse_metrics_.kv_cache_reuse_length            = stream_->initialReuseLength();
-    cache_reuse_metrics_.device_reuse_length = stream_->deviceReuseLength();
-    cache_reuse_metrics_.host_reuse_length = stream_->hostReuseLength();
-    cache_reuse_metrics_.disk_reuse_length   = stream_->diskReuseLength();
-    cache_reuse_metrics_.remote_reuse_length = stream_->remoteReuseLength();
-    cache_reuse_metrics_.report_reuse_metrics = resource_context_.cache_manager && reuseCache();
-    if (cache_reuse_metrics_.report_reuse_metrics) {
-        resource_context_.cache_manager->recordCacheHitTokens(stream_->inputLength(), cache_reuse_metrics_);
-    }
+    cache_reuse_metrics_.stream_cache_device_reuse_length = stream_->deviceReuseLength();
+    cache_reuse_metrics_.stream_cache_memory_reuse_length = stream_->hostReuseLength();
+    cache_reuse_metrics_.stream_cache_disk_reuse_length   = stream_->diskReuseLength();
+    cache_reuse_metrics_.stream_cache_remote_reuse_length = stream_->remoteReuseLength();
+    cache_reuse_metrics_.report_reuse_metrics             = reuseCache();
     kmonitor::MetricsTags tags;
     auto                  metrics = cache_reuse_metrics_;
     metrics.report_reuse_lengths = true;
@@ -674,7 +718,7 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
     malloc_info.reuse_cache                  = reuseCache();
     malloc_info.enable_cache_lookup          = enableCacheLookup();
-    malloc_info.enable_remove_skipped_blocks = true;
+    malloc_info.enable_remove_skipped_blocks = !(stream_->chunkedPrefillEnabled() && stream_->isContextStream());
     malloc_info.incr_seq_len_override        = seq_len_override;
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
@@ -788,7 +832,12 @@ bool StreamCacheResource::loadCacheDone() {
         }
         if (p2p_load_context_->success()) {
             if (const auto* payload = p2pSideChannel(p2p_load_context_)) {
-                applyP2PSideChannel(*payload, stream_, reuseBlockTokens());
+                try {
+                    applyP2PSideChannel(*payload, stream_);
+                } catch (const std::exception& error) {
+                    stream_->reportErrorWithoutLock(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
+                                                     std::string("invalid P2P side-channel payload: ") + error.what());
+                }
             }
             p2p_load_context_.reset();
         } else {
@@ -798,6 +847,9 @@ bool StreamCacheResource::loadCacheDone() {
             // resources, and Prefill registration itself. None of these
             // failures is a benign cache miss.
             const auto error = p2p_load_context_->errorInfo();
+            // The scheduler may still retain the target lease after logical failure.
+            // Keep its physical-completion proof visible to cancellation cleanup.
+            released_p2p_load_context_ = p2p_load_context_;
             p2p_load_context_.reset();
             RTP_LLM_LOG_WARNING(
                 "P2P cache load failed, stream=%ld error=%s", stream_->streamId(), error.ToString().c_str());

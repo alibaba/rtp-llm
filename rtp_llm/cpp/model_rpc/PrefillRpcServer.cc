@@ -37,10 +37,10 @@ class BatchTraceCarrier: public opentelemetry::context::propagation::TextMapCarr
 public:
     explicit BatchTraceCarrier(const TraceContextPB& context): context_(context) {}
     opentelemetry::nostd::string_view Get(opentelemetry::nostd::string_view key) const noexcept override {
-        if (key == "traceparent") {
+        if (key == "traceparent" && context_.traceparent().size() <= 256) {
             return {context_.traceparent().data(), context_.traceparent().size()};
         }
-        if (key == "tracestate") {
+        if (key == "tracestate" && context_.tracestate().size() <= 512) {
             return {context_.tracestate().data(), context_.tracestate().size()};
         }
         return {};
@@ -185,7 +185,8 @@ std::unique_ptr<GenerateContext> PrefillRpcServer::makeBatchRequestContext(
             auto propagator = opentelemetry::context::propagation::GlobalTextMapPropagator::GetGlobalPropagator();
             opentelemetry::context::Context empty_context;
             auto remote = propagator->Extract(carrier, empty_context);
-            if (opentelemetry::trace::GetSpan(remote)->GetContext().IsValid()) {
+            const auto remote_span = opentelemetry::trace::GetSpan(remote);
+            if (remote_span && remote_span->GetContext().IsValid() && remote_span->GetContext().IsRemote()) {
                 options.parent = remote;
             }
             span = telemetry::TelemetryRuntime::tracer()->StartSpan("rtp_llm.prefill_batch_request", options);
@@ -313,6 +314,16 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
         return ret;
     }
 
+    if (autil::EnvUtil::getEnv("ENABLE_PREFILL_REQUEST_LOG", false)) {
+        try {
+            request_logger_ = std::make_unique<PrefillRequestLogger>(
+                autil::EnvUtil::getEnv("LOG_PATH", std::string("logs")),
+                maga_init_params.parallelism_config.world_rank,
+                maga_init_params.profiling_debug_logging_config.log_file_backup_count);
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("Failed to initialize prefill request logger: %s", e.what());
+        }
+    }
     auto kvcache_manager = engine_->getCacheManager();
     if (!kvcache_manager) {
         RTP_LLM_LOG_WARNING("prefill rpc server new2 init failed, kvcache manager is null");
@@ -348,6 +359,9 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   grpc::ServerWriter<GenerateOutputsPB>* response_writer) try {
     if (!request) {
         return serializeErrorMsg("unknown", ErrorInfo(ErrorCode::INVALID_PARAMS, "null generate request"));
+    }
+    if (request_logger_) {
+        request_logger_->log(*request);
     }
     const bool pd_separation = checkPDSupport(*request).supported;
     if (!pd_separation) {
@@ -682,6 +696,9 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
             try {
                 GenerateInputPB item;
                 item.CopyFrom(external_input.input());
+                if (request_logger_) {
+                    request_logger_->log(item);
+                }
                 item.mutable_group_id()->set_value(request->batch_id());
                 auto* config = item.mutable_generate_config();
                 config->set_unique_key(masterEnqueuedHandoffUniqueKey(request_id));

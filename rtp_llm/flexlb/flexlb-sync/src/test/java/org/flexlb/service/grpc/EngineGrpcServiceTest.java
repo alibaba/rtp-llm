@@ -21,8 +21,8 @@ class EngineGrpcServiceTest {
     void cacheRequestOnlyFetchesDetailedKeysWhenNeeded(RoleType role, boolean needsCacheKeys) {
         EngineGrpcClient client = mock(EngineGrpcClient.class);
         EngineGrpcService service = new EngineGrpcService(client);
-        WorkerStatus status = RunnerTestSupport.discovered(
-                role, null, "127.0.0.1", 8080, 8081, "test-site");
+        WorkerStatus status =
+                RunnerTestSupport.discovered(role, null, "127.0.0.1", 8080, 8081, "test-site");
 
         service.getCacheStatusAsync("127.0.0.1", 8081, status, 7L, 100L, role);
 

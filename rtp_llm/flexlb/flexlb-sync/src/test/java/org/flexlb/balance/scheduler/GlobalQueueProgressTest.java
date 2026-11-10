@@ -1,11 +1,11 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointRegistry.PrefillRoutingEntry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
@@ -41,8 +41,8 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class GlobalQueueProgressTest {
@@ -56,25 +56,27 @@ class GlobalQueueProgressTest {
             CountDownLatch finishFirst = new CountDownLatch(1);
             CountDownLatch finishSecond = new CountDownLatch(1);
             CountDownLatch thirdPlanning = new CountDownLatch(1);
-            f.onAdmission = id -> {
-                if (id == 1L) {
-                    firstCommitting.countDown();
-                    await(finishFirst);
-                } else if (id == 2L) {
-                    secondCommitting.countDown();
-                    await(finishSecond);
-                }
-            };
-            f.onSelection = id -> {
-                if (id == 1L) {
-                    firstPlanning.countDown();
-                    await(finishFirstPlanning);
-                } else if (id == 2L) {
-                    await(firstCommitting);
-                } else if (id == 3L) {
-                    thirdPlanning.countDown();
-                }
-            };
+            f.onAdmission =
+                    id -> {
+                        if (id == 1L) {
+                            firstCommitting.countDown();
+                            await(finishFirst);
+                        } else if (id == 2L) {
+                            secondCommitting.countDown();
+                            await(finishSecond);
+                        }
+                    };
+            f.onSelection =
+                    id -> {
+                        if (id == 1L) {
+                            firstPlanning.countDown();
+                            await(finishFirstPlanning);
+                        } else if (id == 2L) {
+                            await(firstCommitting);
+                        } else if (id == 3L) {
+                            thirdPlanning.countDown();
+                        }
+                    };
             try {
                 f.submit(1, "b");
                 await(firstPlanning);
@@ -86,7 +88,8 @@ class GlobalQueueProgressTest {
                 f.submit(3, "d");
                 finishFirst.countDown();
                 await(secondCommitting);
-                assertTrue(thirdPlanning.await(1, TimeUnit.SECONDS),
+                assertTrue(
+                        thirdPlanning.await(1, TimeUnit.SECONDS),
                         "R3 must reuse R1's slot before the buffered R2 commit finishes");
             } finally {
                 finishFirstPlanning.countDown();
@@ -101,12 +104,13 @@ class GlobalQueueProgressTest {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
             CountDownLatch started = new CountDownLatch(1);
             CountDownLatch finish = new CountDownLatch(1);
-            f.onSelection = id -> {
-                if (id == 1L) {
-                    started.countDown();
-                    await(finish);
-                }
-            };
+            f.onSelection =
+                    id -> {
+                        if (id == 1L) {
+                            started.countDown();
+                            await(finish);
+                        }
+                    };
             try {
                 f.submit(1, "b");
                 await(started);
@@ -131,13 +135,14 @@ class GlobalQueueProgressTest {
             CountDownLatch started = new CountDownLatch(1);
             CountDownLatch finish = new CountDownLatch(1);
             AtomicInteger newerSelections = new AtomicInteger();
-            f.onSelection = id -> {
-                if (id == 2L) {
-                    newerSelections.incrementAndGet();
-                    started.countDown();
-                    await(finish);
-                }
-            };
+            f.onSelection =
+                    id -> {
+                        if (id == 2L) {
+                            newerSelections.incrementAndGet();
+                            started.countDown();
+                            await(finish);
+                        }
+                    };
             try {
                 f.submit(1, "a");
                 f.submit(2, "b");
@@ -161,21 +166,23 @@ class GlobalQueueProgressTest {
             CountDownLatch started = new CountDownLatch(2);
             CountDownLatch finish = new CountDownLatch(1);
             CountDownLatch thirdStarted = new CountDownLatch(1);
-            f.onSelection = id -> {
-                if (id <= 2L) {
-                    started.countDown();
-                    await(finish);
-                } else {
-                    thirdStarted.countDown();
-                }
-            };
+            f.onSelection =
+                    id -> {
+                        if (id <= 2L) {
+                            started.countDown();
+                            await(finish);
+                        } else {
+                            thirdStarted.countDown();
+                        }
+                    };
             try {
                 f.submit(1, "b");
                 f.submit(2, "c");
                 await(started);
                 f.requests.get(1L).cancel(false);
                 f.submit(3, "d");
-                assertFalse(thirdStarted.await(100, TimeUnit.MILLISECONDS),
+                assertFalse(
+                        thirdStarted.await(100, TimeUnit.MILLISECONDS),
                         "cancellation must not allow unbounded outstanding planners");
                 finish.countDown();
                 awaitCondition(() -> f.admitted.contains(3L));
@@ -193,10 +200,11 @@ class GlobalQueueProgressTest {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
             CountDownLatch started = new CountDownLatch(1);
             CountDownLatch finish = new CountDownLatch(1);
-            f.onSelection = id -> {
-                started.countDown();
-                await(finish);
-            };
+            f.onSelection =
+                    id -> {
+                        started.countDown();
+                        await(finish);
+                    };
             try {
                 f.submit(1, "b");
                 await(started);
@@ -222,12 +230,13 @@ class GlobalQueueProgressTest {
             CountDownLatch started = new CountDownLatch(2);
             CountDownLatch finishFirst = new CountDownLatch(1);
             CountDownLatch finishSecond = new CountDownLatch(1);
-            f.onSelection = id -> {
-                if (id <= 2) {
-                    started.countDown();
-                    await(id == 1 ? finishFirst : finishSecond);
-                }
-            };
+            f.onSelection =
+                    id -> {
+                        if (id <= 2) {
+                            started.countDown();
+                            await(id == 1 ? finishFirst : finishSecond);
+                        }
+                    };
             try {
                 f.submit(1, "b", 10);
                 f.submit(2, "b", 10);
@@ -293,8 +302,8 @@ class GlobalQueueProgressTest {
         private final List<Long> admissionOrder = new CopyOnWriteArrayList<>();
         private final Set<Long> admissionBlocked = ConcurrentHashMap.newKeySet();
         private final Set<Long> decodeBlocked = ConcurrentHashMap.newKeySet();
-        private volatile LongConsumer onAdmission = ignored -> { };
-        private volatile LongConsumer onSelection = ignored -> { };
+        private volatile LongConsumer onAdmission = ignored -> {};
+        private volatile LongConsumer onSelection = ignored -> {};
         private final RequestScheduler scheduler;
         private final RoleType role;
 
@@ -321,52 +330,72 @@ class GlobalQueueProgressTest {
             ConfigService service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
             DefaultRouter router = mock(DefaultRouter.class);
-            when(router.resolvePolicyGroup(any())).thenAnswer(i -> groups.get(((BalanceContext) i.getArgument(0)).getRequestId()));
+            when(router.resolvePolicyGroup(any()))
+                    .thenAnswer(
+                            i -> groups.get(((BalanceContext) i.getArgument(0)).getRequestId()));
             EndpointRegistry endpoints = mock(EndpointRegistry.class);
             PrefillRoutingEntry a = endpoint("a");
             RequestRegistry lifecycle = mock(RequestRegistry.class);
-            when(lifecycle.register(any())).thenAnswer(i -> {
-                BalanceContext context = i.getArgument(0);
-                CompletableFuture<Response> future = new CompletableFuture<>();
-                requests.put(context.getRequestId(), future);
-                return future;
-            });
-            when(lifecycle.claimAdmissionHandle(anyLong(), any())).thenAnswer(i -> {
-                AdmissionHandle mutation = mock(AdmissionHandle.class);
-                mutations.put(i.getArgument(0), mutation);
-                return mutation;
-            });
-            when(router.select(any(), nullable(String.class))).thenAnswer(i -> {
-                BalanceContext context = i.getArgument(0);
-                long id = context.getRequestId();
-                selected.add(id);
-                onSelection.accept(id);
-                if ("a".equals(groups.get(id)) && aSlots.get() == 0 && !preempt) {
-                    return PlacementResult.blocked(new PlacementKey(role, "a"));
-                }
-                if (decodeBlocked.contains(id)) {
-                    return PlacementResult.blocked(new PlacementKey(RoleType.DECODE, groups.get(id)));
-                }
-                RouteAdmission route = mock(RouteAdmission.class);
-                routes.put(id, route);
-                ScheduledRequest item = mock(ScheduledRequest.class);
-                ServerStatus status = new ServerStatus();
-                status.setRole(role);
-                when(item.prefill()).thenReturn(status);
-                when(item.prefillEp()).thenReturn(a.endpoint());
-                when(route.tryEnqueue(any(), any(), any())).thenAnswer(commit -> {
-                    onAdmission.accept(id);
-                    if (admissionBlocked.contains(id)) {
-                        return PlacementResult.blocked(PlacementKey.exact(role, "a", "a:8000"));
-                    }
-                    admissionOrder.add(id);
-                    admitted.add(id);
-                    return PlacementResult.success(item);
-                });
-                return PlacementResult.success(route);
-            });
-            scheduler = new RequestScheduler(service, router, endpoints, mock(BatchSchedulerReporter.class),
-                    mock(EvictionManager.class), lifecycle, availability);
+            when(lifecycle.register(any()))
+                    .thenAnswer(
+                            i -> {
+                                BalanceContext context = i.getArgument(0);
+                                CompletableFuture<Response> future = new CompletableFuture<>();
+                                requests.put(context.getRequestId(), future);
+                                return future;
+                            });
+            when(lifecycle.claimAdmissionHandle(anyLong(), any()))
+                    .thenAnswer(
+                            i -> {
+                                AdmissionHandle mutation = mock(AdmissionHandle.class);
+                                mutations.put(i.getArgument(0), mutation);
+                                return mutation;
+                            });
+            when(router.select(any(), nullable(String.class)))
+                    .thenAnswer(
+                            i -> {
+                                BalanceContext context = i.getArgument(0);
+                                long id = context.getRequestId();
+                                selected.add(id);
+                                onSelection.accept(id);
+                                if ("a".equals(groups.get(id)) && aSlots.get() == 0 && !preempt) {
+                                    return PlacementResult.blocked(new PlacementKey(role, "a"));
+                                }
+                                if (decodeBlocked.contains(id)) {
+                                    return PlacementResult.blocked(
+                                            new PlacementKey(RoleType.DECODE, groups.get(id)));
+                                }
+                                RouteAdmission route = mock(RouteAdmission.class);
+                                routes.put(id, route);
+                                ScheduledRequest item = mock(ScheduledRequest.class);
+                                ServerStatus status = new ServerStatus();
+                                status.setRole(role);
+                                when(item.prefill()).thenReturn(status);
+                                when(item.prefillEp()).thenReturn(a.endpoint());
+                                when(route.tryEnqueue(any(), any(), any()))
+                                        .thenAnswer(
+                                                commit -> {
+                                                    onAdmission.accept(id);
+                                                    if (admissionBlocked.contains(id)) {
+                                                        return PlacementResult.blocked(
+                                                                PlacementKey.exact(
+                                                                        role, "a", "a:8000"));
+                                                    }
+                                                    admissionOrder.add(id);
+                                                    admitted.add(id);
+                                                    return PlacementResult.success(item);
+                                                });
+                                return PlacementResult.success(route);
+                            });
+            scheduler =
+                    new RequestScheduler(
+                            service,
+                            router,
+                            endpoints,
+                            mock(BatchSchedulerReporter.class),
+                            mock(EvictionManager.class),
+                            lifecycle,
+                            availability);
         }
 
         private void submit(long id, String group) {
@@ -376,8 +405,9 @@ class GlobalQueueProgressTest {
         private void submit(long id, String group, int priority) {
             groups.put(id, group);
             BalanceContext context = RequestLifecycleTestSupport.context(config, id);
-            context.setSchedulingMetadata(org.flexlb.dao.SchedulingMetadata.explicit(
-                    priority, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1)));
+            context.setSchedulingMetadata(
+                    org.flexlb.dao.SchedulingMetadata.explicit(
+                            priority, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1)));
             scheduler.submit(context);
         }
 
@@ -385,12 +415,10 @@ class GlobalQueueProgressTest {
             // Observe the handoff under its lock to make the regression independent
             // of thread timing, without adding a hook to production code.
             Object queue = ReflectionTestUtils.getField(scheduler, "globalQueue");
-            var lock = (ReentrantLock)
-                    ReflectionTestUtils.getField(queue, "lock");
+            var lock = (ReentrantLock) ReflectionTestUtils.getField(queue, "lock");
             lock.lock();
             try {
-                var completed = (Queue<?>) ReflectionTestUtils
-                        .getField(queue, "completedPlans");
+                var completed = (Queue<?>) ReflectionTestUtils.getField(queue, "completedPlans");
                 return !completed.isEmpty();
             } finally {
                 lock.unlock();

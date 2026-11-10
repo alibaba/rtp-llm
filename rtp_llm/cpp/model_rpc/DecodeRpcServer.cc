@@ -23,16 +23,19 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
-#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
+#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "autil/NetUtil.h"
 #include <cerrno>
 #include <cstring>
+#include <unistd.h>
 #include <utility>
+#include <unordered_set>
+#include <c10/core/InferenceMode.h>
 
 namespace rtp_llm {
 
@@ -86,7 +89,8 @@ std::string prefillAddress(const GenerateInputPB& request) {
 }  // namespace
 
 std::string makeDecodeEntranceUniqueKey(const std::string& bind_ip, int64_t unique_key_id, int64_t current_time_us) {
-    return bind_ip + "_" + std::to_string(unique_key_id) + "_" + std::to_string(current_time_us);
+    return bind_ip + "_" + std::to_string(getpid()) + "_" + std::to_string(unique_key_id) + "_"
+           + std::to_string(current_time_us);
 }
 
 GenerateInputPB makeDecodeEntranceHandoffRequest(const GenerateInputPB& request,
@@ -283,6 +287,214 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
 
     RTP_LLM_LOG_INFO("decode rpc server new2 init");
     return grpc::Status::OK;
+}
+
+grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        context,
+                                                const BatchGenerateInputPB* request,
+                                                BatchGenerateOutputsPB*     response) {
+    c10::InferenceMode inference_guard(true);
+    AtomicGuard request_guard(onflight_requests_);
+    if (!request || !response)
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "batch request and response are required");
+    response->Clear();
+    if (request->inputs().empty())
+        return grpc::Status::OK;
+    if (!engine_ || !prefill_server_caller_ || !cancel_registry_)
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE, "Decode is not initialized");
+
+    const auto entry_ms = currentTimeMs();
+    const auto address  = prefillAddress(request->inputs(0));
+    if (address.empty())
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "batch requires a Prefill address");
+    std::unordered_set<int64_t> request_ids;
+    bool                        all_pd            = true;
+    bool                        master_admitted   = false;
+    int64_t                     batch_deadline_ms = entry_ms;
+    BatchGenerateInputPB        effective;
+    for (const auto& item : request->inputs()) {
+        if (item.request_id() <= 0 || !request_ids.insert(item.request_id()).second)
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "batch requires distinct positive request_ids");
+        if (prefillAddress(item) != address)
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "batch items require the same Prefill address");
+        all_pd          = all_pd && (item.enqueued_by_master() || checkPDSupport(item).supported);
+        master_admitted = master_admitted || item.enqueued_by_master();
+        auto* copy      = effective.add_inputs();
+        copy->CopyFrom(item);
+        const auto timeout = clampRpcTimeoutMsToInt32(normalizeRpcTimeoutMs(
+            item.generate_config().timeout_ms(), maga_init_params_.pd_sep_config.max_rpc_timeout_ms));
+        copy->mutable_generate_config()->set_timeout_ms(timeout);
+        batch_deadline_ms = std::max(batch_deadline_ms, entry_ms + timeout);
+    }
+    const auto client_cancelled = [context]() { return context && context->IsCancelled(); };
+    if (!all_pd) {
+        if (master_admitted)
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                "cannot forward a mixed batch after Master Prefill admission");
+        // Match single-request fallback, while retaining the existing batch result contract.
+        for (auto& item : *effective.mutable_inputs())
+            item.mutable_generate_config()->set_can_use_pd_separation(false);
+        return prefill_server_caller_->forwardBatchGenerate(
+            effective, response, address, batch_deadline_ms, client_cancelled);
+    }
+    if (maga_init_params_.parallelism_config.dp_size != 1)
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "P2P batch inference requires single-DP mode");
+
+    struct BatchContextGuard {
+        PDCancelRegistry&                             registry;
+        EngineBase&                                   engine;
+        std::vector<PDCancelRegistry::Handle>         handles;
+        std::vector<std::unique_ptr<GenerateContext>> contexts;
+        std::vector<GenerateStreamPtr>                streams;
+        std::unordered_set<int64_t>                   submitted_prefill;
+        grpc::Status                                  status;
+        size_t                                        enqueued_stream_count = 0;
+        bool                                          completed = false;
+        ~BatchContextGuard() {
+            if (!completed) {
+                auto reason = errorInfoFromGrpcStatus(status);
+                if (!reason.hasError())
+                    reason = {ErrorCode::CANCELLED, "batch generation abandoned"};
+                // Also cancel attempted admissions when the EnqueueBatch ACK was lost.
+                for (const auto& handle : handles) {
+                    if (submitted_prefill.count(handle->identity.request_id))
+                        registry.cancel(handle->identity.request_id, reason);
+                    else
+                        registry.finishDownstream(handle);
+                }
+                for (const auto& stream : streams) {
+                    if (!stream->hasError() && stream->getStatus() != StreamState::FINISHED)
+                        stream->reportError(reason.code(), reason.ToString());
+                }
+                for (auto& ctx : contexts) {
+                    ctx->error_info   = reason;
+                    ctx->error_status = grpcStatusFromErrorInfo(reason);
+                }
+                // Canceled streams still need the engine's terminal/resource cleanup.
+                // Resume after any partial submission without enqueueing a stream twice.
+                for (size_t i = enqueued_stream_count; i < streams.size(); ++i)
+                    engine.enqueue(streams[i]);
+            }
+            contexts.clear();
+            for (const auto& handle : handles) {
+                if (completed)
+                    registry.finishDownstream(handle);
+                registry.finishLocal(handle);
+            }
+        }
+    } guard{*cancel_registry_, *engine_, {}, {}, {}, {}, grpc::Status::OK};
+
+    try {
+        EnqueueBatchRequestPB prefill_request;
+        prefill_request.set_batch_id(request->inputs(0).request_id());
+        auto* slot = prefill_request.add_dp_slots();
+        slot->set_dp_rank(0);
+        for (auto& item : *effective.mutable_inputs()) {
+            item.mutable_generate_config()->set_unique_key(masterEnqueuedHandoffUniqueKey(item.request_id()));
+            if (!item.has_group_id())
+                item.mutable_group_id()->set_value(prefill_request.batch_id());
+            item.set_group_size(request->inputs_size());
+            const auto               deadline_ms = entry_ms + item.generate_config().timeout_ms();
+            PDCancelRegistry::Handle handle;
+            const auto               admission =
+                cancel_registry_->admit(item, item.generate_config().unique_key(), address, deadline_ms, handle);
+            if (!admission.ok())
+                return guard.status = serializeErrorMsg(std::to_string(item.request_id()), admission);
+            guard.handles.push_back(handle);
+            if (item.enqueued_by_master())
+                guard.submitted_prefill.insert(item.request_id());
+
+            std::shared_ptr<GenerateInput> input;
+            GenerateInputPB                prefill_input;
+            PrefillPeerInfo                peer;
+            auto status = preparePDRequest(item, deadline_ms, input, prefill_input, peer);
+            if (!status.ok())
+                return guard.status = status;
+            auto stream = engine_->makeStream(input);
+            stream->setPrefillTpSize(peer.tp_size);
+            stream->setPrefillCpSize(peer.cp_size);
+            guard.streams.push_back(stream);
+            cancel_registry_->attach(handle, stream);
+            auto ctx = std::make_unique<GenerateContext>(
+                item.request_id(), item.generate_config().timeout_ms(), context, metrics_reporter_, meta_);
+            ctx->setStream(stream);
+            guard.contexts.push_back(std::move(ctx));
+            if (!item.enqueued_by_master()) {
+                auto* input_pb = slot->add_requests()->mutable_input();
+                input_pb->CopyFrom(item);
+            }
+        }
+        const auto is_cancelled = [&]() {
+            return client_cancelled()
+                   || std::any_of(guard.handles.begin(), guard.handles.end(), [](const auto& handle) {
+                          return handle->canceled.load();
+                      });
+        };
+        const auto cancellation_status = [&]() {
+            for (const auto& handle : guard.handles) {
+                if (handle->canceled.load())
+                    return grpcStatusFromErrorInfo(handle->cancel_reason);
+            }
+            return grpcStatusFromErrorInfo({ErrorCode::CANCELLED, "batch cancelled before Prefill admission"});
+        };
+        if (is_cancelled())
+            return guard.status = cancellation_status();
+        if (!slot->requests().empty()) {
+            for (auto& external : *slot->mutable_requests()) {
+                auto*      item      = external.mutable_input();
+                const auto remaining = entry_ms + item->generate_config().timeout_ms() - currentTimeMs();
+                if (remaining <= 0)
+                    return guard.status = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED,
+                                                       "batch item expired before Prefill admission");
+                item->mutable_generate_config()->set_timeout_ms(clampRpcTimeoutMsToInt32(remaining));
+            }
+            EnqueueBatchResponsePB ack;
+            for (const auto& external : slot->requests())
+                guard.submitted_prefill.insert(external.input().request_id());
+            auto status =
+                prefill_server_caller_->enqueueBatch(prefill_request, &ack, address, batch_deadline_ms, is_cancelled);
+            if (!status.ok())
+                return guard.status = is_cancelled() ? cancellation_status() : status;
+            // Explicit rejections were not admitted by this call. In particular,
+            // a duplicate ID must not cancel a different request already on P.
+            for (const auto& error : ack.errors())
+                guard.submitted_prefill.erase(error.request_id());
+            for (const auto& error : ack.errors()) {
+                const auto code     = static_cast<ErrorCode>(error.error_info().error_code());
+                return guard.status = grpcStatusFromErrorInfo(
+                           {code == ErrorCode::NONE_ERROR ? ErrorCode::EXECUTION_EXCEPTION : code,
+                            "Prefill batch request " + std::to_string(error.request_id()) + ": "
+                                + error.error_info().error_message()});
+            }
+            std::unordered_set<int64_t> accepted;
+            for (const auto& success : ack.successes())
+                accepted.insert(success.request_id());
+            if (ack.batch_id() != prefill_request.batch_id() || ack.successes_size() != slot->requests_size()
+                || accepted.size() != static_cast<size_t>(slot->requests_size()))
+                return guard.status = grpc::Status(grpc::StatusCode::INTERNAL, "Prefill batch ACK size/id mismatch");
+            for (const auto& external : slot->requests()) {
+                if (!accepted.count(external.input().request_id()))
+                    return guard.status =
+                               grpc::Status(grpc::StatusCode::INTERNAL, "Prefill batch ACK request mismatch");
+            }
+        }
+        // Prefill stays grouped; Decode streams independently join ordinary dynamic batching.
+        for (auto& stream : guard.streams) {
+            engine_->enqueue(stream);
+            ++guard.enqueued_stream_count;
+        }
+        for (const auto& stream : guard.streams) {
+            const auto error = stream->statusInfo();
+            if (error.hasError())
+                return guard.status = grpcStatusFromErrorInfo(error);
+        }
+        guard.status    = pollBatchStreamOutput(context, guard.streams, response);
+        guard.completed = guard.status.ok() && !client_cancelled();
+        return guard.status;
+    } catch (const std::exception& e) {
+        return guard.status = serializeErrorMsg("batch", {ErrorCode::EXECUTION_EXCEPTION, e.what()});
+    } catch (...) {
+        return guard.status = serializeErrorMsg("batch", {ErrorCode::EXECUTION_EXCEPTION, "unknown batch exception"});
+    }
 }
 
 grpc::Status DecodeRpcServer::preparePDRequest(const GenerateInputPB&          request,
@@ -630,16 +842,16 @@ void DecodeRpcServer::updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_p
         aux_info->set_cost_time_us(cost_time_us);
         aux_info->set_pd_sep(true);
 
-        const bool expose_decode_reuse =
-            stream->prefillUsesIndependentBlockPools() && decode_total_reuse_len > reuse_lens.total;
-        const auto actual_reuse_len = expose_decode_reuse ? decode_total_reuse_len : reuse_lens.total;
-        const auto first_use_len = std::clamp<int64_t>(stream->prefillWritebackFirstUseLength(), 0, actual_reuse_len);
+        // Generic prompt-cache accounting describes Prefill reuse. Decode reuse
+        // is reported separately and must not inflate OpenAI cached_tokens.
+        const auto first_use_len =
+            std::clamp<int64_t>(stream->prefillWritebackFirstUseLength(), 0, reuse_lens.total);
         aux_info->set_writeback_first_use_len(first_use_len);
-        aux_info->set_total_reuse_len(actual_reuse_len - first_use_len);
-        aux_info->set_local_reuse_len(expose_decode_reuse ? decode_local_reuse_len : reuse_lens.local);
-        aux_info->set_remote_reuse_len(expose_decode_reuse ? decode_remote_reuse_len : reuse_lens.remote);
-        aux_info->set_memory_reuse_len(expose_decode_reuse ? decode_memory_reuse_len : reuse_lens.memory);
-        aux_info->set_disk_reuse_len(expose_decode_reuse ? decode_disk_reuse_len : reuse_lens.disk);
+        aux_info->set_total_reuse_len(reuse_lens.total - first_use_len);
+        aux_info->set_local_reuse_len(reuse_lens.local);
+        aux_info->set_remote_reuse_len(reuse_lens.remote);
+        aux_info->set_memory_reuse_len(reuse_lens.memory);
+        aux_info->set_disk_reuse_len(reuse_lens.disk);
 
         aux_info->set_prefill_total_reuse_len(reuse_lens.total);
         aux_info->set_prefill_local_reuse_len(reuse_lens.local);

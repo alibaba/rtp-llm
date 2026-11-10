@@ -778,8 +778,10 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
             deadline = time.monotonic() + self.STATUS_SYNC_TIMEOUT_S
             consecutive_exclusions = 0
             propagation_routes: list[str] = []
-            while (time.monotonic() < deadline
-                   and consecutive_exclusions < self.PENDING_FILTER_CONFIRMATIONS):
+            while (
+                time.monotonic() < deadline
+                and consecutive_exclusions < self.PENDING_FILTER_CONFIRMATIONS
+            ):
                 routed, error = await route_affinity_request()
                 if error:
                     return ScenarioResult(

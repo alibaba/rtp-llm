@@ -93,12 +93,13 @@ public class WhitelistMetricsFilterConfig {
 
     public WhitelistMetricsFilterConfig(
             @Value("${flexlb.monitor.metric-whitelist:" + DEFAULT_METRIC_WHITELIST + "}")
-            String metricWhitelist) {
+                    String metricWhitelist) {
         this.allowedMetrics = new PrefixAllowSet(parseWhitelist(metricWhitelist));
         if (this.allowedMetrics.isEmpty()) {
-            log.warn("flexlb.monitor.metric-whitelist is empty/blank: denying every "
-                    + "flexlb.* metric (fail-safe; configure a comma-separated prefix "
-                    + "list via --flexlb.monitor.metric-whitelist)");
+            log.warn(
+                    "flexlb.monitor.metric-whitelist is empty/blank: denying every "
+                            + "flexlb.* metric (fail-safe; configure a comma-separated prefix "
+                            + "list via --flexlb.monitor.metric-whitelist)");
         }
     }
 
@@ -147,7 +148,8 @@ public class WhitelistMetricsFilterConfig {
                     return MeterFilterReply.NEUTRAL;
                 }
                 return allowedMetrics.contains(name.substring(METRIC_PREFIX.length()))
-                        ? MeterFilterReply.NEUTRAL : MeterFilterReply.DENY;
+                        ? MeterFilterReply.NEUTRAL
+                        : MeterFilterReply.DENY;
             }
         };
     }

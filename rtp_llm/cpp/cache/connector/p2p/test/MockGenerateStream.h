@@ -81,6 +81,9 @@ public:
     void setPrefillCpSize(int cp_size) {
         routing_ctx_.prefill_cp_size = cp_size;
     }
+    void setDecodeNeedsCompute(bool value) {
+        routing_ctx_.decode_needs_compute = value;
+    }
     void setGenerateStream(GenerateStream* stream) {
         stream_ = stream;
     }

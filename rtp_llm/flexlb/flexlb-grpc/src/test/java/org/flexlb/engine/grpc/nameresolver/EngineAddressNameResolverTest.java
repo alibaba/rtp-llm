@@ -4,8 +4,8 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
-import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 import java.util.List;
@@ -21,7 +21,8 @@ import static org.mockito.Mockito.when;
 
 class EngineAddressNameResolverTest {
 
-    private static final String MODEL_CONFIG = """
+    private static final String MODEL_CONFIG =
+            """
             {
               "service_id": "aigc.text-generation.generation.test-service",
               "role_endpoints": [{
@@ -41,7 +42,8 @@ class EngineAddressNameResolverTest {
         when(discovery.getHosts("test.prefill"))
                 .thenReturn(List.of(new WorkerHost("10.0.0.1", 8080)));
 
-        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
+        try (AnnotationConfigApplicationContext context =
+                new AnnotationConfigApplicationContext()) {
             context.registerBean(ModelMetaConfig.class, () -> new ModelMetaConfig(MODEL_CONFIG));
             context.registerBean(ServiceDiscovery.class, () -> discovery);
             context.registerBean(EngineAddressNameResolver.class);
@@ -56,7 +58,8 @@ class EngineAddressNameResolverTest {
         ServiceDiscovery discovery = mock(ServiceDiscovery.class);
         when(discovery.getHosts("test.prefill"))
                 .thenReturn(List.of(new WorkerHost("10.0.0.1", 8080)));
-        EngineAddressNameResolver resolver = new EngineAddressNameResolver(discovery, new ModelMetaConfig(MODEL_CONFIG));
+        EngineAddressNameResolver resolver =
+                new EngineAddressNameResolver(discovery, new ModelMetaConfig(MODEL_CONFIG));
         CustomNameResolver.Listener listener = mock(CustomNameResolver.Listener.class);
         resolver.start(listener);
         clearInvocations(listener);
@@ -65,9 +68,11 @@ class EngineAddressNameResolverTest {
 
         verify(listener, never()).onAddressUpdate(anyList());
     }
+
     @Test
     void sharedAddressSubscribesOnceAndTracksGrpcMembershipChanges() {
-        String config = """
+        String config =
+                """
                 {
                   "service_id": "aigc.text-generation.generation.test-service",
                   "role_endpoints": [{
@@ -78,10 +83,9 @@ class EngineAddressNameResolverTest {
                 }
                 """;
         ServiceDiscovery discovery = mock(ServiceDiscovery.class);
-        when(discovery.getHosts("shared"))
-                .thenReturn(List.of(new WorkerHost("10.0.0.1", 8081)));
-        EngineAddressNameResolver resolver = new EngineAddressNameResolver(
-                discovery, new ModelMetaConfig(config));
+        when(discovery.getHosts("shared")).thenReturn(List.of(new WorkerHost("10.0.0.1", 8081)));
+        EngineAddressNameResolver resolver =
+                new EngineAddressNameResolver(discovery, new ModelMetaConfig(config));
         ArgumentCaptor<ServiceHostListener> subscription =
                 ArgumentCaptor.forClass(ServiceHostListener.class);
         verify(discovery).listen(eq("shared"), subscription.capture());
@@ -96,5 +100,4 @@ class EngineAddressNameResolverTest {
         subscription.getValue().onHostsChanged(List.of());
         verify(listener).onAddressUpdate(List.of());
     }
-
 }

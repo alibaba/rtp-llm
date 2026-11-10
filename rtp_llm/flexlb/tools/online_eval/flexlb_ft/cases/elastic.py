@@ -639,7 +639,9 @@ def _pending_drain_spec(ctx: CaseContext) -> EnvSpec:
         perf=fault_env_perf(),
         master_profile=ctx.profile,
         discovery="discovery_file",
-        master_env={"FLEXLB_CONFIG": fault_env_config(max_inflight_per_prefill_worker=2)},
+        master_env={
+            "FLEXLB_CONFIG": fault_env_config(max_inflight_per_prefill_worker=2)
+        },
     )
 
 

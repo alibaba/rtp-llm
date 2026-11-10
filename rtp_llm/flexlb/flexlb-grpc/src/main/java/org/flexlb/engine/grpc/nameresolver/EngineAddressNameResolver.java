@@ -13,9 +13,9 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -28,18 +28,20 @@ import java.util.concurrent.ConcurrentHashMap;
 @Component
 public class EngineAddressNameResolver implements CustomNameResolver {
 
-    private final Map<String/*address*/, List<String/*ip:port*/>> domainHostsMap = new ConcurrentHashMap<>();
+    private final Map<String /*address*/, List<String /*ip:port*/>> domainHostsMap =
+            new ConcurrentHashMap<>();
     private final ServiceDiscovery serviceDiscovery;
     private Listener listener;
-    private List<String/*ip:port*/> allIpPortList = new ArrayList<>();
-    private final Map<String/*address*/, String/*protocol*/> addressProtocols;
+    private List<String /*ip:port*/> allIpPortList = new ArrayList<>();
+    private final Map<String /*address*/, String /*protocol*/> addressProtocols;
 
     public EngineAddressNameResolver(
-            ServiceDiscovery serviceDiscovery,
-            ModelMetaConfig modelConfig) {
+            ServiceDiscovery serviceDiscovery, ModelMetaConfig modelConfig) {
         this.serviceDiscovery = serviceDiscovery;
         this.addressProtocols = addressProtocols(modelConfig.getServiceRoute());
-        log.info("EngineAddressNameResolver start subscribe clusters:{} ", addressProtocols.keySet());
+        log.info(
+                "EngineAddressNameResolver start subscribe clusters:{} ",
+                addressProtocols.keySet());
         fetchAllDomainsHosts();
         setupListeners();
     }
@@ -63,7 +65,11 @@ public class EngineAddressNameResolver implements CustomNameResolver {
                 List<WorkerHost> hosts = serviceDiscovery.getHosts(serverAddress);
                 updateDomainHosts(serverAddress, hosts);
             } catch (Exception e) {
-                Logger.error("Failed to fetch hosts for domain: {}, error: {}", serverAddress, e.getMessage(), e);
+                Logger.error(
+                        "Failed to fetch hosts for domain: {}, error: {}",
+                        serverAddress,
+                        e.getMessage(),
+                        e);
             }
         }
     }
@@ -102,8 +108,9 @@ public class EngineAddressNameResolver implements CustomNameResolver {
             // so correct the port back to httpPort semantics here (aligned with the GRPC branch
             // of WorkerAddressService.convertServiceDiscoveryHosts on the sync path).
             String protocol = addressProtocols.get(address);
-            boolean isGrpcProtocol = BackendServiceProtocolEnum.GRPC.getName().equalsIgnoreCase(protocol);
-            List<String/*ip:port*/> ipPortList = new ArrayList<>(hostList.size());
+            boolean isGrpcProtocol =
+                    BackendServiceProtocolEnum.GRPC.getName().equalsIgnoreCase(protocol);
+            List<String /*ip:port*/> ipPortList = new ArrayList<>(hostList.size());
             for (WorkerHost host : hostList) {
                 int port = isGrpcProtocol ? host.getPort() - 1 : host.getPort();
                 ipPortList.add(host.getIp() + ":" + port);
@@ -111,8 +118,8 @@ public class EngineAddressNameResolver implements CustomNameResolver {
             domainHostsMap.put(address, ipPortList);
         }
         // Aggregate host lists from all addresses
-        List<String/*ip:port*/> aggregatedHosts = new ArrayList<>();
-        for (List<String/*ip:port*/> hosts : domainHostsMap.values()) {
+        List<String /*ip:port*/> aggregatedHosts = new ArrayList<>();
+        for (List<String /*ip:port*/> hosts : domainHostsMap.values()) {
             aggregatedHosts.addAll(hosts);
         }
 
@@ -122,8 +129,11 @@ public class EngineAddressNameResolver implements CustomNameResolver {
             return;
         }
 
-        Logger.info("Engine hosts changed: domain={}, domainHosts={}, totalHosts={}",
-                address, hostList == null ? 0 : hostList.size(), aggregatedHosts.size());
+        Logger.info(
+                "Engine hosts changed: domain={}, domainHosts={}, totalHosts={}",
+                address,
+                hostList == null ? 0 : hostList.size(),
+                aggregatedHosts.size());
         // Update global host list and notify listener
         this.allIpPortList = aggregatedHosts;
         if (this.listener != null) {

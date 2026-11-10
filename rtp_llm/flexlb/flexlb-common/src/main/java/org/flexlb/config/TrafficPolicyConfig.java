@@ -34,8 +34,8 @@ public final class TrafficPolicyConfig {
 
     static void validate(TrafficPolicyConfig config) {
         if (config.defaultTargets == null || config.rules == null) {
-            throw new ConfigValidationException("router.groupSelector",
-                    "defaultTargets and rules must not be null");
+            throw new ConfigValidationException(
+                    "router.groupSelector", "defaultTargets and rules must not be null");
         }
         validateTargets(config.defaultTargets, "router.groupSelector.defaultTargets", true);
         Set<String> names = new HashSet<>();
@@ -49,8 +49,8 @@ public final class TrafficPolicyConfig {
                 throw new ConfigValidationException(path + ".name", "must be unique");
             }
             if (rule.match == null || !rule.match.hasConstraint()) {
-                throw new ConfigValidationException(path + ".match",
-                        "must contain at least one constraint");
+                throw new ConfigValidationException(
+                        path + ".match", "must contain at least one constraint");
             }
             rule.match.validate(path + ".match");
             validateTargets(rule.targets, path + ".targets", false);
@@ -66,22 +66,22 @@ public final class TrafficPolicyConfig {
         for (int index = 0; index < targets.size(); index++) {
             Target target = targets.get(index);
             if (target == null || target.group == null || target.group.isBlank()) {
-                throw new ConfigValidationException(path + "[" + index + "].group",
-                        "must not be blank");
+                throw new ConfigValidationException(
+                        path + "[" + index + "].group", "must not be blank");
             }
             if (!groups.add(target.group)) {
-                throw new ConfigValidationException(path + "[" + index + "].group",
-                        "must be unique");
+                throw new ConfigValidationException(
+                        path + "[" + index + "].group", "must be unique");
             }
             if (target.weight <= 0) {
-                throw new ConfigValidationException(path + "[" + index + "].weight",
-                        "must be greater than zero");
+                throw new ConfigValidationException(
+                        path + "[" + index + "].weight", "must be greater than zero");
             }
             try {
                 total = Math.addExact(total, target.weight);
             } catch (ArithmeticException overflow) {
-                throw new ConfigValidationException(path,
-                        "total weight exceeds the supported range", overflow);
+                throw new ConfigValidationException(
+                        path, "total weight exceeds the supported range", overflow);
             }
         }
         if (!targets.isEmpty() && total <= 0) {
@@ -89,9 +89,8 @@ public final class TrafficPolicyConfig {
         }
     }
 
-    private static Optional<String> chooseWeightedTarget(List<Target> targets,
-                                                          Request request,
-                                                          String salt) {
+    private static Optional<String> chooseWeightedTarget(
+            List<Target> targets, Request request, String salt) {
         if (targets == null || targets.isEmpty()) {
             return Optional.empty();
         }
@@ -109,8 +108,14 @@ public final class TrafficPolicyConfig {
 
     private static long hashRequest(Request request, String salt) {
         CRC32 crc32 = new CRC32();
-        String key = request.getRequestId() + "|" + request.getApiKey() + "|"
-                + request.getSeqLen() + "|" + salt;
+        String key =
+                request.getRequestId()
+                        + "|"
+                        + request.getApiKey()
+                        + "|"
+                        + request.getSeqLen()
+                        + "|"
+                        + salt;
         crc32.update(key.getBytes(StandardCharsets.UTF_8));
         return crc32.getValue();
     }

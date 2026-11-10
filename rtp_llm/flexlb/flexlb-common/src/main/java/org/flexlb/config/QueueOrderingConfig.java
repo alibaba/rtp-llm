@@ -33,8 +33,6 @@ public final class QueueOrderingConfig {
     }
 
     public Optional<PreemptionConfig> preemptionPolicy() {
-        return type == Type.PRIORITY
-                ? Optional.ofNullable(preemption)
-                : Optional.empty();
+        return type == Type.PRIORITY ? Optional.ofNullable(preemption) : Optional.empty();
     }
 }

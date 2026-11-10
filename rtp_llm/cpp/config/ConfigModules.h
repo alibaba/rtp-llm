@@ -208,6 +208,7 @@ struct KVCacheConfig {
     bool        enable_memory_cache       = false;
     bool        enable_disk_cache         = false;
     bool        enable_remote_cache       = false;
+    bool        enable_crc                = true;
     std::string device_eviction_policy    = "lru";
     std::string memory_eviction_policy    = "lru";
     std::string disk_eviction_policy      = "fifo";
@@ -476,6 +477,9 @@ struct FIFOSchedulerConfig {
     bool        cp_force_single_prefill        = true;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;
+    // Global real-context token budget per chunked-prefill forward; <=0 disables, >0 enables.
+    // Config injection requires at least one seq_size_per_block and floor-aligns larger values.
+    int64_t     prefill_chunk_size = 0;
     std::string to_string() const;
 };
 

@@ -48,8 +48,7 @@ class ShutdownDrainTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BASE_PORT = 63200;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(8);
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
@@ -82,11 +81,17 @@ class ShutdownDrainTest {
 
         // Wait until both decode engines have running AND queued requests.
         for (JavaMockEngineCluster.FastRpcService decode : decodeServices) {
-            await(() -> decode.getActiveDecodeCount() >= 4
-                            && decode.getDecodePendingQueueDepth() >= 1, 5_000,
-                    "decode engine " + decode.getGrpcPort() + " never built a backlog: active="
+            await(
+                    () ->
+                            decode.getActiveDecodeCount() >= 4
+                                    && decode.getDecodePendingQueueDepth() >= 1,
+                    5_000,
+                    "decode engine "
+                            + decode.getGrpcPort()
+                            + " never built a backlog: active="
                             + decode.getActiveDecodeCount()
-                            + " queued=" + decode.getDecodePendingQueueDepth());
+                            + " queued="
+                            + decode.getDecodePendingQueueDepth());
         }
         assertTrue(totalInflight() > 0, "requests should be in flight before drain");
 
@@ -105,21 +110,25 @@ class ShutdownDrainTest {
             assertEquals(0, service.getActiveDecodeCount(), port + " activeDecodeRequests");
             assertEquals(0, service.getActiveKvTokens(), port + " activeKvTokens");
             assertEquals(0, service.getWaitingCount(), port + " waitingPrefillRequests");
-            assertEquals(0, service.getActivePrefillRequestCount(), port + " activePrefillRequests");
+            assertEquals(
+                    0, service.getActivePrefillRequestCount(), port + " activePrefillRequests");
             assertEquals(0, service.getActivePrefillBatchCount(), port + " activePrefillBatches");
             assertEquals(0, service.getDecodePendingQueueDepth(), port + " decodePendingQueue");
             assertEquals(0, service.getPrefillPendingQueueDepth(), port + " prefillPendingQueue");
         }
 
         // The in-flight requests were cancelled, not leaked.
-        long cancelled = services.values().stream()
-                .mapToLong(JavaMockEngineCluster.FastRpcService::getCancelledCount).sum();
+        long cancelled =
+                services.values().stream()
+                        .mapToLong(JavaMockEngineCluster.FastRpcService::getCancelledCount)
+                        .sum();
         assertTrue(cancelled >= n, "expected >= " + n + " cancellations, got " + cancelled);
 
         // checkLeakDrain must not report while shutting down, even with zero grace.
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
             service.checkLeakDrain(0);
-            assertFalse(service.isLeakDetected(),
+            assertFalse(
+                    service.isLeakDetected(),
                     "leak must NOT be detected during shutdown on port " + service.getGrpcPort());
         }
     }
@@ -136,8 +145,11 @@ class ShutdownDrainTest {
         enqueueBatch(prefill, 9100, 1, 4, decodeServices);
         enqueueBatch(prefill, 9101, 5, 4, decodeServices);
         enqueueBatch(prefill, 9102, 9, 4, decodeServices);
-        await(() -> prefill.getPrefillPendingQueueDepth() >= 2, 2_000,
-                "prefill pending queue never filled: depth=" + prefill.getPrefillPendingQueueDepth());
+        await(
+                () -> prefill.getPrefillPendingQueueDepth() >= 2,
+                2_000,
+                "prefill pending queue never filled: depth="
+                        + prefill.getPrefillPendingQueueDepth());
         assertTrue(prefill.getWaitingCount() >= 8, "queued prefill requests expected");
 
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
@@ -152,18 +164,23 @@ class ShutdownDrainTest {
 
         // The RUNNING batch's slot counters are freed by its already-scheduled
         // completion callback (all members cancelled → no further decrements).
-        await(() -> prefill.getActivePrefillBatchCount() == 0
-                        && prefill.getActivePrefillRequestCount() == 0, 7_000,
+        await(
+                () ->
+                        prefill.getActivePrefillBatchCount() == 0
+                                && prefill.getActivePrefillRequestCount() == 0,
+                7_000,
                 "running prefill batch slot never freed: batches="
                         + prefill.getActivePrefillBatchCount()
-                        + " reqs=" + prefill.getActivePrefillRequestCount());
+                        + " reqs="
+                        + prefill.getActivePrefillRequestCount());
         // No negative drift from the completion racing the drain.
         assertEquals(0, prefill.getInflightCount(), "pendingRequests after completion");
         assertEquals(0, prefill.getWaitingCount(), "waitingPrefillRequests after completion");
 
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
             service.checkLeakDrain(0);
-            assertFalse(service.isLeakDetected(),
+            assertFalse(
+                    service.isLeakDetected(),
                     "leak must NOT be detected during shutdown on port " + service.getGrpcPort());
         }
     }
@@ -184,29 +201,32 @@ class ShutdownDrainTest {
         // enqueueBatch on a stopped engine returns an empty response (no
         // successes, nothing admitted) — existing /stop_engine semantics.
         EngineRpcService.EnqueueBatchResponsePB response =
-                enqueue(prefill, batch(9200, slot(0, inputWithDecode(100, 10, decode.getGrpcPort()))));
+                enqueue(
+                        prefill,
+                        batch(9200, slot(0, inputWithDecode(100, 10, decode.getGrpcPort()))));
         assertEquals(0, response.getSuccessesCount(), "stopped engine must not admit requests");
         assertEquals(0, prefill.getInflightCount(), "no residue after rejected enqueue");
 
         // generateStreamCall on a stopped engine errors out.
         AtomicReference<Throwable> streamError = new AtomicReference<>();
         CountDownLatch latch = new CountDownLatch(1);
-        decode.generateStreamCall(input(101, 10), new StreamObserver<>() {
-            @Override
-            public void onNext(EngineRpcService.GenerateOutputsPB value) {
-            }
+        decode.generateStreamCall(
+                input(101, 10),
+                new StreamObserver<>() {
+                    @Override
+                    public void onNext(EngineRpcService.GenerateOutputsPB value) {}
 
-            @Override
-            public void onError(Throwable throwable) {
-                streamError.set(throwable);
-                latch.countDown();
-            }
+                    @Override
+                    public void onError(Throwable throwable) {
+                        streamError.set(throwable);
+                        latch.countDown();
+                    }
 
-            @Override
-            public void onCompleted() {
-                latch.countDown();
-            }
-        });
+                    @Override
+                    public void onCompleted() {
+                        latch.countDown();
+                    }
+                });
         assertTrue(latch.await(5, TimeUnit.SECONDS), "generateStreamCall should answer");
         assertNotNull(streamError.get(), "stopped decode engine should reject generate_stream");
         assertEquals(0, decode.getInflightCount(), "no residue after rejected stream");
@@ -226,14 +246,16 @@ class ShutdownDrainTest {
 
         // NOT shutting down + grace expired → the real leak check still trips.
         prefill.checkLeakDrain(0);
-        assertTrue(prefill.isLeakDetected(),
+        assertTrue(
+                prefill.isLeakDetected(),
                 "runtime leak detection must still fire when not shutting down");
     }
 
     // ──────────── Cluster setup ────────────
 
-    private void startCluster(MockPerformanceModel model, int nPrefill, int nDecode,
-                              int decodeMaxConcurrency) throws IOException {
+    private void startCluster(
+            MockPerformanceModel model, int nPrefill, int nDecode, int decodeMaxConcurrency)
+            throws IOException {
         services = new ConcurrentHashMap<>();
         prefillServices = new ArrayList<>();
         decodeServices = new ArrayList<>();
@@ -241,21 +263,39 @@ class ShutdownDrainTest {
 
         for (int i = 0; i < nPrefill; i++) {
             int port = BASE_PORT + i;
-            JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                    "prefill-" + i, "127.0.0.1", "prefill",
-                    EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                    port, services, scheduler, model, 100, stats,
-                    JavaMockEngineCluster.DEFAULT_TOTAL_KV_TOKENS, decodeMaxConcurrency);
+            JavaMockEngineCluster.FastRpcService service =
+                    new JavaMockEngineCluster.FastRpcService(
+                            "prefill-" + i,
+                            "127.0.0.1",
+                            "prefill",
+                            EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                            port,
+                            services,
+                            scheduler,
+                            model,
+                            100,
+                            stats,
+                            JavaMockEngineCluster.DEFAULT_TOTAL_KV_TOKENS,
+                            decodeMaxConcurrency);
             services.put(port, service);
             prefillServices.add(service);
         }
         for (int i = 0; i < nDecode; i++) {
             int port = BASE_PORT + nPrefill + i;
-            JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                    "decode-" + i, "127.0.0.1", "decode",
-                    EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                    port, services, scheduler, model, 100, stats,
-                    JavaMockEngineCluster.DEFAULT_TOTAL_KV_TOKENS, decodeMaxConcurrency);
+            JavaMockEngineCluster.FastRpcService service =
+                    new JavaMockEngineCluster.FastRpcService(
+                            "decode-" + i,
+                            "127.0.0.1",
+                            "decode",
+                            EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
+                            port,
+                            services,
+                            scheduler,
+                            model,
+                            100,
+                            stats,
+                            JavaMockEngineCluster.DEFAULT_TOTAL_KV_TOKENS,
+                            decodeMaxConcurrency);
             services.put(port, service);
             decodeServices.add(service);
         }
@@ -265,7 +305,8 @@ class ShutdownDrainTest {
 
     private long totalInflight() {
         return services.values().stream()
-                .mapToLong(JavaMockEngineCluster.FastRpcService::getInflightCount).sum();
+                .mapToLong(JavaMockEngineCluster.FastRpcService::getInflightCount)
+                .sum();
     }
 
     private static void await(BooleanSupplier condition, long timeoutMs, String message)
@@ -280,9 +321,12 @@ class ShutdownDrainTest {
         fail(message);
     }
 
-    private void enqueueBatch(JavaMockEngineCluster.FastRpcService prefill,
-                              long batchId, int startRequestId, int count,
-                              List<JavaMockEngineCluster.FastRpcService> decodeEngines) {
+    private void enqueueBatch(
+            JavaMockEngineCluster.FastRpcService prefill,
+            long batchId,
+            int startRequestId,
+            int count,
+            List<JavaMockEngineCluster.FastRpcService> decodeEngines) {
         EngineRpcService.GenerateInputPB[] inputs = new EngineRpcService.GenerateInputPB[count];
         for (int i = 0; i < count; i++) {
             int decodePort = decodeEngines.get(i % decodeEngines.size()).getGrpcPort();
@@ -297,5 +341,4 @@ class ShutdownDrainTest {
         return MockEngineTestSupport.performanceModel(
                 tempDir, formula, 1.0, 1.0, Map.of(), Map.of());
     }
-
 }

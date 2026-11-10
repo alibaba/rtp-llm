@@ -123,6 +123,7 @@ protected:
         input->generate_config = std::make_shared<GenerateConfig>();
         input->generate_config->unique_key = GetParam().name;
         input->generate_config->timeout_ms = 10000;
+        input->generate_config->max_new_tokens = 8;
         input->input_ids = torch::zeros({5}, torch::kInt32);
         stream_ = std::make_shared<MockGenerateStream>(input);
         meta_ = std::make_shared<MockMeta>();
@@ -211,6 +212,37 @@ TEST_P(KVCacheManagerP2PReadTest, TreePrefixDeterminesWireRoutes) {
         EXPECT_EQ(actual, expected);  // Exact keys and IDs; includes prefix exclusion.
     }
     EXPECT_EQ(layers, (std::set<int>{0, 1}));
+}
+
+TEST_P(KVCacheManagerP2PReadTest, SingleTokenSkipsTransferEvenWithoutAnyDecodeBlockTable) {
+    stream_->generateConfig()->max_new_tokens = 1;
+    meta_->setDecodeNeedsCompute(stream_->needsDecodeAfterPrefill());
+    auto empty_resource = std::make_shared<KVCacheResource>();
+    auto read_context = std::make_shared<PrefixReadContext>(meta_, empty_resource, 0);
+    context_ = std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(manager_->asyncLoadCache(read_context));
+    ASSERT_NE(context_, nullptr);
+    const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!context_->done() && std::chrono::steady_clock::now() < limit) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_TRUE(context_->done());
+    ASSERT_TRUE(context_->success()) << context_->errorInfo().ToString();
+    ASSERT_NE(context_->sideChannelPayload(), nullptr);
+    EXPECT_TRUE(context_->sideChannelPayload()->has_first_token);
+    EXPECT_EQ(context_->sideChannelPayload()->first_token_id, 42);
+    ASSERT_EQ(prefill_->service()->getStartLoadCallCount(), 1);
+    const auto request = prefill_->service()->getLastStartLoadRequest();
+    EXPECT_TRUE(request.no_transfer());
+    EXPECT_EQ(request.active_route_ids_size(), 0);
+    EXPECT_EQ(worker_->service()->getBroadcastTpCallCount(), 0);
+}
+
+TEST_P(KVCacheManagerP2PReadTest, SequenceLimitAfterFirstTokenDoesNotNeedDecode) {
+    stream_->generateConfig()->max_new_tokens = 100;
+    stream_->max_seq_len_ = stream_->inputLength() + 1;
+    EXPECT_FALSE(stream_->needsDecodeAfterPrefill());
+    stream_->max_seq_len_ = 4096;
+    EXPECT_TRUE(stream_->needsDecodeAfterPrefill());
 }
 
 INSTANTIATE_TEST_SUITE_P(

@@ -32,8 +32,7 @@ import java.util.function.BooleanSupplier;
 @Component
 public final class DecodePreemptionCoordinator {
 
-    record PreemptionResult(
-            boolean committed, boolean controlFailure, String detail) {
+    record PreemptionResult(boolean committed, boolean controlFailure, String detail) {
         public PreemptionResult {
             if (committed && controlFailure) {
                 throw new IllegalArgumentException(
@@ -61,27 +60,23 @@ public final class DecodePreemptionCoordinator {
             }
             victims = List.copyOf(victims);
             if (incomingRequestId <= 0L) {
-                throw new IllegalArgumentException(
-                        "incoming request id must be positive");
+                throw new IllegalArgumentException("incoming request id must be positive");
             }
             if (capacity == null) {
                 throw new IllegalArgumentException("capacity policy is required");
             }
             Set<Long> victimIds = new LinkedHashSet<>();
             for (DecodeRequestView victim : victims) {
-                if (victim.requestId() <= 0L
-                        || victim.reservationToken() <= 0L) {
+                if (victim.requestId() <= 0L || victim.reservationToken() <= 0L) {
                     throw new IllegalArgumentException(
                             "victim requestId and reservation token must be positive");
                 }
-                if (victim.phase() == null
-                        || !victim.phase().requiresEngineCancel()) {
+                if (victim.phase() == null || !victim.phase().requiresEngineCancel()) {
                     throw new IllegalArgumentException(
                             "coordinator accepts only Engine-Cancel victims");
                 }
                 if (!victimIds.add(victim.requestId())) {
-                    throw new IllegalArgumentException(
-                            "duplicate victim " + victim.requestId());
+                    throw new IllegalArgumentException("duplicate victim " + victim.requestId());
                 }
             }
             if (admissionOpen == null) {
@@ -95,138 +90,135 @@ public final class DecodePreemptionCoordinator {
     private final AtomicLong tokenSequence = new AtomicLong(1);
 
     public DecodePreemptionCoordinator(
-            EngineCancelChannel cancelChannel,
-            RequestRegistry requests) {
-        this.cancelChannel = Objects.requireNonNull(
-                cancelChannel, "cancelChannel");
+            EngineCancelChannel cancelChannel, RequestRegistry requests) {
+        this.cancelChannel = Objects.requireNonNull(cancelChannel, "cancelChannel");
         this.requests = Objects.requireNonNull(requests, "requests");
     }
 
-    CompletableFuture<PreemptionResult> preempt(
-            PreemptionCommand command) {
+    CompletableFuture<PreemptionResult> preempt(PreemptionCommand command) {
         long token = nextToken();
-        List<CancelTarget> targets =
-                new ArrayList<>(command.victims().size());
+        List<CancelTarget> targets = new ArrayList<>(command.victims().size());
         List<DecodeEndpoint.ReservationHandle> victimReservations =
                 new ArrayList<>(command.victims().size());
-        long endpointGenerationId =
-                command.endpoint().getStatus().getGenerationId();
+        long endpointGenerationId = command.endpoint().getStatus().getGenerationId();
         for (DecodeRequestView victim : command.victims()) {
-            Optional<CancelTarget> target = requests.findCancelTarget(
-                    victim.requestId(), victim.reservationToken());
+            Optional<CancelTarget> target =
+                    requests.findCancelTarget(victim.requestId(), victim.reservationToken());
             if (target.isEmpty()) {
-                return CompletableFuture.completedFuture(new PreemptionResult(
-                        false, true,
-                        "cancel_owner_missing:" + victim.requestId()));
+                return CompletableFuture.completedFuture(
+                        new PreemptionResult(
+                                false, true, "cancel_owner_missing:" + victim.requestId()));
             }
             targets.add(target.get());
-            victimReservations.add(new DecodeEndpoint.ReservationHandle(
-                    endpointGenerationId,
-                    victim.requestId(),
-                    victim.reservationToken()));
+            victimReservations.add(
+                    new DecodeEndpoint.ReservationHandle(
+                            endpointGenerationId, victim.requestId(), victim.reservationToken()));
         }
 
-        AttemptCapability capability = new AttemptCapability(
-                command, requests, token);
+        AttemptCapability capability = new AttemptCapability(command, requests, token);
         try {
             for (int index = 0; index < command.victims().size(); index++) {
                 DecodeRequestView victim = command.victims().get(index);
-                Optional<PreemptionRegistration> claimAttempt = requests.tryClaim(
-                        victim.requestId(), victim.reservationToken(),
-                        token, command.detail());
+                Optional<PreemptionRegistration> claimAttempt =
+                        requests.tryClaim(
+                                victim.requestId(),
+                                victim.reservationToken(),
+                                token,
+                                command.detail());
                 if (claimAttempt.isEmpty()) {
-                    return CompletableFuture.completedFuture(capability.abort(
-                            false, "victim_inflight_gone"));
+                    return CompletableFuture.completedFuture(
+                            capability.abort(false, "victim_inflight_gone"));
                 }
                 PreemptionRegistration claim = claimAttempt.get();
-                ClaimedVictim owned = capability.add(
-                        victim, targets.get(index), claim);
-                if (claim.requestId() != victim.requestId()
-                        || claim.attemptToken() != token) {
-                    return CompletableFuture.completedFuture(capability.abort(
-                            true,
-                            "lifecycle_returned_mismatched_claim:" + owned.requestId()));
+                ClaimedVictim owned = capability.add(victim, targets.get(index), claim);
+                if (claim.requestId() != victim.requestId() || claim.attemptToken() != token) {
+                    return CompletableFuture.completedFuture(
+                            capability.abort(
+                                    true,
+                                    "lifecycle_returned_mismatched_claim:" + owned.requestId()));
                 }
             }
 
             DecodeEndpoint.PreemptionBeginResult begin =
-                    command.endpoint().beginPreemption(
-                            token,
-                            victimReservations,
-                            command.incomingRequestId(),
-                            command.incomingKvTokens(),
-                            command.incomingExpectedKvTokens(),
-                            command.incomingPriority(),
-                            command.capacity());
+                    command.endpoint()
+                            .beginPreemption(
+                                    token,
+                                    victimReservations,
+                                    command.incomingRequestId(),
+                                    command.incomingKvTokens(),
+                                    command.incomingExpectedKvTokens(),
+                                    command.incomingPriority(),
+                                    command.capacity());
             if (begin != DecodeEndpoint.PreemptionBeginResult.SUCCESS) {
-                return CompletableFuture.completedFuture(capability.abort(
-                        begin == DecodeEndpoint.PreemptionBeginResult.ENDPOINT_RETIRED,
-                        "begin_" + begin.name().toLowerCase()));
+                return CompletableFuture.completedFuture(
+                        capability.abort(
+                                begin == DecodeEndpoint.PreemptionBeginResult.ENDPOINT_RETIRED,
+                                "begin_" + begin.name().toLowerCase()));
             }
             capability.endpointBegun();
-            if (!command.endpoint().updatePreemption(token, DecodeEndpoint.PreemptionUpdate.cancelSending())) {
-                return CompletableFuture.completedFuture(capability.abort(
-                        true,
-                        "endpoint_cancel_linearization_failed"));
+            if (!command.endpoint()
+                    .updatePreemption(token, DecodeEndpoint.PreemptionUpdate.cancelSending())) {
+                return CompletableFuture.completedFuture(
+                        capability.abort(true, "endpoint_cancel_linearization_failed"));
             }
             for (ClaimedVictim owned : capability.claims) {
                 if (!owned.claim().applyPhase(PreemptionCancelPhase.CANCEL_IN_FLIGHT)) {
-                    return CompletableFuture.completedFuture(capability.abort(
-                            true,
-                            "inflight_cancel_linearization_failed:"
-                                    + owned.requestId()));
+                    return CompletableFuture.completedFuture(
+                            capability.abort(
+                                    true,
+                                    "inflight_cancel_linearization_failed:" + owned.requestId()));
                 }
             }
             if (!capability.markCancelStarted()) {
-                return CompletableFuture.completedFuture(capability.abort(
-                        true,
-                        "attempt_cancel_linearization_failed"));
+                return CompletableFuture.completedFuture(
+                        capability.abort(true, "attempt_cancel_linearization_failed"));
             }
 
             // Capture every terminal capability before the first outbound
             // side effect. The exact claim remains the only lookup key.
             for (ClaimedVictim owned : capability.claims) {
-                owned.terminalCompletion = owned.claim()
-                        .terminalObservation()
-                        .handle((terminal, failure) -> failure == null
-                                && capability.recordTerminal(owned, terminal))
-                        .toCompletableFuture();
+                owned.terminalCompletion =
+                        owned.claim()
+                                .terminalObservation()
+                                .handle(
+                                        (terminal, failure) ->
+                                                failure == null
+                                                        && capability.recordTerminal(
+                                                                owned, terminal))
+                                .toCompletableFuture();
             }
 
-            List<CompletableFuture<EngineCancelChannel.CancelAck>>
-                    acknowledgements = new ArrayList<>(capability.claims.size());
+            List<CompletableFuture<EngineCancelChannel.CancelAck>> acknowledgements =
+                    new ArrayList<>(capability.claims.size());
             for (ClaimedVictim owned : capability.claims) {
                 if (capability.outboundStarted(owned)) {
-                    acknowledgements.add(cancel(
-                            owned, command.cancelAckTimeoutMs()));
+                    acknowledgements.add(cancel(owned, command.cancelAckTimeoutMs()));
                 } else {
-                    acknowledgements.add(CompletableFuture.completedFuture(
-                            EngineCancelChannel.CancelAck.FAILED));
+                    acknowledgements.add(
+                            CompletableFuture.completedFuture(
+                                    EngineCancelChannel.CancelAck.FAILED));
                 }
             }
 
             CompletableFuture<PreemptionResult> protocol =
-                    CompletableFuture.allOf(
-                            acknowledgements.toArray(new CompletableFuture[0]))
-                    .thenCompose(ignored -> handleAcknowledgements(
-                            capability, acknowledgements));
-            return protocol.handle((result, failure) -> {
-                if (failure != null) {
-                    return capability.abort(
-                            true,
-                            "coordinator_continuation_failed:"
-                                    + failureDetail(failure));
-                }
-                return result == null
-                        ? capability.abort(
-                                true,
-                                "coordinator_returned_null_result")
-                        : result;
-            });
+                    CompletableFuture.allOf(acknowledgements.toArray(new CompletableFuture[0]))
+                            .thenCompose(
+                                    ignored ->
+                                            handleAcknowledgements(capability, acknowledgements));
+            return protocol.handle(
+                    (result, failure) -> {
+                        if (failure != null) {
+                            return capability.abort(
+                                    true,
+                                    "coordinator_continuation_failed:" + failureDetail(failure));
+                        }
+                        return result == null
+                                ? capability.abort(true, "coordinator_returned_null_result")
+                                : result;
+                    });
         } catch (RuntimeException | Error failure) {
-            return CompletableFuture.completedFuture(capability.abort(
-                    true,
-                    "coordinator_setup_failed:" + failureDetail(failure)));
+            return CompletableFuture.completedFuture(
+                    capability.abort(true, "coordinator_setup_failed:" + failureDetail(failure)));
         }
     }
 
@@ -253,10 +245,14 @@ public final class DecodePreemptionCoordinator {
             switch (outcome) {
                 case ACCEPTED -> {
                     boolean transitioned =
-                            command.endpoint().updatePreemption(
-                                    capability.token,
-                                    DecodeEndpoint.PreemptionUpdate.cancelReply(victim.requestId(), PreemptionCancelPhase.CANCEL_REQUESTED))
-                            && owned.claim().applyPhase(PreemptionCancelPhase.CANCEL_REQUESTED);
+                            command.endpoint()
+                                            .updatePreemption(
+                                                    capability.token,
+                                                    DecodeEndpoint.PreemptionUpdate.cancelReply(
+                                                            victim.requestId(),
+                                                            PreemptionCancelPhase.CANCEL_REQUESTED))
+                                    && owned.claim()
+                                            .applyPhase(PreemptionCancelPhase.CANCEL_REQUESTED);
                     if (transitioned) {
                         capability.transferred(owned);
                         owned.acceptedAcknowledgement = true;
@@ -267,9 +263,12 @@ public final class DecodePreemptionCoordinator {
                     }
                 }
                 case NOT_FOUND -> {
-                    command.endpoint().updatePreemption(
-                            capability.token,
-                            DecodeEndpoint.PreemptionUpdate.cancelReply(victim.requestId(), PreemptionCancelPhase.NOT_FOUND_STALE));
+                    command.endpoint()
+                            .updatePreemption(
+                                    capability.token,
+                                    DecodeEndpoint.PreemptionUpdate.cancelReply(
+                                            victim.requestId(),
+                                            PreemptionCancelPhase.NOT_FOUND_STALE));
                     owned.claim().applyPhase(PreemptionCancelPhase.NOT_FOUND_STALE);
                     capability.transferred(owned);
                     if (!capability.isTerminal(owned)) {
@@ -291,62 +290,60 @@ public final class DecodePreemptionCoordinator {
         }
 
         if (pendingTerminals.isEmpty()) {
-            return CompletableFuture.completedFuture(
-                    capability.finish(hasNotFound));
+            return CompletableFuture.completedFuture(capability.finish(hasNotFound));
         }
         // The completion budget begins only after the ACK phase has ended; a
         // 40ms ACK followed by a 100ms cleanup therefore gets the full cleanup
         // window rather than sharing one 50ms deadline.
-        long completionDeadlineNanos = System.nanoTime()
-                + TimeUnit.MILLISECONDS.toNanos(
-                        Math.max(1, command.preemptionTimeoutMs()));
+        long completionDeadlineNanos =
+                System.nanoTime()
+                        + TimeUnit.MILLISECONDS.toNanos(Math.max(1, command.preemptionTimeoutMs()));
         List<CompletableFuture<Boolean>> boundedSettlements =
                 new ArrayList<>(pendingTerminals.size());
         for (ClaimedVictim pending : pendingTerminals) {
             // The unbounded continuation was installed before the first RPC.
             // Timing out this admission wait cannot cancel or lose a later
             // canonical victim terminal.
-            boundedSettlements.add(withDeadline(
-                    pending.terminalCompletion, completionDeadlineNanos)
-                    .exceptionally(ignored -> false));
+            boundedSettlements.add(
+                    withDeadline(pending.terminalCompletion, completionDeadlineNanos)
+                            .exceptionally(ignored -> false));
         }
 
         final boolean ackNotFound = hasNotFound;
         return CompletableFuture.allOf(boundedSettlements.toArray(new CompletableFuture[0]))
-                .thenApply(ignored -> {
-                    for (int i = 0; i < boundedSettlements.size(); i++) {
-                        if (!boundedSettlements.get(i).join()
-                                && !pendingTerminals.get(i)
-                                        .acceptedAcknowledgement) {
-                            capability.transferUnknown(pendingTerminals.get(i));
-                        }
-                    }
-                    return capability.finish(ackNotFound);
-                });
+                .thenApply(
+                        ignored -> {
+                            for (int i = 0; i < boundedSettlements.size(); i++) {
+                                if (!boundedSettlements.get(i).join()
+                                        && !pendingTerminals.get(i).acceptedAcknowledgement) {
+                                    capability.transferUnknown(pendingTerminals.get(i));
+                                }
+                            }
+                            return capability.finish(ackNotFound);
+                        });
     }
 
-    private static boolean settleRequestFenced(
-            AttemptCapability capability,
-            ClaimedVictim owned) {
+    private static boolean settleRequestFenced(AttemptCapability capability, ClaimedVictim owned) {
         PreemptionCommand command = capability.command;
         RequestRegistry requests = capability.requests;
         DecodeRequestView victim = owned.victim();
         // Endpoint accounting remains the resource-owning CAS. The remaining
         // transitions are exact-token followers, but no WorkerStatus future
         // is required for this stronger proof.
-        boolean endpointSettled = command.endpoint().updatePreemption(
-                capability.token,
-                DecodeEndpoint.PreemptionUpdate.fenced(reservation(command.endpoint(), victim)));
-        boolean inflightSettled = endpointSettled
-                && owned.claim().completePreemption(command.detail());
-        boolean attemptSettled = inflightSettled
-                && capability.recordTerminal(owned);
+        boolean endpointSettled =
+                command.endpoint()
+                        .updatePreemption(
+                                capability.token,
+                                DecodeEndpoint.PreemptionUpdate.fenced(
+                                        reservation(command.endpoint(), victim)));
+        boolean inflightSettled =
+                endpointSettled && owned.claim().completePreemption(command.detail());
+        boolean attemptSettled = inflightSettled && capability.recordTerminal(owned);
         return endpointSettled && inflightSettled && attemptSettled;
     }
 
     private static DecodeEndpoint.ReservationHandle reservation(
-            DecodeEndpoint endpoint,
-            DecodeRequestView victim) {
+            DecodeEndpoint endpoint, DecodeRequestView victim) {
         return new DecodeEndpoint.ReservationHandle(
                 endpoint.getStatus().getGenerationId(),
                 victim.requestId(),
@@ -358,30 +355,30 @@ public final class DecodePreemptionCoordinator {
         long remainingNanos = Math.max(1, deadlineNanos - System.nanoTime());
         CompletableFuture<T> timeout = new CompletableFuture<>();
         CompletableFuture.delayedExecutor(remainingNanos, TimeUnit.NANOSECONDS)
-                .execute(() -> timeout.completeExceptionally(
-                        new TimeoutException("victim terminal deadline exceeded")));
+                .execute(
+                        () ->
+                                timeout.completeExceptionally(
+                                        new TimeoutException("victim terminal deadline exceeded")));
         return source.applyToEither(timeout, value -> value);
     }
 
     private CompletableFuture<EngineCancelChannel.CancelAck> cancel(
-            ClaimedVictim victim,
-            long timeoutMs) {
+            ClaimedVictim victim, long timeoutMs) {
         try {
             CompletableFuture<EngineCancelChannel.CancelAck> stage =
-                    cancelChannel.cancel(
-                            victim.target(), victim.requestId(), timeoutMs);
+                    cancelChannel.cancel(victim.target(), victim.requestId(), timeoutMs);
             if (stage == null) {
-                return CompletableFuture.completedFuture(
-                        EngineCancelChannel.CancelAck.FAILED);
+                return CompletableFuture.completedFuture(EngineCancelChannel.CancelAck.FAILED);
             }
-            return stage.handle((outcome, failure) -> failure == null
-                            && outcome != null
-                    ? outcome : EngineCancelChannel.CancelAck.FAILED);
+            return stage.handle(
+                    (outcome, failure) ->
+                            failure == null && outcome != null
+                                    ? outcome
+                                    : EngineCancelChannel.CancelAck.FAILED);
         } catch (RuntimeException | Error failure) {
             // The capability marked this victim OUTBOUND before invocation,
             // so close conservatively transfers its exact claims to UNKNOWN.
-            return CompletableFuture.completedFuture(
-                    EngineCancelChannel.CancelAck.FAILED);
+            return CompletableFuture.completedFuture(EngineCancelChannel.CancelAck.FAILED);
         }
     }
 
@@ -409,13 +406,10 @@ public final class DecodePreemptionCoordinator {
         private final PreemptionRegistration claim;
         private CompletableFuture<Boolean> terminalCompletion;
         private boolean acceptedAcknowledgement;
-        private volatile ClaimDisposition disposition =
-                ClaimDisposition.RELEASABLE;
+        private volatile ClaimDisposition disposition = ClaimDisposition.RELEASABLE;
 
         private ClaimedVictim(
-                DecodeRequestView victim,
-                CancelTarget target,
-                PreemptionRegistration claim) {
+                DecodeRequestView victim, CancelTarget target, PreemptionRegistration claim) {
             this.victim = victim;
             this.target = target;
             this.claim = claim;
@@ -449,17 +443,16 @@ public final class DecodePreemptionCoordinator {
         private final RequestRegistry requests;
         private final long token;
         private final List<ClaimedVictim> claims = new ArrayList<>();
+
         /** Historical outbound boundary retained after an abort. */
         private boolean cancelStarted;
+
         private boolean endpointBegun;
         private boolean committed;
         private boolean closed;
         private String cleanupFailure;
 
-        private AttemptCapability(
-                PreemptionCommand command,
-                RequestRegistry requests,
-                long token) {
+        private AttemptCapability(PreemptionCommand command, RequestRegistry requests, long token) {
             if (token <= 0) {
                 throw new IllegalArgumentException("token is required");
             }
@@ -469,9 +462,7 @@ public final class DecodePreemptionCoordinator {
         }
 
         private ClaimedVictim add(
-                DecodeRequestView victim,
-                CancelTarget target,
-                PreemptionRegistration claim) {
+                DecodeRequestView victim, CancelTarget target, PreemptionRegistration claim) {
             ClaimedVictim owned = new ClaimedVictim(victim, target, claim);
             claims.add(owned);
             return owned;
@@ -496,18 +487,14 @@ public final class DecodePreemptionCoordinator {
             }
             if (owned.disposition != ClaimDisposition.RELEASABLE) {
                 throw new IllegalStateException(
-                        "Cancel outbound ownership changed request_id="
-                                + owned.requestId());
+                        "Cancel outbound ownership changed request_id=" + owned.requestId());
             }
             owned.disposition = ClaimDisposition.OUTBOUND;
             return true;
         }
 
-        private synchronized boolean recordTerminal(
-                ClaimedVictim owned,
-                VictimTerminal terminal) {
-            if (terminal == null
-                    || terminal.requestId() != owned.requestId()) {
+        private synchronized boolean recordTerminal(ClaimedVictim owned, VictimTerminal terminal) {
+            if (terminal == null || terminal.requestId() != owned.requestId()) {
                 return false;
             }
             return recordTerminal(owned);
@@ -533,8 +520,8 @@ public final class DecodePreemptionCoordinator {
             if (claims.isEmpty()) {
                 return false;
             }
-            return claims.stream().allMatch(
-                    owned -> owned.disposition == ClaimDisposition.TERMINAL);
+            return claims.stream()
+                    .allMatch(owned -> owned.disposition == ClaimDisposition.TERMINAL);
         }
 
         private synchronized void transferred(ClaimedVictim owned) {
@@ -549,43 +536,39 @@ public final class DecodePreemptionCoordinator {
             if (!shouldTransferUnknown(owned)) {
                 return;
             }
-            command.endpoint().updatePreemption(
-                    token,
-                    DecodeEndpoint.PreemptionUpdate.cancelReply(owned.requestId(), PreemptionCancelPhase.CANCEL_UNKNOWN));
+            command.endpoint()
+                    .updatePreemption(
+                            token,
+                            DecodeEndpoint.PreemptionUpdate.cancelReply(
+                                    owned.requestId(), PreemptionCancelPhase.CANCEL_UNKNOWN));
             owned.claim().applyPhase(PreemptionCancelPhase.CANCEL_UNKNOWN);
             transferred(owned);
         }
 
-        private synchronized boolean shouldTransferUnknown(
-                ClaimedVictim owned) {
+        private synchronized boolean shouldTransferUnknown(ClaimedVictim owned) {
             return owned.disposition == ClaimDisposition.OUTBOUND;
         }
 
         private PreemptionResult finish(boolean hasNotFound) {
             if (allVictimsTerminal()
                     && command.admissionOpen().getAsBoolean()
-                    && command.endpoint().finishPreemption(token, DecodeEndpoint.PreemptionDecision.COMMIT)) {
+                    && command.endpoint()
+                            .finishPreemption(token, DecodeEndpoint.PreemptionDecision.COMMIT)) {
                 markCommitted();
-                return new PreemptionResult(
-                        true, false, "committed");
+                return new PreemptionResult(true, false, "committed");
             }
-            boolean cleanSingleNotFound = hasNotFound
-                    && claims.size() == 1
-                    && !isTerminal(claims.get(0));
+            boolean cleanSingleNotFound =
+                    hasNotFound && claims.size() == 1 && !isTerminal(claims.get(0));
             return abort(
                     !cleanSingleNotFound,
-                    cleanSingleNotFound
-                            ? "cancel_not_found"
-                            : "cancel_terminal_unknown");
+                    cleanSingleNotFound ? "cancel_not_found" : "cancel_terminal_unknown");
         }
 
-        private PreemptionResult abort(
-                boolean controlFailure, String detail) {
+        private PreemptionResult abort(boolean controlFailure, String detail) {
             close();
-            String resultDetail = cleanupFailure == null
-                    ? detail : detail + ";cleanup_failed=" + cleanupFailure;
-            return new PreemptionResult(
-                    false, controlFailure, resultDetail);
+            String resultDetail =
+                    cleanupFailure == null ? detail : detail + ";cleanup_failed=" + cleanupFailure;
+            return new PreemptionResult(false, controlFailure, resultDetail);
         }
 
         @Override
@@ -602,15 +585,14 @@ public final class DecodePreemptionCoordinator {
                     try {
                         transferUnknown(owned);
                     } catch (RuntimeException | Error failure) {
-                        recordCleanupFailure(
-                                "transfer_unknown:" + owned.requestId(),
-                                failure);
+                        recordCleanupFailure("transfer_unknown:" + owned.requestId(), failure);
                     }
                 }
             }
             if (endpointBegun) {
                 try {
-                    command.endpoint().finishPreemption(token, DecodeEndpoint.PreemptionDecision.ABORT);
+                    command.endpoint()
+                            .finishPreemption(token, DecodeEndpoint.PreemptionDecision.ABORT);
                 } catch (RuntimeException | Error failure) {
                     recordCleanupFailure("endpoint_abort", failure);
                 }
@@ -620,9 +602,7 @@ public final class DecodePreemptionCoordinator {
                     try {
                         owned.claim().release();
                     } catch (RuntimeException | Error failure) {
-                        recordCleanupFailure(
-                                "release_claim:" + owned.requestId(),
-                                failure);
+                        recordCleanupFailure("release_claim:" + owned.requestId(), failure);
                     }
                 }
             }

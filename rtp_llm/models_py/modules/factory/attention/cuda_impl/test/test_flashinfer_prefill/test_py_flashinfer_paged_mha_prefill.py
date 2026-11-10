@@ -267,6 +267,109 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
 
     # ========== Test Cases: Chunked Prefill (Prefix Caching) ==========
 
+    def test_chunked_prefill_varlen_rounds_match_dense_attention(self):
+        """Prefix hits, mixed chunk lengths and short tails must mask future KV."""
+        torch.manual_seed(44)
+        lengths = (273, 401)
+        config = self._create_config(
+            head_num=4, head_num_kv=2, size_per_head=128, seq_size_per_block=64
+        )
+        config.attn_configs.is_causal = True
+        dtype = torch.float16
+        cache_dtype = self.cache_dtype(config.attn_configs)
+        queries = [
+            torch.randn(length, 4, 128, dtype=dtype, device=self.device)
+            for length in lengths
+        ]
+        keys = [
+            torch.randn(length, 2, 128, dtype=dtype, device=self.device)
+            for length in lengths
+        ]
+        values = [torch.randn_like(key) for key in keys]
+        full_inputs = self._create_chunked_prefill_attention_inputs(
+            2, [0, 0], list(lengths), 64
+        )
+        block_table = full_inputs.kv_cache_kernel_block_id
+        cache = self._create_paged_kv_cache(
+            torch.cat(keys),
+            torch.cat(values),
+            list(lengths),
+            64,
+            2,
+            128,
+            block_table,
+            cache_dtype,
+        )
+        for initial_prefixes in ((0, 0), (64, 128)):
+            for chunk_tokens in (128, 256):
+                with self.subTest(prefixes=initial_prefixes, chunk_tokens=chunk_tokens):
+                    prefixes = list(initial_prefixes)
+                    while any(
+                        prefix < length for prefix, length in zip(prefixes, lengths)
+                    ):
+                        active = [
+                            row for row in range(2) if prefixes[row] < lengths[row]
+                        ]
+                        grants = [
+                            min(chunk_tokens, lengths[row] - prefixes[row])
+                            for row in active
+                        ]
+                        inputs = self._create_chunked_prefill_attention_inputs(
+                            len(active), [prefixes[row] for row in active], grants, 64
+                        )
+                        # Keep physical IDs stable while the logical lengths grow.
+                        table = block_table[active].contiguous()
+                        inputs.kv_cache_block_id = table
+                        inputs.kv_cache_kernel_block_id = table
+                        inputs.kv_cache_block_id_device = table.to(self.device)
+                        inputs.kv_cache_kernel_block_id_device = table.to(self.device)
+                        op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, inputs)
+                        self.assertTrue(op.support(inputs))
+                        op.prepare(inputs)
+                        q = torch.cat(
+                            [
+                                queries[row][prefixes[row] : prefixes[row] + grant]
+                                for row, grant in zip(active, grants)
+                            ]
+                        )
+                        output = op.forward(q, cache)
+                        references = []
+                        for row, grant in zip(active, grants):
+                            prefix = prefixes[row]
+                            end = prefix + grant
+                            k = (
+                                keys[row][:end]
+                                .to(cache_dtype)
+                                .float()
+                                .repeat_interleave(2, dim=1)
+                            )
+                            v = (
+                                values[row][:end]
+                                .to(cache_dtype)
+                                .float()
+                                .repeat_interleave(2, dim=1)
+                            )
+                            scores = torch.einsum(
+                                "qhd,khd->hqk",
+                                queries[row][prefix:end].to(op.q_dtype).float(),
+                                k,
+                            ) / (128**0.5)
+                            causal = (
+                                torch.arange(end, device=self.device)[None, :]
+                                > torch.arange(prefix, end, device=self.device)[:, None]
+                            )
+                            scores.masked_fill_(causal[None], float("-inf"))
+                            references.append(
+                                torch.einsum("hqk,khd->qhd", scores.softmax(-1), v)
+                            )
+                            prefixes[row] = end
+                        reference = torch.cat(references)
+                        self._assert_output_close(
+                            output.reshape_as(reference).float(),
+                            reference,
+                            name="Chunked prefill output",
+                        )
+
     def test_chunked_prefill_single_batch(self):
         """Test chunked prefill with single batch (mimics your real scenario)
 

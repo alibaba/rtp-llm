@@ -6,7 +6,6 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.IOException;
 import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
@@ -53,15 +52,15 @@ class MetricsValidationTest {
     private static final int BASE_PORT = 62800;
 
     /** Pattern: {@code metric_name{engine_name="...",role="...",grpc_port="12345",engine_ip="..."} value} */
-    private static final Pattern PER_ENGINE_METRIC_PATTERN = Pattern.compile(
-            "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"\\}\\s+(\\d+)");
+    private static final Pattern PER_ENGINE_METRIC_PATTERN =
+            Pattern.compile(
+                    "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"\\}\\s+(\\d+)");
 
     /** Pattern: {@code metric_name{role="prefill"} value} */
-    private static final Pattern ROLE_METRIC_PATTERN = Pattern.compile(
-            "(\\w+)\\{role=\"(\\w+)\"\\}\\s+(\\d+)");
+    private static final Pattern ROLE_METRIC_PATTERN =
+            Pattern.compile("(\\w+)\\{role=\"(\\w+)\"\\}\\s+(\\d+)");
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     @Test
     void metricsEndpointReportsCorrectData() throws Exception {
@@ -71,7 +70,7 @@ class MetricsValidationTest {
         int nRequests = 20;
 
         try (MockEngineTestCluster cluster =
-                     MockEngineTestCluster.start(model, BASE_PORT, nPrefill, nDecode)) {
+                MockEngineTestCluster.start(model, BASE_PORT, nPrefill, nDecode)) {
             Map<Integer, JavaMockEngineCluster.FastRpcService> services = cluster.services();
             List<JavaMockEngineCluster.FastRpcService> prefillServices = cluster.prefills();
             List<JavaMockEngineCluster.FastRpcService> decodeServices = cluster.decodes();
@@ -89,12 +88,11 @@ class MetricsValidationTest {
                 EngineRpcService.GenerateInputPB[] inputs =
                         new EngineRpcService.GenerateInputPB[count];
                 for (int j = 0; j < count; j++) {
-                    int decodePort = decodeServices.get(
-                            (i * count + j) % nDecode).getGrpcPort();
+                    int decodePort = decodeServices.get((i * count + j) % nDecode).getGrpcPort();
                     inputs[j] = inputWithDecode(startRequestId + j, 10, decodePort);
                 }
-                EngineRpcService.EnqueueBatchResponsePB response = enqueue(
-                        prefillServices.get(i), batch(1000 + i, slot(0, inputs)));
+                EngineRpcService.EnqueueBatchResponsePB response =
+                        enqueue(prefillServices.get(i), batch(1000 + i, slot(0, inputs)));
                 totalEnqueueErrors += response.getErrorsCount();
             }
 
@@ -108,8 +106,9 @@ class MetricsValidationTest {
 
             // ── Fetch /metrics (Prometheus format, both emission modes) ──
             String metricsBody = MockEngineTestSupport.httpGet(cluster.controlPort(), "/metrics");
-            String perEngineBody = MockEngineTestSupport.httpGet(
-                    cluster.controlPort(), "/metrics?per_engine=true");
+            String perEngineBody =
+                    MockEngineTestSupport.httpGet(
+                            cluster.controlPort(), "/metrics?per_engine=true");
             Map<String, Map<Integer, Long>> perEngineMetrics = parsePerEngineMetrics(perEngineBody);
             Map<String, Map<String, Long>> roleMetrics = parseRoleMetrics(metricsBody);
 
@@ -117,7 +116,9 @@ class MetricsValidationTest {
             JsonNode snapshotArray = cluster.snapshot();
 
             assertTrue(snapshotArray.isArray(), "/snapshot should return a JSON array");
-            assertEquals(nPrefill + nDecode, snapshotArray.size(),
+            assertEquals(
+                    nPrefill + nDecode,
+                    snapshotArray.size(),
                     "/snapshot should contain all " + (nPrefill + nDecode) + " engines");
 
             // ── Verify per-engine metrics ──
@@ -133,14 +134,20 @@ class MetricsValidationTest {
                 boolean leakDetected = engineNode.get("leak_detected").asBoolean();
 
                 // ── Verify inflight is 0 (all completed) ──
-                assertEquals(0, inflight,
-                        "engine port " + port + " (" + role
-                                + ") inflight should be 0, got " + inflight);
+                assertEquals(
+                        0,
+                        inflight,
+                        "engine port "
+                                + port
+                                + " ("
+                                + role
+                                + ") inflight should be 0, got "
+                                + inflight);
 
                 // ── Verify no leak ──
-                assertFalse(leakDetected,
-                        "engine port " + port + " (" + role
-                                + ") leak_detected should be false");
+                assertFalse(
+                        leakDetected,
+                        "engine port " + port + " (" + role + ") leak_detected should be false");
 
                 // ── Cross-verify /metrics per-engine Python series match /snapshot ──
                 long running = engineNode.get("running").asLong();
@@ -148,72 +155,93 @@ class MetricsValidationTest {
                         perEngineMetrics.get("mock_engine_accepted_total");
                 Map<Integer, Long> completedMetrics =
                         perEngineMetrics.get("mock_engine_completed_total");
-                Map<Integer, Long> runningMetrics =
-                        perEngineMetrics.get("mock_engine_running");
-                Map<Integer, Long> waitingMetrics =
-                        perEngineMetrics.get("mock_engine_waiting");
+                Map<Integer, Long> runningMetrics = perEngineMetrics.get("mock_engine_running");
+                Map<Integer, Long> waitingMetrics = perEngineMetrics.get("mock_engine_waiting");
 
-                assertNotNull(acceptedMetrics,
+                assertNotNull(
+                        acceptedMetrics,
                         "mock_engine_accepted_total should exist in per-engine /metrics");
-                assertNotNull(completedMetrics,
+                assertNotNull(
+                        completedMetrics,
                         "mock_engine_completed_total should exist in per-engine /metrics");
-                assertNotNull(runningMetrics,
-                        "mock_engine_running should exist in per-engine /metrics");
-                assertNotNull(waitingMetrics,
-                        "mock_engine_waiting should exist in per-engine /metrics");
+                assertNotNull(
+                        runningMetrics, "mock_engine_running should exist in per-engine /metrics");
+                assertNotNull(
+                        waitingMetrics, "mock_engine_waiting should exist in per-engine /metrics");
 
-                assertEquals(accepted, acceptedMetrics.getOrDefault(port, -1L),
+                assertEquals(
+                        accepted,
+                        acceptedMetrics.getOrDefault(port, -1L),
                         "/metrics accepted mismatch for port " + port);
-                assertEquals(completed, completedMetrics.getOrDefault(port, -1L),
+                assertEquals(
+                        completed,
+                        completedMetrics.getOrDefault(port, -1L),
                         "/metrics completed mismatch for port " + port);
-                assertEquals(running, runningMetrics.getOrDefault(port, -1L),
+                assertEquals(
+                        running,
+                        runningMetrics.getOrDefault(port, -1L),
                         "/metrics running mismatch for port " + port);
-                assertEquals(0, waitingMetrics.getOrDefault(port, -1L),
+                assertEquals(
+                        0,
+                        waitingMetrics.getOrDefault(port, -1L),
                         "/metrics waiting should be 0 for port " + port);
 
                 // ── Aggregate ──
                 if ("prefill".equals(role)) {
-                    assertTrue(accepted > 0,
+                    assertTrue(
+                            accepted > 0,
                             "prefill engine port " + port + " should have accepted > 0");
                     totalAcceptedPrefill += accepted;
                 }
                 if ("decode".equals(role)) {
-                    assertTrue(completed > 0,
+                    assertTrue(
+                            completed > 0,
                             "decode engine port " + port + " should have completed > 0");
                     totalCompletedDecode += completed;
                 }
-
             }
 
             // ── Verify aggregate metrics ──
-            assertEquals(nRequests, totalAcceptedPrefill,
+            assertEquals(
+                    nRequests,
+                    totalAcceptedPrefill,
                     "total accepted across prefill engines should be " + nRequests);
-            assertEquals(nRequests, totalCompletedDecode,
+            assertEquals(
+                    nRequests,
+                    totalCompletedDecode,
                     "total completed across decode engines should be " + nRequests);
-            assertEquals(totalAcceptedPrefill, totalCompletedDecode,
+            assertEquals(
+                    totalAcceptedPrefill,
+                    totalCompletedDecode,
                     "total accepted should equal total completed (no errors in pipeline)");
 
             // ── Verify aggregate role series (default /metrics mode) ──
             Map<String, Long> acceptedByRole = roleMetrics.get("mock_engine_accepted_total");
             Map<String, Long> completedByRole = roleMetrics.get("mock_engine_completed_total");
-            assertNotNull(acceptedByRole,
+            assertNotNull(
+                    acceptedByRole,
                     "mock_engine_accepted_total{role=...} should exist in /metrics");
-            assertNotNull(completedByRole,
+            assertNotNull(
+                    completedByRole,
                     "mock_engine_completed_total{role=...} should exist in /metrics");
-            assertEquals(nRequests, acceptedByRole.getOrDefault("prefill", -1L),
+            assertEquals(
+                    nRequests,
+                    acceptedByRole.getOrDefault("prefill", -1L),
                     "aggregated prefill accepted should be " + nRequests);
-            assertEquals(nRequests, completedByRole.getOrDefault("decode", -1L),
+            assertEquals(
+                    nRequests,
+                    completedByRole.getOrDefault("decode", -1L),
                     "aggregated decode completed should be " + nRequests);
 
             // ── Verify Prometheus metrics contain expected Python metric names ──
-            for (String metric : new String[]{
-                    "mock_engine_running", "mock_engine_waiting",
-                    "mock_engine_accepted_total", "mock_engine_completed_total",
-                    "mock_engine_active_kv_tokens", "mock_engine_rpc_total"}) {
-                assertTrue(metricsBody.contains(metric),
-                        "/metrics should contain " + metric);
+            for (String metric :
+                    new String[] {
+                        "mock_engine_running", "mock_engine_waiting",
+                        "mock_engine_accepted_total", "mock_engine_completed_total",
+                        "mock_engine_active_kv_tokens", "mock_engine_rpc_total"
+                    }) {
+                assertTrue(metricsBody.contains(metric), "/metrics should contain " + metric);
             }
-
         }
     }
 
@@ -237,11 +265,12 @@ class MetricsValidationTest {
     @Test
     void snapshotKvMetricsTrackBlockPool() throws Exception {
         // fixed 800ms prefill: a stable RUNNING window to observe occupancy.
-        MockPerformanceModel model = MockEngineTestSupport.performanceModel(
-                tempDir, "10", 1.0, 1.0, Map.of("fixed_ms", 800), Map.of());
+        MockPerformanceModel model =
+                MockEngineTestSupport.performanceModel(
+                        tempDir, "10", 1.0, 1.0, Map.of("fixed_ms", 800), Map.of());
 
         try (MockEngineTestCluster cluster =
-                     MockEngineTestCluster.start(model, BASE_PORT + 100, 1, 1)) {
+                MockEngineTestCluster.start(model, BASE_PORT + 100, 1, 1)) {
             JavaMockEngineCluster.FastRpcService prefill = cluster.prefill(0);
             long spb = prefill.getSeqSizePerBlock();
 
@@ -255,37 +284,48 @@ class MetricsValidationTest {
                     "idle availability = min(total, pool blocks x spb)");
 
             // Request A (3 fresh hash keys) completes → keys parked in the LRU.
-            EngineRpcService.GenerateInputPB a = inputWithBlockKeys(
-                    101L, (int) (3 * spb), List.of(11L, 22L, 33L));
+            EngineRpcService.GenerateInputPB a =
+                    inputWithBlockKeys(101L, (int) (3 * spb), List.of(11L, 22L, 33L));
             assertEquals(0, enqueue(prefill, batch(1, slot(0, a))).getErrorsCount());
-            awaitEngine(cluster, prefill.getGrpcPort(),
-                    snap -> snap.get("cache_keys").asInt() == 3, 5_000,
+            awaitEngine(
+                    cluster,
+                    prefill.getGrpcPort(),
+                    snap -> snap.get("cache_keys").asInt() == 3,
+                    5_000,
                     "request A completion must index its 3 keys");
             JsonNode parked = engineByPort(cluster, prefill.getGrpcPort());
             assertEquals(3, parked.get("cache_keys").asInt());
-            assertEquals(idleAvailable, parked.get("available_kv_tokens").asLong(),
+            assertEquals(
+                    idleAvailable,
+                    parked.get("available_kv_tokens").asLong(),
                     "parked LRU keys must count as available (release != delete)");
 
             // Request B re-acquires the SAME keys → RUNNING pins them as
             // referenced → availability drops by exactly 3 blocks.
-            EngineRpcService.GenerateInputPB b = inputWithBlockKeys(
-                    102L, (int) (3 * spb), List.of(11L, 22L, 33L));
+            EngineRpcService.GenerateInputPB b =
+                    inputWithBlockKeys(102L, (int) (3 * spb), List.of(11L, 22L, 33L));
             assertEquals(0, enqueue(prefill, batch(2, slot(0, b))).getErrorsCount());
-            awaitEngine(cluster, prefill.getGrpcPort(),
+            awaitEngine(
+                    cluster,
+                    prefill.getGrpcPort(),
                     snap -> snap.get("available_kv_tokens").asLong() == idleAvailable - 3 * spb,
                     2_000,
                     "in-flight re-reference must hide LRU blocks from availability");
             JsonNode running = engineByPort(cluster, prefill.getGrpcPort());
-            assertEquals(3, running.get("cache_keys").asInt(),
+            assertEquals(
+                    3,
+                    running.get("cache_keys").asInt(),
                     "RUNNING re-reference must not change cache_keys");
             assertEquals(idleAvailable - 3 * spb, running.get("available_kv_tokens").asLong());
 
             // B completes → availability restored, keys still parked.
-            awaitEngine(cluster, prefill.getGrpcPort(),
+            awaitEngine(
+                    cluster,
+                    prefill.getGrpcPort(),
                     snap -> snap.get("available_kv_tokens").asLong() == idleAvailable,
-                    5_000, "completion must restore availability");
-            assertEquals(3, engineByPort(cluster, prefill.getGrpcPort())
-                    .get("cache_keys").asInt());
+                    5_000,
+                    "completion must restore availability");
+            assertEquals(3, engineByPort(cluster, prefill.getGrpcPort()).get("cache_keys").asInt());
         }
     }
 
@@ -301,43 +341,60 @@ class MetricsValidationTest {
         MockPerformanceModel model = model("10", 0.1);
 
         try (MockEngineTestCluster cluster =
-                     MockEngineTestCluster.start(model, BASE_PORT + 200, 1, 1)) {
+                MockEngineTestCluster.start(model, BASE_PORT + 200, 1, 1)) {
             JavaMockEngineCluster.FastRpcService prefill = cluster.prefill(0);
             long idle = cacheStatusAvailable(prefill);
             assertEquals(idle, workerStatus(prefill, 0).getAvailableKvCache());
-            assertEquals(idle, engineByPort(cluster, prefill.getGrpcPort())
-                    .get("available_kv_tokens").asLong());
+            assertEquals(
+                    idle,
+                    engineByPort(cluster, prefill.getGrpcPort())
+                            .get("available_kv_tokens")
+                            .asLong());
 
             // Inject absolute pressure via the control plane (engine names in
             // this fixture are role-port, e.g. prefill-63000).
-            httpPost(cluster.controlPort(), "/set_kv_pressure",
+            httpPost(
+                    cluster.controlPort(),
+                    "/set_kv_pressure",
                     "{\"engine\":\"" + prefill.getEngineName() + "\",\"active_kv_tokens\":5000}");
             long pressured = idle - 5_000;
-            assertEquals(pressured, cacheStatusAvailable(prefill),
+            assertEquals(
+                    pressured,
+                    cacheStatusAvailable(prefill),
                     "getCacheStatus must subtract kv_pressure");
             assertEquals(pressured, workerStatus(prefill, 0).getAvailableKvCache());
-            assertEquals(pressured, engineByPort(cluster, prefill.getGrpcPort())
-                    .get("available_kv_tokens").asLong());
+            assertEquals(
+                    pressured,
+                    engineByPort(cluster, prefill.getGrpcPort())
+                            .get("available_kv_tokens")
+                            .asLong());
 
             // Clear → restored on every surface.
-            httpPost(cluster.controlPort(), "/set_kv_pressure",
+            httpPost(
+                    cluster.controlPort(),
+                    "/set_kv_pressure",
                     "{\"engine\":\"" + prefill.getEngineName() + "\",\"active_kv_tokens\":0}");
             assertEquals(idle, cacheStatusAvailable(prefill));
             assertEquals(idle, workerStatus(prefill, 0).getAvailableKvCache());
-            assertEquals(idle, engineByPort(cluster, prefill.getGrpcPort())
-                    .get("available_kv_tokens").asLong());
+            assertEquals(
+                    idle,
+                    engineByPort(cluster, prefill.getGrpcPort())
+                            .get("available_kv_tokens")
+                            .asLong());
         }
     }
 
     private long cacheStatusAvailable(JavaMockEngineCluster.FastRpcService service) {
-        EngineRpcService.CacheStatusPB status = unary(observer -> service.getCacheStatus(
-                EngineRpcService.CacheVersionPB.newBuilder().build(),
-                observer));
+        EngineRpcService.CacheStatusPB status =
+                unary(
+                        observer ->
+                                service.getCacheStatus(
+                                        EngineRpcService.CacheVersionPB.newBuilder().build(),
+                                        observer));
         return status.getAvailableKvCache();
     }
 
-    private JsonNode engineByPort(MockEngineTestCluster cluster, int grpcPort)
-            throws Exception {
+    private JsonNode engineByPort(MockEngineTestCluster cluster, int grpcPort) throws Exception {
         for (JsonNode engine : cluster.snapshot()) {
             if (engine.get("port").asInt() == grpcPort) {
                 return engine;
@@ -346,9 +403,13 @@ class MetricsValidationTest {
         throw new AssertionError("engine not found in /snapshot: port " + grpcPort);
     }
 
-    private void awaitEngine(MockEngineTestCluster cluster, int grpcPort,
-                              java.util.function.Predicate<JsonNode> condition,
-                              long timeoutMs, String message) throws Exception {
+    private void awaitEngine(
+            MockEngineTestCluster cluster,
+            int grpcPort,
+            java.util.function.Predicate<JsonNode> condition,
+            long timeoutMs,
+            String message)
+            throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMs;
         JsonNode last = null;
         while (System.currentTimeMillis() < deadline) {
@@ -379,8 +440,7 @@ class MetricsValidationTest {
                 String metricName = matcher.group(1);
                 int port = Integer.parseInt(matcher.group(2));
                 long value = Long.parseLong(matcher.group(3));
-                result.computeIfAbsent(metricName, k -> new LinkedHashMap<>())
-                        .put(port, value);
+                result.computeIfAbsent(metricName, k -> new LinkedHashMap<>()).put(port, value);
             }
         }
         return result;
@@ -411,5 +471,4 @@ class MetricsValidationTest {
     private MockPerformanceModel model(String formula, double sleepScale) throws Exception {
         return MockEngineTestSupport.performanceModel(tempDir, formula, sleepScale);
     }
-
 }

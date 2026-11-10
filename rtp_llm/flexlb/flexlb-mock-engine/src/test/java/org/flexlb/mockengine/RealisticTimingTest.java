@@ -39,8 +39,7 @@ class RealisticTimingTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BASE_PORT = 62700;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     @Test
     void realisticTimingVerifiesActualWait() throws Exception {
@@ -50,25 +49,25 @@ class RealisticTimingTest {
         int nRequests = 5;
 
         try (MockEngineTestCluster cluster =
-                     MockEngineTestCluster.create(model, BASE_PORT, nPrefill, nDecode)) {
+                MockEngineTestCluster.create(model, BASE_PORT, nPrefill, nDecode)) {
             Map<Integer, JavaMockEngineCluster.FastRpcService> services = cluster.services();
             List<JavaMockEngineCluster.FastRpcService> prefillServices = cluster.prefills();
             List<JavaMockEngineCluster.FastRpcService> decodeServices = cluster.decodes();
 
             // ── Enqueue 5 requests with outputLen = 10 ──
             long enqueueStartMs = System.currentTimeMillis();
-            EngineRpcService.GenerateInputPB[] inputs = new EngineRpcService.GenerateInputPB[nRequests];
+            EngineRpcService.GenerateInputPB[] inputs =
+                    new EngineRpcService.GenerateInputPB[nRequests];
             for (int i = 0; i < nRequests; i++) {
                 int decodePort = decodeServices.get(i % nDecode).getGrpcPort();
                 inputs[i] = inputWithDecode(i + 1, 10, decodePort, 10);
             }
-            EngineRpcService.EnqueueBatchResponsePB response = enqueue(
-                    prefillServices.get(0), batch(1000, slot(0, inputs)));
+            EngineRpcService.EnqueueBatchResponsePB response =
+                    enqueue(prefillServices.get(0), batch(1000, slot(0, inputs)));
 
-            assertEquals(nRequests, response.getSuccessesCount(),
-                    "all requests should be accepted");
-            assertEquals(0, response.getErrorsCount(),
-                    "no enqueue errors expected");
+            assertEquals(
+                    nRequests, response.getSuccessesCount(), "all requests should be accepted");
+            assertEquals(0, response.getErrorsCount(), "no enqueue errors expected");
 
             // ── Wait for all requests to complete ──
             cluster.awaitCompleted(nRequests, 10_000);
@@ -83,34 +82,47 @@ class RealisticTimingTest {
             }
 
             // ── Verify timing ──
-            assertEquals(nRequests, completionTimes.size(),
+            assertEquals(
+                    nRequests,
+                    completionTimes.size(),
                     "all " + nRequests + " requests should have decode completions");
 
             for (int i = 0; i < completionTimes.size(); i++) {
                 long time = completionTimes.get(i);
-                assertTrue(time >= 100,
-                        "request " + (i + 1) + " took " + time + "ms, expected >= 100ms"
+                assertTrue(
+                        time >= 100,
+                        "request "
+                                + (i + 1)
+                                + " took "
+                                + time
+                                + "ms, expected >= 100ms"
                                 + " (prefill should actually wait 100ms)");
-                assertTrue(time <= 300,
+                assertTrue(
+                        time <= 300,
                         "request " + (i + 1) + " took " + time + "ms, expected <= 300ms");
             }
 
             // ── Verify all completed ──
-            long totalCompleted = services.values().stream()
-                    .mapToLong(JavaMockEngineCluster.FastRpcService::getCompletedCount)
-                    .sum();
-            assertEquals(nRequests, totalCompleted,
-                    "all requests should be completed");
+            long totalCompleted =
+                    services.values().stream()
+                            .mapToLong(JavaMockEngineCluster.FastRpcService::getCompletedCount)
+                            .sum();
+            assertEquals(nRequests, totalCompleted, "all requests should be completed");
 
             // ── Verify no inflight leak ──
             for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-                assertEquals(0, service.getInflightCount(),
-                        "engine port " + service.getGrpcPort()
-                                + " has inflight=" + service.getInflightCount() + " (expected 0)");
-                assertFalse(service.isLeakDetected(),
+                assertEquals(
+                        0,
+                        service.getInflightCount(),
+                        "engine port "
+                                + service.getGrpcPort()
+                                + " has inflight="
+                                + service.getInflightCount()
+                                + " (expected 0)");
+                assertFalse(
+                        service.isLeakDetected(),
                         "engine port " + service.getGrpcPort() + " has leak detected");
             }
-
         }
     }
 
@@ -128,14 +140,24 @@ class RealisticTimingTest {
     private MockPerformanceModel model() throws Exception {
         Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
         Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 1.0,
-                "jitter_pct", 0.0,
-                "decode", Map.of("scale", 1.0, "tokens_per_step", 1.0,
-                        "step_ms_by_batch", List.of(List.of(1, 5.0)))));
+        MAPPER.writeValue(
+                performance.toFile(),
+                Map.of(
+                        "block_size",
+                        1024,
+                        "sleep_scale",
+                        1.0,
+                        "jitter_pct",
+                        0.0,
+                        "decode",
+                        Map.of(
+                                "scale",
+                                1.0,
+                                "tokens_per_step",
+                                1.0,
+                                "step_ms_by_batch",
+                                List.of(List.of(1, 5.0)))));
         MockMasterConfig.writeWithPrefillExpression(master, "100");
         return MockPerformanceModel.load(performance.toString(), master.toString());
     }
-
 }

@@ -295,7 +295,13 @@ class LoadClient:
             self._pushgateway_task = asyncio.create_task(self._pushgateway_loop())
             parsed_pushgateway = urllib.parse.urlsplit(self._pushgateway_url)
             safe_pushgateway = urllib.parse.urlunsplit(
-                (parsed_pushgateway.scheme, parsed_pushgateway.hostname or "", "", "", "")
+                (
+                    parsed_pushgateway.scheme,
+                    parsed_pushgateway.hostname or "",
+                    "",
+                    "",
+                    "",
+                )
             )
             print(f"pushgateway metrics push enabled: {safe_pushgateway}", flush=True)
         first_ts = trace_first_ts

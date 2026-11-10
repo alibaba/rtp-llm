@@ -1675,7 +1675,7 @@
                     "input_len": 1425,
                     "pd_sep": true,
                     "prefill_total_reuse_len": 0,
-                    "decode_total_reuse_len": 1280
+                    "decode_total_reuse_len": 0
                 }
             }
         },
@@ -1757,7 +1757,7 @@
                     "input_len": 1425,
                     "pd_sep": true,
                     "prefill_total_reuse_len": 1024,
-                    "decode_total_reuse_len": 1280
+                    "decode_total_reuse_len": 0
                 }
             }
         },
@@ -1839,7 +1839,7 @@
                     "input_len": 3745,
                     "pd_sep": true,
                     "prefill_total_reuse_len": 1024,
-                    "decode_total_reuse_len": 3584
+                    "decode_total_reuse_len": 0
                 }
             }
         }

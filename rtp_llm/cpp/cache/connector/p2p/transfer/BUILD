@@ -84,6 +84,33 @@ cc_library(
     alwayslink = True,
 )
 
+# RDMA variant of the backend factory (TCP + barex backends). The source
+# lives in the barex_rdma subpackage (renamed so the public base file keeps
+# its name); the target label is kept from the internal tree. srcs/deps
+# appear only when //:using_rdma is ON, so the default OFF build never
+# resolves @alibaba_rdma (see barex_rdma/BUILD).
+cc_library(
+    name = "transfer_backend_rdma_impl",
+    srcs = select({
+        "//:using_rdma": [
+            "//rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma:TransferBackendFactoryRdma.cc",
+        ],
+        "//conditions:default": [],
+    }),
+    deps = select({
+        "//:using_rdma": [
+            ":transfer_backend_factory_interface",
+            "//rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma:rdma_interface",
+            "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
+            "//rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma:rdma_backend",
+            "//rtp_llm/cpp/utils:core_utils",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+    alwayslink = True,
+)
+
 cc_library(
     name = "backend_factory",
     hdrs = ["TransferBackendFactory.h"],

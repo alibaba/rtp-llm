@@ -48,9 +48,14 @@ import java.util.Set;
  */
 public final class PrefillTimeFormula {
 
-    private static final Set<String> BATCH_SCOPED_VARIABLES = Set.of(
-            "batchSize", "totalInputTokens", "totalHitCacheTokens",
-            "totalComputeTokens", "maxInputTokens", "maxComputeTokens");
+    private static final Set<String> BATCH_SCOPED_VARIABLES =
+            Set.of(
+                    "batchSize",
+                    "totalInputTokens",
+                    "totalHitCacheTokens",
+                    "totalComputeTokens",
+                    "maxInputTokens",
+                    "maxComputeTokens");
 
     static final int IDX_BATCH_SIZE = 0;
     static final int IDX_INPUT_TOKENS = 1;
@@ -64,18 +69,18 @@ public final class PrefillTimeFormula {
     static final int IDX_MAX_COMPUTE_TOKENS = 9;
     static final int VAR_COUNT = 10;
 
-    private static final Map<String, Integer> VAR_INDEX_MAP = Map.of(
-            "batchSize", IDX_BATCH_SIZE,
-            "inputTokens", IDX_INPUT_TOKENS,
-            "hitCacheTokens", IDX_HIT_CACHE_TOKENS,
-            "computeTokens", IDX_COMPUTE_TOKENS,
-            "hasHitCache", IDX_HAS_HIT_CACHE,
-            "totalInputTokens", IDX_TOTAL_INPUT_TOKENS,
-            "totalHitCacheTokens", IDX_TOTAL_HIT_CACHE_TOKENS,
-            "totalComputeTokens", IDX_TOTAL_COMPUTE_TOKENS,
-            "maxInputTokens", IDX_MAX_INPUT_TOKENS,
-            "maxComputeTokens", IDX_MAX_COMPUTE_TOKENS
-    );
+    private static final Map<String, Integer> VAR_INDEX_MAP =
+            Map.of(
+                    "batchSize", IDX_BATCH_SIZE,
+                    "inputTokens", IDX_INPUT_TOKENS,
+                    "hitCacheTokens", IDX_HIT_CACHE_TOKENS,
+                    "computeTokens", IDX_COMPUTE_TOKENS,
+                    "hasHitCache", IDX_HAS_HIT_CACHE,
+                    "totalInputTokens", IDX_TOTAL_INPUT_TOKENS,
+                    "totalHitCacheTokens", IDX_TOTAL_HIT_CACHE_TOKENS,
+                    "totalComputeTokens", IDX_TOTAL_COMPUTE_TOKENS,
+                    "maxInputTokens", IDX_MAX_INPUT_TOKENS,
+                    "maxComputeTokens", IDX_MAX_COMPUTE_TOKENS);
 
     private final ArithmeticFormula formula;
 
@@ -89,8 +94,8 @@ public final class PrefillTimeFormula {
      * @throws IllegalArgumentException if the formula is malformed or references unknown variables.
      */
     public static PrefillTimeFormula parse(String formula) {
-        return new PrefillTimeFormula(ArithmeticFormula.parse(
-                formula, VAR_INDEX_MAP, BATCH_SCOPED_VARIABLES, true));
+        return new PrefillTimeFormula(
+                ArithmeticFormula.parse(formula, VAR_INDEX_MAP, BATCH_SCOPED_VARIABLES, true));
     }
 
     /** Fresh accumulation state for one nonempty append-only batch; null if compilation falls back. */

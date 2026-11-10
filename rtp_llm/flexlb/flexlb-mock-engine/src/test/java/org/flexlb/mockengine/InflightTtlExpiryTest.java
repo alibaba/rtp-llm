@@ -30,8 +30,7 @@ class InflightTtlExpiryTest {
 
     private static final int BASE_PORT = 62500;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private MockEngineTestCluster cluster;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
@@ -59,43 +58,47 @@ class InflightTtlExpiryTest {
         // ── Phase 1: Enqueue 10 requests with decode routing → stay inflight ──
         cluster.enqueueBatch(prefill, 10000, 1, n, decodeServices);
         cluster.awaitInflight(prefill, 1, 1_000);
-        assertTrue(prefill.getInflightCount() > 0,
-                "prefill should have inflight > 0 after enqueue");
+        assertTrue(
+                prefill.getInflightCount() > 0, "prefill should have inflight > 0 after enqueue");
 
         // ── Phase 2: TTL grace window (60s) — should NOT detect leak ──
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
             service.checkLeakDrain(60_000_000_000L);
-            assertFalse(service.isLeakDetected(),
+            assertFalse(
+                    service.isLeakDetected(),
                     "leak should NOT be detected during grace window on port "
                             + service.getGrpcPort());
         }
 
         // ── Phase 3: Simulate TTL expiry (0 grace) — leak detected on prefill ──
         prefill.checkLeakDrain(0);
-        assertTrue(prefill.isLeakDetected(),
+        assertTrue(
+                prefill.isLeakDetected(),
                 "leak should be detected when TTL expires and inflight > 0 on prefill");
 
         // Decode engines should NOT have leak (they may not have started decode yet)
-        assertFalse(decode0.isLeakDetected(),
-                "decode engine 0 should not have leak detected");
-        assertFalse(decode1.isLeakDetected(),
-                "decode engine 1 should not have leak detected");
+        assertFalse(decode0.isLeakDetected(), "decode engine 0 should not have leak detected");
+        assertFalse(decode1.isLeakDetected(), "decode engine 1 should not have leak detected");
 
         // ── Phase 4: Wait for TTL cleanup (scheduled completions fire, inflight → 0) ──
         cluster.awaitAllInflightZero(5_000);
         cluster.assertAllInflightZero();
 
         // ── Phase 5: Decode engines remain clean — TTL cleanup is not a leak ──
-        assertFalse(decode0.isLeakDetected(),
-                "decode engine 0 should not have leak after TTL cleanup");
-        assertFalse(decode1.isLeakDetected(),
-                "decode engine 1 should not have leak after TTL cleanup");
+        assertFalse(
+                decode0.isLeakDetected(), "decode engine 0 should not have leak after TTL cleanup");
+        assertFalse(
+                decode1.isLeakDetected(), "decode engine 1 should not have leak after TTL cleanup");
 
         // ── Phase 6: Inject noRespond on decode engine 0 via HTTP /inject ──
-        MockEngineTestSupport.httpPost(cluster.controlPort(), "/inject",
-                "{\"port\":" + decode0.getGrpcPort()
+        MockEngineTestSupport.httpPost(
+                cluster.controlPort(),
+                "/inject",
+                "{\"port\":"
+                        + decode0.getGrpcPort()
                         + ",\"type\":\"no_respond\",\"enabled\":true}");
-        assertTrue(decode0.getFaultConfig().isNoRespond(),
+        assertTrue(
+                decode0.getFaultConfig().isNoRespond(),
                 "noRespond should be injected on decode engine 0");
 
         // ── Phase 7: Enqueue more requests — noRespond prevents response delivery
@@ -106,15 +109,16 @@ class InflightTtlExpiryTest {
 
         // Decode engine 0 with noRespond should still NOT have a leak
         // (scheduled completions fire regardless of noRespond)
-        assertFalse(decode0.isLeakDetected(),
+        assertFalse(
+                decode0.isLeakDetected(),
                 "decode engine 0 should not have leak despite noRespond injection");
-        assertFalse(decode1.isLeakDetected(),
-                "decode engine 1 should not have leak");
+        assertFalse(decode1.isLeakDetected(), "decode engine 1 should not have leak");
 
         // ── Phase 8: Clear injection via HTTP /clear_inject ──
-        MockEngineTestSupport.httpPost(cluster.controlPort(), "/clear_inject",
-                "{\"port\":" + decode0.getGrpcPort() + "}");
-        assertFalse(decode0.getFaultConfig().isNoRespond(),
+        MockEngineTestSupport.httpPost(
+                cluster.controlPort(), "/clear_inject", "{\"port\":" + decode0.getGrpcPort() + "}");
+        assertFalse(
+                decode0.getFaultConfig().isNoRespond(),
                 "noRespond should be cleared on decode engine 0");
 
         // ── Phase 9: Verify recovery — enqueue 10 more requests ──
@@ -123,21 +127,23 @@ class InflightTtlExpiryTest {
         cluster.assertAllInflightZero();
 
         // Decode engines should still have no leak after recovery
-        assertFalse(decode0.isLeakDetected(),
-                "decode engine 0 should not have leak after recovery");
-        assertFalse(decode1.isLeakDetected(),
-                "decode engine 1 should not have leak after recovery");
+        assertFalse(
+                decode0.isLeakDetected(), "decode engine 0 should not have leak after recovery");
+        assertFalse(
+                decode1.isLeakDetected(), "decode engine 1 should not have leak after recovery");
 
         // ── Phase 10: HTTP snapshot verification ──
         JsonNode snapshot = cluster.snapshot();
         assertEquals(services.size(), snapshot.size());
         for (JsonNode engine : snapshot) {
-            assertEquals(0, engine.get("inflight").asInt(),
-                    "snapshot inflight should be 0 for port "
-                            + engine.get("port").asInt());
+            assertEquals(
+                    0,
+                    engine.get("inflight").asInt(),
+                    "snapshot inflight should be 0 for port " + engine.get("port").asInt());
             // Decode engines must show leak_detected == false
             if (engine.get("port").asInt() != prefill.getGrpcPort()) {
-                assertFalse(engine.get("leak_detected").asBoolean(),
+                assertFalse(
+                        engine.get("leak_detected").asBoolean(),
                         "snapshot leak_detected should be false for decode engine on port "
                                 + engine.get("port").asInt());
             }
@@ -159,5 +165,4 @@ class InflightTtlExpiryTest {
     private MockPerformanceModel model(String formula) throws Exception {
         return MockEngineTestSupport.performanceModel(tempDir, formula);
     }
-
 }

@@ -4,6 +4,8 @@
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferBackendConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include <algorithm>
+#include <limits>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -147,11 +149,15 @@ struct P2PConnectorConfig {
         config.scheduler_config =
             P2PConnectorSchedulerConfig::create(runtime_config, cache_store_config, parallelism_config, pd_sep_config);
         config.worker_config = P2PConnectorWorkerConfig::create(
-            cache_store_config,
-            pd_sep_config,
-            parallelism_config,
-            layer_all_num,
-            llm_kv_block_size_bytes);
+            cache_store_config, pd_sep_config, parallelism_config, layer_all_num, llm_kv_block_size_bytes);
+        // Apply the same bounded fallback as the scheduler before init validates
+        // the production connector, including Prefill's worker configuration.
+        const auto    timeout                         = pd_sep_config.load_cache_timeout_ms;
+        const int64_t normalized_timeout              = timeout > 0 ?
+                                                            std::min<int64_t>(timeout, std::numeric_limits<int32_t>::max()) :
+                                                            PDSepConfig{}.load_cache_timeout_ms;
+        config.scheduler_config.load_cache_timeout_ms = normalized_timeout;
+        config.worker_config.load_cache_timeout_ms    = normalized_timeout;
         return config;
     }
 };

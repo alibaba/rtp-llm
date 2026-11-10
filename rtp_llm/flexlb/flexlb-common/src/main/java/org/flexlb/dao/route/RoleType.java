@@ -16,8 +16,7 @@ public enum RoleType {
     VIT("VIT", "Vision Transformer"),
     FRONTEND("FRONTEND", "Frontend");
 
-    @JsonValue
-    private final String code;
+    @JsonValue private final String code;
     private final String description;
 
     private static final Map<String, RoleType> CODE_MAP = new HashMap<>();
@@ -95,5 +94,4 @@ public enum RoleType {
             case FRONTEND -> StrategyErrorType.NO_FRONTEND_WORKER;
         };
     }
-
 }

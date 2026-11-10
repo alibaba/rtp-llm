@@ -18,7 +18,8 @@ public class ShardedRecentCacheKeyWindow {
 
     @Autowired
     public ShardedRecentCacheKeyWindow(ConfigService configService) {
-        this(RecentCacheKeyWindow.resolveTimeWindowMs(configService),
+        this(
+                RecentCacheKeyWindow.resolveTimeWindowMs(configService),
                 RecentCacheKeyWindow.resolveMaxCacheKeys(configService),
                 System::currentTimeMillis);
     }
@@ -30,5 +31,4 @@ public class ShardedRecentCacheKeyWindow {
     public RecentCacheKeyWindow.Snapshot record(long requestId, List<Long> cacheKeys) {
         return window.record(cacheKeys);
     }
-
 }

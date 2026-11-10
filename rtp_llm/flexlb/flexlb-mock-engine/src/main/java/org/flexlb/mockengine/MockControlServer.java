@@ -46,6 +46,7 @@ import java.util.concurrent.TimeUnit;
 final class MockControlServer {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
     /** Default bound for the graceful /remove_engine drain (in-flight work must
      * finish within this window or the removal falls back to abrupt teardown). */
     private static final long DEFAULT_DRAIN_TIMEOUT_MS = 60_000L;
@@ -55,25 +56,30 @@ final class MockControlServer {
     private final Map<Integer, Server> serversByPort;
     private final EventLoopGroup bossGroup;
     private final EventLoopGroup workerGroup;
+
     /** Runtime scale-out/in backend for /add_engine + /remove_engine; null disables them. */
     private final DynamicEngineManager engineManager;
 
-    MockControlServer(Map<Integer, JavaMockEngineCluster.FastRpcService> services,
-                      Map<Integer, Server> serversByPort,
-                      EventLoopGroup bossGroup,
-                      EventLoopGroup workerGroup,
-                      String host,
-                      int httpPort) throws IOException {
+    MockControlServer(
+            Map<Integer, JavaMockEngineCluster.FastRpcService> services,
+            Map<Integer, Server> serversByPort,
+            EventLoopGroup bossGroup,
+            EventLoopGroup workerGroup,
+            String host,
+            int httpPort)
+            throws IOException {
         this(services, serversByPort, bossGroup, workerGroup, host, httpPort, null);
     }
 
-    MockControlServer(Map<Integer, JavaMockEngineCluster.FastRpcService> services,
-                      Map<Integer, Server> serversByPort,
-                      EventLoopGroup bossGroup,
-                      EventLoopGroup workerGroup,
-                      String host,
-                      int httpPort,
-                      DynamicEngineManager engineManager) throws IOException {
+    MockControlServer(
+            Map<Integer, JavaMockEngineCluster.FastRpcService> services,
+            Map<Integer, Server> serversByPort,
+            EventLoopGroup bossGroup,
+            EventLoopGroup workerGroup,
+            String host,
+            int httpPort,
+            DynamicEngineManager engineManager)
+            throws IOException {
         this.services = services;
         this.serversByPort = serversByPort;
         this.bossGroup = bossGroup;
@@ -95,11 +101,13 @@ final class MockControlServer {
         httpServer.createContext("/add_engine", this::handleAddEngine);
         httpServer.createContext("/remove_engine", this::handleRemoveEngine);
         httpServer.createContext("/metrics", this::handleMetrics);
-        httpServer.setExecutor(Executors.newCachedThreadPool(r -> {
-            Thread t = new Thread(r, "mock-control-http");
-            t.setDaemon(true);
-            return t;
-        }));
+        httpServer.setExecutor(
+                Executors.newCachedThreadPool(
+                        r -> {
+                            Thread t = new Thread(r, "mock-control-http");
+                            t.setDaemon(true);
+                            return t;
+                        }));
     }
 
     void start() {
@@ -127,10 +135,7 @@ final class MockControlServer {
             this.response = Map.of("error", message);
         }
 
-        ApiException(
-                int status,
-                String message,
-                Map<String, Object> response) {
+        ApiException(int status, String message, Map<String, Object> response) {
             super(message);
             this.status = status;
             this.response = response;
@@ -139,9 +144,8 @@ final class MockControlServer {
 
     @FunctionalInterface
     private interface ServicePostAction {
-        Map<String, Object> apply(
-                JsonNode body,
-                JavaMockEngineCluster.FastRpcService service) throws Exception;
+        Map<String, Object> apply(JsonNode body, JavaMockEngineCluster.FastRpcService service)
+                throws Exception;
     }
 
     /**
@@ -173,9 +177,8 @@ final class MockControlServer {
         throw new ApiException(400, "request must contain 'engine' or 'port'");
     }
 
-    private void handleServicePost(
-            HttpExchange exchange,
-            ServicePostAction action) throws IOException {
+    private void handleServicePost(HttpExchange exchange, ServicePostAction action)
+            throws IOException {
         if (!"POST".equals(exchange.getRequestMethod())) {
             sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
             return;
@@ -190,8 +193,7 @@ final class MockControlServer {
             // Always answer malformed JSON and unexpected handler failures;
             // if a response was already committed there is nothing left to do.
             try {
-                sendJson(exchange, 500,
-                        Map.of("error", String.valueOf(failure)));
+                sendJson(exchange, 500, Map.of("error", String.valueOf(failure)));
             } catch (IOException ignored) {
                 // Response already committed.
             }
@@ -228,102 +230,129 @@ final class MockControlServer {
     }
 
     private void handleInject(HttpExchange exchange) throws IOException {
-        handleServicePost(exchange, (body, service) -> {
-            if (body.has("type")) {
-                // Original Java fault-injection format ({"port"/"engine", "type", "enabled", ...}).
-                String type = body.path("type").asText();
-                boolean enabled = body.path("enabled").asBoolean(true);
-                FaultInjectionConfig.Builder builder = service.getFaultConfig().toBuilder();
-                switch (type) {
-                    case "enqueue_error" -> builder.failOnEnqueue(enabled);
-                    case "generate_error" -> builder.generateError(enabled);
-                    case "fetch_error" -> builder.fetchError(enabled);
-                    case "no_respond" -> builder.noRespond(enabled);
-                    case "kv_pressure" -> builder.kvPressureTokens(enabled ? body.path("tokens").asLong(500_000) : 0);
-                    case "queue_depth" -> builder.queueDepthLimit(enabled ? body.path("depth").asInt(10) : 0);
-                    case "crash_after" -> builder.crashAfterNRequests(enabled ? body.path("n").asInt(5) : 0);
-                    case "enqueue_delay" -> builder.enqueueDelayMs(enabled ? body.path("delay_ms").asLong(0) : 0);
-                    case "generate_delay" -> builder.generateDelayMs(enabled ? body.path("delay_ms").asLong(0) : 0);
-                    // ── Status-report fault family (getWorkerStatus output layer) ──
-                    case "status_suppress_finished" -> builder.statusSuppressFinished(enabled);
-                    case "status_suppress_running" -> builder.statusSuppressRunning(enabled);
-                    case "status_suppress_rids" -> builder.statusSuppressRids(
-                            enabled ? readLongList(body.path("rids")) : List.of());
-                    case "status_no_respond" -> builder.statusNoRespond(enabled);
-                    case "status_fake_task" -> {
-                        // Append-on-inject / clear-on-disable: multiple injects
-                        // accumulate into a continuously reported synthetic set.
-                        if (enabled) {
-                            long rid = body.path("rid").asLong(0);
-                            if (rid == 0) {
-                                throw new ApiException(400, "status_fake_task requires 'rid'");
+        handleServicePost(
+                exchange,
+                (body, service) -> {
+                    if (body.has("type")) {
+                        // Original Java fault-injection format ({"port"/"engine", "type",
+                        // "enabled", ...}).
+                        String type = body.path("type").asText();
+                        boolean enabled = body.path("enabled").asBoolean(true);
+                        FaultInjectionConfig.Builder builder = service.getFaultConfig().toBuilder();
+                        switch (type) {
+                            case "enqueue_error" -> builder.failOnEnqueue(enabled);
+                            case "generate_error" -> builder.generateError(enabled);
+                            case "fetch_error" -> builder.fetchError(enabled);
+                            case "no_respond" -> builder.noRespond(enabled);
+                            case "kv_pressure" ->
+                                    builder.kvPressureTokens(
+                                            enabled ? body.path("tokens").asLong(500_000) : 0);
+                            case "queue_depth" ->
+                                    builder.queueDepthLimit(
+                                            enabled ? body.path("depth").asInt(10) : 0);
+                            case "crash_after" ->
+                                    builder.crashAfterNRequests(
+                                            enabled ? body.path("n").asInt(5) : 0);
+                            case "enqueue_delay" ->
+                                    builder.enqueueDelayMs(
+                                            enabled ? body.path("delay_ms").asLong(0) : 0);
+                            case "generate_delay" ->
+                                    builder.generateDelayMs(
+                                            enabled ? body.path("delay_ms").asLong(0) : 0);
+                            // ── Status-report fault family (getWorkerStatus output layer) ──
+                            case "status_suppress_finished" ->
+                                    builder.statusSuppressFinished(enabled);
+                            case "status_suppress_running" ->
+                                    builder.statusSuppressRunning(enabled);
+                            case "status_suppress_rids" ->
+                                    builder.statusSuppressRids(
+                                            enabled ? readLongList(body.path("rids")) : List.of());
+                            case "status_no_respond" -> builder.statusNoRespond(enabled);
+                            case "status_fake_task" -> {
+                                // Append-on-inject / clear-on-disable: multiple injects
+                                // accumulate into a continuously reported synthetic set.
+                                if (enabled) {
+                                    long rid = body.path("rid").asLong(0);
+                                    if (rid == 0) {
+                                        throw new ApiException(
+                                                400, "status_fake_task requires 'rid'");
+                                    }
+                                    List<FaultInjectionConfig.StatusFakeTask> fakeTasks =
+                                            new ArrayList<>(
+                                                    service.getFaultConfig().getStatusFakeTasks());
+                                    fakeTasks.add(
+                                            new FaultInjectionConfig.StatusFakeTask(
+                                                    rid,
+                                                    body.path("batch_id").asLong(0),
+                                                    body.path("phase").asText("RUNNING"),
+                                                    body.path("error_code").asLong(0)));
+                                    builder.statusFakeTasks(fakeTasks);
+                                } else {
+                                    builder.statusFakeTasks(List.of());
+                                }
                             }
-                            List<FaultInjectionConfig.StatusFakeTask> fakeTasks =
-                                    new ArrayList<>(service.getFaultConfig().getStatusFakeTasks());
-                            fakeTasks.add(new FaultInjectionConfig.StatusFakeTask(
-                                    rid,
-                                    body.path("batch_id").asLong(0),
-                                    body.path("phase").asText("RUNNING"),
-                                    body.path("error_code").asLong(0)));
-                            builder.statusFakeTasks(fakeTasks);
-                        } else {
-                            builder.statusFakeTasks(List.of());
+                            case "status_duplicate_finished" ->
+                                    builder.statusDuplicateFinished(enabled);
+                            case "status_cursor_regress" ->
+                                    builder.statusCursorRegress(
+                                            enabled ? body.path("n").asInt(1) : 0);
+                            case "status_version_regress" -> builder.statusVersionRegress(enabled);
+                            case "status_zombie_running" -> builder.statusZombieRunning(enabled);
+                            // ── EnqueueBatch ack fault family (ack content corruption;
+                            // engine-side processing is untouched) ──
+                            case "enqueue_ack_partial_fail" ->
+                                    builder.enqueueAckPartialFail(
+                                            enabled ? body.path("k").asInt(1) : 0);
+                            case "enqueue_ack_error_code" ->
+                                    builder.enqueueAckErrorCode(
+                                            enabled ? body.path("code").asLong(0) : 0);
+                            case "enqueue_ack_drop" -> builder.enqueueAckDrop(enabled);
+                            // ── Prefill execution-phase partial-failure family (the
+                            // completion-callback injection — see FaultInjectionConfig
+                            // .prefillAsyncPartialFail; single case carrying both k
+                            // and code, the status_fake_task multi-param pattern) ──
+                            case "prefill_async_partial_fail" -> {
+                                builder.prefillAsyncPartialFail(
+                                        enabled ? body.path("k").asInt(1) : 0);
+                                // Disarm restores the default code (NOT 0 — a zero
+                                // errorCode reads as "success" in the terminal fact).
+                                builder.prefillAsyncFailCode(
+                                        enabled ? body.path("code").asLong(8500L) : 8500L);
+                            }
+                            // ── Cancel-RPC fault family (RPC-layer failures simulated
+                            // BEFORE the engine cancel state machine is touched — no
+                            // fences, no terminal records; the gRPC Cancel handler and the
+                            // in-process MockEngineCancelChannel run the same gate) ──
+                            case "cancel_no_respond" -> builder.cancelNoRespond(enabled);
+                            case "cancel_error" -> builder.cancelError(enabled);
+                            case "cancel_unexpected_status" ->
+                                    builder.cancelUnexpectedStatus(enabled);
+                            default ->
+                                    throw new ApiException(400, "unknown injection type: " + type);
                         }
+                        service.setFaultConfig(builder.build());
+                        Map<String, Object> response = successResponse(service);
+                        response.put("type", type);
+                        return response;
                     }
-                    case "status_duplicate_finished" -> builder.statusDuplicateFinished(enabled);
-                    case "status_cursor_regress" -> builder.statusCursorRegress(
-                            enabled ? body.path("n").asInt(1) : 0);
-                    case "status_version_regress" -> builder.statusVersionRegress(enabled);
-                    case "status_zombie_running" -> builder.statusZombieRunning(enabled);
-                    // ── EnqueueBatch ack fault family (ack content corruption;
-                    // engine-side processing is untouched) ──
-                    case "enqueue_ack_partial_fail" -> builder.enqueueAckPartialFail(
-                            enabled ? body.path("k").asInt(1) : 0);
-                    case "enqueue_ack_error_code" -> builder.enqueueAckErrorCode(
-                            enabled ? body.path("code").asLong(0) : 0);
-                    case "enqueue_ack_drop" -> builder.enqueueAckDrop(enabled);
-                    // ── Prefill execution-phase partial-failure family (the
-                    // completion-callback injection — see FaultInjectionConfig
-                    // .prefillAsyncPartialFail; single case carrying both k
-                    // and code, the status_fake_task multi-param pattern) ──
-                    case "prefill_async_partial_fail" -> {
-                        builder.prefillAsyncPartialFail(
-                                enabled ? body.path("k").asInt(1) : 0);
-                        // Disarm restores the default code (NOT 0 — a zero
-                        // errorCode reads as "success" in the terminal fact).
-                        builder.prefillAsyncFailCode(
-                                enabled ? body.path("code").asLong(8500L) : 8500L);
-                    }
-                    // ── Cancel-RPC fault family (RPC-layer failures simulated
-                    // BEFORE the engine cancel state machine is touched — no
-                    // fences, no terminal records; the gRPC Cancel handler and the
-                    // in-process MockEngineCancelChannel run the same gate) ──
-                    case "cancel_no_respond" -> builder.cancelNoRespond(enabled);
-                    case "cancel_error" -> builder.cancelError(enabled);
-                    case "cancel_unexpected_status" -> builder.cancelUnexpectedStatus(enabled);
-                    default -> throw new ApiException(
-                            400, "unknown injection type: " + type);
-                }
-                service.setFaultConfig(builder.build());
-                Map<String, Object> response = successResponse(service);
-                response.put("type", type);
-                return response;
-            }
 
-            // Python format (_http_inject / set_injection):
-            // {"engine": "prefill-0", "config": {"enqueue_error": bool, "fetch_error": bool,
-            //                                     "generate_error": bool, "no_respond": bool}}
-            // Python REPLACES the whole inject config (not merge), so build a fresh one.
-            JsonNode cfg = body.path("config");
-            FaultInjectionConfig injected = FaultInjectionConfig.builder()
-                    .failOnEnqueue(cfg.path("enqueue_error").asBoolean(false))
-                    .fetchError(cfg.path("fetch_error").asBoolean(false))
-                    .generateError(cfg.path("generate_error").asBoolean(false))
-                    .noRespond(cfg.path("no_respond").asBoolean(false))
-                    .build();
-            service.setFaultConfig(injected);
-            return successResponse(service);
-        });
+                    // Python format (_http_inject / set_injection):
+                    // {"engine": "prefill-0", "config": {"enqueue_error": bool, "fetch_error":
+                    // bool,
+                    //                                     "generate_error": bool, "no_respond":
+                    // bool}}
+                    // Python REPLACES the whole inject config (not merge), so build a fresh one.
+                    JsonNode cfg = body.path("config");
+                    FaultInjectionConfig injected =
+                            FaultInjectionConfig.builder()
+                                    .failOnEnqueue(cfg.path("enqueue_error").asBoolean(false))
+                                    .fetchError(cfg.path("fetch_error").asBoolean(false))
+                                    .generateError(cfg.path("generate_error").asBoolean(false))
+                                    .noRespond(cfg.path("no_respond").asBoolean(false))
+                                    .build();
+                    service.setFaultConfig(injected);
+                    return successResponse(service);
+                });
     }
 
     /** Read a JSON array of integers into a Long list (status_suppress_rids). */
@@ -336,10 +365,12 @@ final class MockControlServer {
     }
 
     private void handleClearInject(HttpExchange exchange) throws IOException {
-        handleServicePost(exchange, (body, service) -> {
-            service.clearFaultConfig();
-            return successResponse(service);
-        });
+        handleServicePost(
+                exchange,
+                (body, service) -> {
+                    service.clearFaultConfig();
+                    return successResponse(service);
+                });
     }
 
     private void handleHealth(HttpExchange exchange) throws IOException {
@@ -373,78 +404,94 @@ final class MockControlServer {
     }
 
     private void handleSetPerf(HttpExchange exchange) throws IOException {
-        handleServicePost(exchange, (body, service) -> {
-            MockPerformanceModel perf = service.getPerformance();
-            // Python fields (_http_set_perf):
-            if (body.has("prefill_fixed_ms")) {
-                perf.setOverrideFixedPrefillMs(body.get("prefill_fixed_ms").asDouble());
-            }
-            if (body.has("decode_scale")) {
-                perf.setOverrideDecodeScale(body.get("decode_scale").asDouble());
-            }
-            if (body.has("max_prefill_concurrency")) {
-                service.setMaxPrefillConcurrency(body.get("max_prefill_concurrency").asInt());
-            }
-            if (body.has("max_waiting_batches")) {
-                // Runtime override of the prefill waiting-queue cap
-                // (performance JSON "prefill.max_waiting_batches"), same
-                // semantics as the JSON field: 0 = unbounded, > 0 = cap on
-                // queued prefill batches. Negative values are meaningless
-                // (neither a cap nor the explicit unbounded 0) -> 400.
-                int cap = body.get("max_waiting_batches").asInt();
-                if (cap < 0) {
-                    throw new ApiException(400,
-                            "max_waiting_batches must be >= 0 (0 = unbounded), got: " + cap);
-                }
-                perf.setOverrideMaxWaitingPrefillBatches(cap);
-            }
-            if (body.has("decode_retry_times") || body.has("decode_retry_interval_ms")
-                    || body.has("decode_retry_timeout_ms")) {
-                // D-side ALLOCATE retry window (production decode_retry_* /
-                // DecodeRpcServer.cc EXECUTE_WITH_RETRY, defaults 100/1/100):
-                // FULL-REPLACE policy — a partial POST supplies the engine's
-                // current values for the absent fields, so the window never
-                // ends up half-configured. Negative values are meaningless
-                // (0 = immediate fail, a valid degenerate) -> 400.
-                int times = body.path("decode_retry_times").asInt(
-                        service.getDecodeAllocateRetryTimes());
-                long intervalMs = body.path("decode_retry_interval_ms").asLong(
-                        service.getDecodeAllocateRetryIntervalMs());
-                long timeoutMs = body.path("decode_retry_timeout_ms").asLong(
-                        service.getDecodeAllocateRetryTimeoutMs());
-                if (times < 0 || intervalMs < 0 || timeoutMs < 0) {
-                    throw new ApiException(400, String.format(
-                            "decode_retry_* must be >= 0, got: times=%d interval_ms=%d timeout_ms=%d",
-                            times, intervalMs, timeoutMs));
-                }
-                service.setDecodeAllocateRetryPolicy(times, intervalMs, timeoutMs);
-            }
-            return successResponse(service);
-        });
+        handleServicePost(
+                exchange,
+                (body, service) -> {
+                    MockPerformanceModel perf = service.getPerformance();
+                    // Python fields (_http_set_perf):
+                    if (body.has("prefill_fixed_ms")) {
+                        perf.setOverrideFixedPrefillMs(body.get("prefill_fixed_ms").asDouble());
+                    }
+                    if (body.has("decode_scale")) {
+                        perf.setOverrideDecodeScale(body.get("decode_scale").asDouble());
+                    }
+                    if (body.has("max_prefill_concurrency")) {
+                        service.setMaxPrefillConcurrency(
+                                body.get("max_prefill_concurrency").asInt());
+                    }
+                    if (body.has("max_waiting_batches")) {
+                        // Runtime override of the prefill waiting-queue cap
+                        // (performance JSON "prefill.max_waiting_batches"), same
+                        // semantics as the JSON field: 0 = unbounded, > 0 = cap on
+                        // queued prefill batches. Negative values are meaningless
+                        // (neither a cap nor the explicit unbounded 0) -> 400.
+                        int cap = body.get("max_waiting_batches").asInt();
+                        if (cap < 0) {
+                            throw new ApiException(
+                                    400,
+                                    "max_waiting_batches must be >= 0 (0 = unbounded), got: "
+                                            + cap);
+                        }
+                        perf.setOverrideMaxWaitingPrefillBatches(cap);
+                    }
+                    if (body.has("decode_retry_times")
+                            || body.has("decode_retry_interval_ms")
+                            || body.has("decode_retry_timeout_ms")) {
+                        // D-side ALLOCATE retry window (production decode_retry_* /
+                        // DecodeRpcServer.cc EXECUTE_WITH_RETRY, defaults 100/1/100):
+                        // FULL-REPLACE policy — a partial POST supplies the engine's
+                        // current values for the absent fields, so the window never
+                        // ends up half-configured. Negative values are meaningless
+                        // (0 = immediate fail, a valid degenerate) -> 400.
+                        int times =
+                                body.path("decode_retry_times")
+                                        .asInt(service.getDecodeAllocateRetryTimes());
+                        long intervalMs =
+                                body.path("decode_retry_interval_ms")
+                                        .asLong(service.getDecodeAllocateRetryIntervalMs());
+                        long timeoutMs =
+                                body.path("decode_retry_timeout_ms")
+                                        .asLong(service.getDecodeAllocateRetryTimeoutMs());
+                        if (times < 0 || intervalMs < 0 || timeoutMs < 0) {
+                            throw new ApiException(
+                                    400,
+                                    String.format(
+                                            "decode_retry_* must be >= 0, got: times=%d interval_ms=%d timeout_ms=%d",
+                                            times, intervalMs, timeoutMs));
+                        }
+                        service.setDecodeAllocateRetryPolicy(times, intervalMs, timeoutMs);
+                    }
+                    return successResponse(service);
+                });
     }
 
     private void handleSetKvPressure(HttpExchange exchange) throws IOException {
-        handleServicePost(exchange, (body, service) -> {
-            // Python semantics (_http_set_kv_pressure): ABSOLUTE value —
-            // state._active_kv_tokens = value.
-            service.setAbsoluteActiveKvTokens(body.path("active_kv_tokens").asLong(0));
-            return successResponse(service);
-        });
+        handleServicePost(
+                exchange,
+                (body, service) -> {
+                    // Python semantics (_http_set_kv_pressure): ABSOLUTE value —
+                    // state._active_kv_tokens = value.
+                    service.setAbsoluteActiveKvTokens(body.path("active_kv_tokens").asLong(0));
+                    return successResponse(service);
+                });
     }
 
     private void handleSetQueueDepth(HttpExchange exchange) throws IOException {
-        handleServicePost(exchange, (body, service) -> {
-            // NOTE (intentional divergence): the legacy Python queue_depth was a fake
-            // display value (only bumped the snapshot "waiting" counter); Java
-            // implements it as real enqueue rejection. Field name kept for compatibility.
-            int depth = body.has("queue_depth")
-                    ? body.get("queue_depth").asInt(0)
-                    : body.path("depth").asInt(0);
-            FaultInjectionConfig.Builder builder = service.getFaultConfig().toBuilder();
-            builder.queueDepthLimit(depth);
-            service.setFaultConfig(builder.build());
-            return successResponse(service);
-        });
+        handleServicePost(
+                exchange,
+                (body, service) -> {
+                    // NOTE (intentional divergence): the legacy Python queue_depth was a fake
+                    // display value (only bumped the snapshot "waiting" counter); Java
+                    // implements it as real enqueue rejection. Field name kept for compatibility.
+                    int depth =
+                            body.has("queue_depth")
+                                    ? body.get("queue_depth").asInt(0)
+                                    : body.path("depth").asInt(0);
+                    FaultInjectionConfig.Builder builder = service.getFaultConfig().toBuilder();
+                    builder.queueDepthLimit(depth);
+                    service.setFaultConfig(builder.build());
+                    return successResponse(service);
+                });
     }
 
     /**
@@ -457,88 +504,95 @@ final class MockControlServer {
      * premise). Response: {status, engine, port, changed, cache_version}.
      */
     private void handleCacheEvict(HttpExchange exchange) throws IOException {
-        handleServicePost(exchange, (body, service) -> {
-            JsonNode keysNode = body.path("keys");
-            if (!keysNode.isArray()) {
-                throw new ApiException(400, "'keys' must be an array of block keys");
-            }
-            List<Long> keys = new ArrayList<>();
-            for (JsonNode key : keysNode) {
-                keys.add(parseBlockKey(key));
-            }
-            boolean changed = service.evictCacheKeys(keys);
-            Map<String, Object> response = successResponse(service);
-            response.put("changed", changed);
-            response.put("cache_version", service.getCacheVersion());
-            return response;
-        });
+        handleServicePost(
+                exchange,
+                (body, service) -> {
+                    JsonNode keysNode = body.path("keys");
+                    if (!keysNode.isArray()) {
+                        throw new ApiException(400, "'keys' must be an array of block keys");
+                    }
+                    List<Long> keys = new ArrayList<>();
+                    for (JsonNode key : keysNode) {
+                        keys.add(parseBlockKey(key));
+                    }
+                    boolean changed = service.evictCacheKeys(keys);
+                    Map<String, Object> response = successResponse(service);
+                    response.put("changed", changed);
+                    response.put("cache_version", service.getCacheVersion());
+                    return response;
+                });
     }
 
     private void handleStopEngine(HttpExchange exchange) throws IOException {
-        handleServicePost(exchange, (body, service) -> {
-            int port = service.getGrpcPort();
-            service.setStopped(true);
-            Server server = serversByPort.get(port);
-            if (server != null) {
-                server.shutdownNow();
-            }
-            Map<String, Object> response = successResponse(service);
-            response.put("action", "stopped");
-            return response;
-        });
+        handleServicePost(
+                exchange,
+                (body, service) -> {
+                    int port = service.getGrpcPort();
+                    service.setStopped(true);
+                    Server server = serversByPort.get(port);
+                    if (server != null) {
+                        server.shutdownNow();
+                    }
+                    Map<String, Object> response = successResponse(service);
+                    response.put("action", "stopped");
+                    return response;
+                });
     }
 
     private void handleStartEngine(HttpExchange exchange) throws IOException {
-        handleServicePost(exchange, (body, service) -> {
-            int port = service.getGrpcPort();
-            service.clearFaultConfig();
-            service.resetEnqueueCount();
-            // Release the port fully before rebinding: shut the old server down
-            // and await termination, then build+bind the new one. Only after the
-            // new server is actually serving do we flip the stopped flag and
-            // swap serversByPort — a bind failure leaves a consistent state
-            // (stopped=true, no phantom server) instead of stopped=false with
-            // nothing listening.
-            Server existing = serversByPort.get(port);
-            if (existing != null && !existing.isShutdown()) {
-                existing.shutdown();
-                try {
-                    if (!existing.awaitTermination(5, TimeUnit.SECONDS)) {
-                        existing.shutdownNow();
-                        existing.awaitTermination(5, TimeUnit.SECONDS);
+        handleServicePost(
+                exchange,
+                (body, service) -> {
+                    int port = service.getGrpcPort();
+                    service.clearFaultConfig();
+                    service.resetEnqueueCount();
+                    // Release the port fully before rebinding: shut the old server down
+                    // and await termination, then build+bind the new one. Only after the
+                    // new server is actually serving do we flip the stopped flag and
+                    // swap serversByPort — a bind failure leaves a consistent state
+                    // (stopped=true, no phantom server) instead of stopped=false with
+                    // nothing listening.
+                    Server existing = serversByPort.get(port);
+                    if (existing != null && !existing.isShutdown()) {
+                        existing.shutdown();
+                        try {
+                            if (!existing.awaitTermination(5, TimeUnit.SECONDS)) {
+                                existing.shutdownNow();
+                                existing.awaitTermination(5, TimeUnit.SECONDS);
+                            }
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            existing.shutdownNow();
+                        }
                     }
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    existing.shutdownNow();
-                }
-            }
-            Server server;
-            try {
-                server = NettyServerBuilder.forPort(port)
-                        .bossEventLoopGroup(bossGroup)
-                        .workerEventLoopGroup(workerGroup)
-                        .channelType(NioServerSocketChannel.class)
-                        .directExecutor()
-                        .maxInboundMessageSize(16 * 1024 * 1024)
-                        .addService(service)
-                        .build()
-                        .start();
-            } catch (Exception e) {
-                service.setStopped(true);
-                throw new ApiException(500,
-                        "failed to start engine on port " + port + ": " + e);
-            }
-            service.setStopped(false);
-            // Point the service at the rebuilt server: after a crash_after
-            // true-crash the old reference is a dead victim; after stop_engine
-            // the port simply rebinds. Either way the service must be able to
-            // kill THIS server on a future crash.
-            service.setGrpcServer(server);
-            serversByPort.put(port, server);
-            Map<String, Object> response = successResponse(service);
-            response.put("action", "started");
-            return response;
-        });
+                    Server server;
+                    try {
+                        server =
+                                NettyServerBuilder.forPort(port)
+                                        .bossEventLoopGroup(bossGroup)
+                                        .workerEventLoopGroup(workerGroup)
+                                        .channelType(NioServerSocketChannel.class)
+                                        .directExecutor()
+                                        .maxInboundMessageSize(16 * 1024 * 1024)
+                                        .addService(service)
+                                        .build()
+                                        .start();
+                    } catch (Exception e) {
+                        service.setStopped(true);
+                        throw new ApiException(
+                                500, "failed to start engine on port " + port + ": " + e);
+                    }
+                    service.setStopped(false);
+                    // Point the service at the rebuilt server: after a crash_after
+                    // true-crash the old reference is a dead victim; after stop_engine
+                    // the port simply rebinds. Either way the service must be able to
+                    // kill THIS server on a future crash.
+                    service.setGrpcServer(server);
+                    serversByPort.put(port, server);
+                    Map<String, Object> response = successResponse(service);
+                    response.put("action", "started");
+                    return response;
+                });
     }
 
     /**
@@ -566,69 +620,76 @@ final class MockControlServer {
      * 200 with the out-of-contract status string. Engine state never changes.
      */
     private void handleCancelRequest(HttpExchange exchange) throws IOException {
-        handleServicePost(exchange, (body, service) -> {
-            if (!body.has("request_id")) {
-                throw new ApiException(400, "request must contain 'request_id'");
-            }
-            long requestId = parseRequestId(body.get("request_id"));
-            // Cancel-RPC fault-injection gate — same arriveCancelRpc entry as
-            // the gRPC Cancel handler and the in-process MockEngineCancelChannel:
-            // the arrival is counted once, the armed fault short-circuits
-            // BEFORE cancelRequest so the engine cancel state machine is never
-            // touched (production semantics "RPC failed = engine state
-            // unchanged": no fences, no terminal records, no census branch).
-            JavaMockEngineCluster.CancelFaultKind fault = service.arriveCancelRpc();
-            if (fault == JavaMockEngineCluster.CancelFaultKind.NO_RESPOND) {
-                // cancel_no_respond over HTTP: outlive HttpMockEngineCancel
-                // Channel's 500ms REQUEST_TIMEOUT (750ms > 500ms) so the
-                // client future times out, then answer 504. The cached
-                // thread pool keeps other control-plane requests responsive.
-                try {
-                    Thread.sleep(750L);
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                }
-                throw new ApiException(504, "cancel_no_respond injection");
-            }
-            if (fault == JavaMockEngineCluster.CancelFaultKind.ERROR) {
-                throw new ApiException(500, "cancel_error injection");
-            }
-            if (fault == JavaMockEngineCluster.CancelFaultKind.UNEXPECTED_STATUS) {
-                // 200 + out-of-contract status string: return the injected
-                // body and let handleServicePost write it (a bare `return;`
-                // does not compile — ServicePostAction returns a Map).
-                Map<String, Object> injected = new LinkedHashMap<>();
-                injected.put("status", "UNEXPECTED_STATUS");
-                injected.put("engine", service.getEngineName());
-                injected.put("port", service.getGrpcPort());
-                injected.put("request_id", requestId);
-                return injected;
-            }
-            JavaMockEngineCluster.CancelResult result;
-            try {
-                result = service.cancelRequest(requestId);
-            } catch (UnsupportedOperationException unsupported) {
-                throw new ApiException(
-                        501,
-                        unsupported.getMessage(),
-                        Map.of(
-                                "status", "UNIMPLEMENTED",
-                                "error", unsupported.getMessage()));
-            }
-            Map<String, Object> response = new LinkedHashMap<>();
-            // Full three-branch contract mirror (block-2 fix): ACCEPTED /
-            // NOT_FOUND (already-finished) / REQUEST_FENCED (never-seen — absent
-            // fence installed, later same-rid enqueues are 8429-rejected).
-            response.put("status", result.found() ? "ACCEPTED"
-                    : result.alreadyFinished() ? "NOT_FOUND" : "TOMBSTONED");
-            response.put("found", result.found());
-            response.put("phase", result.phase() == null ? null : result.phase().name());
-            response.put("already_finished", result.alreadyFinished());
-            response.put("engine", service.getEngineName());
-            response.put("port", service.getGrpcPort());
-            response.put("request_id", requestId);
-            return response;
-        });
+        handleServicePost(
+                exchange,
+                (body, service) -> {
+                    if (!body.has("request_id")) {
+                        throw new ApiException(400, "request must contain 'request_id'");
+                    }
+                    long requestId = parseRequestId(body.get("request_id"));
+                    // Cancel-RPC fault-injection gate — same arriveCancelRpc entry as
+                    // the gRPC Cancel handler and the in-process MockEngineCancelChannel:
+                    // the arrival is counted once, the armed fault short-circuits
+                    // BEFORE cancelRequest so the engine cancel state machine is never
+                    // touched (production semantics "RPC failed = engine state
+                    // unchanged": no fences, no terminal records, no census branch).
+                    JavaMockEngineCluster.CancelFaultKind fault = service.arriveCancelRpc();
+                    if (fault == JavaMockEngineCluster.CancelFaultKind.NO_RESPOND) {
+                        // cancel_no_respond over HTTP: outlive HttpMockEngineCancel
+                        // Channel's 500ms REQUEST_TIMEOUT (750ms > 500ms) so the
+                        // client future times out, then answer 504. The cached
+                        // thread pool keeps other control-plane requests responsive.
+                        try {
+                            Thread.sleep(750L);
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                        }
+                        throw new ApiException(504, "cancel_no_respond injection");
+                    }
+                    if (fault == JavaMockEngineCluster.CancelFaultKind.ERROR) {
+                        throw new ApiException(500, "cancel_error injection");
+                    }
+                    if (fault == JavaMockEngineCluster.CancelFaultKind.UNEXPECTED_STATUS) {
+                        // 200 + out-of-contract status string: return the injected
+                        // body and let handleServicePost write it (a bare `return;`
+                        // does not compile — ServicePostAction returns a Map).
+                        Map<String, Object> injected = new LinkedHashMap<>();
+                        injected.put("status", "UNEXPECTED_STATUS");
+                        injected.put("engine", service.getEngineName());
+                        injected.put("port", service.getGrpcPort());
+                        injected.put("request_id", requestId);
+                        return injected;
+                    }
+                    JavaMockEngineCluster.CancelResult result;
+                    try {
+                        result = service.cancelRequest(requestId);
+                    } catch (UnsupportedOperationException unsupported) {
+                        throw new ApiException(
+                                501,
+                                unsupported.getMessage(),
+                                Map.of(
+                                        "status",
+                                        "UNIMPLEMENTED",
+                                        "error",
+                                        unsupported.getMessage()));
+                    }
+                    Map<String, Object> response = new LinkedHashMap<>();
+                    // Full three-branch contract mirror (block-2 fix): ACCEPTED /
+                    // NOT_FOUND (already-finished) / REQUEST_FENCED (never-seen — absent
+                    // fence installed, later same-rid enqueues are 8429-rejected).
+                    response.put(
+                            "status",
+                            result.found()
+                                    ? "ACCEPTED"
+                                    : result.alreadyFinished() ? "NOT_FOUND" : "TOMBSTONED");
+                    response.put("found", result.found());
+                    response.put("phase", result.phase() == null ? null : result.phase().name());
+                    response.put("already_finished", result.alreadyFinished());
+                    response.put("engine", service.getEngineName());
+                    response.put("port", service.getGrpcPort());
+                    response.put("request_id", requestId);
+                    return response;
+                });
     }
 
     /**
@@ -685,8 +746,12 @@ final class MockControlServer {
         }
         try {
             if (engineManager == null) {
-                sendJson(exchange, 501, Map.of("error",
-                        "dynamic engine management not configured (start cluster with --discovery-file)"));
+                sendJson(
+                        exchange,
+                        501,
+                        Map.of(
+                                "error",
+                                "dynamic engine management not configured (start cluster with --discovery-file)"));
                 return;
             }
             JsonNode body = MAPPER.readTree(exchange.getRequestBody());
@@ -735,25 +800,36 @@ final class MockControlServer {
         }
         try {
             if (engineManager == null) {
-                sendJson(exchange, 501, Map.of("error",
-                        "dynamic engine management not configured (start cluster with --discovery-file)"));
+                sendJson(
+                        exchange,
+                        501,
+                        Map.of(
+                                "error",
+                                "dynamic engine management not configured (start cluster with --discovery-file)"));
                 return;
             }
             JsonNode body = MAPPER.readTree(exchange.getRequestBody());
             JavaMockEngineCluster.FastRpcService service = resolveService(body);
             String mode = body.path("mode").asText("graceful");
             if (!"graceful".equalsIgnoreCase(mode) && !"abrupt".equalsIgnoreCase(mode)) {
-                sendJson(exchange, 400, Map.of("error",
-                        "mode must be 'graceful' or 'abrupt', got: " + mode));
+                sendJson(
+                        exchange,
+                        400,
+                        Map.of("error", "mode must be 'graceful' or 'abrupt', got: " + mode));
                 return;
             }
             long drainTimeoutMs = body.path("drain_timeout_ms").asLong(DEFAULT_DRAIN_TIMEOUT_MS);
             if (drainTimeoutMs < 0 || drainTimeoutMs > 600_000L) {
-                sendJson(exchange, 400, Map.of("error",
-                        "drain_timeout_ms must be in [0, 600000]: " + drainTimeoutMs));
+                sendJson(
+                        exchange,
+                        400,
+                        Map.of(
+                                "error",
+                                "drain_timeout_ms must be in [0, 600000]: " + drainTimeoutMs));
                 return;
             }
-            DynamicEngineManager.RemovedEngine removed = engineManager.removeEngine(service, mode, drainTimeoutMs);
+            DynamicEngineManager.RemovedEngine removed =
+                    engineManager.removeEngine(service, mode, drainTimeoutMs);
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("status", "ok");
             response.put("engine", removed.engineName());
@@ -812,7 +888,9 @@ final class MockControlServer {
     /** Services sorted by gRPC port for deterministic output (Python lists engines in creation order). */
     private List<JavaMockEngineCluster.FastRpcService> orderedServices() {
         List<JavaMockEngineCluster.FastRpcService> ordered = new ArrayList<>(services.values());
-        ordered.sort(java.util.Comparator.comparingInt(JavaMockEngineCluster.FastRpcService::getGrpcPort));
+        ordered.sort(
+                java.util.Comparator.comparingInt(
+                        JavaMockEngineCluster.FastRpcService::getGrpcPort));
         return ordered;
     }
 
@@ -823,49 +901,85 @@ final class MockControlServer {
      */
     private static void appendMetricsMeta(StringBuilder sb) {
         String[][] meta = {
-                {"mock_engine_up", "1 if engine is running, 0 if stopped", "gauge"},
-                {"mock_engine_running", "current running requests", "gauge"},
-                {"mock_engine_waiting", "current waiting requests", "gauge"},
-                {"mock_engine_accepted_total", "total accepted requests", "counter"},
-                {"mock_engine_completed_total", "total completed requests", "counter"},
-                {"mock_engine_cancelled_total", "total cancelled requests", "counter"},
-                {"mock_engine_cache_keys", "number of cache keys", "gauge"},
-                {"mock_engine_cache_evictions_total", "total cache evictions", "counter"},
-                {"mock_engine_active_kv_tokens", "active KV cache tokens", "gauge"},
-                {"mock_engine_available_kv_tokens", "available KV cache tokens", "gauge"},
-                {"mock_engine_rpc_total", "total RPC calls by method", "counter"},
-                {"mock_engine_prefill_ms_avg", "average prefill execution time in ms", "gauge"},
-                {"mock_engine_prefill_ms_p99", "p99 prefill execution time in ms", "gauge"},
-                {"mock_engine_prefill_ms_count", "number of prefill samples", "gauge"},
-                {"mock_engine_decode_ms_avg", "average decode execution time in ms", "gauge"},
-                {"mock_engine_decode_ms_p99", "p99 decode execution time in ms", "gauge"},
-                {"mock_engine_decode_ms_count", "number of decode samples", "gauge"},
-                // Production-caliber TPS series (pure accounting on completion
-                // events; window = scrape interval, 1s under the G1 poller).
-                // Same metric names as the real engine (RtpLLMMetrics) so mock
-                // dashboards read like the production ones.
-                {"rtp_llm_context_tps", "computed context tokens (input minus cache hits) per scrape window", "gauge"},
-                {"rtp_llm_context_tps_with_cache", "context tokens per scrape window including cache hits", "gauge"},
-                {"rtp_llm_generate_tps", "generated output tokens per scrape window", "gauge"},
-                // Block-pool observability (KV capacity model v2): the
-                // three-state block split + the admission/reuse counters.
-                // Gauges read the pool state; counters are cumulative
-                // (prefill rejects synchronously, decode degrades un-pooled
-                // and stalls growth; decode reuse = the fix #5 net-demand
-                // deduction against the engine's own LRU).
-                {"mock_engine_cache_blocks", "total block-pool size in blocks", "gauge"},
-                {"mock_engine_available_blocks", "available blocks (free + pure-LRU, held excluded)", "gauge"},
-                {"mock_engine_held_blocks", "blocks held by in-flight requests", "gauge"},
-                {"mock_engine_referenced_blocks", "cache-key blocks referenced by in-flight requests", "gauge"},
-                {"mock_engine_kv_admission_fails_total", "total decode KV admission/growth failures, RETRYABLE family (temporarily short; 8211 terminals after the ALLOCATE retry window)", "counter"},
-                {"mock_engine_lack_mem_rejects_total", "total LACK_MEM rejections, PERMANENT family (never fits) + prefill pool 602 surface", "counter"},
-                {"mock_engine_decode_reuse_blocks_total", "total decode prefix-reuse blocks (own-LRU net-demand deduction)", "counter"},
-                // Key-level cache-hit observability (recent_cache_key_hit_count /
-                // total_count production caliber): cumulative counters recorded at
-                // the prefill admission hit computation (shape()'s prefixHitBlocks
-                // call). hit ratio = hits/requested, both per-engine + role.
-                {"mock_engine_cache_key_hits_total", "total prefix-matched cache keys at prefill admission (recent_cache_key_hit caliber)", "counter"},
-                {"mock_engine_cache_keys_requested_total", "total request block keys observed at prefill admission (empty-bh adds 0)", "counter"},
+            {"mock_engine_up", "1 if engine is running, 0 if stopped", "gauge"},
+            {"mock_engine_running", "current running requests", "gauge"},
+            {"mock_engine_waiting", "current waiting requests", "gauge"},
+            {"mock_engine_accepted_total", "total accepted requests", "counter"},
+            {"mock_engine_completed_total", "total completed requests", "counter"},
+            {"mock_engine_cancelled_total", "total cancelled requests", "counter"},
+            {"mock_engine_cache_keys", "number of cache keys", "gauge"},
+            {"mock_engine_cache_evictions_total", "total cache evictions", "counter"},
+            {"mock_engine_active_kv_tokens", "active KV cache tokens", "gauge"},
+            {"mock_engine_available_kv_tokens", "available KV cache tokens", "gauge"},
+            {"mock_engine_rpc_total", "total RPC calls by method", "counter"},
+            {"mock_engine_prefill_ms_avg", "average prefill execution time in ms", "gauge"},
+            {"mock_engine_prefill_ms_p99", "p99 prefill execution time in ms", "gauge"},
+            {"mock_engine_prefill_ms_count", "number of prefill samples", "gauge"},
+            {"mock_engine_decode_ms_avg", "average decode execution time in ms", "gauge"},
+            {"mock_engine_decode_ms_p99", "p99 decode execution time in ms", "gauge"},
+            {"mock_engine_decode_ms_count", "number of decode samples", "gauge"},
+            // Production-caliber TPS series (pure accounting on completion
+            // events; window = scrape interval, 1s under the G1 poller).
+            // Same metric names as the real engine (RtpLLMMetrics) so mock
+            // dashboards read like the production ones.
+            {
+                "rtp_llm_context_tps",
+                "computed context tokens (input minus cache hits) per scrape window",
+                "gauge"
+            },
+            {
+                "rtp_llm_context_tps_with_cache",
+                "context tokens per scrape window including cache hits",
+                "gauge"
+            },
+            {"rtp_llm_generate_tps", "generated output tokens per scrape window", "gauge"},
+            // Block-pool observability (KV capacity model v2): the
+            // three-state block split + the admission/reuse counters.
+            // Gauges read the pool state; counters are cumulative
+            // (prefill rejects synchronously, decode degrades un-pooled
+            // and stalls growth; decode reuse = the fix #5 net-demand
+            // deduction against the engine's own LRU).
+            {"mock_engine_cache_blocks", "total block-pool size in blocks", "gauge"},
+            {
+                "mock_engine_available_blocks",
+                "available blocks (free + pure-LRU, held excluded)",
+                "gauge"
+            },
+            {"mock_engine_held_blocks", "blocks held by in-flight requests", "gauge"},
+            {
+                "mock_engine_referenced_blocks",
+                "cache-key blocks referenced by in-flight requests",
+                "gauge"
+            },
+            {
+                "mock_engine_kv_admission_fails_total",
+                "total decode KV admission/growth failures, RETRYABLE family (temporarily short; 8211 terminals after the ALLOCATE retry window)",
+                "counter"
+            },
+            {
+                "mock_engine_lack_mem_rejects_total",
+                "total LACK_MEM rejections, PERMANENT family (never fits) + prefill pool 602 surface",
+                "counter"
+            },
+            {
+                "mock_engine_decode_reuse_blocks_total",
+                "total decode prefix-reuse blocks (own-LRU net-demand deduction)",
+                "counter"
+            },
+            // Key-level cache-hit observability (recent_cache_key_hit_count /
+            // total_count production caliber): cumulative counters recorded at
+            // the prefill admission hit computation (shape()'s prefixHitBlocks
+            // call). hit ratio = hits/requested, both per-engine + role.
+            {
+                "mock_engine_cache_key_hits_total",
+                "total prefix-matched cache keys at prefill admission (recent_cache_key_hit caliber)",
+                "counter"
+            },
+            {
+                "mock_engine_cache_keys_requested_total",
+                "total request block keys observed at prefill admission (empty-bh adds 0)",
+                "counter"
+            },
         };
         for (String[] m : meta) {
             sb.append("# HELP ").append(m[0]).append(' ').append(m[1]).append('\n');
@@ -885,50 +999,122 @@ final class MockControlServer {
         for (int i = 0; i < engineServices.size(); i++) {
             JavaMockEngineCluster.FastRpcService service = engineServices.get(i);
             Map<String, Object> snap = snaps.get(i);
-            String labels = String.format("engine_name=\"%s\",role=\"%s\",grpc_port=\"%d\",engine_ip=\"%s\"",
-                    escapeLabel(service.getEngineName()),
-                    escapeLabel(service.getRoleName().toLowerCase()),
-                    service.getGrpcPort(),
-                    escapeLabel(service.getHost()));
-            sb.append(String.format("mock_engine_up{%s} %d%n", labels, service.isStopped() ? 0 : 1));
+            String labels =
+                    String.format(
+                            "engine_name=\"%s\",role=\"%s\",grpc_port=\"%d\",engine_ip=\"%s\"",
+                            escapeLabel(service.getEngineName()),
+                            escapeLabel(service.getRoleName().toLowerCase()),
+                            service.getGrpcPort(),
+                            escapeLabel(service.getHost()));
+            sb.append(
+                    String.format("mock_engine_up{%s} %d%n", labels, service.isStopped() ? 0 : 1));
             sb.append(String.format("mock_engine_running{%s} %s%n", labels, snap.get("running")));
             sb.append(String.format("mock_engine_waiting{%s} %s%n", labels, snap.get("waiting")));
-            sb.append(String.format("mock_engine_accepted_total{%s} %s%n", labels, snap.get("accepted")));
-            sb.append(String.format("mock_engine_completed_total{%s} %s%n", labels, snap.get("completed")));
-            sb.append(String.format("mock_engine_cancelled_total{%s} %s%n", labels, snap.get("cancelled_count")));
-            sb.append(String.format("mock_engine_cache_keys{%s} %s%n", labels, snap.get("cache_keys")));
-            sb.append(String.format("mock_engine_cache_evictions_total{%s} %s%n", labels, snap.get("cache_evictions")));
-            sb.append(String.format("mock_engine_active_kv_tokens{%s} %s%n", labels, snap.get("active_kv_tokens")));
-            sb.append(String.format("mock_engine_available_kv_tokens{%s} %s%n", labels, snap.get("available_kv_tokens")));
+            sb.append(
+                    String.format(
+                            "mock_engine_accepted_total{%s} %s%n", labels, snap.get("accepted")));
+            sb.append(
+                    String.format(
+                            "mock_engine_completed_total{%s} %s%n", labels, snap.get("completed")));
+            sb.append(
+                    String.format(
+                            "mock_engine_cancelled_total{%s} %s%n",
+                            labels, snap.get("cancelled_count")));
+            sb.append(
+                    String.format(
+                            "mock_engine_cache_keys{%s} %s%n", labels, snap.get("cache_keys")));
+            sb.append(
+                    String.format(
+                            "mock_engine_cache_evictions_total{%s} %s%n",
+                            labels, snap.get("cache_evictions")));
+            sb.append(
+                    String.format(
+                            "mock_engine_active_kv_tokens{%s} %s%n",
+                            labels, snap.get("active_kv_tokens")));
+            sb.append(
+                    String.format(
+                            "mock_engine_available_kv_tokens{%s} %s%n",
+                            labels, snap.get("available_kv_tokens")));
             @SuppressWarnings("unchecked")
             Map<String, Object> rpcCounts = (Map<String, Object>) snap.get("rpc_counts");
             for (Map.Entry<String, Object> entry : rpcCounts.entrySet()) {
-                sb.append(String.format("mock_engine_rpc_total{%s,rpc_method=\"%s\"} %s%n",
-                        labels, escapeLabel(entry.getKey()), entry.getValue()));
+                sb.append(
+                        String.format(
+                                "mock_engine_rpc_total{%s,rpc_method=\"%s\"} %s%n",
+                                labels, escapeLabel(entry.getKey()), entry.getValue()));
             }
-            sb.append(String.format("mock_engine_prefill_ms_avg{%s} %.1f%n", labels, asDouble(snap.get("prefill_ms_avg"))));
-            sb.append(String.format("mock_engine_prefill_ms_p99{%s} %.1f%n", labels, asDouble(snap.get("prefill_ms_p99"))));
-            sb.append(String.format("mock_engine_prefill_ms_count{%s} %s%n", labels, snap.get("prefill_ms_count")));
-            sb.append(String.format("mock_engine_decode_ms_avg{%s} %.1f%n", labels, asDouble(snap.get("decode_ms_avg"))));
-            sb.append(String.format("mock_engine_decode_ms_p99{%s} %.1f%n", labels, asDouble(snap.get("decode_ms_p99"))));
-            sb.append(String.format("mock_engine_decode_ms_count{%s} %s%n", labels, snap.get("decode_ms_count")));
+            sb.append(
+                    String.format(
+                            "mock_engine_prefill_ms_avg{%s} %.1f%n",
+                            labels, asDouble(snap.get("prefill_ms_avg"))));
+            sb.append(
+                    String.format(
+                            "mock_engine_prefill_ms_p99{%s} %.1f%n",
+                            labels, asDouble(snap.get("prefill_ms_p99"))));
+            sb.append(
+                    String.format(
+                            "mock_engine_prefill_ms_count{%s} %s%n",
+                            labels, snap.get("prefill_ms_count")));
+            sb.append(
+                    String.format(
+                            "mock_engine_decode_ms_avg{%s} %.1f%n",
+                            labels, asDouble(snap.get("decode_ms_avg"))));
+            sb.append(
+                    String.format(
+                            "mock_engine_decode_ms_p99{%s} %.1f%n",
+                            labels, asDouble(snap.get("decode_ms_p99"))));
+            sb.append(
+                    String.format(
+                            "mock_engine_decode_ms_count{%s} %s%n",
+                            labels, snap.get("decode_ms_count")));
             // Production-caliber TPS (PD-split roles: prefill engines carry
             // the context series, decode engines the generate series; the
             // off-role series stay 0 so every engine reports the full set).
-            sb.append(String.format("rtp_llm_context_tps{%s} %s%n", labels, snap.get("context_tps")));
-            sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %s%n", labels, snap.get("context_tps_with_cache")));
-            sb.append(String.format("rtp_llm_generate_tps{%s} %s%n", labels, snap.get("generate_tps")));
+            sb.append(
+                    String.format("rtp_llm_context_tps{%s} %s%n", labels, snap.get("context_tps")));
+            sb.append(
+                    String.format(
+                            "rtp_llm_context_tps_with_cache{%s} %s%n",
+                            labels, snap.get("context_tps_with_cache")));
+            sb.append(
+                    String.format(
+                            "rtp_llm_generate_tps{%s} %s%n", labels, snap.get("generate_tps")));
             // Block-pool observability (KV v2): gauges + cumulative counters,
             // same snapshot fields the /snapshot endpoint exposes.
-            sb.append(String.format("mock_engine_cache_blocks{%s} %s%n", labels, snap.get("cache_blocks")));
-            sb.append(String.format("mock_engine_available_blocks{%s} %s%n", labels, snap.get("available_blocks")));
-            sb.append(String.format("mock_engine_held_blocks{%s} %s%n", labels, snap.get("held_blocks")));
-            sb.append(String.format("mock_engine_referenced_blocks{%s} %s%n", labels, snap.get("referenced_blocks")));
-            sb.append(String.format("mock_engine_kv_admission_fails_total{%s} %s%n", labels, snap.get("kv_admission_fails")));
-            sb.append(String.format("mock_engine_lack_mem_rejects_total{%s} %s%n", labels, snap.get("lack_mem_rejects")));
-            sb.append(String.format("mock_engine_decode_reuse_blocks_total{%s} %s%n", labels, snap.get("decode_reuse_blocks")));
-            sb.append(String.format("mock_engine_cache_key_hits_total{%s} %s%n", labels, snap.get("cache_key_hits")));
-            sb.append(String.format("mock_engine_cache_keys_requested_total{%s} %s%n", labels, snap.get("cache_keys_requested")));
+            sb.append(
+                    String.format(
+                            "mock_engine_cache_blocks{%s} %s%n", labels, snap.get("cache_blocks")));
+            sb.append(
+                    String.format(
+                            "mock_engine_available_blocks{%s} %s%n",
+                            labels, snap.get("available_blocks")));
+            sb.append(
+                    String.format(
+                            "mock_engine_held_blocks{%s} %s%n", labels, snap.get("held_blocks")));
+            sb.append(
+                    String.format(
+                            "mock_engine_referenced_blocks{%s} %s%n",
+                            labels, snap.get("referenced_blocks")));
+            sb.append(
+                    String.format(
+                            "mock_engine_kv_admission_fails_total{%s} %s%n",
+                            labels, snap.get("kv_admission_fails")));
+            sb.append(
+                    String.format(
+                            "mock_engine_lack_mem_rejects_total{%s} %s%n",
+                            labels, snap.get("lack_mem_rejects")));
+            sb.append(
+                    String.format(
+                            "mock_engine_decode_reuse_blocks_total{%s} %s%n",
+                            labels, snap.get("decode_reuse_blocks")));
+            sb.append(
+                    String.format(
+                            "mock_engine_cache_key_hits_total{%s} %s%n",
+                            labels, snap.get("cache_key_hits")));
+            sb.append(
+                    String.format(
+                            "mock_engine_cache_keys_requested_total{%s} %s%n",
+                            labels, snap.get("cache_keys_requested")));
         }
     }
 
@@ -957,34 +1143,94 @@ final class MockControlServer {
 
             long up = group.stream().filter(e -> !Boolean.TRUE.equals(e.get("stopped"))).count();
             sb.append(String.format("mock_engine_up{%s} %d%n", label, up));
-            sb.append(String.format("mock_engine_running{%s} %d%n", label, sumLong(group, "running")));
-            sb.append(String.format("mock_engine_waiting{%s} %d%n", label, sumLong(group, "waiting")));
-            sb.append(String.format("mock_engine_accepted_total{%s} %d%n", label, sumLong(group, "accepted")));
-            sb.append(String.format("mock_engine_completed_total{%s} %d%n", label, sumLong(group, "completed")));
-            sb.append(String.format("mock_engine_cancelled_total{%s} %d%n", label, sumLong(group, "cancelled_count")));
-            sb.append(String.format("mock_engine_cache_keys{%s} %d%n", label, sumLong(group, "cache_keys")));
-            sb.append(String.format("mock_engine_cache_evictions_total{%s} %d%n", label, sumLong(group, "cache_evictions")));
-            sb.append(String.format("mock_engine_active_kv_tokens{%s} %d%n", label, sumLong(group, "active_kv_tokens")));
-            sb.append(String.format("mock_engine_available_kv_tokens{%s} %d%n", label, sumLong(group, "available_kv_tokens")));
+            sb.append(
+                    String.format(
+                            "mock_engine_running{%s} %d%n", label, sumLong(group, "running")));
+            sb.append(
+                    String.format(
+                            "mock_engine_waiting{%s} %d%n", label, sumLong(group, "waiting")));
+            sb.append(
+                    String.format(
+                            "mock_engine_accepted_total{%s} %d%n",
+                            label, sumLong(group, "accepted")));
+            sb.append(
+                    String.format(
+                            "mock_engine_completed_total{%s} %d%n",
+                            label, sumLong(group, "completed")));
+            sb.append(
+                    String.format(
+                            "mock_engine_cancelled_total{%s} %d%n",
+                            label, sumLong(group, "cancelled_count")));
+            sb.append(
+                    String.format(
+                            "mock_engine_cache_keys{%s} %d%n",
+                            label, sumLong(group, "cache_keys")));
+            sb.append(
+                    String.format(
+                            "mock_engine_cache_evictions_total{%s} %d%n",
+                            label, sumLong(group, "cache_evictions")));
+            sb.append(
+                    String.format(
+                            "mock_engine_active_kv_tokens{%s} %d%n",
+                            label, sumLong(group, "active_kv_tokens")));
+            sb.append(
+                    String.format(
+                            "mock_engine_available_kv_tokens{%s} %d%n",
+                            label, sumLong(group, "available_kv_tokens")));
             // Production-caliber TPS, role-summed (rate series add across
             // engines; each engine's off-role series are 0 by design, so the
             // prefill bucket carries the context pair and the decode bucket
             // the generate series).
-            sb.append(String.format("rtp_llm_context_tps{%s} %d%n", label, sumLong(group, "context_tps")));
-            sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %d%n", label, sumLong(group, "context_tps_with_cache")));
-            sb.append(String.format("rtp_llm_generate_tps{%s} %d%n", label, sumLong(group, "generate_tps")));
+            sb.append(
+                    String.format(
+                            "rtp_llm_context_tps{%s} %d%n", label, sumLong(group, "context_tps")));
+            sb.append(
+                    String.format(
+                            "rtp_llm_context_tps_with_cache{%s} %d%n",
+                            label, sumLong(group, "context_tps_with_cache")));
+            sb.append(
+                    String.format(
+                            "rtp_llm_generate_tps{%s} %d%n",
+                            label, sumLong(group, "generate_tps")));
             // Block-pool observability (KV v2): blocks and cumulative counters
             // sum across engines (role-level pool totals; the report layer
             // derives per-engine averages via its engine-count chain).
-            sb.append(String.format("mock_engine_cache_blocks{%s} %d%n", label, sumLong(group, "cache_blocks")));
-            sb.append(String.format("mock_engine_available_blocks{%s} %d%n", label, sumLong(group, "available_blocks")));
-            sb.append(String.format("mock_engine_held_blocks{%s} %d%n", label, sumLong(group, "held_blocks")));
-            sb.append(String.format("mock_engine_referenced_blocks{%s} %d%n", label, sumLong(group, "referenced_blocks")));
-            sb.append(String.format("mock_engine_kv_admission_fails_total{%s} %d%n", label, sumLong(group, "kv_admission_fails")));
-            sb.append(String.format("mock_engine_lack_mem_rejects_total{%s} %d%n", label, sumLong(group, "lack_mem_rejects")));
-            sb.append(String.format("mock_engine_decode_reuse_blocks_total{%s} %d%n", label, sumLong(group, "decode_reuse_blocks")));
-            sb.append(String.format("mock_engine_cache_key_hits_total{%s} %d%n", label, sumLong(group, "cache_key_hits")));
-            sb.append(String.format("mock_engine_cache_keys_requested_total{%s} %d%n", label, sumLong(group, "cache_keys_requested")));
+            sb.append(
+                    String.format(
+                            "mock_engine_cache_blocks{%s} %d%n",
+                            label, sumLong(group, "cache_blocks")));
+            sb.append(
+                    String.format(
+                            "mock_engine_available_blocks{%s} %d%n",
+                            label, sumLong(group, "available_blocks")));
+            sb.append(
+                    String.format(
+                            "mock_engine_held_blocks{%s} %d%n",
+                            label, sumLong(group, "held_blocks")));
+            sb.append(
+                    String.format(
+                            "mock_engine_referenced_blocks{%s} %d%n",
+                            label, sumLong(group, "referenced_blocks")));
+            sb.append(
+                    String.format(
+                            "mock_engine_kv_admission_fails_total{%s} %d%n",
+                            label, sumLong(group, "kv_admission_fails")));
+            sb.append(
+                    String.format(
+                            "mock_engine_lack_mem_rejects_total{%s} %d%n",
+                            label, sumLong(group, "lack_mem_rejects")));
+            sb.append(
+                    String.format(
+                            "mock_engine_decode_reuse_blocks_total{%s} %d%n",
+                            label, sumLong(group, "decode_reuse_blocks")));
+            sb.append(
+                    String.format(
+                            "mock_engine_cache_key_hits_total{%s} %d%n",
+                            label, sumLong(group, "cache_key_hits")));
+            sb.append(
+                    String.format(
+                            "mock_engine_cache_keys_requested_total{%s} %d%n",
+                            label, sumLong(group, "cache_keys_requested")));
 
             Map<String, Long> rpcTotals = new TreeMap<>();
             for (Map<String, Object> e : group) {
@@ -992,13 +1238,16 @@ final class MockControlServer {
                 Map<String, Object> rpcCounts = (Map<String, Object>) e.get("rpc_counts");
                 if (rpcCounts != null) {
                     for (Map.Entry<String, Object> entry : rpcCounts.entrySet()) {
-                        rpcTotals.merge(entry.getKey(), ((Number) entry.getValue()).longValue(), Long::sum);
+                        rpcTotals.merge(
+                                entry.getKey(), ((Number) entry.getValue()).longValue(), Long::sum);
                     }
                 }
             }
             for (Map.Entry<String, Long> entry : rpcTotals.entrySet()) {
-                sb.append(String.format("mock_engine_rpc_total{role=\"%s\",rpc_method=\"%s\"} %d%n",
-                        bucket.getKey(), escapeLabel(entry.getKey()), entry.getValue()));
+                sb.append(
+                        String.format(
+                                "mock_engine_rpc_total{role=\"%s\",rpc_method=\"%s\"} %d%n",
+                                bucket.getKey(), escapeLabel(entry.getKey()), entry.getValue()));
             }
 
             appendLatencyAggregates(sb, label, group, "prefill");
@@ -1006,8 +1255,8 @@ final class MockControlServer {
         }
     }
 
-    private static void appendLatencyAggregates(StringBuilder sb, String label,
-                                                List<Map<String, Object>> group, String kind) {
+    private static void appendLatencyAggregates(
+            StringBuilder sb, String label, List<Map<String, Object>> group, String kind) {
         long totalCount = sumLong(group, kind + "_ms_count");
         double avg = 0.0;
         if (totalCount > 0) {
@@ -1048,7 +1297,8 @@ final class MockControlServer {
 
     // ────────────────── Utility methods ──────────────────
 
-    private static void sendJson(HttpExchange exchange, int status, Object body) throws IOException {
+    private static void sendJson(HttpExchange exchange, int status, Object body)
+            throws IOException {
         String json = MAPPER.writeValueAsString(body);
         byte[] bytes = json.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json");
@@ -1058,9 +1308,11 @@ final class MockControlServer {
         }
     }
 
-    private static void sendText(HttpExchange exchange, int status, String text) throws IOException {
+    private static void sendText(HttpExchange exchange, int status, String text)
+            throws IOException {
         byte[] bytes = text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().set("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+        exchange.getResponseHeaders()
+                .set("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
         exchange.sendResponseHeaders(status, bytes.length);
         try (OutputStream os = exchange.getResponseBody()) {
             os.write(bytes);

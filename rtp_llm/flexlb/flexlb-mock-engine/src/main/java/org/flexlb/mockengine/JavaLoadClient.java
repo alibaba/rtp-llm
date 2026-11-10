@@ -77,6 +77,7 @@ public final class JavaLoadClient {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BLOCK_SIZE = 1024;
+
     /**
      * gRPC client keepalive interval. Must stay >= the server-side default
      * permitKeepAliveTime (5 minutes in grpc-java NettyServerBuilder, which the
@@ -86,6 +87,7 @@ public final class JavaLoadClient {
      * in twin r5). 6 minutes is the smallest safe multiple.
      */
     private static final long KEEPALIVE_TIME_MINUTES = 6;
+
     /**
      * Sweep cadence for the outstanding-result collector: completed futures are
      * harvested at this granularity while slow RPCs are still in flight. All
@@ -93,11 +95,11 @@ public final class JavaLoadClient {
      * happens, so sweep latency only delays row collection, never per-row data
      * fidelity.
      */
-    private static final long COLLECTION_SWEEP_INTERVAL_NANOS =
-            TimeUnit.MILLISECONDS.toNanos(100);
+    private static final long COLLECTION_SWEEP_INTERVAL_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
 
     private final Config config;
     private final EventLoopGroup eventLoopGroup;
+
     /**
      * HA multi-target router (GRPC_TARGETS with >= 2 addresses): per-target
      * channel pools + sticky pointer + transport-failure same-request retry.
@@ -105,13 +107,14 @@ public final class JavaLoadClient {
      * paths keep the byte-identical legacy behavior.
      */
     private final MasterTargetRouter router;
+
     private final ManagedChannel[] scheduleChannels;
     private final FlexlbServiceGrpc.FlexlbServiceBlockingStub[] scheduleStubs;
     private final AtomicInteger scheduleStubRR = new AtomicInteger();
     private final Map<String, ManagedChannel[]> engineChannelPools = new ConcurrentHashMap<>();
     private final Map<String, AtomicInteger> engineChannelRR = new ConcurrentHashMap<>();
-    private final HttpClient httpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(5)).build();
+    private final HttpClient httpClient =
+            HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
     private final List<RequestResult> results = new ArrayList<>();
     final AtomicInteger actualSentCount = new AtomicInteger();
     private final AtomicInteger responseCount = new AtomicInteger();
@@ -145,28 +148,32 @@ public final class JavaLoadClient {
         if (config.isMultiTarget()) {
             // HA mode (GRPC_TARGETS >= 2): every target gets its own
             // N_CHANNELS pool inside the router; the legacy arrays stay empty.
-            this.router = new MasterTargetRouter(
-                    config.grpcTargets, config.nChannels, eventLoopGroup);
+            this.router =
+                    new MasterTargetRouter(config.grpcTargets, config.nChannels, eventLoopGroup);
             this.scheduleChannels = new ManagedChannel[0];
             this.scheduleStubs = new FlexlbServiceGrpc.FlexlbServiceBlockingStub[0];
-            System.out.println("HA multi-target mode: targets=" + config.grpcTargets
-                    + ", sticky=" + router.stickyTarget()
-                    + " (gRPC UNAVAILABLE retries same-request on the next target)");
+            System.out.println(
+                    "HA multi-target mode: targets="
+                            + config.grpcTargets
+                            + ", sticky="
+                            + router.stickyTarget()
+                            + " (gRPC UNAVAILABLE retries same-request on the next target)");
             return;
         }
         this.router = null;
         this.scheduleChannels = new ManagedChannel[config.nChannels];
         this.scheduleStubs = new FlexlbServiceGrpc.FlexlbServiceBlockingStub[config.nChannels];
         for (int i = 0; i < config.nChannels; i++) {
-            ManagedChannel channel = NettyChannelBuilder.forTarget(config.grpcTarget)
-                    .eventLoopGroup(eventLoopGroup)
-                    .channelType(NioSocketChannel.class)
-                    .maxInboundMessageSize(16 * 1024 * 1024)
-                    .flowControlWindow(1024 * 1024)
-                    .keepAliveTime(KEEPALIVE_TIME_MINUTES, TimeUnit.MINUTES)
-                    .keepAliveTimeout(10, TimeUnit.SECONDS)
-                    .usePlaintext()
-                    .build();
+            ManagedChannel channel =
+                    NettyChannelBuilder.forTarget(config.grpcTarget)
+                            .eventLoopGroup(eventLoopGroup)
+                            .channelType(NioSocketChannel.class)
+                            .maxInboundMessageSize(16 * 1024 * 1024)
+                            .flowControlWindow(1024 * 1024)
+                            .keepAliveTime(KEEPALIVE_TIME_MINUTES, TimeUnit.MINUTES)
+                            .keepAliveTimeout(10, TimeUnit.SECONDS)
+                            .usePlaintext()
+                            .build();
             scheduleChannels[i] = channel;
             scheduleStubs[i] = FlexlbServiceGrpc.newBlockingStub(channel);
         }
@@ -201,10 +208,13 @@ public final class JavaLoadClient {
         // only, wall-clock duration, total sent cap): request bodies still come
         // from cycling the trace shard, only the arrival process changes.
         boolean cyclic = config.loop || config.isUniform();
-        records = filterAndShard(records,
-                cyclic ? 0 : config.durationS,
-                cyclic ? 0 : config.limit,
-                config.numShards, config.shardIndex);
+        records =
+                filterAndShard(
+                        records,
+                        cyclic ? 0 : config.durationS,
+                        cyclic ? 0 : config.limit,
+                        config.numShards,
+                        config.shardIndex);
         if (records.isEmpty()) {
             throw new RuntimeException("trace shard has no replayable requests");
         }
@@ -214,21 +224,32 @@ public final class JavaLoadClient {
             records = truncateRecords(records, config.maxInputLen, config.maxOutputLen);
         }
 
-        System.out.println("loaded " + records.size() + " requests from " + config.traceFile
-                + " (shard=" + config.shardIndex + "/" + config.numShards + ")");
+        System.out.println(
+                "loaded "
+                        + records.size()
+                        + " requests from "
+                        + config.traceFile
+                        + " (shard="
+                        + config.shardIndex
+                        + "/"
+                        + config.numShards
+                        + ")");
 
         if (config.isUniform()) {
             double perShardQps = config.sendModeQps / config.numShards;
-            System.out.println(String.format(
-                    "send mode: uniform — target_qps=%.3f, per_shard_qps=%.3f "
-                            + "(interval %.3fms), trace timestamps ignored",
-                    config.sendModeQps, perShardQps, 1000.0 / perShardQps));
+            System.out.println(
+                    String.format(
+                            "send mode: uniform — target_qps=%.3f, per_shard_qps=%.3f "
+                                    + "(interval %.3fms), trace timestamps ignored",
+                            config.sendModeQps, perShardQps, 1000.0 / perShardQps));
             if (config.rampUpSeconds > 0) {
-                System.out.println(String.format(
-                        "ramp-up: per-shard QPS climbs linearly 0 -> %.3f over %.1fs, "
-                                + "then constant (ramp sends ≈ %.1f per shard)",
-                        perShardQps, config.rampUpSeconds,
-                        perShardQps * config.rampUpSeconds / 2.0));
+                System.out.println(
+                        String.format(
+                                "ramp-up: per-shard QPS climbs linearly 0 -> %.3f over %.1fs, "
+                                        + "then constant (ramp sends ≈ %.1f per shard)",
+                                perShardQps,
+                                config.rampUpSeconds,
+                                perShardQps * config.rampUpSeconds / 2.0));
             }
         }
 
@@ -248,18 +269,24 @@ public final class JavaLoadClient {
             System.out.println("WARNING: GRADIENT is ignored in uniform send mode");
         }
         if (!config.isUniform() && config.rampUpSeconds > 0) {
-            System.out.println("WARNING: RAMP_UP_SECONDS is ignored outside "
-                    + "uniform send mode");
+            System.out.println(
+                    "WARNING: RAMP_UP_SECONDS is ignored outside " + "uniform send mode");
         }
         if (config.gradient && !config.isUniform() && config.durationS <= 0) {
-            System.out.println("WARNING: GRADIENT requires DURATION_S > 0, "
-                    + "falling back to fixed replay_speed");
+            System.out.println(
+                    "WARNING: GRADIENT requires DURATION_S > 0, "
+                            + "falling back to fixed replay_speed");
         }
         if (config.gradient && !config.isUniform() && config.durationS > 0) {
             int startSpeed = Math.max(1, config.gradientStartSpeed);
-            System.out.println("gradient mode: speed will increase from " + startSpeed
-                    + "x to " + config.gradientMaxSpeed + "x over "
-                    + config.durationS + "s");
+            System.out.println(
+                    "gradient mode: speed will increase from "
+                            + startSpeed
+                            + "x to "
+                            + config.gradientMaxSpeed
+                            + "x over "
+                            + config.durationS
+                            + "s");
         }
 
         if (config.startAtEpochMs > 0) {
@@ -283,13 +310,13 @@ public final class JavaLoadClient {
         int loopIdx = 0;
         // Per-shard uniform interval: total target rate SEND_MODE_QPS is split
         // evenly across NUM_SHARDS instances.
-        double uniformIntervalS = config.isUniform()
-                ? config.numShards / config.sendModeQps : 0.0;
+        double uniformIntervalS = config.isUniform() ? config.numShards / config.sendModeQps : 0.0;
 
         while (true) {
             for (TraceRecord record : records) {
                 if (cyclic && config.durationS > 0) {
-                    if ((System.nanoTime() - replayStartedNanos) / 1_000_000_000L >= config.durationS) {
+                    if ((System.nanoTime() - replayStartedNanos) / 1_000_000_000L
+                            >= config.durationS) {
                         break;
                     }
                 }
@@ -302,14 +329,19 @@ public final class JavaLoadClient {
                 double currentSpeed;
                 if (config.gradient && !config.isUniform() && config.durationS > 0) {
                     double elapsedS = (System.nanoTime() - replayStartedNanos) / 1_000_000_000.0;
-                    currentSpeed = gradientSpeed(elapsedS, config.durationS,
-                            config.gradientStartSpeed, config.gradientMaxSpeed);
+                    currentSpeed =
+                            gradientSpeed(
+                                    elapsedS,
+                                    config.durationS,
+                                    config.gradientStartSpeed,
+                                    config.gradientMaxSpeed);
                     double progress = Math.min(elapsedS / config.durationS, 1.0);
                     if (elapsedS - lastGradientLogS >= 10) {
                         lastGradientLogS = elapsedS;
-                        System.out.println(String.format(
-                                "gradient speed: %.1fx (progress %.1f%%, elapsed %.1fs/%ds)",
-                                currentSpeed, progress * 100, elapsedS, config.durationS));
+                        System.out.println(
+                                String.format(
+                                        "gradient speed: %.1fx (progress %.1f%%, elapsed %.1fs/%ds)",
+                                        currentSpeed, progress * 100, elapsedS, config.durationS));
                     }
                 } else {
                     currentSpeed = config.replaySpeed;
@@ -324,11 +356,13 @@ public final class JavaLoadClient {
                     // linear-QPS-climb schedule (see uniformDueSeconds):
                     // pacing lag keeps measuring send_start against the
                     // ramped ideal schedule, so it is not polluted by ramp.
-                    dueSeconds = config.rampUpSeconds > 0
-                            ? uniformDueSeconds(sentCount,
-                                    config.sendModeQps / config.numShards,
-                                    config.rampUpSeconds)
-                            : sentCount * uniformIntervalS;
+                    dueSeconds =
+                            config.rampUpSeconds > 0
+                                    ? uniformDueSeconds(
+                                            sentCount,
+                                            config.sendModeQps / config.numShards,
+                                            config.rampUpSeconds)
+                                    : sentCount * uniformIntervalS;
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
                     long sleepNanos = dueNanos - System.nanoTime();
                     if (sleepNanos > 0) {
@@ -345,7 +379,8 @@ public final class JavaLoadClient {
                 }
 
                 if (cyclic && config.durationS > 0) {
-                    if ((System.nanoTime() - replayStartedNanos) / 1_000_000_000L >= config.durationS) {
+                    if ((System.nanoTime() - replayStartedNanos) / 1_000_000_000L
+                            >= config.durationS) {
                         break;
                     }
                 }
@@ -366,7 +401,8 @@ public final class JavaLoadClient {
                 break;
             }
             if (config.durationS > 0
-                    && (System.nanoTime() - replayStartedNanos) / 1_000_000_000L >= config.durationS) {
+                    && (System.nanoTime() - replayStartedNanos) / 1_000_000_000L
+                            >= config.durationS) {
                 break;
             }
             if (config.limit > 0 && sentCount >= config.limit) {
@@ -376,54 +412,86 @@ public final class JavaLoadClient {
             if (futures.size() >= 100_000) {
                 // Collect results from completed futures before removing them
                 // to avoid losing latency/error statistics in loop mode.
-                futures.removeIf(future -> {
-                    if (future.isDone()) {
-                        try {
-                            RequestResult collected = future.get();
-                            if (collected != null) {
-                                results.add(collected);
+                futures.removeIf(
+                        future -> {
+                            if (future.isDone()) {
+                                try {
+                                    RequestResult collected = future.get();
+                                    if (collected != null) {
+                                        results.add(collected);
+                                    }
+                                } catch (Exception ignored) {
+                                    // Result could not be retrieved; will not be counted.
+                                }
+                                return true;
                             }
-                        } catch (Exception ignored) {
-                            // Result could not be retrieved; will not be counted.
-                        }
-                        return true;
-                    }
-                    return false;
-                });
+                            return false;
+                        });
             }
-            System.out.println("loop replay: iteration " + loopIdx + " starting, sent " + sentCount
-                    + " requests, elapsed " + (System.nanoTime() - replayStartedNanos) / 1_000_000_000L + "s");
+            System.out.println(
+                    "loop replay: iteration "
+                            + loopIdx
+                            + " starting, sent "
+                            + sentCount
+                            + " requests, elapsed "
+                            + (System.nanoTime() - replayStartedNanos) / 1_000_000_000L
+                            + "s");
         }
 
         sendEndNanos = System.nanoTime();
         double sendDurationS = (sendEndNanos - sendStartNanos) / 1_000_000_000.0;
-        System.out.println("sending complete: sent=" + sentCount + " requests dispatched in "
-                + String.format("%.1f", sendDurationS) + "s, waiting for responses...");
+        System.out.println(
+                "sending complete: sent="
+                        + sentCount
+                        + " requests dispatched in "
+                        + String.format("%.1f", sendDurationS)
+                        + "s, waiting for responses...");
 
-        ScheduledExecutorService progressMonitor = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "progress-monitor");
-            t.setDaemon(true);
-            return t;
-        });
+        ScheduledExecutorService progressMonitor =
+                Executors.newSingleThreadScheduledExecutor(
+                        r -> {
+                            Thread t = new Thread(r, "progress-monitor");
+                            t.setDaemon(true);
+                            return t;
+                        });
         final int totalSent = sentCount;
-        progressMonitor.scheduleAtFixedRate(() -> {
-            System.out.println("  progress: " + responseCount.get() + "/" + totalSent
-                    + " responses received, elapsed "
-                    + String.format("%.1f", (System.nanoTime() - replayStartedNanos) / 1_000_000_000.0) + "s");
-        }, 10, 10, TimeUnit.SECONDS);
+        progressMonitor.scheduleAtFixedRate(
+                () -> {
+                    System.out.println(
+                            "  progress: "
+                                    + responseCount.get()
+                                    + "/"
+                                    + totalSent
+                                    + " responses received, elapsed "
+                                    + String.format(
+                                            "%.1f",
+                                            (System.nanoTime() - replayStartedNanos)
+                                                    / 1_000_000_000.0)
+                                    + "s");
+                },
+                10,
+                10,
+                TimeUnit.SECONDS);
 
-        long deadlineNanos = System.nanoTime()
-                + TimeUnit.SECONDS.toNanos(config.responseTimeoutSeconds);
+        long deadlineNanos =
+                System.nanoTime() + TimeUnit.SECONDS.toNanos(config.responseTimeoutSeconds);
         results.addAll(collectOutstandingResults(futures, deadlineNanos));
         progressMonitor.shutdownNow();
         executor.shutdownNow();
 
         long elapsedNanos = System.nanoTime() - replayStartedNanos;
         double elapsedS = elapsedNanos / 1_000_000_000.0;
-        System.out.println("responses collected: " + results.size() + "/" + sentCount
-                + " in " + String.format("%.1f", elapsedS) + "s");
+        System.out.println(
+                "responses collected: "
+                        + results.size()
+                        + "/"
+                        + sentCount
+                        + " in "
+                        + String.format("%.1f", elapsedS)
+                        + "s");
 
-        JsonNode serverLatency = config.skipServerLatency ? MAPPER.createObjectNode() : fetchServerLatency();
+        JsonNode serverLatency =
+                config.skipServerLatency ? MAPPER.createObjectNode() : fetchServerLatency();
         writePerRequestResults();
         writeServerLatencySnapshot(serverLatency);
         stopPushgateway();
@@ -465,8 +533,8 @@ public final class JavaLoadClient {
      *         futures are cancelled and synthesized
      * @return one result row per future, in submission order
      */
-    static List<RequestResult> collectOutstandingResults(List<Future<RequestResult>> futures,
-            long deadlineNanos) {
+    static List<RequestResult> collectOutstandingResults(
+            List<Future<RequestResult>> futures, long deadlineNanos) {
         if (futures.isEmpty()) {
             return new ArrayList<>();
         }
@@ -523,8 +591,11 @@ public final class JavaLoadClient {
      * terminal state since the last sweep and compacts the list in place.
      * Returns the new pending count.
      */
-    private static int sweepCompletedFutures(List<Future<RequestResult>> futures,
-            RequestResult[] collected, int[] pending, int pendingCount) {
+    private static int sweepCompletedFutures(
+            List<Future<RequestResult>> futures,
+            RequestResult[] collected,
+            int[] pending,
+            int pendingCount) {
         int kept = 0;
         for (int i = 0; i < pendingCount; i++) {
             int idx = pending[i];
@@ -579,8 +650,16 @@ public final class JavaLoadClient {
             salted.set(0, roundSaltedKey(blockKeys.get(0), loopIdx));
             blockKeys = salted;
         }
-        return new TraceRecord(newRequestId, newSourceRid, newTraceId, req.tsMs,
-                req.inputLen, req.outputLen, blockKeys, req.tokenIds, req.priority);
+        return new TraceRecord(
+                newRequestId,
+                newSourceRid,
+                newTraceId,
+                req.tsMs,
+                req.inputLen,
+                req.outputLen,
+                blockKeys,
+                req.tokenIds,
+                req.priority);
     }
 
     private RequestResult handleRequest(TraceRecord record, Semaphore semaphore, double dueS) {
@@ -620,14 +699,15 @@ public final class JavaLoadClient {
         Exception scheduleExc = null;
         inflightCount.incrementAndGet();
         try {
-            double sendStartEpochMs = replayStartedEpochMs
-                    + (System.nanoTime() - replayStartedNanos) / 1_000_000.0;
+            double sendStartEpochMs =
+                    replayStartedEpochMs + (System.nanoTime() - replayStartedNanos) / 1_000_000.0;
             result.sendStartEpochMs = sendStartEpochMs;
             result.pacingLagMs = Math.max(0.0, sendStartEpochMs - sendDueEpochMs);
             actualSentCount.incrementAndGet();
 
             inputPb = buildGenerateInput(record);
-            FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleReq = buildScheduleRequest(record, inputPb);
+            FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleReq =
+                    buildScheduleRequest(record, inputPb);
 
             long scheduleStartNanos = System.nanoTime();
             if (router != null) {
@@ -651,15 +731,18 @@ public final class JavaLoadClient {
                     // try block (terminating-failure boundary lives there).
                     scheduleExc = outcome.failure;
                     result.status = "exception";
-                    result.error = outcome.failure == null
-                            ? "no master response" : outcome.failure.toString();
+                    result.error =
+                            outcome.failure == null
+                                    ? "no master response"
+                                    : outcome.failure.toString();
                     result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
                 } else {
                     result.enqueuedByMaster = scheduleResponse.getEnqueuedByMaster();
                 }
             } else {
-                FlexlbServiceGrpc.FlexlbServiceBlockingStub stub = nextScheduleStub()
-                        .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
+                FlexlbServiceGrpc.FlexlbServiceBlockingStub stub =
+                        nextScheduleStub()
+                                .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
                 scheduleResponse = stub.schedule(scheduleReq);
 
                 result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
@@ -677,9 +760,10 @@ public final class JavaLoadClient {
                 // handling right after the try block takes it from here.
             } else if (scheduleResponse.getCode() != 200 || !scheduleResponse.getSuccess()) {
                 result.status = "schedule_error";
-                result.error = scheduleResponse.getErrorMessage().isEmpty()
-                        ? "code=" + scheduleResponse.getCode()
-                        : scheduleResponse.getErrorMessage();
+                result.error =
+                        scheduleResponse.getErrorMessage().isEmpty()
+                                ? "code=" + scheduleResponse.getCode()
+                                : scheduleResponse.getErrorMessage();
                 result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
                 // Master answered (8431 admission rejection, 8511 forwarding
                 // terminal code, ...): business-error boundary — never
@@ -701,12 +785,14 @@ public final class JavaLoadClient {
                     if (!scheduleResponse.getEnqueuedByMaster()) {
                         System.err.println(
                                 "FATAL: FETCH_OUTPUT_STREAM=0 requires dispatcher.type=BATCH: "
-                                + "schedule response reports enqueued_by_master=false "
-                                + "(request_id=" + record.requestId + "). Under a NON_BATCH "
-                                + "dispatcher the engine only receives requests through the "
-                                + "client's GenerateStreamCall stream, so skipping the fetch "
-                                + "would leave the engine idle. Re-enable stream reading or "
-                                + "switch the master to a BATCH dispatcher.");
+                                        + "schedule response reports enqueued_by_master=false "
+                                        + "(request_id="
+                                        + record.requestId
+                                        + "). Under a NON_BATCH "
+                                        + "dispatcher the engine only receives requests through the "
+                                        + "client's GenerateStreamCall stream, so skipping the fetch "
+                                        + "would leave the engine idle. Re-enable stream reading or "
+                                        + "switch the master to a BATCH dispatcher.");
                         System.exit(86);
                     }
                     result.status = "scheduled";
@@ -751,12 +837,14 @@ public final class JavaLoadClient {
         //    "transport") may bypass the master. Business error codes (8431 /
         //    8511 — master answered) and DEADLINE_EXCEEDED never fall back
         //    (production connection_failed contract).
-        boolean legacyScheduleFailure = scheduleResponse == null
-                || "schedule_error".equals(result.status)
-                || "exception".equals(result.status);
-        boolean terminating = router == null
-                ? legacyScheduleFailure
-                : (scheduleResponse == null || "schedule_error".equals(result.status));
+        boolean legacyScheduleFailure =
+                scheduleResponse == null
+                        || "schedule_error".equals(result.status)
+                        || "exception".equals(result.status);
+        boolean terminating =
+                router == null
+                        ? legacyScheduleFailure
+                        : (scheduleResponse == null || "schedule_error".equals(result.status));
         if (terminating) {
             // Fallback eligibility is mode-dependent (same contract as the
             // trigger-semantics comment above): the legacy single-target
@@ -764,15 +852,13 @@ public final class JavaLoadClient {
             // (exception OR schedule_error); the HA mode only bypasses the
             // master on the double-connection failure (error_kind=transport
             // AND no master answer anywhere in the target chain).
-            boolean fallbackEligible = (router == null)
-                    ? legacyScheduleFailure
-                    : ("transport".equals(result.errorKind)
-                        && scheduleResponse == null);
-            if (fallbackEligible && config.enableFallback
-                    && !fallbackPrefillAddrs.isEmpty()) {
-                String prefix = scheduleExc != null
-                        ? "master=" + scheduleExc
-                        : "master=" + result.error;
+            boolean fallbackEligible =
+                    (router == null)
+                            ? legacyScheduleFailure
+                            : ("transport".equals(result.errorKind) && scheduleResponse == null);
+            if (fallbackEligible && config.enableFallback && !fallbackPrefillAddrs.isEmpty()) {
+                String prefix =
+                        scheduleExc != null ? "master=" + scheduleExc : "master=" + result.error;
                 attemptFallback(record, result, startedNanos, prefix);
             } else if (router != null && scheduleResponse == null) {
                 // HA mode, no master answer, no (or disabled) direct fallback:
@@ -801,16 +887,20 @@ public final class JavaLoadClient {
                     throw new RuntimeException("schedule response has no PREFILL/PDFUSION address");
                 }
 
-                EngineRpcService.GenerateInputPB modifiedInput = copyRoleAddrs(inputPb, scheduleResponse);
+                EngineRpcService.GenerateInputPB modifiedInput =
+                        copyRoleAddrs(inputPb, scheduleResponse);
                 ManagedChannel engineChannel = getEngineChannel(prefillAddr);
-                RpcServiceGrpc.RpcServiceBlockingStub engineStub = RpcServiceGrpc.newBlockingStub(engineChannel)
-                        .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
+                RpcServiceGrpc.RpcServiceBlockingStub engineStub =
+                        RpcServiceGrpc.newBlockingStub(engineChannel)
+                                .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
 
                 Iterator<EngineRpcService.GenerateOutputsPB> stream;
                 if (scheduleResponse.getEnqueuedByMaster()) {
-                    stream = engineStub.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
-                            .setRequestId(inputPb.getRequestId())
-                            .build());
+                    stream =
+                            engineStub.fetchResponse(
+                                    EngineRpcService.FetchRequestPB.newBuilder()
+                                            .setRequestId(inputPb.getRequestId())
+                                            .build());
                 } else {
                     stream = engineStub.generateStreamCall(modifiedInput);
                 }
@@ -836,7 +926,8 @@ public final class JavaLoadClient {
                     result.error = "stream completed with zero outputs";
                     result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
                 } else {
-                    long endNanos = terminalNanos != null ? terminalNanos.longValue() : System.nanoTime();
+                    long endNanos =
+                            terminalNanos != null ? terminalNanos.longValue() : System.nanoTime();
                     result.ttftMs = (firstFrameNanos - startedNanos) / 1_000_000.0;
                     result.totalMs = (endNanos - startedNanos) / 1_000_000.0;
                     result.status = "ok";
@@ -850,8 +941,7 @@ public final class JavaLoadClient {
                 // not a master connection failure — never falls back (brief
                 // p7 defect-8: the legacy any-failure parity behavior is
                 // retired for the HA mode only).
-                if (router == null
-                        && config.enableFallback && !fallbackPrefillAddrs.isEmpty()) {
+                if (router == null && config.enableFallback && !fallbackPrefillAddrs.isEmpty()) {
                     attemptFallback(record, result, startedNanos, "fetch=" + e);
                 } else {
                     result.status = "exception";
@@ -880,8 +970,8 @@ public final class JavaLoadClient {
      * picks prefill/decode addresses from endpoints.json, attaches role_addrs and
      * streams GenerateStreamCall directly against the prefill engine.
      */
-    private void attemptFallback(TraceRecord record, RequestResult result, long startedNanos,
-                                String masterErrorPrefix) {
+    private void attemptFallback(
+            TraceRecord record, RequestResult result, long startedNanos, String masterErrorPrefix) {
         try {
             runFallbackStream(record, result, startedNanos);
         } catch (Exception fbExc) {
@@ -895,26 +985,31 @@ public final class JavaLoadClient {
 
     private void runFallbackStream(TraceRecord record, RequestResult result, long startedNanos)
             throws IOException {
-        String prefillAddr = roundRobinAddr(fallbackPrefillAddrs, fallbackPrefillRR,
-                "no fallback prefill addresses available");
-        String decodeAddr = fallbackDecodeAddrs.isEmpty()
-                ? "" : roundRobinAddr(fallbackDecodeAddrs, fallbackDecodeRR, "");
+        String prefillAddr =
+                roundRobinAddr(
+                        fallbackPrefillAddrs,
+                        fallbackPrefillRR,
+                        "no fallback prefill addresses available");
+        String decodeAddr =
+                fallbackDecodeAddrs.isEmpty()
+                        ? ""
+                        : roundRobinAddr(fallbackDecodeAddrs, fallbackDecodeRR, "");
 
         EngineRpcService.GenerateConfigPB.Builder fbConfig =
                 buildGenerateInput(record).getGenerateConfig().toBuilder().clearRoleAddrs();
-        fbConfig.addRoleAddrs(toRoleAddrPb(
-                EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL, prefillAddr));
+        fbConfig.addRoleAddrs(
+                toRoleAddrPb(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL, prefillAddr));
         if (!decodeAddr.isEmpty()) {
-            fbConfig.addRoleAddrs(toRoleAddrPb(
-                    EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE, decodeAddr));
+            fbConfig.addRoleAddrs(
+                    toRoleAddrPb(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE, decodeAddr));
         }
-        EngineRpcService.GenerateInputPB fbInput = buildGenerateInput(record).toBuilder()
-                .setGenerateConfig(fbConfig)
-                .build();
+        EngineRpcService.GenerateInputPB fbInput =
+                buildGenerateInput(record).toBuilder().setGenerateConfig(fbConfig).build();
 
         ManagedChannel channel = getEngineChannel(prefillAddr);
-        RpcServiceGrpc.RpcServiceBlockingStub stub = RpcServiceGrpc.newBlockingStub(channel)
-                .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
+        RpcServiceGrpc.RpcServiceBlockingStub stub =
+                RpcServiceGrpc.newBlockingStub(channel)
+                        .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
         Iterator<EngineRpcService.GenerateOutputsPB> stream = stub.generateStreamCall(fbInput);
 
         Double firstFrameNanos = null;
@@ -1015,7 +1110,8 @@ public final class JavaLoadClient {
         }
     }
 
-    private EngineRpcService.GenerateInputPB buildGenerateInput(TraceRecord record) throws IOException {
+    private EngineRpcService.GenerateInputPB buildGenerateInput(TraceRecord record)
+            throws IOException {
         ObjectNode meta = MAPPER.createObjectNode();
         meta.put("rid", record.sourceRid);
         meta.put("trace_id", record.traceId);
@@ -1027,29 +1123,32 @@ public final class JavaLoadClient {
         }
         String uniqueKey = "flexlb_eval:" + MAPPER.writeValueAsString(meta);
 
-        EngineRpcService.GenerateConfigPB.Builder genConfig = EngineRpcService.GenerateConfigPB.newBuilder()
-                .setMaxNewTokens(Math.max(1, record.outputLen))
-                .setNumReturnSequences(1)
-                .setTopP(1.0f)
-                .setTopK(0)
-                .setTemperature(1.0f)
-                .setReturnIncremental(true)
-                .setIsStreaming(true)
-                .setTimeoutMs((int) Math.min(config.timeoutMs, Integer.MAX_VALUE))
-                .setUniqueKey(uniqueKey);
+        EngineRpcService.GenerateConfigPB.Builder genConfig =
+                EngineRpcService.GenerateConfigPB.newBuilder()
+                        .setMaxNewTokens(Math.max(1, record.outputLen))
+                        .setNumReturnSequences(1)
+                        .setTopP(1.0f)
+                        .setTopK(0)
+                        .setTemperature(1.0f)
+                        .setReturnIncremental(true)
+                        .setIsStreaming(true)
+                        .setTimeoutMs((int) Math.min(config.timeoutMs, Integer.MAX_VALUE))
+                        .setUniqueKey(uniqueKey);
 
-        EngineRpcService.RequestInfoPB.Builder info = EngineRpcService.RequestInfoPB.newBuilder()
-                .setRequestId(record.sourceRid)
-                .setTraceId(record.traceId)
-                .setSourceRole("flexlb_eval");
+        EngineRpcService.RequestInfoPB.Builder info =
+                EngineRpcService.RequestInfoPB.newBuilder()
+                        .setRequestId(record.sourceRid)
+                        .setTraceId(record.traceId)
+                        .setSourceRole("flexlb_eval");
 
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(record.requestId)
-                .addAllTokenIds(record.tokenIds)
-                .setGenerateConfig(genConfig)
-                .setClientId("flexlb_eval_client")
-                .setStartTime(System.currentTimeMillis())
-                .setRequestInfo(info);
+        EngineRpcService.GenerateInputPB.Builder input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(record.requestId)
+                        .addAllTokenIds(record.tokenIds)
+                        .setGenerateConfig(genConfig)
+                        .setClientId("flexlb_eval_client")
+                        .setStartTime(System.currentTimeMillis())
+                        .setRequestInfo(info);
 
         return input.build();
     }
@@ -1059,18 +1158,18 @@ public final class JavaLoadClient {
             TraceRecord record, EngineRpcService.GenerateInputPB inputPb) {
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB.Builder builder =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(record.requestId)
-                .setGenerateInput(inputPb.toByteString())
-                .addAllBlockCacheKeys(record.blockKeys)
-                .setSeqLen(record.inputLen)
-                .setGenerateTimeout(config.timeoutMs)
-                .setRequestTimeMs(System.currentTimeMillis())
-                .setMaxNewTokens(Math.max(1, record.outputLen))
-                .setNumBeams(1)
-                .setForceDisableSpRun(false)
-                .setModel(config.model)
-                .setApiKey(config.apiKey)
-                .setCacheKeyBlockSize(BLOCK_SIZE);
+                        .setRequestId(record.requestId)
+                        .setGenerateInput(inputPb.toByteString())
+                        .addAllBlockCacheKeys(record.blockKeys)
+                        .setSeqLen(record.inputLen)
+                        .setGenerateTimeout(config.timeoutMs)
+                        .setRequestTimeMs(System.currentTimeMillis())
+                        .setMaxNewTokens(Math.max(1, record.outputLen))
+                        .setNumBeams(1)
+                        .setForceDisableSpRun(false)
+                        .setModel(config.model)
+                        .setApiKey(config.apiKey)
+                        .setCacheKeyBlockSize(BLOCK_SIZE);
         if (record.priority > 0) {
             builder.setPriority(record.priority);
         }
@@ -1083,20 +1182,24 @@ public final class JavaLoadClient {
         EngineRpcService.GenerateInputPB.Builder modified = inputPb.toBuilder();
         modified.getGenerateConfigBuilder().clearRoleAddrs();
         for (FlexlbScheduleProtocol.FlexlbServerStatusPB status : response.getServerStatusList()) {
-            EngineRpcService.RoleTypePB roleType = switch (status.getRole()) {
-                case "PREFILL" -> EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL;
-                case "DECODE" -> EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE;
-                default -> EngineRpcService.RoleTypePB.ROLE_TYPE_PDFUSION;
-            };
-            modified.getGenerateConfigBuilder().addRoleAddrs(
-                    EngineRpcService.RoleAddrPB.newBuilder()
-                            .setRole(RoleTypeProtoConverter.toLegacyProto(
-                                    RoleTypeProtoConverter.fromProto(roleType)))
-                            .setRoleStr(RoleTypeProtoConverter.fromProto(roleType).getCode())
-                            .setIp(status.getServerIp())
-                            .setHttpPort(status.getHttpPort())
-                            .setGrpcPort(status.getGrpcPort())
-                            .build());
+            EngineRpcService.RoleTypePB roleType =
+                    switch (status.getRole()) {
+                        case "PREFILL" -> EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL;
+                        case "DECODE" -> EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE;
+                        default -> EngineRpcService.RoleTypePB.ROLE_TYPE_PDFUSION;
+                    };
+            modified.getGenerateConfigBuilder()
+                    .addRoleAddrs(
+                            EngineRpcService.RoleAddrPB.newBuilder()
+                                    .setRole(
+                                            RoleTypeProtoConverter.toLegacyProto(
+                                                    RoleTypeProtoConverter.fromProto(roleType)))
+                                    .setRoleStr(
+                                            RoleTypeProtoConverter.fromProto(roleType).getCode())
+                                    .setIp(status.getServerIp())
+                                    .setHttpPort(status.getHttpPort())
+                                    .setGrpcPort(status.getGrpcPort())
+                                    .build());
         }
         return modified.build();
     }
@@ -1116,22 +1219,27 @@ public final class JavaLoadClient {
     }
 
     private ManagedChannel getEngineChannel(String target) {
-        ManagedChannel[] pool = engineChannelPools.computeIfAbsent(target, t -> {
-            ManagedChannel[] channels = new ManagedChannel[config.nChannels];
-            for (int i = 0; i < config.nChannels; i++) {
-                channels[i] = NettyChannelBuilder.forTarget(t)
-                        .eventLoopGroup(eventLoopGroup)
-                        .channelType(NioSocketChannel.class)
-                        .maxInboundMessageSize(16 * 1024 * 1024)
-                        .flowControlWindow(1024 * 1024)
-                        .keepAliveTime(KEEPALIVE_TIME_MINUTES, TimeUnit.MINUTES)
-                        .keepAliveTimeout(10, TimeUnit.SECONDS)
-                        .usePlaintext()
-                        .build();
-            }
-            engineChannelRR.put(t, new AtomicInteger());
-            return channels;
-        });
+        ManagedChannel[] pool =
+                engineChannelPools.computeIfAbsent(
+                        target,
+                        t -> {
+                            ManagedChannel[] channels = new ManagedChannel[config.nChannels];
+                            for (int i = 0; i < config.nChannels; i++) {
+                                channels[i] =
+                                        NettyChannelBuilder.forTarget(t)
+                                                .eventLoopGroup(eventLoopGroup)
+                                                .channelType(NioSocketChannel.class)
+                                                .maxInboundMessageSize(16 * 1024 * 1024)
+                                                .flowControlWindow(1024 * 1024)
+                                                .keepAliveTime(
+                                                        KEEPALIVE_TIME_MINUTES, TimeUnit.MINUTES)
+                                                .keepAliveTimeout(10, TimeUnit.SECONDS)
+                                                .usePlaintext()
+                                                .build();
+                            }
+                            engineChannelRR.put(t, new AtomicInteger());
+                            return channels;
+                        });
         AtomicInteger rr = engineChannelRR.get(target);
         int idx = Math.floorMod(rr.getAndIncrement(), config.nChannels);
         return pool[idx];
@@ -1161,8 +1269,11 @@ public final class JavaLoadClient {
 
     // Package-visible for per-record priority parsing assertions in tests.
     TraceRecord parseTraceRecord(JsonNode raw) {
-        int inputLen = raw.path("il").asInt(raw.path("input_token_len")
-                .asInt(raw.path("backend_input_token_len").asInt(0)));
+        int inputLen =
+                raw.path("il")
+                        .asInt(
+                                raw.path("input_token_len")
+                                        .asInt(raw.path("backend_input_token_len").asInt(0)));
         if (inputLen <= 0) {
             return null;
         }
@@ -1174,9 +1285,12 @@ public final class JavaLoadClient {
             return null;
         }
 
-        String sourceRid = raw.has("request_id") ? raw.get("request_id").asText()
-                : raw.has("rid") ? raw.get("rid").asText()
-                : Long.toString(stableRequestId(raw.toString()));
+        String sourceRid =
+                raw.has("request_id")
+                        ? raw.get("request_id").asText()
+                        : raw.has("rid")
+                                ? raw.get("rid").asText()
+                                : Long.toString(stableRequestId(raw.toString()));
         String traceId = extractTraceId(raw);
         if (traceId.isEmpty()) {
             traceId = sourceRid;
@@ -1190,8 +1304,11 @@ public final class JavaLoadClient {
             requestId = stableRequestId(sourceRid);
         }
 
-        long tsMs = raw.path("ts").asLong(raw.path("request_enter_ts_epoch_ms")
-                .asLong(raw.path("ts_epoch_ms").asLong(0)));
+        long tsMs =
+                raw.path("ts")
+                        .asLong(
+                                raw.path("request_enter_ts_epoch_ms")
+                                        .asLong(raw.path("ts_epoch_ms").asLong(0)));
 
         List<Integer> tokenIds = null;
         JsonNode inputIdsNode = raw.get("input_ids");
@@ -1232,15 +1349,20 @@ public final class JavaLoadClient {
         } else {
             priority = raw.path("priority").asInt(config.priority);
             if (priority != 0 && !PriorityNormalizer.isValid(priority)) {
-                System.err.println("ignoring invalid trace priority " + priority
-                        + " (must be 1-100) for rid=" + sourceRid
-                        + "; falling back to PRIORITY=" + config.priority);
+                System.err.println(
+                        "ignoring invalid trace priority "
+                                + priority
+                                + " (must be 1-100) for rid="
+                                + sourceRid
+                                + "; falling back to PRIORITY="
+                                + config.priority);
                 priority = config.priority;
             }
         }
 
-        return new TraceRecord(requestId, sourceRid, traceId, tsMs,
-                inputLen, outputLen, blockKeys, tokenIds, priority);
+        return new TraceRecord(
+                requestId, sourceRid, traceId, tsMs, inputLen, outputLen, blockKeys, tokenIds,
+                priority);
     }
 
     private String extractTraceId(JsonNode raw) {
@@ -1268,7 +1390,9 @@ public final class JavaLoadClient {
                     continue;
                 }
                 String key = item.path("key").asText().toLowerCase();
-                if (key.equals("eagleeye-traceid") || key.equals("trace-id") || key.equals("x-trace-id")) {
+                if (key.equals("eagleeye-traceid")
+                        || key.equals("trace-id")
+                        || key.equals("x-trace-id")) {
                     JsonNode val = item.get("value");
                     if (val != null && !val.asText().isEmpty()) {
                         return val.asText();
@@ -1293,20 +1417,15 @@ public final class JavaLoadClient {
     }
 
     static long stableRequestId(String value) {
-        return Hashing.murmur3_128()
-                .hashString(value, StandardCharsets.UTF_8)
-                .asLong() & 0x7FFF_FFFF_FFFF_FFFFL;
+        return Hashing.murmur3_128().hashString(value, StandardCharsets.UTF_8).asLong()
+                & 0x7FFF_FFFF_FFFF_FFFFL;
     }
 
     // Package-visible for loop-mode unique-prefix assertions in tests.
     // Deterministic per-round salt: the same (key, loop) pair always maps to
     // the same value, different loops map to different values.
     static long roundSaltedKey(long blockKey, int loopIdx) {
-        return Hashing.murmur3_128().newHasher()
-                .putLong(blockKey)
-                .putInt(loopIdx)
-                .hash()
-                .asLong();
+        return Hashing.murmur3_128().newHasher().putLong(blockKey).putInt(loopIdx).hash().asLong();
     }
 
     private static long toSignedInt64(BigInteger value) {
@@ -1321,11 +1440,16 @@ public final class JavaLoadClient {
 
     private void resetServerLatency() {
         try {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create("http://" + config.targetAddr + "/rtp_llm/server_latency/reset"))
-                    .POST(HttpRequest.BodyPublishers.noBody())
-                    .timeout(Duration.ofSeconds(5))
-                    .build();
+            HttpRequest request =
+                    HttpRequest.newBuilder()
+                            .uri(
+                                    URI.create(
+                                            "http://"
+                                                    + config.targetAddr
+                                                    + "/rtp_llm/server_latency/reset"))
+                            .POST(HttpRequest.BodyPublishers.noBody())
+                            .timeout(Duration.ofSeconds(5))
+                            .build();
             httpClient.send(request, HttpResponse.BodyHandlers.discarding());
         } catch (Exception e) {
             System.out.println("server latency reset unavailable: " + e.getMessage());
@@ -1334,15 +1458,22 @@ public final class JavaLoadClient {
 
     private JsonNode fetchServerLatency() {
         try {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create("http://" + config.targetAddr + "/rtp_llm/server_latency"))
-                    .GET()
-                    .timeout(Duration.ofSeconds(5))
-                    .build();
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpRequest request =
+                    HttpRequest.newBuilder()
+                            .uri(
+                                    URI.create(
+                                            "http://"
+                                                    + config.targetAddr
+                                                    + "/rtp_llm/server_latency"))
+                            .GET()
+                            .timeout(Duration.ofSeconds(5))
+                            .build();
+            HttpResponse<String> response =
+                    httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             return MAPPER.readTree(response.body());
         } catch (Exception e) {
-            System.out.println("server latency snapshot unavailable, using client RTT: " + e.getMessage());
+            System.out.println(
+                    "server latency snapshot unavailable, using client RTT: " + e.getMessage());
             return MAPPER.createObjectNode();
         }
     }
@@ -1422,7 +1553,8 @@ public final class JavaLoadClient {
     private void writeServerLatencySnapshot(JsonNode serverLatency) throws IOException {
         if (!serverLatency.isMissingNode() && !serverLatency.isEmpty()) {
             Path serverLatencyPath = Path.of(config.outputDir, "server_latency.json");
-            MAPPER.writerWithDefaultPrettyPrinter().writeValue(serverLatencyPath.toFile(), serverLatency);
+            MAPPER.writerWithDefaultPrettyPrinter()
+                    .writeValue(serverLatencyPath.toFile(), serverLatency);
         }
     }
 
@@ -1433,8 +1565,8 @@ public final class JavaLoadClient {
      * identical to Python load_replay_requests + shard slice order, so LIMIT is a
      * total cap across all shards rather than a per-shard cap.
      */
-    static List<TraceRecord> filterAndShard(List<TraceRecord> records, int durationS, int limit,
-                                            int numShards, int shardIndex) {
+    static List<TraceRecord> filterAndShard(
+            List<TraceRecord> records, int durationS, int limit, int numShards, int shardIndex) {
         List<TraceRecord> out = records;
         if (durationS > 0 && !out.isEmpty()) {
             long firstTs = out.get(0).tsMs;
@@ -1479,7 +1611,8 @@ public final class JavaLoadClient {
      * Legacy Python client truncation: block_keys are left untouched.
      * Returns new records; counts each field truncation like Python does.
      */
-    static List<TraceRecord> truncateRecords(List<TraceRecord> records, int maxInputLen, int maxOutputLen) {
+    static List<TraceRecord> truncateRecords(
+            List<TraceRecord> records, int maxInputLen, int maxOutputLen) {
         int truncated = 0;
         List<TraceRecord> out = new ArrayList<>(records.size());
         for (TraceRecord r : records) {
@@ -1487,21 +1620,47 @@ public final class JavaLoadClient {
             if (maxInputLen > 0 && cur.inputLen > maxInputLen) {
                 List<Integer> tokens = cur.tokenIds;
                 if (tokens != null && !tokens.isEmpty()) {
-                    tokens = new ArrayList<>(tokens.subList(0, Math.min(maxInputLen, tokens.size())));
+                    tokens =
+                            new ArrayList<>(
+                                    tokens.subList(0, Math.min(maxInputLen, tokens.size())));
                 }
-                cur = new TraceRecord(cur.requestId, cur.sourceRid, cur.traceId, cur.tsMs,
-                        maxInputLen, cur.outputLen, cur.blockKeys, tokens, cur.priority);
+                cur =
+                        new TraceRecord(
+                                cur.requestId,
+                                cur.sourceRid,
+                                cur.traceId,
+                                cur.tsMs,
+                                maxInputLen,
+                                cur.outputLen,
+                                cur.blockKeys,
+                                tokens,
+                                cur.priority);
                 truncated++;
             }
             if (maxOutputLen > 0 && cur.outputLen > maxOutputLen) {
-                cur = new TraceRecord(cur.requestId, cur.sourceRid, cur.traceId, cur.tsMs,
-                        cur.inputLen, maxOutputLen, cur.blockKeys, cur.tokenIds, cur.priority);
+                cur =
+                        new TraceRecord(
+                                cur.requestId,
+                                cur.sourceRid,
+                                cur.traceId,
+                                cur.tsMs,
+                                cur.inputLen,
+                                maxOutputLen,
+                                cur.blockKeys,
+                                cur.tokenIds,
+                                cur.priority);
                 truncated++;
             }
             out.add(cur);
         }
-        System.out.println("truncated " + truncated + " request length(s): "
-                + "max_input_len=" + maxInputLen + ", max_output_len=" + maxOutputLen);
+        System.out.println(
+                "truncated "
+                        + truncated
+                        + " request length(s): "
+                        + "max_input_len="
+                        + maxInputLen
+                        + ", max_output_len="
+                        + maxOutputLen);
         return out;
     }
 
@@ -1511,18 +1670,24 @@ public final class JavaLoadClient {
         if (config.pushgatewayUrl.isEmpty()) {
             return;
         }
-        pushgatewayExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "pushgateway-push");
-            t.setDaemon(true);
-            return t;
-        });
-        pushgatewayExecutor.scheduleAtFixedRate(() -> {
-            try {
-                pushMetrics();
-            } catch (Exception e) {
-                System.out.println("pushgateway push error: " + e);
-            }
-        }, 5, 5, TimeUnit.SECONDS);
+        pushgatewayExecutor =
+                Executors.newSingleThreadScheduledExecutor(
+                        r -> {
+                            Thread t = new Thread(r, "pushgateway-push");
+                            t.setDaemon(true);
+                            return t;
+                        });
+        pushgatewayExecutor.scheduleAtFixedRate(
+                () -> {
+                    try {
+                        pushMetrics();
+                    } catch (Exception e) {
+                        System.out.println("pushgateway push error: " + e);
+                    }
+                },
+                5,
+                5,
+                TimeUnit.SECONDS);
         System.out.println("pushgateway metrics push enabled: " + config.pushgatewayUrl);
     }
 
@@ -1546,15 +1711,20 @@ public final class JavaLoadClient {
         List<String> lines = new ArrayList<>();
         int inflight = inflightCount.get();
         lines.add("flexlb_client_send_total{route_path=\"master\"} " + sentTotal.get());
-        lines.add("flexlb_client_actual_send_total{route_path=\"master\"} " + actualSentCount.get());
-        lines.add("flexlb_client_completed_total{route_path=\"master\"} " + completedResults.size());
+        lines.add(
+                "flexlb_client_actual_send_total{route_path=\"master\"} " + actualSentCount.get());
+        lines.add(
+                "flexlb_client_completed_total{route_path=\"master\"} " + completedResults.size());
         lines.add("flexlb_client_success_total{route_path=\"master\"} " + successCount.get());
         lines.add("flexlb_client_error_total{route_path=\"master\"} " + errorCount.get());
         lines.add("flexlb_client_inflight_count{route_path=\"master\"} " + inflight);
         lines.add("flexlb_client_max_concurrency{route_path=\"master\"} " + config.maxConcurrency);
         if (config.maxConcurrency > 0) {
             double util = inflight / (double) config.maxConcurrency;
-            lines.add(String.format("flexlb_client_semaphore_utilization{route_path=\"master\"} %.4f", util));
+            lines.add(
+                    String.format(
+                            "flexlb_client_semaphore_utilization{route_path=\"master\"} %.4f",
+                            util));
         }
 
         List<RequestResult> snapshot;
@@ -1565,13 +1735,16 @@ public final class JavaLoadClient {
             Map<String, Map<String, List<Double>>> groups = new LinkedHashMap<>();
             for (RequestResult r : snapshot) {
                 String rp = r.routePath == null ? "unknown" : r.routePath;
-                Map<String, List<Double>> vals = groups.computeIfAbsent(rp, k -> {
-                    Map<String, List<Double>> m = new LinkedHashMap<>();
-                    m.put("schedule_ms", new ArrayList<>());
-                    m.put("total_ms", new ArrayList<>());
-                    m.put("ttft_ms", new ArrayList<>());
-                    return m;
-                });
+                Map<String, List<Double>> vals =
+                        groups.computeIfAbsent(
+                                rp,
+                                k -> {
+                                    Map<String, List<Double>> m = new LinkedHashMap<>();
+                                    m.put("schedule_ms", new ArrayList<>());
+                                    m.put("total_ms", new ArrayList<>());
+                                    m.put("ttft_ms", new ArrayList<>());
+                                    return m;
+                                });
                 if (r.scheduleMs > 0) {
                     vals.get("schedule_ms").add(r.scheduleMs);
                 }
@@ -1598,11 +1771,21 @@ public final class JavaLoadClient {
                     double avg = sum / values.size();
                     double p50 = percentileNearestRank(values, 50);
                     double p99 = percentileNearestRank(values, 99);
-                    lines.add(String.format("flexlb_client_%s_avg{%s} %.3f", metricName, label, avg));
-                    lines.add(String.format("flexlb_client_%s_p50{%s} %.3f", metricName, label, p50));
-                    lines.add(String.format("flexlb_client_%s_p99{%s} %.3f", metricName, label, p99));
-                    lines.add(String.format("flexlb_client_%s_max{%s} %.3f", metricName, label, mx));
-                    lines.add("flexlb_client_" + metricName + "_count{" + label + "} " + values.size());
+                    lines.add(
+                            String.format("flexlb_client_%s_avg{%s} %.3f", metricName, label, avg));
+                    lines.add(
+                            String.format("flexlb_client_%s_p50{%s} %.3f", metricName, label, p50));
+                    lines.add(
+                            String.format("flexlb_client_%s_p99{%s} %.3f", metricName, label, p99));
+                    lines.add(
+                            String.format("flexlb_client_%s_max{%s} %.3f", metricName, label, mx));
+                    lines.add(
+                            "flexlb_client_"
+                                    + metricName
+                                    + "_count{"
+                                    + label
+                                    + "} "
+                                    + values.size());
                 }
             }
         }
@@ -1617,16 +1800,22 @@ public final class JavaLoadClient {
         } catch (Exception e) {
             hostname = "unknown";
         }
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(config.pushgatewayUrl
-                        + "/metrics/job/flexlb_client/instance/" + hostname))
-                .header("Content-Type", "text/plain; version=0.0.4")
-                .PUT(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-                .timeout(Duration.ofSeconds(10))
-                .build();
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpRequest request =
+                HttpRequest.newBuilder()
+                        .uri(
+                                URI.create(
+                                        config.pushgatewayUrl
+                                                + "/metrics/job/flexlb_client/instance/"
+                                                + hostname))
+                        .header("Content-Type", "text/plain; version=0.0.4")
+                        .PUT(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                        .timeout(Duration.ofSeconds(10))
+                        .build();
+        HttpResponse<String> response =
+                httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() != 200 && response.statusCode() != 202) {
-            System.out.println("pushgateway push failed: " + response.statusCode() + " " + response.body());
+            System.out.println(
+                    "pushgateway push failed: " + response.statusCode() + " " + response.body());
         }
     }
 
@@ -1634,7 +1823,8 @@ public final class JavaLoadClient {
      * Linear gradient replay speed (parity with Python gradient pacing): speed ramps
      * from max(1, startSpeed) to maxSpeed as elapsed time progresses over duration.
      */
-    static double gradientSpeed(double elapsedS, int durationS, int gradientStartSpeed, int gradientMaxSpeed) {
+    static double gradientSpeed(
+            double elapsedS, int durationS, int gradientStartSpeed, int gradientMaxSpeed) {
         double progress = Math.min(Math.max(elapsedS, 0.0) / durationS, 1.0);
         int startSpeed = Math.max(1, gradientStartSpeed);
         return startSpeed + (gradientMaxSpeed - startSpeed) * progress;
@@ -1717,6 +1907,7 @@ public final class JavaLoadClient {
         final String traceFile;
         final String targetAddr;
         final String grpcTarget;
+
         /**
          * Parsed GRPC_TARGETS addresses (comma-separated host:port list).
          * Empty in the legacy single-target mode. >= 2 addresses activate the
@@ -1724,6 +1915,7 @@ public final class JavaLoadClient {
          * degenerates to the legacy mode with that address as grpcTarget.
          */
         final List<String> grpcTargets;
+
         final int durationS;
         final int maxConcurrency;
         final double replaySpeed;
@@ -1734,12 +1926,14 @@ public final class JavaLoadClient {
         final int limit;
         final long timeoutMs;
         final double slaTtftMs;
+
         /** When false the client skips reading engine output streams (FetchResponse/
          *  GenerateStreamCall phase 2) after a successful Schedule RPC. The engine
          *  still executes prefill + decode in full — only the client-side read is
          *  trimmed. Requires a BATCH dispatcher (see the enqueued_by_master
          *  fail-fast in handleRequest). */
         final boolean fetchOutputStream;
+
         final boolean loop;
         final int nChannels;
         final int eventLoopThreads;
@@ -1754,6 +1948,7 @@ public final class JavaLoadClient {
         final int maxInputLen;
         final int maxOutputLen;
         final String pushgatewayUrl;
+
         /**
          * Direct-to-engine fallback escape hatch (bypasses the master when
          * the Schedule RPC fails or the engine stream read fails). DEFAULT
@@ -1766,20 +1961,26 @@ public final class JavaLoadClient {
          * deliberately want the escape hatch.
          */
         final boolean enableFallback;
+
         final String endpointsFile;
         final boolean dryRun;
+
         /** Default Auto-TPM QoS priority for all replayed requests. Defaults to
          *  the neutral level 50 (same as scheduler.ordering.defaultPriority):
          *  priority 0 is not a valid QoS level — load-test traffic at 0 gets
          *  100% rejected by master admission. Pass PRIORITY=0 explicitly to
          *  restore the old "leave the field unset on the wire" behavior. */
         final int priority;
+
         /** Single-priority override: > 0 pins every request to that level. */
         final int forcePriority;
+
         /** Arrival process: "replay" (trace ts pacing) or "uniform" (fixed interval). */
         final String sendMode;
+
         /** Total target QPS across all shards; required > 0 in uniform mode. */
         final double sendModeQps;
+
         /** Uniform-mode traffic ramp-up: per-shard QPS climbs linearly from 0
          *  to sendModeQps/numShards over RAMP_UP_SECONDS, then stays constant.
          *  0 (default) disables it — the arrival process stays a fixed
@@ -1788,76 +1989,231 @@ public final class JavaLoadClient {
          *  FLEXLB_WARMUP_SECONDS (a no-traffic prepare sleep before load
          *  starts); this knob shapes the arrival process once traffic begins. */
         final double rampUpSeconds;
+
         /**
          * REPLAY_UNIQUE_PREFIX: re-salt blockKeys[0] per loop round so every
          * replay round presents a fresh cache-affinity prefix (default on).
          */
         final boolean replayUniquePrefix;
 
-        Config(String traceFile, String targetAddr, String grpcTarget,
-               int durationS, int maxConcurrency, double replaySpeed,
-               int loadClientWorkers, String outputDir, int numShards,
-               int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               boolean fetchOutputStream, boolean loop,
-               int nChannels, int eventLoopThreads, long startAtEpochMs,
-               int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean gradient,
-               int gradientStartSpeed, int gradientMaxSpeed,
-               int maxInputLen, int maxOutputLen, String pushgatewayUrl,
-               boolean enableFallback, String endpointsFile, boolean dryRun) {
-            this(traceFile, targetAddr, grpcTarget, durationS, maxConcurrency, replaySpeed,
-                    loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
-                    slaTtftMs, fetchOutputStream, loop, nChannels,
-                    eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
-                    skipServerLatency, model, apiKey, gradient,
-                    gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
-                    pushgatewayUrl, enableFallback, endpointsFile, dryRun, 0, 0, "replay", 0.0,
+        Config(
+                String traceFile,
+                String targetAddr,
+                String grpcTarget,
+                int durationS,
+                int maxConcurrency,
+                double replaySpeed,
+                int loadClientWorkers,
+                String outputDir,
+                int numShards,
+                int shardIndex,
+                int limit,
+                long timeoutMs,
+                double slaTtftMs,
+                boolean fetchOutputStream,
+                boolean loop,
+                int nChannels,
+                int eventLoopThreads,
+                long startAtEpochMs,
+                int responseTimeoutSeconds,
+                boolean skipServerLatency,
+                String model,
+                String apiKey,
+                boolean gradient,
+                int gradientStartSpeed,
+                int gradientMaxSpeed,
+                int maxInputLen,
+                int maxOutputLen,
+                String pushgatewayUrl,
+                boolean enableFallback,
+                String endpointsFile,
+                boolean dryRun) {
+            this(
+                    traceFile,
+                    targetAddr,
+                    grpcTarget,
+                    durationS,
+                    maxConcurrency,
+                    replaySpeed,
+                    loadClientWorkers,
+                    outputDir,
+                    numShards,
+                    shardIndex,
+                    limit,
+                    timeoutMs,
+                    slaTtftMs,
+                    fetchOutputStream,
+                    loop,
+                    nChannels,
+                    eventLoopThreads,
+                    startAtEpochMs,
+                    responseTimeoutSeconds,
+                    skipServerLatency,
+                    model,
+                    apiKey,
+                    gradient,
+                    gradientStartSpeed,
+                    gradientMaxSpeed,
+                    maxInputLen,
+                    maxOutputLen,
+                    pushgatewayUrl,
+                    enableFallback,
+                    endpointsFile,
+                    dryRun,
+                    0,
+                    0,
+                    "replay",
+                    0.0,
                     true);
         }
 
-        Config(String traceFile, String targetAddr, String grpcTarget,
-               int durationS, int maxConcurrency, double replaySpeed,
-               int loadClientWorkers, String outputDir, int numShards,
-               int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               boolean fetchOutputStream, boolean loop,
-               int nChannels, int eventLoopThreads, long startAtEpochMs,
-               int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean gradient,
-               int gradientStartSpeed, int gradientMaxSpeed,
-               int maxInputLen, int maxOutputLen, String pushgatewayUrl,
-               boolean enableFallback, String endpointsFile, boolean dryRun,
-               int priority) {
-            this(traceFile, targetAddr, grpcTarget, durationS, maxConcurrency, replaySpeed,
-                    loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
-                    slaTtftMs, fetchOutputStream, loop, nChannels,
-                    eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
-                    skipServerLatency, model, apiKey, gradient,
-                    gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
-                    pushgatewayUrl, enableFallback, endpointsFile, dryRun, priority,
-                    0, "replay", 0.0, true);
+        Config(
+                String traceFile,
+                String targetAddr,
+                String grpcTarget,
+                int durationS,
+                int maxConcurrency,
+                double replaySpeed,
+                int loadClientWorkers,
+                String outputDir,
+                int numShards,
+                int shardIndex,
+                int limit,
+                long timeoutMs,
+                double slaTtftMs,
+                boolean fetchOutputStream,
+                boolean loop,
+                int nChannels,
+                int eventLoopThreads,
+                long startAtEpochMs,
+                int responseTimeoutSeconds,
+                boolean skipServerLatency,
+                String model,
+                String apiKey,
+                boolean gradient,
+                int gradientStartSpeed,
+                int gradientMaxSpeed,
+                int maxInputLen,
+                int maxOutputLen,
+                String pushgatewayUrl,
+                boolean enableFallback,
+                String endpointsFile,
+                boolean dryRun,
+                int priority) {
+            this(
+                    traceFile,
+                    targetAddr,
+                    grpcTarget,
+                    durationS,
+                    maxConcurrency,
+                    replaySpeed,
+                    loadClientWorkers,
+                    outputDir,
+                    numShards,
+                    shardIndex,
+                    limit,
+                    timeoutMs,
+                    slaTtftMs,
+                    fetchOutputStream,
+                    loop,
+                    nChannels,
+                    eventLoopThreads,
+                    startAtEpochMs,
+                    responseTimeoutSeconds,
+                    skipServerLatency,
+                    model,
+                    apiKey,
+                    gradient,
+                    gradientStartSpeed,
+                    gradientMaxSpeed,
+                    maxInputLen,
+                    maxOutputLen,
+                    pushgatewayUrl,
+                    enableFallback,
+                    endpointsFile,
+                    dryRun,
+                    priority,
+                    0,
+                    "replay",
+                    0.0,
+                    true);
         }
 
-        Config(String traceFile, String targetAddr, String grpcTarget,
-               int durationS, int maxConcurrency, double replaySpeed,
-               int loadClientWorkers, String outputDir, int numShards,
-               int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               boolean fetchOutputStream, boolean loop,
-               int nChannels, int eventLoopThreads, long startAtEpochMs,
-               int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean gradient,
-               int gradientStartSpeed, int gradientMaxSpeed,
-               int maxInputLen, int maxOutputLen, String pushgatewayUrl,
-               boolean enableFallback, String endpointsFile, boolean dryRun,
-               int priority, int forcePriority, String sendMode, double sendModeQps,
-               boolean replayUniquePrefix) {
-            this(traceFile, targetAddr, grpcTarget, durationS, maxConcurrency, replaySpeed,
-                    loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
-                    slaTtftMs, fetchOutputStream, loop, nChannels,
-                    eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
-                    skipServerLatency, model, apiKey, gradient,
-                    gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
-                    pushgatewayUrl, enableFallback, endpointsFile, dryRun, priority,
-                    forcePriority, sendMode, sendModeQps, 0.0, replayUniquePrefix,
+        Config(
+                String traceFile,
+                String targetAddr,
+                String grpcTarget,
+                int durationS,
+                int maxConcurrency,
+                double replaySpeed,
+                int loadClientWorkers,
+                String outputDir,
+                int numShards,
+                int shardIndex,
+                int limit,
+                long timeoutMs,
+                double slaTtftMs,
+                boolean fetchOutputStream,
+                boolean loop,
+                int nChannels,
+                int eventLoopThreads,
+                long startAtEpochMs,
+                int responseTimeoutSeconds,
+                boolean skipServerLatency,
+                String model,
+                String apiKey,
+                boolean gradient,
+                int gradientStartSpeed,
+                int gradientMaxSpeed,
+                int maxInputLen,
+                int maxOutputLen,
+                String pushgatewayUrl,
+                boolean enableFallback,
+                String endpointsFile,
+                boolean dryRun,
+                int priority,
+                int forcePriority,
+                String sendMode,
+                double sendModeQps,
+                boolean replayUniquePrefix) {
+            this(
+                    traceFile,
+                    targetAddr,
+                    grpcTarget,
+                    durationS,
+                    maxConcurrency,
+                    replaySpeed,
+                    loadClientWorkers,
+                    outputDir,
+                    numShards,
+                    shardIndex,
+                    limit,
+                    timeoutMs,
+                    slaTtftMs,
+                    fetchOutputStream,
+                    loop,
+                    nChannels,
+                    eventLoopThreads,
+                    startAtEpochMs,
+                    responseTimeoutSeconds,
+                    skipServerLatency,
+                    model,
+                    apiKey,
+                    gradient,
+                    gradientStartSpeed,
+                    gradientMaxSpeed,
+                    maxInputLen,
+                    maxOutputLen,
+                    pushgatewayUrl,
+                    enableFallback,
+                    endpointsFile,
+                    dryRun,
+                    priority,
+                    forcePriority,
+                    sendMode,
+                    sendModeQps,
+                    0.0,
+                    replayUniquePrefix,
                     List.of());
         }
 
@@ -1866,44 +2222,124 @@ public final class JavaLoadClient {
          * uniform-mode tests): delegates with no multi-target list — the
          * single-target behavior is unchanged.
          */
-        Config(String traceFile, String targetAddr, String grpcTarget,
-               int durationS, int maxConcurrency, double replaySpeed,
-               int loadClientWorkers, String outputDir, int numShards,
-               int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               boolean fetchOutputStream, boolean loop,
-               int nChannels, int eventLoopThreads, long startAtEpochMs,
-               int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean gradient,
-               int gradientStartSpeed, int gradientMaxSpeed,
-               int maxInputLen, int maxOutputLen, String pushgatewayUrl,
-               boolean enableFallback, String endpointsFile, boolean dryRun,
-               int priority, int forcePriority, String sendMode, double sendModeQps,
-               double rampUpSeconds, boolean replayUniquePrefix) {
-            this(traceFile, targetAddr, grpcTarget, durationS, maxConcurrency, replaySpeed,
-                    loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
-                    slaTtftMs, fetchOutputStream, loop, nChannels,
-                    eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
-                    skipServerLatency, model, apiKey, gradient,
-                    gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
-                    pushgatewayUrl, enableFallback, endpointsFile, dryRun, priority,
-                    forcePriority, sendMode, sendModeQps, rampUpSeconds,
-                    replayUniquePrefix, List.of());
+        Config(
+                String traceFile,
+                String targetAddr,
+                String grpcTarget,
+                int durationS,
+                int maxConcurrency,
+                double replaySpeed,
+                int loadClientWorkers,
+                String outputDir,
+                int numShards,
+                int shardIndex,
+                int limit,
+                long timeoutMs,
+                double slaTtftMs,
+                boolean fetchOutputStream,
+                boolean loop,
+                int nChannels,
+                int eventLoopThreads,
+                long startAtEpochMs,
+                int responseTimeoutSeconds,
+                boolean skipServerLatency,
+                String model,
+                String apiKey,
+                boolean gradient,
+                int gradientStartSpeed,
+                int gradientMaxSpeed,
+                int maxInputLen,
+                int maxOutputLen,
+                String pushgatewayUrl,
+                boolean enableFallback,
+                String endpointsFile,
+                boolean dryRun,
+                int priority,
+                int forcePriority,
+                String sendMode,
+                double sendModeQps,
+                double rampUpSeconds,
+                boolean replayUniquePrefix) {
+            this(
+                    traceFile,
+                    targetAddr,
+                    grpcTarget,
+                    durationS,
+                    maxConcurrency,
+                    replaySpeed,
+                    loadClientWorkers,
+                    outputDir,
+                    numShards,
+                    shardIndex,
+                    limit,
+                    timeoutMs,
+                    slaTtftMs,
+                    fetchOutputStream,
+                    loop,
+                    nChannels,
+                    eventLoopThreads,
+                    startAtEpochMs,
+                    responseTimeoutSeconds,
+                    skipServerLatency,
+                    model,
+                    apiKey,
+                    gradient,
+                    gradientStartSpeed,
+                    gradientMaxSpeed,
+                    maxInputLen,
+                    maxOutputLen,
+                    pushgatewayUrl,
+                    enableFallback,
+                    endpointsFile,
+                    dryRun,
+                    priority,
+                    forcePriority,
+                    sendMode,
+                    sendModeQps,
+                    rampUpSeconds,
+                    replayUniquePrefix,
+                    List.of());
         }
 
-        Config(String traceFile, String targetAddr, String grpcTarget,
-               int durationS, int maxConcurrency, double replaySpeed,
-               int loadClientWorkers, String outputDir, int numShards,
-               int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               boolean fetchOutputStream, boolean loop,
-               int nChannels, int eventLoopThreads, long startAtEpochMs,
-               int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean gradient,
-               int gradientStartSpeed, int gradientMaxSpeed,
-               int maxInputLen, int maxOutputLen, String pushgatewayUrl,
-               boolean enableFallback, String endpointsFile, boolean dryRun,
-               int priority, int forcePriority, String sendMode, double sendModeQps,
-               double rampUpSeconds, boolean replayUniquePrefix,
-               List<String> grpcTargets) {
+        Config(
+                String traceFile,
+                String targetAddr,
+                String grpcTarget,
+                int durationS,
+                int maxConcurrency,
+                double replaySpeed,
+                int loadClientWorkers,
+                String outputDir,
+                int numShards,
+                int shardIndex,
+                int limit,
+                long timeoutMs,
+                double slaTtftMs,
+                boolean fetchOutputStream,
+                boolean loop,
+                int nChannels,
+                int eventLoopThreads,
+                long startAtEpochMs,
+                int responseTimeoutSeconds,
+                boolean skipServerLatency,
+                String model,
+                String apiKey,
+                boolean gradient,
+                int gradientStartSpeed,
+                int gradientMaxSpeed,
+                int maxInputLen,
+                int maxOutputLen,
+                String pushgatewayUrl,
+                boolean enableFallback,
+                String endpointsFile,
+                boolean dryRun,
+                int priority,
+                int forcePriority,
+                String sendMode,
+                double sendModeQps,
+                double rampUpSeconds,
+                boolean replayUniquePrefix,
+                List<String> grpcTargets) {
             this.traceFile = traceFile;
             this.targetAddr = targetAddr;
             this.grpcTarget = grpcTarget;
@@ -2001,7 +2437,8 @@ public final class JavaLoadClient {
             if (out.isEmpty()) {
                 throw new IllegalArgumentException(
                         "GRPC_TARGETS is set but contains no valid host:port address: '"
-                                + raw + "'");
+                                + raw
+                                + "'");
             }
             return out;
         }
@@ -2015,20 +2452,25 @@ public final class JavaLoadClient {
             // addresses activate the sticky+failover router; exactly 1
             // degenerates to the legacy single-target mode on that address.
             String grpcTargetsRaw = env("GRPC_TARGETS", "");
-            List<String> grpcTargets = grpcTargetsRaw.isEmpty()
-                    ? List.of() : parseGrpcTargets(grpcTargetsRaw);
+            List<String> grpcTargets =
+                    grpcTargetsRaw.isEmpty() ? List.of() : parseGrpcTargets(grpcTargetsRaw);
             if (!grpcTargets.isEmpty()) {
                 if (!grpcTarget.isEmpty()) {
-                    System.out.println("GRPC_TARGETS=" + grpcTargetsRaw
-                            + " takes precedence over GRPC_TARGET=" + grpcTarget
-                            + " (both set)");
+                    System.out.println(
+                            "GRPC_TARGETS="
+                                    + grpcTargetsRaw
+                                    + " takes precedence over GRPC_TARGET="
+                                    + grpcTarget
+                                    + " (both set)");
                 }
                 // Cosmetic anchor for logs / server-latency: the router owns
                 // the real per-target pools; grpcTarget points at the first.
                 grpcTarget = grpcTargets.get(0);
                 if (grpcTargets.size() == 1) {
-                    System.out.println("GRPC_TARGETS has a single address '"
-                            + grpcTarget + "': legacy single-target mode (no failover)");
+                    System.out.println(
+                            "GRPC_TARGETS has a single address '"
+                                    + grpcTarget
+                                    + "': legacy single-target mode (no failover)");
                 }
             }
             if (grpcTarget.isEmpty()) {
@@ -2085,8 +2527,7 @@ public final class JavaLoadClient {
                     envDouble("SEND_MODE_QPS", 0.0),
                     envDouble("RAMP_UP_SECONDS", 0.0),
                     envBool("REPLAY_UNIQUE_PREFIX", true),
-                    grpcTargets
-            );
+                    grpcTargets);
         }
 
         void print() {
@@ -2094,9 +2535,10 @@ public final class JavaLoadClient {
             System.out.println("  TRACE_FILE=" + traceFile);
             System.out.println("  TARGET_ADDR=" + targetAddr);
             System.out.println("  GRPC_TARGET=" + grpcTarget);
-            System.out.println("  GRPC_TARGETS=" + (grpcTargets.isEmpty()
-                    ? "<unset>" : String.join(",", grpcTargets))
-                    + (isMultiTarget() ? " (HA sticky+failover mode)" : ""));
+            System.out.println(
+                    "  GRPC_TARGETS="
+                            + (grpcTargets.isEmpty() ? "<unset>" : String.join(",", grpcTargets))
+                            + (isMultiTarget() ? " (HA sticky+failover mode)" : ""));
             System.out.println("  DURATION_S=" + durationS);
             System.out.println("  MAX_CONCURRENCY=" + maxConcurrency);
             System.out.println("  REPLAY_SPEED=" + replaySpeed);
@@ -2172,7 +2614,8 @@ public final class JavaLoadClient {
             if (value == PriorityNormalizer.NO_PRIORITY || PriorityNormalizer.isValid(value)) {
                 return value;
             }
-            System.err.println("invalid PRIORITY=" + value + " (must be 0-100); falling back to 50");
+            System.err.println(
+                    "invalid PRIORITY=" + value + " (must be 0-100); falling back to 50");
             return PriorityNormalizer.DEFAULT_PRIORITY;
         }
 
@@ -2185,8 +2628,10 @@ public final class JavaLoadClient {
             if (value == PriorityNormalizer.NO_PRIORITY || PriorityNormalizer.isValid(value)) {
                 return value;
             }
-            System.err.println("invalid FORCE_PRIORITY=" + value
-                    + " (must be 0-100); disabling the priority pin");
+            System.err.println(
+                    "invalid FORCE_PRIORITY="
+                            + value
+                            + " (must be 0-100); disabling the priority pin");
             return PriorityNormalizer.NO_PRIORITY;
         }
     }
@@ -2200,17 +2645,32 @@ public final class JavaLoadClient {
         final int outputLen;
         final List<Long> blockKeys;
         final List<Integer> tokenIds;
+
         /** Auto-TPM QoS priority in [1, 100]; 0 means unset. */
         final int priority;
 
-        TraceRecord(long requestId, String sourceRid, String traceId, long tsMs,
-                    int inputLen, int outputLen, List<Long> blockKeys, List<Integer> tokenIds) {
+        TraceRecord(
+                long requestId,
+                String sourceRid,
+                String traceId,
+                long tsMs,
+                int inputLen,
+                int outputLen,
+                List<Long> blockKeys,
+                List<Integer> tokenIds) {
             this(requestId, sourceRid, traceId, tsMs, inputLen, outputLen, blockKeys, tokenIds, 0);
         }
 
-        TraceRecord(long requestId, String sourceRid, String traceId, long tsMs,
-                    int inputLen, int outputLen, List<Long> blockKeys, List<Integer> tokenIds,
-                    int priority) {
+        TraceRecord(
+                long requestId,
+                String sourceRid,
+                String traceId,
+                long tsMs,
+                int inputLen,
+                int outputLen,
+                List<Long> blockKeys,
+                List<Integer> tokenIds,
+                int priority) {
             this.requestId = requestId;
             this.sourceRid = sourceRid;
             this.traceId = traceId;
@@ -2232,8 +2692,10 @@ public final class JavaLoadClient {
         int outputLen;
         String status = "unknown";
         double scheduleMs;
+
         /** Absolute epoch-ms when the schedule RPC returned (send_start + schedule_ms); 0 on the direct fallback path (no master schedule hop). */
         double schedDoneEpochMs;
+
         double ttftMs;
         double totalMs;
         boolean enqueuedByMaster;
@@ -2241,29 +2703,34 @@ public final class JavaLoadClient {
         String decode = "";
         String error = "";
         String routePath = "master";
+
         /** Actually-served (or last-attempted) flexlb gRPC address; empty on
          *  synthetic rows (collector timeout / dead-future fallbacks). */
         String masterTarget = "";
+
         /** True when the same request was retried on another GRPC_TARGETS
          *  target (transport-failure failover). Always false in the legacy
          *  single-target mode. */
         boolean failover;
+
         /** Schedule-stage failure taxonomy: transport|business|deadline|none.
          *  Business error codes (8431/8511) and gRPC-layer master errors map
          *  to "business"; "none" covers successes and phase-2 stream
          *  failures (the master leg itself succeeded). */
         String errorKind = "none";
+
         double wallClockTs;
         double sendDueEpochMs;
         double sendStartEpochMs;
         double pacingLagMs;
+
         /** Auto-TPM QoS priority carried by the schedule request; 0 means unset. */
         int priority;
+
         /** True for rows synthesized by the collector (deadline timeout /
          *  dead-future exception) rather than produced by a real request:
          *  they carry no priority and stay out of priority-scoped output
          *  and aggregates. */
         boolean synthetic;
     }
-
 }

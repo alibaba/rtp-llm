@@ -36,11 +36,11 @@ public class HttpMockEngineCancelChannel implements EngineCancelChannel {
     public HttpMockEngineCancelChannel(String controlUrl) {
         // Normalize so both ".../cancel_request"-less base URLs with and
         // without a trailing slash are accepted.
-        this.controlUrl = controlUrl.endsWith("/")
-                ? controlUrl.substring(0, controlUrl.length() - 1) : controlUrl;
-        this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(REQUEST_TIMEOUT)
-                .build();
+        this.controlUrl =
+                controlUrl.endsWith("/")
+                        ? controlUrl.substring(0, controlUrl.length() - 1)
+                        : controlUrl;
+        this.httpClient = HttpClient.newBuilder().connectTimeout(REQUEST_TIMEOUT).build();
     }
 
     /**
@@ -54,26 +54,28 @@ public class HttpMockEngineCancelChannel implements EngineCancelChannel {
     }
 
     @Override
-    public CompletableFuture<CancelAck> cancel(CancelTarget target,
-                                               long requestId,
-                                               long timeoutMs) {
+    public CompletableFuture<CancelAck> cancel(
+            CancelTarget target, long requestId, long timeoutMs) {
         try {
             // TEST-ONLY routing: the mock control plane resolves the target
             // engine by the original Prefill endpoint's gRPC port.
             if (target == null || !target.isRoutable()) {
                 return CompletableFuture.completedFuture(CancelAck.UNSUPPORTED);
             }
-            String body = MAPPER.createObjectNode()
-                    .put("port", target.prefillGrpcPort())
-                    .put("request_id", requestId)
-                    .toString();
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(controlUrl + "/cancel_request"))
-                    .timeout(REQUEST_TIMEOUT)
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(body))
-                    .build();
-            return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+            String body =
+                    MAPPER.createObjectNode()
+                            .put("port", target.prefillGrpcPort())
+                            .put("request_id", requestId)
+                            .toString();
+            HttpRequest request =
+                    HttpRequest.newBuilder()
+                            .uri(URI.create(controlUrl + "/cancel_request"))
+                            .timeout(REQUEST_TIMEOUT)
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(body))
+                            .build();
+            return httpClient
+                    .sendAsync(request, HttpResponse.BodyHandlers.ofString())
                     .thenApply(response -> mapResponse(response, requestId));
         } catch (Exception e) {
             // Contract: never throw synchronously; surface as a failed future.
@@ -93,9 +95,13 @@ public class HttpMockEngineCancelChannel implements EngineCancelChannel {
             return CancelAck.UNSUPPORTED;
         }
         if (response.statusCode() != 200) {
-            throw new IllegalStateException("mock cancel control plane returned HTTP "
-                    + response.statusCode() + " for request " + requestId
-                    + ": " + response.body());
+            throw new IllegalStateException(
+                    "mock cancel control plane returned HTTP "
+                            + response.statusCode()
+                            + " for request "
+                            + requestId
+                            + ": "
+                            + response.body());
         }
         try {
             String status = MAPPER.readTree(response.body()).path("status").asText();
@@ -103,9 +109,12 @@ public class HttpMockEngineCancelChannel implements EngineCancelChannel {
                 case "ACCEPTED" -> CancelAck.ACCEPTED;
                 case "NOT_FOUND" -> CancelAck.NOT_FOUND;
                 case "TOMBSTONED" -> CancelAck.REQUEST_FENCED;
-                default -> throw new IllegalStateException(
-                        "mock cancel control plane returned unknown status '" + status
-                                + "' for request " + requestId);
+                default ->
+                        throw new IllegalStateException(
+                                "mock cancel control plane returned unknown status '"
+                                        + status
+                                        + "' for request "
+                                        + requestId);
             };
         } catch (Exception e) {
             if (e instanceof IllegalStateException illegalStateException) {

@@ -1,6 +1,9 @@
 #!/bin/bash
 
-APP_HOME=$(cd $(dirname ${BASH_SOURCE[0]})/..; pwd)
+APP_HOME=$(
+    cd $(dirname ${BASH_SOURCE[0]})/..
+    pwd
+)
 source "${APP_HOME}/bin/setenv.sh"
 
 CHECK_PORT=$STATUS_PORT
@@ -24,9 +27,9 @@ checkpage() {
         if [ -f "$SERVICE_PID" ]; then
             if [ -s "$SERVICE_PID" ]; then
                 if [ -r "$SERVICE_PID" ]; then
-                    PID=`cat "$SERVICE_PID"`
+                    PID=$(cat "$SERVICE_PID")
                     ps -p $PID >/dev/null 2>&1
-                    if [ $? -eq 0 ] ; then
+                    if [ $? -eq 0 ]; then
                         # Only check /hook/process_ok endpoint
                         health_check "/hook/process_ok" "${APP_NAME}" "200"
                         if [ $? -eq 0 ]; then
@@ -52,7 +55,7 @@ health_check() {
     # check health endpoint with HTTP status code
     echo "Starting health_check function"
     echo "TOMCAT_PORT=${TOMCAT_PORT}, NGINX_SKIP=${NGINX_SKIP}"
-    
+
     # Always try health check regardless of port listening status
     # This allows checking even if ss command doesn't detect the port yet
     echo "INFO: checking health endpoint through port: ${CHECK_PORT}"
@@ -61,12 +64,12 @@ health_check() {
     TITLE=$2
     EXPECTED_STATUS=$3
     echo "$CURL_BIN" "${HTTP_IP}${URL}"
-    
+
     # Check HTTP status code
-    HTTP_STATUS=`$CURL_BIN --silent --write-out '%{http_code}' --output /dev/null -m 120 "${HTTP_IP}${URL}" 2>&1`
+    HTTP_STATUS=$($CURL_BIN --silent --write-out '%{http_code}' --output /dev/null -m 120 "${HTTP_IP}${URL}" 2>&1)
     echo ""
     echo "$CURL_BIN" "${HTTP_IP}${URL}" " HTTP status: $HTTP_STATUS"
-    
+
     if [ "$EXPECTED_STATUS" != "" ]; then
         if [ "$HTTP_STATUS" == "$EXPECTED_STATUS" ]; then
             echo "INFO: Health check passed with status $HTTP_STATUS"
@@ -81,13 +84,16 @@ health_check() {
 
 preload_htm() {
     # check preload.htm
-    portret=`(/usr/sbin/ss -ln4 sport = :${TOMCAT_PORT}; /usr/sbin/ss -ln6 sport = :${TOMCAT_PORT}) | grep -c ":${TOMCAT_PORT}"`
+    portret=$( (
+        /usr/sbin/ss -ln4 sport = :${TOMCAT_PORT}
+        /usr/sbin/ss -ln6 sport = :${TOMCAT_PORT}
+    ) | grep -c ":${TOMCAT_PORT}")
     if [ $portret -ne 0 -a "${NGINX_SKIP}" -ne "1" ]; then
         echo "INFO: tomcat is running at port: ${TOMCAT_PORT}"
         if [ "$CHECK_PORT" == 80 ]; then
-          echo "INFO: try to chek checkpreload.htm through nginx port: 80"
+            echo "INFO: try to chek checkpreload.htm through nginx port: 80"
         else
-          echo "INFO: try to check checkpreload.htm through tomcat port: ${CHECK_PORT}"
+            echo "INFO: try to check checkpreload.htm through tomcat port: ${CHECK_PORT}"
         fi
 
         URL=$1
@@ -97,15 +103,15 @@ preload_htm() {
         if [ "$TITLE" == "" ]; then
             TITLE=$URL
         fi
-        len=`echo $TITLE | wc -c`
-        len=`expr 60 - $len`
+        len=$(echo $TITLE | wc -c)
+        len=$(expr 60 - $len)
         echo -n -e "$TITLE ...${SPACE_STR:1:$len}"
-        TMP_FILE=`$CURL_BIN --silent -m 150 "${HTTP_IP}${URL}" 2>&1`
+        TMP_FILE=$($CURL_BIN --silent -m 150 "${HTTP_IP}${URL}" 2>&1)
         echo ""
         echo "$CURL_BIN" "${HTTP_IP}${URL}" " return: "
         echo "$TMP_FILE"
         if [ "$CHECK_TXT" != "" ]; then
-            checkret=`echo "$TMP_FILE" | fgrep "$CHECK_TXT"`
+            checkret=$(echo "$TMP_FILE" | fgrep "$CHECK_TXT")
             if [ "$checkret" == "" ]; then
                 echo "ERROR: Please make sure checkpreload.htm return: success"
                 error=1

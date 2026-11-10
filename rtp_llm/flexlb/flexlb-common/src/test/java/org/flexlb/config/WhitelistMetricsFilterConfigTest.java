@@ -45,8 +45,7 @@ class WhitelistMetricsFilterConfigTest {
         MeterFilter filter = filterFor(G3_SHAPED_WHITELIST);
         MeterRegistry registry = new SimpleMeterRegistry();
         Meter.Id cacheHit = registry.counter("flexlb.app.cache.hit.ratio").getId();
-        Meter.Id inflightBatch = registry
-                .counter("flexlb.app.flexlb.inflight.batch.count").getId();
+        Meter.Id inflightBatch = registry.counter("flexlb.app.flexlb.inflight.batch.count").getId();
 
         assertEquals(MeterFilterReply.NEUTRAL, filter.accept(cacheHit));
         assertEquals(MeterFilterReply.NEUTRAL, filter.accept(inflightBatch));
@@ -59,8 +58,8 @@ class WhitelistMetricsFilterConfigTest {
         // must try the counter exposition form.
         MeterFilter filter = filterFor(G3_SHAPED_WHITELIST);
         MeterRegistry registry = new SimpleMeterRegistry();
-        Meter.Id dispatchReason = registry
-                .counter("flexlb.app.engine.balancing.master.dispatch.reason").getId();
+        Meter.Id dispatchReason =
+                registry.counter("flexlb.app.engine.balancing.master.dispatch.reason").getId();
 
         assertEquals(MeterFilterReply.NEUTRAL, filter.accept(dispatchReason));
     }
@@ -69,10 +68,9 @@ class WhitelistMetricsFilterConfigTest {
     void deniesFlexlbMetricsOutsideWhitelist() {
         MeterFilter filter = filterFor(G3_SHAPED_WHITELIST);
         MeterRegistry registry = new SimpleMeterRegistry();
-        Meter.Id nonWhitelisted = registry
-                .counter("flexlb.grpc.server.executor.queue.size").getId();
-        Meter.Id nearMiss = registry
-                .counter("flexlb.app.cachex.should.not.match").getId();
+        Meter.Id nonWhitelisted =
+                registry.counter("flexlb.grpc.server.executor.queue.size").getId();
+        Meter.Id nearMiss = registry.counter("flexlb.app.cachex.should.not.match").getId();
 
         assertEquals(MeterFilterReply.DENY, filter.accept(nonWhitelisted));
         // "flexlb_app_cachex..." is NOT under the "flexlb_app_cache_" prefix.
@@ -95,29 +93,34 @@ class WhitelistMetricsFilterConfigTest {
         // Property default: the six core link latency meters stay exposed
         // (the DEFAULT_METRIC_WHITELIST preset), everything else flexlb.* is
         // denied, non-flexlb metrics unaffected.
-        WhitelistMetricsFilterConfig config = new WhitelistMetricsFilterConfig(
-                WhitelistMetricsFilterConfig.DEFAULT_METRIC_WHITELIST);
+        WhitelistMetricsFilterConfig config =
+                new WhitelistMetricsFilterConfig(
+                        WhitelistMetricsFilterConfig.DEFAULT_METRIC_WHITELIST);
         MeterFilter filter = config.whitelistMetricsFilter();
         MeterRegistry registry = new SimpleMeterRegistry();
         String[] criticalMeters = {
-                "app.request.network.delay.ms",
-                "app.grpc.server.process.ms",
-                "app.flexlb.route.submit.time.ms",
-                "app.routing.queue.wait.time.ms",
-                "app.flexlb.dispatch.ack.time.ms",
-                "app.engine.balancing.master.dispatch.reason",
+            "app.request.network.delay.ms",
+            "app.grpc.server.process.ms",
+            "app.flexlb.route.submit.time.ms",
+            "app.routing.queue.wait.time.ms",
+            "app.flexlb.dispatch.ack.time.ms",
+            "app.engine.balancing.master.dispatch.reason",
         };
         for (String meter : criticalMeters) {
-            assertEquals(MeterFilterReply.NEUTRAL,
-                    filter.accept(registry.counter("flexlb." + meter).getId()), meter);
+            assertEquals(
+                    MeterFilterReply.NEUTRAL,
+                    filter.accept(registry.counter("flexlb." + meter).getId()),
+                    meter);
         }
-        Meter.Id inflightBatch = registry
-                .counter("flexlb.app.flexlb.inflight.batch.count").getId();
+        Meter.Id inflightBatch = registry.counter("flexlb.app.flexlb.inflight.batch.count").getId();
         Meter.Id jvm = registry.counter("jvm.test.metric").getId();
         assertEquals(MeterFilterReply.DENY, filter.accept(inflightBatch));
         assertEquals(MeterFilterReply.NEUTRAL, filter.accept(jvm));
-        assertEquals(6, WhitelistMetricsFilterConfig.parseWhitelist(
-                WhitelistMetricsFilterConfig.DEFAULT_METRIC_WHITELIST).size());
+        assertEquals(
+                6,
+                WhitelistMetricsFilterConfig.parseWhitelist(
+                                WhitelistMetricsFilterConfig.DEFAULT_METRIC_WHITELIST)
+                        .size());
     }
 
     @Test
@@ -151,8 +154,7 @@ class WhitelistMetricsFilterConfigTest {
         // Early-return layer: after init(), register()/report() for a metric
         // outside the whitelist must not reach the registry at all, while a
         // whitelisted one still lands.
-        WhitelistMetricsFilterConfig config =
-                new WhitelistMetricsFilterConfig(G3_SHAPED_WHITELIST);
+        WhitelistMetricsFilterConfig config = new WhitelistMetricsFilterConfig(G3_SHAPED_WHITELIST);
         config.init();
 
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
@@ -189,15 +191,20 @@ class WhitelistMetricsFilterConfigTest {
     @Test
     void counterSuffixMatchingKeepsPrefixBoundaries() {
         String name = "app.requests";
-        for (String prefix : List.of("flexlb_app_requests", "flexlb_app_requests_",
-                "flexlb_app_requests_tot", "flexlb_app_requests_total")) {
+        for (String prefix :
+                List.of(
+                        "flexlb_app_requests",
+                        "flexlb_app_requests_",
+                        "flexlb_app_requests_tot",
+                        "flexlb_app_requests_total")) {
             var allowed = new WhitelistMetricsFilterConfig.PrefixAllowSet(List.of(prefix));
             assertTrue(allowed.contains(name), prefix);
             assertTrue(allowed.contains(new String(name)), prefix);
             assertFalse(allowed.contains("app.request"), prefix);
         }
-        var denied = new WhitelistMetricsFilterConfig.PrefixAllowSet(
-                List.of("flexlb_app_requests_total_extra"));
+        var denied =
+                new WhitelistMetricsFilterConfig.PrefixAllowSet(
+                        List.of("flexlb_app_requests_total_extra"));
         assertFalse(denied.contains(name));
         assertFalse(denied.contains(new String(name)));
     }
@@ -237,19 +244,33 @@ class WhitelistMetricsFilterConfigTest {
 
     @Test
     void concurrentLookupsKeepAllowedAndDeniedNamesDistinct() throws Exception {
-        var allowed = new WhitelistMetricsFilterConfig.PrefixAllowSet(
-                WhitelistMetricsFilterConfig.parseWhitelist(G3_SHAPED_WHITELIST));
+        var allowed =
+                new WhitelistMetricsFilterConfig.PrefixAllowSet(
+                        WhitelistMetricsFilterConfig.parseWhitelist(G3_SHAPED_WHITELIST));
         try (var executor = Executors.newFixedThreadPool(8)) {
-            List<Callable<Void>> tasks = IntStream.range(0, 8)
-                    .mapToObj(thread -> (Callable<Void>) () -> {
-                        for (int i = 0; i < 1_000; i++) {
-                            assertTrue(allowed.contains("app.cache.hit.ratio"));
-                            assertTrue(allowed.contains("app.engine.balancing.master.dispatch.reason"));
-                            assertFalse(allowed.contains("grpc.server.executor.queue.size"));
-                            assertFalse(allowed.contains("app.cachex.near.miss"));
-                        }
-                        return null;
-                    }).toList();
+            List<Callable<Void>> tasks =
+                    IntStream.range(0, 8)
+                            .mapToObj(
+                                    thread ->
+                                            (Callable<Void>)
+                                                    () -> {
+                                                        for (int i = 0; i < 1_000; i++) {
+                                                            assertTrue(
+                                                                    allowed.contains(
+                                                                            "app.cache.hit.ratio"));
+                                                            assertTrue(
+                                                                    allowed.contains(
+                                                                            "app.engine.balancing.master.dispatch.reason"));
+                                                            assertFalse(
+                                                                    allowed.contains(
+                                                                            "grpc.server.executor.queue.size"));
+                                                            assertFalse(
+                                                                    allowed.contains(
+                                                                            "app.cachex.near.miss"));
+                                                        }
+                                                        return null;
+                                                    })
+                            .toList();
             for (var result : executor.invokeAll(tasks)) {
                 result.get();
             }

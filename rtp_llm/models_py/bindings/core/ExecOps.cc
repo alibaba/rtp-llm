@@ -179,6 +179,9 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     }
     requireHostTensor(param.input_lengths_host, "input_lengths_host", 1, torch::kInt32);
     requireHostTensor(param.prefix_lengths_host, "prefix_lengths_host", 1, torch::kInt32);
+    requireHostTensor(param.publish_start_tokens, "publish_start_tokens", 1, torch::kInt32);
+    RTP_LLM_CHECK_WITH_INFO(param.publish_start_tokens.numel() == static_cast<int64_t>(context_batch_size),
+                            "cache-store publish_start_tokens size must match context batch");
     requireHostTensor(param.host_kv_cache_offset, "host_kv_cache_offset", 2, torch::kInt32);
     requireHostTensor(param.request_pd_separation, "request_pd_separation", 1, torch::kBool);
     requireHostTensor(param.cache_keys, "cache_keys", 2, torch::kInt64);
@@ -290,6 +293,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     const auto   host_kv_cache_offset  = param.host_kv_cache_offset.accessor<int32_t, 2>();
     const auto   input_lengths_host    = param.input_lengths_host.accessor<int32_t, 1>();
     const auto   prefix_lengths_host   = param.prefix_lengths_host.accessor<int32_t, 1>();
+    const auto   publish_start_tokens = param.publish_start_tokens.accessor<int32_t, 1>();
     const auto   request_ids           = param.request_id.accessor<int64_t, 1>();
     const auto   request_pd_separation = param.request_pd_separation.accessor<bool, 1>();
     const auto   cache_keys            = param.cache_keys.accessor<int64_t, 2>();
@@ -344,9 +348,16 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                 (request_cache_key_count + key_blocks_per_group_block - 1) / key_blocks_per_group_block;
         const size_t key_blocks_per_logical_block = compact_cp_mapping ? 1 : key_blocks_per_group_block;
 
-        const int64_t        request_id     = request_ids[context_index];
-        auto                 event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
-        auto                 request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
+        const int64_t request_id       = request_ids[context_index];
+        const int publish_start_token = publish_start_tokens[context_index];
+        RTP_LLM_CHECK_WITH_INFO(publish_start_token >= 0 && publish_start_token <= prefix_length,
+                                "cache-store tag=%s invalid publish_start_token=%d for prefix_length=%d",
+                                layer_kv.tag.c_str(), publish_start_token, prefix_length);
+        const size_t publish_start_block =
+            group.policy.group_type == CacheGroupType::FULL && group.policy.active_tail_blocks == 0 ?
+                static_cast<size_t>(publish_start_token) / seq_size_per_block : 0;
+        auto event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
+        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
         std::vector<int64_t> publication_lease_keys;
         std::vector<int32_t> publication_lease_blocks;
         RTP_LLM_LOG_DEBUG("write cache store, request id is %ld, blocks num is %zu",
@@ -467,24 +478,29 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                                                     cp_rank,
                                                     planner_cp_size,
                                                     key_blocks_per_logical_block,
-                                                    request_cache_key_count);
+                                                    request_cache_key_count,
+                                                    publish_start_block);
         for (const auto& pair : block_plan) {
             addBlock(pair.key_index, pair.offset_index);
         }
 
         if (param.p2p_layer_write) {
-            const int64_t deadline_ms = param.request_deadline_ms.defined() ?
-                param.request_deadline_ms.data_ptr<int64_t>()[batch_id] : std::numeric_limits<int64_t>::max();
-            if (publication_lease_keys.empty() && !block_plan.empty()) {
-                // Report a missing required block through the existing request
-                // error channel; do not abort the model execution thread.
-                const auto& missing = block_plan.front();
-                const auto missing_key =
-                    cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(missing.key_index)];
-                (void)param.p2p_layer_write(cache_model_id, layer_kv.layer_id, layer_kv.tag,
-                                             {missing_key}, {NULL_BLOCK_IDX}, request_id, event, deadline_ms);
+            // NormalModelInputGatherer masks cyclic banks during middle chunks because
+            // later chunks overwrite them. A masked row is deferred publication, not
+            // an empty ready buffer; the final chunk publishes the materialized row.
+            bool deferred_cyclic_row = group.policy.active_tail_blocks > 0;
+            for (size_t offset = 0; deferred_cyclic_row && offset < max_blocks_per_batch; ++offset) {
+                deferred_cyclic_row = host_kv_cache_offset[input_index][offset] == NULL_BLOCK_IDX;
+            }
+            if (deferred_cyclic_row && max_blocks_per_batch > 0) {
                 continue;
             }
+            const int64_t deadline_ms = param.request_deadline_ms.defined() ?
+                                            param.request_deadline_ms.data_ptr<int64_t>()[batch_id] :
+                                            std::numeric_limits<int64_t>::max();
+            // A sparse local projection may contain no materialized blocks.
+            // Publish its readiness without inventing a NULL block; the route
+            // consumer remains responsible for validating its required keys.
             if (!param.p2p_layer_write(cache_model_id,
                                        layer_kv.layer_id,
                                        layer_kv.tag,
@@ -540,7 +556,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                 throw;
             }
         } else {
-            RTP_LLM_LOG_DEBUG("skip cache store because all selected blocks are null, request id [%ld], layer id [%d]",
+            RTP_LLM_LOG_DEBUG("skip cache store because no blocks require publication, request id [%ld], layer id [%d]",
                               static_cast<long>(request_id),
                               layer_kv.layer_id);
         }

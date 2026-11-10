@@ -173,7 +173,8 @@ def balance_concurrent_mix(ctx: CaseContext):
         dist_json = json.dumps(dict(dist), sort_keys=True)
 
         report.invariant(
-            "P6", not failures and n_ok == len(rids),
+            "P6",
+            not failures and n_ok == len(rids),
             detail=f"completed={n_ok}/{len(rids)}, failures={failures[:2]}, dist={dist_json}",
         )
 
@@ -580,7 +581,9 @@ def balance_overload_avoid_decode(ctx: CaseContext):
                 pass
 
 
-@case("balance_decode_rotation", source="Decode rotation over settled admissible workers")
+@case(
+    "balance_decode_rotation", source="Decode rotation over settled admissible workers"
+)
 def balance_decode_rotation(ctx: CaseContext):
     """Settled, healthy Decode workers all participate in repeated routing."""
     ops = ctx.ops()
@@ -597,7 +600,9 @@ def balance_decode_rotation(ctx: CaseContext):
         for _ in range(count):
             rid = ops.next_request_id(rid_base(ctx, "balance"))
             _, error = ops.run_one_request(
-                rid, output_len=2, block_keys=[rid * 100],
+                rid,
+                output_len=2,
+                block_keys=[rid * 100],
                 stream_timeout_s=STREAM_TIMEOUT_S,
             )
             if error:
@@ -606,8 +611,12 @@ def balance_decode_rotation(ctx: CaseContext):
             if not clean:
                 return False, f"rid={rid} did not settle: {detail}"
         after = ops.snapshot_by_name()
-        deltas = {name: after[name].get("completed", 0) - baseline[name] for name in names}
-        return all(value > 0 for value in deltas.values()) and sum(deltas.values()) == count, (
+        deltas = {
+            name: after[name].get("completed", 0) - baseline[name] for name in names
+        }
+        return all(value > 0 for value in deltas.values()) and sum(
+            deltas.values()
+        ) == count, (
             f"Decode completions={deltas}, expected {count} total and every healthy worker used"
         )
     except Exception as exc:
@@ -737,7 +746,6 @@ def balance_len_mixed(ctx: CaseContext):
                 context="bimodal_5waves",
                 detail=f"tokens={tokens_json}, shorts={dict(short_by_engine)}",
             )
-
 
         return report.finish(
             f"waves=5, landed={len(landed)}/40, " f"grades: {report.summary()}"

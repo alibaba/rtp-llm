@@ -606,7 +606,7 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayerAllNullBlocksReturnsRequestErrorWitho
     ASSERT_NE(computed, nullptr);
     const auto error = computed->error();
     EXPECT_EQ(error.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
-    EXPECT_NE(error.ToString().find("null/invalid block"), std::string::npos);
+    EXPECT_NE(error.ToString().find("no layer buffers"), std::string::npos);
     EXPECT_EQ(mock_sender_->getTransferCallCount(), 0);
 }
 
@@ -624,6 +624,32 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {
     // Wait for cleanup thread to check once — event is immediately ready so buffer should appear
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
     ASSERT_NE(computed_buffers_->getBuffer(request_id, deadline_ms), nullptr);
+}
+
+TEST_F(P2PConnectorWorkerTest, WriteByLayerPublishesOnlyTransferableSparseGroups) {
+    worker_config_.topology = makeTestCacheTopology(2, 2, {{0, 1}, {1}});
+    prefill_ = std::make_unique<P2PWorkerPrefillRead>(
+        worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+    ASSERT_TRUE(prefill_->init());
+    computed_buffers_ = prefill_->getComputedBuffersStore();
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->initGroups(worker_config_.topology);
+    resource->cacheKeys() = {10, 11};
+    resource->mutableBlockIds("group0").assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    resource->mutableBlockIds("group1").assign({3, 4});
+    const int64_t request_id = 1004;
+    const int64_t deadline = currentTimeMs() + 10000;
+    ASSERT_TRUE(prefill_->writeByLayer(0, resource, request_id, nullptr, deadline));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    auto computed = computed_buffers_->getBuffer(request_id, deadline);
+    ASSERT_NE(computed, nullptr);
+    ASSERT_TRUE(computed->error().ok());
+    const auto inventory = computed->getBuffers({"0:group0", "0:group1"});
+    EXPECT_EQ(inventory.first, 1);
+    ASSERT_EQ(inventory.second.size(), 1u);
+    EXPECT_EQ(inventory.second.front()->cacheTag(), "group1");
+    EXPECT_EQ(inventory.second.front()->getBlockId(10), 3);
+    EXPECT_EQ(inventory.second.front()->getBlockId(11), 4);
 }
 
 TEST_F(P2PConnectorWorkerTest, WriteByLayerTag_RankZeroReleasesSourceAfterSuccessfulSend) {

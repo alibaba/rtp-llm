@@ -14,7 +14,7 @@ import java.util.Map;
  * @author FlexLB
  */
 public interface CacheAwareService {
-    
+
     /**
      * Find matching engines
      *
@@ -23,11 +23,9 @@ public interface CacheAwareService {
      * @param candidateEngineIpPorts exact live candidate addresses
      * @return Engine matching result map, key: engineIpPort, value: prefixMatchLength
      */
-    Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> findMatchingEngines(
-            List<Long> blockCacheKeys,
-            RoleType roleType,
-            List<String> candidateEngineIpPorts);
-    
+    Map<String /*engineIpPort*/, Integer /*prefixMatchLength*/> findMatchingEngines(
+            List<Long> blockCacheKeys, RoleType roleType, List<String> candidateEngineIpPorts);
+
     /**
      * Update engine block KV cache status
      *

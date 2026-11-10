@@ -26,9 +26,9 @@ export PATH="/opt/homebrew/bin:${PATH}"
 # ---------------------------------------------------------------------------
 DEFAULT_SPEEDS=(5 10 15 20 30 50)
 if [[ -n "${SPEEDS:-}" ]]; then
-    read -r -a SPEEDS <<< "${SPEEDS}"
+    read -r -a SPEEDS <<<"${SPEEDS}"
 elif [[ -n "${SPEEDS_OVERRIDE:-}" ]]; then
-    read -r -a SPEEDS <<< "${SPEEDS_OVERRIDE}"
+    read -r -a SPEEDS <<<"${SPEEDS_OVERRIDE}"
 else
     SPEEDS=("${DEFAULT_SPEEDS[@]}")
 fi
@@ -52,12 +52,13 @@ EXPERIMENT_DECODE_MAX_ENGINE_REQUESTS="${EXPERIMENT_DECODE_MAX_ENGINE_REQUESTS:-
 PROCESS_CONFIG_FILE="${PROCESS_CONFIG_FILE:-${SCRIPT_DIR}/data/config/master_fixed_window.json}"
 
 if [[ -z "${FLEXLB_CONFIG:-}" ]]; then
-    FLEXLB_CONFIG="$(python3 - \
-        "${PROCESS_CONFIG_FILE}" \
-        "${EXPERIMENT_MAX_INFLIGHT_BATCHES}" \
-        "${EXPERIMENT_BATCH_WAIT_MS}" \
-        "${EXPERIMENT_MAX_PREDICTED_EXECUTION_MS}" \
-        "${EXPERIMENT_DECODE_MAX_ENGINE_REQUESTS}" <<'PY'
+    FLEXLB_CONFIG="$(
+        python3 - \
+            "${PROCESS_CONFIG_FILE}" \
+            "${EXPERIMENT_MAX_INFLIGHT_BATCHES}" \
+            "${EXPERIMENT_BATCH_WAIT_MS}" \
+            "${EXPERIMENT_MAX_PREDICTED_EXECUTION_MS}" \
+            "${EXPERIMENT_DECODE_MAX_ENGINE_REQUESTS}" <<'PY'
 import json
 import sys
 
@@ -72,7 +73,7 @@ config["scheduler"]["decision"]["maxPredictedExecutionMs"] = int(max_predicted_m
 config["router"]["roles"]["decode"]["availability"]["maxEngineRequests"] = int(decode_limit)
 print(json.dumps(config, separators=(",", ":")))
 PY
-)"
+    )"
 fi
 
 # gRPC timeout: 3600s (1 hour) — large output_len requests need long decode time

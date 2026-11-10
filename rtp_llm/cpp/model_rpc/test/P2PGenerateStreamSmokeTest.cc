@@ -124,7 +124,8 @@ std::vector<uint8_t> readBytes(const BlockInfo& info) {
 enum class Fault {
     None,
     CorruptByte,
-    OmitLastLayer
+    OmitLastLayer,
+    DropBatchAck
 };
 
 enum class CancelStage : int32_t {
@@ -137,6 +138,14 @@ enum class CancelStage : int32_t {
 struct CancelControl {
     int32_t stage         = static_cast<int32_t>(CancelStage::None);
     int32_t step_delay_ms = 0;
+    int64_t request_id    = 0;
+};
+
+struct SchedulingObservation {
+    int32_t waiting_groups        = 0;
+    int32_t waiting_group_streams = 0;
+    int32_t waiting_individuals   = 0;
+    int32_t max_running_streams   = 0;
 };
 
 // Only model execution/sampling is substituted. NormalGenerateStream, the FIFO
@@ -203,6 +212,14 @@ public:
         }
     }
 
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+    enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) override {
+        std::vector<GenerateStreamPtr> streams;
+        for (const auto& input : inputs)
+            streams.push_back(makeStream(input));
+        return scheduler_->enqueueGroup(streams);
+    }
+
     absl::Status stop() override {
         stopping_ = true;
         {
@@ -259,6 +276,18 @@ public:
 
     bool idle() const {
         return scheduler_->empty();
+    }
+
+    SchedulingObservation schedulingObservation() const {
+        auto&                       scheduler = static_cast<FIFOScheduler&>(*scheduler_);
+        std::lock_guard<std::mutex> lock(scheduler.lock_);
+        SchedulingObservation       observation;
+        observation.waiting_groups      = static_cast<int32_t>(scheduler.waiting_group_queue_.size());
+        observation.waiting_individuals = static_cast<int32_t>(scheduler.waiting_streams_.size());
+        for (const auto& group : scheduler.waiting_group_queue_)
+            observation.waiting_group_streams += static_cast<int32_t>(group.size());
+        observation.max_running_streams = max_running_streams_.load();
+        return observation;
     }
 
     Fault               fault         = Fault::None;  // Set before starting the executor thread.
@@ -358,6 +387,7 @@ private:
             if (!scheduled.ok()) {
                 continue;
             }
+            max_running_streams_ = std::max(max_running_streams_.load(), static_cast<int>(scheduled->size()));
             for (const auto& stream : scheduled.value()) {
                 try {
                     cudaCheck(device_status);
@@ -365,6 +395,7 @@ private:
                     if (stream->hasError())
                         continue;
                     if (!prefill && cancel_control_.stage == static_cast<int32_t>(CancelStage::AfterFirstDecodeOutput)
+                        && (cancel_control_.request_id == 0 || cancel_control_.request_id == stream->streamId())
                         && decode_steps_[stream->streamId()] > 0) {
                         stage_reached = true;
                         continue;
@@ -409,6 +440,17 @@ private:
                                             true,
                                             false,
                                             std::nullopt};
+                    if (prefill && token == 100 && stream->generateConfig()->return_prompt_logits) {
+                        update.prompt_logits = PromptLogitsOutput{};
+                        auto& scores         = *update.prompt_logits;
+                        scores.topk_logprobs =
+                            torch::full({2, 2}, -static_cast<float>(stream->streamId() % 1000), torch::kFloat32);
+                        scores.topk_token_ids = torch::tensor({{4, 5}, {6, 7}}, torch::kInt32);
+                        if (stream->generateConfig()->return_target_logprob)
+                            scores.target_logprobs = torch::tensor({-0.5f, -0.25f});
+                        scores.start_pos = 1;
+                        scores.end_pos   = 3;
+                    }
                     stream->update(update);
                     if (!prefill)
                         ++decode_steps_[stream->streamId()];
@@ -428,6 +470,7 @@ private:
     RuntimeConfig                        runtime_;
     PDSepConfig                          pd_;
     std::atomic<bool>                    stopping_{false};
+    std::atomic<int>                     max_running_streams_{0};
     std::thread                          thread_;
     std::mutex                           execution_mutex_;
     mutable std::mutex                   error_mutex_;
@@ -445,13 +488,39 @@ public:
     std::atomic<int>      generate_calls{0}, peer_calls{0}, load_calls{0}, read_calls{0}, handle_read_calls{0};
     std::atomic<int>      generate_done{0}, generate_cancelled{0}, load_done{0}, load_cancelled{0};
     std::atomic<int>      read_done{0}, handle_read_done{0}, cancel_read_calls{0};
+    bool                  drop_batch_ack = false;
+
+    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                   const BatchGenerateInputPB* request,
+                                   BatchGenerateOutputsPB*     response) override {
+        return target->BatchGenerateCall(context, request, response);
+    }
+    grpc::Status EnqueueBatch(grpc::ServerContext*         context,
+                              const EnqueueBatchRequestPB* request,
+                              EnqueueBatchResponsePB*      response) override {
+        if (!prefill)
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "D");
+        const auto status = prefill->EnqueueBatch(context, request, response);
+        return status.ok() && drop_batch_ack ?
+                   grpc::Status(grpc::StatusCode::UNAVAILABLE, "injected loss of successful batch admission ACK") :
+                   status;
+    }
+    grpc::Status
+    Cancel(grpc::ServerContext* context, const CancelRequestPB* request, CancelResponsePB* response) override {
+        return prefill ? prefill->Cancel(context, request, response) :
+                         static_cast<DecodeRpcServer*>(target)->Cancel(context, request, response);
+    }
+    grpc::Status
+    GetWorkerStatus(grpc::ServerContext* context, const StatusVersionPB* request, WorkerStatusPB* response) override {
+        return target->GetWorkerStatus(context, request, response);
+    }
 
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
         ++generate_calls;
         const auto status = target->GenerateStreamCall(context, request, writer);
-        if (context->IsCancelled())
+        if (context->IsCancelled() || status.error_code() == grpc::StatusCode::CANCELLED)
             ++generate_cancelled;
         ++generate_done;
         return status;
@@ -469,7 +538,9 @@ public:
         ++load_calls;
         const auto status = prefill ? prefill->StartLoad(context, request, response) :
                                       grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "D");
-        if (context->IsCancelled())
+        if (context->IsCancelled() || status.error_code() == grpc::StatusCode::CANCELLED
+            || response->error_code() == ErrorCodePB::CANCELLED
+            || response->error_code() == ErrorCodePB::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED)
             ++load_cancelled;
         ++load_done;
         return status;
@@ -548,6 +619,7 @@ struct WorkerHello {
     int32_t  rdma               = 0;
     int32_t  request_timeout_ms = 0;
     int32_t  load_timeout_ms    = 0;
+    int32_t  pause_prefill_start = 0;
 };
 
 struct WorkerReport {
@@ -560,6 +632,7 @@ struct WorkerReport {
     uint64_t block_refs    = 0;
     int32_t  generate_done = 0, generate_cancelled = 0, load_done = 0, load_cancelled = 0;
     int32_t  handle_read_done = 0, stage_reached = 0, scheduler_idle = 0;
+    SchedulingObservation scheduling;
     char     host[64]      = {};
     char     failure[1024] = {};
 };
@@ -624,7 +697,7 @@ sockaddr_in controlAddress(const std::string& address) {
 // connects to an explicitly launched P worker and never signals a remote PID.
 class PrefillProcess {
 public:
-    PrefillProcess(DataType dtype, Fault fault, bool rdma, PayloadTimeouts timeouts) {
+    PrefillProcess(DataType dtype, Fault fault, bool rdma, PayloadTimeouts timeouts, bool pause_start = false) {
         try {
             const auto remote = environment("P2P_SMOKE_CONTROL_ADDR", "");
             if (remote.empty()) {
@@ -647,6 +720,7 @@ public:
             hello.rdma               = rdma;
             hello.request_timeout_ms = timeouts.request_ms;
             hello.load_timeout_ms    = timeouts.load_ms;
+            hello.pause_prefill_start = pause_start;
             controlIO(control_.fd, &hello, sizeof(hello), true);
             ready = receive(120000);
             require(ready.grpc_port > 0 && ready.host[0] != '\0', "P did not advertise a ready RPC endpoint");
@@ -676,6 +750,12 @@ public:
         char command = 'C';
         controlIO(control_.fd, &command, 1, true);
         controlIO(control_.fd, &control, sizeof(control), true);
+        (void)receive(10000);
+    }
+
+    void startExecution() {
+        char command = 'R';
+        controlIO(control_.fd, &command, 1, true);
         (void)receive(10000);
     }
 
@@ -804,7 +884,7 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
     ASSERT_LE(hello.request_timeout_ms, 600000);
     ASSERT_TRUE(hello.dtype == 0 || hello.dtype == 1);
     ASSERT_GE(hello.fault, 0);
-    ASSERT_LE(hello.fault, static_cast<int>(Fault::OmitLastLayer));
+    ASSERT_LE(hello.fault, static_cast<int>(Fault::DropBatchAck));
     const auto transport = environment("P2P_SMOKE_TRANSPORT", "tcp");
     ASSERT_TRUE(transport == "tcp" || transport == "rdma");
     ASSERT_EQ(hello.rdma, transport == "rdma");
@@ -814,14 +894,19 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
     {
         PrefillRpcServer prefill;
         prefill.meta_ = std::make_shared<RpcServerRuntimeMeta>();
-        prefill.cancel_registry_ = std::make_unique<PDCancelRegistry>(prefill.meta_);
+        prefill.cancel_registry_              = std::make_unique<PDCancelRegistry>(prefill.meta_);
+        prefill.batch_context_cleanup_thread_ = autil::LoopThread::createLoopThread(
+            [&prefill] { prefill.batchContextCleanupTick(); }, 10000, "BatchSmokePrefillCleanup");
         PayloadEndpoint endpoint(prefill, &prefill, host);
+        endpoint.service.drop_batch_ack = hello.fault == static_cast<int>(Fault::DropBatchAck);
         const auto      config = test::makeSimpleMhaCacheConfig(
             kLayers, kBlocks, kTokensPerBlock, hello.dtype == 1 ? DataType::TYPE_INT8 : DataType::TYPE_FP16, 2, 16);
         auto engine     = makePayloadEngine(config, RoleType::PREFILL, endpoint, hello.rdma, hello.load_timeout_ms);
         prefill.engine_ = engine;
         engine->fault          = static_cast<Fault>(hello.fault);
-        engine->start();
+        bool engine_started    = !hello.pause_prefill_start;
+        if (engine_started)
+            engine->start();
         const auto report = [&] {
             WorkerReport state;
             state.pid                = ::getpid();
@@ -837,6 +922,7 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
             state.block_refs         = engine->blockRefs();
             state.stage_reached      = engine->stage_reached.load();
             state.scheduler_idle     = engine->idle();
+            state.scheduling         = engine->schedulingObservation();
             state.generate_done      = endpoint.service.generate_done.load();
             state.generate_cancelled = endpoint.service.generate_cancelled.load();
             state.load_done          = endpoint.service.load_done.load();
@@ -860,6 +946,10 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
                     CancelControl config;
                     controlIO(control.fd, &config, sizeof(config), false);
                     engine->configureCancel(config);
+                } else if (command == 'R') {
+                    require(!engine_started, "P executor already started");
+                    engine->start();
+                    engine_started = true;
                 } else {
                     require(command == 'S', "unknown P worker control command");
                 }
@@ -877,7 +967,10 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
 
 class P2PGenerateStreamSmokeTest: public DeviceTestBase {
 protected:
-    void initialize(DataType dtype, Fault fault = Fault::None, bool cancellation_test = false) {
+    void initialize(DataType dtype,
+                    Fault    fault               = Fault::None,
+                    bool     cancellation_test   = false,
+                    bool     pause_prefill_start = false) {
         timeouts_ = payloadTimeouts();
         if (cancellation_test) {
             // The 30s drain assertion must expire before production deadlines;
@@ -890,13 +983,16 @@ protected:
         host_ = environment("P2P_SMOKE_HOST", "127.0.0.1");
         require(transport != "rdma" || host_ != "127.0.0.1", "RDMA requires P2P_SMOKE_HOST on its network interface");
         // P execs a fresh image (or is launched on another host) before D starts its backend.
-        prefill_process_ = std::make_unique<PrefillProcess>(dtype, fault, transport == "rdma", timeouts_);
+        prefill_process_ =
+            std::make_unique<PrefillProcess>(dtype, fault, transport == "rdma", timeouts_, pause_prefill_start);
         std::cerr << "P2P decode pid=" << ::getpid() << ", prefill pid=" << prefill_process_->ready.pid
                   << " grpc=" << prefill_process_->ready.host << ':' << prefill_process_->ready.grpc_port
                   << " request_timeout_ms=" << timeouts_.request_ms << " load_timeout_ms=" << timeouts_.load_ms
                   << std::endl;
         decode_.meta_           = std::make_shared<RpcServerRuntimeMeta>();
-        decode_.cancel_registry_ = std::make_unique<PDCancelRegistry>(decode_.meta_);
+        decode_.cancel_registry_       = std::make_unique<PDCancelRegistry>(decode_.meta_);
+        decode_.cancel_cleanup_thread_ = autil::LoopThread::createLoopThread(
+            [this] { decode_.cancelCleanupTick(); }, 10000, "BatchSmokeDecodeCleanup");
         decode_rpc_             = std::make_unique<PayloadEndpoint>(decode_, nullptr, host_);
         const auto cache_config = test::makeSimpleMhaCacheConfig(kLayers, kBlocks, kTokensPerBlock, dtype, 2, 16);
         decode_engine_ =
@@ -1116,13 +1212,186 @@ protected:
             EXPECT_EQ(prefill.published_layers, requests * kLayers);
             EXPECT_EQ(decode_engine_->checked_requests.load(), requests);
             EXPECT_GT(decode_engine_->checked_bytes.load(), 0u);
-            expected_bytes += ((prompt_length + kTokensPerBlock - 1) / kTokensPerBlock) * cache_config.totalGroupBlockSizeBytes();
+            expected_bytes +=
+                ((prompt_length + kTokensPerBlock - 1) / kTokensPerBlock) * cache_config.totalGroupBlockSizeBytes();
             EXPECT_EQ(decode_engine_->checked_bytes.load(), expected_bytes);
             EXPECT_EQ(prefill.published_bytes, decode_engine_->checked_bytes.load());
             EXPECT_TRUE(std::string(prefill.failure).empty()) << std::string(prefill.failure);
             EXPECT_TRUE(decode_engine_->failure().empty()) << decode_engine_->failure();
             ASSERT_NO_FATAL_FAILURE(expectReleased());
         }
+    }
+
+    void batchRoundTrips(bool prompt_scores) {
+        initialize(DataType::TYPE_FP16);
+        BatchGenerateInputPB batch;
+        batch.add_inputs()->CopyFrom(request(1701, 8));
+        batch.add_inputs()->CopyFrom(request(1702, 11));
+        for (auto& item : *batch.mutable_inputs()) {
+            item.mutable_generate_config()->set_is_streaming(false);
+            item.mutable_generate_config()->set_return_prompt_logits(prompt_scores);
+            item.mutable_generate_config()->set_return_target_logprob(prompt_scores && item.request_id() == 1701);
+        }
+        auto stub =
+            RpcService::NewStub(grpc::CreateChannel(decode_rpc_->address(), grpc::InsecureChannelCredentials()));
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(timeouts_.request_ms + 2000));
+        BatchGenerateOutputsPB response;
+        const auto             status = stub->BatchGenerateCall(&context, batch, &response);
+        ASSERT_TRUE(status.ok()) << status.error_message();
+        ASSERT_EQ(response.results_size(), 2);
+        for (int i = 0; i < 2; ++i) {
+            const auto& result = response.results(i).final_output();
+            EXPECT_EQ(result.request_id(), 1701 + i);
+            ASSERT_EQ(result.flatten_output().finished_size(), 1);
+            EXPECT_TRUE(result.flatten_output().finished(0));
+            const auto&  bytes       = result.flatten_output().output_ids().int32_data();
+            const size_t token_count = prompt_scores ? 1 : 3;
+            ASSERT_EQ(bytes.size(), token_count * sizeof(int32_t));
+            std::vector<int32_t> ids(token_count);
+            std::memcpy(ids.data(), bytes.data(), bytes.size());
+            EXPECT_EQ(ids, prompt_scores ? std::vector<int32_t>{100} : (std::vector<int32_t>{100, 101, 102}));
+            ASSERT_EQ(result.flatten_output().has_prompt_logits(), prompt_scores);
+            if (!prompt_scores)
+                continue;
+            const auto& scores = result.flatten_output().prompt_logits();
+            EXPECT_EQ(scores.start_pos(), 1);
+            EXPECT_EQ(scores.end_pos(), 3);
+            ASSERT_EQ(scores.topk_logprobs().shape_size(), 2);
+            EXPECT_EQ(scores.topk_logprobs().shape(0), 2);
+            EXPECT_EQ(scores.topk_logprobs().shape(1), 2);
+            EXPECT_EQ(scores.topk_token_ids().data_type(), TensorPB::INT32);
+            ASSERT_EQ(scores.topk_logprobs().fp32_data().size(), 4 * sizeof(float));
+            float marker = 0;
+            std::memcpy(&marker, scores.topk_logprobs().fp32_data().data(), sizeof(marker));
+            EXPECT_FLOAT_EQ(marker, -static_cast<float>(701 + i));
+            EXPECT_EQ(scores.has_target_logprobs(), i == 0);
+        }
+        EXPECT_EQ(decode_engine_->checked_requests.load(), prompt_scores ? 0 : 2);
+        EXPECT_EQ(prefill_process_->snapshot().load_calls, prompt_scores ? 0 : 2);
+        EXPECT_EQ(prefill_process_->snapshot().generate_calls, 0);
+        ASSERT_NO_FATAL_FAILURE(expectReleased());
+    }
+
+    void enqueueMasterBatch(BatchGenerateInputPB& batch) {
+        EnqueueBatchRequestPB admission;
+        admission.set_batch_id(batch.inputs(0).request_id());
+        auto* slot = admission.add_dp_slots();
+        slot->set_dp_rank(0);
+        for (auto& item : *batch.mutable_inputs()) {
+            item.set_enqueued_by_master(true);
+            slot->add_requests()->mutable_input()->CopyFrom(item);
+        }
+        auto stub = RpcService::NewStub(grpc::CreateChannel(prefill_process_->ready.host + std::string(":")
+                                                                + std::to_string(prefill_process_->ready.grpc_port),
+                                                            grpc::InsecureChannelCredentials()));
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
+        EnqueueBatchResponsePB ack;
+        const auto             status = stub->EnqueueBatch(&context, admission, &ack);
+        require(status.ok() && ack.errors_size() == 0 && ack.successes_size() == batch.inputs_size(),
+                "Master Prefill batch admission failed: " + status.error_message());
+    }
+
+    void prefillBatchScheduling(bool master_admitted) {
+        // Inspect the admission queue before allowing any Prefill execution.
+        initialize(DataType::TYPE_FP16, Fault::None, true, true);
+        BatchGenerateInputPB batch;
+        batch.add_inputs()->CopyFrom(request(2301, 8));
+        batch.add_inputs()->CopyFrom(request(2302, 11));
+        for (auto& item : *batch.mutable_inputs())
+            item.mutable_generate_config()->set_is_streaming(false);
+        if (master_admitted)
+            enqueueMasterBatch(batch);
+        auto stub =
+            RpcService::NewStub(grpc::CreateChannel(decode_rpc_->address(), grpc::InsecureChannelCredentials()));
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(timeouts_.request_ms + 2000));
+        BatchGenerateOutputsPB response;
+        auto call = std::async(std::launch::async, [&] { return stub->BatchGenerateCall(&context, batch, &response); });
+        WorkerReport observed;
+        bool         grouped = false;
+        try {
+            grouped = waitFor([&] {
+                observed = prefill_process_->snapshot();
+                return observed.scheduling.waiting_group_streams == 2;
+            });
+            prefill_process_->startExecution();
+        } catch (...) {
+            context.TryCancel();
+            call.wait();
+            throw;
+        }
+        const auto status = call.get();
+        EXPECT_TRUE(grouped);
+        EXPECT_EQ(observed.scheduling.waiting_groups, 1);
+        EXPECT_EQ(observed.scheduling.waiting_individuals, 0);
+        ASSERT_TRUE(status.ok()) << status.error_message();
+        ASSERT_EQ(response.results_size(), 2);
+        EXPECT_EQ(prefill_process_->snapshot().scheduling.max_running_streams, 2);
+        EXPECT_EQ(decode_engine_->checked_requests.load(), 2);
+        ASSERT_NO_FATAL_FAILURE(expectReleased());
+    }
+
+    void decodeBatchJoinsRunningRequest(bool master_admitted) {
+        initialize(DataType::TYPE_FP16, Fault::None, true);
+        // Keep one Decode request running while the new batch finishes. An
+        // explicit Decode group would wait for this request to drain first.
+        constexpr int64_t held_request_id = 2400;
+        decode_engine_->configureCancel(
+            {static_cast<int32_t>(CancelStage::AfterFirstDecodeOutput), 0, held_request_id});
+        grpc::ClientContext held_context;
+        held_context.set_deadline(std::chrono::system_clock::now()
+                                  + std::chrono::milliseconds(timeouts_.request_ms + 2000));
+        std::vector<GenerateOutputsPB> held_outputs;
+        std::atomic<int>               held_output_count{0};
+        auto                           held_call = std::async(std::launch::async, [&] {
+            return generate(request(held_request_id, 8), held_outputs, held_context, &held_output_count);
+        });
+        BatchGenerateInputPB           batch;
+        batch.add_inputs()->CopyFrom(request(2401, 8));
+        batch.add_inputs()->CopyFrom(request(2402, 11));
+        for (auto& item : *batch.mutable_inputs())
+            item.mutable_generate_config()->set_is_streaming(false);
+        auto stub =
+            RpcService::NewStub(grpc::CreateChannel(decode_rpc_->address(), grpc::InsecureChannelCredentials()));
+        grpc::ClientContext batch_context;
+        batch_context.set_deadline(std::chrono::system_clock::now()
+                                   + std::chrono::milliseconds(timeouts_.request_ms + 2000));
+        BatchGenerateOutputsPB    response;
+        std::future<grpc::Status> batch_call;
+        grpc::Status              held_status, batch_status;
+        bool                      batch_completed_before_release = false;
+        bool                      held_request_still_running     = false;
+        try {
+            require(waitFor([&] { return decode_engine_->stage_reached && held_output_count > 0; }),
+                    "existing Decode request did not reach the execution hold");
+            if (master_admitted)
+                enqueueMasterBatch(batch);
+            batch_call                     = std::async(std::launch::async,
+                                    [&] { return stub->BatchGenerateCall(&batch_context, batch, &response); });
+            batch_completed_before_release = batch_call.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+            held_request_still_running     = held_call.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
+            decode_engine_->configureCancel({static_cast<int32_t>(CancelStage::None), 0});
+            batch_status = batch_call.get();
+            held_status  = held_call.get();
+        } catch (...) {
+            decode_engine_->configureCancel({static_cast<int32_t>(CancelStage::None), 0});
+            held_context.TryCancel();
+            batch_context.TryCancel();
+            if (batch_call.valid())
+                batch_call.wait();
+            if (held_call.valid())
+                held_call.wait();
+            throw;
+        }
+        EXPECT_TRUE(batch_completed_before_release) << "Decode batch waited for the existing request to drain";
+        EXPECT_TRUE(held_request_still_running);
+        ASSERT_TRUE(batch_status.ok()) << batch_status.error_message();
+        ASSERT_TRUE(held_status.ok()) << held_status.error_message();
+        ASSERT_EQ(response.results_size(), 2);
+        EXPECT_EQ(decode_engine_->checked_requests.load(), 3);
+        ASSERT_NO_FATAL_FAILURE(expectReleased());
     }
 
     PayloadTimeouts                  timeouts_{10000, 3000};
@@ -1135,6 +1404,139 @@ protected:
 
 TEST_F(P2PGenerateStreamSmokeTest, GenerateStreamTransfersEveryFp16CacheByte) {
     roundTrips(DataType::TYPE_FP16);
+}
+
+TEST_F(P2PGenerateStreamSmokeTest, BatchGenerateTransfersMixedLengthKVAndReturnsOrderedFullTokens) {
+    batchRoundTrips(false);
+}
+
+TEST_F(P2PGenerateStreamSmokeTest, DecodeBatchSchedulesPrefillAsOneGroup) {
+    prefillBatchScheduling(false);
+}
+
+TEST_F(P2PGenerateStreamSmokeTest, MasterBatchSchedulesPrefillAsOneGroup) {
+    prefillBatchScheduling(true);
+}
+
+TEST_F(P2PGenerateStreamSmokeTest, DecodeBatchJoinsExistingRunningDecodeRequest) {
+    decodeBatchJoinsRunningRequest(false);
+}
+
+TEST_F(P2PGenerateStreamSmokeTest, MasterBatchJoinsExistingRunningDecodeRequest) {
+    decodeBatchJoinsRunningRequest(true);
+}
+
+TEST_F(P2PGenerateStreamSmokeTest, PromptScoringBatchFallsBackAndReturnsSingleTokenWithScores) {
+    batchRoundTrips(true);
+}
+
+TEST_F(P2PGenerateStreamSmokeTest, BatchAttachesMasterAdmissionsWithoutEnqueueingAgain) {
+    initialize(DataType::TYPE_FP16);
+    BatchGenerateInputPB batch;
+    batch.add_inputs()->CopyFrom(request(1801, 8));
+    batch.add_inputs()->CopyFrom(request(1802, 11));
+    EnqueueBatchRequestPB admission;
+    admission.set_batch_id(1800);
+    auto* slot = admission.add_dp_slots();
+    slot->set_dp_rank(0);
+    for (auto& item : *batch.mutable_inputs()) {
+        item.set_enqueued_by_master(true);
+        item.mutable_generate_config()->set_is_streaming(false);
+        slot->add_requests()->mutable_input()->CopyFrom(item);
+    }
+    auto prefill_stub = RpcService::NewStub(grpc::CreateChannel(prefill_process_->ready.host + std::string(":")
+                                                                    + std::to_string(prefill_process_->ready.grpc_port),
+                                                                grpc::InsecureChannelCredentials()));
+    grpc::ClientContext admission_context;
+    admission_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
+    EnqueueBatchResponsePB ack;
+    ASSERT_TRUE(prefill_stub->EnqueueBatch(&admission_context, admission, &ack).ok());
+    ASSERT_EQ(ack.successes_size(), 2);
+    auto stub = RpcService::NewStub(grpc::CreateChannel(decode_rpc_->address(), grpc::InsecureChannelCredentials()));
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(timeouts_.request_ms + 2000));
+    BatchGenerateOutputsPB response;
+    const auto             status = stub->BatchGenerateCall(&context, batch, &response);
+    ASSERT_TRUE(status.ok()) << status.error_message();
+    ASSERT_EQ(response.results_size(), 2);
+    EXPECT_EQ(decode_engine_->checked_requests.load(), 2);
+    ASSERT_NO_FATAL_FAILURE(expectReleased());
+}
+
+TEST_F(P2PGenerateStreamSmokeTest, BatchPartialPrefillAdmissionCancelsEverySubmittedItem) {
+    initialize(DataType::TYPE_FP16);
+    BatchGenerateInputPB batch;
+    batch.add_inputs()->CopyFrom(request(1901, 8));
+    batch.add_inputs()->CopyFrom(request(1902, 65));  // Payload model max_seq_len is 64.
+    auto stub = RpcService::NewStub(grpc::CreateChannel(decode_rpc_->address(), grpc::InsecureChannelCredentials()));
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(15));
+    BatchGenerateOutputsPB response;
+    EXPECT_FALSE(stub->BatchGenerateCall(&context, batch, &response).ok());
+    expectCancelDrained();
+    EXPECT_EQ(decode_engine_->checked_requests.load(), 0);
+    healthyAfterCancel(1903);
+}
+
+TEST_F(P2PGenerateStreamSmokeTest, BatchClientCancelDrainsBothEndpoints) {
+    initialize(DataType::TYPE_FP16, Fault::None, true);
+    configureCancel(CancelStage::BeforePublish, 10);
+    BatchGenerateInputPB batch;
+    batch.add_inputs()->CopyFrom(request(2001, 8));
+    batch.add_inputs()->CopyFrom(request(2002, 11));
+    auto stub = RpcService::NewStub(grpc::CreateChannel(decode_rpc_->address(), grpc::InsecureChannelCredentials()));
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(timeouts_.request_ms + 2000));
+    BatchGenerateOutputsPB response;
+    auto call = std::async(std::launch::async, [&] { return stub->BatchGenerateCall(&context, batch, &response); });
+    const bool reached = waitFor([&] { return prefill_process_->snapshot().stage_reached; });
+    context.TryCancel();
+    EXPECT_EQ(call.get().error_code(), grpc::StatusCode::CANCELLED);
+    ASSERT_TRUE(reached);
+    expectCancelDrained();
+    healthyAfterCancel(2003);
+}
+
+TEST_F(P2PGenerateStreamSmokeTest, BatchLostAdmissionAckStillCancelsPrefillResources) {
+    initialize(DataType::TYPE_FP16, Fault::DropBatchAck);
+    BatchGenerateInputPB batch;
+    batch.add_inputs()->CopyFrom(request(2201, 8));
+    batch.add_inputs()->CopyFrom(request(2202, 11));
+    auto stub = RpcService::NewStub(grpc::CreateChannel(decode_rpc_->address(), grpc::InsecureChannelCredentials()));
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(15));
+    BatchGenerateOutputsPB response;
+    EXPECT_EQ(stub->BatchGenerateCall(&context, batch, &response).error_code(), grpc::StatusCode::UNAVAILABLE);
+    expectCancelDrained();
+    EXPECT_EQ(decode_engine_->checked_requests.load(), 0);
+    healthyAfterCancel(2203);
+}
+
+TEST_F(P2PGenerateStreamSmokeTest, BatchNonPDFallbackKeepsPrefillBatchResults) {
+    initialize(DataType::TYPE_FP16);
+    BatchGenerateInputPB batch;
+    for (int i = 0; i < 2; ++i) {
+        auto* item = batch.add_inputs();
+        item->CopyFrom(request(2101 + i, 8 + i));
+        item->mutable_generate_config()->set_max_new_tokens(1);
+        item->mutable_generate_config()->set_is_streaming(false);
+    }
+    auto stub = RpcService::NewStub(grpc::CreateChannel(decode_rpc_->address(), grpc::InsecureChannelCredentials()));
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(15));
+    BatchGenerateOutputsPB response;
+    const auto             status = stub->BatchGenerateCall(&context, batch, &response);
+    ASSERT_TRUE(status.ok()) << status.error_message();
+    ASSERT_EQ(response.results_size(), 2);
+    for (const auto& result : response.results()) {
+        ASSERT_FALSE(result.has_error_info());
+        ASSERT_EQ(result.final_output().flatten_output().finished_size(), 1);
+        EXPECT_TRUE(result.final_output().flatten_output().finished(0));
+        EXPECT_EQ(result.final_output().flatten_output().output_ids().int32_data().size(), sizeof(int32_t));
+    }
+    EXPECT_EQ(prefill_process_->snapshot().load_calls, 0);
+    EXPECT_EQ(decode_engine_->checked_requests.load(), 0);
+    ASSERT_NO_FATAL_FAILURE(expectReleased());
 }
 
 TEST_F(P2PGenerateStreamSmokeTest, GenerateStreamTransfersInt8CacheAndScaleBytes) {

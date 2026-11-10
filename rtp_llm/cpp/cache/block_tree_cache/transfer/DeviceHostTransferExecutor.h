@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -38,6 +39,10 @@ private:
 
     std::shared_ptr<CrcTransferService>                  crc_service_;
     DeviceHostCopyOptions                                options_;
+    // A rank uses one device. Bind its stream pair on the first copy; call_once
+    // publishes it safely to concurrent transfer workers.
+    std::once_flag                                       copy_streams_once_;
+    std::shared_ptr<DeviceHostCopyStreams>               copy_streams_;
     std::vector<std::unique_ptr<DeviceHostCopyStrategy>> strategies_;
 };
 

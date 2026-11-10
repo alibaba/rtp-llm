@@ -90,6 +90,10 @@ CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
             policy.cp_slice = *desc.cp->slice;
         }
     }
+    policy.shared_chunk_state =
+        policy.group_type == CacheGroupType::SWA && desc.cache_type == KVCacheSpecType::OpaqueState
+        && desc.entry_count_mode == OpaqueBlockEntryCountMode::STATE_RING && desc.state_ring_overlap == 0
+        && !policy.enable_prefix_reuse && policy.active_tail_blocks == 1;
     return policy;
 }
 

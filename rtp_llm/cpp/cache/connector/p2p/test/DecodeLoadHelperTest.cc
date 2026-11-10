@@ -189,6 +189,7 @@ TEST_F(DecodeLoadHelperTest, LoadReturnsPlanDigestMismatchBeforeTransferDeadline
 
 TEST_F(DecodeLoadHelperTest, LoadRejectsSuccessfulResponseWithoutFirstToken) {
     server_->service()->setFirstGenerateTokenId(0);
+    server_->service()->setHasFirstGenerateToken(false);
     const int64_t deadline_ms = currentTimeMs() + 5000;
 
     auto result = client_->load(1011,
@@ -233,11 +234,11 @@ TEST_F(DecodeLoadHelperTest, Load_ReturnNotNull_RequestFailed) {
 
 TEST_F(DecodeLoadHelperTest, Load_ReturnNotNull_Timeout) {
     // 设置服务器延迟响应
-    server_->service()->setSleepMillis(200);
+    server_->service()->setSleepMillis(1000);
 
     std::string unique_key   = "test_load_timeout";
     int64_t     request_id   = 1003;
-    int64_t     deadline_ms  = currentTimeMs() + 10;  // 很短的超时时间
+    int64_t     deadline_ms  = currentTimeMs() + 500;  // Allow RPC dispatch on a loaded test host.
     std::string prefill_ip   = "127.0.0.1";
     uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
 
@@ -246,7 +247,7 @@ TEST_F(DecodeLoadHelperTest, Load_ReturnNotNull_Timeout) {
     ASSERT_NE(result, nullptr);
 
     // 等待完成，应该会因为超时返回 false
-    bool success = waitDone(result, 1000);
+    bool success = waitDone(result, 2000);
     EXPECT_FALSE(success);
     EXPECT_FALSE(result->success());
 

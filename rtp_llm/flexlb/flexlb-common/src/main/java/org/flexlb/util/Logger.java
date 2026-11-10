@@ -24,7 +24,9 @@ public class Logger {
             try {
                 setLevel(LogLevel.valueOf(logLevelStr.toUpperCase().trim()));
             } catch (IllegalArgumentException e) {
-                log.warn("Invalid LOG_LEVEL value: '{}'. Valid values are: TRACE, DEBUG, INFO, WARN, ERROR.", logLevelStr);
+                log.warn(
+                        "Invalid LOG_LEVEL value: '{}'. Valid values are: TRACE, DEBUG, INFO, WARN, ERROR.",
+                        logLevelStr);
             }
         }
     }
@@ -89,9 +91,7 @@ public class Logger {
      * A {@code null} level resets the logger to {@code INFO} (the safe production default).
      */
     public static void setLevel(LogLevel level) {
-        Level lbLevel = level != null
-                ? Level.toLevel(level.name(), Level.INFO)
-                : Level.INFO;
+        Level lbLevel = level != null ? Level.toLevel(level.name(), Level.INFO) : Level.INFO;
         logbackLogger().setLevel(lbLevel);
     }
 

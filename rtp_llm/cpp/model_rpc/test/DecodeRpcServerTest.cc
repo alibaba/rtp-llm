@@ -1,6 +1,7 @@
 #include <limits>
 #include <functional>
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
+#include "rtp_llm/cpp/model_rpc/BatchStreamOutputCollector.h"
 #include <memory>
 
 #include <gtest/gtest.h>
@@ -69,6 +70,49 @@ TEST(DecodeRpcServerTest, ShouldUsePDSeparationIgnoresUniqueKeyPresence) {
 
     config->set_unique_key("user-cache-key");
     EXPECT_TRUE(checkPDSupport(request).supported);
+}
+
+TEST(DecodeRpcServerTest, BatchResultKeepsFirstTokenAndPrefillOnlyOptionalOutputs) {
+    BatchStreamOutputCollector collector(/*logits_index=*/1);
+    const auto                 loss          = torch::tensor({0.25f});
+    const auto                 hidden        = torch::ones({1, 3});
+    const auto                 logits        = torch::tensor({1.0f, 2.0f, 3.0f});
+    const auto                 prompt_scores = torch::tensor({-0.5f, -0.25f});
+    GenerateOutputs            first;
+    first.request_id                       = 42;
+    auto& prefill                          = first.generate_outputs.emplace_back();
+    prefill.output_ids                     = torch::tensor({{100}}, torch::kInt32);
+    prefill.finished                       = false;
+    prefill.aux_info.output_len            = 1;
+    prefill.loss                           = loss;
+    prefill.hidden_states                  = hidden;
+    prefill.logits                         = logits;
+    prefill.prompt_logits                  = PromptLogitsOutput{};
+    prefill.prompt_logits->target_logprobs = prompt_scores;
+    ASSERT_TRUE(collector.add(std::move(first)).ok());
+
+    GenerateOutputs next;
+    next.request_id            = 42;
+    auto& decode               = next.generate_outputs.emplace_back();
+    decode.output_ids          = torch::tensor({{101, 102}}, torch::kInt32);
+    decode.finished            = true;
+    decode.aux_info.output_len = 3;
+    decode.logits              = torch::zeros({3});
+    ASSERT_TRUE(collector.add(std::move(next)).ok());
+    const auto result = collector.finish();
+    ASSERT_EQ(result.generate_outputs.size(), 1);
+    const auto& output = result.generate_outputs[0];
+    EXPECT_EQ(result.request_id, 42);
+    EXPECT_TRUE(output.finished);
+    EXPECT_TRUE(torch::equal(output.output_ids, torch::tensor({{100, 101, 102}}, torch::kInt32)));
+    ASSERT_TRUE(output.loss.has_value());
+    ASSERT_TRUE(output.hidden_states.has_value());
+    ASSERT_TRUE(output.logits.has_value());
+    ASSERT_TRUE(output.prompt_logits.has_value());
+    EXPECT_TRUE(torch::equal(*output.loss, loss));
+    EXPECT_TRUE(torch::equal(*output.hidden_states, hidden));
+    EXPECT_TRUE(torch::equal(*output.logits, logits));
+    EXPECT_TRUE(torch::equal(output.prompt_logits->target_logprobs, prompt_scores));
 }
 
 TEST(DecodeRpcServerTest, DecodeEntranceHandoffUsesInternalKeyAndPreservesBusinessKey) {
@@ -198,7 +242,7 @@ TEST(DecodeRpcServerTest, UpdateAuxInfoUsesPrefillReuseAsTopLevelAndPreservesDec
     EXPECT_EQ(aux_info.decode_disk_reuse_len(), 2);
 }
 
-TEST(DecodeRpcServerTest, WritebackFirstUseIsDeductedAfterMergingPhysicalReuse) {
+TEST(DecodeRpcServerTest, WritebackFirstUseIsDeductedFromPrefillReuse) {
     for (bool independent : {false, true}) {
         for (int decode_total : {64, 128, 256}) {
             DecodeRpcServer server;
@@ -208,7 +252,7 @@ TEST(DecodeRpcServerTest, WritebackFirstUseIsDeductedAfterMergingPhysicalReuse) 
                 auto outputs = makeOutputsWithDecodeReuse(decode_total, 16, decode_total - 16, 2, 1);
                 server.updateAuxInfo(outputs, stream);
                 const auto& aux    = outputs.flatten_output().aux_info(0);
-                const int   actual = independent && decode_total > 128 ? decode_total : 128;
+                const int   actual = 128;
                 EXPECT_EQ(aux.total_reuse_len(), actual - 32);
                 EXPECT_EQ(aux.writeback_first_use_len(), 32);
                 EXPECT_EQ(aux.prefill_total_reuse_len(), 128);
@@ -218,23 +262,32 @@ TEST(DecodeRpcServerTest, WritebackFirstUseIsDeductedAfterMergingPhysicalReuse) 
     }
 }
 
-TEST(DecodeRpcServerTest, IndependentPrefillPoolsExposeTheLongerReusePhase) {
+TEST(DecodeRpcServerTest, GenericReuseAlwaysDescribesPrefillAcrossPoolLayouts) {
     for (bool independent : {false, true}) {
-        for (int decode_total : {64, 128, 256}) {
-            DecodeRpcServer server;
-            auto            stream = makeStream({11, 12, 13});
-            stream->setPrefillReuseLength(128, 32, 96, 8, 4, independent);
-            auto outputs = makeOutputsWithDecodeReuse(decode_total, 16, decode_total - 16, 2, 1);
-            server.updateAuxInfo(outputs, stream);
-            const auto& aux        = outputs.flatten_output().aux_info(0);
-            const bool  use_decode = independent && decode_total > 128;
-            EXPECT_EQ(aux.total_reuse_len(), use_decode ? decode_total : 128);
-            EXPECT_EQ(aux.local_reuse_len(), use_decode ? 16 : 32);
-            EXPECT_EQ(aux.remote_reuse_len(), use_decode ? decode_total - 16 : 96);
-            EXPECT_EQ(aux.memory_reuse_len(), use_decode ? 2 : 8);
-            EXPECT_EQ(aux.disk_reuse_len(), use_decode ? 1 : 4);
-            EXPECT_EQ(aux.prefill_total_reuse_len(), 128);
-            EXPECT_EQ(aux.decode_total_reuse_len(), decode_total);
+        for (int prefill_total : {0, 128}) {
+            for (int decode_total : {64, 128, 256, 2048}) {
+                DecodeRpcServer server;
+                auto            stream = makeStream({11, 12, 13});
+                const int       local  = prefill_total == 0 ? 0 : 32;
+                const int       remote = prefill_total - local;
+                const int       memory = prefill_total == 0 ? 0 : 8;
+                const int       disk   = prefill_total == 0 ? 0 : 4;
+                stream->setPrefillReuseLength(prefill_total, local, remote, memory, disk, independent);
+                auto outputs = makeOutputsWithDecodeReuse(decode_total, 16, decode_total - 16, 2, 1);
+                server.updateAuxInfo(outputs, stream);
+                const auto& aux = outputs.flatten_output().aux_info(0);
+                EXPECT_EQ(aux.total_reuse_len(), prefill_total);
+                EXPECT_EQ(aux.local_reuse_len(), local);
+                EXPECT_EQ(aux.remote_reuse_len(), remote);
+                EXPECT_EQ(aux.memory_reuse_len(), memory);
+                EXPECT_EQ(aux.disk_reuse_len(), disk);
+                EXPECT_EQ(aux.prefill_total_reuse_len(), prefill_total);
+                EXPECT_EQ(aux.decode_total_reuse_len(), decode_total);
+                EXPECT_EQ(aux.decode_local_reuse_len(), 16);
+                EXPECT_EQ(aux.decode_remote_reuse_len(), decode_total - 16);
+                EXPECT_EQ(aux.decode_memory_reuse_len(), 2);
+                EXPECT_EQ(aux.decode_disk_reuse_len(), 1);
+            }
         }
     }
 }

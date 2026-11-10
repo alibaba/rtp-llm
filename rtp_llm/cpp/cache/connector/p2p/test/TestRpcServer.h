@@ -42,6 +42,9 @@ public:
     void setStartLoadApplicationError(ErrorCodePB code, const std::string& message = "");
     void setRpcResponseStatus(const ::grpc::Status& status);
     void setFirstGenerateTokenId(int64_t token_id);
+    void setHasFirstGenerateToken(bool present) {
+        has_first_generate_token_ = present;
+    }
     void setGenerateStreamCallSuccess(bool success);
 
     // 调用计数相关方法
@@ -69,6 +72,7 @@ private:
     std::string      start_load_app_error_message_;
     bool             generate_stream_call_success_{true};
     int64_t          first_generate_token_id_{12345};  // 默认测试 token ID
+    bool                                 has_first_generate_token_{true};
     ::grpc::Status   rpc_response_status_{::grpc::Status::OK};
     std::atomic<int> broadcast_tp_call_count_{0};
     std::atomic<int> broadcast_tp_cancel_call_count_{0};

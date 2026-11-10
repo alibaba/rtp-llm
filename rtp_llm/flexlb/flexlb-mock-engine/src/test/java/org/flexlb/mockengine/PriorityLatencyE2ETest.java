@@ -43,8 +43,7 @@ class PriorityLatencyE2ETest {
             // This case measures Prefill priority ordering, not Decode KV
             // admission. Use the large fixture KV pool without a percentage
             // reserve so every request reaches the queue under test.
-            h.config.getRouter().getRoles().getDecode().getAvailability()
-                    .setMaxKvUsagePercent(100);
+            h.config.getRouter().getRoles().getDecode().getAvailability().setMaxKvUsagePercent(100);
 
             Map<Long, Long> submitNanos = new HashMap<>();
             Map<Long, Integer> priorityByRid = new HashMap<>();
@@ -66,7 +65,9 @@ class PriorityLatencyE2ETest {
                     () -> h.scheduler.getQueuedRequestCount() == total,
                     10_000,
                     "all requests must be committed into the scheduler queue");
-            assertEquals(total, h.scheduler.getQueuedRequestCount(),
+            assertEquals(
+                    total,
+                    h.scheduler.getQueuedRequestCount(),
                     "all requests must be committed into the global priority queue before release");
 
             // flip：小批次 + 短 fixedWait 放行派发，持续饱和下由优先级序主导
@@ -78,20 +79,30 @@ class PriorityLatencyE2ETest {
                     () -> {
                         h.assertAutoPumpHealthy();
                         return futures.stream().allMatch(CompletableFuture::isDone);
-                    }, 60_000,
+                    },
+                    60_000,
                     "all " + total + " requests must reach a terminal state");
 
             for (CompletableFuture<Response> future : futures) {
                 Response response = future.get(1, TimeUnit.SECONDS);
-                assertTrue(response.isSuccess(),
+                assertTrue(
+                        response.isSuccess(),
                         "no eviction switches on — every request must succeed, got "
-                                + response.getCode() + ": " + response.getErrorMessage()
-                                + ", arrivals=" + h.engineArrivalOrder.size()
-                                + ", queued=" + h.scheduler.getQueuedRequestCount()
-                                + ", prefillWork=" + h.prefillEndpoint(0).captureRouteProjectionInputs().work()
-                                + ", decode=" + h.decodeEndpoint(0).resourceSnapshot());
+                                + response.getCode()
+                                + ": "
+                                + response.getErrorMessage()
+                                + ", arrivals="
+                                + h.engineArrivalOrder.size()
+                                + ", queued="
+                                + h.scheduler.getQueuedRequestCount()
+                                + ", prefillWork="
+                                + h.prefillEndpoint(0).captureRouteProjectionInputs().work()
+                                + ", decode="
+                                + h.decodeEndpoint(0).resourceSnapshot());
             }
-            assertEquals(total, h.engineArrivalOrder.size(),
+            assertEquals(
+                    total,
+                    h.engineArrivalOrder.size(),
                     "every request must have reached the engine exactly once");
 
             // 量化：平均到达位次 + 平均调度延迟（ms）
@@ -105,8 +116,8 @@ class PriorityLatencyE2ETest {
                     long requestId = h.engineArrivalOrder.get(index);
                     if (priorityByRid.get(requestId) == priority) {
                         rankSum += index;
-                        latencySum += h.engineArrivalNanos.get(requestId)
-                                - submitNanos.get(requestId);
+                        latencySum +=
+                                h.engineArrivalNanos.get(requestId) - submitNanos.get(requestId);
                         count++;
                     }
                 }
@@ -117,16 +128,25 @@ class PriorityLatencyE2ETest {
             System.out.printf(
                     "[task35-B] avg schedule latency ms: P70=%.2f P50=%.2f P30=%.2f | "
                             + "avg arrival rank: P70=%.1f P50=%.1f P30=%.1f (n=%d each)%n",
-                    avgLatencyMs.get(70), avgLatencyMs.get(50), avgLatencyMs.get(30),
-                    avgRank.get(70), avgRank.get(50), avgRank.get(30), PER_PRIORITY);
+                    avgLatencyMs.get(70),
+                    avgLatencyMs.get(50),
+                    avgLatencyMs.get(30),
+                    avgRank.get(70),
+                    avgRank.get(50),
+                    avgRank.get(30),
+                    PER_PRIORITY);
 
-            assertTrue(avgLatencyMs.get(70) < avgLatencyMs.get(50),
+            assertTrue(
+                    avgLatencyMs.get(70) < avgLatencyMs.get(50),
                     "P70 avg latency must beat P50: " + avgLatencyMs);
-            assertTrue(avgLatencyMs.get(50) < avgLatencyMs.get(30),
+            assertTrue(
+                    avgLatencyMs.get(50) < avgLatencyMs.get(30),
                     "P50 avg latency must beat P30: " + avgLatencyMs);
-            assertTrue(avgRank.get(70) < avgRank.get(50),
+            assertTrue(
+                    avgRank.get(70) < avgRank.get(50),
                     "P70 avg arrival rank must beat P50: " + avgRank);
-            assertTrue(avgRank.get(50) < avgRank.get(30),
+            assertTrue(
+                    avgRank.get(50) < avgRank.get(30),
                     "P50 avg arrival rank must beat P30: " + avgRank);
         }
     }

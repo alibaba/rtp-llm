@@ -26,8 +26,8 @@ import java.util.stream.Collectors;
 public class LearningPredictor implements PrefillTimePredictor {
 
     private static final double TOKENS_PER_FEATURE_UNIT = 1_024.0;
-    private record BatchUpdateItem(PrefillBatchFeatures features, long actualMs) {
-    }
+
+    private record BatchUpdateItem(PrefillBatchFeatures features, long actualMs) {}
 
     /**
      * Atomically published prediction model. The weights array is owned by the
@@ -62,8 +62,10 @@ public class LearningPredictor implements PrefillTimePredictor {
         @Override
         public double predictBatchMs(PrefillBatchFeatures features) {
             if (logger.isDebugEnabled()) {
-                logger.debug("learn predictor predictBatchMs: {}, items count: {}",
-                        formulaStringParam(weights), features.batchSize());
+                logger.debug(
+                        "learn predictor predictBatchMs: {}, items count: {}",
+                        formulaStringParam(weights),
+                        features.batchSize());
             }
             if (features.items().isEmpty()) {
                 return 0;
@@ -103,10 +105,13 @@ public class LearningPredictor implements PrefillTimePredictor {
     private final List<BatchUpdateItem> itemBatch;
 
     public LearningPredictor() {
-        ModelEvaluator initialModel = new ModelEvaluator(
-                new double[] { -4.40538432604287, 10.522208701202377, 1.5043093890711503,
-                               21.40103419118763, 0.11145680735428248, 0.08305932028650383,
-                               1.451617309598213, 1.0268830123611967, -4.405384326042869 });
+        ModelEvaluator initialModel =
+                new ModelEvaluator(
+                        new double[] {
+                            -4.40538432604287, 10.522208701202377, 1.5043093890711503,
+                            21.40103419118763, 0.11145680735428248, 0.08305932028650383,
+                            1.451617309598213, 1.0268830123611967, -4.405384326042869
+                        });
         this.modelRef = new AtomicReference<>(initialModel);
         this.adamMoment1 = new double[initialModel.parameterCount()];
         this.adamMoment2 = new double[initialModel.parameterCount()];
@@ -114,9 +119,13 @@ public class LearningPredictor implements PrefillTimePredictor {
         logger.debug(
                 "learn predictor created, t: {}, total param {}, init param: {}, "
                         + "beta1: {}, beta2: {}, alpha: {}, batchSize: {}",
-                this.t, initialModel.parameterCount(),
+                this.t,
+                initialModel.parameterCount(),
                 formulaStringParam(initialModel.weightsCopy()),
-                this.beta1, this.beta2, this.alpha, this.batchSize);
+                this.beta1,
+                this.beta2,
+                this.alpha,
+                this.batchSize);
     }
 
     @Override
@@ -132,8 +141,7 @@ public class LearningPredictor implements PrefillTimePredictor {
         return sum / COFF3;
     }
 
-    private static void calcNonLinear(
-            double[] weights, double linearOutput, double[] output) {
+    private static void calcNonLinear(double[] weights, double linearOutput, double[] output) {
         // param6 / coff1 + param7 / coff2 * ((linear + 1 + p8) + Sqrt((linear + 1 + p8)^2 + 4))
         double p6 = weights[LINEAR_PARAM_COUNT] / COFF1;
         double p7 = weights[LINEAR_PARAM_COUNT + 1] / COFF2;
@@ -216,28 +224,30 @@ public class LearningPredictor implements PrefillTimePredictor {
         }
         for (int i = 0; i < oldWeights.length; i++) {
             this.adamMoment1[i] = this.adamMoment1[i] * this.beta1 + (1 - this.beta1) * gradient[i];
-            this.adamMoment2[i] = this.adamMoment2[i] * this.beta2 + (1 - this.beta2) * gradient[i] * gradient[i];
+            this.adamMoment2[i] =
+                    this.adamMoment2[i] * this.beta2 + (1 - this.beta2) * gradient[i] * gradient[i];
         }
         double[] newWeights = oldWeights.clone();
         for (int i = 0; i < newWeights.length; i++) {
-            newWeights[i] -= this.alpha * Math.sqrt(1.0 - Math.pow(this.beta2, this.t))
-                    / (1.0 - Math.pow(this.beta1, this.t))
-                    * this.adamMoment1[i] / (Math.sqrt(this.adamMoment2[i] + this.epsilon));
+            newWeights[i] -=
+                    this.alpha
+                            * Math.sqrt(1.0 - Math.pow(this.beta2, this.t))
+                            / (1.0 - Math.pow(this.beta1, this.t))
+                            * this.adamMoment1[i]
+                            / (Math.sqrt(this.adamMoment2[i] + this.epsilon));
         }
 
         this.modelRef.set(new ModelEvaluator(newWeights));
         this.t = this.t + 1;
         this.itemBatch.clear();
         if (logger.isDebugEnabled()) {
-            logger.debug("t: {}, learn predictor param: {}", this.t, formulaStringParam(newWeights));
+            logger.debug(
+                    "t: {}, learn predictor param: {}", this.t, formulaStringParam(newWeights));
         }
         return LearningResult.MODEL_UPDATED;
     }
 
     private static String formulaStringParam(double[] weights) {
-        return Arrays.stream(weights)
-                .mapToObj(String::valueOf)
-                .collect(Collectors.joining(", "));
+        return Arrays.stream(weights).mapToObj(String::valueOf).collect(Collectors.joining(", "));
     }
-
 }

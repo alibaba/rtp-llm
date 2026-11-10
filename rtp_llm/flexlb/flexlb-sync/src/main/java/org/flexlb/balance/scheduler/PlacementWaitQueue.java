@@ -29,10 +29,16 @@ final class PlacementWaitQueue {
     PlacementWaitQueue(boolean priorityOrdering, PlacementAvailability availability) {
         this.availability = Objects.requireNonNull(availability, "availability");
         Comparator<GlobalQueueEntry> fifo = Comparator.comparingLong(entry -> entry.sequence);
-        order = priorityOrdering
-                ? Comparator.<GlobalQueueEntry>comparingInt(entry -> entry.priority).reversed().thenComparing(fifo)
-                : fifo;
-        ready = new TreeSet<>((left, right) -> order.compare(left.entries.first(), right.entries.first()));
+        order =
+                priorityOrdering
+                        ? Comparator.<GlobalQueueEntry>comparingInt(entry -> entry.priority)
+                                .reversed()
+                                .thenComparing(fifo)
+                        : fifo;
+        ready =
+                new TreeSet<>(
+                        (left, right) ->
+                                order.compare(left.entries.first(), right.entries.first()));
     }
 
     boolean isWaiting(GlobalQueueEntry entry) {

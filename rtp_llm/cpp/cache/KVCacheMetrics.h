@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -24,6 +26,11 @@ struct CachePoolMetricsSnapshot {
     size_t      eviction_target_ref_blocks = 0;
     size_t      store_ref_blocks           = 0;
     float       used_ratio                 = 0.0f;
+
+    std::optional<int64_t> read_bytes;
+    std::optional<int64_t> write_bytes;
+    std::optional<double>  read_bandwidth_bytes_per_sec;
+    std::optional<double>  write_bandwidth_bytes_per_sec;
 };
 
 // Allocator snapshots own device pool metrics. BlockTree pools missing from the allocator are appended,

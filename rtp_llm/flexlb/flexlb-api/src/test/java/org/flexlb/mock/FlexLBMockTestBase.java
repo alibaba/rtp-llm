@@ -137,8 +137,12 @@ public abstract class FlexLBMockTestBase {
         decodeIp = "127.0.0.1";
         decodeIpPort = decodeIp + ":" + decodeHttpPort;
 
-        log.info("Mock workers started: prefill=127.0.0.1:{}(grpc={}), decode=127.0.0.1:{}(grpc={})",
-                prefillHttpPort, prefillGrpcPort, decodeHttpPort, decodeGrpcPort);
+        log.info(
+                "Mock workers started: prefill=127.0.0.1:{}(grpc={}), decode=127.0.0.1:{}(grpc={})",
+                prefillHttpPort,
+                prefillGrpcPort,
+                decodeHttpPort,
+                decodeGrpcPort);
 
         // 2. Create config
         config = createConfig();
@@ -149,16 +153,27 @@ public abstract class FlexLBMockTestBase {
         // 3. Create gRPC infrastructure
         InternalRuntimeSettings runtime = config.getInternalRuntime();
         eventLoopGroup = new NioEventLoopGroup(runtime.getGrpcClientEventLoopThreads());
-        grpcExecutor = new ThreadPoolExecutor(
-                runtime.getGrpcClientExecutorThreads(), runtime.getGrpcClientExecutorThreads(),
-                60L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(runtime.getGrpcClientExecutorQueueCapacity()));
+        grpcExecutor =
+                new ThreadPoolExecutor(
+                        runtime.getGrpcClientExecutorThreads(),
+                        runtime.getGrpcClientExecutorThreads(),
+                        60L,
+                        TimeUnit.SECONDS,
+                        new LinkedBlockingQueue<>(runtime.getGrpcClientExecutorQueueCapacity()));
 
-        CustomNameResolver nameResolver = (listener) -> { /* no-op */ };
+        CustomNameResolver nameResolver =
+                (listener) -> {
+                    /* no-op */
+                };
         GrpcReporter grpcReporter = new GrpcReporter(new NoOpFlexMonitor());
-        grpcClient = new EngineGrpcClient(
-                nameResolver, grpcExecutor, eventLoopGroup,
-                grpcReporter, 1_000, enqueueTimeoutMillis());
+        grpcClient =
+                new EngineGrpcClient(
+                        nameResolver,
+                        grpcExecutor,
+                        eventLoopGroup,
+                        grpcReporter,
+                        1_000,
+                        enqueueTimeoutMillis());
 
         // 4. Create real dispatcher
         dispatcher = createDispatcher();
@@ -169,35 +184,39 @@ public abstract class FlexLBMockTestBase {
         // 6. Compose the real request lifecycle and endpoint runtime. The
         // router is bound after endpoints and the registry-backed status view
         // exist, matching production's constructor graph without reopening it.
-        schedulerRuntime = new RequestSchedulerTestRuntime(
-                configService,
-                dispatcher::tryPrepareSubmission,
-                reporter,
-                createRequestSchedulerReporter());
+        schedulerRuntime =
+                new RequestSchedulerTestRuntime(
+                        configService,
+                        dispatcher::tryPrepareSubmission,
+                        reporter,
+                        createRequestSchedulerReporter());
         endpointRegistry = schedulerRuntime.endpointRegistry();
         scheduler = schedulerRuntime.scheduler();
 
-        // 7. Engine status is mocked by default; E2E subclasses can use the real registry-backed view.
+        // 7. Engine status is mocked by default; E2E subclasses can use the real registry-backed
+        // view.
         engineWorkerStatus = createWorkerDirectory();
 
         // 8. Build WorkerStatus for prefill and decode mock workers
-        WorkerEndpoint prefillEndpoint = publishEndpoint(
-                RoleType.PREFILL,
-                prefillIp,
-                prefillHttpPort,
-                prefillGrpcPort,
-                0L,
-                1_000_000L,
-                2_000_000L);
+        WorkerEndpoint prefillEndpoint =
+                publishEndpoint(
+                        RoleType.PREFILL,
+                        prefillIp,
+                        prefillHttpPort,
+                        prefillGrpcPort,
+                        0L,
+                        1_000_000L,
+                        2_000_000L);
 
-        WorkerEndpoint decodeEndpoint = publishEndpoint(
-                RoleType.DECODE,
-                decodeIp,
-                decodeHttpPort,
-                decodeGrpcPort,
-                0L,
-                1_000_000L,
-                2_000_000L);
+        WorkerEndpoint decodeEndpoint =
+                publishEndpoint(
+                        RoleType.DECODE,
+                        decodeIp,
+                        decodeHttpPort,
+                        decodeGrpcPort,
+                        0L,
+                        1_000_000L,
+                        2_000_000L);
 
         WorkerStatus prefillWs = prefillEndpoint.getStatus();
         WorkerStatus decodeWs = decodeEndpoint.getStatus();
@@ -247,8 +266,7 @@ public abstract class FlexLBMockTestBase {
             }
         }
         if (eventLoopGroup != null) {
-            eventLoopGroup.shutdownGracefully(0, 2, TimeUnit.SECONDS)
-                    .syncUninterruptibly();
+            eventLoopGroup.shutdownGracefully(0, 2, TimeUnit.SECONDS).syncUninterruptibly();
         }
     }
 
@@ -280,11 +298,13 @@ public abstract class FlexLBMockTestBase {
 
     protected DefaultRouter createRouter() {
         DefaultRouter fixedRouter = mock(DefaultRouter.class);
-        when(fixedRouter.select(any(BalanceContext.class), any())).thenAnswer(inv -> {
-            BalanceContext ctx = inv.getArgument(0);
-            return schedulerRuntime.admittedRoute(
-                    ctx, successRoute(ctx.getRequestId()));
-        });
+        when(fixedRouter.select(any(BalanceContext.class), any()))
+                .thenAnswer(
+                        inv -> {
+                            BalanceContext ctx = inv.getArgument(0);
+                            return schedulerRuntime.admittedRoute(
+                                    ctx, successRoute(ctx.getRequestId()));
+                        });
         return fixedRouter;
     }
 
@@ -341,13 +361,11 @@ public abstract class FlexLBMockTestBase {
     // ==================== Helper: endpoint accessors ====================
 
     protected PrefillEndpoint getPrefillEndpoint() {
-        return (PrefillEndpoint) endpointRegistry.get(
-                RoleType.PREFILL, prefillIpPort);
+        return (PrefillEndpoint) endpointRegistry.get(RoleType.PREFILL, prefillIpPort);
     }
 
     protected DecodeEndpoint getDecodeEndpoint() {
-        return (DecodeEndpoint) endpointRegistry.get(
-                RoleType.DECODE, decodeIpPort);
+        return (DecodeEndpoint) endpointRegistry.get(RoleType.DECODE, decodeIpPort);
     }
 
     // ==================== Helper: multi-worker support ====================
@@ -367,9 +385,8 @@ public abstract class FlexLBMockTestBase {
     }
 
     /** Start an additional Prefill worker; port 0 asks the OS to allocate its gRPC port. */
-    protected MockPrefillWorker addPrefillWorker(
-            MockWorkerBehavior behavior,
-            int grpcPort) throws IOException {
+    protected MockPrefillWorker addPrefillWorker(MockWorkerBehavior behavior, int grpcPort)
+            throws IOException {
         MockPrefillWorker worker = new MockPrefillWorker(behavior);
         worker.start(grpcPort);
         additionalPrefillWorkers.add(worker);
@@ -378,14 +395,9 @@ public abstract class FlexLBMockTestBase {
         String ip = "127.0.0.1";
         String ipPort = ip + ":" + httpPort;
 
-        WorkerEndpoint endpoint = publishEndpoint(
-                RoleType.PREFILL,
-                ip,
-                httpPort,
-                actualGrpcPort,
-                0L,
-                1_000_000L,
-                2_000_000L);
+        WorkerEndpoint endpoint =
+                publishEndpoint(
+                        RoleType.PREFILL, ip, httpPort, actualGrpcPort, 0L, 1_000_000L, 2_000_000L);
 
         WorkerStatus ws = endpoint.getStatus();
         discover(ws);
@@ -419,23 +431,26 @@ public abstract class FlexLBMockTestBase {
      */
     protected PrefillEndpoint addLogicalPrefillEndpoint(int workerIndex) {
         if (workerIndex <= 0 || workerIndex > LOGICAL_WORKER_INDEX_LIMIT) {
-            throw new IllegalArgumentException("logical prefill worker index must be in [1, "
-                    + LOGICAL_WORKER_INDEX_LIMIT + "]");
+            throw new IllegalArgumentException(
+                    "logical prefill worker index must be in [1, "
+                            + LOGICAL_WORKER_INDEX_LIMIT
+                            + "]");
         }
-        String ip = "198.19." + (workerIndex - 1) / 254 + "."
-                + ((workerIndex - 1) % 254 + 1);
+        String ip = "198.19." + (workerIndex - 1) / 254 + "." + ((workerIndex - 1) % 254 + 1);
         int httpPort = 60_000;
         int grpcPort = httpPort + 1;
         String ipPort = ip + ":" + httpPort;
 
-        PrefillEndpoint endpoint = (PrefillEndpoint) publishEndpoint(
-                RoleType.PREFILL,
-                ip,
-                httpPort,
-                grpcPort,
-                workerIndex,
-                1_000_000_000L,
-                2_000_000_000L);
+        PrefillEndpoint endpoint =
+                (PrefillEndpoint)
+                        publishEndpoint(
+                                RoleType.PREFILL,
+                                ip,
+                                httpPort,
+                                grpcPort,
+                                workerIndex,
+                                1_000_000_000L,
+                                2_000_000_000L);
 
         WorkerStatus ws = endpoint.getStatus();
         discover(ws);
@@ -449,8 +464,10 @@ public abstract class FlexLBMockTestBase {
      */
     protected DecodeEndpoint addLogicalDecodeEndpoint(int workerIndex) {
         if (workerIndex <= 0 || workerIndex > LOGICAL_WORKER_INDEX_LIMIT) {
-            throw new IllegalArgumentException("logical decode worker index must be in [1, "
-                    + LOGICAL_WORKER_INDEX_LIMIT + "]");
+            throw new IllegalArgumentException(
+                    "logical decode worker index must be in [1, "
+                            + LOGICAL_WORKER_INDEX_LIMIT
+                            + "]");
         }
         // RFC 2544 benchmarking block, spread over subnets so a production-sized
         // decode fleet still gets one distinct address per endpoint.
@@ -459,14 +476,16 @@ public abstract class FlexLBMockTestBase {
         int grpcPort = httpPort + 1;
         String ipPort = ip + ":" + httpPort;
 
-        DecodeEndpoint endpoint = (DecodeEndpoint) publishEndpoint(
-                RoleType.DECODE,
-                ip,
-                httpPort,
-                grpcPort,
-                workerIndex,
-                1_000_000_000L,
-                2_000_000_000L);
+        DecodeEndpoint endpoint =
+                (DecodeEndpoint)
+                        publishEndpoint(
+                                RoleType.DECODE,
+                                ip,
+                                httpPort,
+                                grpcPort,
+                                workerIndex,
+                                1_000_000_000L,
+                                2_000_000_000L);
 
         WorkerStatus ws = endpoint.getStatus();
         discover(ws);
@@ -495,15 +514,17 @@ public abstract class FlexLBMockTestBase {
     }
 
     private static byte[] generateInputBytes(long requestId) {
-        EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .addTokenIds(101)
-                .addTokenIds(102)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(8)
-                        .setGroupTimeout(com.google.protobuf.Int32Value.of(77))
-                        .build())
-                .build();
+        EngineRpcService.GenerateInputPB input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(requestId)
+                        .addTokenIds(101)
+                        .addTokenIds(102)
+                        .setGenerateConfig(
+                                EngineRpcService.GenerateConfigPB.newBuilder()
+                                        .setMaxNewTokens(8)
+                                        .setGroupTimeout(com.google.protobuf.Int32Value.of(77))
+                                        .build())
+                        .build();
         return input.toByteArray();
     }
 
@@ -514,26 +535,25 @@ public abstract class FlexLBMockTestBase {
     }
 
     private void discover(WorkerStatus status) {
-        engineWorkerStatus.currentOrDiscover(
-                status.getRole(), status.getIpPort(), () -> status);
+        engineWorkerStatus.currentOrDiscover(status.getRole(), status.getIpPort(), () -> status);
     }
 
     /** Apply one already immutable gRPC status observation. */
     protected final void applyWorkerStatusObservation(
-            WorkerStatus status,
-            WorkerStatus.StatusObservation observation) {
+            WorkerStatus status, WorkerStatus.StatusObservation observation) {
         schedulerRuntime.applyStatus(status, observation);
     }
 
     /** Publish a synthetic Decode capacity observation for integration setup. */
     protected final void publishDecodeCapacity(long available, long total) {
         WorkerStatus status = getDecodeEndpoint().getStatus();
-        WorkerStatusResponse response = workerStatusResponse(
-                RoleType.DECODE,
-                status.getDpRank(),
-                available,
-                total,
-                status.appliedStatusCursor().statusVersion() + 1L);
+        WorkerStatusResponse response =
+                workerStatusResponse(
+                        RoleType.DECODE,
+                        status.getDpRank(),
+                        available,
+                        total,
+                        status.appliedStatusCursor().statusVersion() + 1L);
         schedulerRuntime.applyStatus(status, response);
     }
 
@@ -545,27 +565,23 @@ public abstract class FlexLBMockTestBase {
             long dpRank,
             long availableKv,
             long totalKv) {
-        WorkerStatus status = WorkerStatus.createDiscovered(
-                role, "test-group", ip, httpPort, grpcPort, null);
-        WorkerStatusResponse initial = workerStatusResponse(
-                role, dpRank, availableKv, totalKv, 1L);
+        WorkerStatus status =
+                WorkerStatus.createDiscovered(role, "test-group", ip, httpPort, grpcPort, null);
+        WorkerStatusResponse initial = workerStatusResponse(role, dpRank, availableKv, totalKv, 1L);
         status.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
-                    status.freezeStatusResponse(initial));
-            return endpointRegistry.publishPreparedEndpoint(
-                    status.getIpPort(), status, prepared).endpoint();
+            WorkerStatus.PreparedStatus prepared =
+                    status.prepareNewStatus(status.freezeStatusResponse(initial));
+            return endpointRegistry
+                    .publishPreparedEndpoint(status.getIpPort(), status, prepared)
+                    .endpoint();
         } finally {
             status.lock.unlock();
         }
     }
 
     private static WorkerStatusResponse workerStatusResponse(
-            RoleType role,
-            long dpRank,
-            long availableKv,
-            long totalKv,
-            long statusVersion) {
+            RoleType role, long dpRank, long availableKv, long totalKv, long statusVersion) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(role);
         response.setAlive(true);
@@ -580,14 +596,25 @@ public abstract class FlexLBMockTestBase {
     private Response successRoute(long requestId) {
         Response response = new Response();
         response.setSuccess(true);
-        response.setServerStatus(List.of(
-                serverStatus(RoleType.PREFILL, prefillIp, prefillHttpPort, prefillGrpcPort, requestId),
-                serverStatus(RoleType.DECODE, decodeIp, decodeHttpPort, decodeGrpcPort, requestId)
-        ));
+        response.setServerStatus(
+                List.of(
+                        serverStatus(
+                                RoleType.PREFILL,
+                                prefillIp,
+                                prefillHttpPort,
+                                prefillGrpcPort,
+                                requestId),
+                        serverStatus(
+                                RoleType.DECODE,
+                                decodeIp,
+                                decodeHttpPort,
+                                decodeGrpcPort,
+                                requestId)));
         return response;
     }
 
-    private static ServerStatus serverStatus(RoleType role, String ip, int httpPort, int grpcPort, long requestId) {
+    private static ServerStatus serverStatus(
+            RoleType role, String ip, int httpPort, int grpcPort, long requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);

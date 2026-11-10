@@ -49,17 +49,20 @@ Enhancement suggestions are tracked as GitHub issues. When creating an enhanceme
 ### Setup
 
 1. Fork and clone the repository
+
 ```bash
 git clone https://github.com/your-username/flexlb.git
 cd flexlb
 ```
 
 2. Build the project
+
 ```bash
 mvn clean package -DskipTests
 ```
 
 3. Run tests
+
 ```bash
 mvn test
 ```
@@ -99,6 +102,7 @@ We follow the [Conventional Commits](https://www.conventionalcommits.org/) speci
 ```
 
 Types:
+
 - `feat`: A new feature
 - `fix`: A bug fix
 - `docs`: Documentation only changes
@@ -109,6 +113,7 @@ Types:
 - `chore`: Changes to the build process or auxiliary tools
 
 Examples:
+
 - `feat(api): add new load balancing strategy`
 - `fix(grpc): handle connection timeout properly`
 - `docs: update installation guide`

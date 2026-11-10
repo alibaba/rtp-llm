@@ -1,7 +1,7 @@
 package org.flexlb;
 
-import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.annotation.JsonAutoDetect;
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -12,8 +12,8 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
-import java.net.URI;
 import java.math.BigDecimal;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.cert.CertificateFactory;
@@ -26,30 +26,54 @@ import java.util.Map;
 import java.util.Set;
 
 /** 与 Python config.py 共享 JSON 配置契约。 */
-@JsonAutoDetect(fieldVisibility = JsonAutoDetect.Visibility.ANY,
+@JsonAutoDetect(
+        fieldVisibility = JsonAutoDetect.Visibility.ANY,
         setterVisibility = JsonAutoDetect.Visibility.NONE)
 final class TraceConfig {
 
     static final String ENV = "RTP_LLM_TRACE_CONFIG";
 
-    private static final Set<String> FIELDS = Set.of("enabled", "sampler_ratio", "endpoint", "headers",
-            "certificate",
-            "max_queue_size", "max_export_batch_size", "schedule_delay_ms", "http_timeout_ms");
+    private static final Set<String> FIELDS =
+            Set.of(
+                    "enabled",
+                    "sampler_ratio",
+                    "endpoint",
+                    "headers",
+                    "certificate",
+                    "max_queue_size",
+                    "max_export_batch_size",
+                    "schedule_delay_ms",
+                    "http_timeout_ms");
 
     /** 需要下界（> 0）与 int 范围检查的字段。 */
-    private static final List<String> INT_FIELDS = List.of("max_queue_size", "max_export_batch_size",
-            "schedule_delay_ms", "http_timeout_ms");
+    private static final List<String> INT_FIELDS =
+            List.of(
+                    "max_queue_size",
+                    "max_export_batch_size",
+                    "schedule_delay_ms",
+                    "http_timeout_ms");
 
     /** 禁止被 headers 覆盖的 HTTP 头。 */
-    private static final Set<String> RESERVED = Set.of("host", "content-length", "content-type", "connection",
-            "transfer-encoding", "content-encoding", "trailer", "upgrade", "keep-alive", "te");
+    private static final Set<String> RESERVED =
+            Set.of(
+                    "host",
+                    "content-length",
+                    "content-type",
+                    "connection",
+                    "transfer-encoding",
+                    "content-encoding",
+                    "trailer",
+                    "upgrade",
+                    "keep-alive",
+                    "te");
 
-    private static final ObjectMapper MAPPER = JsonMapper.builder()
-            .propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
-            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
-            .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
-            .build();
+    private static final ObjectMapper MAPPER =
+            JsonMapper.builder()
+                    .propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
+                    .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+                    .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                    .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .build();
 
     private Boolean enabled;
     private Double samplerRatio;
@@ -150,7 +174,10 @@ final class TraceConfig {
         try {
             node = MAPPER.readTree(raw);
         } catch (com.fasterxml.jackson.core.JsonParseException error) {
-            String code = error.getOriginalMessage().startsWith("Duplicate field") ? "duplicate_key" : "invalid_json";
+            String code =
+                    error.getOriginalMessage().startsWith("Duplicate field")
+                            ? "duplicate_key"
+                            : "invalid_json";
             throw new ConfigException("config", code);
         } catch (IOException ignored) {
             throw new ConfigException("config", "invalid_json");
@@ -189,7 +216,8 @@ final class TraceConfig {
             } catch (NumberFormatException error) {
                 throw new ConfigException(name, "out_of_range");
             }
-            if (number.signum() <= 0 || number.compareTo(BigDecimal.valueOf(Integer.MAX_VALUE)) > 0) {
+            if (number.signum() <= 0
+                    || number.compareTo(BigDecimal.valueOf(Integer.MAX_VALUE)) > 0) {
                 throw new ConfigException(name, "out_of_range");
             }
             root.put(name, number.intValue());
@@ -200,7 +228,9 @@ final class TraceConfig {
                 throw new ConfigException("sampler_ratio", "expected_number");
             }
             String value = ratio.isTextual() ? ratio.textValue().strip() : ratio.asText();
-            if (ratio.isTextual() && !value.matches("[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?")) {
+            if (ratio.isTextual()
+                    && !value.matches(
+                            "[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?")) {
                 throw new ConfigException("sampler_ratio", "expected_number");
             }
             double number;
@@ -231,11 +261,13 @@ final class TraceConfig {
         if (!node.isObject()) {
             throw new ConfigException("headers", "expected_object");
         }
-        node.fields().forEachRemaining(entry -> {
-            if (!entry.getValue().isTextual()) {
-                throw new ConfigException("headers", "invalid_header");
-            }
-        });
+        node.fields()
+                .forEachRemaining(
+                        entry -> {
+                            if (!entry.getValue().isTextual()) {
+                                throw new ConfigException("headers", "invalid_header");
+                            }
+                        });
     }
 
     private static void validateScalarNulls(JsonNode root) {
@@ -291,7 +323,8 @@ final class TraceConfig {
             config.source = "manual";
             Map<String, String> normalized = new LinkedHashMap<>();
             validateHeaders(config.headers());
-            config.headers().forEach((name, value) -> normalized.put(name.toLowerCase(Locale.ROOT), value));
+            config.headers()
+                    .forEach((name, value) -> normalized.put(name.toLowerCase(Locale.ROOT), value));
             config.headers = Collections.unmodifiableMap(normalized);
             return config;
         } catch (ConfigException error) {
@@ -359,8 +392,11 @@ final class TraceConfig {
             String name = entry.getKey();
             String value = entry.getValue();
             String normalized = name.toLowerCase(Locale.ROOT);
-            if (!name.matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+") || RESERVED.contains(normalized)
-                    || value == null || value.isBlank() || !value.equals(value.strip())
+            if (!name.matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+                    || RESERVED.contains(normalized)
+                    || value == null
+                    || value.isBlank()
+                    || !value.equals(value.strip())
                     || value.chars().anyMatch(c -> c < 32 && c != '\t' || c == 127 || c > 255)) {
                 throw new ConfigException("headers", "invalid_header");
             }
@@ -388,8 +424,12 @@ final class TraceConfig {
             URI uri = new URI(endpoint);
             String scheme = uri.getScheme();
             if (!("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))
-                    || uri.getHost() == null || uri.getRawUserInfo() != null || uri.getRawFragment() != null
-                    || uri.getPort() == 0 || uri.getPort() > 65535 || uri.getRawAuthority().endsWith(":")
+                    || uri.getHost() == null
+                    || uri.getRawUserInfo() != null
+                    || uri.getRawFragment() != null
+                    || uri.getPort() == 0
+                    || uri.getPort() > 65535
+                    || uri.getRawAuthority().endsWith(":")
                     || endpoint.chars().anyMatch(c -> c <= 32 || c >= 127)) {
                 throw new IllegalArgumentException();
             }

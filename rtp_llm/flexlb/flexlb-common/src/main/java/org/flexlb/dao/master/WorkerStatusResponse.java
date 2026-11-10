@@ -89,5 +89,4 @@ public class WorkerStatusResponse {
 
     @JsonProperty("message")
     private String message;
-
 }

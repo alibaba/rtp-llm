@@ -1,11 +1,10 @@
 package org.flexlb.balance.preemption;
 
-/** Original Prefill route which owns propagation of one Engine cancel. */
-public record CancelTarget(String prefillIp, int prefillGrpcPort) {
+/** Decode control route and the original Prefill endpoint for early cancellation. */
+public record CancelTarget(String decodeIp, int decodeGrpcPort, String prefillAddress) {
 
     public boolean isRoutable() {
-        return prefillIp != null
-                && !prefillIp.isBlank()
-                && prefillGrpcPort > 0;
+        return decodeIp != null && !decodeIp.isBlank() && decodeGrpcPort > 0
+                && prefillAddress != null && !prefillAddress.isBlank();
     }
 }

@@ -4,6 +4,16 @@ Wraps ``deep_gemm.fp8_paged_mqa_logits`` so it can drop into the indexer
 decode loop in place of the bf16 ``v4_indexer_score`` Triton kernel
 when the cache is FP8 packed (132B/slot).
 
+Device/block contract (shared with dsv4): the FP8 paged/prefill dispatch
+below calls the same predicates that dsv4's production dispatch uses —
+:func:`deepgemm_supports_block_kv`, :func:`supports_paged_mqa_logits` and
+:func:`supports_mqa_logits` are imported from
+``rtp_llm.models_py.modules.dsv4.fp8._indexer_score`` rather than copied.
+Unlike dsv4, dsv41 has **no Triton fallback** for these two entry points, so
+an unsupported device/block combination raises a diagnosable ``RuntimeError``
+(carrying the device capability and ``block_kv``) instead of hard-failing
+inside DeepGEMM. The FP4 variants below keep their own gates.
+
 End-to-end shape contract:
 
   q_fp8       [B, next_n, H, D]            float8_e4m3fn  (per-(t,h) quant)
@@ -30,6 +40,11 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
+    deepgemm_supports_block_kv,
+    supports_mqa_logits,
+    supports_paged_mqa_logits,
+)
 from rtp_llm.models_py.modules.dsv41.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
@@ -204,6 +219,57 @@ def fp8_fp4_paged_indexer_score(
     )
 
 
+def _device_capability_str(device) -> str:
+    """Device capability for diagnostics; never raises while reporting."""
+    try:
+        major, minor = torch.cuda.get_device_capability(device)
+        return f"({major}, {minor})"
+    except Exception as exc:  # CPU tensor / no CUDA runtime in this process
+        return f"<unavailable for {device}: {exc}>"
+
+
+def _deepgemm_version_str() -> str:
+    return getattr(_deep_gemm, "__version__", None) or "<not importable>"
+
+
+def _raise_paged_contract_error(device, block_size: int) -> None:
+    """Reject a paged call dsv41 cannot serve, with triage-ready context.
+
+    dsv41 has no Triton fallback, so an unsupported device/block combination
+    must be reported here instead of surfacing as a DeepGEMM-internal assert.
+    The shared predicate answers *whether* the path is servable; this helper
+    explains *why not* using the device capability and ``block_kv``.
+    """
+    capability = _device_capability_str(device)
+    if not deepgemm_supports_block_kv(device, block_size):
+        reason = (
+            f"block_kv={block_size} is outside DeepGEMM's paged metadata "
+            "contract for this device (64 is SM90/SM100-only, 32 is SM100-only)"
+        )
+    else:
+        reason = (
+            "the installed DeepGEMM wheel rejects the group-128 legacy paged "
+            "call on this device (see dsv4 supports_paged_mqa_logits)"
+        )
+    raise RuntimeError(
+        "dsv41 fp8_paged_indexer_score: DeepGEMM paged MQA logits unavailable "
+        f"for device capability {capability}, block_kv={block_size} "
+        f"(deep_gemm={_deepgemm_version_str()}). {reason}. dsv41 has no Triton "
+        "fallback for this path."
+    )
+
+
+def _raise_mqa_contract_error(device) -> None:
+    """Reject a non-paged prefill call dsv41 cannot serve (no fallback)."""
+    raise RuntimeError(
+        "dsv41 fp8_mqa_indexer_score: DeepGEMM fp8_mqa_logits unavailable for "
+        f"device capability {_device_capability_str(device)}, block_kv=n/a "
+        f"(non-paged path; deep_gemm={_deepgemm_version_str()}). The installed "
+        "wheel rejects the group-128 legacy call on this device (see dsv4 "
+        "supports_mqa_logits). dsv41 has no Triton fallback for this path."
+    )
+
+
 def fp8_paged_indexer_score(
     q_fp8: torch.Tensor,  # [B, next_n, H, D] float8_e4m3fn
     w_fold: torch.Tensor,  # [B*next_n, H]    fp32
@@ -220,7 +286,20 @@ def fp8_paged_indexer_score(
     whatever DeepGEMM writes (use ``clean_logits=True`` if the
     downstream topk needs ``-inf`` there; default False to save the
     extra mask).
+
+    Device/block contract: the call is served only when the shared
+    :func:`supports_paged_mqa_logits` (dsv4) accepts this device and
+    ``block_size``. dsv41 deliberately has **no Triton fallback**, so any
+    other combination raises ``RuntimeError`` naming the device capability
+    and ``block_kv`` — never a raw DeepGEMM assert.
     """
+    if not q_fp8.is_cuda:
+        raise RuntimeError(
+            "dsv41 fp8_paged_indexer_score requires a CUDA tensor, got "
+            f"{q_fp8.device}, block_kv={block_size}"
+        )
+    if not supports_paged_mqa_logits(q_fp8.device, block_size):
+        _raise_paged_contract_error(q_fp8.device, block_size)
     # DeepGEMM kv_cache shape: [num_blocks, block_size, 1, D+4] uint8.
     # Our pool is a flat [total_slots, 132] view; reshape into the 4D
     # layout (no copy — just a metadata change).
@@ -280,7 +359,19 @@ def fp8_mqa_indexer_score(
     ``clean_logits=False`` matches what we want — entries past
     ``cu_seqlen_ke[m]`` are left untouched; the topk-with-causal-mask path
     in :class:`Indexer.forward` re-applies its own ``q_pos`` causal cap.
+
+    Device contract: the call is served only when the shared
+    :func:`supports_mqa_logits` (dsv4) accepts this device/wheel. dsv41 has
+    **no Triton fallback** here, so any other combination raises
+    ``RuntimeError`` naming the device capability (``block_kv`` does not
+    apply to the non-paged path).
     """
+    if not q_fp8.is_cuda:
+        raise RuntimeError(
+            f"dsv41 fp8_mqa_indexer_score requires a CUDA tensor, got {q_fp8.device}"
+        )
+    if not supports_mqa_logits(q_fp8.device):
+        _raise_mqa_contract_error(q_fp8.device)
     return _deep_gemm.fp8_mqa_logits(
         q_fp8.contiguous(),
         (k_quant.contiguous(), k_scale.contiguous()),

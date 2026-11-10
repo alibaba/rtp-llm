@@ -27,23 +27,55 @@ class LoopShardRidDisjointTest {
 
     private static final int NUM_SHARDS = 8;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private static JavaLoadClient.TraceRecord rec(int idx) {
         String sourceRid = "rid-" + idx;
         return new JavaLoadClient.TraceRecord(
-                JavaLoadClient.stableRequestId(sourceRid), sourceRid, "trace-" + idx,
-                idx * 100L, 128, 16, Collections.emptyList(), Collections.nCopies(128, 0));
+                JavaLoadClient.stableRequestId(sourceRid),
+                sourceRid,
+                "trace-" + idx,
+                idx * 100L,
+                128,
+                16,
+                Collections.emptyList(),
+                Collections.nCopies(128, 0));
     }
 
     private JavaLoadClient loopClient(int shardIndex) {
-        JavaLoadClient.Config config = new JavaLoadClient.Config(
-                "trace.jsonl", "127.0.0.1:7001", "127.0.0.1:7003",
-                0, 16, 10.0, 1, tempDir.resolve("out").toString(), NUM_SHARDS, shardIndex, 0,
-                120_000L, 500.0, false, true, 1, 1, 0L, 120, true,
-                "engine_service", "",
-                false, 10, 1000, 0, 0, "", false, "", true);
+        JavaLoadClient.Config config =
+                new JavaLoadClient.Config(
+                        "trace.jsonl",
+                        "127.0.0.1:7001",
+                        "127.0.0.1:7003",
+                        0,
+                        16,
+                        10.0,
+                        1,
+                        tempDir.resolve("out").toString(),
+                        NUM_SHARDS,
+                        shardIndex,
+                        0,
+                        120_000L,
+                        500.0,
+                        false,
+                        true,
+                        1,
+                        1,
+                        0L,
+                        120,
+                        true,
+                        "engine_service",
+                        "",
+                        false,
+                        10,
+                        1000,
+                        0,
+                        0,
+                        "",
+                        false,
+                        "",
+                        true);
         return new JavaLoadClient(config);
     }
 
@@ -64,8 +96,9 @@ class LoopShardRidDisjointTest {
             List<JavaLoadClient.TraceRecord> slice =
                     JavaLoadClient.shardSlice(records, NUM_SHARDS, shard);
             for (JavaLoadClient.TraceRecord r : slice) {
-                assertTrue(seen.add(r.sourceRid), "record " + r.sourceRid
-                        + " appears in more than one shard");
+                assertTrue(
+                        seen.add(r.sourceRid),
+                        "record " + r.sourceRid + " appears in more than one shard");
             }
             total += slice.size();
         }
@@ -103,7 +136,8 @@ class LoopShardRidDisjointTest {
                     // Mirrors run(): loopIdx == 0 uses the original record.
                     JavaLoadClient.TraceRecord sent =
                             loopIdx == 0 ? r : client.makeLoopRequest(r, loopIdx, 0);
-                    assertTrue(rids.add(sent.requestId),
+                    assertTrue(
+                            rids.add(sent.requestId),
                             "duplicate rid within shard " + shard + ": " + sent.sourceRid);
                 }
             }
@@ -114,7 +148,8 @@ class LoopShardRidDisjointTest {
             for (int b = a + 1; b < NUM_SHARDS; b++) {
                 Set<Long> overlap = new HashSet<>(ridsPerShard.get(a));
                 overlap.retainAll(ridsPerShard.get(b));
-                assertTrue(overlap.isEmpty(),
+                assertTrue(
+                        overlap.isEmpty(),
                         "shards " + a + " and " + b + " share " + overlap.size() + " rid(s)");
             }
         }
@@ -150,7 +185,8 @@ class LoopShardRidDisjointTest {
             for (int b = a + 1; b < NUM_SHARDS; b++) {
                 Set<Long> overlap = new HashSet<>(ridsPerShard.get(a));
                 overlap.retainAll(ridsPerShard.get(b));
-                assertTrue(overlap.isEmpty(),
+                assertTrue(
+                        overlap.isEmpty(),
                         "unsliced shards " + a + " and " + b + " share rid(s): " + overlap);
             }
         }

@@ -16,13 +16,17 @@ import java.util.Set;
 final class PrefillTimeVariableBindings {
 
     private static final String BATCH_SIZE = "batchSize";
-    private static final Set<String> BATCH_VAR_NAMES = Set.of(
-            "totalInputTokens", "totalHitCacheTokens", "totalComputeTokens",
-            "maxInputTokens", "maxComputeTokens");
-    private static final ThreadLocal<BindingContext> BINDING_CTX = ThreadLocal.withInitial(BindingContext::new);
+    private static final Set<String> BATCH_VAR_NAMES =
+            Set.of(
+                    "totalInputTokens",
+                    "totalHitCacheTokens",
+                    "totalComputeTokens",
+                    "maxInputTokens",
+                    "maxComputeTokens");
+    private static final ThreadLocal<BindingContext> BINDING_CTX =
+            ThreadLocal.withInitial(BindingContext::new);
 
-    private PrefillTimeVariableBindings() {
-    }
+    private PrefillTimeVariableBindings() {}
 
     static boolean isBatchScoped(String name) {
         return BATCH_SIZE.equals(name) || BATCH_VAR_NAMES.contains(name);
@@ -34,9 +38,14 @@ final class PrefillTimeVariableBindings {
         fillRequestVars(ctx.topLevelVars, totalTokens, hitCacheTokens);
         ctx.topLevelVars[PrefillTimeFormula.IDX_BATCH_SIZE] = 1.0;
         long inputTokens = (long) ctx.topLevelVars[PrefillTimeFormula.IDX_INPUT_TOKENS];
-        long boundedHitCacheTokens = (long) ctx.topLevelVars[PrefillTimeFormula.IDX_HIT_CACHE_TOKENS];
-        fillBatchVars(ctx.topLevelVars, inputTokens, boundedHitCacheTokens,
-                inputTokens, inputTokens - boundedHitCacheTokens);
+        long boundedHitCacheTokens =
+                (long) ctx.topLevelVars[PrefillTimeFormula.IDX_HIT_CACHE_TOKENS];
+        fillBatchVars(
+                ctx.topLevelVars,
+                inputTokens,
+                boundedHitCacheTokens,
+                inputTokens,
+                inputTokens - boundedHitCacheTokens);
 
         double[] item = ctx.acquireArray();
         fillRequestVars(item, totalTokens, hitCacheTokens);
@@ -66,8 +75,12 @@ final class PrefillTimeVariableBindings {
             maxComputeTokens = Math.max(maxComputeTokens, computeTokens);
         }
         ctx.topLevelVars[PrefillTimeFormula.IDX_BATCH_SIZE] = features.batchSize();
-        fillBatchVars(ctx.topLevelVars, totalInputTokens, totalHitCacheTokens,
-                maxInputTokens, maxComputeTokens);
+        fillBatchVars(
+                ctx.topLevelVars,
+                totalInputTokens,
+                totalHitCacheTokens,
+                maxInputTokens,
+                maxComputeTokens);
         return ctx.evaluationVariables;
     }
 
@@ -93,11 +106,12 @@ final class PrefillTimeVariableBindings {
         }
     }
 
-    private static void fillBatchVars(double[] vars,
-                                      long totalInputTokens,
-                                      long totalHitCacheTokens,
-                                      long maxInputTokens,
-                                      long maxComputeTokens) {
+    private static void fillBatchVars(
+            double[] vars,
+            long totalInputTokens,
+            long totalHitCacheTokens,
+            long maxInputTokens,
+            long maxComputeTokens) {
         vars[PrefillTimeFormula.IDX_TOTAL_INPUT_TOKENS] = totalInputTokens;
         vars[PrefillTimeFormula.IDX_TOTAL_HIT_CACHE_TOKENS] = totalHitCacheTokens;
         vars[PrefillTimeFormula.IDX_TOTAL_COMPUTE_TOKENS] = totalInputTokens - totalHitCacheTokens;
@@ -157,7 +171,5 @@ final class PrefillTimeVariableBindings {
         }
     }
 
-    record EvaluationVariables(double[] topLevelVars,
-                               List<double[]> itemVars) {
-    }
+    record EvaluationVariables(double[] topLevelVars, List<double[]> itemVars) {}
 }

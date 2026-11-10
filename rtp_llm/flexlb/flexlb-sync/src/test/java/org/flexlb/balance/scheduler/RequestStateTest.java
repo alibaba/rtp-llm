@@ -12,24 +12,24 @@ class RequestStateTest {
 
     @Test
     void batchDeliverySnapshotRequiresItsExactBatchIdentity() {
-        RequestState state = state(
-                RequestState.Phase.DISPATCHING,
-                DeliveryClaimKind.BATCH_ENQUEUE,
-                17L);
+        RequestState state =
+                state(RequestState.Phase.DISPATCHING, DeliveryClaimKind.BATCH_ENQUEUE, 17L);
 
         assertEquals(17L, state.batchId());
-        assertThrows(IllegalArgumentException.class, () -> state(
-                RequestState.Phase.DISPATCHING,
-                DeliveryClaimKind.BATCH_ENQUEUE,
-                0L));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> state(RequestState.Phase.DISPATCHING, DeliveryClaimKind.BATCH_ENQUEUE, 0L));
     }
 
     @Test
     void requestScopedDeliveryCannotCarryBatchIdentity() {
-        assertThrows(IllegalArgumentException.class, () -> state(
-                RequestState.Phase.ACKNOWLEDGED,
-                DeliveryClaimKind.ROUTE_DECISION,
-                17L));
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        state(
+                                RequestState.Phase.ACKNOWLEDGED,
+                                DeliveryClaimKind.ROUTE_DECISION,
+                                17L));
     }
 
     @Test
@@ -43,11 +43,7 @@ class RequestStateTest {
     }
 
     private static RequestState state(
-            RequestState.Phase phase,
-            DeliveryClaimKind claim,
-            long batchId) {
-        return new RequestState(
-                1L, phase, claim, batchId,
-                10L, 11L, "test");
+            RequestState.Phase phase, DeliveryClaimKind claim, long batchId) {
+        return new RequestState(1L, phase, claim, batchId, 10L, 11L, "test");
     }
 }

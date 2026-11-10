@@ -4,19 +4,30 @@ import java.util.List;
 
 /** Immutable syntax, exact constant folding, and the small interpreter used for oversized formulas. */
 final class ArithmeticFormulaAst {
-    private ArithmeticFormulaAst() { }
+    private ArithmeticFormulaAst() {}
 
-    sealed interface Node { }
-    record ConstantNode(double value) implements Node { }
-    record VariableNode(int varIndex) implements Node { }
-    record UnaryNode(char op, Node operand) implements Node { }
-    record BinaryNode(char op, Node left, Node right) implements Node { }
-    record FunctionNode(Function function, Node left, Node right) implements Node { }
-    record AggregateFuncNode(Node arg) implements Node { }
+    sealed interface Node {}
+
+    record ConstantNode(double value) implements Node {}
+
+    record VariableNode(int varIndex) implements Node {}
+
+    record UnaryNode(char op, Node operand) implements Node {}
+
+    record BinaryNode(char op, Node left, Node right) implements Node {}
+
+    record FunctionNode(Function function, Node left, Node right) implements Node {}
+
+    record AggregateFuncNode(Node arg) implements Node {}
 
     enum Function {
-        SQRT("sqrt", 1), LOG("log", 1), EXP("exp", 1), ABS("abs", 1),
-        MAX("max", 2), MIN("min", 2), POW("pow", 2);
+        SQRT("sqrt", 1),
+        LOG("log", 1),
+        EXP("exp", 1),
+        ABS("abs", 1),
+        MAX("max", 2),
+        MIN("min", 2),
+        POW("pow", 2);
 
         final String mathName;
         final int arity;
@@ -53,13 +64,16 @@ final class ArithmeticFormulaAst {
 
     static Node binary(char op, Node left, Node right) {
         Node node = new BinaryNode(op, left, right);
-        return left instanceof ConstantNode && right instanceof ConstantNode ? constant(node) : node;
+        return left instanceof ConstantNode && right instanceof ConstantNode
+                ? constant(node)
+                : node;
     }
 
     static Node function(Function function, Node left, Node right) {
         Node node = new FunctionNode(function, left, right);
         return left instanceof ConstantNode && (right == null || right instanceof ConstantNode)
-                ? constant(node) : node;
+                ? constant(node)
+                : node;
     }
 
     private static Node constant(Node node) {
@@ -89,7 +103,8 @@ final class ArithmeticFormulaAst {
             }
             case FunctionNode function -> {
                 double left = evaluate(function.left(), vars, items);
-                double right = function.right() == null ? 0.0 : evaluate(function.right(), vars, items);
+                double right =
+                        function.right() == null ? 0.0 : evaluate(function.right(), vars, items);
                 yield function.function().apply(left, right);
             }
             case AggregateFuncNode aggregate -> {

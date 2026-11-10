@@ -11,9 +11,7 @@ import java.util.Comparator;
  * @param deterministicTieBreak stable tie-break (smallest victim request id)
  */
 public record PlanCost(
-        PriorityHarmProfile priorityHarmProfile,
-        int victimCount,
-        long deterministicTieBreak) {
+        PriorityHarmProfile priorityHarmProfile, int victimCount, long deterministicTieBreak) {
 
     /**
      * Plan preference (smaller = better): exact priority harm profile →
@@ -21,8 +19,8 @@ public record PlanCost(
      * Scalar diagnostic cost stays on the proposal and never participates in
      * priority-safety ordering.
      */
-    public static final Comparator<PlanCost> ORDER = Comparator
-            .comparing(PlanCost::priorityHarmProfile)
-            .thenComparingInt(PlanCost::victimCount)
-            .thenComparingLong(PlanCost::deterministicTieBreak);
+    public static final Comparator<PlanCost> ORDER =
+            Comparator.comparing(PlanCost::priorityHarmProfile)
+                    .thenComparingInt(PlanCost::victimCount)
+                    .thenComparingLong(PlanCost::deterministicTieBreak);
 }

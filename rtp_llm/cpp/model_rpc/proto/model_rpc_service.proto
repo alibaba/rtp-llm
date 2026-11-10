@@ -1018,7 +1018,8 @@ message SideChannelPayloadPB {
     uint64 rng_offset = 12;
     // Prefill owns embedding-derived media lengths; Decode has no embedding.
     map<int32, int32> multimodal_lengths = 13;
-    int32 writeback_first_use_len = 14;
+    PromptLogitsOutputPB prompt_logits = 14;
+    int32 writeback_first_use_len = 15;
 }
 
 message P2PConnectorStartLoadResponsePB {

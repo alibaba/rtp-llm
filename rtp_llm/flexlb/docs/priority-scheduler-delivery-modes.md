@@ -205,30 +205,30 @@ accepted.
 
 ### Scheduler
 
-| JSON path | Applies to | Default | Meaning |
-| --- | --- | ---: | --- |
-| `scheduler.type` | all | `QUEUE` | `DIRECT` or `QUEUE` |
-| `scheduler.queueTimeoutMs` | `QUEUE` | `3600000` ms | Total scheduling lifetime from FlexLB admission through delivery acknowledgement |
-| `scheduler.ordering.type` | `QUEUE` | `FIFO` | `FIFO` or `PRIORITY` |
-| `scheduler.ordering.defaultPriority` | `QUEUE + PRIORITY` | `50` | Fallback priority in `[1, 100]` |
-| `scheduler.decision.type` | `QUEUE` | `FIXED_WINDOW` | `SINGLE` or `FIXED_WINDOW` |
-| `scheduler.decision.maxRequests` | `QUEUE + FIXED_WINDOW` | `8` | Maximum requests in one decision group |
-| `scheduler.decision.maxCollectionWaitMs` | `QUEUE + FIXED_WINDOW` | `300` ms | Maximum collection wait; zero is allowed |
-| `scheduler.decision.maxPredictedExecutionMs` | `QUEUE + FIXED_WINDOW` | omitted | Optional positive inclusive group-growth cap; reaching it dispatches immediately, and an indivisible singleton may exceed it |
-| `scheduler.capacity.maxOutstandingRequestsGlobal` | `QUEUE` | `100000` | Exact cluster-wide cap on requests owned by QUEUE |
-| `scheduler.capacity.maxWaitingRequestsPerPrefillWorker` | `QUEUE` | `1024` | Positive hard bound for each Prefill waiting queue |
-| `scheduler.lifecycle.staleInflightTimeoutMs` | `QUEUE` | `300000` ms | Stale inflight reconciliation bound |
-| `scheduler.lifecycle.deliveredNotAcceptedTimeoutMs` | `QUEUE` | `30000` ms | Bound before reconciling work delivered but not accepted by Decode |
-| `scheduler.lifecycle.maxDeliveredNotAcceptedRequestsGlobal` | `QUEUE` | `200` | Global Decode acceptance guard, acquired during delivery preparation |
+| JSON path                                                   | Applies to             |        Default | Meaning                                                                                                                      |
+| ----------------------------------------------------------- | ---------------------- | -------------: | ---------------------------------------------------------------------------------------------------------------------------- |
+| `scheduler.type`                                            | all                    |        `QUEUE` | `DIRECT` or `QUEUE`                                                                                                          |
+| `scheduler.queueTimeoutMs`                                  | `QUEUE`                |   `3600000` ms | Total scheduling lifetime from FlexLB admission through delivery acknowledgement                                             |
+| `scheduler.ordering.type`                                   | `QUEUE`                |         `FIFO` | `FIFO` or `PRIORITY`                                                                                                         |
+| `scheduler.ordering.defaultPriority`                        | `QUEUE + PRIORITY`     |           `50` | Fallback priority in `[1, 100]`                                                                                              |
+| `scheduler.decision.type`                                   | `QUEUE`                | `FIXED_WINDOW` | `SINGLE` or `FIXED_WINDOW`                                                                                                   |
+| `scheduler.decision.maxRequests`                            | `QUEUE + FIXED_WINDOW` |            `8` | Maximum requests in one decision group                                                                                       |
+| `scheduler.decision.maxCollectionWaitMs`                    | `QUEUE + FIXED_WINDOW` |       `300` ms | Maximum collection wait; zero is allowed                                                                                     |
+| `scheduler.decision.maxPredictedExecutionMs`                | `QUEUE + FIXED_WINDOW` |        omitted | Optional positive inclusive group-growth cap; reaching it dispatches immediately, and an indivisible singleton may exceed it |
+| `scheduler.capacity.maxOutstandingRequestsGlobal`           | `QUEUE`                |       `100000` | Exact cluster-wide cap on requests owned by QUEUE                                                                            |
+| `scheduler.capacity.maxWaitingRequestsPerPrefillWorker`     | `QUEUE`                |         `1024` | Positive hard bound for each Prefill waiting queue                                                                           |
+| `scheduler.lifecycle.staleInflightTimeoutMs`                | `QUEUE`                |    `300000` ms | Stale inflight reconciliation bound                                                                                          |
+| `scheduler.lifecycle.deliveredNotAcceptedTimeoutMs`         | `QUEUE`                |     `30000` ms | Bound before reconciling work delivered but not accepted by Decode                                                           |
+| `scheduler.lifecycle.maxDeliveredNotAcceptedRequestsGlobal` | `QUEUE`                |          `200` | Global Decode acceptance guard, acquired during delivery preparation                                                         |
 
 FIFO has no additional fields. PRIORITY can optionally contain
 `scheduler.ordering.preemption`:
 
-| JSON path | Default | Meaning |
-| --- | ---: | --- |
-| `allowedVictimStages` | omitted | Non-empty subset of `PREFILL_QUEUED`, `DECODE_RESERVED`, and `DECODE_ENGINE_OWNED` |
-| `engineCancellation.ackTimeoutMs` | `50` ms | Cancel RPC acknowledgement bound |
-| `engineCancellation.completionTimeoutMs` | `1000` ms | Typed cancellation completion bound |
+| JSON path                                |   Default | Meaning                                                                            |
+| ---------------------------------------- | --------: | ---------------------------------------------------------------------------------- |
+| `allowedVictimStages`                    |   omitted | Non-empty subset of `PREFILL_QUEUED`, `DECODE_RESERVED`, and `DECODE_ENGINE_OWNED` |
+| `engineCancellation.ackTimeoutMs`        |   `50` ms | Cancel RPC acknowledgement bound                                                   |
+| `engineCancellation.completionTimeoutMs` | `1000` ms | Typed cancellation completion bound                                                |
 
 `engineCancellation` is required when `DECODE_ENGINE_OWNED` is allowed and is
 rejected otherwise. Omit the whole `preemption` object to disable preemption.
@@ -268,12 +268,12 @@ short admission critical section. Rejected submissions publish no lifecycle obje
 
 ### Dispatcher
 
-| JSON path | Applies to | Default | Meaning |
-| --- | --- | ---: | --- |
-| `dispatcher.type` | all | `BATCH` | `BATCH` or `NON_BATCH`; DIRECT requires `NON_BATCH` |
-| `dispatcher.maxInflightBatchesPerPrefillWorker` | `BATCH` | omitted | Optional positive per-Prefill EnqueueBatch backpressure cap |
-| `dispatcher.enqueueRpcTimeoutMs` | `BATCH` | `5000` ms | EnqueueBatch RPC timeout |
-| `dispatcher.maxInflightRequestsPerPrefillWorker` | `DIRECT/QUEUE + NON_BATCH` | omitted | Optional positive per-Prefill outstanding request cap |
+| JSON path                                        | Applies to                 |   Default | Meaning                                                     |
+| ------------------------------------------------ | -------------------------- | --------: | ----------------------------------------------------------- |
+| `dispatcher.type`                                | all                        |   `BATCH` | `BATCH` or `NON_BATCH`; DIRECT requires `NON_BATCH`         |
+| `dispatcher.maxInflightBatchesPerPrefillWorker`  | `BATCH`                    |   omitted | Optional positive per-Prefill EnqueueBatch backpressure cap |
+| `dispatcher.enqueueRpcTimeoutMs`                 | `BATCH`                    | `5000` ms | EnqueueBatch RPC timeout                                    |
+| `dispatcher.maxInflightRequestsPerPrefillWorker` | `DIRECT/QUEUE + NON_BATCH` |   omitted | Optional positive per-Prefill outstanding request cap       |
 
 The two optional inflight limits use omission, not zero, to mean unlimited.
 Decision-group and waiting-queue parameters are rejected under `dispatcher`.
@@ -285,8 +285,8 @@ DIRECT with the default role routing configuration:
 ```json
 {
   "schemaVersion": 2,
-  "scheduler": {"type": "DIRECT"},
-  "dispatcher": {"type": "NON_BATCH"}
+  "scheduler": { "type": "DIRECT" },
+  "dispatcher": { "type": "NON_BATCH" }
 }
 ```
 
@@ -299,10 +299,10 @@ SINGLE decision, frontend delivery:
   "schemaVersion": 2,
   "scheduler": {
     "type": "QUEUE",
-    "ordering": {"type": "FIFO"},
-    "decision": {"type": "SINGLE"}
+    "ordering": { "type": "FIFO" },
+    "decision": { "type": "SINGLE" }
   },
-  "dispatcher": {"type": "NON_BATCH"}
+  "dispatcher": { "type": "NON_BATCH" }
 }
 ```
 
@@ -313,10 +313,10 @@ SINGLE decision, Master delivery:
   "schemaVersion": 2,
   "scheduler": {
     "type": "QUEUE",
-    "ordering": {"type": "FIFO"},
-    "decision": {"type": "SINGLE"}
+    "ordering": { "type": "FIFO" },
+    "decision": { "type": "SINGLE" }
   },
-  "dispatcher": {"type": "BATCH"}
+  "dispatcher": { "type": "BATCH" }
 }
 ```
 
@@ -327,14 +327,14 @@ FIXED_WINDOW decision, frontend delivery:
   "schemaVersion": 2,
   "scheduler": {
     "type": "QUEUE",
-    "ordering": {"type": "FIFO"},
+    "ordering": { "type": "FIFO" },
     "decision": {
       "type": "FIXED_WINDOW",
       "maxRequests": 8,
       "maxCollectionWaitMs": 300
     }
   },
-  "dispatcher": {"type": "NON_BATCH"}
+  "dispatcher": { "type": "NON_BATCH" }
 }
 ```
 
@@ -345,14 +345,14 @@ FIXED_WINDOW decision, Master delivery:
   "schemaVersion": 2,
   "scheduler": {
     "type": "QUEUE",
-    "ordering": {"type": "FIFO"},
+    "ordering": { "type": "FIFO" },
     "decision": {
       "type": "FIXED_WINDOW",
       "maxRequests": 8,
       "maxCollectionWaitMs": 300
     }
   },
-  "dispatcher": {"type": "BATCH"}
+  "dispatcher": { "type": "BATCH" }
 }
 ```
 
@@ -462,17 +462,17 @@ any of these valid modes. Role algorithms themselves are fixed.
 
 ## Mode matrix
 
-| Scheduler | Ordering | Decision | Dispatcher | Delivery |
-| --- | --- | --- | --- | --- |
-| `DIRECT` | — | — | `NON_BATCH` | Immediate route response; frontend sends |
-| `QUEUE` | `FIFO` | `SINGLE` | `NON_BATCH` | FIFO singleton route response; frontend sends |
-| `QUEUE` | `FIFO` | `SINGLE` | `BATCH` | FIFO singleton `EnqueueBatch`; Master sends |
-| `QUEUE` | `FIFO` | `FIXED_WINDOW` | `NON_BATCH` | FIFO-ordered independent route decisions; frontend sends each request |
-| `QUEUE` | `FIFO` | `FIXED_WINDOW` | `BATCH` | FIFO-ordered independent route decisions; each selected endpoint batches locally |
-| `QUEUE` | `PRIORITY` | `SINGLE` | `NON_BATCH` | Priority singleton route response; frontend sends |
-| `QUEUE` | `PRIORITY` | `SINGLE` | `BATCH` | Priority singleton `EnqueueBatch`; Master sends |
-| `QUEUE` | `PRIORITY` | `FIXED_WINDOW` | `NON_BATCH` | Priority-ordered independent route decisions; frontend sends each request |
-| `QUEUE` | `PRIORITY` | `FIXED_WINDOW` | `BATCH` | Priority-ordered independent route decisions; each selected endpoint batches locally |
+| Scheduler | Ordering   | Decision       | Dispatcher  | Delivery                                                                             |
+| --------- | ---------- | -------------- | ----------- | ------------------------------------------------------------------------------------ |
+| `DIRECT`  | —          | —              | `NON_BATCH` | Immediate route response; frontend sends                                             |
+| `QUEUE`   | `FIFO`     | `SINGLE`       | `NON_BATCH` | FIFO singleton route response; frontend sends                                        |
+| `QUEUE`   | `FIFO`     | `SINGLE`       | `BATCH`     | FIFO singleton `EnqueueBatch`; Master sends                                          |
+| `QUEUE`   | `FIFO`     | `FIXED_WINDOW` | `NON_BATCH` | FIFO-ordered independent route decisions; frontend sends each request                |
+| `QUEUE`   | `FIFO`     | `FIXED_WINDOW` | `BATCH`     | FIFO-ordered independent route decisions; each selected endpoint batches locally     |
+| `QUEUE`   | `PRIORITY` | `SINGLE`       | `NON_BATCH` | Priority singleton route response; frontend sends                                    |
+| `QUEUE`   | `PRIORITY` | `SINGLE`       | `BATCH`     | Priority singleton `EnqueueBatch`; Master sends                                      |
+| `QUEUE`   | `PRIORITY` | `FIXED_WINDOW` | `NON_BATCH` | Priority-ordered independent route decisions; frontend sends each request            |
+| `QUEUE`   | `PRIORITY` | `FIXED_WINDOW` | `BATCH`     | Priority-ordered independent route decisions; each selected endpoint batches locally |
 
 `DIRECT + BATCH` and `DIRECT + decision` are rejected during strict
 configuration parsing/validation.

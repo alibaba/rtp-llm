@@ -28,15 +28,15 @@ if [[ -f ".sdkmanrc" ]]; then
     echo "📋 .sdkmanrc 内容:"
     cat .sdkmanrc | grep -v '^#'
     echo
-    
+
     # 自动安装和切换 Java 版本
     echo "🔧 自动安装配置 Java 版本..."
-    
+
     # 安装指定的 Java 版本
     java_version=$(cat .sdkmanrc | grep '^java=' | cut -d'=' -f2 | tr -d ' ')
     if [[ -n "$java_version" ]]; then
         echo "💡 正在检查和安装 Java $java_version..."
-        
+
         # 检查版本是否已安装
         if ! sdk list java | grep -q "$java_version" | grep -q "installed"; then
             echo "⬇️  安装 Java $java_version..."
@@ -44,7 +44,7 @@ if [[ -f ".sdkmanrc" ]]; then
         else
             echo "✅ Java $java_version 已安装"
         fi
-        
+
         # 自动启用环境
         sdk env install
         echo "✅ Java 环境已设置为: $java_version"

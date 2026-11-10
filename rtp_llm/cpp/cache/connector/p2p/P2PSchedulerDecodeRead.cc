@@ -272,6 +272,9 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
             ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "meta->p2pRouting() returned nullopt")};
     }
 
+    // Enforce result-only handoff even for callers entering the scheduler directly.
+    no_transfer = no_transfer || !routing->decode_needs_compute;
+
     const int64_t     request_id          = routing->request_id;
     const std::string unique_key          = routing->unique_key;
     const int64_t     request_deadline_ms = routing->deadline_ms;

@@ -151,6 +151,7 @@ std::string KVCacheConfig::to_string() const {
         << "enable_memory_cache: " << enable_memory_cache << "\n"
         << "enable_disk_cache: " << enable_disk_cache << "\n"
         << "enable_remote_cache: " << enable_remote_cache << "\n"
+        << "enable_crc: " << enable_crc << "\n"
         << "device_eviction_policy: " << device_eviction_policy << "\n"
         << "memory_eviction_policy: " << memory_eviction_policy << "\n"
         << "disk_eviction_policy: " << disk_eviction_policy << "\n"
@@ -432,7 +433,8 @@ std::string FIFOSchedulerConfig::to_string() const {
         << "decode_prefill_ratio: " << decode_prefill_ratio << "\n"
         << "cp_force_single_prefill: " << cp_force_single_prefill << "\n"
         << "max_inited_kv_cache_streams: " << max_inited_kv_cache_streams << "\n"
-        << "max_batch_tokens_without_cache: " << max_batch_tokens_without_cache;
+        << "max_batch_tokens_without_cache: " << max_batch_tokens_without_cache << "\n"
+        << "prefill_chunk_size: " << prefill_chunk_size;
     return oss.str();
 }
 

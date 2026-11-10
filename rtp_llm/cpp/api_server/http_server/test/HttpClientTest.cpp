@@ -1,3 +1,7 @@
+#include <atomic>
+#include <chrono>
+#include <thread>
+
 #include "gtest/gtest.h"
 
 #include "autil/NetUtil.h"
@@ -61,94 +65,142 @@ std::shared_ptr<http_server::HttpServer> HttpClientTest::initServer(const std::s
     return server_;
 }
 
-void processResponse(const std::string& response_body) {
+// Returns whether the body parsed into the expected worker status; callers
+// record the outcome and assert on the test thread, because the callback runs
+// on a network thread where gtest assertions are not allowed.
+bool processResponse(const std::string& response_body) {
     try {
         WorkerStatusResponse worker_status_response;
         autil::legacy::FromJsonString(worker_status_response, response_body);
-        ASSERT_TRUE(worker_status_response.available_concurrency == 32);
+        return worker_status_response.available_concurrency == 32;
     } catch (...) {
-        ASSERT_TRUE(0);
+        return false;
     }
+}
+
+// Bounded wait for an asynchronous condition: a lost callback must fail the
+// test instead of hanging the whole gtest binary.
+template <typename Predicate>
+bool waitUntil(Predicate done, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (!done() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return done();
 }
 
 TEST_F(HttpClientTest, testRequestSuccess) {
     auto http_client_ = std::make_shared<SimpleHttpClient>();
     ASSERT_TRUE(http_client_ != nullptr);
 
-    std::atomic_int finish_cnt       = 0;
-    int             http_request_num = 5;
+    const int        http_request_num = 5;
+    const int        expected_total   = static_cast<int>(http_servers_.size()) * http_request_num;
+    std::atomic<int> finish_cnt{0};
+    std::atomic<int> failures{0};
     for (auto& it : http_servers_) {
         for (int i = 0; i < http_request_num; i++) {
-            HttpCallBack http_call_back = [&finish_cnt](bool ok, const std::string& response_body) {
-                ASSERT_TRUE(ok);
-                processResponse(response_body);
+            HttpCallBack http_call_back = [&finish_cnt, &failures](bool ok, const std::string& response_body) {
+                if (!ok || !processResponse(response_body)) {
+                    ++failures;
+                }
                 ++finish_cnt;
             };
             ASSERT_TRUE(http_client_->get(it.first, "/worker_status", "", std::move(http_call_back)));
         }
     }
-    while (true) {
-        if (finish_cnt == http_servers_.size() * http_request_num) {
-            break;
-        }
-    }
+    ASSERT_TRUE(waitUntil([&] { return finish_cnt.load() >= expected_total; }, std::chrono::seconds(30)))
+        << "only " << finish_cnt.load() << " of " << expected_total << " callbacks arrived";
+    ASSERT_EQ(0, failures.load());
 }
 
 TEST_F(HttpClientTest, testRequestInvalidAddress) {
     auto http_client_ = std::make_shared<SimpleHttpClient>();
     ASSERT_TRUE(http_client_ != nullptr);
 
-    std::mutex mutex;
-    mutex.lock();
-    HttpCallBack http_call_back = [&mutex](bool ok, const std::string& response_body) {
-        ASSERT_FALSE(ok);
-        ASSERT_TRUE(response_body == "");
-        mutex.unlock();
+    // Record the callback outcome and assert on the test thread: gtest
+    // assertions may only run in the thread that owns the test.
+    std::atomic<bool> callback_invoked{false};
+    std::atomic<bool> callback_ok{false};
+    std::atomic<bool> response_empty{false};
+    HttpCallBack      http_call_back = [&](bool ok, const std::string& response_body) {
+        callback_ok.store(ok);
+        response_empty.store(response_body.empty());
+        callback_invoked.store(true);
     };
 
-    std::string address = "tcp:0.0.0.0:" + std::to_string(autil::NetUtil::randomPort());  // invalid address
-    ASSERT_TRUE(http_client_->get(address, "/worker_status", "", std::move(http_call_back)));
-    mutex.lock();
-    mutex.unlock();
+    // Keep the invalid address out of the ports the fixture already bound:
+    // an address that actually listens is not an invalid address at all.
+    std::string address;
+    do {
+        address = "tcp:0.0.0.0:" + std::to_string(autil::NetUtil::randomPort());
+    } while (http_servers_.count(address) != 0);
+
+    // An invalid address must never be reported as a successful transfer.
+    // Two observations are legitimate: the submission is refused outright
+    // (get() returns false because the connection already failed before the
+    // packet could be posted) or the submission is accepted and the failure
+    // arrives through the callback.  Only a silent success is a bug.
+    const bool submitted = http_client_->get(address, "/worker_status", "", std::move(http_call_back));
+    if (!submitted) {
+        ASSERT_FALSE(callback_ok.load()) << "a refused submission must not report success";
+        return;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!callback_invoked.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(callback_invoked.load()) << "no callback for an invalid address";
+    ASSERT_FALSE(callback_ok.load());
+    ASSERT_TRUE(response_empty.load());
 }
 
 TEST_F(HttpClientTest, testRequestInvalidRoute) {
     auto http_client_ = std::make_shared<SimpleHttpClient>();
     ASSERT_TRUE(http_client_ != nullptr);
 
-    auto address = http_servers_.begin()->first;
-
-    std::mutex mutex;
-    mutex.lock();
-    HttpCallBack http_call_back = [&mutex](bool ok, const std::string& response_body) {
-        ASSERT_FALSE(ok);
-        ASSERT_TRUE(response_body == std::string("http route not found: [GET: /worker_status_invalid]"));
-        mutex.unlock();
+    auto              address = http_servers_.begin()->first;
+    std::atomic<bool> callback_invoked{false};
+    std::atomic<bool> callback_ok{true};
+    std::atomic<bool> body_matches{false};
+    HttpCallBack      http_call_back = [&](bool ok, const std::string& response_body) {
+        callback_ok.store(ok);
+        body_matches.store(response_body == std::string("http route not found: [GET: /worker_status_invalid]"));
+        callback_invoked.store(true);
     };
 
     ASSERT_TRUE(http_client_->get(address, "/worker_status_invalid", "", std::move(http_call_back)));
-    mutex.lock();
-    mutex.unlock();
+    ASSERT_TRUE(waitUntil([&] { return callback_invoked.load(); }, std::chrono::seconds(10)))
+        << "no callback for an invalid route";
+    ASSERT_FALSE(callback_ok.load());
+    ASSERT_TRUE(body_matches.load());
 }
 
 TEST_F(HttpClientTest, testRecycleConnectionInHandlePacket) {
     auto http_client_ = std::make_shared<SimpleHttpClient>();
     ASSERT_TRUE(http_client_ != nullptr);
 
-    auto       address = http_servers_.begin()->first;
-    std::mutex mutex;
-    mutex.lock();
-    HttpCallBack http_call_back = [&mutex](bool ok, const std::string& response_body) {
-        sleep(2);
-        ASSERT_TRUE(ok);
-        processResponse(response_body);
-        mutex.unlock();
+    auto              address = http_servers_.begin()->first;
+    std::atomic<bool> callback_invoked{false};
+    std::atomic<bool> callback_ok{false};
+    std::atomic<bool> parsed{false};
+    HttpCallBack      http_call_back = [&](bool ok, const std::string& response_body) {
+        // Slow consumer on purpose: the connection must already be recycled
+        // before the callback runs, so a slow consumer cannot pin it.
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        callback_ok.store(ok);
+        parsed.store(processResponse(response_body));
+        callback_invoked.store(true);
     };
+
     ASSERT_TRUE(http_client_->get(address, "/worker_status", "", std::move(http_call_back)));
-    ASSERT_TRUE(http_client_->connection_pool_->busy_connection_pool_[address]->size() == 1);
-    ASSERT_TRUE(http_client_->connection_pool_->idle_connection_pool_[address]->size() == 0);
-    mutex.lock();
-    mutex.unlock();
+    ASSERT_TRUE(waitUntil([&] { return callback_invoked.load(); }, std::chrono::seconds(10)))
+        << "no callback for a valid request";
+    ASSERT_TRUE(callback_ok.load());
+    ASSERT_TRUE(parsed.load());
+    // Assert the settled pool state instead of racing the network thread right
+    // after submission: recycle happens before the callback, so by the time the
+    // callback returned the connection must be back in the idle list.
     ASSERT_TRUE(http_client_->connection_pool_->busy_connection_pool_[address]->size() == 0);
     ASSERT_TRUE(http_client_->connection_pool_->idle_connection_pool_[address]->size() == 1);
 }

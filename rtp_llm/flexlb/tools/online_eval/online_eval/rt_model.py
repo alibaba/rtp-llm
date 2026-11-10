@@ -134,9 +134,7 @@ def parse_prefill_formula(expression: str) -> PrefillFormulaCoeffs:
         rf"({_NUM})\s*\*\s*\(\s*sum\(\s*hasHitCache\s*\)\s*/\s*batchSize\s*\)", s
     )
     if not has_hit_m:
-        raise ValueError(
-            f"Cannot parse HAS_HIT_COEF from formula: {expression[:80]!r}"
-        )
+        raise ValueError(f"Cannot parse HAS_HIT_COEF from formula: {expression[:80]!r}")
     has_hit_coef = float(has_hit_m.group(1))
 
     # HIT_RATIO_COEF — COEF*(sum(hitCacheTokens/(inputTokens + 1))/batchSize)
@@ -309,9 +307,7 @@ def extract_prefill_expression_from_master_config(
         (
             item[1]
             for item in envs
-            if isinstance(item, list)
-            and len(item) == 2
-            and item[0] == "FLEXLB_CONFIG"
+            if isinstance(item, list) and len(item) == 2 and item[0] == "FLEXLB_CONFIG"
         ),
         None,
     )

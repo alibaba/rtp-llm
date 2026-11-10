@@ -27,8 +27,7 @@ class UniqueEngineIpsTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     // ──────────── Derivation formula ────────────
 
@@ -40,13 +39,16 @@ class UniqueEngineIpsTest {
             String[] octets = ip.split("\\.");
             assertEquals(4, octets.length, "loopback advertisement is a /8-style 127.a.b.1: " + ip);
             assertEquals("127", octets[0]);
-            assertEquals("1", octets[3], "the fixed 4th octet keeps the IP a full valid IPv4: " + ip);
+            assertEquals(
+                    "1", octets[3], "the fixed 4th octet keeps the IP a full valid IPv4: " + ip);
             int third = Integer.parseInt(octets[1]);
             int fourth = Integer.parseInt(octets[2]);
-            assertTrue(third >= 1 && third <= 5,
+            assertTrue(
+                    third >= 1 && third <= 5,
                     "third octet must stay out of the real 127.0.0.x range: " + ip);
             assertTrue(fourth >= 0 && fourth <= 249, "fourth octet must stay below 250: " + ip);
-            assertTrue(seen.add(ip), "duplicate advertisement IP at engine index " + idx + ": " + ip);
+            assertTrue(
+                    seen.add(ip), "duplicate advertisement IP at engine index " + idx + ": " + ip);
         }
         assertEquals(1250, seen.size(), "750P + 500D production shape needs 1250 distinct IPs");
     }
@@ -63,9 +65,10 @@ class UniqueEngineIpsTest {
 
     @Test
     void derivationRejectsOutOfRangeIndexes() {
-        assertThrows(IllegalArgumentException.class,
-                () -> JavaMockEngineCluster.derivedLoopbackIp(-1));
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(
+                IllegalArgumentException.class, () -> JavaMockEngineCluster.derivedLoopbackIp(-1));
+        assertThrows(
+                IllegalArgumentException.class,
                 () -> JavaMockEngineCluster.derivedLoopbackIp(63_750));
     }
 
@@ -79,29 +82,41 @@ class UniqueEngineIpsTest {
 
     @Test
     void spaceFormDisablesUniqueEngineIps() {
-        JavaMockEngineCluster.Config config = JavaMockEngineCluster.Config.parse(
-                with(baseArgs(), "--unique-engine-ips", "false"));
+        JavaMockEngineCluster.Config config =
+                JavaMockEngineCluster.Config.parse(
+                        with(baseArgs(), "--unique-engine-ips", "false"));
         assertFalse(config.uniqueEngineIps);
     }
 
     @Test
     void gluedFormDisablesUniqueEngineIpsAndDoesNotSwallowNextArgument() {
-        JavaMockEngineCluster.Config off = JavaMockEngineCluster.Config.parse(
-                with(baseArgs(), "--unique-engine-ips=false"));
+        JavaMockEngineCluster.Config off =
+                JavaMockEngineCluster.Config.parse(with(baseArgs(), "--unique-engine-ips=false"));
         assertFalse(off.uniqueEngineIps);
         // Glued true must not consume the following flag's value.
-        JavaMockEngineCluster.Config on = JavaMockEngineCluster.Config.parse(
-                with(baseArgs(), "--unique-engine-ips=true", "--stats-interval-ms", "2000"));
+        JavaMockEngineCluster.Config on =
+                JavaMockEngineCluster.Config.parse(
+                        with(
+                                baseArgs(),
+                                "--unique-engine-ips=true",
+                                "--stats-interval-ms",
+                                "2000"));
         assertTrue(on.uniqueEngineIps);
         assertEquals(2000, on.statsIntervalMs);
     }
 
     @Test
     void booleanFlagRejectsGarbageValues() {
-        assertThrows(IllegalArgumentException.class, () -> JavaMockEngineCluster.Config.parse(
-                with(baseArgs(), "--unique-engine-ips", "yes")));
-        assertThrows(IllegalArgumentException.class, () -> JavaMockEngineCluster.Config.parse(
-                with(baseArgs(), "--unique-engine-ips=maybe")));
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        JavaMockEngineCluster.Config.parse(
+                                with(baseArgs(), "--unique-engine-ips", "yes")));
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        JavaMockEngineCluster.Config.parse(
+                                with(baseArgs(), "--unique-engine-ips=maybe")));
     }
 
     // ──────────── Discovery files carry the declared IPs ────────────
@@ -116,46 +131,54 @@ class UniqueEngineIpsTest {
         assertEquals("127.1.0.1:64000", engines.get(0).get("grpc_addr").asText());
         assertEquals("127.1.0.1:63999", engines.get(0).get("http_addr").asText());
         assertEquals("127.1.1.1:64001", engines.get(1).get("grpc_addr").asText());
-        assertEquals("127.1.2.1", engines.get(2).get("ip").asText(),
+        assertEquals(
+                "127.1.2.1",
+                engines.get(2).get("ip").asText(),
                 "decode engines continue the global index after prefill");
         assertEquals("127.1.2.1:64002", engines.get(2).get("grpc_addr").asText());
         assertEquals("127.1.3.1:64003", engines.get(3).get("grpc_addr").asText());
 
         JsonNode service = MAPPER.readTree(payload.get("env").get("MODEL_SERVICE_CONFIG").asText());
-        assertEquals(tempDir.resolve("discovery.json").toString(), service.get("discovery_file").asText());
+        assertEquals(
+                tempDir.resolve("discovery.json").toString(),
+                service.get("discovery_file").asText());
         assertEquals(1, payload.get("env").size());
     }
 
     @Test
     void writeDiscoveryFilesFallsBackToConfigHostWhenDisabled() throws Exception {
-        JsonNode payload = writeDiscovery("--n-prefill", "2", "--n-decode", "1",
-                "--unique-engine-ips", "false");
+        JsonNode payload =
+                writeDiscovery(
+                        "--n-prefill", "2", "--n-decode", "1", "--unique-engine-ips", "false");
 
         JsonNode engines = payload.get("engines");
         assertEquals(3, engines.size());
         assertEquals("127.0.0.1", engines.get(0).get("ip").asText());
         assertEquals("127.0.0.1:64000", engines.get(0).get("grpc_addr").asText());
         assertEquals("127.0.0.1:63999", engines.get(0).get("http_addr").asText());
-
     }
 
     private JsonNode writeDiscovery(String... extra) throws Exception {
         Path endpointFile = tempDir.resolve("endpoint.json");
-        JavaMockEngineCluster.Config config = JavaMockEngineCluster.Config.parse(with(new String[]{
-                "--endpoint-file", endpointFile.toString(),
-                "--performance", tempDir.resolve("performance.json").toString(),
-                "--master-config", tempDir.resolve("master.json").toString(),
-                "--base-grpc-port", "64000",
-        }, extra));
+        JavaMockEngineCluster.Config config =
+                JavaMockEngineCluster.Config.parse(
+                        with(
+                                new String[] {
+                                    "--endpoint-file", endpointFile.toString(),
+                                    "--performance", tempDir.resolve("performance.json").toString(),
+                                    "--master-config", tempDir.resolve("master.json").toString(),
+                                    "--base-grpc-port", "64000",
+                                },
+                                extra));
         JavaMockEngineCluster.writeDiscoveryFiles(config);
         return MAPPER.readTree(endpointFile.toFile());
     }
 
     private String[] baseArgs() {
-        return new String[]{
-                "--endpoint-file", tempDir.resolve("endpoint.json").toString(),
-                "--performance", tempDir.resolve("performance.json").toString(),
-                "--master-config", tempDir.resolve("master.json").toString(),
+        return new String[] {
+            "--endpoint-file", tempDir.resolve("endpoint.json").toString(),
+            "--performance", tempDir.resolve("performance.json").toString(),
+            "--master-config", tempDir.resolve("master.json").toString(),
         };
     }
 

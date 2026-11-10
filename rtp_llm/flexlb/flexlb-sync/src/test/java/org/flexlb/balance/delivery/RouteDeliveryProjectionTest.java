@@ -32,16 +32,15 @@ import static org.mockito.Mockito.mock;
 class RouteDeliveryProjectionTest {
 
     private static GroupPlanner.Item item(long id, long seqLen) {
-        return new GroupPlanner.Item(
-                id, 0, id, 1000L, 1_000_000L, seqLen, 0L);
+        return new GroupPlanner.Item(id, 0, id, 1000L, 1_000_000L, seqLen, 0L);
     }
 
     private static GroupPlanner.Plan<GroupPlanner.Item> plan(
             List<GroupPlanner.Item> items, OptionalDouble selectedPredictionMs) {
         GroupPlanner.Shape shape = GroupPlanner.Shape.empty();
         for (GroupPlanner.Item it : items) shape = shape.add(it.seqLen());
-        return new GroupPlanner.Plan<>(items, shape, 1000L, 1300L, false,
-                selectedPredictionMs, GroupPlanner.BATCH_FULL);
+        return new GroupPlanner.Plan<>(
+                items, shape, 1000L, 1300L, false, selectedPredictionMs, GroupPlanner.BATCH_FULL);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -50,14 +49,12 @@ class RouteDeliveryProjectionTest {
     class RouteService {
 
         private final RouteProjection.DeliveryProjection projection =
-                new RouteDeliveryStrategy(
-                        mock(RequestRegistry.class),
-                        mock(DeliveryMetrics.class)).projectionPolicy();
+                new RouteDeliveryStrategy(mock(RequestRegistry.class), mock(DeliveryMetrics.class))
+                        .projectionPolicy();
 
         @Test
         void completionOffsetIsTheCumulativePrefixSum() {
-            List<GroupPlanner.Item> items =
-                    List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
+            List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
             CountingPredictions pred = new CountingPredictions();
             RouteProjection.GroupService svc =
                     projection.service(plan(items, OptionalDouble.empty()), pred);
@@ -70,29 +67,30 @@ class RouteDeliveryProjectionTest {
 
         @Test
         void probePrefixDoesNotEvaluateTheSuffix() {
-            List<GroupPlanner.Item> items =
-                    List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
+            List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
             CountingPredictions pred = new CountingPredictions();
             RouteProjection.GroupService svc =
                     projection.service(plan(items, OptionalDouble.empty()), pred);
             svc.completionOffsetMs(1);
             assertEquals(1, pred.itemCalls(1L));
             assertEquals(1, pred.itemCalls(2L));
-            assertEquals(0, pred.itemCalls(3L),
-                    "suffix must not be predicted for a prefix query");
+            assertEquals(0, pred.itemCalls(3L), "suffix must not be predicted for a prefix query");
         }
 
         @Test
         void prefixTtftSurvivesASuffixPredictionFailure() {
-            List<GroupPlanner.Item> items =
-                    List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
+            List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
             CountingPredictions pred = new CountingPredictions();
             pred.failOn(3L);
             RouteProjection.GroupService svc =
                     projection.service(plan(items, OptionalDouble.empty()), pred);
-            assertEquals(300L, svc.completionOffsetMs(1),
+            assertEquals(
+                    300L,
+                    svc.completionOffsetMs(1),
                     "probe TTFT preserved even when suffix will fail");
-            assertThrows(RuntimeException.class, svc::totalDurationMs,
+            assertThrows(
+                    RuntimeException.class,
+                    svc::totalDurationMs,
                     "drain requires the failing suffix → unknown");
         }
 
@@ -111,8 +109,7 @@ class RouteDeliveryProjectionTest {
 
         @Test
         void planningDurationIsThePrefixSumThroughRequiredIndex() {
-            List<GroupPlanner.Item> items =
-                    List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
+            List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
             CountingPredictions pred = new CountingPredictions();
             RouteProjection.GroupPlanning planning = projection.planning(pred);
             // Through index 1: items[0]+items[1] = 100+200 = 300
@@ -122,9 +119,10 @@ class RouteDeliveryProjectionTest {
 
         @Test
         void memberIndexIsBoundsChecked() {
-            RouteProjection.GroupService svc = projection.service(
-                    plan(List.of(item(1L, 100L)), OptionalDouble.empty()),
-                    new CountingPredictions());
+            RouteProjection.GroupService svc =
+                    projection.service(
+                            plan(List.of(item(1L, 100L)), OptionalDouble.empty()),
+                            new CountingPredictions());
             assertThrows(IndexOutOfBoundsException.class, () -> svc.completionOffsetMs(1));
             assertThrows(IndexOutOfBoundsException.class, () -> svc.completionOffsetMs(-1));
         }
@@ -137,17 +135,18 @@ class RouteDeliveryProjectionTest {
 
         private final RouteProjection.DeliveryProjection projection =
                 new BatchDeliveryStrategy(
-                        () -> CapacityBoundary.Attempt.rejected(
-                                CapacityBoundary.OWNERSHIP_LOST),
-                        () -> 1L,
-                        mock(RequestRegistry.class),
-                        mock(DeliveryMetrics.class)).projectionPolicy();
+                                () ->
+                                        CapacityBoundary.Attempt.rejected(
+                                                CapacityBoundary.OWNERSHIP_LOST),
+                                () -> 1L,
+                                mock(RequestRegistry.class),
+                                mock(DeliveryMetrics.class))
+                        .projectionPolicy();
 
         @Test
         void eachMemberGetsBatchDurationOfItsExactPrefix() {
             // batchDurationMs returns 100*items.size() for discrimination.
-            List<GroupPlanner.Item> items =
-                    List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
+            List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
             CountingPredictions pred = new CountingPredictions();
             RouteProjection.GroupService svc =
                     projection.service(plan(items, OptionalDouble.empty()), pred);
@@ -185,8 +184,7 @@ class RouteDeliveryProjectionTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    private static final class CountingPredictions
-            implements RouteProjection.Predictions {
+    private static final class CountingPredictions implements RouteProjection.Predictions {
 
         private final Map<Long, Integer> itemCalls = new HashMap<>();
         private Set<Long> failingIds = Set.of();
@@ -225,6 +223,5 @@ class RouteDeliveryProjectionTest {
             batchDurationCalls++;
             return 100L * items.size(); // discriminating: prefix-size dependent
         }
-
     }
 }

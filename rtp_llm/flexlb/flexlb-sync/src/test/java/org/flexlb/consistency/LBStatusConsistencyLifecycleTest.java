@@ -21,7 +21,8 @@ class LBStatusConsistencyLifecycleTest {
         config.setNeedConsistency(enabled);
         when(election.getLbConsistencyConfig()).thenReturn(config);
         try (var context = new AnnotationConfigApplicationContext()) {
-            context.registerBean(LBStatusConsistencyService.class,
+            context.registerBean(
+                    LBStatusConsistencyService.class,
                     () -> new LBStatusConsistencyService(election, new MockEnvironment()));
             context.refresh();
             verify(election, times(0)).destroy();

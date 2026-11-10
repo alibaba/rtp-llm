@@ -159,9 +159,9 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.aux_info.output_len       = seqLength() - generate_input_->inputLength();
             generate_output.aux_info.step_output_len  = output_len;
             generate_output.aux_info.writeback_first_use_len =
-                std::min(initial_reuse_length_, writeback_first_use_length_);
+                std::min(initialReuseLength(), writeback_first_use_length_);
             generate_output.aux_info.reuse_len =
-                initial_reuse_length_ - generate_output.aux_info.writeback_first_use_len;
+                initialReuseLength() - generate_output.aux_info.writeback_first_use_len;
             generate_output.aux_info.pd_sep           = queryPdSep();
             generate_output.aux_info.local_reuse_len  = local_reuse_length_;
             generate_output.aux_info.remote_reuse_len = remote_reuse_length_;
@@ -313,6 +313,15 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             save_output("first_token_all_probs",
                         update_info.all_probs,
                         config.return_all_probs != ReturnAllProbsMode::NONE);
+            if (config.return_prompt_logits && update_info.prompt_logits.has_value()) {
+                const auto& scores      = *update_info.prompt_logits;
+                side_data.prompt_logits = scores;
+                auto& snapshot          = *side_data.prompt_logits;
+                snapshot.topk_logprobs  = scores.topk_logprobs.to(torch::kCPU, false, true).contiguous();
+                snapshot.topk_token_ids = scores.topk_token_ids.to(torch::kCPU, false, true).contiguous();
+                if (scores.target_logprobs.defined())
+                    snapshot.target_logprobs = scores.target_logprobs.to(torch::kCPU, false, true).contiguous();
+            }
             if (!getProposeToken().empty()) {
                 side_data.propose_tokens = getProposeToken();
             }

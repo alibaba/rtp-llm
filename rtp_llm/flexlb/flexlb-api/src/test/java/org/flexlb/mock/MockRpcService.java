@@ -32,7 +32,7 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
 
     private static final Logger log = LoggerFactory.getLogger(MockRpcService.class);
 
-    private record FinishedTask(long version, EngineRpcService.TaskInfoPB task) { }
+    private record FinishedTask(long version, EngineRpcService.TaskInfoPB task) {}
 
     private final List<FinishedTask> finishedTasks = new ArrayList<>();
     private volatile Consumer<EngineRpcService.EnqueueBatchRequestPB> acceptedBatchListener;
@@ -48,15 +48,16 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
             for (var slot : batch.getDpSlotsList()) {
                 for (var external : slot.getRequestsList()) {
                     var input = external.getInput();
-                    var task = EngineRpcService.TaskInfoPB.newBuilder()
-                            .setRequestId(input.getRequestId())
-                            .setInputLength(input.getTokenIdsCount())
-                            .setBatchId(batch.getBatchId())
-                            .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
-                            .setEndTimeMs(System.currentTimeMillis())
-                            .setExecutionTimeMs(1)
-                            .setIterateCount(1)
-                            .build();
+                    var task =
+                            EngineRpcService.TaskInfoPB.newBuilder()
+                                    .setRequestId(input.getRequestId())
+                                    .setInputLength(input.getTokenIdsCount())
+                                    .setBatchId(batch.getBatchId())
+                                    .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
+                                    .setEndTimeMs(System.currentTimeMillis())
+                                    .setExecutionTimeMs(1)
+                                    .setIterateCount(1)
+                                    .build();
                     finishedTasks.add(new FinishedTask(finishedTasks.size() + 1L, task));
                 }
             }
@@ -66,7 +67,8 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     // ==================== Call records (thread-safe, for assertions) ====================
 
     /** All EnqueueBatch requests received, in arrival order. */
-    final CopyOnWriteArrayList<EngineRpcService.EnqueueBatchRequestPB> enqueuedRequests = new CopyOnWriteArrayList<>();
+    final CopyOnWriteArrayList<EngineRpcService.EnqueueBatchRequestPB> enqueuedRequests =
+            new CopyOnWriteArrayList<>();
 
     /** Counter for GetWorkerStatus calls. */
     final AtomicLong workerStatusCallCount = new AtomicLong(0);
@@ -125,12 +127,17 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     // ==================== RPC implementations ====================
 
     @Override
-    public void enqueueBatch(EngineRpcService.EnqueueBatchRequestPB request,
-                            StreamObserver<EngineRpcService.EnqueueBatchResponsePB> responseObserver) {
+    public void enqueueBatch(
+            EngineRpcService.EnqueueBatchRequestPB request,
+            StreamObserver<EngineRpcService.EnqueueBatchResponsePB> responseObserver) {
         enqueuedRequests.add(request);
         MockWorkerBehavior beh = behavior;
-        log.debug("MockRpcService enqueueBatch: batch_id={}, dp_slots={}, delay_ms={}, fail={}",
-                request.getBatchId(), request.getDpSlotsCount(), beh.getEnqueueDelayMs(), beh.isFailOnEnqueue());
+        log.debug(
+                "MockRpcService enqueueBatch: batch_id={}, dp_slots={}, delay_ms={}, fail={}",
+                request.getBatchId(),
+                request.getDpSlotsCount(),
+                beh.getEnqueueDelayMs(),
+                beh.isFailOnEnqueue());
 
         if (beh.getEnqueueDelayMs() > 0) {
             try {
@@ -148,22 +155,25 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
             for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
                 for (EngineRpcService.EnqueueBatchExternalInputPB ext : slot.getRequestsList()) {
                     long reqId = ext.getInput().getRequestId();
-                    responseBuilder.addErrors(EngineRpcService.EnqueueBatchErrorPB.newBuilder()
-                            .setRequestId(reqId)
-                            .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
-                                    .setErrorCode(beh.getEnqueueErrorCode())
-                                    .setErrorMessage(beh.getEnqueueErrorMessage())
-                                    .build())
-                            .build());
+                    responseBuilder.addErrors(
+                            EngineRpcService.EnqueueBatchErrorPB.newBuilder()
+                                    .setRequestId(reqId)
+                                    .setErrorInfo(
+                                            EngineRpcService.ErrorDetailsPB.newBuilder()
+                                                    .setErrorCode(beh.getEnqueueErrorCode())
+                                                    .setErrorMessage(beh.getEnqueueErrorMessage())
+                                                    .build())
+                                    .build());
                 }
             }
         } else {
             for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
                 for (EngineRpcService.EnqueueBatchExternalInputPB ext : slot.getRequestsList()) {
                     long reqId = ext.getInput().getRequestId();
-                    responseBuilder.addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                            .setRequestId(reqId)
-                            .build());
+                    responseBuilder.addSuccesses(
+                            EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
+                                    .setRequestId(reqId)
+                                    .build());
                 }
             }
         }
@@ -177,27 +187,30 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     }
 
     @Override
-    public void getWorkerStatus(EngineRpcService.StatusVersionPB request,
-                                StreamObserver<EngineRpcService.WorkerStatusPB> responseObserver) {
+    public void getWorkerStatus(
+            EngineRpcService.StatusVersionPB request,
+            StreamObserver<EngineRpcService.WorkerStatusPB> responseObserver) {
         workerStatusCallCount.incrementAndGet();
         MockWorkerBehavior beh = behavior;
 
-        EngineRpcService.WorkerStatusPB.Builder builder = EngineRpcService.WorkerStatusPB.newBuilder()
-                .setAlive(true)
-                .setRoleType(beh.getRoleType())
-                .setAvailableConcurrency(beh.getAvailableConcurrency())
-                .setAvailableKvCache(beh.getAvailableKvCache())
-                .setTotalKvCache(beh.getTotalKvCache())
-                .setStatusVersion(request.getLatestCacheVersion() + 1)
-                .setLatestFinishedVersion(request.getLatestFinishedVersion())
-                .setDpSize(1)
-                .setTpSize(1)
-                .setDpRank(0);
+        EngineRpcService.WorkerStatusPB.Builder builder =
+                EngineRpcService.WorkerStatusPB.newBuilder()
+                        .setAlive(true)
+                        .setRoleType(beh.getRoleType())
+                        .setAvailableConcurrency(beh.getAvailableConcurrency())
+                        .setAvailableKvCache(beh.getAvailableKvCache())
+                        .setTotalKvCache(beh.getTotalKvCache())
+                        .setStatusVersion(request.getLatestCacheVersion() + 1)
+                        .setLatestFinishedVersion(request.getLatestFinishedVersion())
+                        .setDpSize(1)
+                        .setTpSize(1)
+                        .setDpRank(0);
 
         synchronized (finishedTasks) {
             if (!finishedTasks.isEmpty()) {
                 long version = finishedTasks.getLast().version();
-                builder.setStatusVersion(Math.max(request.getLatestCacheVersion() + 1L, version + 1L))
+                builder.setStatusVersion(
+                                Math.max(request.getLatestCacheVersion() + 1L, version + 1L))
                         .setLatestFinishedVersion(version);
                 for (FinishedTask finished : finishedTasks) {
                     if (finished.version() > request.getLatestFinishedVersion()) {
@@ -211,28 +224,30 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     }
 
     @Override
-    public void getCacheStatus(EngineRpcService.CacheVersionPB request,
-                               StreamObserver<EngineRpcService.CacheStatusPB> responseObserver) {
+    public void getCacheStatus(
+            EngineRpcService.CacheVersionPB request,
+            StreamObserver<EngineRpcService.CacheStatusPB> responseObserver) {
         cacheStatusCallCount.incrementAndGet();
         MockWorkerBehavior beh = behavior;
 
-        EngineRpcService.CacheStatusPB.Builder builder = EngineRpcService.CacheStatusPB.newBuilder()
-                .setAvailableKvCache(beh.getAvailableKvCache())
-                .setTotalKvCache(beh.getTotalKvCache())
-                .setBlockSize(1024)
-                .setVersion(request.getLatestCacheVersion() + 1);
+        EngineRpcService.CacheStatusPB.Builder builder =
+                EngineRpcService.CacheStatusPB.newBuilder()
+                        .setAvailableKvCache(beh.getAvailableKvCache())
+                        .setTotalKvCache(beh.getTotalKvCache())
+                        .setBlockSize(1024)
+                        .setVersion(request.getLatestCacheVersion() + 1);
 
         responseObserver.onNext(builder.build());
         responseObserver.onCompleted();
     }
 
     @Override
-    public void checkHealth(EngineRpcService.EmptyPB request,
-                            StreamObserver<EngineRpcService.CheckHealthResponsePB> responseObserver) {
+    public void checkHealth(
+            EngineRpcService.EmptyPB request,
+            StreamObserver<EngineRpcService.CheckHealthResponsePB> responseObserver) {
         healthCheckCount.incrementAndGet();
-        responseObserver.onNext(EngineRpcService.CheckHealthResponsePB.newBuilder()
-                .setHealth("ok")
-                .build());
+        responseObserver.onNext(
+                EngineRpcService.CheckHealthResponsePB.newBuilder().setHealth("ok").build());
         responseObserver.onCompleted();
     }
 }

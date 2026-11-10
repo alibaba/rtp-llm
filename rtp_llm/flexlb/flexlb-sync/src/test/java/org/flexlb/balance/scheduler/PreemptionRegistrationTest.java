@@ -12,18 +12,12 @@ class PreemptionRegistrationTest {
     void acceptedCancelFollowsTheSingleLegalPath() {
         PreemptionRegistration registration = registration();
 
-        assertTrue(registration.advanceTo(
-                PreemptionCancelPhase.CANCEL_IN_FLIGHT));
-        assertFalse(registration.advanceTo(
-                PreemptionCancelPhase.CANCEL_IN_FLIGHT));
-        assertTrue(registration.advanceTo(
-                PreemptionCancelPhase.CANCEL_REQUESTED));
-        assertFalse(registration.advanceTo(
-                PreemptionCancelPhase.CANCEL_REQUESTED));
-        assertFalse(registration.advanceTo(
-                PreemptionCancelPhase.NOT_FOUND_STALE));
-        assertTrue(registration.advanceTo(
-                PreemptionCancelPhase.CANCEL_UNKNOWN));
+        assertTrue(registration.advanceTo(PreemptionCancelPhase.CANCEL_IN_FLIGHT));
+        assertFalse(registration.advanceTo(PreemptionCancelPhase.CANCEL_IN_FLIGHT));
+        assertTrue(registration.advanceTo(PreemptionCancelPhase.CANCEL_REQUESTED));
+        assertFalse(registration.advanceTo(PreemptionCancelPhase.CANCEL_REQUESTED));
+        assertFalse(registration.advanceTo(PreemptionCancelPhase.NOT_FOUND_STALE));
+        assertTrue(registration.advanceTo(PreemptionCancelPhase.CANCEL_UNKNOWN));
         assertTrue(registration.isUnknown());
         assertTrue(registration.canCompletePreemption());
         assertTrue(registration.tryFinish());
@@ -35,12 +29,9 @@ class PreemptionRegistrationTest {
     void notFoundRetainsTheAttemptUntilEvidenceOrRequestExpiryFinishesIt() {
         PreemptionRegistration registration = registration();
 
-        assertTrue(registration.advanceTo(
-                PreemptionCancelPhase.CANCEL_IN_FLIGHT));
-        assertTrue(registration.advanceTo(
-                PreemptionCancelPhase.NOT_FOUND_STALE));
-        assertFalse(registration.advanceTo(
-                PreemptionCancelPhase.CANCEL_UNKNOWN));
+        assertTrue(registration.advanceTo(PreemptionCancelPhase.CANCEL_IN_FLIGHT));
+        assertTrue(registration.advanceTo(PreemptionCancelPhase.NOT_FOUND_STALE));
+        assertFalse(registration.advanceTo(PreemptionCancelPhase.CANCEL_UNKNOWN));
         assertTrue(registration.isNotFound());
         assertFalse(registration.isReleasable());
         assertTrue(registration.canCompletePreemption());
@@ -55,11 +46,9 @@ class PreemptionRegistrationTest {
         PreemptionRegistration inFlight = registration();
 
         assertTrue(claimed.isReleasable());
-        assertTrue(inFlight.advanceTo(
-                PreemptionCancelPhase.CANCEL_IN_FLIGHT));
+        assertTrue(inFlight.advanceTo(PreemptionCancelPhase.CANCEL_IN_FLIGHT));
         assertTrue(inFlight.isReleasable());
-        assertTrue(inFlight.advanceTo(
-                PreemptionCancelPhase.CANCEL_REQUESTED));
+        assertTrue(inFlight.advanceTo(PreemptionCancelPhase.CANCEL_REQUESTED));
         assertFalse(inFlight.isReleasable());
     }
 

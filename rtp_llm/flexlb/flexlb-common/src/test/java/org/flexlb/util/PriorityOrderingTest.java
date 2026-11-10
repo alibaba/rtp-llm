@@ -25,11 +25,11 @@ class PriorityOrderingTest {
     @Test
     void primitiveTotalOrderMatchesStrictComparatorAtNumericBoundaries() {
         Node[] boundaries = {
-                new Node(Integer.MIN_VALUE, Long.MIN_VALUE, Long.MIN_VALUE),
-                new Node(Integer.MIN_VALUE, Long.MIN_VALUE, Long.MAX_VALUE),
-                new Node(0, 0, 0),
-                new Node(Integer.MAX_VALUE, Long.MAX_VALUE, Long.MIN_VALUE),
-                new Node(Integer.MAX_VALUE, Long.MAX_VALUE, Long.MAX_VALUE)
+            new Node(Integer.MIN_VALUE, Long.MIN_VALUE, Long.MIN_VALUE),
+            new Node(Integer.MIN_VALUE, Long.MIN_VALUE, Long.MAX_VALUE),
+            new Node(0, 0, 0),
+            new Node(Integer.MAX_VALUE, Long.MAX_VALUE, Long.MIN_VALUE),
+            new Node(Integer.MAX_VALUE, Long.MAX_VALUE, Long.MAX_VALUE)
         };
         for (Node left : boundaries) {
             for (Node right : boundaries) {
@@ -40,13 +40,17 @@ class PriorityOrderingTest {
 
     private static void assertEquivalent(Node left, Node right) {
         int expected = Integer.signum(REFERENCE.compare(left, right));
-        int actual = Integer.signum(PriorityOrdering.compareWithRequestId(
-                left.priority(), left.enqueueSeq(), left.requestId(),
-                right.priority(), right.enqueueSeq(), right.requestId()));
+        int actual =
+                Integer.signum(
+                        PriorityOrdering.compareWithRequestId(
+                                left.priority(),
+                                left.enqueueSeq(),
+                                left.requestId(),
+                                right.priority(),
+                                right.enqueueSeq(),
+                                right.requestId()));
         assertEquals(expected, actual);
     }
 
-    private record Node(int priority, long enqueueSeq, long requestId)
-            implements Prioritized {
-    }
+    private record Node(int priority, long enqueueSeq, long requestId) implements Prioritized {}
 }

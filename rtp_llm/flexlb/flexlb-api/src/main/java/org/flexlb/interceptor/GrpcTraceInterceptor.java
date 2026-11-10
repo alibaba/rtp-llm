@@ -24,24 +24,25 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class GrpcTraceInterceptor implements ServerInterceptor {
 
-    private static final TextMapGetter<Metadata> METADATA_GETTER = new TextMapGetter<>() {
-        @Override
-        public Iterable<String> keys(Metadata carrier) {
-            return List.of("traceparent", "tracestate");
-        }
+    private static final TextMapGetter<Metadata> METADATA_GETTER =
+            new TextMapGetter<>() {
+                @Override
+                public Iterable<String> keys(Metadata carrier) {
+                    return List.of("traceparent", "tracestate");
+                }
 
-        @Override
-        public String get(Metadata carrier, String key) {
-            if (carrier == null || key == null) {
-                return null;
-            }
-            try {
-                return carrier.get(Metadata.Key.of(key, Metadata.ASCII_STRING_MARSHALLER));
-            } catch (RuntimeException ignored) {
-                return null;
-            }
-        }
-    };
+                @Override
+                public String get(Metadata carrier, String key) {
+                    if (carrier == null || key == null) {
+                        return null;
+                    }
+                    try {
+                        return carrier.get(Metadata.Key.of(key, Metadata.ASCII_STRING_MARSHALLER));
+                    } catch (RuntimeException ignored) {
+                        return null;
+                    }
+                }
+            };
 
     public static final io.grpc.Context.Key<io.opentelemetry.context.Context> OTEL_CONTEXT_KEY =
             io.grpc.Context.key("flexlbOtelContext");
@@ -52,12 +53,9 @@ public final class GrpcTraceInterceptor implements ServerInterceptor {
 
     @Override
     public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
-            ServerCall<ReqT, RespT> call,
-            Metadata headers,
-            ServerCallHandler<ReqT, RespT> next) {
+            ServerCall<ReqT, RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
         Context grpcCurrent = Context.current();
-        io.opentelemetry.context.Context otelCurrent =
-                io.opentelemetry.context.Context.current();
+        io.opentelemetry.context.Context otelCurrent = io.opentelemetry.context.Context.current();
         io.opentelemetry.context.Context extracted = otelCurrent;
         Span serverSpan = Span.getInvalid();
         boolean ownsSpan = false;
@@ -90,8 +88,12 @@ public final class GrpcTraceInterceptor implements ServerInterceptor {
             // the listener callbacks alone cannot recover: onComplete() fires for
             // an error close just as it does for a successful one.
             AtomicReference<Status> observedStatus = new AtomicReference<>();
-            ServerCall.Listener<ReqT> listener = Contexts.interceptCall(
-                    grpcContext, new StatusCapturingCall<>(call, observedStatus), headers, next);
+            ServerCall.Listener<ReqT> listener =
+                    Contexts.interceptCall(
+                            grpcContext,
+                            new StatusCapturingCall<>(call, observedStatus),
+                            headers,
+                            next);
             return new FinishingListener<>(listener, serverSpan, ownsSpan, observedStatus);
         } catch (RuntimeException | Error error) {
             if (ownsSpan) {
@@ -104,9 +106,8 @@ public final class GrpcTraceInterceptor implements ServerInterceptor {
     private static String spanName(ServerCall<?, ?> call) {
         String fullMethodName = call.getMethodDescriptor().getFullMethodName();
         int separator = fullMethodName.lastIndexOf('/');
-        String methodName = separator >= 0
-                ? fullMethodName.substring(separator + 1)
-                : fullMethodName;
+        String methodName =
+                separator >= 0 ? fullMethodName.substring(separator + 1) : fullMethodName;
         StringBuilder snakeName = new StringBuilder(methodName.length() + 8);
         for (int i = 0; i < methodName.length(); ++i) {
             char character = methodName.charAt(i);
@@ -123,8 +124,8 @@ public final class GrpcTraceInterceptor implements ServerInterceptor {
             extends ForwardingServerCall.SimpleForwardingServerCall<ReqT, RespT> {
         private final AtomicReference<Status> observedStatus;
 
-        private StatusCapturingCall(ServerCall<ReqT, RespT> delegate,
-                                   AtomicReference<Status> observedStatus) {
+        private StatusCapturingCall(
+                ServerCall<ReqT, RespT> delegate, AtomicReference<Status> observedStatus) {
             super(delegate);
             this.observedStatus = observedStatus;
         }
@@ -145,10 +146,11 @@ public final class GrpcTraceInterceptor implements ServerInterceptor {
         private final AtomicBoolean finished = new AtomicBoolean();
         private final AtomicReference<Status> observedStatus;
 
-        private FinishingListener(ServerCall.Listener<ReqT> delegate,
-                                 Span span,
-                                 boolean ownsSpan,
-                                 AtomicReference<Status> observedStatus) {
+        private FinishingListener(
+                ServerCall.Listener<ReqT> delegate,
+                Span span,
+                boolean ownsSpan,
+                AtomicReference<Status> observedStatus) {
             super(delegate);
             this.span = span;
             this.ownsSpan = ownsSpan;
@@ -179,8 +181,8 @@ public final class GrpcTraceInterceptor implements ServerInterceptor {
             Status observed = observedStatus.get();
             if (!ownsSpan) {
                 if (observed != null) {
-                    FlexlbTrace.setAttribute(span, FlexlbTrace.RPC_RESPONSE_STATUS_CODE,
-                            observed.getCode().name());
+                    FlexlbTrace.setAttribute(
+                            span, FlexlbTrace.RPC_RESPONSE_STATUS_CODE, observed.getCode().name());
                 }
                 return;
             }
@@ -188,10 +190,14 @@ public final class GrpcTraceInterceptor implements ServerInterceptor {
                 return;
             }
             if (observed != null) {
-                FlexlbTrace.finishWithGrpcStatus(span, observed.getCode().name(),
-                        observed.getCode().value(), observed.isOk());
+                FlexlbTrace.finishWithGrpcStatus(
+                        span,
+                        observed.getCode().name(),
+                        observed.getCode().value(),
+                        observed.isOk());
             } else if (fallbackError instanceof CancellationException) {
-                FlexlbTrace.finishWithGrpcStatus(span, "CANCELLED", Status.Code.CANCELLED.value(), false);
+                FlexlbTrace.finishWithGrpcStatus(
+                        span, "CANCELLED", Status.Code.CANCELLED.value(), false);
             } else {
                 FlexlbTrace.finish(span, fallbackError);
             }

@@ -36,6 +36,7 @@ public:
         std::pair<std::string, uint32_t> prefill_addr;
         int                              prefill_tp_size = 0;
         int                              prefill_cp_size = 0;
+        bool                             decode_needs_compute = true;
     };
 
     virtual std::optional<P2PRoutingContext> p2pRouting() const {

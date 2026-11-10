@@ -47,19 +47,21 @@ class BlockPoolCapacityTest {
 
     private static final int SPB = 1024;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private ScheduledExecutorService scheduler;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
 
     @BeforeEach
     void setUp() {
-        scheduler = Executors.newScheduledThreadPool(4, runnable -> {
-            Thread thread = new Thread(runnable, "block-pool-test-scheduler");
-            thread.setDaemon(true);
-            return thread;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        4,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "block-pool-test-scheduler");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         services = new ConcurrentHashMap<>();
     }
 
@@ -92,7 +94,8 @@ class BlockPoolCapacityTest {
     void admitHandsKeysToLruAndRestoresAvailability() {
         MockLruBlockCache cache = new MockLruBlockCache(10);
         MockLruBlockCache.BlockLease lease = cache.acquire(3, List.of(1L, 2L, 3L));
-        assertTrue(cache.admit(lease, List.of(1L, 2L, 3L)),
+        assertTrue(
+                cache.admit(lease, List.of(1L, 2L, 3L)),
                 "completion must index the request's keys");
         assertEquals(3, cache.snapshotKeys().size());
         assertEquals(0, cache.heldBlocks());
@@ -106,7 +109,8 @@ class BlockPoolCapacityTest {
         // ceil(0.05 x 10) = 1 reserve block.
         MockLruBlockCache cache = new MockLruBlockCache(10, 0.05);
         // need=10 leaves available-need = 0 < reserve=1 → reject.
-        assertNull(cache.acquire(10, List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L)),
+        assertNull(
+                cache.acquire(10, List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L)),
                 "the reserve watermark must reject a pool-filling allocation");
         // need=9 leaves 1 >= reserve=1 → admit.
         assertNotNull(cache.acquire(9, List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L)));
@@ -148,7 +152,8 @@ class BlockPoolCapacityTest {
 
         // No free blocks and no pure-LRU blocks → LACK_MEM, and the pool state
         // must not change (the caller rejects synchronously).
-        assertNull(cache.acquire(1, List.of(9L)),
+        assertNull(
+                cache.acquire(1, List.of(9L)),
                 "exhausted pool must reject with LACK_MEM (null lease)");
         assertEquals(5, cache.heldBlocks(), "rejected request must leave no residue");
         assertEquals(0, cache.evictions(), "nothing was evictable");
@@ -169,13 +174,14 @@ class BlockPoolCapacityTest {
         assertNotNull(second);
         assertEquals(3, second.totalBlocks(), "hit references count as lease blocks");
         assertEquals(0, second.nakedBlocks, "no new blocks allocated for a full hit");
-        assertEquals(7, cache.availableBlocks(),
-                "referenced key blocks must leave the available set");
+        assertEquals(
+                7, cache.availableBlocks(), "referenced key blocks must leave the available set");
 
         // Completion of the second request restores availability (ref back to
         // 0). No NEW keys entered the index — admit returns false (no
         // cacheVersion bump: the master re-pulls nothing).
-        assertFalse(cache.admit(second, List.of(1L, 2L, 3L)),
+        assertFalse(
+                cache.admit(second, List.of(1L, 2L, 3L)),
                 "re-completing the same keys must not bump the key set");
         assertEquals(10, cache.availableBlocks());
     }
@@ -201,8 +207,7 @@ class BlockPoolCapacityTest {
         MockLruBlockCache cache = new MockLruBlockCache(10);
         MockLruBlockCache.BlockLease lease = cache.acquire(3, List.of(1L, 2L, 3L));
         cache.release(lease);
-        assertEquals(0, cache.snapshotKeys().size(),
-                "a cancelled request leaves no cache entries");
+        assertEquals(0, cache.snapshotKeys().size(), "a cancelled request leaves no cache entries");
         assertEquals(0, cache.heldBlocks());
         assertEquals(10, cache.availableBlocks());
     }
@@ -248,19 +253,18 @@ class BlockPoolCapacityTest {
 
     @Test
     void enqueueBatchRejectsWithMallocFailedWhenPoolExhausted() throws IOException {
-        MockPerformanceModel model =
-                MockEngineTestSupport.performanceModel(tempDir, "10", 0.1);
+        MockPerformanceModel model = MockEngineTestSupport.performanceModel(tempDir, "10", 0.1);
         JavaMockEngineCluster.FastRpcService prefill =
                 newService(model, 10); // 10-block pool, reserve = 1
 
         // 11 hash-channel blocks > 10-block pool → synchronous LACK_MEM in the
         // EnqueueBatch ack (the master's EngineRejectedException surface).
-        EngineRpcService.GenerateInputPB tooBig = inputWithBlockKeys(
-                7L, SPB, List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L));
-        EngineRpcService.EnqueueBatchResponsePB ack =
-                enqueue(prefill, batch(1, slot(0, tooBig)));
+        EngineRpcService.GenerateInputPB tooBig =
+                inputWithBlockKeys(7L, SPB, List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L));
+        EngineRpcService.EnqueueBatchResponsePB ack = enqueue(prefill, batch(1, slot(0, tooBig)));
         assertEquals(1, ack.getErrorsCount(), "the oversized request must be rejected");
-        assertEquals(JavaMockEngineCluster.LACK_MEM_ERROR_CODE,
+        assertEquals(
+                JavaMockEngineCluster.LACK_MEM_ERROR_CODE,
                 ack.getErrors(0).getErrorInfo().getErrorCode(),
                 "LACK_MEM must surface MALLOC_FAILED (602), never the master's 8431");
         assertTrue(ack.getErrors(0).getErrorInfo().getErrorMessage().contains("LACK_MEM"));
@@ -269,10 +273,8 @@ class BlockPoolCapacityTest {
 
         // A request the pool CAN serve still succeeds afterwards — the pool
         // is not poisoned by the rejection.
-        EngineRpcService.GenerateInputPB small =
-                inputWithBlockKeys(8L, SPB, List.of(1L, 2L));
-        EngineRpcService.EnqueueBatchResponsePB ack2 =
-                enqueue(prefill, batch(2, slot(0, small)));
+        EngineRpcService.GenerateInputPB small = inputWithBlockKeys(8L, SPB, List.of(1L, 2L));
+        EngineRpcService.EnqueueBatchResponsePB ack2 = enqueue(prefill, batch(2, slot(0, small)));
         assertEquals(0, ack2.getErrorsCount());
         assertEquals(1, ack2.getSuccessesCount());
     }

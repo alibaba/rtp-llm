@@ -706,14 +706,21 @@ _MONITOR_AUTO_TPM_ARGS = ["--flexlb.monitor.metric-whitelist=flexlb_auto_tpm"]
 
 
 def _prio_config(
-    *, ordering: str = "priority", preemption: Optional[dict] = None,
-    default_priority: Optional[int] = None, queue_timeout_ms: Optional[int] = None,
-    max_inflight_per_prefill_worker: int = 1, dispatcher: str = "non_batch",
+    *,
+    ordering: str = "priority",
+    preemption: Optional[dict] = None,
+    default_priority: Optional[int] = None,
+    queue_timeout_ms: Optional[int] = None,
+    max_inflight_per_prefill_worker: int = 1,
+    dispatcher: str = "non_batch",
 ) -> str:
     """Priority fixtures admit one request at a time unless a case sets another limit."""
     return build_flexlb_config(
-        ordering=ordering, decision="single", dispatcher=dispatcher,
-        default_priority=default_priority, preemption=preemption,
+        ordering=ordering,
+        decision="single",
+        dispatcher=dispatcher,
+        default_priority=default_priority,
+        preemption=preemption,
         queue_timeout_ms=queue_timeout_ms,
         max_inflight_per_prefill_worker=max_inflight_per_prefill_worker,
     )
@@ -811,7 +818,9 @@ def _d1_spec(ctx: CaseContext) -> EnvSpec:
         "atpm_d1",
         n_prefill=2,
         config=_prio_config(
-            preemption=_PREEMPT_DECODE, max_inflight_per_prefill_worker=3, queue_timeout_ms=60_000
+            preemption=_PREEMPT_DECODE,
+            max_inflight_per_prefill_worker=3,
+            queue_timeout_ms=60_000,
         ),
         extra_args=_MONITOR_AUTO_TPM_ARGS,
     )
@@ -2827,7 +2836,9 @@ def atpm_error_code_family(ctx: CaseContext):
 
         m1 = _outcome_map(_drain(ops1, ph_fires + rej_fires))
         rej_codes = [m1[rej_lo][1], m1[rej_hi][1]]
-        deadline_waited = all(1.0 <= f.settled_s - f.submitted_s < 4.0 for f in rej_fires)
+        deadline_waited = all(
+            1.0 <= f.settled_s - f.submitted_s < 4.0 for f in rej_fires
+        )
         rej_reasons = [f.reason for f in rej_fires]
         placeholders_ok = m1[ph_a][0] and m1[ph_b][0]
         isolated1 = all(
@@ -3881,8 +3892,6 @@ def _max_engine_requests_1(config: str) -> str:
     return json.dumps(parsed, separators=(",", ":"))
 
 
-
-
 def _dr_live_spec(ctx: CaseContext) -> EnvSpec:
     """ENV for atpm_preempt_decode_reserved_live: BATCH dispatcher + the
     production-baseline stage set {DECODE_RESERVED} + a
@@ -3934,8 +3943,6 @@ def _ts_spec(ctx: CaseContext) -> EnvSpec:
             )
         ),
     )
-
-
 
 
 @case(

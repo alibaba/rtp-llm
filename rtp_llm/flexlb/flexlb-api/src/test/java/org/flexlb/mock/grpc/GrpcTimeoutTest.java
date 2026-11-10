@@ -23,7 +23,7 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
     @Override
     protected MockWorkerBehavior createPrefillBehavior() {
         return MockWorkerBehavior.builder()
-                .enqueueDelayMs(3000)  // 3s: far exceeds the 500ms deadline
+                .enqueueDelayMs(3000) // 3s: far exceeds the 500ms deadline
                 .build();
     }
 
@@ -45,10 +45,10 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         CompletableFuture<Response> future = submitRequest(10001);
 
         // The RPC expires before the request lease: uncertainty remains pending briefly.
-        assertThrows(TimeoutException.class,
-                () -> future.get(750, TimeUnit.MILLISECONDS));
+        assertThrows(TimeoutException.class, () -> future.get(750, TimeUnit.MILLISECONDS));
         assertFalse(future.isDone());
-        assertTrue(mockPrefillWorker.getEnqueueCount() >= 1,
+        assertTrue(
+                mockPrefillWorker.getEnqueueCount() >= 1,
                 "the worker records EnqueueBatch before delaying its ACK");
         assertEquals(1, getPrefillEndpoint().getInflightBatchCount());
         assertEquals(1, getPrefillEndpoint().getLocallyOwnedRequestCount());
@@ -67,6 +67,7 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         mockPrefillWorker.setBehavior(MockWorkerBehavior.builder().build());
         Response recovered = submitRequest(10002).get(5, TimeUnit.SECONDS);
         assertTrue(recovered.isSuccess(), "the same gRPC channel remains usable after expiry");
-        assertFalse(future.join().isSuccess(), "later traffic cannot reopen the expired generation");
+        assertFalse(
+                future.join().isSuccess(), "later traffic cannot reopen the expired generation");
     }
 }

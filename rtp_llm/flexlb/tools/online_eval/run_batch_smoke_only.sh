@@ -22,38 +22,38 @@ export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21}"
 export PATH="${JAVA_HOME}/bin:${PATH}"
 
 JAVA_MODULE_OPTS=(
-  --add-modules ALL-SYSTEM
-  --add-opens java.base/java.lang=ALL-UNNAMED
-  --add-opens java.base/java.lang.invoke=ALL-UNNAMED
-  --add-opens java.base/java.util=ALL-UNNAMED
-  --add-opens java.base/java.util.concurrent=ALL-UNNAMED
-  --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED
-  --add-opens java.base/java.nio=ALL-UNNAMED
-  --add-opens java.base/sun.nio.ch=ALL-UNNAMED
-  --add-opens java.instrument/sun.instrument=ALL-UNNAMED
+    --add-modules ALL-SYSTEM
+    --add-opens java.base/java.lang=ALL-UNNAMED
+    --add-opens java.base/java.lang.invoke=ALL-UNNAMED
+    --add-opens java.base/java.util=ALL-UNNAMED
+    --add-opens java.base/java.util.concurrent=ALL-UNNAMED
+    --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED
+    --add-opens java.base/java.nio=ALL-UNNAMED
+    --add-opens java.base/sun.nio.ch=ALL-UNNAMED
+    --add-opens java.instrument/sun.instrument=ALL-UNNAMED
 )
 
 MOCK_PID=""
 FLEXLB_PID=""
 
 cleanup() {
-  echo ""
-  echo "[cleanup] stopping processes ..."
-  if [[ -n "${FLEXLB_PID}" ]]; then
-    kill "${FLEXLB_PID}" 2>/dev/null || true
-    wait "${FLEXLB_PID}" 2>/dev/null || true
-  fi
-  if [[ -n "${MOCK_PID}" ]]; then
-    kill "${MOCK_PID}" 2>/dev/null || true
-    wait "${MOCK_PID}" 2>/dev/null || true
-  fi
-  echo "[cleanup] done."
+    echo ""
+    echo "[cleanup] stopping processes ..."
+    if [[ -n "${FLEXLB_PID}" ]]; then
+        kill "${FLEXLB_PID}" 2>/dev/null || true
+        wait "${FLEXLB_PID}" 2>/dev/null || true
+    fi
+    if [[ -n "${MOCK_PID}" ]]; then
+        kill "${MOCK_PID}" 2>/dev/null || true
+        wait "${MOCK_PID}" 2>/dev/null || true
+    fi
+    echo "[cleanup] done."
 }
 trap cleanup EXIT
 
 wait_for_port() {
-  local host="$1" port="$2" timeout_s="$3"
-  python3 - "$host" "$port" "$timeout_s" <<'PY'
+    local host="$1" port="$2" timeout_s="$3"
+    python3 - "$host" "$port" "$timeout_s" <<'PY'
 import socket, sys, time
 host, port, timeout_s = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
 deadline = time.time() + timeout_s
@@ -69,7 +69,7 @@ PY
 }
 
 # -- Perf config --
-cat > "${RUN_DIR}/perf.json" <<'JSON'
+cat >"${RUN_DIR}/perf.json" <<'JSON'
 {
   "block_size": 1024,
   "sleep_scale": 1.0,
@@ -89,15 +89,15 @@ ENDPOINT_FILE="${RUN_DIR}/endpoints.json"
 # -- 1. Start mock engine cluster --
 echo "[1/4] Starting mock engine cluster (${N_PREFILL}P + ${N_DECODE}D) ..."
 PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/mock_engine_cluster.py" \
-  --n-prefill "${N_PREFILL}" \
-  --n-decode "${N_DECODE}" \
-  --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
-  --performance "${RUN_DIR}/perf.json" \
-  --prefill-cache-blocks 6000 \
-  --decode-cache-blocks 3000 \
-  --endpoint-file "${ENDPOINT_FILE}" \
-  --env-file "${RUN_DIR}/flexlb_env.txt" \
-  >"${RUN_DIR}/mock_engine.log" 2>&1 &
+    --n-prefill "${N_PREFILL}" \
+    --n-decode "${N_DECODE}" \
+    --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
+    --performance "${RUN_DIR}/perf.json" \
+    --prefill-cache-blocks 6000 \
+    --decode-cache-blocks 3000 \
+    --endpoint-file "${ENDPOINT_FILE}" \
+    --env-file "${RUN_DIR}/flexlb_env.txt" \
+    >"${RUN_DIR}/mock_engine.log" 2>&1 &
 MOCK_PID="$!"
 wait_for_port "127.0.0.1" "${MOCK_BASE_GRPC_PORT}" 20
 echo "  mock cluster started (pid=${MOCK_PID})"
@@ -105,8 +105,9 @@ echo "  mock cluster started (pid=${MOCK_PID})"
 # -- Parse env from endpoint file --
 FLEXLB_ENV_ARGS=()
 while IFS= read -r line; do
-  FLEXLB_ENV_ARGS+=("${line}")
-done < <(python3 - "${ENDPOINT_FILE}" <<'PY'
+    FLEXLB_ENV_ARGS+=("${line}")
+done < <(
+    python3 - "${ENDPOINT_FILE}" <<'PY'
 import json, sys
 payload = json.load(open(sys.argv[1], "r", encoding="utf-8"))
 for key, value in payload["env"].items():
@@ -119,12 +120,12 @@ DEFAULT_FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering"
 FLEXLB_CONFIG="${FLEXLB_CONFIG:-${DEFAULT_FLEXLB_CONFIG}}"
 echo "[2/4] Starting FlexLB master (BATCH / COST_BASED_PREFILL) ..."
 env ${FLEXLB_ENV_ARGS[@]+"${FLEXLB_ENV_ARGS[@]}"} \
-  "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
-  "HIPPO_ROLE=flexlb_batch_smoke" \
-  java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
-  --server.port="${FLEXLB_HTTP_PORT}" \
-  --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
-  >"${RUN_DIR}/flexlb.log" 2>&1 &
+    "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
+    "HIPPO_ROLE=flexlb_batch_smoke" \
+    java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
+    --server.port="${FLEXLB_HTTP_PORT}" \
+    --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
+    >"${RUN_DIR}/flexlb.log" 2>&1 &
 FLEXLB_PID="$!"
 wait_for_port "127.0.0.1" "${FLEXLB_HTTP_PORT}" 60
 echo "  master started (pid=${FLEXLB_PID})"
@@ -136,35 +137,35 @@ TOTAL_PASS=0
 TOTAL_FAIL=0
 
 run_suite() {
-  local name="$1" script="$2" rid_base="$3"
-  local cmd_args=(
-    --master-ip 127.0.0.1
-    --master-http-port "${FLEXLB_HTTP_PORT}"
-    --flexlb-http-port "${FLEXLB_HTTP_PORT}"
-    --request-id-base "${rid_base}"
-  )
-  if [[ "${script}" != "cancel_smoke.py" ]]; then
-    cmd_args+=(--mock-http-port "${MOCK_HTTP_PORT}")
-  fi
-  echo ""
-  echo "  --- ${name} ---"
-  set +e
-  PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/${script}" \
-    "${cmd_args[@]}" 2>&1 | tee "${RUN_DIR}/${name}.stdout"
-  local exit_code=${PIPESTATUS[0]}
-  set -e
-  if [[ "${exit_code}" -eq 0 ]]; then
-    echo "  ${name}: PASS"
-    TOTAL_PASS=$((TOTAL_PASS + 1))
-  else
-    echo "  ${name}: FAIL (exit=${exit_code})"
-    TOTAL_FAIL=$((TOTAL_FAIL + 1))
-  fi
+    local name="$1" script="$2" rid_base="$3"
+    local cmd_args=(
+        --master-ip 127.0.0.1
+        --master-http-port "${FLEXLB_HTTP_PORT}"
+        --flexlb-http-port "${FLEXLB_HTTP_PORT}"
+        --request-id-base "${rid_base}"
+    )
+    if [[ "${script}" != "cancel_smoke.py" ]]; then
+        cmd_args+=(--mock-http-port "${MOCK_HTTP_PORT}")
+    fi
+    echo ""
+    echo "  --- ${name} ---"
+    set +e
+    PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/${script}" \
+        "${cmd_args[@]}" 2>&1 | tee "${RUN_DIR}/${name}.stdout"
+    local exit_code=${PIPESTATUS[0]}
+    set -e
+    if [[ "${exit_code}" -eq 0 ]]; then
+        echo "  ${name}: PASS"
+        TOTAL_PASS=$((TOTAL_PASS + 1))
+    else
+        echo "  ${name}: FAIL (exit=${exit_code})"
+        TOTAL_FAIL=$((TOTAL_FAIL + 1))
+    fi
 }
 
-run_suite "cancel_smoke"     "cancel_smoke.py"     10000
+run_suite "cancel_smoke" "cancel_smoke.py" 10000
 run_suite "scheduling_smoke" "scheduling_smoke.py" 20000
-run_suite "anomaly_smoke"    "anomaly_smoke.py"    30000
+run_suite "anomaly_smoke" "anomaly_smoke.py" 30000
 
 # -- 4. Summary --
 echo ""
@@ -176,5 +177,5 @@ echo "  Logs: ${RUN_DIR}/"
 echo "=========================================="
 
 if [[ "${TOTAL_FAIL}" -gt 0 ]]; then
-  exit 1
+    exit 1
 fi

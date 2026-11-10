@@ -75,8 +75,7 @@ class WorkerBatcherQueueTest {
         assertTrue(runtime.offer(item(3, 50, now + 1_000, now + 200, 128)));
         assertTrue(runtime.offer(item(4, 50, now + 5_000, now - 100, 128)));
 
-        WorkerBatcher.QueueSnapshot snapshot =
-                runtime.captureQueueSnapshot();
+        WorkerBatcher.QueueSnapshot snapshot = runtime.captureQueueSnapshot();
         assertEquals(List.of(2L, 1L, 3L, 4L), requestIds(snapshot.items()));
         assertEquals(4, snapshot.items().size());
         assertEquals("test-worker", snapshot.endpointId());
@@ -92,8 +91,7 @@ class WorkerBatcherQueueTest {
         assertTrue(runtime.offer(item(4, 50, now + 9_000, now, 128)));
         assertTrue(runtime.offer(item(3, 50, now + 9_000, now, 128)));
 
-        assertEquals(List.of(1L, 2L, 4L, 3L), requestIds(
-                runtime.captureQueueSnapshot().items()));
+        assertEquals(List.of(1L, 2L, 4L, 3L), requestIds(runtime.captureQueueSnapshot().items()));
     }
 
     @Test
@@ -106,8 +104,7 @@ class WorkerBatcherQueueTest {
         assertTrue(runtime.offer(item(2, 50, now + 500, now + 100, 128)));
         assertTrue(runtime.offer(item(3, 70, now + 100, now + 200, 128)));
 
-        assertEquals(List.of(1L, 2L, 3L), requestIds(
-                runtime.captureQueueSnapshot().items()));
+        assertEquals(List.of(1L, 2L, 3L), requestIds(runtime.captureQueueSnapshot().items()));
     }
 
     @Test
@@ -116,23 +113,19 @@ class WorkerBatcherQueueTest {
         ScheduledRequest first = item(11, 70, Long.MAX_VALUE, 1, 128);
         ScheduledRequest second = item(12, 50, Long.MAX_VALUE, 2, 128);
 
-        WorkerBatcher.QueueSnapshot empty =
-                runtime.captureQueueSnapshot();
+        WorkerBatcher.QueueSnapshot empty = runtime.captureQueueSnapshot();
         assertTrue(runtime.offer(first));
         assertTrue(runtime.offer(second));
-        WorkerBatcher.QueueSnapshot offered =
-                runtime.captureQueueSnapshot();
+        WorkerBatcher.QueueSnapshot offered = runtime.captureQueueSnapshot();
 
         assertTrue(offered.queueVersion() > empty.queueVersion());
         assertSame(first, offered.items().get(0));
         assertSame(second, offered.items().get(1));
         assertEquals(2, runtime.queueSize());
-        assertEquals(java.util.Map.of(70, 1, 50, 1),
-                runtime.queueSizeByPriority());
+        assertEquals(java.util.Map.of(70, 1, 50, 1), runtime.queueSizeByPriority());
 
         assertTrue(runtime.removeQueued(first, "test exact removal"));
-        WorkerBatcher.QueueSnapshot removed =
-                runtime.captureQueueSnapshot();
+        WorkerBatcher.QueueSnapshot removed = runtime.captureQueueSnapshot();
         assertTrue(removed.queueVersion() > offered.queueVersion());
         assertEquals(List.of(second), removed.items());
     }
@@ -145,8 +138,7 @@ class WorkerBatcherQueueTest {
         assertTrue(runtime.offer(canonical));
 
         assertFalse(runtime.removeQueued(lookalike, "stale identity"));
-        assertEquals(List.of(canonical),
-                runtime.captureQueueSnapshot().items());
+        assertEquals(List.of(canonical), runtime.captureQueueSnapshot().items());
         assertTrue(runtime.removeQueued(canonical, "canonical identity"));
     }
 
@@ -164,27 +156,27 @@ class WorkerBatcherQueueTest {
     }
 
     private WorkerBatcher runningRuntime() {
-        WorkerBatcher runtime = new WorkerBatcher(
-                "test-worker",
-                prefillEndpoint,
-                config,
-                deliveryStrategy,
-                mock(EndpointEventProjector.class));
+        WorkerBatcher runtime =
+                new WorkerBatcher(
+                        "test-worker",
+                        prefillEndpoint,
+                        config,
+                        deliveryStrategy,
+                        mock(EndpointEventProjector.class));
         runtimes.add(runtime);
         runtime.start();
         return runtime;
     }
 
-    private ScheduledRequest item(long requestId, int priority, long expiresAtMs,
-                           long enqueuedAtMs, long seqLen) {
+    private ScheduledRequest item(
+            long requestId, int priority, long expiresAtMs, long enqueuedAtMs, long seqLen) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
         request.setPriority(priority);
         BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
-        context.setSchedulingMetadata(
-                SchedulingMetadata.explicit(priority, expiresAtMs));
+        context.setSchedulingMetadata(SchedulingMetadata.explicit(priority, expiresAtMs));
         return new ScheduledRequest(
                 context,
                 new CompletableFuture<Response>(),
@@ -202,26 +194,20 @@ class WorkerBatcherQueueTest {
     }
 
     private static PrefillEndpoint stablePrefillEndpoint() {
-        PrefillTimePredictor.Evaluator evaluator =
-                mock(PrefillTimePredictor.Evaluator.class);
+        PrefillTimePredictor.Evaluator evaluator = mock(PrefillTimePredictor.Evaluator.class);
         PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
         when(predictor.evaluator()).thenReturn(evaluator);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getPredictor()).thenReturn(predictor);
-        WorkerStatus status = WorkerStatus.createDiscovered(
-                RoleType.PREFILL,
-                "test",
-                "127.0.0.1",
-                8080,
-                8090,
-                "test-site");
+        WorkerStatus status =
+                WorkerStatus.createDiscovered(
+                        RoleType.PREFILL, "test", "127.0.0.1", 8080, 8090, "test-site");
         when(endpoint.getStatus()).thenReturn(status);
         return endpoint;
     }
 
     /** Holds every exact head ACTIVE so snapshots can exercise live ordering. */
-    private static final class BlockingDeliveryStrategy
-            implements DeliveryStrategy {
+    private static final class BlockingDeliveryStrategy implements DeliveryStrategy {
 
         private final AtomicInteger attempts = new AtomicInteger();
         private final CapacityBoundary.Availability availability =
@@ -232,12 +218,10 @@ class WorkerBatcherQueueTest {
                     }
 
                     @Override
-                    public void addListener(Runnable listener) {
-                    }
+                    public void addListener(Runnable listener) {}
 
                     @Override
-                    public void removeListener(Runnable listener) {
-                    }
+                    public void removeListener(Runnable listener) {}
                 };
 
         @Override
@@ -259,8 +243,7 @@ class WorkerBatcherQueueTest {
 
         @Override
         public double projectGroupDurationMs(
-                List<ScheduledRequest> items,
-                PrefillTimePredictor.Evaluator evaluator) {
+                List<ScheduledRequest> items, PrefillTimePredictor.Evaluator evaluator) {
             return 0.0;
         }
 

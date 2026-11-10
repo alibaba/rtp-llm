@@ -63,78 +63,78 @@ MOCK_PID=""
 FLEXLB_PID=""
 
 JAVA_MODULE_OPTS=(
-  --add-modules ALL-SYSTEM
-  --add-opens java.base/java.lang=ALL-UNNAMED
-  --add-opens java.base/java.lang.invoke=ALL-UNNAMED
-  --add-opens java.base/java.util=ALL-UNNAMED
-  --add-opens java.base/java.util.concurrent=ALL-UNNAMED
-  --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED
-  --add-opens java.base/java.nio=ALL-UNNAMED
-  --add-opens java.base/sun.nio.ch=ALL-UNNAMED
-  --add-opens java.instrument/sun.instrument=ALL-UNNAMED
+    --add-modules ALL-SYSTEM
+    --add-opens java.base/java.lang=ALL-UNNAMED
+    --add-opens java.base/java.lang.invoke=ALL-UNNAMED
+    --add-opens java.base/java.util=ALL-UNNAMED
+    --add-opens java.base/java.util.concurrent=ALL-UNNAMED
+    --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED
+    --add-opens java.base/java.nio=ALL-UNNAMED
+    --add-opens java.base/sun.nio.ch=ALL-UNNAMED
+    --add-opens java.instrument/sun.instrument=ALL-UNNAMED
 )
 
 # -- Helpers ---------------------------------------------------------------
 
 java_major() {
-  local java_bin="${1:-java}"
-  "${java_bin}" -version 2>&1 | awk -F'[\".]' '/version/ {print ($2 == "1" ? $3 : $2); exit}'
+    local java_bin="${1:-java}"
+    "${java_bin}" -version 2>&1 | awk -F'[\".]' '/version/ {print ($2 == "1" ? $3 : $2); exit}'
 }
 
 detect_java21_home() {
-  if [[ -n "${JAVA_HOME:-}" && -x "${JAVA_HOME}/bin/java" ]]; then
-    if [[ "$(java_major "${JAVA_HOME}/bin/java")" -ge 21 ]]; then
-      echo "${JAVA_HOME}"
-      return 0
+    if [[ -n "${JAVA_HOME:-}" && -x "${JAVA_HOME}/bin/java" ]]; then
+        if [[ "$(java_major "${JAVA_HOME}/bin/java")" -ge 21 ]]; then
+            echo "${JAVA_HOME}"
+            return 0
+        fi
     fi
-  fi
-  if [[ -n "${JAVA21_HOME:-}" && -x "${JAVA21_HOME}/bin/java" ]]; then
-    echo "${JAVA21_HOME}"
-    return 0
-  fi
-  local java_bin
-  while IFS= read -r java_bin; do
-    if [[ -x "${java_bin}" && "$(java_major "${java_bin}")" -ge 21 ]]; then
-      dirname "$(dirname "${java_bin}")"
-      return 0
+    if [[ -n "${JAVA21_HOME:-}" && -x "${JAVA21_HOME}/bin/java" ]]; then
+        echo "${JAVA21_HOME}"
+        return 0
     fi
-  done < <(
-    {
-      alternatives --display java 2>/dev/null || true
-      update-alternatives --display java 2>/dev/null || true
-    } | awk '/bin\/java/ {print $1}' | sort -u
-  )
-  return 1
+    local java_bin
+    while IFS= read -r java_bin; do
+        if [[ -x "${java_bin}" && "$(java_major "${java_bin}")" -ge 21 ]]; then
+            dirname "$(dirname "${java_bin}")"
+            return 0
+        fi
+    done < <(
+        {
+            alternatives --display java 2>/dev/null || true
+            update-alternatives --display java 2>/dev/null || true
+        } | awk '/bin\/java/ {print $1}' | sort -u
+    )
+    return 1
 }
 
 JAVA21_HOME_DETECTED="$(detect_java21_home || true)"
 if [[ -n "${JAVA21_HOME_DETECTED}" ]]; then
-  export JAVA_HOME="${JAVA21_HOME_DETECTED}"
-  export PATH="${JAVA_HOME}/bin:${PATH}"
+    export JAVA_HOME="${JAVA21_HOME_DETECTED}"
+    export PATH="${JAVA_HOME}/bin:${PATH}"
 fi
 
 cleanup() {
-  echo ""
-  echo "[cleanup] stopping processes ..."
-  if [[ -n "${FLEXLB_PID}" ]]; then
-    kill "${FLEXLB_PID}" >/dev/null 2>&1 || true
-    wait "${FLEXLB_PID}" 2>/dev/null || true
-    FLEXLB_PID=""
-  fi
-  if [[ -n "${MOCK_PID}" ]]; then
-    kill "${MOCK_PID}" >/dev/null 2>&1 || true
-    wait "${MOCK_PID}" 2>/dev/null || true
-    MOCK_PID=""
-  fi
-  echo "[cleanup] done."
+    echo ""
+    echo "[cleanup] stopping processes ..."
+    if [[ -n "${FLEXLB_PID}" ]]; then
+        kill "${FLEXLB_PID}" >/dev/null 2>&1 || true
+        wait "${FLEXLB_PID}" 2>/dev/null || true
+        FLEXLB_PID=""
+    fi
+    if [[ -n "${MOCK_PID}" ]]; then
+        kill "${MOCK_PID}" >/dev/null 2>&1 || true
+        wait "${MOCK_PID}" 2>/dev/null || true
+        MOCK_PID=""
+    fi
+    echo "[cleanup] done."
 }
 trap cleanup EXIT
 
 wait_for_port() {
-  local host="$1"
-  local port="$2"
-  local timeout_s="$3"
-  python3 - "$host" "$port" "$timeout_s" <<'PY'
+    local host="$1"
+    local port="$2"
+    local timeout_s="$3"
+    python3 - "$host" "$port" "$timeout_s" <<'PY'
 import socket, sys, time
 host, port, timeout_s = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
 deadline = time.time() + timeout_s
@@ -161,7 +161,7 @@ FLEXLB_ENV_FILE="${RUN_DIR}/flexlb_env.txt"
 
 # Generate performance config for cancel tests
 mkdir -p "${PERF_CONFIG_DIR}"
-cat > "${PERF_CONFIG_FILE}" <<'JSON'
+cat >"${PERF_CONFIG_FILE}" <<'JSON'
 {
   "block_size": 1024,
   "sleep_scale": 1.0,
@@ -190,35 +190,36 @@ echo "perf_config=${PERF_CONFIG_FILE}"
 # -- Start mock engine cluster --------------------------------------------
 
 if [[ "${START_MOCK}" == "1" ]]; then
-  echo ""
-  echo "[1/5] Starting mock engine cluster (${N_PREFILL} prefill, ${N_DECODE} decode) ..."
-  PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/mock_engine_cluster.py" \
-    --n-prefill "${N_PREFILL}" \
-    --n-decode "${N_DECODE}" \
-    --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
-    --performance "${PERF_CONFIG_FILE}" \
-    --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
-    --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
-    --endpoint-file "${ENDPOINT_FILE}" \
-    --env-file "${FLEXLB_ENV_FILE}" \
-    >"${RUN_DIR}/mock_engine.log" 2>&1 &
-  MOCK_PID="$!"
-  wait_for_port "127.0.0.1" "${MOCK_BASE_GRPC_PORT}" 20
-  echo "  mock cluster started (pid=${MOCK_PID})"
+    echo ""
+    echo "[1/5] Starting mock engine cluster (${N_PREFILL} prefill, ${N_DECODE} decode) ..."
+    PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/mock_engine_cluster.py" \
+        --n-prefill "${N_PREFILL}" \
+        --n-decode "${N_DECODE}" \
+        --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
+        --performance "${PERF_CONFIG_FILE}" \
+        --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
+        --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
+        --endpoint-file "${ENDPOINT_FILE}" \
+        --env-file "${FLEXLB_ENV_FILE}" \
+        >"${RUN_DIR}/mock_engine.log" 2>&1 &
+    MOCK_PID="$!"
+    wait_for_port "127.0.0.1" "${MOCK_BASE_GRPC_PORT}" 20
+    echo "  mock cluster started (pid=${MOCK_PID})"
 else
-  if [[ ! -f "${ENDPOINT_FILE}" ]]; then
-    echo "START_MOCK=0 requires ENDPOINT_FILE at ${ENDPOINT_FILE}" >&2
-    exit 1
-  fi
-  echo "  [skipped] mock cluster already running"
+    if [[ ! -f "${ENDPOINT_FILE}" ]]; then
+        echo "START_MOCK=0 requires ENDPOINT_FILE at ${ENDPOINT_FILE}" >&2
+        exit 1
+    fi
+    echo "  [skipped] mock cluster already running"
 fi
 
 # -- Parse service discovery env vars from endpoint file ------------------
 
 FLEXLB_ENV_ARGS=()
 while IFS= read -r line; do
-  FLEXLB_ENV_ARGS+=("${line}")
-done < <(python3 - "${ENDPOINT_FILE}" <<'PY'
+    FLEXLB_ENV_ARGS+=("${line}")
+done < <(
+    python3 - "${ENDPOINT_FILE}" <<'PY'
 import json, sys
 payload = json.load(open(sys.argv[1], "r", encoding="utf-8"))
 for key, value in payload["env"].items():
@@ -229,37 +230,37 @@ PY
 # -- Start flexlb-api master -----------------------------------------------
 
 if [[ "${START_FLEXLB}" == "1" ]]; then
-  echo ""
-  echo "[2/5] Starting flexlb-api master ..."
+    echo ""
+    echo "[2/5] Starting flexlb-api master ..."
 
-  if [[ "$(java_major java)" -lt 21 ]]; then
-    echo "Java 21 is required to build/start flexlb-api. Set JAVA21_HOME or JAVA_HOME." >&2
-    exit 1
-  fi
+    if [[ "$(java_major java)" -lt 21 ]]; then
+        echo "Java 21 is required to build/start flexlb-api. Set JAVA21_HOME or JAVA_HOME." >&2
+        exit 1
+    fi
 
-  if [[ "${BUILD_FLEXLB}" == "1" ]]; then
-    echo "  Building flexlb-api (mvnw) ..."
-    (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-api -am package -DskipTests)
-  elif [[ ! -f "${FLEXLB_JAR}" ]]; then
-    echo "BUILD_FLEXLB=0 but FlexLB jar does not exist: ${FLEXLB_JAR}" >&2
-    exit 1
-  fi
+    if [[ "${BUILD_FLEXLB}" == "1" ]]; then
+        echo "  Building flexlb-api (mvnw) ..."
+        (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-api -am package -DskipTests)
+    elif [[ ! -f "${FLEXLB_JAR}" ]]; then
+        echo "BUILD_FLEXLB=0 but FlexLB jar does not exist: ${FLEXLB_JAR}" >&2
+        exit 1
+    fi
 
-  env "${FLEXLB_ENV_ARGS[@]}" \
-    "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
-    "HIPPO_ROLE=${HIPPO_ROLE}" \
-    java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
-    --server.port="${FLEXLB_HTTP_PORT}" \
-    --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
-    --flexlb.engine-grpc.enqueue-timeout-ms=5000 \
-    --spring.profiles.active="${SPRING_PROFILE:-default}" \
-    >"${RUN_DIR}/flexlb.log" 2>&1 &
-  FLEXLB_PID="$!"
-  echo "  master starting (pid=${FLEXLB_PID}), waiting for port ${FLEXLB_HTTP_PORT} ..."
-  wait_for_port "127.0.0.1" "${FLEXLB_HTTP_PORT}" 60
-  echo "  master started"
+    env "${FLEXLB_ENV_ARGS[@]}" \
+        "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
+        "HIPPO_ROLE=${HIPPO_ROLE}" \
+        java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
+        --server.port="${FLEXLB_HTTP_PORT}" \
+        --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
+        --flexlb.engine-grpc.enqueue-timeout-ms=5000 \
+        --spring.profiles.active="${SPRING_PROFILE:-default}" \
+        >"${RUN_DIR}/flexlb.log" 2>&1 &
+    FLEXLB_PID="$!"
+    echo "  master starting (pid=${FLEXLB_PID}), waiting for port ${FLEXLB_HTTP_PORT} ..."
+    wait_for_port "127.0.0.1" "${FLEXLB_HTTP_PORT}" 60
+    echo "  master started"
 else
-  echo "  [skipped] flexlb-api master already running"
+    echo "  [skipped] flexlb-api master already running"
 fi
 
 # -- Run priority-preemption acceptance -----------------------------------
@@ -270,13 +271,13 @@ echo ""
 
 set +e
 PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/priority_preemption_smoke.py" \
-  --master-ip 127.0.0.1 \
-  --master-http-port "${FLEXLB_HTTP_PORT}" \
-  --mock-http-port "$((MOCK_BASE_GRPC_PORT - 1))" \
-  --flexlb-http-port "${FLEXLB_HTTP_PORT}" \
-  --schedule-mode "${SCHEDULE_MODE}" \
-  --prefill-request-cap "${PREFILL_REQUEST_CAP}" \
-  2>&1 | tee "${RUN_DIR}/priority_preemption_smoke.stdout"
+    --master-ip 127.0.0.1 \
+    --master-http-port "${FLEXLB_HTTP_PORT}" \
+    --mock-http-port "$((MOCK_BASE_GRPC_PORT - 1))" \
+    --flexlb-http-port "${FLEXLB_HTTP_PORT}" \
+    --schedule-mode "${SCHEDULE_MODE}" \
+    --prefill-request-cap "${PREFILL_REQUEST_CAP}" \
+    2>&1 | tee "${RUN_DIR}/priority_preemption_smoke.stdout"
 
 PRIORITY_SMOKE_EXIT="${PIPESTATUS[0]}"
 set -e
@@ -287,18 +288,18 @@ echo ""
 
 SMOKE_EXIT=0
 if [[ "${RUN_CLIENT_CANCEL_SMOKE}" == "1" ]]; then
-  set +e
-  PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/cancel_smoke.py" \
-    --master-ip 127.0.0.1 \
-    --master-http-port "${FLEXLB_HTTP_PORT}" \
-    --mock-http-port "$((MOCK_BASE_GRPC_PORT - 1))" \
-    --flexlb-http-port "${FLEXLB_HTTP_PORT}" \
-    --schedule-mode "${SCHEDULE_MODE}" \
-    2>&1 | tee "${RUN_DIR}/cancel_smoke.stdout"
-  SMOKE_EXIT="${PIPESTATUS[0]}"
-  set -e
+    set +e
+    PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/cancel_smoke.py" \
+        --master-ip 127.0.0.1 \
+        --master-http-port "${FLEXLB_HTTP_PORT}" \
+        --mock-http-port "$((MOCK_BASE_GRPC_PORT - 1))" \
+        --flexlb-http-port "${FLEXLB_HTTP_PORT}" \
+        --schedule-mode "${SCHEDULE_MODE}" \
+        2>&1 | tee "${RUN_DIR}/cancel_smoke.stdout"
+    SMOKE_EXIT="${PIPESTATUS[0]}"
+    set -e
 else
-  echo "  skipped (set RUN_CLIENT_CANCEL_SMOKE=1 to run the unchanged six scenarios)"
+    echo "  skipped (set RUN_CLIENT_CANCEL_SMOKE=1 to run the unchanged six scenarios)"
 fi
 
 # -- Collect results -------------------------------------------------------
@@ -314,6 +315,6 @@ echo "  flexlb_log=${RUN_DIR}/flexlb.log"
 echo ""
 
 if [[ "${SMOKE_EXIT}" != "0" || "${PRIORITY_SMOKE_EXIT}" != "0" ]]; then
-  exit 1
+    exit 1
 fi
 exit 0

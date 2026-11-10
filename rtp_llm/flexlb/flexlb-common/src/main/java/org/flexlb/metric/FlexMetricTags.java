@@ -32,8 +32,7 @@ public interface FlexMetricTags {
      * Used to replace KMonitor's ImmutableMetricTags
      */
     class ImmutableFlexMetricTags implements FlexMetricTags {
-        @Getter
-        private final Map<String, String> tags;
+        @Getter private final Map<String, String> tags;
 
         /**
          * Constructor - create from Map
@@ -57,7 +56,8 @@ public interface FlexMetricTags {
             if (keyValues == null || keyValues.length == 0) {
                 this.tags = Collections.emptyMap();
             } else if (keyValues.length % 2 != 0) {
-                throw new IllegalArgumentException("Key-value pairs must be even number of arguments");
+                throw new IllegalArgumentException(
+                        "Key-value pairs must be even number of arguments");
             } else {
                 Map<String, String> tempTags = new HashMap<>();
                 for (int i = 0; i < keyValues.length; i += 2) {

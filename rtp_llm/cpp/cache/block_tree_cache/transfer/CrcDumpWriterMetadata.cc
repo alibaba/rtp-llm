@@ -16,11 +16,12 @@ CrcDumpWriter::Metadata CrcDumpWriter::dumpMetadata(const TransferDescriptor& de
         {"kind", cacheGroupTypeName(group.groupType())},
         {"layout", group.usesPhysicalPayloadGeometry() ? "physical_pool_geometry" : "topology_geometry"},
         {"member_count", std::to_string(group.groupTags().size())},
-        {"output_written", store ? "true" : "false"},
+        // CRC diagnostics are emitted after gather/store or load/scatter has completed.
+        {"output_written", "true"},
         {"cpu_snapshot_role", store ? "candidate_output_after_failure" : "restore_source_after_failure"},
         {"gpu_footer_role", store ? "candidate_output" : "checked_source"},
-        {"gpu_snapshot_role", store ? "gathered_candidate_output" : "checked_source_before_scatter"},
-        {"tile_copy_stage", store ? "gather_completed" : "scatter_not_started"},
+        {"gpu_snapshot_role", store ? "gathered_candidate_output" : "checked_source"},
+        {"tile_copy_stage", store ? "gather_completed" : "scatter_completed"},
         {"cpu_backing",
          descriptor.source_tier == Tier::HOST || descriptor.target_tier == Tier::HOST ? "memory_pool" :
                                                                                         "disk_staging_buffer"},

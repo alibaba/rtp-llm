@@ -16,7 +16,8 @@ class FlexlbScheduleProtocolTest {
 
     @Test
     void scheduleContractIsSeparatedButKeepsOriginalWireServiceName() {
-        assertNull(EngineRpcService.getDescriptor().findMessageTypeByName("FlexlbScheduleRequestPB"));
+        assertNull(
+                EngineRpcService.getDescriptor().findMessageTypeByName("FlexlbScheduleRequestPB"));
         assertNull(EngineRpcService.getDescriptor().findServiceByName("FlexlbService"));
 
         var service = FlexlbScheduleProtocol.getDescriptor().findServiceByName("FlexlbService");
@@ -35,25 +36,28 @@ class FlexlbScheduleProtocolTest {
         assertNotNull(preemptionProgress);
         assertEquals("priority_preemption_progress", preemptionProgress.getName());
         assertEquals(Descriptors.FieldDescriptor.Type.ENUM, preemptionProgress.getType());
-        assertEquals(EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_NONE,
-                EngineRpcService.TaskInfoPB.getDefaultInstance()
-                        .getPriorityPreemptionProgress());
+        assertEquals(
+                EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_NONE,
+                EngineRpcService.TaskInfoPB.getDefaultInstance().getPriorityPreemptionProgress());
         Descriptors.FieldDescriptor taskPriority =
                 EngineRpcService.TaskInfoPB.getDescriptor().findFieldByNumber(15);
         assertEquals("priority", taskPriority.getName());
         assertEquals(Descriptors.FieldDescriptor.Type.INT32, taskPriority.getType());
-        assertEquals(Descriptors.FieldDescriptor.Type.STRING,
+        assertEquals(
+                Descriptors.FieldDescriptor.Type.STRING,
                 EngineRpcService.WorkerStatusPB.getDescriptor().findFieldByNumber(1).getType());
-        assertNull(FlexlbScheduleProtocol.FlexlbServerStatusPB.getDescriptor().findFieldByNumber(5));
+        assertNull(
+                FlexlbScheduleProtocol.FlexlbServerStatusPB.getDescriptor().findFieldByNumber(5));
     }
 
     @Test
     void historicalEmbeddedGenerateInputWireParsesAsOpaquePayload() throws Exception {
-        EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(123L)
-                .addTokenIds(1)
-                .addTokenIds(2)
-                .build();
+        EngineRpcService.GenerateInputPB input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(123L)
+                        .addTokenIds(1)
+                        .addTokenIds(2)
+                        .build();
 
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         CodedOutputStream coded = CodedOutputStream.newInstance(output);
@@ -67,5 +71,4 @@ class FlexlbScheduleProtocolTest {
         assertEquals(123L, parsed.getRequestId());
         assertArrayEquals(input.toByteArray(), parsed.getGenerateInput().toByteArray());
     }
-
 }

@@ -17,8 +17,7 @@ class ShardedRecentCacheKeyWindowTest {
     @Test
     void should_count_hits_across_requests_with_different_request_ids() {
         AtomicLong now = new AtomicLong(0L);
-        ShardedRecentCacheKeyWindow window =
-                new ShardedRecentCacheKeyWindow(1000L, 320L, now::get);
+        ShardedRecentCacheKeyWindow window = new ShardedRecentCacheKeyWindow(1000L, 320L, now::get);
 
         RecentCacheKeyWindow.Snapshot first = window.record(1L, List.of(11L, 22L, 33L));
         assertEquals(0L, first.getRequestHitOccurrences());
@@ -32,8 +31,7 @@ class ShardedRecentCacheKeyWindowTest {
     @Test
     void should_count_all_request_occurrences() {
         AtomicLong now = new AtomicLong(0L);
-        ShardedRecentCacheKeyWindow window =
-                new ShardedRecentCacheKeyWindow(1000L, 40L, now::get);
+        ShardedRecentCacheKeyWindow window = new ShardedRecentCacheKeyWindow(1000L, 40L, now::get);
 
         window.record(7L, List.of(1L, 2L, 3L, 4L, 5L));
         now.set(10L);
@@ -47,8 +45,7 @@ class ShardedRecentCacheKeyWindowTest {
     @Test
     void should_expire_shared_history_before_matching() {
         AtomicLong now = new AtomicLong(0L);
-        ShardedRecentCacheKeyWindow window =
-                new ShardedRecentCacheKeyWindow(1000L, 40L, now::get);
+        ShardedRecentCacheKeyWindow window = new ShardedRecentCacheKeyWindow(1000L, 40L, now::get);
 
         window.record(1L, List.of(11L));
         now.set(999L);
@@ -59,21 +56,18 @@ class ShardedRecentCacheKeyWindowTest {
 
     @Test
     void should_apply_capacity_to_the_global_history() {
-        ShardedRecentCacheKeyWindow window =
-                new ShardedRecentCacheKeyWindow(1000L, 4L, () -> 0L);
+        ShardedRecentCacheKeyWindow window = new ShardedRecentCacheKeyWindow(1000L, 4L, () -> 0L);
 
         window.record(1L, List.of(11L, 22L));
         window.record(2L, List.of(33L, 44L));
         assertEquals(1L, window.record(3L, List.of(33L)).getRequestHitOccurrences());
         // The oldest whole request was evicted to retain the preceding record.
-        assertEquals(2L, window.record(4L, List.of(11L, 22L, 33L, 44L))
-                .getRequestHitOccurrences());
+        assertEquals(2L, window.record(4L, List.of(11L, 22L, 33L, 44L)).getRequestHitOccurrences());
     }
 
     @Test
     void should_not_count_duplicate_keys_as_hits_within_the_same_request() {
-        ShardedRecentCacheKeyWindow window =
-                new ShardedRecentCacheKeyWindow(1000L, 40L, () -> 0L);
+        ShardedRecentCacheKeyWindow window = new ShardedRecentCacheKeyWindow(1000L, 40L, () -> 0L);
 
         assertEquals(0L, window.record(1L, List.of(11L, 11L)).getRequestHitOccurrences());
         assertEquals(2L, window.record(2L, List.of(11L, 11L)).getRequestHitOccurrences());
@@ -90,10 +84,12 @@ class ShardedRecentCacheKeyWindowTest {
         try {
             for (long requestId = 0; requestId < requestCount; requestId++) {
                 long id = requestId;
-                results.add(executor.submit(() -> {
-                    start.await();
-                    return window.record(id, List.of(11L, 22L, 11L));
-                }));
+                results.add(
+                        executor.submit(
+                                () -> {
+                                    start.await();
+                                    return window.record(id, List.of(11L, 22L, 11L));
+                                }));
             }
             start.countDown();
             int coldRequests = 0;

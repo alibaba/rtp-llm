@@ -28,32 +28,64 @@ class LoadClientPriorityTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private JavaLoadClient dryRunClient(int priority) {
-        JavaLoadClient.Config config = new JavaLoadClient.Config(
-                "trace.jsonl", "127.0.0.1:7001", "127.0.0.1:7003",
-                0, 16, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
-                120_000L, 500.0, false, false, 1, 1, 0L, 120, true,
-                "engine_service", "",
-                false, 10, 1000, 0, 0, "", false, "", true,
-                priority);
+        JavaLoadClient.Config config =
+                new JavaLoadClient.Config(
+                        "trace.jsonl",
+                        "127.0.0.1:7001",
+                        "127.0.0.1:7003",
+                        0,
+                        16,
+                        10.0,
+                        1,
+                        tempDir.resolve("out").toString(),
+                        1,
+                        0,
+                        0,
+                        120_000L,
+                        500.0,
+                        false,
+                        false,
+                        1,
+                        1,
+                        0L,
+                        120,
+                        true,
+                        "engine_service",
+                        "",
+                        false,
+                        10,
+                        1000,
+                        0,
+                        0,
+                        "",
+                        false,
+                        "",
+                        true,
+                        priority);
         return new JavaLoadClient(config);
     }
 
     private static JavaLoadClient.TraceRecord record(long requestId, int priority) {
-        return new JavaLoadClient.TraceRecord(requestId, "rid-" + requestId,
-                "trace-" + requestId, 1000L, 2048, 10,
-                List.of(1L, 2L), List.of(1, 2, 3), priority);
+        return new JavaLoadClient.TraceRecord(
+                requestId,
+                "rid-" + requestId,
+                "trace-" + requestId,
+                1000L,
+                2048,
+                10,
+                List.of(1L, 2L),
+                List.of(1, 2, 3),
+                priority);
     }
 
     private static EngineRpcService.GenerateInputPB input(long requestId) {
         return EngineRpcService.GenerateInputPB.newBuilder()
                 .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(10)
-                        .build())
+                .setGenerateConfig(
+                        EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(10).build())
                 .build();
     }
 
@@ -85,16 +117,23 @@ class LoadClientPriorityTest {
     void traceRecordFieldOverridesConfigDefault() throws Exception {
         JavaLoadClient client = dryRunClient(40);
 
-        ObjectNode withField = MAPPER.createObjectNode()
-                .put("il", 100).put("ol", 10).put("ts", 1L)
-                .put("request_id", "r1").put("priority", 70);
+        ObjectNode withField =
+                MAPPER.createObjectNode()
+                        .put("il", 100)
+                        .put("ol", 10)
+                        .put("ts", 1L)
+                        .put("request_id", "r1")
+                        .put("priority", 70);
         JavaLoadClient.TraceRecord parsed = client.parseTraceRecord(withField);
         assertNotNull(parsed);
         assertEquals(70, parsed.priority);
 
-        ObjectNode withoutField = MAPPER.createObjectNode()
-                .put("il", 100).put("ol", 10).put("ts", 1L)
-                .put("request_id", "r2");
+        ObjectNode withoutField =
+                MAPPER.createObjectNode()
+                        .put("il", 100)
+                        .put("ol", 10)
+                        .put("ts", 1L)
+                        .put("request_id", "r2");
         JavaLoadClient.TraceRecord defaulted = client.parseTraceRecord(withoutField);
         assertNotNull(defaulted);
         assertEquals(40, defaulted.priority);
@@ -106,25 +145,63 @@ class LoadClientPriorityTest {
     void forcePriorityPinsEveryRecord() throws Exception {
         // Bottom constructor carries the FORCE_PRIORITY knob (fromEnv reads
         // the env); the 35-param convenience overload forwards 0 = disabled.
-        JavaLoadClient.Config config = new JavaLoadClient.Config(
-                "trace.jsonl", "127.0.0.1:7001", "127.0.0.1:7003",
-                0, 16, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
-                120_000L, 500.0, false, false, 1, 1, 0L, 120, true,
-                "engine_service", "",
-                false, 10, 1000, 0, 0, "", false, "", true,
-                40, 50, "replay", 0.0, true);
+        JavaLoadClient.Config config =
+                new JavaLoadClient.Config(
+                        "trace.jsonl",
+                        "127.0.0.1:7001",
+                        "127.0.0.1:7003",
+                        0,
+                        16,
+                        10.0,
+                        1,
+                        tempDir.resolve("out").toString(),
+                        1,
+                        0,
+                        0,
+                        120_000L,
+                        500.0,
+                        false,
+                        false,
+                        1,
+                        1,
+                        0L,
+                        120,
+                        true,
+                        "engine_service",
+                        "",
+                        false,
+                        10,
+                        1000,
+                        0,
+                        0,
+                        "",
+                        false,
+                        "",
+                        true,
+                        40,
+                        50,
+                        "replay",
+                        0.0,
+                        true);
         JavaLoadClient client = new JavaLoadClient(config);
 
-        ObjectNode withField = MAPPER.createObjectNode()
-                .put("il", 100).put("ol", 10).put("ts", 1L)
-                .put("request_id", "r1").put("priority", 70);
+        ObjectNode withField =
+                MAPPER.createObjectNode()
+                        .put("il", 100)
+                        .put("ol", 10)
+                        .put("ts", 1L)
+                        .put("request_id", "r1")
+                        .put("priority", 70);
         JavaLoadClient.TraceRecord pinned = client.parseTraceRecord(withField);
         assertNotNull(pinned);
         assertEquals(50, pinned.priority);
 
-        ObjectNode withoutField = MAPPER.createObjectNode()
-                .put("il", 100).put("ol", 10).put("ts", 1L)
-                .put("request_id", "r2");
+        ObjectNode withoutField =
+                MAPPER.createObjectNode()
+                        .put("il", 100)
+                        .put("ol", 10)
+                        .put("ts", 1L)
+                        .put("request_id", "r2");
         JavaLoadClient.TraceRecord pinnedDefault = client.parseTraceRecord(withoutField);
         assertNotNull(pinnedDefault);
         assertEquals(50, pinnedDefault.priority);
@@ -132,9 +209,17 @@ class LoadClientPriorityTest {
 
     @Test
     void loopAndTruncationPreservePriority() {
-        JavaLoadClient.TraceRecord original = new JavaLoadClient.TraceRecord(
-                1L, "rid-1", "trace-1", 1000L, 4096, 500,
-                List.of(1L), List.of(1, 2, 3), 60);
+        JavaLoadClient.TraceRecord original =
+                new JavaLoadClient.TraceRecord(
+                        1L,
+                        "rid-1",
+                        "trace-1",
+                        1000L,
+                        4096,
+                        500,
+                        List.of(1L),
+                        List.of(1, 2, 3),
+                        60);
         List<JavaLoadClient.TraceRecord> truncated =
                 JavaLoadClient.truncateRecords(List.of(original), 1024, 100);
         assertEquals(1, truncated.size());
@@ -154,28 +239,39 @@ class LoadClientPriorityTest {
         // client_events.jsonl rows distinguish synthesized entries by key
         // absence — a literal 0 would pollute downstream priority stats.
         ObjectNode synthetic = JavaLoadClient.perRequestNode(syntheticResult("timeout"));
-        assertFalse(synthetic.has("priority"),
-                "synthetic rows must not write priority=0");
+        assertFalse(synthetic.has("priority"), "synthetic rows must not write priority=0");
     }
 
     @Test
     void invalidTracePriorityFallsBackToConfigDefault() throws Exception {
         JavaLoadClient client = dryRunClient(40);
 
-        ObjectNode invalidHigh = MAPPER.createObjectNode()
-                .put("il", 100).put("ol", 10).put("ts", 1L)
-                .put("request_id", "r1").put("priority", 200);
+        ObjectNode invalidHigh =
+                MAPPER.createObjectNode()
+                        .put("il", 100)
+                        .put("ol", 10)
+                        .put("ts", 1L)
+                        .put("request_id", "r1")
+                        .put("priority", 200);
         assertEquals(40, client.parseTraceRecord(invalidHigh).priority);
 
-        ObjectNode invalidNegative = MAPPER.createObjectNode()
-                .put("il", 100).put("ol", 10).put("ts", 1L)
-                .put("request_id", "r2").put("priority", -5);
+        ObjectNode invalidNegative =
+                MAPPER.createObjectNode()
+                        .put("il", 100)
+                        .put("ol", 10)
+                        .put("ts", 1L)
+                        .put("request_id", "r2")
+                        .put("priority", -5);
         assertEquals(40, client.parseTraceRecord(invalidNegative).priority);
 
         // Explicit 0 stays unset (legacy wire behavior), not "invalid".
-        ObjectNode explicitZero = MAPPER.createObjectNode()
-                .put("il", 100).put("ol", 10).put("ts", 1L)
-                .put("request_id", "r3").put("priority", 0);
+        ObjectNode explicitZero =
+                MAPPER.createObjectNode()
+                        .put("il", 100)
+                        .put("ol", 10)
+                        .put("ts", 1L)
+                        .put("request_id", "r3")
+                        .put("priority", 0);
         assertEquals(0, client.parseTraceRecord(explicitZero).priority);
     }
 
@@ -193,7 +289,8 @@ class LoadClientPriorityTest {
         assertEquals(0, JavaLoadClient.Config.sanitizeForcePriority(-1));
     }
 
-    private static JavaLoadClient.RequestResult result(int priority, String status, double scheduleMs) {
+    private static JavaLoadClient.RequestResult result(
+            int priority, String status, double scheduleMs) {
         JavaLoadClient.RequestResult result = new JavaLoadClient.RequestResult();
         result.priority = priority;
         result.status = status;

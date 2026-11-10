@@ -5,11 +5,23 @@ from google.protobuf.descriptor import FieldDescriptor
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (  # type: ignore
     ErrorCodePB,
     GenerateConfigPB,
+    GenerateInputPB,
     RpcErrorPB,
+    SideChannelPayloadPB,
 )
 
 
 class RpcErrorCodeProtoTest(unittest.TestCase):
+    def test_master_enqueue_flag_uses_independent_wire_field_13(self):
+        fields = GenerateInputPB.DESCRIPTOR.fields_by_name
+        self.assertEqual(fields["multimodal_token_layout"].number, 11)
+        self.assertEqual(fields["v41_inputs"].number, 12)
+        self.assertEqual(fields["enqueued_by_master"].number, 13)
+        # Field 13, wire type 0, boolean true; independent of generated constants.
+        parsed = GenerateInputPB.FromString(bytes((0x68, 0x01)))
+        self.assertTrue(parsed.enqueued_by_master)
+        self.assertEqual(parsed.SerializeToString(), bytes((0x68, 0x01)))
+
     def test_request_level_p2p_writeback_uses_presence_aware_wire_field(self):
         field = GenerateConfigPB.DESCRIPTOR.fields_by_name["enable_p2p_writeback"]
         self.assertEqual(field.number, 80)
@@ -22,6 +34,16 @@ class RpcErrorCodeProtoTest(unittest.TestCase):
                 parsed = GenerateConfigPB.FromString(config.SerializeToString())
                 self.assertTrue(parsed.HasField("enable_p2p_writeback"))
                 self.assertEqual(parsed.enable_p2p_writeback.value, enabled)
+
+    def test_prompt_logits_and_writeback_accounting_keep_independent_wire_fields(self):
+        fields = SideChannelPayloadPB.DESCRIPTOR.fields_by_name
+        self.assertEqual(fields["prompt_logits"].number, 14)
+        self.assertEqual(fields["writeback_first_use_len"].number, 15)
+        payload = SideChannelPayloadPB(writeback_first_use_len=256)
+        payload.prompt_logits.SetInParent()
+        parsed = SideChannelPayloadPB.FromString(payload.SerializeToString())
+        self.assertTrue(parsed.HasField("prompt_logits"))
+        self.assertEqual(parsed.writeback_first_use_len, 256)
 
     def test_invalid_params_is_declared_and_round_trips(self):
         self.assertEqual(ErrorCodePB.Value("INVALID_PARAMS"), 26)

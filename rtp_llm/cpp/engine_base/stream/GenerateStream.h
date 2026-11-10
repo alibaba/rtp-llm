@@ -243,6 +243,11 @@ public:
     int     reuseLength() const;
     int     initialReuseLength() const;
     size_t  maxTokenNum() const;
+    // Prefill produces the first output token. Only a later token needs Decode KV.
+    bool needsDecodeAfterPrefill() const {
+        return maxTokenNum() > static_cast<size_t>(inputLength()) + 1;
+    }
+
     void    setReuseLength(int reuse_length);
     void    setLocalReuseLength(int length);
     void    setDeviceReuseLength(int length);
@@ -272,6 +277,35 @@ public:
     int64_t prefillMemoryReuseLen() const;
     int64_t prefillDiskReuseLen() const;
     bool    prefillUsesIndependentBlockPools() const;
+
+    // ---- chunked prefill (PREFILL / PDFUSION roles) ----
+    // reuse_length_ is the current chunk start, and advances after each middle chunk.
+    // When useChunkWindow() is true, contextLength() returns the current chunk length.
+    // initial_reuse_length_ stays frozen for cache-hit metrics.
+    void setChunkSize(int chunk_size) {
+        chunk_size_ = chunk_size;
+        max_chunk_size_ = std::max(max_chunk_size_, chunk_size);
+    }
+    int maxChunkSize() const {
+        return max_chunk_size_;
+    }
+    bool chunkedPrefillEnabled() const {
+        return chunk_size_ > 0;
+    }
+    void enableWarmupChunkWindow() {
+        warmup_chunk_window_ = true;
+    }
+    bool useChunkWindow() const;   // enabled + RUNNING/warmup + context -> window funcs return chunk view
+    int  currentChunkLen() const;  // tokens to compute in the current chunk
+    bool isLastChunk() const;      // current chunk reaches seqLength()
+    bool isMiddleChunk() const;    // chunked + context + !last → no sample / no output row
+    void advanceChunk();  // reuse_length_ += currentChunkLen()
+    int  cacheStorePublishStartToken() const {
+        return chunk_advanced_ ? prefixLength() : 0;
+    }
+    // Prompt token right after the current chunk; valid only for middle chunks.
+    // Used as speculative draft prefill tail instead of a sampled token.
+    int nextChunkBoundaryToken() const;
 
     bool                 isContextStream() const;
     const torch::Tensor& cumLogProbs() const;
@@ -892,6 +926,7 @@ protected:
 
     int                      estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
     bool                     reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
+    bool prepareUpdateWithoutLock(const std::optional<ErrorInfo>& error_info, bool force_update_info);
     std::optional<ErrorInfo> updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info);
     std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);
     void                     updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
@@ -943,6 +978,12 @@ protected:
     int                                remote_reuse_length_  = 0;
     int                                host_reuse_length_    = 0;
     int                                disk_reuse_length_    = 0;
+    // Chunked prefill normally gates on RUNNING so admission-time calls keep whole-segment
+    // semantics. Prefill warmup explicitly opts in because it bypasses the scheduler.
+    int  chunk_size_          = 0;
+    int  max_chunk_size_      = 0;
+    bool chunk_advanced_      = false;
+    bool warmup_chunk_window_ = false;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     bool    prefill_independent_block_pools_ = false;
     int     prefill_writeback_first_use_length_ = 0;

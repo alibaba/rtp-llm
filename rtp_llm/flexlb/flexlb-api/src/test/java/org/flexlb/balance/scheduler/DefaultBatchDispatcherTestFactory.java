@@ -6,14 +6,10 @@ import org.flexlb.engine.grpc.EngineGrpcClient;
 /** Test-source bridge to the package-visible dispatcher sizing injection. */
 public final class DefaultBatchDispatcherTestFactory {
 
-    private DefaultBatchDispatcherTestFactory() {
-    }
+    private DefaultBatchDispatcherTestFactory() {}
 
-    public static DefaultBatchDispatcher create(EngineGrpcClient grpcClient,
-                                                ConfigService configService,
-                                                int poolSize,
-                                                int queueSize) {
-        return new DefaultBatchDispatcher(
-                grpcClient, configService, null, poolSize, queueSize);
+    public static DefaultBatchDispatcher create(
+            EngineGrpcClient grpcClient, ConfigService configService, int poolSize, int queueSize) {
+        return new DefaultBatchDispatcher(grpcClient, configService, null, poolSize, queueSize);
     }
 }

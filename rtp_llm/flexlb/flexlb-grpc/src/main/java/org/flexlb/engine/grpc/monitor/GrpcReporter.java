@@ -37,7 +37,8 @@ public class GrpcReporter {
         this.monitor.register(GRPC_CALL_DURATION, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(GRPC_RESPONSE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(GRPC_CALL_COUNT, FlexMetricType.QPS);
-        this.monitor.register(GRPC_CONNECTION_DURATION, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(
+                GRPC_CONNECTION_DURATION, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
     }
 
     /**
@@ -57,11 +58,10 @@ public class GrpcReporter {
      * @param responseSize Response body size in bytes
      * @param isRetry Whether this is a retry call
      */
-    public void reportCallMetrics(String serviceType, long duration, int responseSize, boolean isRetry) {
-        FlexMetricTags tags = FlexMetricTags.of(
-            "service", serviceType,
-            "retry", String.valueOf(isRetry)
-        );
+    public void reportCallMetrics(
+            String serviceType, long duration, int responseSize, boolean isRetry) {
+        FlexMetricTags tags =
+                FlexMetricTags.of("service", serviceType, "retry", String.valueOf(isRetry));
 
         // Report call duration
         monitor.report(GRPC_CALL_DURATION, tags, duration);
@@ -80,9 +80,7 @@ public class GrpcReporter {
      * @param connectionDuration Connection duration in microseconds
      */
     public void reportConnectionDuration(String serviceType, long connectionDuration) {
-        FlexMetricTags tags = FlexMetricTags.of(
-            "service", serviceType
-        );
+        FlexMetricTags tags = FlexMetricTags.of("service", serviceType);
 
         // Report connection duration
         monitor.report(GRPC_CONNECTION_DURATION, tags, connectionDuration);

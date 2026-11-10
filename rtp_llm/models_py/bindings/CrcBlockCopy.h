@@ -34,6 +34,8 @@ enum class CrcCopyStatus {
     OK,
     INVALID_ARGS,
     CRC_MISMATCH,
+    // Retained for status/dump compatibility; the current CUDA kernel has no
+    // separate compute-error channel and reports mismatches as CRC_MISMATCH.
     CRC_COMPUTE_ERROR,
     DEVICE_ERROR
 };
@@ -43,6 +45,8 @@ struct CrcCopyFailure {
     uint32_t      expected;
     uint32_t      actual;
     CrcCopyStatus status{CrcCopyStatus::CRC_MISMATCH};
+    // Historical nvCOMP status field, kept for dump-format compatibility; the
+    // current kernel always records nvcompSuccess (0).
     int           nvcomp_status{0};
     // Populated only after capture is admitted. CPU is observed after the
     // verdict; GPU contains the exact staging record that was checked.
@@ -57,10 +61,24 @@ using CrcSnapshotCapture = std::function<CrcCopyFailure()>;
 
 // Bounded synchronous CRC32C workspace. max_tiles limits the entire batch.
 // store/load require ordered, gap-free tiles covering exactly payload_bytes.
+// load additionally requires device target spans across items to be disjoint:
+// two items aliasing the same target would race in the scatter instead of
+// failing. store only reads device sources, so aliasing source spans are safe.
+// max_payload_bytes must be <= UINT32_MAX: the kernel's byte counters are
+// 32-bit, so larger capacities are rejected at construction.
 // Host storage must have encodedBytes(payload) capacity.
 // Every pointer must remain live until the method returns. Calls are serialized.
+// The caller must order the workspace after any producer of the device source
+// data (the workspace streams are non-blocking).
+// If CUDA completion cannot be established, the implementation aborts rather
+// than returning while submitted work may still own caller pointers.
+// The workspace must not be destroyed while a call is in progress; teardown
+// only drains best-effort and reports (does not abort on) a CUDA failure.
+// A post-scatter DEVICE_ERROR can lose the per-item verdict; treat the whole
+// batch as uncommitted in that case.
 // A failed store may have written host bytes: callers must not publish them.
-// load verifies ALL items before scattering any item into its device tiles.
+// A failed load may have scattered corrupted bytes into device tiles: callers
+// discard failed items through the reported status instead of adopting them.
 class CrcBlockCopyBatch {
 public:
     CrcBlockCopyBatch(int                            device_index,
@@ -82,11 +100,13 @@ public:
 
     // Explicit GPU allocations owned by this workspace; excludes pinned host and CUDA/nvCOMP internal memory.
     size_t deviceMemoryBytes() const;
+    // Explicit pinned-host allocations owned by this workspace (pack buffers, fold tables, aliases,
+    // results and per-item failure flags); excludes CUDA/allocator internal memory.
+    size_t hostMemoryBytes() const;
 
-    CrcCopyStatus store(const std::vector<CrcCopyItem>& items,
-                        std::vector<CrcCopyFailure>*    failures = nullptr);
-    CrcCopyStatus load(const std::vector<CrcCopyItem>& items,
-                       std::vector<CrcCopyFailure>*    failures = nullptr);
+    // Clears failures on entry, then records per-item CRC mismatches.
+    CrcCopyStatus store(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>& failures);
+    CrcCopyStatus load(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>& failures);
 
 private:
     struct Impl;

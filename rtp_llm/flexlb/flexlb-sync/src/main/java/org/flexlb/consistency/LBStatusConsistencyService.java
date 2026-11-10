@@ -28,8 +28,8 @@ public class LBStatusConsistencyService implements MasterElectService {
     private String roleId;
     private String localHostIp;
 
-    public LBStatusConsistencyService(ZookeeperMasterElectService zookeeperMasterElectService,
-                                      Environment environment) {
+    public LBStatusConsistencyService(
+            ZookeeperMasterElectService zookeeperMasterElectService, Environment environment) {
         this.zookeeperMasterElectService = zookeeperMasterElectService;
         this.environment = environment;
         this.init();
@@ -56,7 +56,6 @@ public class LBStatusConsistencyService implements MasterElectService {
             return;
         }
         log.info("start init ZookeeperMasterElectService.");
-
     }
 
     public void start() {

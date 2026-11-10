@@ -72,7 +72,8 @@ class RecentCacheKeyWindowTest {
         AtomicLong now = new AtomicLong(0L);
         RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 10L, now::get);
 
-        RecentCacheKeyWindow.Snapshot snapshot = window.record(java.util.Arrays.asList(1L, null, 1L));
+        RecentCacheKeyWindow.Snapshot snapshot =
+                window.record(java.util.Arrays.asList(1L, null, 1L));
 
         assertEquals(2L, snapshot.getRequestOccurrences());
         assertEquals(0L, snapshot.getRequestHitOccurrences());

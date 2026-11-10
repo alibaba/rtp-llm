@@ -13,14 +13,17 @@ Built on Spring Boot 2.7.18 with reactive architecture (WebFlux), targeting Java
 FlexLB is a multi-module Maven project with the following structure:
 
 ### flexlb-api
+
 Web layer providing HTTP endpoints and reactive web services. Runs the main Spring Boot application with actuator endpoints for health monitoring and Prometheus metrics.
 
 Key classes:
+
 - `HttpLoadBalanceServer`: Main HTTP service for load balancing requests
 - `HealthCheckServer`: Health check endpoints
 - Configuration: `application.yml` (reactive mode, ports 7001/8803)
 
 New HTTP endpoints in `HttpLoadBalanceServer`:
+
 - `POST /rtp_llm/schedule`: Main load balance endpoint
 - `POST /rtp_llm/master/info`: Get master info
 - `POST /rtp_llm/schedule_snapshot`: Dump LB status
@@ -29,9 +32,11 @@ New HTTP endpoints in `HttpLoadBalanceServer`:
 - `GET /rtp_llm/queue_snapshot`: Get queue snapshot
 
 ### flexlb-common
+
 Shared utilities, data models, exception handling, and common configurations used across all modules.
 
 Key classes:
+
 - `ServerStatus`: Worker node status representation
 - `Request`/`Response`: API request/response models
 - `RoleType`: Enum defining worker roles (PREFILL, DECODE, PDFUSION, VIT, FRONTEND)
@@ -45,12 +50,15 @@ acquisition to endpoint admission or dispatch.
 `RoleType` remains an identity enum and does not own mutable routing policy.
 
 ### flexlb-grpc
+
 gRPC client implementation for model service communication. Contains protocol buffer definitions and generated stubs for communicating with backend AI worker nodes.
 
 ### flexlb-sync
+
 Core load balancing logic, scheduling strategies, and worker status synchronization. This is the heart of the load balancing system.
 
 Key concepts:
+
 - **Routing**: `DefaultRouter` composes the Prefill and Decode cost selectors and the VIT random selector for multi-role requests
 - **Queue-based scheduling**: `RequestScheduler` facade + `GlobalQueueCoordinator` ordered placement owner + per-generation `WorkerBatcher` delivery runtime
 - **Resource measurement**: Endpoint resource views used by routing strategies
@@ -59,6 +67,7 @@ Key concepts:
 - **Graceful lifecycle**: `ApplicationLifecycle` owns the fixed online, health, and shutdown workflow
 
 Queue scheduling components:
+
 - `RequestScheduler`: Public QUEUE submission/cancellation/query facade with no request-state ownership
 - `GlobalQueueCoordinator`: One ordered placement owner per model; bounded planning and endpoint-conflict-aware commit
 - `RequestRegistry`: Canonical owner of request generations, deadlines, cancellation, delivery claims, and publication
@@ -66,15 +75,18 @@ Queue scheduling components:
 - `RouteService`: High-level service that delegates queued work to `RequestScheduler`
 
 Capacity management components:
+
 - Prefill and Decode selection pipelines evaluate immutable full-fleet snapshots.
 - Endpoint admission and dispatch own exact capacity, one-shot permits, and capacity-change signals.
 
 See flexlb-sync/CLAUDE.md for detailed module-specific guidance.
 
 ### flexlb-cache
+
 KV cache management for improving inference performance by tracking and matching cached computation blocks across workers.
 
 Key classes:
+
 - `KvCacheManager`: High-level cache management API
 - `GlobalCacheIndex`: Global hash table for cache block tracking
 - `EngineGeneration`: Exact worker-address and generation identity
@@ -83,6 +95,7 @@ Key classes:
 ## Development Commands
 
 ### Build
+
 ```bash
 # Using Maven Wrapper (recommended)
 ./mvnw clean package -DskipTests
@@ -95,6 +108,7 @@ Key classes:
 ```
 
 ### Run Application
+
 ```bash
 # Run the main application
 java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar \
@@ -110,6 +124,7 @@ java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar \
 ```
 
 ### Testing
+
 ```bash
 # Run all functional tests (performance regressions are excluded)
 ./mvnw test
@@ -131,6 +146,7 @@ java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar \
 ```
 
 ### Code Formatting
+
 ```bash
 # Check code formatting
 ./mvnw spotless:check -Pspotless-check
@@ -140,6 +156,7 @@ java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar \
 ```
 
 ### Build Specific Module
+
 ```bash
 # Build only flexlb-sync
 ./mvnw clean package -pl flexlb-sync -DskipTests
@@ -194,8 +211,8 @@ Scheduling and dispatch are independent tagged choices in `FLEXLB_CONFIG`:
 Every QUEUE combination follows the same lifecycle: `RouteService` submits to
 `RequestScheduler`, `GlobalQueueCoordinator` selects and commits all required
 endpoints once, and the selected Prefill `WorkerBatcher` performs the configured
-  decision-window and delivery. There is no secondary routing queue, earlier-entry
-  scan, or multi-stage placement retry loop. The global decision thread waits only
+decision-window and delivery. There is no secondary routing queue, earlier-entry
+scan, or multi-stage placement retry loop. The global decision thread waits only
 on an exact capacity event or queue mutation; endpoint workers independently wait
 on their delivery-capacity, window, and deadline predicates.
 
@@ -238,18 +255,19 @@ For high availability, FlexLB uses ZooKeeper-based master election:
 FlexLB reads configuration from environment variables:
 
 ### FLEXLB_CONFIG (single public behavior document)
+
 ```json
 {
   "schemaVersion": 3,
   "scheduler": {
     "type": "QUEUE",
-    "ordering": {"type": "FIFO"},
-    "decision": {"type": "SINGLE"}
+    "ordering": { "type": "FIFO" },
+    "decision": { "type": "SINGLE" }
   },
-  "dispatcher": {"type": "NON_BATCH"},
+  "dispatcher": { "type": "NON_BATCH" },
   "requestLifecycle": {
-    "request": {"timeoutMs": 60000},
-    "decision": {"lifetime": 2.0}
+    "request": { "timeoutMs": 60000 },
+    "decision": { "lifetime": 2.0 }
   }
 }
 ```
@@ -272,6 +290,7 @@ On timeout, the incoming request fails with `RESOURCE_EXHAUSTED`; the victim
 reservation remains tracked until authoritative terminal/retirement evidence or request inactivity expiry.
 
 ### MODEL_SERVICE_CONFIG (required)
+
 ```json
 {
   "prefill_endpoint": {
@@ -285,27 +304,32 @@ reservation remains tracked until authoritative terminal/retirement evidence or 
 ```
 
 ### FLEXLB_SYNC_CONSISTENCY_CONFIG (optional, for master election)
+
 ZooKeeper connection configuration for distributed coordination.
 
 ## Important Implementation Details
 
 ### Endpoint Selection
+
 `DefaultRouter` calls the explicit selector for each required role. Prefill and
 Decode selectors consume complete immutable fleet snapshots and return an exact
 generation capability; do not add a second selector pass or endpoint fallback
 after ordered QUEUE commit begins.
 
 ### Rollback Mechanism
+
 When multi-stage routing partially fails, `DefaultRouter` closes the exact
 `SelectedRole` capabilities that were already selected. Direct-placement owners
 also roll back their exact endpoint reservations before returning the failure.
 
 ### Concurrent Data Access
+
 `EndpointRegistry` owns endpoint publication and replacement across sync and
 routing threads. Readers use immutable snapshots and exact generation-fenced
 captures; writers publish status through the endpoint lifecycle transaction.
 
 ### Queue Concurrency
+
 `RequestRegistry` owns request lifecycle. `dispatcher.maxInflightPerPrefillWorker`
 limits batches in BATCH and requests in NON_BATCH / DIRECT, default 2.
 `decision.maxRequests` only controls group size. DIRECT has no queue timer.
@@ -314,15 +338,19 @@ Reservation and release paths must remain idempotent across
 completion, timeout, and cancellation races.
 
 ### BalanceContext Extensions
+
 `BalanceContext` (request state) includes queue-related fields:
+
 - `future`: `CompletableFuture<Response>` for async response
 - `enqueueTime`: Timestamp when request entered queue
 - `schedulingMetadata`: Immutable request id, priority, and absolute expiration metadata
 
 Methods:
+
 - Cancellation and lifecycle state are owned by `RequestRegistry`, keyed by exact request generation rather than request id alone.
 
 ### Reactive Programming
+
 The flexlb-api module uses Spring WebFlux for non-blocking reactive request handling. All HTTP endpoints return `Mono` or `Flux` types.
 
 ## Testing Strategy
@@ -343,6 +371,7 @@ FlexLB provides comprehensive monitoring through Spring Boot Actuator:
 OpenTelemetry integration for distributed tracing (configured via `RTP_LLM_TRACE_CONFIG`).
 
 Monitoring enhancements:
+
 - `BatchSchedulerReporter`: Reports canonical worker-queue size and wait-time metrics
 - `RequestSchedulerReporter`: Reports admission and lifecycle metrics
 
@@ -354,10 +383,12 @@ serving resources. No application request counter or per-request token is used.
 ## Error Types
 
 ### Queue Errors
+
 - `QUEUE_TIMEOUT`: Request waited in queue longer than configured timeout
 - `REQUEST_CANCELLED`: Request cancelled by client or system during queue wait
 
 ### Worker Errors
+
 - `NO_PREFILL_WORKER`: No available Prefill workers
 - `NO_DECODE_WORKER`: No available Decode workers
 - `NO_PDFUSION_WORKER`: No available Pdfusion workers
@@ -384,6 +415,7 @@ Follow Conventional Commits specification:
 Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
 
 Examples:
+
 - `feat(router): add cache-aware routing strategy`
 - `fix(grpc): handle connection timeout gracefully`
 - `refactor(router): simplify role selection`
@@ -410,14 +442,13 @@ The project supports two Maven profiles:
 Most development uses the opensource profile.
 
 ## Important Reminders
+
 1. Do what is asked; no more, no less.
 2. Don't keep reading the file back and forth. If you need to make changes, do it quickly.
 3. Always prefer editing existing files over creating new ones.
-3. Do not proactively create documentation files (*.md) or README files unless explicitly requested.
-4. When fixing issues in code, such as using solution A to fix problem X, don't write comments that explain why solution A was used to fix problem X. Make the code appear as if problem X never existed in the first place. For example, avoid comments like:
-// Request queue (using configured capacity parameter to control queue size, avoiding race conditions)
-private final BlockingDeque<BalanceContext> queue;
+4. Do not proactively create documentation files (\*.md) or README files unless explicitly requested.
+5. When fixing issues in code, such as using solution A to fix problem X, don't write comments that explain why solution A was used to fix problem X. Make the code appear as if problem X never existed in the first place. For example, avoid comments like:
+   // Request queue (using configured capacity parameter to control queue size, avoiding race conditions)
+   private final BlockingDeque<BalanceContext> queue;
 
-The parenthetical content in such comments is unnecessary because it makes readers wonder about a problem X they weren't aware of. The code should look naturally correct from the beginning.
-5. To run Maven commands, use the Maven wrapper from rtp_llm/flexlb directory: `./mvnw`
-6. **IMPORTANT**: Do not repeatedly read the same file multiple times. Once you have sufficient context from a file read, proceed to edit directly. Avoid excessive redundant Read operations on the same file or code snippets.
+The parenthetical content in such comments is unnecessary because it makes readers wonder about a problem X they weren't aware of. The code should look naturally correct from the beginning. 5. To run Maven commands, use the Maven wrapper from rtp_llm/flexlb directory: `./mvnw` 6. **IMPORTANT**: Do not repeatedly read the same file multiple times. Once you have sufficient context from a file read, proceed to edit directly. Avoid excessive redundant Read operations on the same file or code snippets.

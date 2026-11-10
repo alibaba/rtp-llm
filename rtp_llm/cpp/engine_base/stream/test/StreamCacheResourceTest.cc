@@ -5,6 +5,7 @@
 #include "gtest/gtest.h"
 #include "gmock/gmock.h"
 #include <utility>
+#include <tuple>
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "kmonitor/client/core/MetricsData.h"
@@ -1069,28 +1070,38 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_NoContext_ReturnsTrue) {
     ASSERT_TRUE(resource.loadCacheDone());
 }
 
-TEST_F(StreamCacheResourceTest, CacheReuseMetricsAllowMissingWarmupCacheManager) {
-    prepareResourceWithInputTokens(std::vector<int>(32, 1), /*reuse_cache=*/true);
-    stream_->setInitialReuseLength(20);
-    stream_->setHostReuseLength(4);
-    stream_->setDiskReuseLength(6);
-    stream_->setLocalReuseLength(12);
-    stream_->setRemoteReuseLength(8);
-    auto&                 resource = stream_->streamCacheResource();
-    kmonitor::MetricsTags tags;
-    stream_->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
+TEST_F(StreamCacheResourceTest, CacheReuseMetricsSkipWarmupWithoutReporter) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+    stream_->setMetricsReporter(nullptr);
     resource.resource_context_.cache_manager.reset();
 
     resource.reportCacheReuseMetrics();
 
+    EXPECT_FALSE(resource.cache_reuse_metrics_.report_reuse_metrics);
+}
+
+TEST_F(StreamCacheResourceTest, CacheReuseMetricsReportWithoutCacheManager) {
+    prepareResourceWithInputTokens(std::vector<int>(32, 1), /*reuse_cache=*/true);
+    auto&                 resource = stream_->streamCacheResource();
+    kmonitor::MetricsTags tags;
+    stream_->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
+    resource.resource_context_.cache_manager.reset();
+    stream_->setInitialReuseLength(20);
+    stream_->setLocalReuseLength(12);
+    stream_->setHostReuseLength(4);
+    stream_->setDiskReuseLength(6);
+    stream_->setRemoteReuseLength(8);
+
+    resource.reportCacheReuseMetrics();
+
     const auto& metrics = resource.cache_reuse_metrics_;
-    EXPECT_FALSE(metrics.report_reuse_metrics);
+    EXPECT_TRUE(metrics.report_reuse_metrics);
     EXPECT_EQ(metrics.kv_cache_reuse_length, 20);
-    EXPECT_EQ(metrics.writeback_reuse_len, -1);
-    EXPECT_EQ(metrics.device_reuse_length, 2);
-    EXPECT_EQ(metrics.host_reuse_length, 4);
-    EXPECT_EQ(metrics.disk_reuse_length, 6);
-    EXPECT_EQ(metrics.remote_reuse_length, 8);
+    EXPECT_EQ(metrics.stream_cache_device_reuse_length, 2);
+    EXPECT_EQ(metrics.stream_cache_memory_reuse_length, 4);
+    EXPECT_EQ(metrics.stream_cache_disk_reuse_length, 6);
+    EXPECT_EQ(metrics.stream_cache_remote_reuse_length, 8);
 }
 
 TEST_F(StreamCacheResourceTest, CacheReuseMetricsReportWritebackBenefitBeforePrefillAccounting) {
@@ -1152,7 +1163,7 @@ TEST_F(StreamCacheResourceTest, testCacheReuseMetricsKeepBlockAlignedInputLength
     StreamCacheResource& resource = stream_->streamCacheResource();
 
     ASSERT_TRUE(resource.initKVBlock().ok());
-    EXPECT_EQ(resource.cache_reuse_metrics_.block_aligned_input_length, 6);
+    EXPECT_EQ(resource.cache_reuse_metrics_.device_input_length, 6);
     EXPECT_FALSE(resource.cache_reuse_metrics_.report_load_metrics);
     EXPECT_FALSE(resource.cache_reuse_metrics_.load_attempted);
     EXPECT_TRUE(resource.cache_reuse_metrics_.report_match_to_ready_latency);
@@ -1185,7 +1196,7 @@ TEST_F(StreamCacheResourceTest, testCacheLoadLatencySegmentsCoverMatchToReady) {
     ASSERT_TRUE(resource.loadCacheDone());
 
     const RtpLLMCacheReuseMetricsCollector& metrics = resource.cache_reuse_metrics_;
-    EXPECT_TRUE(metrics.report_match_latency);
+    EXPECT_TRUE(metrics.report_match_cost_time);
     EXPECT_TRUE(metrics.report_load_metrics);
     EXPECT_TRUE(metrics.load_success);
     EXPECT_TRUE(metrics.load_attempted);
@@ -1193,7 +1204,7 @@ TEST_F(StreamCacheResourceTest, testCacheLoadLatencySegmentsCoverMatchToReady) {
     EXPECT_TRUE(metrics.report_match_to_ready_latency);
     EXPECT_EQ(metrics.load_prepare_latency_us, result.load_prepare_latency_us);
     EXPECT_GE(metrics.match_to_ready_latency_us,
-              metrics.match_latency_us + metrics.load_prepare_latency_us + metrics.load_wait_latency_us);
+              metrics.match_cost_time_us + metrics.load_prepare_latency_us + metrics.load_wait_latency_us);
 }
 
 TEST_F(StreamCacheResourceTest, testCacheLoadPrepareFailureHasNoWaitLatency) {
@@ -1216,7 +1227,7 @@ TEST_F(StreamCacheResourceTest, testCacheLoadPrepareFailureHasNoWaitLatency) {
     EXPECT_FALSE(metrics.report_load_wait_latency);
     EXPECT_TRUE(metrics.report_match_to_ready_latency);
     EXPECT_EQ(metrics.load_prepare_latency_us, result.load_prepare_latency_us);
-    EXPECT_GE(metrics.match_to_ready_latency_us, metrics.match_latency_us + metrics.load_prepare_latency_us);
+    EXPECT_GE(metrics.match_to_ready_latency_us, metrics.match_cost_time_us + metrics.load_prepare_latency_us);
 }
 
 TEST_F(StreamCacheResourceTest, testCacheLoadFailureKeepsDeviceReuseMetrics) {
@@ -1232,9 +1243,9 @@ TEST_F(StreamCacheResourceTest, testCacheLoadFailureKeepsDeviceReuseMetrics) {
     stream_->setLocalReuseLength(2);
     stream_->setHostReuseLength(0);
     stream_->setDiskReuseLength(0);
-    resource.cache_reuse_metrics_.block_aligned_input_length = 6;
-    resource.load_wait_begin_time_us_                        = currentTimeUs();
-    resource.malloc_begin_time_us_                           = resource.load_wait_begin_time_us_;
+    resource.cache_reuse_metrics_.device_input_length = 6;
+    resource.load_wait_begin_time_us_                 = currentTimeUs();
+    resource.malloc_begin_time_us_                    = resource.load_wait_begin_time_us_;
 
     auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST});
     ASSERT_TRUE(load_context->completeTransfers(1, false));
@@ -1252,19 +1263,11 @@ TEST_F(StreamCacheResourceTest, testCacheLoadFailureKeepsDeviceReuseMetrics) {
     resource.reportCacheReuseMetrics();
 
     const RtpLLMCacheReuseMetricsCollector& metrics = resource.cache_reuse_metrics_;
-    EXPECT_EQ(metrics.block_aligned_input_length, 6);
+    EXPECT_EQ(metrics.device_input_length, 6);
     EXPECT_EQ(metrics.kv_cache_reuse_length, 2);
-    EXPECT_EQ(metrics.device_reuse_length, 2);
-    EXPECT_EQ(metrics.host_reuse_length, 0);
-    EXPECT_EQ(metrics.disk_reuse_length, 0);
-    EXPECT_FALSE(metrics.report_hit_rates);
-    RtpLLMCacheReuseMetricsCollector hit_metrics;
-    ASSERT_TRUE(cache_manager_->collectCacheHitRates(cache_manager_->cache_hit_window_start_ + std::chrono::minutes(1),
-                                                     hit_metrics));
-    EXPECT_FLOAT_EQ(hit_metrics.kv_cache_hit_rate, 100.0f / 3.0f);
-    EXPECT_FLOAT_EQ(hit_metrics.device_hit_rate, 100.0f / 3.0f);
-    EXPECT_FLOAT_EQ(hit_metrics.host_hit_rate, 0.0f);
-    EXPECT_FLOAT_EQ(hit_metrics.disk_hit_rate, 0.0f);
+    EXPECT_EQ(metrics.stream_cache_device_reuse_length, 2);
+    EXPECT_EQ(metrics.stream_cache_memory_reuse_length, 0);
+    EXPECT_EQ(metrics.stream_cache_disk_reuse_length, 0);
     EXPECT_TRUE(metrics.report_reuse_metrics);
     EXPECT_TRUE(metrics.report_load_metrics);
     EXPECT_FALSE(metrics.load_success);
@@ -1608,6 +1611,86 @@ TEST_F(StreamCacheResourceTest, testPrefillAllocatorLoadFailureKeepsDeviceReadyR
     EXPECT_FALSE(stream_->hasError());
 }
 
+TEST_F(StreamCacheResourceTest, testPrefillLoadFailureDetachesSharedSuffix) {
+    for (bool cache_owned : {false, true}) {
+        SCOPED_TRACE(cache_owned);
+        prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
+        auto& resource = stream_->streamCacheResource();
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        auto&      batch    = resource.kvCacheMutable();
+        const auto original = batch.blocks(0, "default");
+        ASSERT_EQ(original.size(), 3u);
+        const auto pool = cache_manager_->coordinator_manager_->groupBlockPools().front();
+        // Keep the device-ready prefix shared; only the writable suffix must detach.
+        pool->incTreeRef(original[0], BlockTreeRefType::CACHE);
+        if (cache_owned) {
+            pool->incTreeRef(original[1], BlockTreeRefType::CACHE);
+        } else {
+            pool->incRef(original[1]);  // Another request joined the failed load.
+        }
+        stream_->setReuseLength(2);
+        stream_->setInitialReuseLength(2);
+        stream_->setLocalReuseLength(2);
+        resource.allocator_load_context_ = std::make_shared<ImmediateAllocatorContext>(false);
+
+        ASSERT_TRUE(resource.loadCacheDone());
+        EXPECT_FALSE(stream_->hasError());
+        EXPECT_EQ(stream_->reuseLength(), 2);
+        const auto replacement = batch.blocks(0, "default")[1];
+        EXPECT_NE(replacement, original[1]);
+        for (int b = 0; b < batch.batchSize(); ++b) {
+            EXPECT_EQ(batch.blocks(b, "default")[0], original[0]);
+            EXPECT_EQ(batch.blocks(b, "default")[1], replacement);
+            EXPECT_EQ(batch.blocks(b, "default")[2], original[2]);
+            EXPECT_EQ(batch.mutableBlockIds(b, "default").kernelBlocks()[1], replacement);
+        }
+        EXPECT_EQ(pool->refCount(original[1]), 1u);
+        EXPECT_EQ(pool->refCount(replacement), batch.batchSize());
+        pool->decTreeRef(original[0], BlockTreeRefType::CACHE);
+        if (cache_owned) {
+            pool->decTreeRef(original[1], BlockTreeRefType::CACHE);
+        } else {
+            pool->decRef(original[1]);
+        }
+        stream_->releaseResource();
+        EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
+    }
+}
+
+TEST_F(StreamCacheResourceTest, testPrefillLoadFailureDetachShortfallRearmsAllocation) {
+    prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    const auto blocks = resource.kvCache().blocks(0, "default");
+    const auto pool   = cache_manager_->coordinator_manager_->groupBlockPools().front();
+    pool->incTreeRef(blocks[1], BlockTreeRefType::CACHE);
+    pool->incTreeRef(blocks[2], BlockTreeRefType::CACHE);
+    // Leave room for only one of the two replacements; the batch cannot fit.
+    auto held_blocks = pool->malloc(pool->freeBlocksNum() - 1);
+    ASSERT_TRUE(held_blocks.has_value());
+    pool->incRef(*held_blocks);
+    stream_->setReuseLength(2);
+    resource.allocator_load_context_ = std::make_shared<ImmediateAllocatorContext>(false);
+    stream_->reportEvent(StreamEvents::CanRun);
+    stream_->reportEvent(StreamEvents::LoadInitiated);
+    stream_->generate_status_->status = StreamState::LOADING_CACHE;
+
+    EXPECT_EQ(stream_->moveToNext(), StreamState::WAITING);
+    EXPECT_FALSE(stream_->hasEvent(StreamEvents::LoadInitiated));
+    EXPECT_FALSE(stream_->hasError());
+    EXPECT_EQ(resource.curBlocksNum(), 0);
+    EXPECT_EQ(stream_->reuseLength(), 0);
+    EXPECT_EQ(resource.mallocFailedTimes(), 1);
+    EXPECT_EQ(pool->refCount(blocks[1]), 1u);
+    EXPECT_EQ(pool->refCount(blocks[2]), 1u);
+    EXPECT_EQ(pool->freeBlocksNum(), 2u);  // Unused free block plus released prefix.
+    pool->decRef(*held_blocks);
+    pool->decTreeRef(blocks[1], BlockTreeRefType::CACHE);
+    pool->decTreeRef(blocks[2], BlockTreeRefType::CACHE);
+    EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
+    ASSERT_TRUE(resource.initKVBlock().ok());
+}
+
 TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocatorLoad) {
     auto backend = prepareStorageBackendResource(/*block_matches=*/false, /*seed_host=*/false, RoleType::PREFILL);
     kmonitor::MetricsTags tags;
@@ -1907,6 +1990,43 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenEnqueuesDecodeDuplicateForSuppr
     EXPECT_EQ(stream_->prefillWritebackFirstUseLength(), 2);
 }
 
+TEST_F(StreamCacheResourceTest, testP2PFirstTokenWithVariableBeamsStartingAtOne) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    stream_->generateConfig()->pd_separation      = true;
+    stream_->generateConfig()->variable_num_beams = {1, 2};
+    ASSERT_FALSE(stream_->usesBeamSearchTokenLayoutForCurrentStep());
+    auto& resource = stream_->streamCacheResource();
+
+    auto matched_resource = std::make_shared<KVCacheResource>();
+    matched_resource->cacheKeys().push_back(1);
+    auto broadcast_result                               = std::make_shared<P2PBroadcastClient::Result>("first-token");
+    auto server_result                                  = std::make_shared<DecodeLoadHelper::Result>();
+    server_result->done_                                = true;
+    server_result->success_                             = true;
+    server_result->side_channel_payload.has_data        = true;
+    server_result->side_channel_payload.has_first_token = true;
+    server_result->side_channel_payload.first_token_id  = 7;
+    auto collector                                      = std::make_shared<P2PConnectorMetricsCollector>();
+    auto context = std::make_shared<P2PConnectorAsyncReadContext>(matched_resource,
+                                                                  broadcast_result,
+                                                                  server_result,
+                                                                  collector,
+                                                                  /*lease_query_timeout_ms=*/0,
+                                                                  /*no_transfer=*/true);
+    context->checkDone();
+    ASSERT_TRUE(context->success());
+    resource.p2p_load_context_ = context;
+
+    const size_t old_seq_length = stream_->seqLength();
+    const size_t old_output_pos = stream_->last_output_pos_;
+    ASSERT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(stream_->seqLength(), old_seq_length + 1);
+    EXPECT_EQ(stream_->last_output_pos_, old_output_pos + 1);
+    EXPECT_EQ(stream_->last_output_pos_, stream_->seqLength());
+    EXPECT_TRUE(stream_->hasOutput());
+    EXPECT_EQ(stream_->completeTokenIdsVec(0).back(), 7);
+}
+
 TEST_F(StreamCacheResourceTest, testP2PDsparkHandoffAcceptsAbsentAndZeroElementTensors) {
     for (int shape_case : {0, 1, 2}) {
         SCOPED_TRACE(shape_case);
@@ -1941,7 +2061,7 @@ TEST_F(StreamCacheResourceTest, testP2PDsparkHandoffAcceptsAbsentAndZeroElementT
 }
 
 TEST_F(StreamCacheResourceTest, testP2PHandoffRejectsIncompleteProposalAndMalformedTensor) {
-    for (int invalid_case : {0, 1, 2}) {
+    for (int invalid_case : {0, 1, 2, 3}) {
         SCOPED_TRACE(invalid_case);
         prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
         stream_->generateConfig()->pd_separation = true;
@@ -1962,12 +2082,17 @@ TEST_F(StreamCacheResourceTest, testP2PHandoffRejectsIncompleteProposalAndMalfor
             auto* tensor = (*payload->mutable_tensors())["propose_hidden"].mutable_tensor();
             tensor->set_data_type(TensorPB::FP16);
             tensor->add_shape(1);
-        } else {
+        } else if (invalid_case == 2) {
             const int32_t token  = 7;
             auto*         tensor = (*payload->mutable_tensors())["propose_tokens"].mutable_tensor();
             tensor->set_data_type(TensorPB::INT32);
             tensor->add_shape(1);
             tensor->set_int32_data(&token, sizeof(token));
+        } else {
+            // First-token output decoding must fail this request, not the engine loop.
+            auto* tensor = (*payload->mutable_tensors())["first_token_hidden_states"].mutable_tensor();
+            tensor->set_data_type(TensorPB::FP16);
+            tensor->add_shape(1);
         }
         completeP2PSideChannel(std::move(response));
         ASSERT_TRUE(stream_->hasError());
@@ -2145,12 +2270,52 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenFinishesSingleTokenRequestAfter
     EXPECT_EQ(stream_->seqLength(), stream_->inputLength() + 1);
 }
 
+TEST_F(StreamCacheResourceTest, testP2PFirstTokenAllowsAbsentPromptScoresForEmptySlice) {
+    autil::EnvGuard real_outputs("PERF_TEST", "0");
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    stream_->generateConfig()->pd_separation        = true;
+    stream_->generateConfig()->return_prompt_logits = true;
+    stream_->generateConfig()->prompt_logits_start  = 1;
+    stream_->generateConfig()->prompt_logits_end    = 1;
+    stream_->generateConfig()->max_new_tokens       = 1;
+    stream_->generate_status_->status               = StreamState::LOADING_CACHE;
+    auto result                                     = std::make_shared<DecodeLoadHelper::Result>();
+    result->side_channel_payload.has_data           = true;
+    result->side_channel_payload.has_first_token    = true;
+    result->side_channel_payload.first_token_id     = 7;
+    result->done_                                   = true;
+    result->success_                                = true;
+    auto context                                    = std::make_shared<P2PConnectorAsyncReadContext>(
+        std::make_shared<KVCacheResource>(),
+        std::make_shared<P2PBroadcastClient::Result>("empty-prompt-scores"),
+        result,
+        std::make_shared<P2PConnectorMetricsCollector>(),
+        0,
+        true);
+    context->checkDone();
+    ASSERT_TRUE(context->success());
+    stream_->streamCacheResource().p2p_load_context_ = context;
+    EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+    ASSERT_FALSE(stream_->hasError());
+    auto output = stream_->nextOutput();
+    ASSERT_TRUE(output.ok());
+    ASSERT_FALSE(output.value().generate_outputs.empty());
+    for (const auto& item : output.value().generate_outputs) {
+        EXPECT_FALSE(item.prompt_logits.has_value());
+    }
+}
+
 TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoad) {
     autil::EnvGuard real_outputs("PERF_TEST", "0");
-    for (const auto& [requested, hybrid] : {std::pair{false, false}, std::pair{true, false},
-                                          std::pair{false, true}, std::pair{true, true}}) {
+    for (const auto& [requested, hybrid, prompt_scores] : {std::tuple{false, false, false},
+                                                           std::tuple{true, false, false},
+                                                           std::tuple{false, true, false},
+                                                           std::tuple{true, true, false},
+                                                           std::tuple{true, false, true},
+                                                           std::tuple{true, true, true}}) {
         for (bool eos : {false, true}) {
-            SCOPED_TRACE(::testing::Message() << "requested=" << requested << ", hybrid=" << hybrid << ", eos=" << eos);
+            SCOPED_TRACE(::testing::Message() << "requested=" << requested << ", hybrid=" << hybrid << ", eos=" << eos
+                                              << ", prompt_scores=" << prompt_scores);
             const std::string key = "first-token-outputs";
             ASSERT_NO_FATAL_FAILURE(prepareP2PRegistrationResource(true, key, hybrid));
             auto&      prefill_connector = *cache_manager_->p2p_connector_->prefill_;
@@ -2175,6 +2340,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
                 config.return_cum_log_probs     = requested;
                 config.return_all_probs         = requested ? ReturnAllProbsMode::DEFAULT : ReturnAllProbsMode::NONE;
                 config.calculate_loss           = requested ? 2 : 0;
+                config.return_prompt_logits     = prompt_scores;
                 ModelConfig model;
                 model.max_seq_len                  = 32;
                 model.vocab_size                   = 16;
@@ -2197,23 +2363,31 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
                 std::vector<MultimodalInput>{MultimodalInput("image", 1), MultimodalInput("video", 2)};
             prefill->generateInput()->multimodal_features =
                 std::vector<torch::Tensor>{torch::zeros({4, 2}), torch::zeros({2, 2})};
-            auto logits     = torch::arange(16, torch::kFloat32).reshape({1, 16});
-            auto hidden     = torch::arange(4, torch::kFloat32).reshape({1, 4});
-            auto all_hidden = torch::arange(24, torch::kFloat32).reshape({6, 4});
-            auto probs      = torch::full({1, 16}, 0.0625f);
-            auto loss       = torch::arange(5, torch::kFloat32);
+            auto               logits     = torch::arange(16, torch::kFloat32).reshape({1, 16});
+            auto               hidden     = torch::arange(4, torch::kFloat32).reshape({1, 4});
+            auto               all_hidden = torch::arange(24, torch::kFloat32).reshape({6, 4});
+            auto               probs      = torch::full({1, 16}, 0.0625f);
+            auto               loss       = torch::arange(5, torch::kFloat32);
+            PromptLogitsOutput scores;
+            scores.topk_logprobs  = torch::arange(6, torch::kFloat32).reshape({3, 2});
+            scores.topk_token_ids = torch::arange(6, torch::kInt32).reshape({3, 2});
+            if (!eos)
+                scores.target_logprobs = torch::arange(3, torch::kFloat32);
+            scores.start_pos        = 1;
+            scores.end_pos          = 4;
             const auto graph_status = eos ? GenerationPrefillCudaGraphStatus::REPLAYED :
                                             GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE;
             prefill->step();
-            prefill->update({.new_tokens                           = torch::tensor({7}, torch::kInt32).reshape({1, 1}),
-                             .num_new_tokens                       = 1,
-                             .hidden_states                        = hidden,
-                             .logits                               = logits,
-                             .softmax_probs                        = torch::full({1, 1}, 0.75f),
-                             .cum_log_probs                        = torch::full({1}, -0.5f),
-                             .all_probs                            = probs,
-                             .loss                                 = requested ? loss : torch::Tensor{},
-                             .all_hidden_states                    = all_hidden,
+            prefill->update({.new_tokens        = torch::tensor({7}, torch::kInt32).reshape({1, 1}),
+                             .num_new_tokens    = 1,
+                             .hidden_states     = hidden,
+                             .logits            = logits,
+                             .softmax_probs     = torch::full({1, 1}, 0.75f),
+                             .cum_log_probs     = torch::full({1}, -0.5f),
+                             .all_probs         = probs,
+                             .loss              = requested ? loss : torch::Tensor{},
+                             .all_hidden_states = all_hidden,
+                             .prompt_logits     = prompt_scores ? std::make_optional(scores) : std::nullopt,
                              .generation_prefill_cuda_graph_status = graph_status});
             ASSERT_FALSE(prefill->hasError());
             PrefillResultStore::SideChannelData published;
@@ -2221,6 +2395,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             EXPECT_EQ(published.first_token_tensors.size(), requested ? 7u : 0u);
             EXPECT_EQ(published.multimodal_lengths, (std::map<int, int>{{1, 4}, {2, 2}}));
             EXPECT_EQ(published.prefill_use_independent_block_pools, hybrid);
+            EXPECT_EQ(published.prompt_logits.has_value(), prompt_scores);
             EXPECT_EQ(published.generation_prefill_cuda_graph_status, static_cast<uint32_t>(graph_status));
             // Reusing executor buffers after publication must not change the payload.
             logits.fill_(-1);
@@ -2228,6 +2403,10 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             all_hidden.fill_(-1);
             probs.fill_(-1);
             loss.fill_(-1);
+            scores.topk_logprobs.fill_(-1);
+            scores.topk_token_ids.fill_(-1);
+            if (scores.target_logprobs.defined())
+                scores.target_logprobs.fill_(-1);
 
             auto result = std::make_shared<DecodeLoadHelper::Result>();
             ASSERT_TRUE(PrefillResultStore::fillStartLoadResponsePayload(published, result->response).ok());
@@ -2255,17 +2434,15 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             const auto& output = output_result.value().generate_outputs.front();
             EXPECT_EQ(output.output_ids.item<int32_t>(), 7);
             EXPECT_EQ(decode->generateInput()->multimodalLengths(), published.multimodal_lengths);
-            const int complete_prefix = (decode->inputLength() - 1)
-                                        / decode->streamCacheResource().reuseBlockTokens()
-                                        * decode->streamCacheResource().reuseBlockTokens();
-            EXPECT_EQ(decode->initialReuseLength(), hybrid ? complete_prefix : local_prefix);
-            EXPECT_EQ(decode->remoteReuseLength(), hybrid ? complete_prefix - local_prefix : 0);
+            // A handoff must retain existing cache hits without counting newly transferred KV.
+            EXPECT_EQ(decode->initialReuseLength(), local_prefix);
+            EXPECT_EQ(decode->remoteReuseLength(), 0);
             EXPECT_EQ(decode->localReuseLength(), local_prefix);
             EXPECT_EQ(decode->prefillTotalReuseLen(), published.total_reuse_len);
             if (requested) {
                 EXPECT_EQ(output.aux_info.multimodal_lengths, published.multimodal_lengths);
             }
-            EXPECT_EQ(output.finished, eos);
+            EXPECT_EQ(output.finished, eos || prompt_scores);
             EXPECT_EQ(decode->prefillUsesIndependentBlockPools(), hybrid);
             EXPECT_EQ(decode->generationPrefillCudaGraphStatus(), graph_status);
             if (requested) {
@@ -2283,10 +2460,24 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             ASSERT_EQ(output.aux_info.softmax_probs.has_value(), requested);
             ASSERT_EQ(output.aux_info.cum_log_probs.has_value(), requested);
             ASSERT_EQ(output.aux_info.all_probs.has_value(), requested);
+            ASSERT_EQ(output.prompt_logits.has_value(), prompt_scores);
             if (requested) {
+                if (prompt_scores) {
+                    const auto& restored = *output.prompt_logits;
+                    EXPECT_EQ(restored.start_pos, 1);
+                    EXPECT_EQ(restored.end_pos, 4);
+                    EXPECT_TRUE(
+                        torch::equal(restored.topk_logprobs, torch::arange(6, torch::kFloat32).reshape({3, 2})));
+                    EXPECT_TRUE(torch::equal(restored.topk_token_ids, torch::arange(6, torch::kInt32).reshape({3, 2})));
+                    EXPECT_EQ(restored.target_logprobs.defined(), !eos);
+                    if (!eos) {
+                        EXPECT_TRUE(torch::equal(restored.target_logprobs, torch::arange(3, torch::kFloat32)));
+                    }
+                }
                 EXPECT_TRUE(torch::equal(*output.logits, torch::tensor({2.f, 0.f}).reshape({1, 2})));
                 EXPECT_TRUE(torch::equal(*output.hidden_states,
-                                         torch::arange(eos ? 2 : 4, torch::kFloat32).reshape({1, eos ? 2 : 4})));
+                                         torch::arange((eos || prompt_scores) ? 2 : 4, torch::kFloat32)
+                                             .reshape({1, (eos || prompt_scores) ? 2 : 4})));
                 EXPECT_TRUE(
                     torch::equal(*output.all_hidden_states, torch::arange(24, torch::kFloat32).reshape({6, 4})));
                 EXPECT_TRUE(torch::equal(*output.loss, torch::arange(5, torch::kFloat32)));
@@ -2294,12 +2485,14 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
                 EXPECT_FLOAT_EQ(output.aux_info.cum_log_probs->item<float>(), -0.5f);
                 EXPECT_TRUE(torch::equal(*output.aux_info.all_probs, torch::full({1, 16}, 0.0625f)));
             }
-            if (!eos) {
+            if (!eos && !prompt_scores) {
                 // Later Decode updates default to NOT_REQUESTED and must retain Prefill's status.
                 decode->step();
                 decode->update({.new_tokens     = torch::tensor({8}, torch::kInt32).reshape({1, 1}),
                                 .num_new_tokens = 1,
-                                .all_probs      = requested ? torch::full({1, 16}, 0.0625f) : torch::Tensor{}});
+                                .softmax_probs  = torch::full({1, 1}, 0.75f),
+                                .cum_log_probs  = torch::full({1}, -0.5f),
+                                .all_probs      = torch::full({1, 16}, 0.0625f)});
                 ASSERT_FALSE(decode->hasError());
                 EXPECT_EQ(decode->generationPrefillCudaGraphStatus(), graph_status);
                 auto next_result = decode->nextOutput();
@@ -2398,6 +2591,24 @@ TEST_F(StreamCacheResourceTest, testCancelCompletionRetainsP2PLeaseProofAfterStr
     stream_->streamCacheResource().p2p_load_context_ = context;
     EXPECT_TRUE(stream_->hasPendingP2PResourceHold());
     stream_->releaseResource();
+    EXPECT_EQ(stream_->streamCacheResource().p2p_load_context_, nullptr);
+    // Clearing the stream's load pointer must not turn an in-flight lease into a release proof.
+    EXPECT_TRUE(stream_->hasPendingP2PResourceHold());
+    context->lease_hold_pending_.store(false);
+    EXPECT_FALSE(stream_->hasPendingP2PResourceHold());
+}
+
+TEST_F(StreamCacheResourceTest, testFailedP2PLoadRetainsPhysicalLeaseProof) {
+    prepareResource(/*reuse_cache=*/false);
+    auto context = std::make_shared<P2PConnectorAsyncReadContext>(
+        std::make_shared<KVCacheResource>(), "cancel-cleanup-lease", nullptr, /*lease_query_timeout_ms=*/1000);
+    context->cancel(nullptr);
+    ASSERT_TRUE(context->done());
+    context->lease_hold_pending_.store(true);
+    stream_->streamCacheResource().p2p_load_context_ = context;
+    EXPECT_TRUE(stream_->hasPendingP2PResourceHold());
+    EXPECT_TRUE(stream_->streamCacheResource().loadCacheDone());
+    EXPECT_TRUE(stream_->hasError());
     EXPECT_EQ(stream_->streamCacheResource().p2p_load_context_, nullptr);
     // Clearing the stream's load pointer must not turn an in-flight lease into a release proof.
     EXPECT_TRUE(stream_->hasPendingP2PResourceHold());

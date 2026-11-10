@@ -25,15 +25,33 @@ class RouteProjectionTest {
 
     @Test
     void unchangedRunningWorkCanReuseItsEarlierClockBase() {
-        WorkSnapshot cached = new WorkSnapshot(13L, List.of(new WorkSnapshot.RequestWork(
-                1L, WorkSnapshot.Phase.ENGINE_RUNNING, 1_000L)), List.of(), 0L);
-        WorkSnapshot current = new WorkSnapshot(20L, List.of(new WorkSnapshot.RequestWork(
-                1L, WorkSnapshot.Phase.ENGINE_RUNNING, 993L)), List.of(), 0L);
+        WorkSnapshot cached =
+                new WorkSnapshot(
+                        13L,
+                        List.of(
+                                new WorkSnapshot.RequestWork(
+                                        1L, WorkSnapshot.Phase.ENGINE_RUNNING, 1_000L)),
+                        List.of(),
+                        0L);
+        WorkSnapshot current =
+                new WorkSnapshot(
+                        20L,
+                        List.of(
+                                new WorkSnapshot.RequestWork(
+                                        1L, WorkSnapshot.Phase.ENGINE_RUNNING, 993L)),
+                        List.of(),
+                        0L);
         assertEquals(
-                RouteProjection.project(new RouteProjection.Inputs(emptyQueue(20L), current),
-                        probe(), new CountingEvaluator(), routeProjection()),
-                RouteProjection.project(new RouteProjection.Inputs(emptyQueue(20L), cached),
-                        probe(), new CountingEvaluator(), routeProjection()));
+                RouteProjection.project(
+                        new RouteProjection.Inputs(emptyQueue(20L), current),
+                        probe(),
+                        new CountingEvaluator(),
+                        routeProjection()),
+                RouteProjection.project(
+                        new RouteProjection.Inputs(emptyQueue(20L), cached),
+                        probe(),
+                        new CountingEvaluator(),
+                        routeProjection()));
     }
 
     @Test
@@ -41,27 +59,24 @@ class RouteProjectionTest {
         RouteProjection.Inputs inputs = inputs(13L);
         CountingEvaluator evaluator = new CountingEvaluator();
 
-        RouteProjection.Candidate result = RouteProjection.project(
-                inputs,
-                probe(),
-                evaluator,
-                routeProjection());
+        RouteProjection.Candidate result =
+                RouteProjection.project(inputs, probe(), evaluator, routeProjection());
 
         assertTrue(result.selectable());
         assertEquals(20L, result.incomingPrefillMs());
         assertTrue(evaluator.invocations() > 0);
 
-        assertThrows(IllegalArgumentException.class,
-                () -> new RouteProjection.Inputs(
-                        emptyQueue(13L), emptyWork(14L)));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new RouteProjection.Inputs(emptyQueue(13L), emptyWork(14L)));
     }
 
     @Test
     void oneCapturedEvaluatorRemainsStableAfterLearningPublishesReplacement() {
         LearningPredictor predictor = new LearningPredictor();
         PrefillTimePredictor.Evaluator captured = predictor.evaluator();
-        PrefillBatchFeatures sample = new PrefillBatchFeatures(List.of(
-                new PrefillBatchFeatures.Item(100L, 0L)));
+        PrefillBatchFeatures sample =
+                new PrefillBatchFeatures(List.of(new PrefillBatchFeatures.Item(100L, 0L)));
         long before = captured.estimateMs(20L, 0L);
 
         for (int sampleIndex = 0; sampleIndex < 4; sampleIndex++) {
@@ -69,50 +84,52 @@ class RouteProjectionTest {
         }
 
         assertNotSame(captured, predictor.evaluator());
-        RouteProjection.Candidate result = RouteProjection.project(
-                inputs(31L),
-                probe(),
-                captured,
-                routeProjection());
+        RouteProjection.Candidate result =
+                RouteProjection.project(inputs(31L), probe(), captured, routeProjection());
         assertTrue(result.selectable());
-        assertEquals(before, captured.estimateMs(20L, 0L),
+        assertEquals(
+                before,
+                captured.estimateMs(20L, 0L),
                 "a projection-owned evaluator cannot change mid-call");
     }
 
     @Test
     void onlyModeledCandidateCarriesKnownTtft() {
-        assertThrows(IllegalArgumentException.class,
-                () -> candidate(RouteProjection.Candidate.State.MODELED,
-                        OptionalLong.empty()));
-        assertThrows(IllegalArgumentException.class,
-                () -> candidate(RouteProjection.Candidate.State.UNAVAILABLE,
-                        OptionalLong.of(1L)));
-        assertThrows(IllegalArgumentException.class,
-                () -> candidate(RouteProjection.Candidate.State.MODELED,
-                        OptionalLong.of(-2L)));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> candidate(RouteProjection.Candidate.State.MODELED, OptionalLong.empty()));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> candidate(RouteProjection.Candidate.State.UNAVAILABLE, OptionalLong.of(1L)));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> candidate(RouteProjection.Candidate.State.MODELED, OptionalLong.of(-2L)));
 
-        RouteProjection.Candidate modeled = candidate(
-                RouteProjection.Candidate.State.MODELED, OptionalLong.of(10L));
-        RouteProjection.Candidate unmodeled = candidate(
-                RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK, OptionalLong.empty());
+        RouteProjection.Candidate modeled =
+                candidate(RouteProjection.Candidate.State.MODELED, OptionalLong.of(10L));
+        RouteProjection.Candidate unmodeled =
+                candidate(
+                        RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK,
+                        OptionalLong.empty());
         assertEquals(10L, modeled.requiredProjectedTtftMs());
         assertTrue(unmodeled.engineWorkUnmodeled());
     }
 
     private static RouteProjection.Candidate candidate(
-            RouteProjection.Candidate.State state,
-            OptionalLong projectedTtftMs) {
+            RouteProjection.Candidate.State state, OptionalLong projectedTtftMs) {
         return new RouteProjection.Candidate(
                 state,
                 projectedTtftMs.orElse(RouteProjection.Candidate.UNKNOWN),
                 0L,
                 RouteProjection.Candidate.InitialHeadDisposition.NONE,
-                state.name(), null, 0L, 0L);
+                state.name(),
+                null,
+                0L,
+                0L);
     }
 
     private static RouteProjection.Inputs inputs(long capturedAtMs) {
-        return new RouteProjection.Inputs(
-                emptyQueue(capturedAtMs), emptyWork(capturedAtMs));
+        return new RouteProjection.Inputs(emptyQueue(capturedAtMs), emptyWork(capturedAtMs));
     }
 
     private static QueueSnapshot emptyQueue(long capturedAtMs) {
@@ -120,32 +137,26 @@ class RouteProjectionTest {
                 capturedAtMs,
                 true,
                 Comparator.comparingLong(GroupPlanner.Item::requestId),
-                new GroupPlanner.Constraints(
-                        1, 1_000_000L, 1_000_000L, 0L, 30L),
+                new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 0L, 30L),
                 List.of(),
                 null);
     }
 
     private static WorkSnapshot emptyWork(long capturedAtMs) {
-        return new WorkSnapshot(
-                capturedAtMs, List.of(), List.of(), 0L);
+        return new WorkSnapshot(capturedAtMs, List.of(), List.of(), 0L);
     }
 
     private static RouteProjection.Probe probe() {
-        return new RouteProjection.Probe(
-                99L, 50, 13L, Long.MAX_VALUE,
-                20L, 0L, 0L);
+        return new RouteProjection.Probe(99L, 50, 13L, Long.MAX_VALUE, 20L, 0L, 0L);
     }
 
     private static RouteProjection.DeliveryProjection routeProjection() {
         return new RouteDeliveryStrategy(
-                Mockito.mock(RequestRegistry.class),
-                Mockito.mock(DeliveryMetrics.class))
+                        Mockito.mock(RequestRegistry.class), Mockito.mock(DeliveryMetrics.class))
                 .projectionPolicy();
     }
 
-    private static final class CountingEvaluator
-            implements PrefillTimePredictor.Evaluator {
+    private static final class CountingEvaluator implements PrefillTimePredictor.Evaluator {
         private final AtomicInteger invocations = new AtomicInteger();
 
         @Override

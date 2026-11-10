@@ -1,14 +1,19 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <mutex>
+#include <numeric>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -19,6 +24,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/models_py/bindings/CrcBlockCopy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcTransferService.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 
 namespace rtp_llm {
 namespace {
@@ -237,6 +243,14 @@ protected:
         }
     }
 
+    void expectScatteredTargets(size_t count) {
+        for (size_t item = 0; item < targets_.size(); ++item) {
+            const auto expected = item < count ? std::vector<uint8_t>(hostData(item), hostData(item) + payload_) :
+                                                 std::vector<uint8_t>(payload_, 0xa5);
+            EXPECT_EQ(readTarget(item), expected) << "item " << item;
+        }
+    }
+
     std::filesystem::path captureDumps(const char* name) {
         const auto root = std::filesystem::path(temp_dir_->path) / name;
         engine_->device_host_executor_->crc_service_ =
@@ -316,7 +330,7 @@ TEST_F(PerRankBlockTransferEngineCrcTest, MixedRpcBatchIsRejectedBeforeCopy) {
     auto topology = makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, payload_),
                                       makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {1}, payload_)});
     group_->initialize(0, topology, {"group0"}, makeTestBackingLayout(payload_, true));
-    auto ordinary = makeTestGroupSet(1, topology, {"group1"}, devices_, host_);
+    auto                           ordinary = makeTestGroupSet(1, topology, {"group1"}, devices_, host_);
     const std::vector<GroupSetPtr> groups{group_, ordinary};
     engine_ = std::make_shared<PerRankBlockTransferEngine>(groups, false, DeviceHostCopyOptions{}, 8, 8, 1);
 
@@ -358,13 +372,13 @@ TEST_F(PerRankBlockTransferEngineCrcTest, CorruptionDumpIncludesPhysicalLayoutAn
     ASSERT_NO_FATAL_FAILURE(initialize(false, false, 3, 1, true));
     ASSERT_TRUE(execute(Tier::DEVICE, Tier::HOST)->success());
     hostData(0)[1] ^= 1;
-    const auto         root = std::filesystem::path(temp_dir_->path) / "diagnostics";
-    CrcTransferService service({group_}, 3, 1, 17, std::make_shared<CrcDumpWriter>(17, root.string()));
+    const auto           root = std::filesystem::path(temp_dir_->path) / "diagnostics";
+    CrcTransferService   service({group_}, 3, 1, 17, std::make_shared<CrcDumpWriter>(17, root.string()));
     const HostBufferView host{hostData(0), payload_, host_->strideBytes()};
     auto                 descriptor = TransferDescriptor::hostToDevice(0, hosts_[0], targets_[0]);
     EXPECT_EQ(service.copy({host}, {descriptor}, {group_.get()}).copy_error, CacheCopyError::CRC_MISMATCH);
 
-    expectUntouchedTargets();
+    expectScatteredTargets(1);
     std::vector<std::filesystem::path> dumps;
     for (const auto& entry : std::filesystem::directory_iterator(root / "rank_17"))
         if (entry.is_directory())
@@ -380,7 +394,9 @@ TEST_F(PerRankBlockTransferEngineCrcTest, CorruptionDumpIncludesPhysicalLayoutAn
                               "\"member_0_tag\": \"group1\"",
                               "\"layout_tile_0_layer_id\": \"1\"",
                               "\"staging_captured\": \"true\"",
-                              "\"output_written\": \"false\""})
+                              "\"output_written\": \"true\"",
+                              "\"tile_copy_stage\": \"scatter_completed\"",
+                              "\"gpu_snapshot_role\": \"checked_source\""})
         EXPECT_NE(manifest.find(field), std::string::npos) << field << "\n" << manifest;
     EXPECT_EQ(std::filesystem::file_size(dumps[0] / "cpu.bin"), encoded_);
     EXPECT_EQ(std::filesystem::file_size(dumps[0] / "gpu_staging.bin"), payload_);
@@ -393,12 +409,12 @@ TEST_F(PerRankBlockTransferEngineCrcTest, CorruptionDumpIncludesPhysicalLayoutAn
     std::ofstream(outside / "keep.bin") << "keep";
     const auto linked = root / "rank_17" / "crc_symlink";
     std::filesystem::create_directory_symlink(outside, linked);
-    const auto old_dump       = dumps.front();
+    const auto         old_dump = dumps.front();
     CrcTransferService rotated_service({group_}, 3, 1, 17, std::make_shared<CrcDumpWriter>(17, root.string(), 1));
-    auto rotated              = TransferDescriptor::hostToDevice(0, hosts_[0], targets_[0]);
+    auto               rotated = TransferDescriptor::hostToDevice(0, hosts_[0], targets_[0]);
     EXPECT_EQ(rotated_service.copy({host}, {rotated}, {group_.get()}).copy_error, CacheCopyError::CRC_MISMATCH);
 
-    expectUntouchedTargets();
+    expectScatteredTargets(1);
     EXPECT_FALSE(std::filesystem::exists(old_dump));
     EXPECT_TRUE(std::filesystem::is_symlink(linked));
     EXPECT_EQ(std::filesystem::file_size(outside / "keep.bin"), 4u);
@@ -416,15 +432,15 @@ TEST_F(PerRankBlockTransferEngineCrcTest, CorruptionDumpIncludesPhysicalLayoutAn
     EXPECT_EQ(read_bytes(dumps[0] / "cpu.bin"), std::vector<uint8_t>(hostData(0), hostData(0) + encoded_));
     EXPECT_EQ(read_bytes(dumps[0] / "gpu_staging.bin"), std::vector<uint8_t>(hostData(0), hostData(0) + payload_));
 
-    // An unavailable dump directory must preserve the CRC result, leave the device
-    // untouched and release the slot for the next operation.
+    // An unavailable dump directory must preserve the CRC result after scatter
+    // and release the slot for the next operation.
     const auto blocked = std::filesystem::path(temp_dir_->path) / "blocked_diagnostics";
     std::ofstream(blocked) << "not a directory";
     CrcTransferService blocked_service({group_}, 3, 1, 17, std::make_shared<CrcDumpWriter>(17, blocked.string()));
-    auto next            = TransferDescriptor::hostToDevice(0, hosts_[0], targets_[0]);
+    auto               next = TransferDescriptor::hostToDevice(0, hosts_[0], targets_[0]);
     EXPECT_EQ(blocked_service.copy({host}, {next}, {group_.get()}).copy_error, CacheCopyError::CRC_MISMATCH);
 
-    expectUntouchedTargets();
+    expectScatteredTargets(1);
     hostData(0)[1] ^= 1;
     auto healthy = TransferDescriptor::hostToDevice(0, hosts_[0], targets_[0]);
     EXPECT_TRUE(blocked_service.copy({host}, {healthy}, {group_.get()}).ok());
@@ -452,7 +468,7 @@ TEST_F(PerRankBlockTransferEngineCrcTest, SlotWriterRotatesCompleteDumpsWithinBa
     EXPECT_EQ(result.block_errors[0], CacheCopyError::CRC_MISMATCH);
     EXPECT_EQ(result.block_errors[1], CacheCopyError::CRC_MISMATCH);
     EXPECT_EQ(result.block_errors[2], CacheCopyError::NOT_EXECUTED);
-    expectUntouchedTargets();
+    expectScatteredTargets(targets_.size());
     // Each failure is dumped; the second completed dump replaces the first.
     expectDump(
         root / "rank_17", std::vector<uint8_t>(hostData(1), hostData(1) + encoded_), {"\"copy_item_index\": \"1\""});
@@ -549,7 +565,7 @@ TEST_F(PerRankBlockTransferEngineCrcTest, PhysicalLayersWithReorderedTagsAndScal
     }
 }
 
-TEST_F(PerRankBlockTransferEngineCrcTest, LastPhysicalLayerCorruptionRejectsWholeBatchBeforeScatter) {
+TEST_F(PerRankBlockTransferEngineCrcTest, LastPhysicalLayerCorruptionRejectsScatteredBatch) {
     ASSERT_NO_FATAL_FAILURE(initialize(false, false, 3, 1, true));
     ASSERT_TRUE(execute(Tier::DEVICE, Tier::HOST)->success());
     // The last byte belongs to a scale buffer absent from this tag's logical spec.
@@ -559,7 +575,7 @@ TEST_F(PerRankBlockTransferEngineCrcTest, LastPhysicalLayerCorruptionRejectsWhol
     EXPECT_EQ(context->result().block_errors,
               (std::vector<CacheCopyError>{
                   CacheCopyError::NOT_EXECUTED, CacheCopyError::NOT_EXECUTED, CacheCopyError::CRC_MISMATCH}));
-    expectUntouchedTargets();
+    expectScatteredTargets(targets_.size());
 }
 
 TEST_F(PerRankBlockTransferEngineCrcTest, FailurePreservesCompletedBatchesAndMarksUnsubmittedBlocks) {
@@ -574,7 +590,7 @@ TEST_F(PerRankBlockTransferEngineCrcTest, FailurePreservesCompletedBatchesAndMar
               (std::vector<CacheCopyError>{
                   CacheCopyError::NONE, CacheCopyError::CRC_MISMATCH, CacheCopyError::NOT_EXECUTED}));
     EXPECT_EQ(readTarget(0), expected_[0]);
-    EXPECT_EQ(readTarget(1), std::vector<uint8_t>(payload_, 0xa5));
+    EXPECT_EQ(readTarget(1), std::vector<uint8_t>(hostData(1), hostData(1) + payload_));
     EXPECT_EQ(readTarget(2), std::vector<uint8_t>(payload_, 0xa5));
 }
 
@@ -625,7 +641,7 @@ TEST_F(PerRankBlockTransferEngineCrcTest, RpcWorkerUsesValidDeviceIndicesWithout
     fillTargets(0xa5);
     hostData(2)[payload_ - 1] ^= 1;
     expectIntegrityFailure(rpcExecute(Tier::HOST, Tier::DEVICE));
-    expectUntouchedTargets();
+    expectScatteredTargets(targets_.size());
 }
 
 TEST_F(PerRankBlockTransferEngineCrcTest, InvalidDeviceIndicesAndMemberCountsNeverWriteTargets) {
@@ -659,21 +675,21 @@ TEST_F(PerRankBlockTransferEngineCrcTest, InvalidDeviceIndicesAndMemberCountsNev
     }
 }
 
-TEST_F(PerRankBlockTransferEngineCrcTest, LastBackingPayloadCorruptionRejectsWholeBatchBeforeScatter) {
+TEST_F(PerRankBlockTransferEngineCrcTest, LastBackingPayloadCorruptionRejectsScatteredBatch) {
     ASSERT_NO_FATAL_FAILURE(initialize());
     ASSERT_TRUE(execute(Tier::DEVICE, Tier::HOST)->success());
     hostData(2)[payload_ - 1] ^= 0x80;
     expectIntegrityFailure(execute(Tier::HOST, Tier::DEVICE));
 
-    expectUntouchedTargets();
+    expectScatteredTargets(targets_.size());
 }
 
-TEST_F(PerRankBlockTransferEngineCrcTest, LastBackingFooterCorruptionRejectsWholeBatchBeforeScatter) {
+TEST_F(PerRankBlockTransferEngineCrcTest, LastBackingFooterCorruptionRejectsScatteredBatch) {
     ASSERT_NO_FATAL_FAILURE(initialize());
     ASSERT_TRUE(execute(Tier::DEVICE, Tier::HOST)->success());
     hostData(2)[encoded_ - 1] ^= 1;
     expectIntegrityFailure(execute(Tier::HOST, Tier::DEVICE));
-    expectUntouchedTargets();
+    expectScatteredTargets(targets_.size());
 }
 
 TEST_F(PerRankBlockTransferEngineCrcTest, EncodedAndDiskPaddingAreOutsideChecksum) {
@@ -721,14 +737,14 @@ TEST_F(PerRankBlockTransferEngineCrcTest, HostDiskPreservesCorruptRecordUntilDev
     }
     EXPECT_FALSE(std::filesystem::exists(dumps));
     expectIntegrityFailure(execute(Tier::HOST, Tier::DEVICE));
-    expectUntouchedTargets();
+    expectScatteredTargets(targets_.size());
     ASSERT_NO_FATAL_FAILURE(
         expectDump(dumps,
                    corrupt,
                    {"\"cpu_backing\": \"memory_pool\"", "\"operation\": \"load\"", "\"direction\": \"HOST->DEVICE\""}));
 }
 
-TEST_F(PerRankBlockTransferEngineCrcTest, DiskCorruptionIsRejectedWithoutDeviceScatter) {
+TEST_F(PerRankBlockTransferEngineCrcTest, DiskCorruptionIsRejectedAfterDeviceScatter) {
     ASSERT_NO_FATAL_FAILURE(initialize());
     ASSERT_TRUE(execute(Tier::DEVICE, Tier::DISK)->success());
     std::vector<uint8_t> raw(disk_->strideBytes());
@@ -741,7 +757,7 @@ TEST_F(PerRankBlockTransferEngineCrcTest, DiskCorruptionIsRejectedWithoutDeviceS
               std::vector<uint8_t>(raw.begin(), raw.begin() + encoded_));
     EXPECT_FALSE(std::filesystem::exists(host_dumps));
     expectIntegrityFailure(execute(Tier::HOST, Tier::DEVICE));
-    expectUntouchedTargets();
+    expectScatteredTargets(targets_.size());
     ASSERT_NO_FATAL_FAILURE(
         expectDump(host_dumps,
                    raw,
@@ -760,7 +776,7 @@ TEST_F(PerRankBlockTransferEngineCrcTest, DiskCorruptionIsRejectedWithoutDeviceS
                   CacheCopyError::NOT_EXECUTED, CacheCopyError::NOT_EXECUTED, CacheCopyError::CRC_MISMATCH}));
     EXPECT_EQ(disk_->readBytes() - read_bytes_before, disks_.size() * disk_->strideBytes());
 
-    expectUntouchedTargets();
+    expectScatteredTargets(targets_.size());
     ASSERT_NO_FATAL_FAILURE(expectDump(device_dumps,
                                        raw,
                                        {"\"cpu_backing\": \"disk_staging_buffer\"",
@@ -770,7 +786,9 @@ TEST_F(PerRankBlockTransferEngineCrcTest, DiskCorruptionIsRejectedWithoutDeviceS
                                         "\"tile_count\": \"8\"",
                                         "\"cpu_captured\": \"true\"",
                                         "\"staging_captured\": \"true\"",
-                                        "\"output_written\": \"false\"",
+                                        "\"output_written\": \"true\"",
+                                        "\"tile_copy_stage\": \"scatter_completed\"",
+                                        "\"gpu_snapshot_role\": \"checked_source\"",
                                         "\"disk_file\": \"" + disk_->filePath() + "\"",
                                         "\"disk_slot\": \"" + std::to_string(disks_[2]) + "\"",
                                         "\"disk_offset\": \"" + std::to_string(disk_->blockOffset(disks_[2])) + "\""}));
@@ -796,7 +814,7 @@ TEST_F(PerRankBlockTransferEngineCrcTest, PayloadSizedHostCapacityCannotHoldFoot
     EXPECT_EQ(engine_, nullptr);
 }
 
-TEST_F(PerRankBlockTransferEngineCrcTest, LargeBatchRoundTripRejectsCorruptionBeforeAnyScatter) {
+TEST_F(PerRankBlockTransferEngineCrcTest, LargeBatchRoundTripRejectsScatteredCorruption) {
     ASSERT_NO_FATAL_FAILURE(initialize(false, false, 32, 256));
     ASSERT_EQ(hosts_.size(), 32u);
     ASSERT_GT(payload_, 16384u);
@@ -813,14 +831,14 @@ TEST_F(PerRankBlockTransferEngineCrcTest, LargeBatchRoundTripRejectsCorruptionBe
     for (size_t item = 0; item < targets_.size(); ++item) {
         EXPECT_EQ(readTarget(item), expected_[item]);
     }
-    // Corrupt payload positions and the stored footer. Even the last
-    // backing's failure must protect the first backing's destination.
+    // Corrupt payload positions and the stored footer. Every item is scattered,
+    // but the failure result prevents the caller from adopting this batch.
     for (size_t offset : {size_t(0), payload_ / 2, payload_ - 1, encoded_ - 1}) {
         SCOPED_TRACE(offset);
         hostData(31)[offset] ^= 0x40;
         fillTargets(0xa5);
         expectIntegrityFailure(execute(Tier::HOST, Tier::DEVICE));
-        expectUntouchedTargets();
+        expectScatteredTargets(targets_.size());
         hostData(31)[offset] ^= 0x40;
         for (size_t item = 0; item < hosts_.size(); ++item) {
             EXPECT_EQ(std::vector<uint8_t>(hostData(item), hostData(item) + encoded_), records[item]);
@@ -854,9 +872,194 @@ TEST_F(PerRankBlockTransferEngineCrcTest, LargeBatchHostDiskPreservesCorruptionU
     }
     fillTargets(0xa5);
     expectIntegrityFailure(execute(Tier::HOST, Tier::DEVICE));
-    expectUntouchedTargets();
+    expectScatteredTargets(targets_.size());
     expectIntegrityFailure(execute(Tier::DISK, Tier::DEVICE));
-    expectUntouchedTargets();
+    expectScatteredTargets(targets_.size());
+}
+
+// DSV4 production shapes contending for 2/4/8 parallel service slots. Each
+// slot owns private streams and staging, so concurrent store->load round-trips
+// from eight threads must stay isolated: with fewer slots than threads the
+// condition-variable wait path is exercised, and every host record, footer,
+// and restored target is re-checked after the threads join. The full shape
+// (62 tiles, 510,912 B) stays on the serial launch path; the prefill shape
+// (85 tiles, 1,235,040 B) crosses the 4 MiB wave threshold at 4 items per
+// batch, so both load paths run under slot contention.
+TEST_F(PerRankBlockTransferEngineCrcTest, MultiSlotParallelDsv4ShapeRoundTripsStayIsolated) {
+    constexpr size_t kItemsPerThread = 4;
+    constexpr size_t kMaxWorkers     = 8;
+    struct Shape {
+        const char*                            name;
+        std::vector<std::pair<size_t, size_t>> layers;
+        size_t                                 tiles;
+    };
+    const auto dsv4Layers = [](bool full) {
+        std::vector<std::pair<size_t, size_t>> layers;
+        if (full) {
+            // 21 scaled layers then 20 kv-only layers: 62 tiles, 510,912 B.
+            layers.insert(layers.end(), 21, std::make_pair<size_t, size_t>(19008, 4224));
+            layers.insert(layers.end(), 20, std::make_pair<size_t, size_t>(1152, 0));
+        } else {
+            // 21 scaled layers, 22 more 18,720 B kv layers, then 21 16,384 B kv
+            // layers: 85 tiles, 1,235,040 B.
+            layers.insert(layers.end(), 21, std::make_pair<size_t, size_t>(18720, 4096));
+            layers.insert(layers.end(), 22, std::make_pair<size_t, size_t>(18720, 0));
+            layers.insert(layers.end(), 21, std::make_pair<size_t, size_t>(16384, 0));
+        }
+        return layers;
+    };
+    const Shape shapes[] = {{"dsv4_full", dsv4Layers(true), 62}, {"dsv4_prefill_cp4", dsv4Layers(false), 85}};
+
+    TempDirGuard slot_dumps("crc_parallel_slots");
+    auto         dump_writer = std::make_shared<CrcDumpWriter>(0, slot_dumps.path, 1);
+    for (const auto& shape : shapes) {
+        payload_ = 0;
+        for (const auto& [kv, scale] : shape.layers) {
+            payload_ += kv + scale;
+        }
+        encoded_ = ((payload_ + 4 + 15) / 16) * 16;
+        layers_  = shape.layers.size();
+        devices_ = {
+            makeTestDevicePool(shape.layers, 2 * kItemsPerThread * kMaxWorkers, "crc_slot_" + std::string(shape.name))};
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        host_ = makeHostPool(payload_, kItemsPerThread * kMaxWorkers, true);
+        std::vector<int> layer_ids(layers_);
+        std::iota(layer_ids.begin(), layer_ids.end(), 0);
+        // The logical spec describes only the first layer; the pool's physical
+        // per-layer geometry is authoritative, as in MTP-style production pools.
+        group_ = makeTestGroupSet(0,
+                                  makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL),
+                                                                      layer_ids,
+                                                                      shape.layers.front().first,
+                                                                      shape.layers.front().second)}),
+                                  {"group0"},
+                                  devices_,
+                                  host_,
+                                  nullptr,
+                                  /*enable_crc=*/true,
+                                  /*physical_payload_bytes=*/payload_);
+        ASSERT_TRUE(group_->crcEnabled());
+        ASSERT_EQ(group_->storageBytes(), encoded_);
+        ASSERT_EQ(getDeviceHostCopyTiles(*group_, std::vector<BlockIdxType>(group_->devicePools().size(), 0)).size(),
+                  shape.tiles);
+
+        sources_.clear();
+        targets_.clear();
+        hosts_.clear();
+        expected_.clear();
+        for (size_t item = 0; item < kItemsPerThread * kMaxWorkers; ++item) {
+            sources_.push_back({allocate(devices_[0])});
+            targets_.push_back({allocate(devices_[0])});
+            hosts_.push_back(allocate(host_));
+            std::vector<uint8_t> expected;
+            for (size_t layer = 0; layer < layers_; ++layer) {
+                const auto buffers = devices_[0]->convertIndexToBuffer(static_cast<int>(layer), sources_[item][0]);
+                for (size_t kind = 0; kind < buffers.size(); ++kind) {
+                    std::vector<uint8_t> bytes(buffers[kind].size_bytes);
+                    for (size_t i = 0; i < bytes.size(); ++i) {
+                        bytes[i] = static_cast<uint8_t>((i * 29 + item * 71 + layer * 17 + kind * 13) & 255);
+                    }
+                    ASSERT_EQ(cudaMemcpy(buffers[kind].addr, bytes.data(), bytes.size(), cudaMemcpyHostToDevice),
+                              cudaSuccess);
+                    expected.insert(expected.end(), bytes.begin(), bytes.end());
+                }
+            }
+            expected_.push_back(std::move(expected));
+        }
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+        for (size_t workers : {2, 4, 8}) {
+            SCOPED_TRACE(::testing::Message() << shape.name << " slots=" << workers);
+            CrcTransferService service({group_}, kItemsPerThread, workers, 0, dump_writer);
+            fillTargets(0xa5);
+            std::vector<std::exception_ptr> failures(kMaxWorkers);
+            std::mutex                      start_mutex;
+            std::condition_variable         start_condition;
+            size_t                          ready  = 0;
+            bool                            start  = false;
+            auto                            worker = [&](size_t thread) {
+                {
+                    std::unique_lock<std::mutex> lock(start_mutex);
+                    ++ready;
+                    start_condition.notify_all();
+                    start_condition.wait(lock, [&] { return start; });
+                }
+                try {
+                    if (cudaSetDevice(0) != cudaSuccess) {
+                        throw std::runtime_error("cudaSetDevice failed");
+                    }
+                    std::vector<HostBufferView>     thread_hosts;
+                    std::vector<TransferDescriptor> thread_descriptors;
+                    std::vector<const GroupSet*>    thread_groups;
+                    for (size_t offset = 0; offset < kItemsPerThread; ++offset) {
+                        const size_t item = thread * kItemsPerThread + offset;
+                        thread_hosts.push_back({hostData(item), payload_, host_->strideBytes()});
+                        thread_descriptors.push_back(TransferDescriptor::deviceToHost(0, sources_[item], hosts_[item]));
+                        thread_groups.push_back(group_.get());
+                    }
+                    if (!service.copy(thread_hosts, thread_descriptors, thread_groups).ok()) {
+                        throw std::runtime_error("concurrent store failed");
+                    }
+                    for (size_t offset = 0; offset < kItemsPerThread; ++offset) {
+                        const size_t item = thread * kItemsPerThread + offset;
+                        thread_descriptors[offset] = TransferDescriptor::hostToDevice(0, hosts_[item], targets_[item]);
+                    }
+                    if (!service.copy(thread_hosts, thread_descriptors, thread_groups).ok()) {
+                        throw std::runtime_error("concurrent load failed");
+                    }
+                    // Each caller owns disjoint targets. A mismatch must release
+                    // its slot and preserve per-item status under contention.
+                    const size_t damaged = thread % kItemsPerThread;
+                    auto*        damaged_host = static_cast<uint8_t*>(thread_hosts[damaged].base);
+                    damaged_host[thread] ^= 1;
+                    const auto rejected = service.copy(thread_hosts, thread_descriptors, thread_groups);
+                    if (rejected.copy_error != CacheCopyError::CRC_MISMATCH
+                        || rejected.block_errors.size() != kItemsPerThread) {
+                        throw std::runtime_error("concurrent mismatch lost its result");
+                    }
+                    for (size_t offset = 0; offset < kItemsPerThread; ++offset) {
+                        const auto expected_error =
+                            offset == damaged ? CacheCopyError::CRC_MISMATCH : CacheCopyError::NOT_EXECUTED;
+                        if (rejected.block_errors[offset] != expected_error) {
+                            throw std::runtime_error("concurrent mismatch changed another item's result");
+                        }
+                    }
+                    damaged_host[thread] ^= 1;
+                    if (!service.copy(thread_hosts, thread_descriptors, thread_groups).ok()) {
+                        throw std::runtime_error("concurrent recovery failed");
+                    }
+                } catch (...) {
+                    failures[thread] = std::current_exception();
+                }
+            };
+            std::vector<std::thread> threads;
+            threads.reserve(kMaxWorkers);
+            for (size_t thread = 0; thread < kMaxWorkers; ++thread) {
+                threads.emplace_back(worker, thread);
+            }
+            {
+                std::unique_lock<std::mutex> lock(start_mutex);
+                start_condition.wait(lock, [&] { return ready == kMaxWorkers; });
+                start = true;
+            }
+            start_condition.notify_all();
+            for (auto& thread : threads) {
+                thread.join();
+            }
+            for (const auto& failure : failures) {
+                if (failure) {
+                    std::rethrow_exception(failure);
+                }
+            }
+            for (size_t item = 0; item < kItemsPerThread * kMaxWorkers; ++item) {
+                EXPECT_EQ(std::vector<uint8_t>(hostData(item), hostData(item) + payload_), expected_[item]);
+                uint32_t footer = 0;
+                std::memcpy(&footer, hostData(item) + encoded_ - sizeof(footer), sizeof(footer));
+                EXPECT_EQ(footer, softwareCrc32c(expected_[item].data(), expected_[item].size()));
+                EXPECT_EQ(readTarget(item), expected_[item]);
+            }
+        }
+    }
 }
 
 }  // namespace

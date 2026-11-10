@@ -32,7 +32,9 @@ public class VitCacheSelector {
 
     private record Placement(WorkerStatus worker, String instance, long expiry) {
         boolean matches(Candidate candidate, long now) {
-            return candidate != null && worker == candidate.worker() && expiry > now
+            return candidate != null
+                    && worker == candidate.worker()
+                    && expiry > now
                     && (instance == null || Objects.equals(instance, candidate.instance()));
         }
     }
@@ -59,7 +61,9 @@ public class VitCacheSelector {
 
     public synchronized ServerStatus select(BalanceContext ctx, String group) {
         var keys = ctx.getRequest().getCacheAffinityKeys();
-        if (keys == null || keys.isEmpty() || keys.size() > 256
+        if (keys == null
+                || keys.isEmpty()
+                || keys.size() > 256
                 || keys.stream().anyMatch(k -> k == null || k.isEmpty() || k.length() > 4096)) {
             return errorStatus(StrategyErrorType.INVALID_REQUEST);
         }
@@ -83,8 +87,12 @@ public class VitCacheSelector {
                     pendingHits++;
                 }
             }
-            MatchScore score = new MatchScore(candidate.hashHits(), candidate.embeddingHits(),
-                    candidate.gpuHits(), pendingHits);
+            MatchScore score =
+                    new MatchScore(
+                            candidate.hashHits(),
+                            candidate.embeddingHits(),
+                            candidate.gpuHits(),
+                            pendingHits);
             int comparison = bestScore == null ? 1 : score.compareTo(bestScore);
             if (comparison > 0) {
                 best.clear();
@@ -99,8 +107,10 @@ public class VitCacheSelector {
         }
         Candidate selected = best.get(ThreadLocalRandom.current().nextInt(best.size()));
         long timeout = ctx.getRequest().getGenerateTimeout();
-        long ttl = timeout <= 0 ? MIN_PENDING_TTL_MS
-                : Math.min(MAX_PENDING_TTL_MS, Math.max(MIN_PENDING_TTL_MS, timeout));
+        long ttl =
+                timeout <= 0
+                        ? MIN_PENDING_TTL_MS
+                        : Math.min(MAX_PENDING_TTL_MS, Math.max(MIN_PENDING_TTL_MS, timeout));
         for (String key : keys) {
             if (!selected.hashKeys().contains(key)) {
                 pending.put(key, new Placement(selected.worker(), selected.instance(), now + ttl));
@@ -122,10 +132,12 @@ public class VitCacheSelector {
         if (selected == null) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
-        try (var pin = workers.captureEndpoint(RoleType.VIT,
-                selected.getServerIp() + ":" + selected.getHttpPort())) {
+        try (var pin =
+                workers.captureEndpoint(
+                        RoleType.VIT, selected.getServerIp() + ":" + selected.getHttpPort())) {
             WorkerStatus worker = pin == null ? null : pin.endpoint().getStatus();
-            if (selected.getRole() != RoleType.VIT || worker == null
+            if (selected.getRole() != RoleType.VIT
+                    || worker == null
                     || (group != null && !Objects.equals(group, worker.getGroup()))
                     || selected.getGrpcPort() != worker.getGrpcPort()
                     || !Objects.equals(selected.getGroup(), worker.getGroup())
@@ -138,12 +150,16 @@ public class VitCacheSelector {
 
     /** Holds the selected endpoint generation through the admission handoff. */
     public synchronized SelectedRole selectPinned(BalanceContext ctx, String group) {
-        ServerStatus result = ctx.getRequest().getSelectedVit() == null ? select(ctx, group) : validate(ctx, group);
+        ServerStatus result =
+                ctx.getRequest().getSelectedVit() == null
+                        ? select(ctx, group)
+                        : validate(ctx, group);
         if (!result.isSuccess()) {
             return null;
         }
-        WorkerEndpoint.GenerationPin pin = workers.captureEndpoint(RoleType.VIT,
-                result.getServerIp() + ":" + result.getHttpPort());
+        WorkerEndpoint.GenerationPin pin =
+                workers.captureEndpoint(
+                        RoleType.VIT, result.getServerIp() + ":" + result.getHttpPort());
         if (pin == null) {
             return null;
         }

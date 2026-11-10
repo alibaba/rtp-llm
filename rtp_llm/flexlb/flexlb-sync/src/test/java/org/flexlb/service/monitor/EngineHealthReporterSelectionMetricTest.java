@@ -24,22 +24,14 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class EngineHealthReporterSelectionMetricTest {
 
-    @Mock
-    private FlexMonitor monitor;
-    @Mock
-    private CacheMetricsReporter cacheMetricsReporter;
-    @Mock
-    private EngineGrpcClient engineGrpcClient;
-    @Mock
-    private LoopResources loopResources;
-    @Mock
-    private EventLoopGroup serverWorker;
-    @Mock
-    private EventLoopGroup serverSelector;
-    @Mock
-    private EventLoopGroup grpcEventLoop;
-    @Mock
-    private WorkerDirectory workerDirectory;
+    @Mock private FlexMonitor monitor;
+    @Mock private CacheMetricsReporter cacheMetricsReporter;
+    @Mock private EngineGrpcClient engineGrpcClient;
+    @Mock private LoopResources loopResources;
+    @Mock private EventLoopGroup serverWorker;
+    @Mock private EventLoopGroup serverSelector;
+    @Mock private EventLoopGroup grpcEventLoop;
+    @Mock private WorkerDirectory workerDirectory;
 
     private EngineHealthReporter reporter;
 
@@ -48,19 +40,29 @@ class EngineHealthReporterSelectionMetricTest {
         when(loopResources.onServer(true)).thenReturn(serverWorker);
         when(loopResources.onServerSelect(true)).thenReturn(serverSelector);
         when(engineGrpcClient.getEventLoopGroup()).thenReturn(grpcEventLoop);
-        reporter = new EngineHealthReporter(
-                monitor, cacheMetricsReporter, engineGrpcClient, loopResources,
-                workerDirectory);
+        reporter =
+                new EngineHealthReporter(
+                        monitor,
+                        cacheMetricsReporter,
+                        engineGrpcClient,
+                        loopResources,
+                        workerDirectory);
     }
 
     @Test
     void registersSelectedPrefillEstimateMetricsAsGauges() {
         reporter.init();
 
-        verify(monitor).register(PREFILL_SELECTED_ESTIMATED_TTFT_MS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        verify(monitor).register(PREFILL_SELECTED_EXECUTION_TIME_MS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        PREFILL_SELECTED_ESTIMATED_TTFT_MS,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(
+                        PREFILL_SELECTED_EXECUTION_TIME_MS,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.PRECISE);
     }
 
     @Test
@@ -68,10 +70,11 @@ class EngineHealthReporterSelectionMetricTest {
         reporter.reportPrefillSelectedEstimates(
                 RoleType.PREFILL, "10.0.0.1", "NON_BATCH", 1_250L, 400L);
 
-        FlexMetricTags tags = FlexMetricTags.of(
-                "engineIp", "10.0.0.1",
-                "role", "PREFILL",
-                "delivery_mode", "NON_BATCH");
+        FlexMetricTags tags =
+                FlexMetricTags.of(
+                        "engineIp", "10.0.0.1",
+                        "role", "PREFILL",
+                        "delivery_mode", "NON_BATCH");
         verify(monitor).report(PREFILL_SELECTED_ESTIMATED_TTFT_MS, tags, 1_250.0);
         verify(monitor).report(PREFILL_SELECTED_EXECUTION_TIME_MS, tags, 400.0);
     }

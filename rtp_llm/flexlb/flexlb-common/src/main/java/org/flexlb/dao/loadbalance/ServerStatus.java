@@ -13,6 +13,7 @@ public class ServerStatus {
     @JsonProperty("worker_generation")
     @JsonInclude(JsonInclude.Include.NON_DEFAULT)
     private long workerGeneration;
+
     @JsonProperty("role")
     private RoleType role;
 
@@ -48,7 +49,6 @@ public class ServerStatus {
 
     @JsonProperty("message")
     private String message;
-
 
     /**
      * Returns an independent copy, or null when the source is null.

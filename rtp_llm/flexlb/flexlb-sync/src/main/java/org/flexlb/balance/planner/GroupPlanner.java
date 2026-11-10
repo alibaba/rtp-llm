@@ -37,8 +37,7 @@ public final class GroupPlanner {
                 }
             };
 
-    private GroupPlanner() {
-    }
+    private GroupPlanner() {}
 
     /**
      * Immutable input suitable for route-time projection. Ordering fields are
@@ -56,22 +55,16 @@ public final class GroupPlanner {
 
         public Item {
             if (seqLen < 0L) {
-                throw new IllegalArgumentException(
-                        "seqLen must be non-negative");
+                throw new IllegalArgumentException("seqLen must be non-negative");
             }
             if (hitCache < 0L || hitCache > seqLen) {
-                throw new IllegalArgumentException(
-                        "hitCache must be in [0, seqLen]");
+                throw new IllegalArgumentException("hitCache must be in [0, seqLen]");
             }
         }
     }
 
     /** Compute and KV resource shape of one planned group. */
-    public record Shape(
-            int size,
-            long maxSeqLen,
-            long paddedTokens,
-            long kvTokens) {
+    public record Shape(int size, long maxSeqLen, long paddedTokens, long kvTokens) {
 
         public static Shape empty() {
             return new Shape(0, 0L, 0L, 0L);
@@ -93,16 +86,14 @@ public final class GroupPlanner {
         }
 
         public boolean fitsKv(long capacity) {
-            return capacity == Long.MAX_VALUE
-                    || (capacity >= 0L && kvTokens <= capacity);
+            return capacity == Long.MAX_VALUE || (capacity >= 0L && kvTokens <= capacity);
         }
 
         private static long saturatedMultiply(long value, int multiplier) {
             if (value == 0L || multiplier == 0) {
                 return 0L;
             }
-            return value > Long.MAX_VALUE / multiplier
-                    ? Long.MAX_VALUE : value * multiplier;
+            return value > Long.MAX_VALUE / multiplier ? Long.MAX_VALUE : value * multiplier;
         }
     }
 
@@ -123,8 +114,7 @@ public final class GroupPlanner {
 
         public Constraints {
             if (maxRequests < 1) {
-                throw new IllegalArgumentException(
-                        "maxRequests must be positive");
+                throw new IllegalArgumentException("maxRequests must be positive");
             }
         }
     }
@@ -177,7 +167,10 @@ public final class GroupPlanner {
             ItemAccess<T> access,
             Constraints constraints,
             ToDoubleFunction<List<T>> predictor) {
-        return selectWithPrediction(orderedItems, access, constraints,
+        return selectWithPrediction(
+                orderedItems,
+                access,
+                constraints,
                 predictor == null ? null : (added, prefix) -> predictor.applyAsDouble(prefix));
     }
 
@@ -192,12 +185,14 @@ public final class GroupPlanner {
     }
 
     public static <T> Selection<T> selectWithPrediction(
-            Iterable<T> orderedItems, ItemAccess<T> access, Constraints constraints,
+            Iterable<T> orderedItems,
+            ItemAccess<T> access,
+            Constraints constraints,
             PrefixPrediction<T> predictor) {
         Iterator<T> ordered = orderedItems.iterator();
         if (!ordered.hasNext()) {
-            return new Selection<>(List.of(), Shape.empty(),
-                    Long.MAX_VALUE, false, OptionalDouble.empty());
+            return new Selection<>(
+                    List.of(), Shape.empty(), Long.MAX_VALUE, false, OptionalDouble.empty());
         }
 
         int maxRequests = constraints.maxRequests();
@@ -215,17 +210,19 @@ public final class GroupPlanner {
         long paddedTokens = headTokens;
         long kvTokens = headTokens;
         long windowOpenedAtMs = access.enqueuedAtMs(head);
-        boolean predictionEnabled = predictor != null
-                && constraints.predictedExecutionBudgetMs() > 0L;
+        boolean predictionEnabled =
+                predictor != null && constraints.predictedExecutionBudgetMs() > 0L;
         double selectedPredictionMs = 0.0;
         boolean predictionBoundaryTriggered = false;
         if (predictionEnabled) {
             selectedPredictionMs = requireValidPrediction(predictor.append(head, picked));
-            predictionBoundaryTriggered = predictionDispatchBoundaryReached(
-                    selectedPredictionMs, constraints.predictedExecutionBudgetMs());
+            predictionBoundaryTriggered =
+                    predictionDispatchBoundaryReached(
+                            selectedPredictionMs, constraints.predictedExecutionBudgetMs());
         }
 
-        while (mayGrow && ordered.hasNext()
+        while (mayGrow
+                && ordered.hasNext()
                 && picked.size() < maxRequests
                 && !predictionBoundaryTriggered) {
             T item = ordered.next();
@@ -239,7 +236,7 @@ public final class GroupPlanner {
             }
             if (constraints.batchKvCapacity() != Long.MAX_VALUE
                     && (constraints.batchKvCapacity() < 0L
-                        || nextKvTokens > constraints.batchKvCapacity())) {
+                            || nextKvTokens > constraints.batchKvCapacity())) {
                 break;
             }
 
@@ -255,8 +252,9 @@ public final class GroupPlanner {
                     break;
                 }
                 selectedPredictionMs = predictedMs;
-                predictionBoundaryTriggered = predictionDispatchBoundaryReached(
-                        predictedMs, constraints.predictedExecutionBudgetMs());
+                predictionBoundaryTriggered =
+                        predictionDispatchBoundaryReached(
+                                predictedMs, constraints.predictedExecutionBudgetMs());
             }
             maxSeqLen = nextMaxSeqLen;
             paddedTokens = nextPaddedTokens;
@@ -264,19 +262,22 @@ public final class GroupPlanner {
             windowOpenedAtMs = Math.min(windowOpenedAtMs, access.enqueuedAtMs(item));
         }
 
-        return new Selection<>(picked,
-                new Shape(picked.size(), maxSeqLen, paddedTokens, kvTokens), windowOpenedAtMs,
+        return new Selection<>(
+                picked,
+                new Shape(picked.size(), maxSeqLen, paddedTokens, kvTokens),
+                windowOpenedAtMs,
                 predictionBoundaryTriggered,
-                predictionEnabled ? OptionalDouble.of(selectedPredictionMs) : OptionalDouble.empty());
+                predictionEnabled
+                        ? OptionalDouble.of(selectedPredictionMs)
+                        : OptionalDouble.empty());
     }
 
     /** Evaluate one selection against an explicit clock value. */
     public static <T> Plan<T> evaluateReadiness(
-            Selection<T> selection,
-            Constraints constraints,
-            long nowMs) {
-        long deadlineMs = collectionDeadlineMs(
-                selection.windowOpenedAtMs(), constraints.collectionWindowMs());
+            Selection<T> selection, Constraints constraints, long nowMs) {
+        long deadlineMs =
+                collectionDeadlineMs(
+                        selection.windowOpenedAtMs(), constraints.collectionWindowMs());
         String reason = null;
         if (selection.predictionBoundaryTriggered()) {
             reason = PREDICTED_EXECUTION_CAP;
@@ -288,9 +289,13 @@ public final class GroupPlanner {
             reason = FIXED_WINDOW_TIMEOUT;
         }
         return new Plan<>(
-                selection.items(), selection.shape(), selection.windowOpenedAtMs(),
-                deadlineMs, selection.predictionBoundaryTriggered(),
-                selection.selectedPredictionMs(), reason);
+                selection.items(),
+                selection.shape(),
+                selection.windowOpenedAtMs(),
+                deadlineMs,
+                selection.predictionBoundaryTriggered(),
+                selection.selectedPredictionMs(),
+                reason);
     }
 
     /** Convenience entry point for projections whose clock is already frozen. */
@@ -304,30 +309,26 @@ public final class GroupPlanner {
                 select(orderedItems, access, constraints, predictor), constraints, nowMs);
     }
 
-    public static boolean windowElapsed(long windowOpenedAtMs,
-                                        long nowMs,
-                                        long collectionWindowMs) {
+    public static boolean windowElapsed(
+            long windowOpenedAtMs, long nowMs, long collectionWindowMs) {
         long boundedWindowMs = Math.max(0L, collectionWindowMs);
         return windowOpenedAtMs != Long.MAX_VALUE
                 && nowMs >= windowOpenedAtMs
                 && nowMs - windowOpenedAtMs >= boundedWindowMs;
     }
 
-    public static long collectionDeadlineMs(
-            long windowOpenedAtMs, long collectionWindowMs) {
+    public static long collectionDeadlineMs(long windowOpenedAtMs, long collectionWindowMs) {
         return saturatedAdd(windowOpenedAtMs, Math.max(0L, collectionWindowMs));
     }
 
-    private static boolean predictionGrowthLimitExceeded(double predictedMs,
-                                                          long thresholdMs) {
+    private static boolean predictionGrowthLimitExceeded(double predictedMs, long thresholdMs) {
         return predictedMs > thresholdMs;
     }
 
     private static void validateSelectedPrediction(
             List<?> items, OptionalDouble selectedPredictionMs) {
         if (items.isEmpty() && selectedPredictionMs.isPresent()) {
-            throw new IllegalArgumentException(
-                    "empty decision group cannot carry a prediction");
+            throw new IllegalArgumentException("empty decision group cannot carry a prediction");
         }
         if (selectedPredictionMs.isPresent()) {
             requireValidPrediction(selectedPredictionMs.getAsDouble());
@@ -336,20 +337,16 @@ public final class GroupPlanner {
 
     private static double requireValidPrediction(double predictedMs) {
         if (!Double.isFinite(predictedMs) || predictedMs < 0.0d) {
-            throw new IllegalArgumentException(
-                    "group prediction must be finite and non-negative");
+            throw new IllegalArgumentException("group prediction must be finite and non-negative");
         }
         return predictedMs;
     }
 
-    private static boolean predictionDispatchBoundaryReached(double predictedMs,
-                                                              long thresholdMs) {
+    private static boolean predictionDispatchBoundaryReached(double predictedMs, long thresholdMs) {
         return predictedMs >= thresholdMs;
     }
 
     private static long saturatedAdd(long left, long right) {
-        return right > 0L && left > Long.MAX_VALUE - right
-                ? Long.MAX_VALUE : left + right;
+        return right > 0L && left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
     }
-
 }

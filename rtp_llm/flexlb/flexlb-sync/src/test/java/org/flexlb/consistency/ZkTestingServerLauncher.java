@@ -32,8 +32,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public final class ZkTestingServerLauncher {
 
-    private ZkTestingServerLauncher() {
-    }
+    private ZkTestingServerLauncher() {}
 
     public static void main(String[] args) {
         int port = parsePort(args);
@@ -54,17 +53,18 @@ public final class ZkTestingServerLauncher {
         }
 
         AtomicBoolean stopped = new AtomicBoolean(false);
-        Runnable stopOnce = () -> {
-            if (stopped.compareAndSet(false, true)) {
-                try {
-                    server.stop();
-                } catch (Exception ignored) {
-                    // best effort
-                }
-                System.out.println("ZK_STOPPED");
-                System.out.flush();
-            }
-        };
+        Runnable stopOnce =
+                () -> {
+                    if (stopped.compareAndSet(false, true)) {
+                        try {
+                            server.stop();
+                        } catch (Exception ignored) {
+                            // best effort
+                        }
+                        System.out.println("ZK_STOPPED");
+                        System.out.flush();
+                    }
+                };
         Runtime.getRuntime().addShutdownHook(new Thread(stopOnce, "zk-launcher-stop"));
 
         System.out.println("ZK_READY " + server.getConnectString());

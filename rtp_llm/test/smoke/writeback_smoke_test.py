@@ -186,12 +186,13 @@ class WritebackSmokeTest(unittest.TestCase):
             {"prefill": ["WORLD_SIZE=2"], "decode": ["WORLD_SIZE=2"]},
             "",
         )
-        runner._keepalive_enabled = Mock(return_value=False)
         runner.start_servers_parallel = Mock(return_value=(
             [self.decode, self.prefill], [TaskStates(), TaskStates()]
         ))
         runner.curl_server = Mock(return_value=TaskStates())
-        with patch("smoke.multi_inst_case_runner.get_gpu_ids", return_value=[0, 1, 2, 3]):
+        with patch("smoke.multi_inst_case_runner.get_gpu_ids", return_value=[0, 1, 2, 3]), \
+             patch("smoke.multi_inst_case_runner._wait_tcp_port_ready") as ready, \
+             patch.dict(os.environ, {"SMOKE_KEEP_SERVER_ALIVE": "False"}):
             with patch("smoke.multi_inst_case_runner.MagaServerManager.get_free_port",
                        side_effect=["12346", "12345"]):
                 self.assertTrue(runner.run().ret)
@@ -199,8 +200,9 @@ class WritebackSmokeTest(unittest.TestCase):
             "prefill": self.prefill, "decode": self.decode
         })
         runner.curl_server.assert_called_once_with(self.decode)
-        self.prefill.stop_server.assert_called_once_with()
-        self.decode.stop_server.assert_called_once_with()
+        self.assertEqual(ready.call_count, 4)
+        self.prefill.stop_server.assert_called_with()
+        self.decode.stop_server.assert_called_with()
 
     def test_fixture_reuses_generated_tokens_and_excludes_last_sample(self):
         first, wait, followup = self.fixture["query_result"]

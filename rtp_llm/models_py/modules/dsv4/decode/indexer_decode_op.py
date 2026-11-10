@@ -43,19 +43,31 @@ from rtp_llm.models_py.modules.dsv4.indexer_topk import (
     select_indexer_topk,
 )
 
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
+    deepgemm_supports_block_kv,
+)
+
 try:
     import deep_gemm
 except Exception:  # pragma: no cover - non-cuda env
     deep_gemm = None  # type: ignore[assignment]
 
 
-def _fast_path_available() -> bool:
-    return (
+def _fast_path_available(device=None, block_kv=None) -> bool:
+    """Whether the DeepGEMM paged fast path can serve this device/block.
+
+    Shares the block-size contract with ``fp8_paged_indexer_score`` (SM90/SM100
+    accept ``block_kv == 64``; SM100 additionally accepts 32), so the decode op
+    and the indexer score wrapper cannot drift apart.
+    """
+    if not (
         torch.cuda.is_available()
         and deep_gemm is not None
         and hasattr(deep_gemm, "fp8_paged_mqa_logits")
         and hasattr(deep_gemm, "get_paged_mqa_logits_metadata")
-    )
+    ):
+        return False
+    return block_kv is None or deepgemm_supports_block_kv(device, block_kv)
 
 
 _USE_DEEP_GEMM_FAST_PATH = (
@@ -63,7 +75,7 @@ _USE_DEEP_GEMM_FAST_PATH = (
 )
 
 
-def _fast_path_unavailable_reason(q_indexer: torch.Tensor) -> str:
+def _fast_path_unavailable_reason(q_indexer: torch.Tensor, block_kv=None) -> str:
     if not q_indexer.is_cuda:
         return f"q_indexer is on {q_indexer.device}, expected CUDA"
     if not torch.cuda.is_available():
@@ -77,6 +89,13 @@ def _fast_path_unavailable_reason(q_indexer: torch.Tensor) -> str:
     ]
     if missing:
         return f"deep_gemm missing required symbols: {missing}"
+    if block_kv is not None and not deepgemm_supports_block_kv(
+        q_indexer.device, block_kv
+    ):
+        return (
+            f"deep_gemm paged MQA logits does not accept block_kv={block_kv} on "
+            f"capability {torch.cuda.get_device_capability(q_indexer.device)}"
+        )
     return "unknown"
 
 
@@ -161,10 +180,14 @@ class IndexerDecodeV4Op:
         assert out_buffer.dtype == torch.int32, "out_buffer must be int32"
 
         if (not force_reference) and _USE_DEEP_GEMM_FAST_PATH:
-            if not _fast_path_available() or not q_indexer.is_cuda:
+            if (
+                not _fast_path_available(q_indexer.device, self.page_block_size)
+                or not q_indexer.is_cuda
+            ):
                 raise RuntimeError(
                     "DSV4 indexer decode fast path is required by default but "
-                    f"is unavailable: {_fast_path_unavailable_reason(q_indexer)}. "
+                    "is unavailable: "
+                    f"{_fast_path_unavailable_reason(q_indexer, self.page_block_size)}. "
                     "Set RTP_LLM_DSV4_INDEXER_DECODE_FAST_PATH=0 or pass "
                     "force_reference=True for explicit reference execution."
                 )

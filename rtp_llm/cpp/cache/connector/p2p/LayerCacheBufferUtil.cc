@@ -138,7 +138,35 @@ LayerCacheBufferUtil::convertLayerTag(KVCacheResource& resource,
             }
         }
     }
-    return convertLayerTagForRoute(resource, group, layer_id, positions, cp_rank, cp_size, cache_key_tokens_per_block);
+    try {
+        const auto& blocks = resource.blocksForLayer(layer_id, group.tag);
+        const bool state_group = group.policy.group_type != CacheGroupType::FULL;
+        const auto state_slots = state_group ? stateProjection(group, count, cache_key_tokens_per_block) :
+                                               std::map<size_t, size_t>{};
+        std::vector<size_t> available;
+        for (size_t pos : positions) {
+            std::optional<size_t> physical;
+            if (state_group) {
+                const auto it = state_slots.find(pos);
+                if (it != state_slots.end()) {
+                    physical = it->second;
+                }
+            } else {
+                physical = CPSlotMapper::physicalBlockPosition(group.policy, pos, count, cp_rank, cp_size);
+            }
+            if (!physical || *physical >= blocks.size()) {
+                return conversionError(context + ": physical block position out of range");
+            }
+            // Inventory publishes only available blocks; required routes remain strict below.
+            if (!isNullBlockIdx(blocks[*physical])) {
+                available.push_back(pos);
+            }
+        }
+        return convertLayerTagForRoute(
+            resource, group, layer_id, available, cp_rank, cp_size, cache_key_tokens_per_block);
+    } catch (const std::exception& error) {
+        return conversionError(context + ": " + error.what());
+    }
 }
 
 ErrorResult<std::shared_ptr<LayerCacheBuffer>>

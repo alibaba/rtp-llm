@@ -11,6 +11,30 @@ from torch.distributed import ProcessGroup
 
 MiB = 1024 * 1024
 
+
+def _rendezvous_with_short_socket_path(buffer, group_name):
+    # PyTorch 2.11 IpcChannel uses the first configured temporary directory.
+    tmp_dir = next(
+        (
+            os.environ[key]
+            for key in ("TMPDIR", "TMP", "TEMP", "TEMPDIR")
+            if key in os.environ
+        ),
+        "/tmp",
+    )
+    if len(os.fsencode(f"{tmp_dir}/symm_mem-{os.getpid()}")) < 108:
+        return torch_symm_mem.rendezvous(buffer, group=group_name)
+    previous_tmpdir = os.environ.get("TMPDIR")
+    os.environ["TMPDIR"] = "/tmp"
+    try:
+        return torch_symm_mem.rendezvous(buffer, group=group_name)
+    finally:
+        if previous_tmpdir is None:
+            os.environ.pop("TMPDIR", None)
+        else:
+            os.environ["TMPDIR"] = previous_tmpdir
+
+
 TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
     9: {
         2: 64 * MiB,  # 64 MB
@@ -196,7 +220,7 @@ class TorchSymmMemCommunicator:
             self.disabled = True
             return
 
-        handle = torch_symm_mem.rendezvous(self.buffer, group=self.group.group_name)
+        handle = _rendezvous_with_short_socket_path(self.buffer, self.group.group_name)
 
         # The post-rendezvous checks are local verdicts too. If they split the
         # group, some ranks would call multimem_all_reduce_ while others fall

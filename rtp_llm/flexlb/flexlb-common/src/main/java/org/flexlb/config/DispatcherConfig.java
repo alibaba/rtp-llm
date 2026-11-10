@@ -18,6 +18,7 @@ public final class DispatcherConfig {
 
     private Type type = Type.BATCH;
     private int maxInflightPerPrefillWorker = DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER;
+
     /** BATCH only: engine wait for FetchResponse attachment, not generation duration. */
     private int fetchAttachTimeoutMs = DEFAULT_FETCH_ATTACH_TIMEOUT_MS;
 
@@ -43,12 +44,12 @@ public final class DispatcherConfig {
             throw new ConfigValidationException("dispatcher.type", "DIRECT requires NON_BATCH");
         }
         if (maxInflightPerPrefillWorker <= 0) {
-            throw new ConfigValidationException("dispatcher.maxInflightPerPrefillWorker",
-                    "must be greater than zero");
+            throw new ConfigValidationException(
+                    "dispatcher.maxInflightPerPrefillWorker", "must be greater than zero");
         }
         if (fetchAttachTimeoutMs <= 0) {
-            throw new ConfigValidationException("dispatcher.fetchAttachTimeoutMs",
-                    "must be greater than zero");
+            throw new ConfigValidationException(
+                    "dispatcher.fetchAttachTimeoutMs", "must be greater than zero");
         }
     }
 }

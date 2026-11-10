@@ -1,5 +1,14 @@
 """UT for DeepGEMM FP8 non-paged indexer score path (prefill).
 
+Path coverage: every case executes on any CUDA device — the shared
+``supports_mqa_logits`` predicate decides which kernel serves it: DeepGEMM
+``fp8_mqa_logits`` when the installed wheel accepts the group-128 legacy call
+on this device, the Triton fallback otherwise (e.g. SM100 with DeepGEMM
+>= 2.8.1). Each case pins the path with a call counter (DeepGEMM calls ==
+number of wrapper invocations when the predicate is true; fallback calls ==
+the same when it is false), so the numeric assertions stay honest about which
+kernel produced the numbers.
+
 End-to-end equivalence check (mirrors decode UT):
 
     bf16 reference (v4_indexer_score on dequantized K) ≈
@@ -21,9 +30,13 @@ Run:
 
 from __future__ import annotations
 
+import contextlib
+import logging
+
 import torch
 
 from rtp_llm.models_py.modules.dsv4._indexer_score_triton import v4_indexer_score
+from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score as _indexer_score_mod
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_gather_triton import (
     gather_indexer_k_for_prefill,
 )
@@ -38,8 +51,74 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     fp8_mqa_indexer_score,
-    has_fp8_mqa_logits,
+    supports_mqa_logits,
 )
+from rtp_llm.models_py.triton_kernels import (
+    legacy_fp8_indexer_score as _legacy_fallback_mod,
+)
+
+
+class _CountingDeepGemm:
+    """Delegate to DeepGEMM while counting the non-paged entry point."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.mqa = 0
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def fp8_mqa_logits(self, *args, **kwargs):
+        self.mqa += 1
+        return self._inner.fp8_mqa_logits(*args, **kwargs)
+
+
+@contextlib.contextmanager
+def _count_mqa_dispatch():
+    """Count DeepGEMM vs Triton-fallback calls around the wrapper invocations.
+
+    ``fp8_mqa_indexer_score`` resolves ``_deep_gemm`` and the fallback symbol at
+    call time, so swapping both handles proves which path the shared predicate
+    selected and that the case really executed on a kernel.
+    """
+    inner = _indexer_score_mod._deep_gemm
+    counted = _CountingDeepGemm(inner)
+    fallback = {"calls": 0}
+    original_fallback = _legacy_fallback_mod.legacy_fp8_mqa_logits
+
+    def _counted_fallback(*args, **kwargs):
+        fallback["calls"] += 1
+        return original_fallback(*args, **kwargs)
+
+    _indexer_score_mod._deep_gemm = counted
+    _legacy_fallback_mod.legacy_fp8_mqa_logits = _counted_fallback
+    try:
+        yield counted, fallback
+    finally:
+        _indexer_score_mod._deep_gemm = inner
+        _legacy_fallback_mod.legacy_fp8_mqa_logits = original_fallback
+
+
+def _assert_mqa_path(counted, fallback, expected_calls: int) -> None:
+    """DeepGEMM-path assertion: the dispatch must match the shared predicate.
+
+    Predicate true → the numeric assertions above ran on DeepGEMM and the
+    entry point was called ``expected_calls`` times; predicate false → they ran
+    on the Triton fallback instead.
+    """
+    expects_deepgemm = supports_mqa_logits(torch.device("cuda"))
+    expected_deepgemm = expected_calls if expects_deepgemm else 0
+    expected_fallback = 0 if expects_deepgemm else expected_calls
+    assert counted.mqa == expected_deepgemm, (
+        f"expected {expected_deepgemm} deep_gemm.fp8_mqa_logits call(s) "
+        f"(predicate says DeepGEMM={expects_deepgemm}), got {counted.mqa} — "
+        "the capability predicate and the dispatch drifted"
+    )
+    assert fallback["calls"] == expected_fallback, (
+        f"expected {expected_fallback} Triton fallback call(s) "
+        f"(predicate says DeepGEMM={expects_deepgemm}), got {fallback['calls']} "
+        "— the case did not run on either kernel path"
+    )
 
 
 def _make_packed_cache(k_bf16: torch.Tensor, block_size: int):
@@ -174,7 +253,10 @@ def _compare(label, ref, cand, k_topk, q_pos_kernel=None, ratio=1):
 
 
 def test_prefill_fresh():
-    assert has_fp8_mqa_logits(), "required DeepGEMM indexer interface is unavailable"
+    # DeepGEMM or the Triton fallback — both must match the reference; an
+    # unconditional assert would red the ARM SM100 lane.
+    if not supports_mqa_logits(torch.device("cuda")):
+        logging.info("prefill MQA logits not served by DeepGEMM here; using fallback")
     torch.manual_seed(0)
     B, S, H, D = 1, 128, 64, INDEXER_HEAD_DIM
     T_live = 128
@@ -195,12 +277,17 @@ def test_prefill_fresh():
 
     qpos = torch.arange(S, device="cuda", dtype=torch.int32).view(1, S)
     ref = _bf16_reference(q_bf16, k_recon, weights, qpos, ratio)
-    cand = _fp8_path(q_bf16, weights, pool_uint8, T_live, qpos, ratio)
+    with _count_mqa_dispatch() as (counted, fallback):
+        cand = _fp8_path(q_bf16, weights, pool_uint8, T_live, qpos, ratio)
     _compare("fresh S=T=128", ref, cand, k_topk=16, q_pos_kernel=qpos, ratio=ratio)
+    _assert_mqa_path(counted, fallback, expected_calls=1)
 
 
 def test_prefill_continuation():
-    assert has_fp8_mqa_logits(), "required DeepGEMM indexer interface is unavailable"
+    # DeepGEMM or the Triton fallback — both must match the reference; an
+    # unconditional assert would red the ARM SM100 lane.
+    if not supports_mqa_logits(torch.device("cuda")):
+        logging.info("prefill MQA logits not served by DeepGEMM here; using fallback")
     torch.manual_seed(1)
     B, S, H, D = 1, 8, 64, INDEXER_HEAD_DIM
     T_live = 200
@@ -221,12 +308,17 @@ def test_prefill_continuation():
 
     # No causal mask in continuation.
     ref = _bf16_reference(q_bf16, k_recon, weights, None, ratio)
-    cand = _fp8_path(q_bf16, weights, pool_uint8, T_live, None, ratio)
+    with _count_mqa_dispatch() as (counted, fallback):
+        cand = _fp8_path(q_bf16, weights, pool_uint8, T_live, None, ratio)
     _compare("continuation S=8 T=200", ref, cand, k_topk=32)
+    _assert_mqa_path(counted, fallback, expected_calls=1)
 
 
 def test_prefill_long_S():
-    assert has_fp8_mqa_logits(), "required DeepGEMM indexer interface is unavailable"
+    # DeepGEMM or the Triton fallback — both must match the reference; an
+    # unconditional assert would red the ARM SM100 lane.
+    if not supports_mqa_logits(torch.device("cuda")):
+        logging.info("prefill MQA logits not served by DeepGEMM here; using fallback")
     torch.manual_seed(2)
     B, S, H, D = 1, 4096, 64, INDEXER_HEAD_DIM
     T_live = 4096
@@ -247,14 +339,19 @@ def test_prefill_long_S():
 
     qpos = torch.arange(S, device="cuda", dtype=torch.int32).view(1, S)
     ref = _bf16_reference(q_bf16, k_recon, weights, qpos, ratio)
-    cand = _fp8_path(q_bf16, weights, pool_uint8, T_live, qpos, ratio)
+    with _count_mqa_dispatch() as (counted, fallback):
+        cand = _fp8_path(q_bf16, weights, pool_uint8, T_live, qpos, ratio)
     _compare("long S=T=4096", ref, cand, k_topk=64, q_pos_kernel=qpos, ratio=ratio)
+    _assert_mqa_path(counted, fallback, expected_calls=1)
 
 
 def test_prefill_chunked():
     """Split S into 2 chunks; each runs its own fp8_mqa call. Concat rows,
     compare vs single-shot fp8 (and bf16 reference)."""
-    assert has_fp8_mqa_logits(), "required DeepGEMM indexer interface is unavailable"
+    # DeepGEMM or the Triton fallback — both must match the reference; an
+    # unconditional assert would red the ARM SM100 lane.
+    if not supports_mqa_logits(torch.device("cuda")):
+        logging.info("prefill MQA logits not served by DeepGEMM here; using fallback")
     torch.manual_seed(3)
     B, S, H, D = 1, 256, 64, INDEXER_HEAD_DIM
     T_live = 256
@@ -275,17 +372,22 @@ def test_prefill_chunked():
     qpos_full = torch.arange(S, device="cuda", dtype=torch.int32).view(1, S)
 
     ref = _bf16_reference(q_bf16, k_recon, weights, qpos_full, ratio)
-    cand_single = _fp8_path(q_bf16, weights, pool_uint8, T_live, qpos_full, ratio)
+    with _count_mqa_dispatch() as (counted, fallback):
+        cand_single = _fp8_path(
+            q_bf16, weights, pool_uint8, T_live, qpos_full, ratio
+        )
 
-    # Chunked: split S → [0, mid), [mid, S). Each chunk's own qpos / output.
-    mid = S // 2
-    parts = []
-    for s_start, s_end in ((0, mid), (mid, S)):
-        q_chunk = q_bf16[:, s_start:s_end]
-        w_chunk = weights[:, s_start:s_end]
-        qpos_chunk = qpos_full[:, s_start:s_end]
-        parts.append(_fp8_path(q_chunk, w_chunk, pool_uint8, T_live, qpos_chunk, ratio))
-    cand_chunked = torch.cat(parts, dim=1)
+        # Chunked: split S → [0, mid), [mid, S). Each chunk's own qpos / output.
+        mid = S // 2
+        parts = []
+        for s_start, s_end in ((0, mid), (mid, S)):
+            q_chunk = q_bf16[:, s_start:s_end]
+            w_chunk = weights[:, s_start:s_end]
+            qpos_chunk = qpos_full[:, s_start:s_end]
+            parts.append(
+                _fp8_path(q_chunk, w_chunk, pool_uint8, T_live, qpos_chunk, ratio)
+            )
+        cand_chunked = torch.cat(parts, dim=1)
 
     # Chunked must match single-shot on finite (masked) positions. Both
     # were called with clean_logits=True so masked positions are -inf —
@@ -305,6 +407,7 @@ def test_prefill_chunked():
         q_pos_kernel=qpos_full,
         ratio=ratio,
     )
+    _assert_mqa_path(counted, fallback, expected_calls=3)  # 1 single + 2 chunks
 
 
 if __name__ == "__main__":

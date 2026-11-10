@@ -69,12 +69,51 @@ def _sm100_needs_triton_fallback(device) -> bool:
     )
 
 
+def deepgemm_supports_block_kv(device, block_kv: int) -> bool:
+    """DeepGEMM's paged-MQA metadata contract per device generation.
+
+    ``get_paged_mqa_logits_metadata`` accepts ``block_kv == 64`` on SM90/SM100
+    and ``block_kv == 32`` on SM100 only (a pre-SM90 device such as L20/SM89
+    rejects either); sizes outside that list are unconstrained here.
+    """
+    major = torch.cuda.get_device_capability(device)[0]
+    if block_kv == 32:
+        return major == 10
+    if block_kv == 64:
+        return major in (9, 10)
+    return True
+
+
+def supports_paged_mqa_logits(device, block_kv: Optional[int] = None) -> bool:
+    """Whether :func:`fp8_paged_indexer_score` takes the DeepGEMM path.
+
+    Single source of truth shared by the production dispatch and the
+    capability gates in the tests: the DeepGEMM entry points must exist, the
+    wheel must accept the group-128 legacy call on this device, and (when
+    ``block_kv`` is given) the block size must satisfy the metadata contract.
+    """
+    if not _HAS_DEEP_GEMM or _sm100_needs_triton_fallback(device):
+        return False
+    return block_kv is None or deepgemm_supports_block_kv(device, block_kv)
+
+
+def supports_mqa_logits(device) -> bool:
+    """Whether :func:`fp8_mqa_indexer_score` takes the DeepGEMM path."""
+    return _HAS_DEEP_GEMM_MQA and not _sm100_needs_triton_fallback(device)
+
+
 def has_fp8_paged_mqa_logits() -> bool:
-    # Group-128 compatibility kernel is available independently of DeepGEMM MX APIs.
+    """Kernel availability — not a device/path decision (always usable).
+
+    The group-128 paged kernel is always servable: DeepGEMM when the wheel
+    accepts the call, the Triton fallback otherwise. Ask
+    :func:`supports_paged_mqa_logits` which path actually runs.
+    """
     return True
 
 
 def has_fp8_mqa_logits() -> bool:
+    """Kernel availability — not a device/path decision; see above."""
     return True
 
 
@@ -123,7 +162,7 @@ def fp8_paged_indexer_score(
     num_blocks = total_slots // block_size
     kv_4d = kv_pool_uint8.view(num_blocks, block_size, 1, INDEXER_ENTRY_BYTES)
 
-    if not _HAS_DEEP_GEMM or _sm100_needs_triton_fallback(q_fp8.device):
+    if not supports_paged_mqa_logits(q_fp8.device, block_size):
         from rtp_llm.models_py.triton_kernels.legacy_fp8_indexer_score import (
             legacy_fp8_paged_mqa_logits,
         )
@@ -197,7 +236,7 @@ def fp8_mqa_indexer_score(
     assert cu_seqlen_ks.shape[0] == q_fp8.shape[0]
     assert cu_seqlen_ke.shape[0] == q_fp8.shape[0]
 
-    if not _HAS_DEEP_GEMM_MQA or _sm100_needs_triton_fallback(q_fp8.device):
+    if not supports_mqa_logits(q_fp8.device):
         from rtp_llm.models_py.triton_kernels.legacy_fp8_indexer_score import (
             legacy_fp8_mqa_logits,
         )

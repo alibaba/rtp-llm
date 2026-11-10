@@ -55,7 +55,8 @@ public class RecentCacheKeyWindow {
         this.tableCounts = new int[hashTableCapacity];
         this.tableStates = new byte[hashTableCapacity];
 
-        log.info("Recent cache-key pool config: timeWindowMs={}, maxCacheKeys={}, hashTableCapacity={}",
+        log.info(
+                "Recent cache-key pool config: timeWindowMs={}, maxCacheKeys={}, hashTableCapacity={}",
                 this.timeWindowMs,
                 this.maxCacheKeys,
                 hashTableCapacity);
@@ -76,7 +77,6 @@ public class RecentCacheKeyWindow {
             if (requestOccurrences > 0L) {
                 retainRequest(cacheKeys, requestOccurrences, nowMs);
             }
-
         }
 
         if (log.isDebugEnabled()) {
@@ -117,7 +117,8 @@ public class RecentCacheKeyWindow {
 
     private void retainRequest(List<Long> cacheKeys, long requestOccurrences, long nowMs) {
         if (requestOccurrences > maxCacheKeys) {
-            log.debug("Recent cache-key request exceeds pool capacity; skip retaining request: "
+            log.debug(
+                    "Recent cache-key request exceeds pool capacity; skip retaining request: "
                             + "requestCacheKeys={}, maxCacheKeys={}",
                     requestOccurrences,
                     maxCacheKeys);
@@ -249,8 +250,12 @@ public class RecentCacheKeyWindow {
     }
 
     private void logRequest(long nowMs, long requestOccurrences, long requestHitOccurrences) {
-        double hitRatio = requestOccurrences > 0L ? requestHitOccurrences / (double) requestOccurrences : 0.0D;
-        log.debug("Recent cache-key request: nowMs={}, requestCacheKeys={}, hitCacheKeys={}, "
+        double hitRatio =
+                requestOccurrences > 0L
+                        ? requestHitOccurrences / (double) requestOccurrences
+                        : 0.0D;
+        log.debug(
+                "Recent cache-key request: nowMs={}, requestCacheKeys={}, hitCacheKeys={}, "
                         + "hitRatio={}, poolCacheKeys={}, poolUniqueCacheKeys={}, poolDuplicateCacheKeys={}, "
                         + "poolEntries={}, maxCacheKeys={}, timeWindowMs={}",
                 nowMs,
@@ -269,33 +274,48 @@ public class RecentCacheKeyWindow {
         if (configService == null || configService.loadBalanceConfig() == null) {
             return DEFAULT_TIME_WINDOW_MS;
         }
-        return configService.loadBalanceConfig().getObservability().getCacheHit()
-                .getRecentKeyWindow().getDurationMs();
+        return configService
+                .loadBalanceConfig()
+                .getObservability()
+                .getCacheHit()
+                .getRecentKeyWindow()
+                .getDurationMs();
     }
 
     static long resolveMaxCacheKeys(ConfigService configService) {
         if (configService == null || configService.loadBalanceConfig() == null) {
             return DEFAULT_MAX_CACHE_KEYS;
         }
-        return configService.loadBalanceConfig().getObservability().getCacheHit()
-                .getRecentKeyWindow().getMaxKeyOccurrences();
+        return configService
+                .loadBalanceConfig()
+                .getObservability()
+                .getCacheHit()
+                .getRecentKeyWindow()
+                .getMaxKeyOccurrences();
     }
 
     private static long normalizeTimeWindowMs(long candidateMs) {
         if (candidateMs > 0L) {
             return candidateMs;
         }
-        log.warn("Invalid cacheHitTimeWindowMs: {}, fallback to default: {}", candidateMs, DEFAULT_TIME_WINDOW_MS);
+        log.warn(
+                "Invalid cacheHitTimeWindowMs: {}, fallback to default: {}",
+                candidateMs,
+                DEFAULT_TIME_WINDOW_MS);
         return DEFAULT_TIME_WINDOW_MS;
     }
 
     private static int normalizeCapacity(long candidate) {
         if (candidate <= 0L) {
-            log.warn("Invalid cacheHitMaxCacheKeys: {}, fallback to default: {}", candidate, DEFAULT_MAX_CACHE_KEYS);
+            log.warn(
+                    "Invalid cacheHitMaxCacheKeys: {}, fallback to default: {}",
+                    candidate,
+                    DEFAULT_MAX_CACHE_KEYS);
             return (int) DEFAULT_MAX_CACHE_KEYS;
         }
         if (candidate > MAX_ARRAY_SIZE) {
-            log.warn("cacheHitMaxCacheKeys is too large for preallocated arrays: {}, cap to {}",
+            log.warn(
+                    "cacheHitMaxCacheKeys is too large for preallocated arrays: {}, cap to {}",
                     candidate,
                     MAX_ARRAY_SIZE);
             return MAX_ARRAY_SIZE;
@@ -304,7 +324,8 @@ public class RecentCacheKeyWindow {
     }
 
     private static int hashTableCapacityFor(int maxCacheKeys) {
-        long needed = Math.max(MIN_HASH_TABLE_SIZE, (long) Math.ceil(maxCacheKeys / HASH_LOAD_FACTOR));
+        long needed =
+                Math.max(MIN_HASH_TABLE_SIZE, (long) Math.ceil(maxCacheKeys / HASH_LOAD_FACTOR));
         int capacity = MIN_HASH_TABLE_SIZE;
         while (capacity < needed && capacity < (1 << 30)) {
             capacity <<= 1;

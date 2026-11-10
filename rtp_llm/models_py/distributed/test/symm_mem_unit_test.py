@@ -8,6 +8,35 @@ from rtp_llm.models_py.distributed import symm_mem
 
 
 class SymmMemConfigurationTest(unittest.TestCase):
+    def test_long_socket_path_is_shortened_during_rendezvous_and_restored(self):
+        long_dir = "/tmp/" + "x" * 180
+        buffer = object()
+
+        def rendezvous(value, group):
+            self.assertIs(value, buffer)
+            self.assertEqual(group, "test-group")
+            self.assertEqual(os.environ["TMPDIR"], "/tmp")
+            return "handle"
+
+        with patch.dict(os.environ, {"TMPDIR": long_dir}, clear=True), patch.object(
+            symm_mem.torch_symm_mem, "rendezvous", side_effect=rendezvous
+        ):
+            self.assertEqual(
+                symm_mem._rendezvous_with_short_socket_path(buffer, "test-group"),
+                "handle",
+            )
+            self.assertEqual(os.environ["TMPDIR"], long_dir)
+
+    def test_rendezvous_error_restores_absent_tmpdir(self):
+        with patch.dict(
+            os.environ, {"TEMP": "/tmp/" + "x" * 180}, clear=True
+        ), patch.object(
+            symm_mem.torch_symm_mem, "rendezvous", side_effect=RuntimeError("failure")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "failure"):
+                symm_mem._rendezvous_with_short_socket_path(object(), "test-group")
+            self.assertNotIn("TMPDIR", os.environ)
+
     def tearDown(self) -> None:
         symm_mem._symm_mem_comm = None
 

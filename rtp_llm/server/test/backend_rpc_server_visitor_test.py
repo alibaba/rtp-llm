@@ -66,6 +66,7 @@ class _FakeInput:
     headers = None
     enqueued_by_master: bool = False
     prompt_length: int = 17
+    mm_inputs: list = field(default_factory=list)
 
     def __init__(
         self,
@@ -89,6 +90,7 @@ class _FakeInput:
         self.request_id = request_id
         self.token_ids = token_ids if token_ids is not None else _FakeTokenIds()
         self.headers = None
+        self.mm_inputs = []
         self.enqueued_by_master = enqueued_by_master
         self.prompt_length = prompt_length
 
@@ -291,6 +293,40 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
         visitor.backend_role_list = [RoleType.PREFILL, RoleType.DECODE]
+        route_span = _FakeRouteSpan()
+
+        async def get_master_route_addrs(route_input):
+            route_input.generate_config.role_addrs.append(
+                RoleAddr(role=RoleType.PREFILL, ip="master", http_port=1, grpc_port=2)
+            )
+            return None
+
+        async def get_domain_route_addrs(route_input):
+            route_input.generate_config.role_addrs.append(
+                RoleAddr(role=RoleType.DECODE, ip="domain", http_port=3, grpc_port=4)
+            )
+
+        visitor.get_master_route_addrs = get_master_route_addrs
+        visitor.get_domain_route_addrs = get_domain_route_addrs
+
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.start_internal_span",
+            return_value=route_span,
+        ), patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
+            await visitor.route_ips(_FakeInput())
+
+        self.assertEqual(
+            route_span.attributes["rtp_llm.route.source"],
+            "master+domain_fallback",
+        )
+
+    async def test_route_ips_text_only_does_not_require_configured_vit(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._local_prefill_addresses = []
+        visitor._mm_cache_routing = False
+        visitor.master_config = None
+        visitor.host_service = _FakeHostService()
+        visitor.backend_role_list = [RoleType.PREFILL, RoleType.DECODE, RoleType.VIT]
         route_span = _FakeRouteSpan()
 
         async def get_master_route_addrs(route_input):
@@ -829,6 +865,364 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.attempts, 2)
 
 
+class _OwnedAttempt:
+    """Retained iterator: cleanup must be explicit, never a GC side effect."""
+
+    def __init__(self, outputs=(), error=None, close_error=None, block=False):
+        self.outputs = iter(outputs)
+        self.error = error
+        self.close_error = close_error
+        self.block = block
+        self.waiting = asyncio.Event()
+        self.closes = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self.outputs)
+        except StopIteration:
+            pass
+        if self.error is not None:
+            raise self.error
+        if self.block:
+            self.waiting.set()
+            await asyncio.Event().wait()
+        raise StopAsyncIteration
+
+    async def aclose(self):
+        self.closes += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class BackendRPCServerVisitorCloseTest(unittest.IsolatedAsyncioTestCase):
+    _visitor = BackendRPCServerVisitorRetryTest._visitor
+
+    async def test_close_propagates_to_retained_inner_and_is_request_local(self):
+        closed = [0, 0]
+
+        async def inner(index):
+            try:
+                yield index
+                await asyncio.Event().wait()
+            finally:
+                closed[index] += 1
+
+        retained = [inner(0), inner(1)]
+        client = SimpleNamespace(enqueue=Mock(side_effect=retained))
+        visitor = self._visitor(client)
+        wrappers = [
+            await visitor.enqueue(_FakeInput(is_streaming=True)) for _ in retained
+        ]
+        try:
+            self.assertEqual(await wrappers[0].__anext__(), 0)
+            self.assertEqual(await wrappers[1].__anext__(), 1)
+            await wrappers[0].aclose()
+            self.assertEqual(closed, [1, 0])
+            await wrappers[1].aclose()
+            self.assertEqual(closed, [1, 1])
+            await wrappers[0].aclose()
+            self.assertEqual(closed, [1, 1])
+        finally:
+            for stream in wrappers + retained:
+                await stream.aclose()
+
+    async def test_attempt_closes_before_retry_and_preserves_buffered_outputs(self):
+        first = _OwnedAttempt(
+            ["discard"],
+            RuntimeError("StatusCode.UNAVAILABLE"),
+            RuntimeError("close failed"),
+        )
+        second = _OwnedAttempt(["one", "two"])
+
+        def enqueue(_input):
+            if first.closes:
+                return second
+            return first
+
+        client = SimpleNamespace(enqueue=Mock(side_effect=enqueue))
+        visitor = self._visitor(client)
+        visitor.set_request_id_factory(lambda: 456)
+        stream = await visitor.enqueue(_FakeInput())
+        self.assertEqual([x async for x in stream], ["one", "two"])
+        self.assertEqual(client.enqueue.call_count, 2)
+        self.assertEqual((first.closes, second.closes), (1, 1))
+
+    async def test_cleanup_error_preserves_primary_error_and_terminal_priority(self):
+        for terminal in (False, True):
+            with self.subTest(terminal=terminal):
+                original = FtRuntimeException(
+                    ExceptionType.MASTER_NO_AVAILABLE_WORKER, "capacity"
+                )
+                later = (
+                    FtRuntimeException(ExceptionType.BATCH_SLO_EXPIRED, "expired")
+                    if terminal
+                    else RuntimeError("downstream failed")
+                )
+                retained = [
+                    _OwnedAttempt(
+                        error=e,
+                        close_error=RuntimeError("StatusCode.UNAVAILABLE cleanup"),
+                    )
+                    for e in (original, later)
+                ]
+                client = SimpleNamespace(enqueue=Mock(side_effect=retained))
+                visitor = self._visitor(client)
+                visitor.set_request_id_factory(lambda: 456)
+                stream = await visitor.enqueue(_FakeInput())
+                with self.assertRaises(FtRuntimeException) as caught:
+                    [x async for x in stream]
+                self.assertIs(caught.exception, later if terminal else original)
+                self.assertEqual([x.closes for x in retained], [1, 1])
+                self.assertEqual(client.enqueue.call_count, 2)
+
+    async def test_streaming_partial_error_does_not_retry_or_get_masked_by_close(self):
+        error = RuntimeError("StatusCode.UNAVAILABLE business")
+        retained = _OwnedAttempt(["one"], error, RuntimeError("close failed"))
+        client = SimpleNamespace(enqueue=Mock(return_value=retained))
+        visitor = self._visitor(client)
+        visitor.set_request_id_factory(lambda: 456)
+        stream = await visitor.enqueue(_FakeInput(is_streaming=True))
+        self.assertEqual(await stream.__anext__(), "one")
+        with self.assertRaises(RuntimeError) as caught:
+            await stream.__anext__()
+        self.assertIs(caught.exception, error)
+        self.assertEqual(retained.closes, 1)
+        self.assertEqual(client.enqueue.call_count, 1)
+
+    async def test_task_cancel_closes_attempt_and_preserves_cancellation(self):
+        retained = _OwnedAttempt(block=True, close_error=RuntimeError("close failed"))
+        client = SimpleNamespace(enqueue=Mock(return_value=retained))
+        visitor = self._visitor(client)
+        visitor.set_request_id_factory(lambda: 456)
+        stream = await visitor.enqueue(_FakeInput(is_streaming=True))
+        task = asyncio.create_task(stream.__anext__())
+        await asyncio.wait_for(retained.waiting.wait(), 5)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(retained.closes, 1)
+        self.assertEqual(client.enqueue.call_count, 1)
+
+    async def test_cleanup_error_preserves_successful_result(self):
+        retained = _OwnedAttempt(
+            ["one", "two"], close_error=RuntimeError("close failed")
+        )
+        client = SimpleNamespace(enqueue=Mock(return_value=retained))
+        visitor = self._visitor(client)
+        stream = await visitor.enqueue(_FakeInput())
+        self.assertEqual([x async for x in stream], ["one", "two"])
+        self.assertEqual(client.enqueue.call_count, 1)
+        self.assertEqual(retained.closes, 1)
+
+
+class _CloseTraceHandle:
+    """Observe the real client's final status without a global SDK dependency."""
+
+    def __init__(self):
+        self.attributes = {}
+        self.finished = asyncio.Event()
+        self.status = None
+        self.end_count = 0
+
+    def set_attribute(self, key, value):
+        if not self.finished.is_set():
+            self.attributes[key] = value
+
+    def finish(self, error=None, error_type=""):
+        if not self.finished.is_set():
+            self.end_count += 1
+            self.status = "ERROR" if error is not None or error_type else "OK"
+            self.finished.set()
+
+
+class BackendRPCServerVisitorRpcCloseTest(unittest.IsolatedAsyncioTestCase):
+    _visitor = BackendRPCServerVisitorRetryTest._visitor
+
+    async def _check_rpc(self, *, fetch, finished, action, terminal, trace_enabled):
+        import grpc
+        import torch
+
+        from rtp_llm.config.generate_config import GenerateConfig
+        from rtp_llm.cpp.model_rpc import model_rpc_client as client_module
+        from rtp_llm.cpp.model_rpc.proto import model_rpc_service_pb2_grpc as rpc
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+            GenerateOutputsPB,
+            TensorPB,
+        )
+        from rtp_llm.utils.base_model_datatypes import GenerateInput
+
+        release = asyncio.Event()
+        server_waiting = asyncio.Event()
+        server_closed = asyncio.Event()
+
+        class Service(rpc.RpcServiceServicer):
+            async def responses(self, request, context):
+                try:
+                    response = GenerateOutputsPB()
+                    output = response.flatten_output
+                    output.output_ids.data_type = TensorPB.DataType.INT32
+                    output.output_ids.shape.extend([1, 1])
+                    output.output_ids.int32_data = (7).to_bytes(4, "little")
+                    output.finished.append(finished)
+                    aux = output.aux_info.add()
+                    aux.input_len, aux.output_len = 3, 1
+                    yield response
+                    server_waiting.set()
+                    await release.wait()
+                    if terminal != grpc.StatusCode.OK:
+                        await context.abort(terminal, "injected terminal error")
+                finally:
+                    server_closed.set()
+
+            GenerateStreamCall = responses
+
+        server = grpc.aio.server()
+        rpc.add_RpcServiceServicer_to_server(Service(), server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        await server.start()
+        channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+        client = client_module.ModelRpcClient([f"127.0.0.1:{port}"], {}, 0)
+
+        async def get_channel(_address):
+            return channel
+
+        client._channel_pool = SimpleNamespace(get=get_channel)
+        retained = []
+
+        def enqueue(request):
+            inner = client.enqueue(request)
+            retained.append(inner)
+            return inner
+
+        visitor = self._visitor(SimpleNamespace(enqueue=Mock(side_effect=enqueue)))
+        request = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(
+                max_new_tokens=16,
+                is_streaming=True,
+                timeout_ms=0,
+                role_addrs=[
+                    RoleAddr(
+                        role=RoleType.DECODE,
+                        ip="127.0.0.1",
+                        http_port=8000,
+                        grpc_port=port,
+                    )
+                ],
+            ),
+            request_id=731,
+            mm_inputs=[],
+            enqueued_by_master=fetch,
+        )
+        calls = []
+        stub = rpc.RpcServiceStub(channel)
+        method = stub.GenerateStreamCall
+
+        def call(*args, **kwargs):
+            result = method(*args, **kwargs)
+            calls.append(result)
+            return result
+
+        wrapped_stub = SimpleNamespace(GenerateStreamCall=call)
+        span = _CloseTraceHandle()
+        wrapper = None
+        task = None
+        try:
+            with (
+                patch.object(
+                    client_module, "RpcServiceStub", return_value=wrapped_stub
+                ),
+                patch.object(
+                    client_module,
+                    "start_client_span",
+                    return_value=(span if trace_enabled else None, []),
+                ),
+                patch.object(client_module, "RPC_SETTLE_TIMEOUT_SECONDS", 0.05),
+            ):
+                wrapper = await visitor.enqueue(request)
+                output = await wrapper.__anext__()
+                self.assertEqual(output.generate_outputs[0].finished, finished)
+                await asyncio.wait_for(server_waiting.wait(), 5)
+                if action == "cancel":
+                    task = asyncio.create_task(wrapper.__anext__())
+                    await asyncio.sleep(0)
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                else:
+                    await asyncio.wait_for(wrapper.aclose(), 1)
+                # Retaining the generator prevents GC from repairing a missing close.
+                self.assertIsNone(retained[0].ag_frame)
+                if finished:
+                    self.assertFalse(calls[0].cancelled())
+                if action != "stall":
+                    release.set()
+                expected = (
+                    terminal
+                    if finished and action != "stall"
+                    else grpc.StatusCode.CANCELLED
+                )
+                self.assertEqual(await asyncio.wait_for(calls[0].code(), 5), expected)
+                await asyncio.wait_for(server_closed.wait(), 5)
+                if trace_enabled:
+                    await asyncio.wait_for(span.finished.wait(), 5)
+                    self.assertEqual(span.attributes["request_id"], "731")
+                    self.assertEqual(
+                        span.attributes["rpc.response.status_code"], expected.name
+                    )
+                    self.assertEqual(
+                        span.status, "OK" if expected == grpc.StatusCode.OK else "ERROR"
+                    )
+                    self.assertEqual(span.end_count, 1)
+                self.assertEqual(visitor.model_rpc_client.enqueue.call_count, 1)
+        finally:
+            release.set()
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            if wrapper is not None:
+                await wrapper.aclose()
+            for inner in retained:
+                await inner.aclose()
+            await channel.close()
+            await server.stop(None)
+
+    async def test_real_rpc_wrapper_close_cancel_and_late_status(self):
+        import grpc
+
+        cases = [
+            (False, False, "close", grpc.StatusCode.OK),
+            (True, False, "close", grpc.StatusCode.OK),
+            (False, False, "cancel", grpc.StatusCode.OK),
+            (True, False, "cancel", grpc.StatusCode.OK),
+            (True, True, "close", grpc.StatusCode.OK),
+            (True, True, "cancel", grpc.StatusCode.OK),
+            # Client tests enumerate late status codes; here verify propagation
+            # through the real visitor wrapper with one representative error.
+            (True, True, "close", grpc.StatusCode.INTERNAL),
+            (True, True, "stall", grpc.StatusCode.OK),
+        ]
+        for trace_enabled in (False, True):
+            for fetch, finished, action, terminal in cases:
+                with self.subTest(
+                    trace=trace_enabled,
+                    fetch=fetch,
+                    finished=finished,
+                    action=action,
+                    terminal=terminal,
+                ):
+                    await self._check_rpc(
+                        fetch=fetch,
+                        finished=finished,
+                        action=action,
+                        terminal=terminal,
+                        trace_enabled=trace_enabled,
+                    )
+
+
 class MixedFrontendBatchTest(unittest.IsolatedAsyncioTestCase):
     def make_visitor(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
@@ -844,6 +1238,17 @@ class MixedFrontendBatchTest(unittest.IsolatedAsyncioTestCase):
         visitor.model_rpc_client = SimpleNamespace(batch_enqueue=AsyncMock(return_value=["result"]))
         return visitor
 
+    async def test_pdfusion_batch_keeps_local_execution_without_per_item_master_routes(self):
+        visitor = self.make_visitor()
+        visitor.pd_sep_config.role_type = RoleType.PDFUSION
+        visitor.host_service.service_available = True
+        inputs = [_FakeRouteInput(), _FakeRouteInput()]
+        result = await visitor.batch_enqueue(inputs)
+        self.assertEqual(result, ["result"])
+        visitor.route_ips.assert_not_awaited()
+        visitor.host_service.get_backend_role_addrs.assert_not_called()
+        visitor.model_rpc_client.batch_enqueue.assert_awaited_once_with(inputs)
+
     async def test_mixed_frontend_resolves_pdfusion_without_master_enqueue(self):
         visitor = self.make_visitor()
         fusion = RoleAddr(role=RoleType.PDFUSION, ip="fusion", http_port=9000, grpc_port=9001)
@@ -856,17 +1261,39 @@ class MixedFrontendBatchTest(unittest.IsolatedAsyncioTestCase):
         for item in inputs:
             self.assertEqual(item.generate_config.role_addrs, [fusion])
 
-    async def test_pd_target_and_missing_pdfusion_remain_unsupported(self):
+    async def test_missing_batch_targets_fail_before_rpc(self):
         visitor = self.make_visitor()
         visitor.host_service.get_backend_role_addrs.return_value = []
         item = _FakeRouteInput()
         with self.assertRaises(FtRuntimeException):
             await visitor.batch_enqueue([item])
-        item.generate_config.role_addrs = [RoleAddr(role=RoleType.DECODE, ip="decode", http_port=1, grpc_port=2)]
-        with self.assertRaises(FtRuntimeException):
-            await visitor.batch_enqueue([item])
         visitor.model_rpc_client.batch_enqueue.assert_not_awaited()
         visitor.route_ips.assert_not_awaited()
+
+    async def test_pd_only_frontend_resolves_one_pair_without_master_admission(self):
+        visitor = self.make_visitor()
+        prefill = RoleAddr(role=RoleType.PREFILL, ip="prefill", http_port=1, grpc_port=2)
+        decode = RoleAddr(role=RoleType.DECODE, ip="decode", http_port=3, grpc_port=4)
+        visitor.host_service.get_backend_role_addrs.side_effect = [[], [prefill, decode]]
+        inputs = [_FakeRouteInput(), _FakeRouteInput()]
+        await visitor.batch_enqueue(inputs)
+        for item in inputs:
+            self.assertEqual(item.generate_config.role_addrs, [prefill, decode])
+            self.assertFalse(item.enqueued_by_master)
+        visitor.route_ips.assert_not_awaited()
+        visitor.model_rpc_client.batch_enqueue.assert_awaited_once_with(inputs)
+
+    async def test_master_admitted_batch_keeps_its_existing_pair(self):
+        visitor = self.make_visitor()
+        pair = [RoleAddr(role=RoleType.PREFILL, ip="prefill", http_port=1, grpc_port=2),
+                RoleAddr(role=RoleType.DECODE, ip="decode", http_port=3, grpc_port=4)]
+        item = _FakeRouteInput()
+        item.generate_config.role_addrs = list(pair)
+        item.enqueued_by_master = True
+        await visitor.batch_enqueue([item])
+        self.assertEqual(item.generate_config.role_addrs, pair)
+        self.assertTrue(item.enqueued_by_master)
+        visitor.host_service.get_backend_role_addrs.assert_not_called()
 
 
 if __name__ == "__main__":

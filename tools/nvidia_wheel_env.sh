@@ -46,17 +46,29 @@ export LD_LIBRARY_PATH="$prefix${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 # CI lanes previously wrapped every test with --run_under=//rtp_llm/test/utils:gpu_lock;
 # this wrapper replaces that flag, so delegate to the gpu_lock device wrapper
 # when it is present in the runfiles (it is a data dep of this target).
-root="$here"
+# The runfiles root is usually exported: prefer it, then fall back to walking
+# up from this script.  Looking in the wrong place used to exec the test
+# directly, which silently dropped both the GPU lock and the hang watchdog.
 gpu_lock=""
+roots=()
+[ -n "${TEST_SRCDIR:-}" ] && roots+=("$TEST_SRCDIR")
+[ -n "${RUNFILES_DIR:-}" ] && roots+=("$RUNFILES_DIR")
+root="$here"
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
-    for base in "$root" "$root/external"; do
-        gpu_lock=$(ls "$base"/rtp_llm/test/utils/gpu_lock 2>/dev/null | head -1)
-        [ -n "$gpu_lock" ] && break 2
-    done
+    roots+=("$root")
     root="$(dirname "$root")"
     [ "$root" = "/" ] && break
+done
+for base in "${roots[@]}"; do
+    for candidate in "$base"/rtp_llm/test/utils/gpu_lock "$base"/external/rtp_llm/test/utils/gpu_lock; do
+        if [ -x "$candidate" ] || [ -f "$candidate" ]; then
+            gpu_lock="$candidate"
+            break 2
+        fi
+    done
 done
 if [ -n "$gpu_lock" ]; then
     exec "$gpu_lock" "$@"
 fi
+echo "nvidia_wheel_env: WARNING gpu_lock helper NOT found in runfiles (searched: ${roots[*]}); running the test WITHOUT the GPU lock and WITHOUT the hang watchdog. Set RTP_TEST_WATCHDOG_SECONDS to bound the test, and check that //rtp_llm/test/utils:gpu_lock is a data dep of this run_under target." >&2
 exec "$@"

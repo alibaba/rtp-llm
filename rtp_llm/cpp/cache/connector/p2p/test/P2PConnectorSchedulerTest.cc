@@ -288,10 +288,9 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadKeepsRequestDeadlineSeparateFromLoadB
     waitAsyncContextDone(result.context);
     ASSERT_TRUE(result.context->success());
     auto request = prefill_server_->service()->getLastStartLoadRequest();
-    ASSERT_NE(result.context->server_call_result_, nullptr);
-    EXPECT_EQ(request.timeout_ms(), result.context->server_call_result_->timeout_ms);
     EXPECT_GT(request.timeout_ms(), 0);
     EXPECT_LE(request.timeout_ms(), 2000);
+    EXPECT_GE(request.timeout_ms(), request_deadline_ms - currentTimeMs());
     EXPECT_EQ(result.context->request_deadline_ms_, request_deadline_ms);
     EXPECT_LE(result.context->transfer_deadline_ms_, request_deadline_ms);
 }
@@ -306,16 +305,34 @@ TEST_F(P2PConnectorSchedulerTest, InvalidLoadConfigurationUsesBoundedSharedFallb
         rebuildSchedulers(config);
         const int64_t expected = timeout <= 0 ? PDSepConfig{}.load_cache_timeout_ms : 2147483647LL;
         EXPECT_EQ(decode_scheduler_->config_.load_cache_timeout_ms, expected);
-        auto meta = createMockMeta(9012, "normalized_load_budget", currentTimeMs() + 60000);
+        const int64_t request_deadline_ms = currentTimeMs() + 60000;
+        auto meta = createMockMeta(9012, "normalized_load_budget", request_deadline_ms);
         auto result = decode_scheduler_->asyncRead(createValidKVCacheResource(), meta, {2, 0}, true);
         ASSERT_TRUE(result.ok());
         waitAsyncContextDone(result.context);
         ASSERT_TRUE(result.context->success());
-        const auto request = prefill_server_->service()->getLastStartLoadRequest();
-        ASSERT_NE(result.context->server_call_result_, nullptr);
-        EXPECT_EQ(request.timeout_ms(), std::min<int64_t>(expected, result.context->server_call_result_->timeout_ms));
-        EXPECT_GT(request.timeout_ms(), 0);
-        EXPECT_LE(request.timeout_ms(), std::min<int64_t>(expected, 60000));
+        const int64_t wire_timeout = prefill_server_->service()->getLastStartLoadRequest().timeout_ms();
+        EXPECT_GT(wire_timeout, 0);
+        EXPECT_LE(wire_timeout, std::min<int64_t>(expected, 60000));
+        EXPECT_GE(wire_timeout, std::min<int64_t>(expected, request_deadline_ms - currentTimeMs()));
+    }
+}
+
+TEST(P2PConnectorConfigTest, ProductionConfigNormalizesLoadTimeoutBeforeInit) {
+    RuntimeConfig     runtime;
+    CacheStoreConfig  cache_store;
+    ParallelismConfig parallelism;
+    for (auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+        for (int64_t timeout : {int64_t{-1}, int64_t{0}, int64_t{900000}, int64_t{2147483648LL}}) {
+            PDSepConfig pd_sep;
+            pd_sep.role_type             = role;
+            pd_sep.load_cache_timeout_ms = timeout;
+            const auto config            = P2PConnectorConfig::create(runtime, cache_store, parallelism, pd_sep, 1, 1);
+            const auto expected          = timeout <= 0 ? PDSepConfig{}.load_cache_timeout_ms :
+                                                          std::min<int64_t>(timeout, std::numeric_limits<int32_t>::max());
+            EXPECT_EQ(config.scheduler_config.load_cache_timeout_ms, expected);
+            EXPECT_EQ(config.worker_config.load_cache_timeout_ms, expected);
+        }
     }
 }
 
@@ -720,6 +737,7 @@ TEST_F(P2PConnectorSchedulerTest, KickoffExceptionRetainsLeaseAndCanCancelWithou
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
     EXPECT_TRUE(context->resourceHoldPending());
+    EXPECT_NO_THROW(context->checkDone());
     EXPECT_TRUE(context->needCancel());
     EXPECT_NO_THROW(context->cancel(tp_broadcast_client_));
     for (int i = 0; i < 1000 && context->needCancel(); ++i) {
@@ -971,6 +989,26 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_NoTransferCompletesWithoutDecodeBuff
     auto meta     = createMockMeta(2011, "test_async_read_no_transfer", currentTimeMs() + 5000);
 
     auto result = decode_scheduler_->asyncRead(resource, meta, {2, 0}, /*no_transfer=*/true);
+    ASSERT_TRUE(result.ok());
+    ASSERT_NE(result.context, nullptr);
+
+    waitAsyncContextDone(result.context);
+
+    EXPECT_TRUE(result.context->done());
+    EXPECT_TRUE(result.context->success());
+    ASSERT_EQ(prefill_server_->service()->getStartLoadCallCount(), 1);
+    EXPECT_TRUE(prefill_server_->service()->getLastStartLoadRequest().no_transfer());
+    for (const auto& server : tp_broadcast_servers_) {
+        EXPECT_EQ(server->service()->getBroadcastTpCallCount(), 0);
+    }
+}
+
+TEST_F(P2PConnectorSchedulerTest, AsyncRead_NoDecodeComputeOverridesRequestedTransfer) {
+    auto resource = std::make_shared<KVCacheResource>();
+    auto meta     = createMockMeta(2011, "test_async_read_no_decode", currentTimeMs() + 5000);
+
+    meta->setDecodeNeedsCompute(false);
+    auto result = decode_scheduler_->asyncRead(resource, meta, {0, 2}, /*no_transfer=*/false);
     ASSERT_TRUE(result.ok());
     ASSERT_NE(result.context, nullptr);
 
@@ -1339,6 +1377,8 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_StartLoadTimeout_HoldsTargetUntilAll
     rebuildSchedulerForDeadlineTest(allocated.config.topologyPtr());
     prefill_server_->service()->setStartLoadSleepMillis(500);
     for (auto& server : tp_broadcast_servers_) {
+        // Keep READ physically unconfirmed when StartLoad expires; a successful READ already proves completion.
+        server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::READ, 500);
         server->service()->setLeaseStatus(true, 1, 0, false);
     }
 
@@ -1367,7 +1407,8 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_StartLoadTimeout_HoldsTargetUntilAll
     }
     EXPECT_TRUE(waitUntil([&]() { return allocated.allocator->freeBlocksNum() == allocated.free_blocks_before; }));
     EXPECT_TRUE(allBlockRefsEqual(allocated, 0));
-    EXPECT_TRUE(weak_context.expired());
+    // Releasing blocks precedes the checker's final shared_ptr destruction.
+    ASSERT_TRUE(waitUntil([&]() { return weak_context.expired(); }));
 }
 
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReadPerRankTimeout_WaitsForEveryRankLease) {

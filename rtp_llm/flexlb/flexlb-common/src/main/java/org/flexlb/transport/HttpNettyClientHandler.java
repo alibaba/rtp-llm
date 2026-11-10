@@ -38,7 +38,8 @@ public class HttpNettyClientHandler extends SimpleChannelInboundHandler<HttpObje
     }
 
     public HttpNettyChannelContext getNettyChannelContext(Channel channel) {
-        return (HttpNettyChannelContext) channel.attr(AttributeKey.valueOf(CHANNEL_CONTEXT_ATTR_NAME)).get();
+        return (HttpNettyChannelContext)
+                channel.attr(AttributeKey.valueOf(CHANNEL_CONTEXT_ATTR_NAME)).get();
     }
 
     public void setNettyChannelContext(Channel channel, HttpNettyChannelContext nettyCtx) {
@@ -63,7 +64,8 @@ public class HttpNettyClientHandler extends SimpleChannelInboundHandler<HttpObje
     @Override
     protected void channelRead0(ChannelHandlerContext channelHandlerContext, HttpObject obj) {
         try {
-            HttpNettyChannelContext nettyCtx = getNettyChannelContext(channelHandlerContext.channel());
+            HttpNettyChannelContext nettyCtx =
+                    getNettyChannelContext(channelHandlerContext.channel());
             if (nettyCtx != null && nettyCtx.getReadCallback() != null) {
                 nettyCtx.getReadCallback().accept(nettyCtx, obj);
             }
@@ -75,7 +77,8 @@ public class HttpNettyClientHandler extends SimpleChannelInboundHandler<HttpObje
     @Override
     public void exceptionCaught(ChannelHandlerContext channelHandlerContext, Throwable cause) {
         try {
-            HttpNettyChannelContext nettyCtx = getNettyChannelContext(channelHandlerContext.channel());
+            HttpNettyChannelContext nettyCtx =
+                    getNettyChannelContext(channelHandlerContext.channel());
             if (nettyCtx != null && nettyCtx.getErrorCallback() != null) {
                 nettyCtx.getErrorCallback().accept(nettyCtx, cause);
             }

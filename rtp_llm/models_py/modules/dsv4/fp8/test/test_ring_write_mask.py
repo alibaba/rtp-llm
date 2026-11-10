@@ -27,6 +27,7 @@ Run:
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from typing import Optional
 
 import torch
@@ -119,6 +120,109 @@ class RingWriteMaskTest(unittest.TestCase):
         if not torch.cuda.is_available():
             self.skipTest("CUDA required")
         self.device = torch.device("cuda")
+
+    def test_hca_chunk_tail_has_one_writer_per_ring_row(self) -> None:
+        for cp_size in (1, 2, 4):
+            for cp_rank in range(cp_size):
+                for prefix, length, tpb in (
+                    (0, 256, 128),
+                    (0, 512, 256),
+                    (512, 768, 256),
+                    (1280, 513, 256),
+                ):
+                    with self.subTest(cp=cp_size, rank=cp_rank, prefix=prefix):
+                        stub = _make_stub(
+                            self.device, ratio=128, overlap=0, gen_num=4, tpb=tpb
+                        )
+                        full_eb = stub._state_eb
+                        stub._state_eb //= cp_size
+                        stub._state_block_table.fill_(-1)
+                        tail = (prefix + length - 1) // stub._state_tokens_per_block
+                        stub._state_block_table[0, tail] = 7
+                        stub._kv_cache_sharded = cp_size > 1
+                        stub._cp_ctx = SimpleNamespace(cp_size=cp_size, cp_rank=cp_rank)
+                        positions = torch.arange(
+                            prefix,
+                            prefix + length,
+                            device=self.device,
+                            dtype=torch.int64,
+                        )
+                        requests = torch.zeros_like(positions)
+                        meta = stub.prepare_metadata(
+                            positions,
+                            requests,
+                            has_prefix=prefix > 0,
+                            is_batched=True,
+                            seq_start_per_req=torch.tensor(
+                                [prefix], dtype=torch.int32, device=self.device
+                            ),
+                            cu_seq_per_req=torch.tensor(
+                                [0, length], dtype=torch.int32, device=self.device
+                            ),
+                        )
+                        expected = positions // stub._state_tokens_per_block == tail
+                        expected &= positions >= prefix + length - full_eb
+                        expected &= (positions % full_eb) // stub._state_eb == cp_rank
+                        self.assertTrue(torch.equal(meta.state_slots >= 0, expected))
+                        live = meta.state_slots[expected]
+                        self.assertEqual(live.numel(), live.unique().numel())
+                        reference = stub._compute_state_slot_mapping(
+                            positions,
+                            requests,
+                            torch.tensor([prefix + length], device=self.device),
+                        )
+                        torch.testing.assert_close(meta.state_slots, reference)
+
+    def test_hca_chunk_tail_keeps_unfinished_interval(self) -> None:
+        from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
+            run_save_partial_states,
+        )
+
+        stub = _make_stub(self.device, ratio=128, overlap=0, gen_num=4)
+        stub._state_block_table.fill_(-1)
+        width = 16
+        state = torch.full((8, stub._state_eb, width * 2), -9.0, device=self.device)
+        expected = state[7].clone()
+        ape = torch.zeros((128, width), device=self.device)
+        for prefix, length in ((0, 512), (512, 768), (1280, 513)):
+            tail = (prefix + length - 1) // stub._state_tokens_per_block
+            stub._state_block_table.fill_(-1)
+            stub._state_block_table[0, tail] = 7
+            positions = torch.arange(
+                prefix, prefix + length, dtype=torch.int64, device=self.device
+            )
+            meta = stub.prepare_metadata(
+                positions,
+                torch.zeros_like(positions),
+                has_prefix=prefix > 0,
+                is_batched=True,
+                seq_start_per_req=torch.tensor(
+                    [prefix], dtype=torch.int32, device=self.device
+                ),
+                cu_seq_per_req=torch.tensor(
+                    [0, length], dtype=torch.int32, device=self.device
+                ),
+            )
+            kv = positions.float().unsqueeze(1).expand(-1, width).contiguous()
+            score = kv + 0.5
+            run_save_partial_states(
+                kv, score, ape, positions, state, meta.state_slots, compress_ratio=128
+            )
+            live = positions // stub._state_tokens_per_block == tail
+            live &= positions >= prefix + length - stub._state_eb
+            rows = positions[live] % stub._state_eb
+            expected[rows, :width] = kv[live]
+            expected[rows, width:] = score[live]
+            torch.testing.assert_close(state[7], expected)
+            self.assertTrue(torch.all(state[:7] == -9.0))
+            # Decode only needs the unfinished 128-token interval; completed
+            # intervals are already in the compressed KV pool.
+            end = prefix + length
+            pending = torch.arange(end - end % 128, end, device=self.device)
+            torch.testing.assert_close(
+                state[7, pending % stub._state_eb, :width],
+                pending.float().unsqueeze(1).expand(-1, width),
+            )
 
     def _run_single_request(
         self,

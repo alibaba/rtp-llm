@@ -104,13 +104,7 @@ class PCPAll2AllAttnOp:
         ]
         prefill_cp_chunk_lengths = self.cp_info.prefill_cp_chunk_lengths
         shuffle_indices = self.cp_info.prefill_shuffle_indices
-        prefix_offsets = torch.repeat_interleave(
-            attention_inputs.prefix_lengths.to(device=shuffle_indices.device),
-            prefill_cp_chunk_lengths.to(device=shuffle_indices.device),
-            output_size=shuffle_indices.numel(),
-        )
-        cache_positions = shuffle_indices + prefix_offsets
-        self.all_shuffle_indices = all_gather(cache_positions, group=Group.TP).reshape(
+        self.all_shuffle_indices = all_gather(shuffle_indices, group=Group.TP).reshape(
             -1, shuffle_indices.shape[0]
         )
 
@@ -164,6 +158,18 @@ class PCPAll2AllAttnOp:
                 for i, cl in enumerate(chunk_lens)
             ]
         )
+        # The CP planner publishes absolute positions, including cached prefixes.
+        # Filter padding against each request's new-token interval.
+        new_lengths = self.cp_info.prefill_actual_input_lengths_cpu.to(self.device)
+        prefix_lengths = attention_inputs.prefix_lengths.to(self.device)
+        window_start = prefix_lengths[self.append_batch_indice]
+        valid = (self.all_shuffle_indices >= window_start) & (
+            self.all_shuffle_indices < window_start + new_lengths[self.append_batch_indice]
+        )
+        self.append_indices = [
+            torch.nonzero(rank_valid, as_tuple=True)[0] for rank_valid in valid
+        ]
+        self.append_positions = self.all_shuffle_indices
 
         self.has_prefix = self.attn_inputs.prefix_lengths.any().item()
         if self.has_prefix:
@@ -180,6 +186,29 @@ class PCPAll2AllAttnOp:
             )
 
         return params
+
+    def _append_kv_cache(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        src_rank: int,
+        kv_cache_tensor: torch.Tensor,
+        params: ParamsBase,
+    ) -> None:
+        indices = self.append_indices[src_rank]
+        if indices.numel() == 0:
+            return
+        append_paged_kv_cache(
+            append_key=k[indices],
+            append_value=v[indices],
+            batch_indices=self.append_batch_indice[indices],
+            positions=self.append_positions[src_rank][indices],
+            paged_kv_cache=kv_cache_tensor,
+            kv_indices=params.page_indice_d,
+            kv_indptr=params.decode_page_indptr_d,
+            kv_last_page_len=params.paged_kv_last_page_len_d,
+            kv_layout="HND",
+        )
 
     def forward(
         self,
@@ -253,16 +282,8 @@ class PCPAll2AllAttnOp:
                 k = k.reshape(-1, self.num_kv_heads, self.head_dim)
                 v = v.reshape(-1, self.num_kv_heads, self.head_dim)
 
-                append_paged_kv_cache(
-                    append_key=k,
-                    append_value=v,
-                    batch_indices=self.append_batch_indice,
-                    positions=self.all_shuffle_indices[self.prefill_cp_rank],
-                    paged_kv_cache=kv_cache_tensor,
-                    kv_indices=params.page_indice_d,
-                    kv_indptr=params.decode_page_indptr_d,
-                    kv_last_page_len=params.paged_kv_last_page_len_d,
-                    kv_layout="HND",
+                self._append_kv_cache(
+                    k, v, self.prefill_cp_rank, kv_cache_tensor, params
                 )
 
                 q_reshaped = q.reshape(-1, self.num_qo_heads, self.head_dim)
@@ -300,16 +321,8 @@ class PCPAll2AllAttnOp:
                 )
                 # TODO: make write local kvcache async
                 src_rank = (self.prefill_cp_rank - round_id) % self.prefill_cp_size
-                append_paged_kv_cache(
-                    append_key=remote_k,
-                    append_value=remote_v,
-                    batch_indices=self.append_batch_indice,
-                    positions=self.all_shuffle_indices[src_rank],
-                    paged_kv_cache=kv_cache_tensor,
-                    kv_indices=params.page_indice_d,
-                    kv_indptr=params.decode_page_indptr_d,
-                    kv_last_page_len=params.paged_kv_last_page_len_d,
-                    kv_layout="HND",
+                self._append_kv_cache(
+                    remote_k, remote_v, src_rank, kv_cache_tensor, params
                 )
                 if round_id > self.prefill_cp_rank:
                     q_split = (

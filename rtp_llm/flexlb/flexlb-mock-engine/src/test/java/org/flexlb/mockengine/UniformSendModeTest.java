@@ -33,33 +33,71 @@ class UniformSendModeTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private Path writeTrace(int n) throws IOException {
         Path trace = tempDir.resolve("trace.jsonl");
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < n; i++) {
-            sb.append("{\"request_id\":\"rid-").append(i)
-                    .append("\",\"il\":32,\"ol\":4,\"ts\":").append(i * 1000L)
+            sb.append("{\"request_id\":\"rid-")
+                    .append(i)
+                    .append("\",\"il\":32,\"ol\":4,\"ts\":")
+                    .append(i * 1000L)
                     .append("}\n");
         }
         Files.writeString(trace, sb.toString());
         return trace;
     }
 
-    private JavaLoadClient.Config config(String traceFile, String outDir,
-                                         int durationS, int limit, int numShards, int shardIndex,
-                                         boolean loop, String sendMode, double sendModeQps) {
+    private JavaLoadClient.Config config(
+            String traceFile,
+            String outDir,
+            int durationS,
+            int limit,
+            int numShards,
+            int shardIndex,
+            boolean loop,
+            String sendMode,
+            double sendModeQps) {
         // Full constructor: priority 0 (unset) keeps the Auto-TPM QoS
         // passthrough path untouched by uniform-mode tests; forcePriority 0
         // likewise leaves per-record priority resolution alone.
         return new JavaLoadClient.Config(
-                traceFile, "127.0.0.1:7001", "127.0.0.1:7003",
-                durationS, 16, 1000.0, 1, outDir, numShards, shardIndex, limit,
-                120_000L, 500.0, false, loop, 1, 1, 0L, 120, true,
-                "engine_service", "",
-                false, 10, 1000, 0, 0, "", false, "", true, 0, 0, sendMode, sendModeQps,
+                traceFile,
+                "127.0.0.1:7001",
+                "127.0.0.1:7003",
+                durationS,
+                16,
+                1000.0,
+                1,
+                outDir,
+                numShards,
+                shardIndex,
+                limit,
+                120_000L,
+                500.0,
+                false,
+                loop,
+                1,
+                1,
+                0L,
+                120,
+                true,
+                "engine_service",
+                "",
+                false,
+                10,
+                1000,
+                0,
+                0,
+                "",
+                false,
+                "",
+                true,
+                0,
+                0,
+                sendMode,
+                sendModeQps,
                 true);
     }
 
@@ -79,29 +117,78 @@ class UniformSendModeTest {
 
     @Test
     void rejectsUnknownSendMode() {
-        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
-                () -> config("trace.jsonl", tempDir.resolve("out").toString(),
-                        0, 0, 1, 0, false, "burst", 10.0));
+        IllegalArgumentException e =
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () ->
+                                config(
+                                        "trace.jsonl",
+                                        tempDir.resolve("out").toString(),
+                                        0,
+                                        0,
+                                        1,
+                                        0,
+                                        false,
+                                        "burst",
+                                        10.0));
         assertTrue(e.getMessage().contains("SEND_MODE"), e.getMessage());
     }
 
     @Test
     void uniformRequiresPositiveQps() {
-        assertThrows(IllegalArgumentException.class,
-                () -> config("trace.jsonl", tempDir.resolve("out").toString(),
-                        0, 0, 1, 0, false, "uniform", 0.0));
-        assertThrows(IllegalArgumentException.class,
-                () -> config("trace.jsonl", tempDir.resolve("out").toString(),
-                        0, 0, 1, 0, false, "uniform", -5.0));
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        config(
+                                "trace.jsonl",
+                                tempDir.resolve("out").toString(),
+                                0,
+                                0,
+                                1,
+                                0,
+                                false,
+                                "uniform",
+                                0.0));
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        config(
+                                "trace.jsonl",
+                                tempDir.resolve("out").toString(),
+                                0,
+                                0,
+                                1,
+                                0,
+                                false,
+                                "uniform",
+                                -5.0));
     }
 
     @Test
     void replayIgnoresQpsAndStaysValid() {
-        JavaLoadClient.Config replay = config("trace.jsonl", tempDir.resolve("out").toString(),
-                0, 0, 1, 0, false, "replay", 0.0);
+        JavaLoadClient.Config replay =
+                config(
+                        "trace.jsonl",
+                        tempDir.resolve("out").toString(),
+                        0,
+                        0,
+                        1,
+                        0,
+                        false,
+                        "replay",
+                        0.0);
         assertFalse(replay.isUniform());
-        JavaLoadClient.Config uniform = config("trace.jsonl", tempDir.resolve("out").toString(),
-                0, 0, 1, 0, false, "uniform", 50.0);
+        JavaLoadClient.Config uniform =
+                config(
+                        "trace.jsonl",
+                        tempDir.resolve("out").toString(),
+                        0,
+                        0,
+                        1,
+                        0,
+                        false,
+                        "uniform",
+                        50.0);
         assertTrue(uniform.isUniform());
     }
 
@@ -114,13 +201,24 @@ class UniformSendModeTest {
         Path trace = writeTrace(5);
         Path outDir = tempDir.resolve("uniform_out");
         // 50 QPS for 2s -> 100 sends at exactly 20ms spacing (single shard).
-        JavaLoadClient client = new JavaLoadClient(config(trace.toString(), outDir.toString(),
-                2, 0, 1, 0, false, "uniform", 50.0));
+        JavaLoadClient client =
+                new JavaLoadClient(
+                        config(
+                                trace.toString(),
+                                outDir.toString(),
+                                2,
+                                0,
+                                1,
+                                0,
+                                false,
+                                "uniform",
+                                50.0));
         client.run();
 
         List<JsonNode> rows = readPerRequest(outDir);
         int expected = 50 * 2;
-        assertTrue(rows.size() >= expected - 1 && rows.size() <= expected + 1,
+        assertTrue(
+                rows.size() >= expected - 1 && rows.size() <= expected + 1,
                 "expected " + expected + "±1 sends, got " + rows.size());
 
         List<Double> dues = new ArrayList<>();
@@ -134,7 +232,10 @@ class UniformSendModeTest {
 
         dues.sort(null);
         for (int i = 1; i < dues.size(); i++) {
-            assertEquals(20.0, dues.get(i) - dues.get(i - 1), 1e-6,
+            assertEquals(
+                    20.0,
+                    dues.get(i) - dues.get(i - 1),
+                    1e-6,
                     "non-uniform interval at index " + i);
         }
 
@@ -150,13 +251,24 @@ class UniformSendModeTest {
         Path trace = writeTrace(5);
         Path outDir = tempDir.resolve("shard_out");
         // 200 QPS over 4 shards -> 50 QPS per shard (20ms interval) for 1s.
-        JavaLoadClient client = new JavaLoadClient(config(trace.toString(), outDir.toString(),
-                1, 0, 4, 1, false, "uniform", 200.0));
+        JavaLoadClient client =
+                new JavaLoadClient(
+                        config(
+                                trace.toString(),
+                                outDir.toString(),
+                                1,
+                                0,
+                                4,
+                                1,
+                                false,
+                                "uniform",
+                                200.0));
         client.run();
 
         List<JsonNode> rows = readPerRequest(outDir);
         int expected = 50;
-        assertTrue(rows.size() >= expected - 1 && rows.size() <= expected + 1,
+        assertTrue(
+                rows.size() >= expected - 1 && rows.size() <= expected + 1,
                 "expected " + expected + "±1 sends, got " + rows.size());
 
         List<Double> dues = new ArrayList<>();
@@ -165,7 +277,10 @@ class UniformSendModeTest {
         }
         dues.sort(null);
         for (int i = 1; i < dues.size(); i++) {
-            assertEquals(20.0, dues.get(i) - dues.get(i - 1), 1e-6,
+            assertEquals(
+                    20.0,
+                    dues.get(i) - dues.get(i - 1),
+                    1e-6,
                     "non-uniform per-shard interval at index " + i);
         }
 
@@ -181,8 +296,18 @@ class UniformSendModeTest {
         Path trace = writeTrace(3);
         Path outDir = tempDir.resolve("limit_out");
         // DURATION_S=0: LIMIT alone stops the run (loop-replay semantics).
-        JavaLoadClient client = new JavaLoadClient(config(trace.toString(), outDir.toString(),
-                0, 10, 1, 0, false, "uniform", 1000.0));
+        JavaLoadClient client =
+                new JavaLoadClient(
+                        config(
+                                trace.toString(),
+                                outDir.toString(),
+                                0,
+                                10,
+                                1,
+                                0,
+                                false,
+                                "uniform",
+                                1000.0));
         client.run();
 
         assertEquals(10, readPerRequest(outDir).size());
@@ -197,8 +322,18 @@ class UniformSendModeTest {
         Path trace = writeTrace(5);
         Path outDir = tempDir.resolve("replay_out");
         // Non-loop replay: all 5 trace records sent once, paced by trace ts.
-        JavaLoadClient client = new JavaLoadClient(config(trace.toString(), outDir.toString(),
-                0, 0, 1, 0, false, "replay", 0.0));
+        JavaLoadClient client =
+                new JavaLoadClient(
+                        config(
+                                trace.toString(),
+                                outDir.toString(),
+                                0,
+                                0,
+                                1,
+                                0,
+                                false,
+                                "replay",
+                                0.0));
         client.run();
 
         List<JsonNode> rows = readPerRequest(outDir);
@@ -213,7 +348,7 @@ class UniformSendModeTest {
         }
 
         // The client writes no summary.json at all anymore: raw rows only.
-        assertFalse(Files.exists(outDir.resolve("summary.json")),
-                "client must not write summary.json");
+        assertFalse(
+                Files.exists(outDir.resolve("summary.json")), "client must not write summary.json");
     }
 }

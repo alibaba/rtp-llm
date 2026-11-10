@@ -29,7 +29,9 @@ public:
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* response_writer);
 
-public:
+    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                   const BatchGenerateInputPB* request,
+                                   BatchGenerateOutputsPB*     response) override;
 
 private:
     std::unique_ptr<PDCancelRegistry> cancel_registry_;

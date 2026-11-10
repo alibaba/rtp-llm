@@ -66,12 +66,16 @@ TEST_F(LayerCacheBufferUtilFilterTest, FullGroupAllValidBlocks) {
     EXPECT_EQ(result->getBlockId(102), 12);
 }
 
-TEST_F(LayerCacheBufferUtilFilterTest, FullGroupWithNullBlockRejected) {
+TEST_F(LayerCacheBufferUtilFilterTest, FullGroupSkipsNullBlocks) {
     auto resource = makeResource(1, 1, {0}, {CacheGroupType::FULL}, {10, -1, 12}, {100, 101, 102});
 
     auto results = LayerCacheBufferUtil::convertLayer(resource, *topology_, 0, 0, -1);
-    EXPECT_FALSE(results.ok());
-    EXPECT_TRUE(results.value().empty());
+    ASSERT_TRUE(results.ok()) << results.status().ToString();
+    ASSERT_EQ(results.value().size(), 1u);
+    EXPECT_EQ(results.value().front()->blockIdMap().size(), 2u);
+    EXPECT_EQ(results.value().front()->getBlockId(100), 10);
+    EXPECT_EQ(results.value().front()->getBlockId(101), -1);
+    EXPECT_EQ(results.value().front()->getBlockId(102), 12);
 }
 
 TEST_F(LayerCacheBufferUtilFilterTest, LinearGroupOnlyLastValidBlock) {
@@ -99,11 +103,11 @@ TEST_F(LayerCacheBufferUtilFilterTest, LinearGroupMixedValidOnlyTakesLast) {
     EXPECT_EQ(result->getBlockId(100), -1);  // not included
 }
 
-TEST_F(LayerCacheBufferUtilFilterTest, AllNullBlocksReturnsError) {
+TEST_F(LayerCacheBufferUtilFilterTest, AllNullBlocksReturnsEmpty) {
     auto resource = makeResource(1, 1, {0}, {CacheGroupType::LINEAR}, {-1, -1, -1}, {100, 101, 102});
 
     auto results = LayerCacheBufferUtil::convertLayer(resource, *topology_, 0, 0, -1);
-    EXPECT_FALSE(results.ok());
+    ASSERT_TRUE(results.ok()) << results.status().ToString();
     EXPECT_TRUE(results.value().empty());
 }
 
@@ -216,14 +220,16 @@ TEST_F(LayerCacheBufferUtilFilterTest, ConvertWithLayerAttnTypes) {
     EXPECT_EQ(results[1]->getBlockId(102), 25);
 }
 
-TEST_F(LayerCacheBufferUtilFilterTest, ConvertLinearAllNullRejectsRequest) {
+TEST_F(LayerCacheBufferUtilFilterTest, ConvertSkipsAllNullLinearGroup) {
     auto resource = makeTwoGroupResource({10, 11, 12},
                                          {-1, -1, -1},  // all null
                                          {100, 101, 102});
 
     auto results = LayerCacheBufferUtil::convert(resource, *topology_);
-    EXPECT_FALSE(results.ok());
-    EXPECT_TRUE(results.value().empty());
+    ASSERT_TRUE(results.ok()) << results.status().ToString();
+    ASSERT_EQ(results.value().size(), 1u);
+    EXPECT_EQ(results.value().front()->getLayerId(), 0);
+    EXPECT_EQ(results.value().front()->blockIdMap().size(), 3u);
 }
 
 TEST_F(LayerCacheBufferUtilFilterTest, NonEmptyRouteRejectsEmptyResourceAndDuplicateKeys) {
@@ -248,6 +254,29 @@ TEST_F(LayerCacheBufferUtilFilterTest, CpOwnershipFilteringDoesNotHideRequiredMi
     EXPECT_EQ(projected.value()->blockIdMap().size(), 1u);
     EXPECT_EQ(projected.value()->getBlockId(101), 10);
     EXPECT_FALSE(LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, {0}, 1, 2).ok());
+}
+
+TEST_F(LayerCacheBufferUtilFilterTest, CpInventorySkipsOwnedNullButRouteRejectsIt) {
+    auto resource = makeResource(1, 1, {0}, {CacheGroupType::FULL}, {-1, 12}, {100, 101, 102, 103});
+    auto group = topology_->group("group0");
+    group.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    auto inventory = LayerCacheBufferUtil::convertLayerTag(resource, group, 0, 0, -1, 1, 2);
+    ASSERT_TRUE(inventory.ok()) << inventory.status().ToString();
+    ASSERT_NE(inventory.value(), nullptr);
+    ASSERT_EQ(inventory.value()->blockIdMap().size(), 1u);
+    EXPECT_EQ(inventory.value()->getBlockId(103), 12);
+    EXPECT_EQ(inventory.value()->getBlockId(101), -1);
+    EXPECT_FALSE(LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, {1, 3}, 1, 2).ok());
+    auto available_route = LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, {3}, 1, 2);
+    ASSERT_TRUE(available_route.ok()) << available_route.status().ToString();
+    EXPECT_EQ(available_route.value()->getBlockId(103), 12);
+}
+
+TEST_F(LayerCacheBufferUtilFilterTest, InventoryStillRejectsMalformedBlockTables) {
+    auto missing = makeResource(1, 1, {0}, {CacheGroupType::FULL}, {10}, {100, 101});
+    EXPECT_FALSE(LayerCacheBufferUtil::convertLayer(missing, *topology_, 0, 0, -1).ok());
+    auto invalid = makeResource(1, 1, {0}, {CacheGroupType::FULL}, {-2}, {100});
+    EXPECT_FALSE(LayerCacheBufferUtil::convertLayer(invalid, *topology_, 0, 0, -1).ok());
 }
 
 class CheckedBlockConverter: public LayerBlockConverter {

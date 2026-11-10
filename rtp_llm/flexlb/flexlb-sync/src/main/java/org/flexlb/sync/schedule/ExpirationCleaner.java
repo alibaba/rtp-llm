@@ -46,10 +46,8 @@ public class ExpirationCleaner {
             ConfigService configService,
             CacheAwareService cacheAwareService,
             WorkerDirectory workerDirectory) {
-        this.cacheAwareService = Objects.requireNonNull(
-                cacheAwareService, "cacheAwareService");
-        this.workerDirectory = Objects.requireNonNull(
-                workerDirectory, "workerDirectory");
+        this.cacheAwareService = Objects.requireNonNull(cacheAwareService, "cacheAwareService");
+        this.workerDirectory = Objects.requireNonNull(workerDirectory, "workerDirectory");
         this.workerTimeoutUs = resolveWorkerTimeoutUs(configService);
     }
 
@@ -62,32 +60,35 @@ public class ExpirationCleaner {
      * retirement on one transiently delayed poll.
      */
     private static long resolveWorkerTimeoutUs(ConfigService configService) {
-        long configMs = configService.loadBalanceConfig().getWorkerRegistry()
-                .getHealth().getStatusStaleAfterMs();
+        long configMs =
+                configService
+                        .loadBalanceConfig()
+                        .getWorkerRegistry()
+                        .getHealth()
+                        .getStatusStaleAfterMs();
         return configMs * 1000L;
     }
 
-    @Scheduled(fixedRateString = "#{@configService.loadBalanceConfig().workerRegistry.health.cleanupIntervalMs}")
+    @Scheduled(
+            fixedRateString =
+                    "#{@configService.loadBalanceConfig().workerRegistry.health.cleanupIntervalMs}")
     public void cleanExpiredWorkers() {
         List<PendingRetirement> retirements = new ArrayList<>();
         for (RoleType role : RoleType.values()) {
-            retirements.addAll(beginExpiredRetirements(
-                    workerDirectory.statusSnapshot(role), role));
+            retirements.addAll(beginExpiredRetirements(workerDirectory.statusSnapshot(role), role));
         }
         completeRetirements(retirements);
     }
 
     /** Phase one: close every expired routing gate without waiting on drains. */
     private List<PendingRetirement> beginExpiredRetirements(
-            Map<String, WorkerStatus> workerStatusMap,
-            RoleType role) {
+            Map<String, WorkerStatus> workerStatusMap, RoleType role) {
         if (MapUtils.isEmpty(workerStatusMap)) {
             return List.of();
         }
 
         List<PendingRetirement> retirements = new ArrayList<>();
-        for (Map.Entry<String, WorkerStatus> item
-                : workerStatusMap.entrySet()) {
+        for (Map.Entry<String, WorkerStatus> item : workerStatusMap.entrySet()) {
             WorkerStatus workerStatus = item.getValue();
 
             EndpointRegistry.DetachedGeneration endpointToRetire = null;
@@ -101,23 +102,19 @@ public class ExpirationCleaner {
                     continue;
                 }
                 WorkerStatus.PollHealth health = workerStatus.pollHealth();
-                long expirationTime = health.lastSuccessfulPollUs()
-                        + workerTimeoutUs;
+                long expirationTime = health.lastSuccessfulPollUs() + workerTimeoutUs;
                 long currentTime = System.nanoTime() / 1000;
                 if (currentTime > expirationTime) {
-                    endpointToRetire = workerDirectory.beginRetirement(
-                            role, item.getKey(), workerStatus);
+                    endpointToRetire =
+                            workerDirectory.beginRetirement(role, item.getKey(), workerStatus);
                     retirementStarted = true;
                 }
             } finally {
                 workerStatus.lock.unlock();
             }
             if (retirementStarted) {
-                retirements.add(new PendingRetirement(
-                        workerStatus,
-                        role,
-                        item.getKey(),
-                        endpointToRetire));
+                retirements.add(
+                        new PendingRetirement(workerStatus, role, item.getKey(), endpointToRetire));
             }
         }
         return retirements;
@@ -135,7 +132,8 @@ public class ExpirationCleaner {
                     logger);
             logger.warn(
                     "Retiring expired worker: {}, role: {}, generation={}",
-                    retirement.ipPort(), retirement.role(),
+                    retirement.ipPort(),
+                    retirement.role(),
                     retirement.workerStatus().getGenerationId());
         }
     }
@@ -144,6 +142,5 @@ public class ExpirationCleaner {
             WorkerStatus workerStatus,
             RoleType role,
             String ipPort,
-            EndpointRegistry.DetachedGeneration endpointToRetire) {
-    }
+            EndpointRegistry.DetachedGeneration endpointToRetire) {}
 }

@@ -132,7 +132,20 @@ int64_t P2PConnectorResourceStore::waitForRequestDeadline(const std::string&    
 }
 
 void P2PConnectorResourceStore::setOnRequestReleased(std::function<void(int64_t, int64_t)> callback) {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
     on_request_released_ = std::move(callback);
+}
+
+void P2PConnectorResourceStore::notifyRequestReleased(int64_t request_id, int64_t deadline_ms) {
+    std::function<void(int64_t, int64_t)> callback;
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        callback = on_request_released_;
+    }
+    // Call outside the lock: release hooks may reenter the store.
+    if (callback) {
+        callback(request_id, deadline_ms);
+    }
 }
 
 bool P2PConnectorResourceStore::isMarkedCancelled(const std::string& unique_key) const {
@@ -199,8 +212,8 @@ bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>& meta,
             scheduleDeadlineCheckLocked(routing->unique_key, state);
         }
     }
-    if (release_layers && on_request_released_) {
-        on_request_released_(routing->request_id, routing->deadline_ms);
+    if (release_layers) {
+        notifyRequestReleased(routing->request_id, routing->deadline_ms);
     }
     resource_cv_.notify_all();
     return accepted;
@@ -240,8 +253,8 @@ void P2PConnectorResourceStore::markTerminal(const std::string& unique_key,
     }
     retired.reset();
     resource_cv_.notify_all();
-    if (request_id.has_value() && on_request_released_) {
-        on_request_released_(*request_id, request_deadline_ms);
+    if (request_id.has_value()) {
+        notifyRequestReleased(*request_id, request_deadline_ms);
     }
 }
 
@@ -333,10 +346,8 @@ void P2PConnectorResourceStore::checkTimeout(int64_t now_ms) {
     }
     retired.clear();
     resource_cv_.notify_all();
-    if (on_request_released_) {
-        for (const auto& [request_id, request_deadline_ms] : released) {
-            on_request_released_(request_id, request_deadline_ms);
-        }
+    for (const auto& [request_id, request_deadline_ms] : released) {
+        notifyRequestReleased(request_id, request_deadline_ms);
     }
 }
 

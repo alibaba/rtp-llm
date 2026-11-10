@@ -20,8 +20,7 @@ public final class PreemptionRegistration {
     private final long requestId;
     private final long attemptToken;
     private final String detail;
-    private final CompletableFuture<VictimTerminal> terminal =
-            new CompletableFuture<>();
+    private final CompletableFuture<VictimTerminal> terminal = new CompletableFuture<>();
 
     private PreemptionCancelPhase phase = PreemptionCancelPhase.CLAIMED;
     private boolean finished;
@@ -29,21 +28,24 @@ public final class PreemptionRegistration {
     private boolean pendingDeliveryConfirmation;
     private long pendingConfirmationBatchId;
 
-    PreemptionRegistration(
-            RequestSlot owner, long requestId,
-            long attemptToken,
-            String detail) {
+    PreemptionRegistration(RequestSlot owner, long requestId, long attemptToken, String detail) {
         this.owner = owner;
         this.requestId = requestId;
         this.attemptToken = attemptToken;
         this.detail = detail == null ? "priority preemption" : detail;
     }
 
-    public boolean applyPhase(PreemptionCancelPhase phase) { return owner.updatePreemption(this, phase); }
+    public boolean applyPhase(PreemptionCancelPhase phase) {
+        return owner.updatePreemption(this, phase);
+    }
 
-    public boolean release() { return owner.releasePreemption(this); }
+    public boolean release() {
+        return owner.releasePreemption(this);
+    }
 
-    public boolean completePreemption(String detail) { return owner.completePreemption(this, detail); }
+    public boolean completePreemption(String detail) {
+        return owner.completePreemption(this, detail);
+    }
 
     public long requestId() {
         return requestId;

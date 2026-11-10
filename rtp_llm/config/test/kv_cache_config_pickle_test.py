@@ -15,33 +15,58 @@ class KVCacheConfigPickleTest(TestCase):
         config.disk_cache_paths = "/tmp/cache"
         for name, value in KV_CACHE_EVENT_FIELD_VALUES.items():
             setattr(config, name, value)
-        state = config.__getstate__()
-        self.assertEqual(state[:2], ("KVCacheConfig", 7))
-        self.assertEqual(state[-5:], tuple(KV_CACHE_EVENT_FIELD_VALUES.values()))
-        # setstate must normalize its private slice, not mutate the supplied
-        # version-7 tuple retained by another Python reference.
-        original_state = tuple(list(state))
-        direct = KVCacheConfig.__new__(KVCacheConfig)
-        direct.__setstate__(state)
-        self.assertEqual(state, original_state)
-        self.assertEqual(direct.__getstate__(), original_state)
-        restored = pickle.loads(pickle.dumps(config))
-        self.assertEqual(restored.block_tree_transfer_worker_count, 7)
-        self.assertTrue(restored.enable_disk_cache)
-        self.assertEqual(restored.disk_cache_paths, "/tmp/cache")
+        for enable_crc in (False, True):
+            with self.subTest(enable_crc=enable_crc):
+                config.enable_crc = enable_crc
+                state = config.__getstate__()
+                self.assertEqual(len(state), 70)
+                self.assertEqual(state[:2], ("KVCacheConfig", 8))
+                self.assertEqual(
+                    state[-6:-1], tuple(KV_CACHE_EVENT_FIELD_VALUES.values())
+                )
+                self.assertIs(state[-1], enable_crc)
+                # Normalizing old fields must not mutate the supplied tuple.
+                original_state = tuple(list(state))
+                direct = KVCacheConfig.__new__(KVCacheConfig)
+                direct.__setstate__(state)
+                self.assertEqual(state, original_state)
+                self.assertEqual(direct.__getstate__(), original_state)
+                restored = pickle.loads(pickle.dumps(config))
+                self.assertIs(restored.enable_crc, enable_crc)
+                self.assertEqual(restored.block_tree_transfer_worker_count, 7)
+                self.assertTrue(restored.enable_disk_cache)
+                self.assertEqual(restored.disk_cache_paths, "/tmp/cache")
+                for name, value in KV_CACHE_EVENT_FIELD_VALUES.items():
+                    self.assertEqual(getattr(restored, name), value, name)
+                self.assertIn(f"enable_crc: {int(enable_crc)}\n", restored.to_string())
+
+    def test_version_seven_preserves_events_and_enables_crc_by_default(self):
+        source = KVCacheConfig()
+        source.enable_crc = False
+        for name, value in KV_CACHE_EVENT_FIELD_VALUES.items():
+            setattr(source, name, value)
+        state = source.__getstate__()
+        previous = (state[0], 7, *state[2:-1])
+        original_state = tuple(list(previous))
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(previous)
+        self.assertEqual(previous, original_state)
+        self.assertTrue(restored.enable_crc)
         for name, value in KV_CACHE_EVENT_FIELD_VALUES.items():
             self.assertEqual(getattr(restored, name), value, name)
 
     def test_previous_block_tree_state_uses_event_defaults(self):
         source = KVCacheConfig()
+        source.enable_crc = False
         source.dsv4_fixed_pool_blocks = 17
         source.block_tree_transfer_worker_count = 7
         state = source.__getstate__()
-        previous = (state[0], 6, *state[2:-5])
+        previous = (state[0], 6, *state[2:-6])
         restored = KVCacheConfig.__new__(KVCacheConfig)
         restored.__setstate__(previous)
         self.assertEqual(restored.dsv4_fixed_pool_blocks, 17)
         self.assertEqual(restored.block_tree_transfer_worker_count, 7)
+        self.assertTrue(restored.enable_crc)
         defaults = KVCacheConfig()
         for name in EVENT_PICKLE_FIELDS:
             self.assertEqual(getattr(restored, name), getattr(defaults, name), name)

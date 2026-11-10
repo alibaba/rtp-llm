@@ -35,19 +35,15 @@ public class DefaultCacheAwareService implements CacheAwareService {
 
     @Autowired
     public DefaultCacheAwareService(
-            KvCacheManager kvCacheManager,
-            CacheMetricsReporter cacheMetricsReporter) {
-        this.kvCacheManager = java.util.Objects.requireNonNull(
-                kvCacheManager, "kvCacheManager");
-        this.cacheMetricsReporter = java.util.Objects.requireNonNull(
-                cacheMetricsReporter, "cacheMetricsReporter");
+            KvCacheManager kvCacheManager, CacheMetricsReporter cacheMetricsReporter) {
+        this.kvCacheManager = java.util.Objects.requireNonNull(kvCacheManager, "kvCacheManager");
+        this.cacheMetricsReporter =
+                java.util.Objects.requireNonNull(cacheMetricsReporter, "cacheMetricsReporter");
     }
 
     @Override
     public Map<String, Integer> findMatchingEngines(
-            List<Long> blockCacheKeys,
-            RoleType roleType,
-            List<String> candidateEngineIpPorts) {
+            List<Long> blockCacheKeys, RoleType roleType, List<String> candidateEngineIpPorts) {
 
         long startTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
 
@@ -57,8 +53,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
 
         final Map<String, Integer> resultMap;
         try {
-            resultMap = kvCacheManager.findMatchingEngines(
-                    blockCacheKeys, candidateEngineIpPorts);
+            resultMap = kvCacheManager.findMatchingEngines(blockCacheKeys, candidateEngineIpPorts);
         } catch (RuntimeException e) {
             reportFindLatency(roleType, startTime, FIND_METRIC_FAILURE);
             log.error("Error finding matching engines for role: {}", roleType, e);
@@ -68,14 +63,11 @@ public class DefaultCacheAwareService implements CacheAwareService {
         return resultMap;
     }
 
-    private void reportFindLatency(
-            RoleType roleType, long startTime, String result) {
+    private void reportFindLatency(RoleType roleType, long startTime, String result) {
         try {
-            cacheMetricsReporter.reportFindMatchingEnginesRT(
-                    roleType, startTime, result);
+            cacheMetricsReporter.reportFindMatchingEnginesRT(roleType, startTime, result);
         } catch (RuntimeException metricFailure) {
-            log.warn("Failed to report cache lookup latency for role: {}",
-                    roleType, metricFailure);
+            log.warn("Failed to report cache lookup latency for role: {}", roleType, metricFailure);
         }
     }
 
@@ -87,7 +79,8 @@ public class DefaultCacheAwareService implements CacheAwareService {
 
         try {
             if (workerStatus.getCacheStatus() == null) {
-                WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, "Worker Cache Status is null");
+                WorkerCacheUpdateResult result =
+                        buildFailureResult(engineIpPort, "Worker Cache Status is null");
                 cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
                 return result;
             }
@@ -95,7 +88,8 @@ public class DefaultCacheAwareService implements CacheAwareService {
             String ipPort = workerStatus.getIpPort();
             CacheStatus cacheStatus = workerStatus.getCacheStatus();
             if (cacheStatus.getCachedKeys() == null) {
-                WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, "Worker Cached Keys is null");
+                WorkerCacheUpdateResult result =
+                        buildFailureResult(engineIpPort, "Worker Cached Keys is null");
                 cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
                 return result;
             }
@@ -130,15 +124,19 @@ public class DefaultCacheAwareService implements CacheAwareService {
     /**
      * Build success result
      */
-    private WorkerCacheUpdateResult buildSuccessResult(WorkerStatus workerStatus, CacheStatus cacheStatus) {
+    private WorkerCacheUpdateResult buildSuccessResult(
+            WorkerStatus workerStatus, CacheStatus cacheStatus) {
         return WorkerCacheUpdateResult.builder()
-            .success(true)
-            .engineIpPort(workerStatus.getIpPort())
-            .cacheBlockCount(cacheStatus.getCachedKeys() != null ? cacheStatus.getCachedKeys().size() : 0)
-            .availableKvCache(cacheStatus.getAvailableKvCache())
-            .totalKvCache(cacheStatus.getTotalKvCache())
-            .cacheVersion(cacheStatus.getVersion())
-            .build();
+                .success(true)
+                .engineIpPort(workerStatus.getIpPort())
+                .cacheBlockCount(
+                        cacheStatus.getCachedKeys() != null
+                                ? cacheStatus.getCachedKeys().size()
+                                : 0)
+                .availableKvCache(cacheStatus.getAvailableKvCache())
+                .totalKvCache(cacheStatus.getTotalKvCache())
+                .cacheVersion(cacheStatus.getVersion())
+                .build();
     }
 
     /**
@@ -146,9 +144,9 @@ public class DefaultCacheAwareService implements CacheAwareService {
      */
     private WorkerCacheUpdateResult buildFailureResult(String engineIpPort, String errorMessage) {
         return WorkerCacheUpdateResult.builder()
-            .success(false)
-            .engineIpPort(engineIpPort)
-            .errorMessage(errorMessage)
-            .build();
+                .success(false)
+                .engineIpPort(engineIpPort)
+                .errorMessage(errorMessage)
+                .build();
     }
 }

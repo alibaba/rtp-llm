@@ -101,6 +101,7 @@ public:
 
     MallocResult malloc(const MallocInfo& malloc_info);
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
+    bool         detachSharedBlocksForRecompute(const BatchKVCacheResourcePtr& resource, int device_ready_reuse_length);
     ErrorInfo    admitWriteBackDecodeCache(const CacheKeysType&               cache_keys,
                                            size_t                             required_prefix_blocks,
                                            KVCacheResourcePtr&                resource,

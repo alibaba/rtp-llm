@@ -5,8 +5,6 @@ import os
 import sys
 from typing import Any, Dict, Optional, Type, Union
 
-import torch
-
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
@@ -416,6 +414,9 @@ class ModelFactory:
         finalize_scheduler_config(
             fifo_scheduler_config=engine_config.runtime_config.fifo_scheduler_config,
             max_seq_len=model_config.max_seq_len,
+            role_type=engine_config.pd_sep_config.role_type,
+            use_batch_decode_scheduler=engine_config.runtime_config.use_batch_decode_scheduler,
+            seq_size_per_block=model_config.attn_config.tokens_per_block,
         )
         scheduler_config = engine_config.runtime_config.fifo_scheduler_config
         # Generic MoE executors allocate their fixed-capacity communication

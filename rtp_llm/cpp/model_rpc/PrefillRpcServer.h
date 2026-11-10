@@ -4,6 +4,7 @@
 #include "autil/LoopThread.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PDCancelRegistry.h"
+#include "rtp_llm/cpp/model_rpc/PrefillRequestLogger.h"
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -51,6 +52,7 @@ public:
                              P2PConnectorStartWriteBackResponsePB*       response);
 
 private:
+    std::unique_ptr<PrefillRequestLogger> request_logger_;
     std::unique_ptr<PDCancelRegistry> cancel_registry_;
     // Per-onflight tracker for [HANG-DIAG] watchdog. Each GenerateStreamCall
     // registers an entry on entry and removes it on return; the background

@@ -31,7 +31,7 @@
 namespace rtp_llm {
 namespace {
 
-constexpr size_t kCopyAlignment = 16;
+constexpr size_t kCopyAlignment     = 16;
 constexpr size_t kDirectIOAlignment = 4096;
 
 std::optional<EvictionPolicy> parseEvictionPolicy(const std::string& value) {
@@ -425,9 +425,19 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         group_pools[static_cast<size_t>(group_id)] = std::move(pool);
     }
 
-    const bool       host_enabled = kv_cache_config.enable_memory_cache;
-    const bool       disk_enabled = kv_cache_config.enable_disk_cache;
-    const bool       crc_backend_available = CrcBlockCopyBatch::available() && (host_enabled || disk_enabled);
+    const bool host_enabled = kv_cache_config.enable_memory_cache;
+    const bool disk_enabled = kv_cache_config.enable_disk_cache;
+    if (!kv_cache_config.enable_crc && (host_enabled || disk_enabled)) {
+        RTP_LLM_LOG_WARNING(
+            "CRC32C KV cache protection disabled by KVCacheConfig.enable_crc; host/disk transfers use plain copies");
+    }
+    if (kv_cache_config.enable_crc && (host_enabled || disk_enabled) && !CrcBlockCopyBatch::available()) {
+        RTP_LLM_LOG_WARNING(
+            "CRC32C requested by KVCacheConfig.enable_crc but the CRC backend is unavailable; "
+            "host/disk transfers use plain copies");
+    }
+    const bool crc_backend_available =
+        kv_cache_config.enable_crc && CrcBlockCopyBatch::available() && (host_enabled || disk_enabled);
     // HOST buffers are also used directly for disk I/O, so both pools share the disk alignment when needed.
     const size_t pool_alignment =
         disk_enabled && !kv_cache_config.disk_cache_buffered_io ? kDirectIOAlignment : kCopyAlignment;

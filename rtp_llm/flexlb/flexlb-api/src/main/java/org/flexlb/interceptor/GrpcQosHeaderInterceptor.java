@@ -41,8 +41,7 @@ public class GrpcQosHeaderInterceptor implements ServerInterceptor {
 
     @Override
     public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
-            ServerCall<ReqT, RespT> call, Metadata headers,
-            ServerCallHandler<ReqT, RespT> next) {
+            ServerCall<ReqT, RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
         String qosLevel = headers.get(QOS_HEADER_KEY);
         if (qosLevel == null) {
             return next.startCall(call, headers);

@@ -22,12 +22,15 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class LocalServiceDiscovery implements ServiceDiscovery {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
     /** Rate limit for the repeated fallback debug log (per instance). */
     private static final long FALLBACK_LOG_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(5);
 
     private final Path file;
+
     /** Last fully-parsed snapshot; replaced wholesale on every successful read. */
     private volatile Map<String, List<WorkerHost>> lastGoodSnapshot;
+
     private final AtomicLong lastFallbackLogNanos = new AtomicLong();
 
     public LocalServiceDiscovery(String filePath) {
@@ -90,14 +93,18 @@ public final class LocalServiceDiscovery implements ServiceDiscovery {
             Map.Entry<String, JsonNode> entry = it.next();
             JsonNode array = entry.getValue();
             if (array == null || !array.isArray()) {
-                throw new IllegalArgumentException(String.format(
-                        "discovery entry for domain '%s' must be an array of ip:port strings", entry.getKey()));
+                throw new IllegalArgumentException(
+                        String.format(
+                                "discovery entry for domain '%s' must be an array of ip:port strings",
+                                entry.getKey()));
             }
             List<WorkerHost> hosts = new ArrayList<>(array.size());
             for (JsonNode node : array) {
                 if (node == null || !node.isTextual()) {
-                    throw new IllegalArgumentException(String.format(
-                            "discovery entry for domain '%s' contains a non-string element", entry.getKey()));
+                    throw new IllegalArgumentException(
+                            String.format(
+                                    "discovery entry for domain '%s' contains a non-string element",
+                                    entry.getKey()));
                 }
                 hosts.add(parseHost(node.asText()));
             }
@@ -110,7 +117,8 @@ public final class LocalServiceDiscovery implements ServiceDiscovery {
     private static WorkerHost parseHost(String hostStr) {
         String[] parts = hostStr.split(":");
         if (parts.length != 2) {
-            throw new IllegalArgumentException("Invalid host format: " + hostStr + ", expected ip:port");
+            throw new IllegalArgumentException(
+                    "Invalid host format: " + hostStr + ", expected ip:port");
         }
         String ip = parts[0].trim();
         int port = Integer.parseInt(parts[1].trim());
@@ -126,8 +134,10 @@ public final class LocalServiceDiscovery implements ServiceDiscovery {
         long last = lastFallbackLogNanos.get();
         if (now - last >= FALLBACK_LOG_INTERVAL_NANOS
                 && lastFallbackLogNanos.compareAndSet(last, now)) {
-            log.debug("LocalServiceDiscovery read failed, serving last good snapshot, file={}, cause={}",
-                    file, cause.getMessage());
+            log.debug(
+                    "LocalServiceDiscovery read failed, serving last good snapshot, file={}, cause={}",
+                    file,
+                    cause.getMessage());
         }
     }
 }

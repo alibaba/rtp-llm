@@ -21,7 +21,7 @@ class OrderedRequestQueueTest {
 
     @Test
     void withdrawnRouteReturnsAheadOfNewerSamePriorityRequests() {
-        for (boolean priority : new boolean[]{false, true}) {
+        for (boolean priority : new boolean[] {false, true}) {
             OrderedRequestQueue queue = new OrderedRequestQueue(priority);
             GlobalQueueEntry first = entry(50);
             GlobalQueueEntry second = entry(50);
@@ -39,7 +39,9 @@ class OrderedRequestQueueTest {
             queue.restore(second);
             assertEquals(3, queue.priorityCounts()[50]);
             assertEquals(sequence, second.sequence);
-            assertEquals(List.of(second, third), queue.scanForPlanningCandidates(3, 3, candidate -> true));
+            assertEquals(
+                    List.of(second, third),
+                    queue.scanForPlanningCandidates(3, 3, candidate -> true));
             assertEquals(List.of(first, second, third), queue.drain());
             assertEquals(0, queue.priorityCounts()[50]);
         }
@@ -59,8 +61,8 @@ class OrderedRequestQueueTest {
 
         assertEquals(2, queue.size());
         assertFalse(middle.linked);
-        assertEquals(List.of(first, last), queue.scanForPlanningCandidates(
-                10, 20, candidate -> true));
+        assertEquals(
+                List.of(first, last), queue.scanForPlanningCandidates(10, 20, candidate -> true));
     }
 
     @Test
@@ -75,8 +77,9 @@ class OrderedRequestQueueTest {
 
         assertTrue(queue.remove(highFirst));
 
-        assertEquals(List.of(highSecond, low), queue.scanForPlanningCandidates(
-                10, 20, candidate -> true));
+        assertEquals(
+                List.of(highSecond, low),
+                queue.scanForPlanningCandidates(10, 20, candidate -> true));
     }
 
     @Test
@@ -98,7 +101,7 @@ class OrderedRequestQueueTest {
 
     @Test
     void budgetCountsBlockedEntriesAndContinuesPastTheBlockedPrefix() {
-        for (boolean priority : new boolean[]{false, true}) {
+        for (boolean priority : new boolean[] {false, true}) {
             var queue = new OrderedRequestQueue(priority);
             for (int i = 0; i < 100; i++) {
                 queue.add(entry(50));
@@ -107,28 +110,44 @@ class OrderedRequestQueueTest {
             queue.add(healthy);
             var checks = new AtomicInteger();
             for (int round = 0; round < 3; round++) {
-                assertTrue(queue.scanForPlanningCandidates(15, 30, candidate -> {
-                    checks.incrementAndGet();
-                    return candidate == healthy;
-                }).isEmpty());
+                assertTrue(
+                        queue.scanForPlanningCandidates(
+                                        15,
+                                        30,
+                                        candidate -> {
+                                            checks.incrementAndGet();
+                                            return candidate == healthy;
+                                        })
+                                .isEmpty());
                 assertEquals((round + 1) * 30, checks.get());
                 assertTrue(queue.hasUnscannedRequests());
             }
-            assertEquals(List.of(healthy), queue.scanForPlanningCandidates(15, 30, candidate -> {
-                checks.incrementAndGet();
-                return candidate == healthy;
-            }));
+            assertEquals(
+                    List.of(healthy),
+                    queue.scanForPlanningCandidates(
+                            15,
+                            30,
+                            candidate -> {
+                                checks.incrementAndGet();
+                                return candidate == healthy;
+                            }));
             assertEquals(101, checks.get());
             assertFalse(queue.hasUnscannedRequests());
-            assertTrue(queue.scanForPlanningCandidates(15, 30, candidate -> {
-                throw new AssertionError("exhausted scan must not start over");
-            }).isEmpty());
+            assertTrue(
+                    queue.scanForPlanningCandidates(
+                                    15,
+                                    30,
+                                    candidate -> {
+                                        throw new AssertionError(
+                                                "exhausted scan must not start over");
+                                    })
+                            .isEmpty());
         }
     }
 
     @Test
     void readyRetryBypassesTheBlockedBacklogWithinOneScanBudget() {
-        for (boolean priority : new boolean[]{false, true}) {
+        for (boolean priority : new boolean[] {false, true}) {
             var queue = new OrderedRequestQueue(priority);
             var first = new GlobalQueueEntry(null, new CompletableFuture<>(), 50);
             queue.add(first);
@@ -138,17 +157,22 @@ class OrderedRequestQueueTest {
             queue.scanForPlanningCandidates(15, 30, candidate -> false);
             queue.markRequestReadyForRetry(first);
             var checked = new AtomicInteger();
-            assertEquals(List.of(first), queue.scanForPlanningCandidates(15, 30, candidate -> {
-                checked.incrementAndGet();
-                return candidate == first;
-            }));
+            assertEquals(
+                    List.of(first),
+                    queue.scanForPlanningCandidates(
+                            15,
+                            30,
+                            candidate -> {
+                                checked.incrementAndGet();
+                                return candidate == first;
+                            }));
             assertTrue(checked.get() <= 30);
         }
     }
 
     @Test
     void readyRetriesKeepTheirOrderAcrossPlanningFrontiers() {
-        for (boolean priority : new boolean[]{false, true}) {
+        for (boolean priority : new boolean[] {false, true}) {
             var queue = new OrderedRequestQueue(priority);
             var requests = new ArrayList<GlobalQueueEntry>();
             for (int i = 0; i < 16; i++) {
@@ -163,9 +187,11 @@ class OrderedRequestQueueTest {
                 queue.add(request);
                 requests.add(request);
             }
-            assertEquals(requests.subList(0, 16),
+            assertEquals(
+                    requests.subList(0, 16),
                     queue.scanForPlanningCandidates(16, 32, candidate -> true));
-            assertEquals(requests.subList(16, 32),
+            assertEquals(
+                    requests.subList(16, 32),
                     queue.scanForPlanningCandidates(16, 32, candidate -> true));
             assertFalse(queue.hasUnscannedRequests());
         }
@@ -173,7 +199,7 @@ class OrderedRequestQueueTest {
 
     @Test
     void blockedRetriesDoNotPreventTheForwardScanFromProgressing() {
-        for (boolean priority : new boolean[]{false, true}) {
+        for (boolean priority : new boolean[] {false, true}) {
             var queue = new OrderedRequestQueue(priority);
             var first = entry(50);
             queue.add(first);
@@ -186,8 +212,8 @@ class OrderedRequestQueueTest {
             boolean reachedLast = false;
             for (int attempt = 0; attempt < 50 && !reachedLast; attempt++) {
                 queue.markRequestReadyForRetry(first);
-                var candidates = queue.scanForPlanningCandidates(1, 2,
-                        candidate -> candidate == last);
+                var candidates =
+                        queue.scanForPlanningCandidates(1, 2, candidate -> candidate == last);
                 reachedLast = candidates.contains(last);
             }
             assertTrue(reachedLast, "blocked retries must not rewind the forward scan");
@@ -196,14 +222,15 @@ class OrderedRequestQueueTest {
 
     @Test
     void retryAheadOfTheCursorIsExaminedOnlyOnceWithATightBudget() {
-        for (boolean priority : new boolean[]{false, true}) {
+        for (boolean priority : new boolean[] {false, true}) {
             var queue = new OrderedRequestQueue(priority);
             var first = entry(50);
             var second = entry(50);
             queue.add(first);
             queue.add(second);
             queue.markRequestReadyForRetry(second);
-            assertEquals(List.of(first, second),
+            assertEquals(
+                    List.of(first, second),
                     queue.scanForPlanningCandidates(2, 2, candidate -> true));
             assertFalse(queue.hasUnscannedRequests());
         }
@@ -219,8 +246,8 @@ class OrderedRequestQueueTest {
         queue.markRequestReadyForRetry(first);
         queue.markRequestReadyForRetry(first);
         queue.markRequestReadyForRetry(second);
-        assertEquals(List.of(first, second),
-                queue.scanForPlanningCandidates(15, 30, candidate -> true));
+        assertEquals(
+                List.of(first, second), queue.scanForPlanningCandidates(15, 30, candidate -> true));
         queue.remove(first);
         queue.remove(second);
         assertFalse(queue.hasUnscannedRequests());
@@ -272,20 +299,24 @@ class OrderedRequestQueueTest {
         queue.scanForPlanningCandidates(1, 1, candidate -> false);
         queue.add(low);
         queue.add(cancelled);
-        var captured = queue.scanForPlanningCandidates(3, 6, candidate -> {
-            if (candidate == cancelled) {
-                queue.remove(cancelled);
-                queue.markRequestReadyForRetry(high);
-                return false;
-            }
-            return true;
-        });
+        var captured =
+                queue.scanForPlanningCandidates(
+                        3,
+                        6,
+                        candidate -> {
+                            if (candidate == cancelled) {
+                                queue.remove(cancelled);
+                                queue.markRequestReadyForRetry(high);
+                                return false;
+                            }
+                            return true;
+                        });
         assertEquals(List.of(high, low), captured);
     }
 
     @Test
     void mixedArrivalsCancellationsAndWakesDoNotLoseReadyRequests() {
-        for (boolean priority : new boolean[]{false, true}) {
+        for (boolean priority : new boolean[] {false, true}) {
             var queue = new OrderedRequestQueue(priority);
             var entries = new ArrayList<GlobalQueueEntry>();
             var ready = new HashSet<GlobalQueueEntry>();
@@ -307,18 +338,27 @@ class OrderedRequestQueueTest {
                     queue.remove(entry);
                 } else {
                     var checked = new AtomicInteger();
-                    var captured = queue.scanForPlanningCandidates(3, 6, entry -> {
-                        checked.incrementAndGet();
-                        return ready.contains(entry);
-                    });
+                    var captured =
+                            queue.scanForPlanningCandidates(
+                                    3,
+                                    6,
+                                    entry -> {
+                                        checked.incrementAndGet();
+                                        return ready.contains(entry);
+                                    });
                     assertTrue(checked.get() <= 6);
                     assertEquals(captured.size(), new HashSet<>(captured).size());
-                    Comparator<GlobalQueueEntry> order = Comparator.comparingLong(entry -> entry.sequence);
+                    Comparator<GlobalQueueEntry> order =
+                            Comparator.comparingLong(entry -> entry.sequence);
                     if (priority) {
-                        order = Comparator.<GlobalQueueEntry>comparingInt(entry -> entry.priority)
-                                .reversed().thenComparing(order);
+                        order =
+                                Comparator.<GlobalQueueEntry>comparingInt(entry -> entry.priority)
+                                        .reversed()
+                                        .thenComparing(order);
                     }
-                    assertEquals(ready.stream().sorted(order).limit(captured.size()).toList(), captured,
+                    assertEquals(
+                            ready.stream().sorted(order).limit(captured.size()).toList(),
+                            captured,
                             "each frontier must be a prefix of the ready requests in queue order");
                     for (var entry : captured) {
                         ready.remove(entry);
@@ -343,8 +383,6 @@ class OrderedRequestQueueTest {
 
     private static GlobalQueueEntry entry(int priority) {
         return new GlobalQueueEntry(
-                mock(BalanceContext.class),
-                new CompletableFuture<Response>(),
-                priority);
+                mock(BalanceContext.class), new CompletableFuture<Response>(), priority);
     }
 }

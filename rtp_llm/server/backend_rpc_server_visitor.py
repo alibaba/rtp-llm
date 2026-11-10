@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import os
 import time
@@ -131,7 +132,8 @@ class BackendRPCServerVisitor:
         self.mm_model_config = mm_model_config
         self._mm_cache_routing = (
             vit_separation == VitSeparation.VIT_SEPARATION_REMOTE
-            and getattr(pd_sep_config, "role_type", None) == RoleType.FRONTEND
+            and getattr(pd_sep_config, "role_type", None)
+            in (RoleType.FRONTEND, RoleType.PREFILL)
             and mm_model_config is not None
         )
         self.source_ip = str(getattr(server_config, "ip", "") or "")
@@ -811,7 +813,14 @@ class BackendRPCServerVisitor:
                         )
                     )
                     final_roles.add(RoleType.PREFILL)
-            missing_roles = [role for role in self.backend_role_list if role not in final_roles]
+            needs_vit = bool(input.mm_inputs) or bool(
+                getattr(getattr(input, "v41_inputs", None), "images", None)
+            )
+            missing_roles = [
+                role
+                for role in self.backend_role_list
+                if role not in final_roles and (role != RoleType.VIT or needs_vit)
+            ]
             if not input.generate_config.role_addrs or missing_roles:
                 route_error = FtRuntimeException(
                     ExceptionType.ROUTE_ERROR,
@@ -994,18 +1003,37 @@ class BackendRPCServerVisitor:
                 yielded_output = False
                 try:
                     stream = await route_and_enqueue(attempt_input)
-                    if is_streaming:
-                        async for output in stream:
+                    try:
+                        if is_streaming:
+                            async for output in stream:
+                                yielded_output = True
+                                yield output
+                        else:
+                            buffered_outputs = []
+                            async for output in stream:
+                                buffered_outputs.append(output)
                             yielded_output = True
-                            yield output
-                    else:
-                        buffered_outputs = []
-                        async for output in stream:
-                            buffered_outputs.append(output)
-                        yielded_output = True
-                        for output in buffered_outputs:
-                            yield output
-                    return
+                            for output in buffered_outputs:
+                                yield output
+                        return
+                    finally:
+                        # Each attempt owns its inner stream. Closing this wrapper
+                        # must release it before retrying or returning to the caller;
+                        # ModelRpcClient still owns finished-RPC EOF settlement.
+                        try:
+                            close = getattr(stream, "aclose", None)
+                            if callable(close):
+                                result = close()
+                                if inspect.isawaitable(result):
+                                    await result
+                        except Exception as close_error:
+                            # Cleanup must not replace a business error or cause a
+                            # successful attempt to retry. Cancellation still escapes.
+                            route_logger.warning(
+                                "backend stream close failed, request_id=%s: %s",
+                                attempt_input.request_id,
+                                close_error,
+                            )
                 except (asyncio.CancelledError, GeneratorExit):
                     # Cancellation and generator teardown are control-flow signals,
                     # never route failures. Do not replace them with a prior retry
@@ -1070,11 +1098,6 @@ class BackendRPCServerVisitor:
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         if not inputs:
             return []
-        if self.pd_sep_config.role_type in (RoleType.PREFILL, RoleType.DECODE):
-            raise FtRuntimeException(
-                ExceptionType.UNSUPPORTED_OPERATION,
-                "/batch_infer is not supported for PD roles",
-            )
         for input in inputs:
             self.fill_request_info(input)
             input.generate_config.validate()
@@ -1082,46 +1105,49 @@ class BackendRPCServerVisitor:
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)
 
-        # HTTP batch has no PD batch entry. Resolve only PDFUSION endpoints,
-        # without asking Master to reserve/enqueue a P/D request first.
+        # Select one batch destination without per-item Master admissions, which
+        # can split a batch across workers before Decode receives it.
         if self.pd_sep_config.role_type == RoleType.FRONTEND:
-            selected_pdfusion = None
+            selected_addrs = next(
+                (
+                    input.generate_config.role_addrs
+                    for input in inputs
+                    if any(
+                        addr.ip and addr.role in (RoleType.PDFUSION, RoleType.DECODE)
+                        for addr in input.generate_config.role_addrs
+                    )
+                ),
+                None,
+            )
+            if selected_addrs is None:
+                candidates = self.host_service.get_backend_role_addrs(
+                    [RoleType.PDFUSION]
+                )
+                selected_addrs = [
+                    addr for addr in (candidates or [])
+                    if addr.ip and addr.role == RoleType.PDFUSION
+                ][:1]
+                if not selected_addrs:
+                    selected_addrs = self.host_service.get_backend_role_addrs(
+                        [RoleType.PREFILL, RoleType.DECODE]
+                    ) or []
             for input in inputs:
-                targets = [
-                    addr
-                    for addr in input.generate_config.role_addrs
-                    if addr.ip and addr.role in (RoleType.PDFUSION, RoleType.DECODE)
+                roles = {addr.role for addr in input.generate_config.role_addrs if addr.ip}
+                input.generate_config.role_addrs = list(input.generate_config.role_addrs) + [
+                    addr for addr in selected_addrs if addr.ip and addr.role not in roles
                 ]
-                if targets:
-                    if targets[0].role != RoleType.PDFUSION or getattr(
-                        input, "enqueued_by_master", False
-                    ):
-                        raise FtRuntimeException(
-                            ExceptionType.UNSUPPORTED_OPERATION,
-                            "/batch_infer requires a PDFUSION target",
-                        )
-                    if selected_pdfusion is None:
-                        selected_pdfusion = targets[0]
-                    continue
-                if selected_pdfusion is None:
-                    candidates = self.host_service.get_backend_role_addrs(
-                        [RoleType.PDFUSION]
-                    )
-                    selected_pdfusion = next(
-                        (
-                            addr
-                            for addr in (candidates or [])
-                            if addr.role == RoleType.PDFUSION and addr.ip
-                        ),
-                        None,
-                    )
-                if selected_pdfusion is None:
+                roles = {addr.role for addr in input.generate_config.role_addrs if addr.ip}
+                if RoleType.PDFUSION not in roles and not {
+                    RoleType.PREFILL, RoleType.DECODE
+                }.issubset(roles):
                     raise FtRuntimeException(
-                        ExceptionType.UNSUPPORTED_OPERATION,
-                        "/batch_infer requires a PDFUSION target",
+                        ExceptionType.ROUTE_ERROR,
+                        "/batch_infer requires a PDFUSION target or a Prefill/Decode pair",
                     )
-                input.generate_config.role_addrs = [selected_pdfusion]
-        elif self.host_service.service_available:
+        elif (
+            self.pd_sep_config.role_type != RoleType.PDFUSION
+            and self.host_service.service_available
+        ):
             for input in inputs:
                 await self.route_ips(input)
 

@@ -8,17 +8,15 @@ java_version() {
     # remove \r for Cygwin
     local lines=$("${JAVA_HOME}"/bin/java -version 2>&1 | tr '\r' '\n')
     for line in $lines; do
-      if [[ (-z $local_java_version) && ($line = *"version \""*) ]]
-      then
-        local ver=$(echo $line | sed -e 's/.*version "\(.*\)"\(.*\)/\1/; 1q')
-        # on macOS, sed doesn't support '?'
-        if [[ $ver = "1."* ]]
-        then
-          local_java_version=$(echo $ver | sed -e 's/1\.\([0-9]*\)\(.*\)/\1/; 1q')
-        else
-          local_java_version=$(echo $ver | sed -e 's/\([0-9]*\)\(.*\)/\1/; 1q')
+        if [[ (-z $local_java_version) && ($line = *"version \""*) ]]; then
+            local ver=$(echo $line | sed -e 's/.*version "\(.*\)"\(.*\)/\1/; 1q')
+            # on macOS, sed doesn't support '?'
+            if [[ $ver = "1."* ]]; then
+                local_java_version=$(echo $ver | sed -e 's/1\.\([0-9]*\)\(.*\)/\1/; 1q')
+            else
+                local_java_version=$(echo $ver | sed -e 's/\([0-9]*\)\(.*\)/\1/; 1q')
+            fi
         fi
-      fi
     done
     echo "$local_java_version"
 }
@@ -29,7 +27,10 @@ if [ -z $SETENV_SETTED ]; then
 
     # app
     # set ${APP_NAME}, if empty $(basename "${APP_HOME}") will be used.
-    APP_HOME=$(cd $(dirname ${BASH_SOURCE[0]})/.. || exit; pwd)
+    APP_HOME=$(
+        cd $(dirname ${BASH_SOURCE[0]})/.. || exit
+        pwd
+    )
     # Force APP_NAME to be FlexLB to match tgz structure
     APP_NAME=FlexLB
     echo "setenv.sh setting APP_NAME to: ${APP_NAME}"
@@ -44,7 +45,7 @@ if [ -z $SETENV_SETTED ]; then
     export PATH=${PATH}:${JAVA_HOME}/bin
     ulimit -c unlimited
 
-    echo "INFO: OS max open files: "`ulimit -n`
+    echo "INFO: OS max open files: "$(ulimit -n)
 
     JAVA_VERSION=$(java_version)
     echo "INFO: java version: $JAVA_VERSION"
@@ -69,8 +70,8 @@ if [ -z $SETENV_SETTED ]; then
         export LD_LIBRARY_PATH=/opt/taobao/oracle/lib:/opt/taobao/lib:$LD_LIBRARY_PATH
         #export CPU_COUNT="$(grep -c 'cpu[0-9][0-9]*' /proc/stat)"
         CPU_COUNT=$SIGMA_MAX_PROCESSORS_LIMIT
-        if [ ! -n "$CPU_COUNT" ];then
-          CPU_COUNT=$(grep -c 'cpu[0-9][0-9]*' /proc/stat);
+        if [ ! -n "$CPU_COUNT" ]; then
+            CPU_COUNT=$(grep -c 'cpu[0-9][0-9]*' /proc/stat)
         fi
         export CPU_COUNT
 
@@ -79,24 +80,24 @@ if [ -z $SETENV_SETTED ]; then
         export MIDDLEWARE_LOGS="${HOME}/logs"
         export MIDDLEWARE_SNAPSHOTS="${HOME}/snapshots"
         mkdir -p "$APP_HOME"/.default "$APP_HOME"/logs \
-          "$MIDDLEWARE_LOGS" "$MIDDLEWARE_SNAPSHOTS" || exit 1
+            "$MIDDLEWARE_LOGS" "$MIDDLEWARE_SNAPSHOTS" || exit 1
 
-        if [ -z "$SERVICE_TMPDIR" ] ; then
+        if [ -z "$SERVICE_TMPDIR" ]; then
             # Define the java.io.tmpdir to use for Service(pandora boot)
             SERVICE_TMPDIR="${APP_HOME}"/.default/temp
         fi
 
         SERVICE_OPTS="${SERVICE_OPTS} -server"
 
-        let memTotal=`cat /proc/meminfo | grep MemTotal | awk '{printf "%d", $2/1024 }'`
+        let memTotal=$(cat /proc/meminfo | grep MemTotal | awk '{printf "%d", $2/1024 }')
         echo "INFO: OS total memory: "$memTotal"M"
         # if os memory <= 2G
         if [ $memTotal -le 2048 ]; then
-          DEFAULT_JVM_XMS="1536m"
-          DEFAULT_JVM_XMX="1536m"
+            DEFAULT_JVM_XMS="1536m"
+            DEFAULT_JVM_XMX="1536m"
         else
-          DEFAULT_JVM_XMS="32g"
-          DEFAULT_JVM_XMX="32g"
+            DEFAULT_JVM_XMS="32g"
+            DEFAULT_JVM_XMX="32g"
         fi
 
         FLEXLB_HEAP_SIZE=${FLEXLB_JVM_HEAP_SIZE:-${MASTER_JVM_HEAP_SIZE}}
@@ -140,15 +141,15 @@ if [ -z $SETENV_SETTED ]; then
 
         # JDK17 JMPS opts
         if [[ "$JAVA_VERSION" -ge 17 ]]; then
-          SERVICE_OPTS="${SERVICE_OPTS} --add-modules ALL-SYSTEM"
-          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.lang=ALL-UNNAMED"
-          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.lang.invoke=ALL-UNNAMED"
-          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.util=ALL-UNNAMED"
-          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.util.concurrent=ALL-UNNAMED"
-          SERVICE_OPTS="${SERVICE_OPTS} --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED"
-          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.nio=ALL-UNNAMED"
-          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/sun.nio.ch=ALL-UNNAMED"
-          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.instrument/sun.instrument=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-modules ALL-SYSTEM"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.lang=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.lang.invoke=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.util=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.util.concurrent=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.nio=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/sun.nio.ch=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.instrument/sun.instrument=ALL-UNNAMED"
         fi
 
         # debug opts

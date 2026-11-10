@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import sys
 import unittest
 from types import SimpleNamespace
@@ -11,6 +12,25 @@ from rtp_llm.models_py.distributed import collective_torch as collective
 
 
 class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
+    def test_broadcaster_long_default_tmpdir_uses_short_socket_path(self):
+        config = SimpleNamespace(dp_rank=0)
+        env = {
+            "TMPDIR": "/tmp/" + "x" * 180,
+            "RTP_LLM_CPU_TP_BROADCASTER_ID": "test",
+        }
+        with patch.dict(os.environ, env, clear=True), patch.object(os, "makedirs"):
+            path = collective._make_cpu_tp_broadcaster_base_path(config, 12345)
+        self.assertEqual(path, f"/tmp/rtp_llm_{os.getuid()}/rtp_llm_tp_test_dp0")
+        self.assertLess(len(os.fsencode(f"{path}_0.sock")), 108)
+
+    def test_broadcaster_explicit_long_directory_still_fails(self):
+        env = {"RTP_LLM_CPU_TP_BROADCASTER_DIR": "/tmp/" + "x" * 180}
+        with patch.dict(os.environ, env, clear=True), patch.object(os, "makedirs"):
+            with self.assertRaisesRegex(ValueError, "UDS path too long"):
+                collective._make_cpu_tp_broadcaster_base_path(
+                    SimpleNamespace(dp_rank=0), 12345
+                )
+
     def _registered_callbacks(self, config=None, process_group=None):
         if process_group is None:
             process_group = MagicMock()

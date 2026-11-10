@@ -14,11 +14,11 @@ JAVA_LOAD_CLIENT_JVM_XMX="${JAVA_LOAD_CLIENT_JVM_XMX:-${JAVA_LOAD_CLIENT_HEAP_SI
 source "${SCRIPT_DIR}/lib_load_client.sh"
 
 FLEXLB_NETWORK_ISOLATED="${FLEXLB_NETWORK_ISOLATED:-0}"
-if [[ "${FLEXLB_NETWORK_ISOLATED}" == "1" \
-      && "${FLEXLB_NETWORK_NAMESPACE_ACTIVE:-0}" != "1" ]]; then
-  exec unshare -Urn bash -c \
-    'ip link set lo up; export FLEXLB_NETWORK_NAMESPACE_ACTIVE=1; exec "$@"' \
-    bash bash "$0" "$@"
+if [[ "${FLEXLB_NETWORK_ISOLATED}" == "1" &&
+    "${FLEXLB_NETWORK_NAMESPACE_ACTIVE:-0}" != "1" ]]; then
+    exec unshare -Urn bash -c \
+        'ip link set lo up; export FLEXLB_NETWORK_NAMESPACE_ACTIVE=1; exec "$@"' \
+        bash bash "$0" "$@"
 fi
 FLEXLB_FAIL_ON_CONCURRENT_TEST="${FLEXLB_FAIL_ON_CONCURRENT_TEST:-1}"
 
@@ -28,8 +28,8 @@ FLEXLB_FAIL_ON_CONCURRENT_TEST="${FLEXLB_FAIL_ON_CONCURRENT_TEST:-1}"
 # fallback to the Java stack. The switch definitions themselves were
 # deleted, hence the ":-" reads to stay safe under set -u.
 if [[ "${LOAD_CLIENT_IMPL:-}" == "python" || "${MOCK_ENGINE_IMPL:-}" == "python" ]]; then
-  echo "ERROR: LOAD_CLIENT_IMPL/MOCK_ENGINE_IMPL=python is no longer supported: the Python mock engine and Python load client implementations have been removed on this branch (Java-only). Unset the variable(s) to run the Java stack." >&2
-  exit 1
+    echo "ERROR: LOAD_CLIENT_IMPL/MOCK_ENGINE_IMPL=python is no longer supported: the Python mock engine and Python load client implementations have been removed on this branch (Java-only). Unset the variable(s) to run the Java stack." >&2
+    exit 1
 fi
 
 TRACE_FILE="${TRACE_FILE:-${SCRIPT_DIR}/data/online_logs/trace_30min.jsonl}"
@@ -57,7 +57,7 @@ MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-61000}"
 # self-documentation of this script's tunable knobs; the effective defaults
 # live in the lib.
 JAVA_MOCK_ENGINE_JAR="${JAVA_MOCK_ENGINE_JAR:-${FLEXLB_DIR}/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar}"
-JAVA_LOAD_CLIENT_JAR="${JAVA_LOAD_CLIENT_JAR:-${FLEXLB_DIR}/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar}"  # no-op see NOTE above
+JAVA_LOAD_CLIENT_JAR="${JAVA_LOAD_CLIENT_JAR:-${FLEXLB_DIR}/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar}" # no-op see NOTE above
 JAVA_LOAD_CLIENT_HEAP_SIZE="${JAVA_LOAD_CLIENT_HEAP_SIZE:-16g}"
 JAVA_MOCK_EVENT_LOOP_THREADS="${JAVA_MOCK_EVENT_LOOP_THREADS:-32}"
 JAVA_MOCK_COMPLETION_THREADS="${JAVA_MOCK_COMPLETION_THREADS:-16}"
@@ -88,7 +88,7 @@ FLEXLB_MANAGEMENT_PORT="${FLEXLB_MANAGEMENT_PORT:-7002}"
 FLEXLB_JAR="${FLEXLB_JAR:-${FLEXLB_DIR}/flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar}"
 START_FLEXLB="${START_FLEXLB:-1}"
 START_MOCK="${START_MOCK:-1}"
-MAVEN_PROFILES="${MAVEN_PROFILES:-opensource,!internal}"  # no-op, see NOTE above (lib default)
+MAVEN_PROFILES="${MAVEN_PROFILES:-opensource,!internal}" # no-op, see NOTE above (lib default)
 
 LIMIT="${LIMIT:-1000}"
 DURATION_S="${DURATION_S:-120}"
@@ -236,15 +236,15 @@ MASTER_PROMETHEUS_POLLER_PID=""
 PROCESS_USAGE_POLLER_PID=""
 CLIENT_PIDS=()
 JAVA_MODULE_OPTS=(
-  --add-modules ALL-SYSTEM
-  --add-opens java.base/java.lang=ALL-UNNAMED
-  --add-opens java.base/java.lang.invoke=ALL-UNNAMED
-  --add-opens java.base/java.util=ALL-UNNAMED
-  --add-opens java.base/java.util.concurrent=ALL-UNNAMED
-  --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED
-  --add-opens java.base/java.nio=ALL-UNNAMED
-  --add-opens java.base/sun.nio.ch=ALL-UNNAMED
-  --add-opens java.instrument/sun.instrument=ALL-UNNAMED
+    --add-modules ALL-SYSTEM
+    --add-opens java.base/java.lang=ALL-UNNAMED
+    --add-opens java.base/java.lang.invoke=ALL-UNNAMED
+    --add-opens java.base/java.util=ALL-UNNAMED
+    --add-opens java.base/java.util.concurrent=ALL-UNNAMED
+    --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED
+    --add-opens java.base/java.nio=ALL-UNNAMED
+    --add-opens java.base/sun.nio.ch=ALL-UNNAMED
+    --add-opens java.instrument/sun.instrument=ALL-UNNAMED
 )
 
 # Limit Reactor boundedElastic scheduler threads to prevent thread explosion
@@ -255,29 +255,29 @@ JVM_SYSTEM_PROPS=(-Dreactor.schedulers.defaultBoundedElasticSize=64)
 
 JAVA21_HOME_DETECTED="$(detect_java21_home || true)"
 if [[ -n "${JAVA21_HOME_DETECTED}" ]]; then
-  export JAVA_HOME="${JAVA21_HOME_DETECTED}"
-  export PATH="${JAVA_HOME}/bin:${PATH}"
+    export JAVA_HOME="${JAVA21_HOME_DETECTED}"
+    export PATH="${JAVA_HOME}/bin:${PATH}"
 fi
 
 cleanup() {
-  # One stop covers all collector threads (G1/G3/G5) of the single
-  # secondary collector process.
-  stop_secondary_pollers
-  for pid in "${CLIENT_PIDS[@]}"; do
-    kill "${pid}" >/dev/null 2>&1 || true
-  done
-  if [[ -n "${FLEXLB_PID}" ]]; then
-    kill "${FLEXLB_PID}" >/dev/null 2>&1 || true
-  fi
-  if [[ -n "${MOCK_PID}" ]]; then
-    kill "${MOCK_PID}" >/dev/null 2>&1 || true
-  fi
-  sleep 1
-  for pid in "${CLIENT_PIDS[@]}" "${FLEXLB_PID}" "${MOCK_PID}"; do
-    if [[ -n "${pid}" ]] && kill -0 "${pid}" >/dev/null 2>&1; then
-      kill -9 "${pid}" >/dev/null 2>&1 || true
+    # One stop covers all collector threads (G1/G3/G5) of the single
+    # secondary collector process.
+    stop_secondary_pollers
+    for pid in "${CLIENT_PIDS[@]}"; do
+        kill "${pid}" >/dev/null 2>&1 || true
+    done
+    if [[ -n "${FLEXLB_PID}" ]]; then
+        kill "${FLEXLB_PID}" >/dev/null 2>&1 || true
     fi
-  done
+    if [[ -n "${MOCK_PID}" ]]; then
+        kill "${MOCK_PID}" >/dev/null 2>&1 || true
+    fi
+    sleep 1
+    for pid in "${CLIENT_PIDS[@]}" "${FLEXLB_PID}" "${MOCK_PID}"; do
+        if [[ -n "${pid}" ]] && kill -0 "${pid}" >/dev/null 2>&1; then
+            kill -9 "${pid}" >/dev/null 2>&1 || true
+        fi
+    done
 }
 trap cleanup EXIT
 
@@ -298,107 +298,107 @@ CONSOLIDATED=0
 # tool exists. The prefix on the md5 fallbacks keeps the algorithm auditable
 # in run_meta.json.
 compute_file_digest() {
-  local file="$1"
-  if [[ ! -f "${file}" ]]; then
-    echo ""
-    return 0
-  fi
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "${file}" | awk '{print $1}'
-  elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "${file}" | awk '{print $1}'
-  elif command -v md5sum >/dev/null 2>&1; then
-    echo "md5:$(md5sum "${file}" | awk '{print $1}')"
-  elif command -v md5 >/dev/null 2>&1; then
-    echo "md5:$(md5 -q "${file}")"
-  else
-    echo ""
-  fi
+    local file="$1"
+    if [[ ! -f "${file}" ]]; then
+        echo ""
+        return 0
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "${file}" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "${file}" | awk '{print $1}'
+    elif command -v md5sum >/dev/null 2>&1; then
+        echo "md5:$(md5sum "${file}" | awk '{print $1}')"
+    elif command -v md5 >/dev/null 2>&1; then
+        echo "md5:$(md5 -q "${file}")"
+    else
+        echo ""
+    fi
 }
 
 count_file_lines() {
-  local file="$1"
-  if [[ ! -f "${file}" ]]; then
-    echo ""
-    return 0
-  fi
-  wc -l <"${file}" | tr -d '[:space:]'
+    local file="$1"
+    if [[ ! -f "${file}" ]]; then
+        echo ""
+        return 0
+    fi
+    wc -l <"${file}" | tr -d '[:space:]'
 }
 
 consolidate_run_outputs_now() {
-  if [[ "${CONSOLIDATED}" == "1" ]]; then
-    return 0
-  fi
-  CONSOLIDATED=1
-  # Stop the secondary pollers first: consolidation merges their one-shot
-  # output files and deletes them, so no writer may still be appending (a
-  # writer holding an unlinked fd would keep writing into the void). The
-  # stop is idempotent — also called at the load-client stop point / cleanup.
-  stop_secondary_pollers
-  local consolidate_mock_port_args=()
-  if [[ "${START_MOCK}" == "1" ]]; then
-    consolidate_mock_port_args+=(--mock-http-port "$((MOCK_BASE_GRPC_PORT - 1))")
-  fi
-  # Consolidate the run directory into the per-component JSON+log layout
-  # (run_meta/mock/master/client .json + .log, merged client_events.jsonl[.gz],
-  # run-root engine_events.jsonl[.gz];
-  # see consolidate_run_outputs.py's docstring for the full keep/delete list).
-  # Runs while the mock cluster and master are still alive (cleanup kills them
-  # on EXIT), so the final cluster snapshot is captured from the control plane.
-  # Kept in place on purpose: endpoints.json, flexlb_env.txt, flexlb_profile.jfr
-  # and load_client/server_latency.json (aggregate validity input; the skill's
-  # fetch_server_latency also reads it). Phase B: the client no longer writes
-  # summary.json / report.md, so they no longer appear in the keep list.
-  local trace_file_sha256 trace_file_lines
-  trace_file_sha256="$(compute_file_digest "${TRACE_FILE}")"
-  trace_file_lines="$(count_file_lines "${TRACE_FILE}")"
-  python3 "${SCRIPT_DIR}/consolidate_run_outputs.py" \
-    --run-dir "${RUN_DIR}" \
-    ${consolidate_mock_port_args[@]+"${consolidate_mock_port_args[@]}"} \
-    --param "n_prefill=${N_PREFILL}" \
-    --param "n_decode=${N_DECODE}" \
-    --param "mock_base_grpc_port=${MOCK_BASE_GRPC_PORT}" \
-    --param "flexlb_http_port=${FLEXLB_HTTP_PORT}" \
-    --param "flexlb_management_port=${FLEXLB_MANAGEMENT_PORT}" \
-    --param "start_mock=${START_MOCK}" \
-    --param "start_flexlb=${START_FLEXLB}" \
-    --param "replay_speed=${REPLAY_SPEED}" \
-    --param "send_mode=${SEND_MODE:-replay}" \
-    --param "send_mode_qps=${SEND_MODE_QPS:-}" \
-    --param "ramp_up_seconds=${RAMP_UP_SECONDS}" \
-    --param "limit=${LIMIT}" \
-    --param "duration_s=${DURATION_S}" \
-    --param "max_concurrency=${MAX_CONCURRENCY}" \
-    --param "load_client_workers=${LOAD_CLIENT_WORKERS}" \
-    --param "sla_ttft_ms=${SLA_TTFT_MS}" \
-    --param "fetch_output_stream=${FETCH_OUTPUT_STREAM}" \
-    --param "loop=${LOOP}" \
-    --param "gradient=${GRADIENT}" \
-    --param "trace_file=${TRACE_FILE}" \
-    --param "trace_file_sha256=${trace_file_sha256}" \
-    --param "trace_file_lines=${trace_file_lines}" \
-    --param "performance_file=${PERFORMANCE_FILE}" \
-    --param "process_config_file=${PROCESS_CONFIG_FILE}" \
-    --param "java_mock_jvm_xms=${JAVA_MOCK_JVM_XMS}" \
-    --param "java_mock_jvm_xmx=${JAVA_MOCK_JVM_XMX}" \
-    --param "java_mock_event_loop_threads=${JAVA_MOCK_EVENT_LOOP_THREADS}" \
-    --param "java_mock_completion_threads=${JAVA_MOCK_COMPLETION_THREADS}" \
-    --param "prefill_cache_blocks=${PREFILL_CACHE_BLOCKS}" \
-    --param "decode_cache_blocks=${DECODE_CACHE_BLOCKS}" \
-    --param "timeout_ms=${TIMEOUT_MS}" \
-    --param "response_timeout=${RESPONSE_TIMEOUT:-}" \
-    --param "java_mock_stats_interval_ms=${JAVA_MOCK_STATS_INTERVAL_MS}" \
-    --param "java_mock_decode_max_concurrency=${JAVA_MOCK_DECODE_MAX_CONCURRENCY}" \
-    --param "flexlb_pv_log=${FLEXLB_PV_LOG}" \
-    --param "flexlb_config=${FLEXLB_CONFIG}" \
-    || echo "WARNING: run output consolidation failed (original files kept as-is)" >&2
+    if [[ "${CONSOLIDATED}" == "1" ]]; then
+        return 0
+    fi
+    CONSOLIDATED=1
+    # Stop the secondary pollers first: consolidation merges their one-shot
+    # output files and deletes them, so no writer may still be appending (a
+    # writer holding an unlinked fd would keep writing into the void). The
+    # stop is idempotent — also called at the load-client stop point / cleanup.
+    stop_secondary_pollers
+    local consolidate_mock_port_args=()
+    if [[ "${START_MOCK}" == "1" ]]; then
+        consolidate_mock_port_args+=(--mock-http-port "$((MOCK_BASE_GRPC_PORT - 1))")
+    fi
+    # Consolidate the run directory into the per-component JSON+log layout
+    # (run_meta/mock/master/client .json + .log, merged client_events.jsonl[.gz],
+    # run-root engine_events.jsonl[.gz];
+    # see consolidate_run_outputs.py's docstring for the full keep/delete list).
+    # Runs while the mock cluster and master are still alive (cleanup kills them
+    # on EXIT), so the final cluster snapshot is captured from the control plane.
+    # Kept in place on purpose: endpoints.json, flexlb_env.txt, flexlb_profile.jfr
+    # and load_client/server_latency.json (aggregate validity input; the skill's
+    # fetch_server_latency also reads it). Phase B: the client no longer writes
+    # summary.json / report.md, so they no longer appear in the keep list.
+    local trace_file_sha256 trace_file_lines
+    trace_file_sha256="$(compute_file_digest "${TRACE_FILE}")"
+    trace_file_lines="$(count_file_lines "${TRACE_FILE}")"
+    python3 "${SCRIPT_DIR}/consolidate_run_outputs.py" \
+        --run-dir "${RUN_DIR}" \
+        ${consolidate_mock_port_args[@]+"${consolidate_mock_port_args[@]}"} \
+        --param "n_prefill=${N_PREFILL}" \
+        --param "n_decode=${N_DECODE}" \
+        --param "mock_base_grpc_port=${MOCK_BASE_GRPC_PORT}" \
+        --param "flexlb_http_port=${FLEXLB_HTTP_PORT}" \
+        --param "flexlb_management_port=${FLEXLB_MANAGEMENT_PORT}" \
+        --param "start_mock=${START_MOCK}" \
+        --param "start_flexlb=${START_FLEXLB}" \
+        --param "replay_speed=${REPLAY_SPEED}" \
+        --param "send_mode=${SEND_MODE:-replay}" \
+        --param "send_mode_qps=${SEND_MODE_QPS:-}" \
+        --param "ramp_up_seconds=${RAMP_UP_SECONDS}" \
+        --param "limit=${LIMIT}" \
+        --param "duration_s=${DURATION_S}" \
+        --param "max_concurrency=${MAX_CONCURRENCY}" \
+        --param "load_client_workers=${LOAD_CLIENT_WORKERS}" \
+        --param "sla_ttft_ms=${SLA_TTFT_MS}" \
+        --param "fetch_output_stream=${FETCH_OUTPUT_STREAM}" \
+        --param "loop=${LOOP}" \
+        --param "gradient=${GRADIENT}" \
+        --param "trace_file=${TRACE_FILE}" \
+        --param "trace_file_sha256=${trace_file_sha256}" \
+        --param "trace_file_lines=${trace_file_lines}" \
+        --param "performance_file=${PERFORMANCE_FILE}" \
+        --param "process_config_file=${PROCESS_CONFIG_FILE}" \
+        --param "java_mock_jvm_xms=${JAVA_MOCK_JVM_XMS}" \
+        --param "java_mock_jvm_xmx=${JAVA_MOCK_JVM_XMX}" \
+        --param "java_mock_event_loop_threads=${JAVA_MOCK_EVENT_LOOP_THREADS}" \
+        --param "java_mock_completion_threads=${JAVA_MOCK_COMPLETION_THREADS}" \
+        --param "prefill_cache_blocks=${PREFILL_CACHE_BLOCKS}" \
+        --param "decode_cache_blocks=${DECODE_CACHE_BLOCKS}" \
+        --param "timeout_ms=${TIMEOUT_MS}" \
+        --param "response_timeout=${RESPONSE_TIMEOUT:-}" \
+        --param "java_mock_stats_interval_ms=${JAVA_MOCK_STATS_INTERVAL_MS}" \
+        --param "java_mock_decode_max_concurrency=${JAVA_MOCK_DECODE_MAX_CONCURRENCY}" \
+        --param "flexlb_pv_log=${FLEXLB_PV_LOG}" \
+        --param "flexlb_config=${FLEXLB_CONFIG}" ||
+        echo "WARNING: run output consolidation failed (original files kept as-is)" >&2
 }
 
 wait_for_port() {
-  local host="$1"
-  local port="$2"
-  local timeout_s="$3"
-  python3 - "$host" "$port" "$timeout_s" <<'PY'
+    local host="$1"
+    local port="$2"
+    local timeout_s="$3"
+    python3 - "$host" "$port" "$timeout_s" <<'PY'
 import socket
 import sys
 import time
@@ -419,12 +419,12 @@ PY
 }
 
 assert_ports_free() {
-  # SO_REUSEADDR lets a check socket bind against a port still in TIME_WAIT
-  # (no process listening, but kernel-held) — the common state right after a
-  # previous run is killed. Without it socket.bind() gives a false failure.
-  # Poll up to 5s for ports to drain; each check binds with SO_REUSEADDR so
-  # TIME_WAIT ports pass immediately.
-  python3 - "$@" <<'PY'
+    # SO_REUSEADDR lets a check socket bind against a port still in TIME_WAIT
+    # (no process listening, but kernel-held) — the common state right after a
+    # previous run is killed. Without it socket.bind() gives a false failure.
+    # Poll up to 5s for ports to drain; each check binds with SO_REUSEADDR so
+    # TIME_WAIT ports pass immediately.
+    python3 - "$@" <<'PY'
 import socket
 import sys
 import time
@@ -459,35 +459,35 @@ PY
 }
 
 assert_no_concurrent_flexlb_test() {
-  local matches
-  matches="$(pgrep -af 'flexlb-api-[^ ]*\.jar|flexlb-mock-engine-[^ ]*\.jar' || true)"
-  if [[ -n "${matches}" ]]; then
-    echo "Concurrent FlexLB performance processes detected on the host:" >&2
-    echo "${matches}" >&2
-    echo "Wait for them to finish, or set FLEXLB_FAIL_ON_CONCURRENT_TEST=0 to override." >&2
-    return 1
-  fi
+    local matches
+    matches="$(pgrep -af 'flexlb-api-[^ ]*\.jar|flexlb-mock-engine-[^ ]*\.jar' || true)"
+    if [[ -n "${matches}" ]]; then
+        echo "Concurrent FlexLB performance processes detected on the host:" >&2
+        echo "${matches}" >&2
+        echo "Wait for them to finish, or set FLEXLB_FAIL_ON_CONCURRENT_TEST=0 to override." >&2
+        return 1
+    fi
 }
 
 wait_for_endpoints_ready() {
-  local master_port=$1
-  local expected_prefill=$2
-  local expected_decode=$3
-  local max_wait="${ENDPOINT_READY_TIMEOUT_S}"
-  local elapsed=0
+    local master_port=$1
+    local expected_prefill=$2
+    local expected_decode=$3
+    local max_wait="${ENDPOINT_READY_TIMEOUT_S}"
+    local elapsed=0
 
-  echo "[wait_for_endpoints_ready] Waiting for ${expected_prefill} prefill + ${expected_decode} decode endpoints to be discovered and alive..."
+    echo "[wait_for_endpoints_ready] Waiting for ${expected_prefill} prefill + ${expected_decode} decode endpoints to be discovered and alive..."
 
-  while [ "${elapsed}" -lt "${max_wait}" ]; do
-    local response
-    response=$(curl -s -X POST "http://127.0.0.1:${master_port}/rtp_llm/master/info" \
-        -H "Content-Type: application/json" \
-        -H "Accept: application/json" \
-        -d '{}' 2>/dev/null) || true
+    while [ "${elapsed}" -lt "${max_wait}" ]; do
+        local response
+        response=$(curl -s -X POST "http://127.0.0.1:${master_port}/rtp_llm/master/info" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d '{}' 2>/dev/null) || true
 
-    if [ -n "${response}" ]; then
-      local result
-      result=$(echo "${response}" | python3 -c "
+        if [ -n "${response}" ]; then
+            local result
+            result=$(echo "${response}" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -504,44 +504,44 @@ except Exception:
     print('False|0|0|0|0')
 " 2>/dev/null) || result="False|0|0|0|0"
 
-      local ready p_disc p_alive d_disc d_alive
-      IFS='|' read -r ready p_disc p_alive d_disc d_alive <<< "${result}"
+            local ready p_disc p_alive d_disc d_alive
+            IFS='|' read -r ready p_disc p_alive d_disc d_alive <<<"${result}"
 
-      if [ "${ready}" = "True" ] && [ "${p_disc}" -ge "${expected_prefill}" ] && [ "${p_alive}" -ge "${expected_prefill}" ] && [ "${d_disc}" -ge "${expected_decode}" ] && [ "${d_alive}" -ge "${expected_decode}" ]; then
-        echo "[wait_for_endpoints_ready] All endpoints ready: prefill=${p_alive}/${expected_prefill}, decode=${d_alive}/${expected_decode} (${elapsed}s)"
-        return 0
-      fi
+            if [ "${ready}" = "True" ] && [ "${p_disc}" -ge "${expected_prefill}" ] && [ "${p_alive}" -ge "${expected_prefill}" ] && [ "${d_disc}" -ge "${expected_decode}" ] && [ "${d_alive}" -ge "${expected_decode}" ]; then
+                echo "[wait_for_endpoints_ready] All endpoints ready: prefill=${p_alive}/${expected_prefill}, decode=${d_alive}/${expected_decode} (${elapsed}s)"
+                return 0
+            fi
 
-      echo "[wait_for_endpoints_ready] Not ready yet: ready=${ready}, prefill discovered=${p_disc}/${expected_prefill} alive=${p_alive}/${expected_prefill}, decode discovered=${d_disc}/${expected_decode} alive=${d_alive}/${expected_decode} (${elapsed}s)"
-    fi
+            echo "[wait_for_endpoints_ready] Not ready yet: ready=${ready}, prefill discovered=${p_disc}/${expected_prefill} alive=${p_alive}/${expected_prefill}, decode discovered=${d_disc}/${expected_decode} alive=${d_alive}/${expected_decode} (${elapsed}s)"
+        fi
 
-    sleep 1
-    elapsed=$((elapsed + 1))
-  done
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
 
-  echo "[wait_for_endpoints_ready] ERROR: Timeout after ${max_wait}s waiting for endpoints." >&2
-  return 1
+    echo "[wait_for_endpoints_ready] ERROR: Timeout after ${max_wait}s waiting for endpoints." >&2
+    return 1
 }
 
 save_master_info() {
-  local output=$1
-  curl -fsS -X POST "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/master/info" \
-    -H "Content-Type: application/json" \
-    -H "Accept: application/json" \
-    -d '{}' >"${output}"
+    local output=$1
+    curl -fsS -X POST "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/master/info" \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/json" \
+        -d '{}' >"${output}"
 }
 
 save_master_prometheus() {
-  local output=$1
-  local path
-  for path in prometheus actuator/prometheus; do
-    if curl -fsS "http://127.0.0.1:${FLEXLB_MANAGEMENT_PORT}/${path}" >"${output}"; then
-      return 0
-    fi
-  done
-  rm -f "${output}"
-  echo "WARNING: unable to save Master Prometheus snapshot" >&2
-  return 1
+    local output=$1
+    local path
+    for path in prometheus actuator/prometheus; do
+        if curl -fsS "http://127.0.0.1:${FLEXLB_MANAGEMENT_PORT}/${path}" >"${output}"; then
+            return 0
+        fi
+    done
+    rm -f "${output}"
+    echo "WARNING: unable to save Master Prometheus snapshot" >&2
+    return 1
 }
 
 # ---- Secondary 1s collectors (unified-analysis data audit G1/G3/G5) ----
@@ -598,17 +598,17 @@ SECONDARY_COLLECTOR_ARGS=()
 # consolidate_run_outputs.py can regroup the flat file into a [{ts, metrics}]
 # timeline.
 start_mock_per_engine_poller() {
-  if [[ "${START_MOCK}" != "1" ]]; then
-    return 0
-  fi
-  # G1: registers the mock lane argv (poller body: eval_collectors.py
-  # run_mock_per_engine_poller; the collector process is started by
-  # start_secondary_pollers).
-  SECONDARY_COLLECTOR_ARGS+=(
-    --mock-port "$((MOCK_BASE_GRPC_PORT - 1))"
-    --mock-out "${MOCK_PER_ENGINE_METRICS_FILE}"
-    --mock-interval "${MOCK_PER_ENGINE_POLL_INTERVAL_S}"
-  )
+    if [[ "${START_MOCK}" != "1" ]]; then
+        return 0
+    fi
+    # G1: registers the mock lane argv (poller body: eval_collectors.py
+    # run_mock_per_engine_poller; the collector process is started by
+    # start_secondary_pollers).
+    SECONDARY_COLLECTOR_ARGS+=(
+        --mock-port "$((MOCK_BASE_GRPC_PORT - 1))"
+        --mock-out "${MOCK_PER_ENGINE_METRICS_FILE}"
+        --mock-interval "${MOCK_PER_ENGINE_POLL_INTERVAL_S}"
+    )
 }
 
 # G3: per-second master business-metric time series — the sole master-plane
@@ -625,16 +625,16 @@ start_mock_per_engine_poller() {
 # and stays in sync by convention.
 # Same "# ts=" grouped layout as G1.
 start_master_prometheus_poller() {
-  if [[ "${START_FLEXLB}" != "1" ]]; then
-    return 0
-  fi
-  # G3: registers the prometheus lane argv (poller body: eval_collectors.py
-  # run_master_prometheus_poller; the collector process is started by
-  # start_secondary_pollers).
-  SECONDARY_COLLECTOR_ARGS+=(
-    --prometheus-port "${FLEXLB_MANAGEMENT_PORT}"
-    --prometheus-out "${MASTER_PROMETHEUS_TS_FILE}"
-  )
+    if [[ "${START_FLEXLB}" != "1" ]]; then
+        return 0
+    fi
+    # G3: registers the prometheus lane argv (poller body: eval_collectors.py
+    # run_master_prometheus_poller; the collector process is started by
+    # start_secondary_pollers).
+    SECONDARY_COLLECTOR_ARGS+=(
+        --prometheus-port "${FLEXLB_MANAGEMENT_PORT}"
+        --prometheus-out "${MASTER_PROMETHEUS_TS_FILE}"
+    )
 }
 
 # G5: per-second CPU/RSS sampling of the three JVM groups (mock cluster,
@@ -644,127 +644,127 @@ start_master_prometheus_poller() {
 # tolerated (ps just omits them; a wholly dead pidlist makes ps exit non-zero
 # and the round is skipped).
 start_process_usage_poller() {
-  if ! command -v ps >/dev/null 2>&1; then
-    echo "WARNING: ps not found; process CPU/RSS sampling disabled" >&2
-    return 0
-  fi
-  # G5: registers the process-usage lane argv (poller body:
-  # eval_collectors.py run_process_usage_poller; the collector process is
-  # started by start_secondary_pollers).
-  SECONDARY_COLLECTOR_ARGS+=(
-    --pid-file "${PROCESS_POLL_PID_FILE}"
-    --process-out "${PROCESS_USAGE_TS_FILE}"
-  )
+    if ! command -v ps >/dev/null 2>&1; then
+        echo "WARNING: ps not found; process CPU/RSS sampling disabled" >&2
+        return 0
+    fi
+    # G5: registers the process-usage lane argv (poller body:
+    # eval_collectors.py run_process_usage_poller; the collector process is
+    # started by start_secondary_pollers).
+    SECONDARY_COLLECTOR_ARGS+=(
+        --pid-file "${PROCESS_POLL_PID_FILE}"
+        --process-out "${PROCESS_USAGE_TS_FILE}"
+    )
 }
 
 # Seed the poller pid list with the processes started so far; load client
 # workers are appended by the multi-worker launch loop below.
 write_process_poll_pids() {
-  : >"${PROCESS_POLL_PID_FILE}"
-  if [[ -n "${MOCK_PID}" ]]; then
-    echo "${MOCK_PID} mock" >>"${PROCESS_POLL_PID_FILE}"
-  fi
-  if [[ -n "${FLEXLB_PID}" ]]; then
-    echo "${FLEXLB_PID} master" >>"${PROCESS_POLL_PID_FILE}"
-  fi
+    : >"${PROCESS_POLL_PID_FILE}"
+    if [[ -n "${MOCK_PID}" ]]; then
+        echo "${MOCK_PID} mock" >>"${PROCESS_POLL_PID_FILE}"
+    fi
+    if [[ -n "${FLEXLB_PID}" ]]; then
+        echo "${FLEXLB_PID} master" >>"${PROCESS_POLL_PID_FILE}"
+    fi
 }
 
 append_process_poll_pid() {
-  echo "$1 $2" >>"${PROCESS_POLL_PID_FILE}"
+    echo "$1 $2" >>"${PROCESS_POLL_PID_FILE}"
 }
 
 start_secondary_pollers() {
-  # The start_*_poller calls below only accumulate lane argv (see
-  # SECONDARY_COLLECTOR_ARGS); re-registered from scratch here so a
-  # hypothetical second call never inherits stale arguments.
-  SECONDARY_COLLECTOR_ARGS=()
-  # G3 first — the M7 exemption (transferred from the retired G6 counter
-  # lane): the master prometheus lane is NOT covered by the M7 A/B switch
-  # below. Its counter/gauge series (flexlb_auto_tpm_request_count etc.,
-  # the consumed set since the G6/G4 collapse) feed aggregate
-  # master_arrivals_ts / inflight_ts / KPI consistency, so A/B-off
-  # baselines keep collecting them.
-  if [[ "${START_FLEXLB}" == "1" ]]; then
-    start_master_prometheus_poller
-  fi
-  # M7: FLEXLB_SECONDARY_POLLERS_ENABLED=0 skips the observation lanes
-  # (G1/G5) — zero observation overhead for A/B comparisons. G3 (when
-  # START_FLEXLB=1) still runs in the process started below.
-  if [[ "${FLEXLB_SECONDARY_POLLERS_ENABLED}" != "1" ]]; then
-    echo "Secondary pollers disabled (FLEXLB_SECONDARY_POLLERS_ENABLED=${FLEXLB_SECONDARY_POLLERS_ENABLED}); G3 prometheus lane unaffected"
-  else
-    write_process_poll_pids
-    start_mock_per_engine_poller
-    start_process_usage_poller
-  fi
-  if [[ "${#SECONDARY_COLLECTOR_ARGS[@]}" -eq 0 ]]; then
-    return 0
-  fi
-  # One process, up to three collector threads (G1/G3/G5). The three PID
-  # variables all capture this single pid; stop_secondary_pollers sends
-  # exactly ONE SIGTERM to it (a rapid same-pid SIGTERM burst deadlocked
-  # the collector's Python signal handler — see the stop function).
-  python3 "${SCRIPT_DIR}/eval_collectors.py" \
-    --secondary-interval "${SECONDARY_POLL_INTERVAL_S}" \
-    "${SECONDARY_COLLECTOR_ARGS[@]}" &
-  local group_pid="$!"
-  MOCK_PER_ENGINE_POLLER_PID="${group_pid}"
-  MASTER_PROMETHEUS_POLLER_PID="${group_pid}"
-  PROCESS_USAGE_POLLER_PID="${group_pid}"
+    # The start_*_poller calls below only accumulate lane argv (see
+    # SECONDARY_COLLECTOR_ARGS); re-registered from scratch here so a
+    # hypothetical second call never inherits stale arguments.
+    SECONDARY_COLLECTOR_ARGS=()
+    # G3 first — the M7 exemption (transferred from the retired G6 counter
+    # lane): the master prometheus lane is NOT covered by the M7 A/B switch
+    # below. Its counter/gauge series (flexlb_auto_tpm_request_count etc.,
+    # the consumed set since the G6/G4 collapse) feed aggregate
+    # master_arrivals_ts / inflight_ts / KPI consistency, so A/B-off
+    # baselines keep collecting them.
+    if [[ "${START_FLEXLB}" == "1" ]]; then
+        start_master_prometheus_poller
+    fi
+    # M7: FLEXLB_SECONDARY_POLLERS_ENABLED=0 skips the observation lanes
+    # (G1/G5) — zero observation overhead for A/B comparisons. G3 (when
+    # START_FLEXLB=1) still runs in the process started below.
+    if [[ "${FLEXLB_SECONDARY_POLLERS_ENABLED}" != "1" ]]; then
+        echo "Secondary pollers disabled (FLEXLB_SECONDARY_POLLERS_ENABLED=${FLEXLB_SECONDARY_POLLERS_ENABLED}); G3 prometheus lane unaffected"
+    else
+        write_process_poll_pids
+        start_mock_per_engine_poller
+        start_process_usage_poller
+    fi
+    if [[ "${#SECONDARY_COLLECTOR_ARGS[@]}" -eq 0 ]]; then
+        return 0
+    fi
+    # One process, up to three collector threads (G1/G3/G5). The three PID
+    # variables all capture this single pid; stop_secondary_pollers sends
+    # exactly ONE SIGTERM to it (a rapid same-pid SIGTERM burst deadlocked
+    # the collector's Python signal handler — see the stop function).
+    python3 "${SCRIPT_DIR}/eval_collectors.py" \
+        --secondary-interval "${SECONDARY_POLL_INTERVAL_S}" \
+        "${SECONDARY_COLLECTOR_ARGS[@]}" &
+    local group_pid="$!"
+    MOCK_PER_ENGINE_POLLER_PID="${group_pid}"
+    MASTER_PROMETHEUS_POLLER_PID="${group_pid}"
+    PROCESS_USAGE_POLLER_PID="${group_pid}"
 }
 
 stop_secondary_pollers() {
-  # All three PID variables capture the SAME unified collector pid (one
-  # process, up to 3 threads). The former loop sent one SIGTERM per
-  # variable — several rapid SIGTERMs to one process — and the collector's
-  # Python handler deadlocked when a second signal landed inside
-  # Event.set()'s non-reentrant lock window (py-spy: recursive handler
-  # frames; every run leaked one frozen process). Now: exactly ONE SIGTERM
-  # per distinct pid, wait up to ~5s for the graceful exit (in-flight round
-  # is bounded by the 2s HTTP timeout, shutdown grace 3s), then SIGKILL as
-  # the fallback. Idempotent: a gone/reaped pid is not an error. The EXIT
-  # trap cleanup path calls this too and benefits from the same fix.
-  local pid
-  local unique_pids=()
-  for pid in "${MOCK_PER_ENGINE_POLLER_PID}" \
-    "${MASTER_PROMETHEUS_POLLER_PID}" \
-    "${PROCESS_USAGE_POLLER_PID}"; do
-    if [[ -n "${pid}" ]] && [[ " ${unique_pids[*]:-} " != *" ${pid} "* ]]; then
-      unique_pids+=("${pid}")
-    fi
-  done
-  for pid in ${unique_pids[@]+"${unique_pids[@]}"}; do
-    kill "${pid}" >/dev/null 2>&1 || true
-    local waited=0
-    while kill -0 "${pid}" >/dev/null 2>&1 && (( waited < 50 )); do
-      sleep 0.1
-      waited=$((waited + 1))
+    # All three PID variables capture the SAME unified collector pid (one
+    # process, up to 3 threads). The former loop sent one SIGTERM per
+    # variable — several rapid SIGTERMs to one process — and the collector's
+    # Python handler deadlocked when a second signal landed inside
+    # Event.set()'s non-reentrant lock window (py-spy: recursive handler
+    # frames; every run leaked one frozen process). Now: exactly ONE SIGTERM
+    # per distinct pid, wait up to ~5s for the graceful exit (in-flight round
+    # is bounded by the 2s HTTP timeout, shutdown grace 3s), then SIGKILL as
+    # the fallback. Idempotent: a gone/reaped pid is not an error. The EXIT
+    # trap cleanup path calls this too and benefits from the same fix.
+    local pid
+    local unique_pids=()
+    for pid in "${MOCK_PER_ENGINE_POLLER_PID}" \
+        "${MASTER_PROMETHEUS_POLLER_PID}" \
+        "${PROCESS_USAGE_POLLER_PID}"; do
+        if [[ -n "${pid}" ]] && [[ " ${unique_pids[*]:-} " != *" ${pid} "* ]]; then
+            unique_pids+=("${pid}")
+        fi
     done
-    if kill -0 "${pid}" >/dev/null 2>&1; then
-      echo "secondary collector pid=${pid} still alive after 5s; sending SIGKILL" >&2
-      kill -9 "${pid}" >/dev/null 2>&1 || true
-    fi
-  done
-  MOCK_PER_ENGINE_POLLER_PID=""
-  MASTER_PROMETHEUS_POLLER_PID=""
-  PROCESS_USAGE_POLLER_PID=""
-  rm -f "${PROCESS_POLL_PID_FILE}"
+    for pid in ${unique_pids[@]+"${unique_pids[@]}"}; do
+        kill "${pid}" >/dev/null 2>&1 || true
+        local waited=0
+        while kill -0 "${pid}" >/dev/null 2>&1 && ((waited < 50)); do
+            sleep 0.1
+            waited=$((waited + 1))
+        done
+        if kill -0 "${pid}" >/dev/null 2>&1; then
+            echo "secondary collector pid=${pid} still alive after 5s; sending SIGKILL" >&2
+            kill -9 "${pid}" >/dev/null 2>&1 || true
+        fi
+    done
+    MOCK_PER_ENGINE_POLLER_PID=""
+    MASTER_PROMETHEUS_POLLER_PID=""
+    PROCESS_USAGE_POLLER_PID=""
+    rm -f "${PROCESS_POLL_PID_FILE}"
 }
 
 assert_mock_engine_healthy() {
-  if [[ "${START_MOCK}" != "1" ]]; then
-    return 0
-  fi
-  if [[ -z "${MOCK_PID}" ]] || ! kill -0 "${MOCK_PID}" >/dev/null 2>&1; then
-    echo "Mock engine is not running" >&2
-    tail -80 "${RUN_DIR}/mock_engine.log" >&2 || true
-    return 1
-  fi
-  if grep -q "OutOfMemoryError" "${RUN_DIR}/mock_engine.log" 2>/dev/null; then
-    echo "Mock engine encountered OutOfMemoryError" >&2
-    tail -80 "${RUN_DIR}/mock_engine.log" >&2 || true
-    return 1
-  fi
+    if [[ "${START_MOCK}" != "1" ]]; then
+        return 0
+    fi
+    if [[ -z "${MOCK_PID}" ]] || ! kill -0 "${MOCK_PID}" >/dev/null 2>&1; then
+        echo "Mock engine is not running" >&2
+        tail -80 "${RUN_DIR}/mock_engine.log" >&2 || true
+        return 1
+    fi
+    if grep -q "OutOfMemoryError" "${RUN_DIR}/mock_engine.log" 2>/dev/null; then
+        echo "Mock engine encountered OutOfMemoryError" >&2
+        tail -80 "${RUN_DIR}/mock_engine.log" >&2 || true
+        return 1
+    fi
 }
 
 mkdir -p "${RUN_DIR}"
@@ -772,23 +772,23 @@ mkdir -p "${FLEXLB_LOG_PATH}"
 echo "run_dir=${RUN_DIR}"
 echo "load client: JavaLoadClient (trace priority passthrough via lib_load_client.sh)"
 if [[ "$(java_major java)" -lt 21 ]]; then
-  echo "Java 21 is required to run JavaLoadClient. Set JAVA21_HOME or JAVA_HOME." >&2
-  exit 1
+    echo "Java 21 is required to run JavaLoadClient. Set JAVA21_HOME or JAVA_HOME." >&2
+    exit 1
 fi
 if [[ ! -f "${JAVA_LOAD_CLIENT_JAR}" ]]; then
-  echo "Java load client jar not found, auto-building: ${JAVA_LOAD_CLIENT_JAR} (first build may take several minutes)"
-  if ! (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-mock-engine -am package -DskipTests); then
-    echo "Failed to build Java load client jar via Maven (this may take several minutes on a cold cache)" >&2
-    exit 1
-  fi
-  if [[ ! -f "${JAVA_LOAD_CLIENT_JAR}" ]]; then
-    echo "Failed to build Java load client jar: ${JAVA_LOAD_CLIENT_JAR}" >&2
-    exit 1
-  fi
+    echo "Java load client jar not found, auto-building: ${JAVA_LOAD_CLIENT_JAR} (first build may take several minutes)"
+    if ! (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-mock-engine -am package -DskipTests); then
+        echo "Failed to build Java load client jar via Maven (this may take several minutes on a cold cache)" >&2
+        exit 1
+    fi
+    if [[ ! -f "${JAVA_LOAD_CLIENT_JAR}" ]]; then
+        echo "Failed to build Java load client jar: ${JAVA_LOAD_CLIENT_JAR}" >&2
+        exit 1
+    fi
 fi
 
 if [[ "${FLEXLB_FAIL_ON_CONCURRENT_TEST}" == "1" ]]; then
-  assert_no_concurrent_flexlb_test
+    assert_no_concurrent_flexlb_test
 fi
 
 ENDPOINT_FILE="${RUN_DIR}/endpoints.json"
@@ -797,82 +797,83 @@ FLEXLB_ENV_FILE="${RUN_DIR}/flexlb_env.txt"
 JAVA_MOCK_DISCOVERY_ARGS=()
 MOCK_DISCOVERY_FILE=""
 if [[ "${START_MOCK}" == "1" ]]; then
-  MOCK_DISCOVERY_FILE="${RUN_DIR}/discovery.json"
-  JAVA_MOCK_DISCOVERY_ARGS=(--discovery-file "${MOCK_DISCOVERY_FILE}")
+    MOCK_DISCOVERY_FILE="${RUN_DIR}/discovery.json"
+    JAVA_MOCK_DISCOVERY_ARGS=(--discovery-file "${MOCK_DISCOVERY_FILE}")
 fi
 
 if [[ "${START_MOCK}" == "1" ]]; then
-  mapfile -t JAVA_MOCK_PORTS < <(seq "${MOCK_BASE_GRPC_PORT}" \
-    "$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE - 1))")
-  assert_ports_free "${JAVA_MOCK_PORTS[@]}"
-  if [[ ! -f "${JAVA_MOCK_ENGINE_JAR}" ]]; then
-    echo "Java mock engine jar not found, auto-building: ${JAVA_MOCK_ENGINE_JAR} (first build may take several minutes)"
-    if ! (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-mock-engine -am package -DskipTests); then
-      echo "Failed to build Java mock engine jar via Maven (this may take several minutes on a cold cache)" >&2
-      exit 1
-    fi
+    mapfile -t JAVA_MOCK_PORTS < <(seq "${MOCK_BASE_GRPC_PORT}" \
+        "$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE - 1))")
+    assert_ports_free "${JAVA_MOCK_PORTS[@]}"
     if [[ ! -f "${JAVA_MOCK_ENGINE_JAR}" ]]; then
-      echo "Failed to build Java mock engine jar: ${JAVA_MOCK_ENGINE_JAR}" >&2
-      exit 1
+        echo "Java mock engine jar not found, auto-building: ${JAVA_MOCK_ENGINE_JAR} (first build may take several minutes)"
+        if ! (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-mock-engine -am package -DskipTests); then
+            echo "Failed to build Java mock engine jar via Maven (this may take several minutes on a cold cache)" >&2
+            exit 1
+        fi
+        if [[ ! -f "${JAVA_MOCK_ENGINE_JAR}" ]]; then
+            echo "Failed to build Java mock engine jar: ${JAVA_MOCK_ENGINE_JAR}" >&2
+            exit 1
+        fi
     fi
-  fi
-  java -Xms"${JAVA_MOCK_JVM_XMS}" -Xmx"${JAVA_MOCK_JVM_XMX}" \
-    -XX:+ExitOnOutOfMemoryError \
-    -Xlog:gc*,safepoint:"${RUN_DIR}/mock_engine_gc.log":time,uptime,level,tags:filecount=3,filesize=20m \
-    -jar "${JAVA_MOCK_ENGINE_JAR}" \
-    --n-prefill "${N_PREFILL}" \
-    --n-decode "${N_DECODE}" \
-    --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
-    --event-loop-threads "${JAVA_MOCK_EVENT_LOOP_THREADS}" \
-    --completion-threads "${JAVA_MOCK_COMPLETION_THREADS}" \
-    --stats-interval-ms "${JAVA_MOCK_STATS_INTERVAL_MS}" \
-    --stats-stdout true \
-    --events-file "${RUN_DIR}/engine_events.jsonl" \
-    --decode-max-concurrency "${JAVA_MOCK_DECODE_MAX_CONCURRENCY}" \
-    --performance "${PERFORMANCE_FILE}" \
-    --master-config "${PROCESS_CONFIG_FILE}" \
-    --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
-    --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
-    --endpoint-file "${ENDPOINT_FILE}" \
-    --env-file "${FLEXLB_ENV_FILE}" \
-    "${JAVA_MOCK_DISCOVERY_ARGS[@]}" \
-    >"${RUN_DIR}/mock_engine.log" 2>&1 &
-  MOCK_PID="$!"
-  echo "Java mock engine heap: Xms=${JAVA_MOCK_JVM_XMS}, Xmx=${JAVA_MOCK_JVM_XMX}"
-  echo "Java mock engine stats interval: ${JAVA_MOCK_STATS_INTERVAL_MS}ms"
-  if [[ -n "${MOCK_DISCOVERY_FILE}" ]]; then
-    echo "File service discovery: engine maintains ${MOCK_DISCOVERY_FILE} (add_engine/remove_engine keep it in sync)"
-  fi
-  # The Java process writes discovery files only after every gRPC port is bound.
-  wait_for_port "127.0.0.1" "$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE - 1))" 60
-  if ! kill -0 "${MOCK_PID}" >/dev/null 2>&1; then
-    echo "Java mock engine exited during startup" >&2
-    tail -50 "${RUN_DIR}/mock_engine.log" >&2 || true
-    exit 1
-  fi
-  for _ in $(seq 1 100); do
+    java -Xms"${JAVA_MOCK_JVM_XMS}" -Xmx"${JAVA_MOCK_JVM_XMX}" \
+        -XX:+ExitOnOutOfMemoryError \
+        -Xlog:gc*,safepoint:"${RUN_DIR}/mock_engine_gc.log":time,uptime,level,tags:filecount=3,filesize=20m \
+        -jar "${JAVA_MOCK_ENGINE_JAR}" \
+        --n-prefill "${N_PREFILL}" \
+        --n-decode "${N_DECODE}" \
+        --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
+        --event-loop-threads "${JAVA_MOCK_EVENT_LOOP_THREADS}" \
+        --completion-threads "${JAVA_MOCK_COMPLETION_THREADS}" \
+        --stats-interval-ms "${JAVA_MOCK_STATS_INTERVAL_MS}" \
+        --stats-stdout true \
+        --events-file "${RUN_DIR}/engine_events.jsonl" \
+        --decode-max-concurrency "${JAVA_MOCK_DECODE_MAX_CONCURRENCY}" \
+        --performance "${PERFORMANCE_FILE}" \
+        --master-config "${PROCESS_CONFIG_FILE}" \
+        --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
+        --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
+        --endpoint-file "${ENDPOINT_FILE}" \
+        --env-file "${FLEXLB_ENV_FILE}" \
+        "${JAVA_MOCK_DISCOVERY_ARGS[@]}" \
+        >"${RUN_DIR}/mock_engine.log" 2>&1 &
+    MOCK_PID="$!"
+    echo "Java mock engine heap: Xms=${JAVA_MOCK_JVM_XMS}, Xmx=${JAVA_MOCK_JVM_XMX}"
+    echo "Java mock engine stats interval: ${JAVA_MOCK_STATS_INTERVAL_MS}ms"
+    if [[ -n "${MOCK_DISCOVERY_FILE}" ]]; then
+        echo "File service discovery: engine maintains ${MOCK_DISCOVERY_FILE} (add_engine/remove_engine keep it in sync)"
+    fi
+    # The Java process writes discovery files only after every gRPC port is bound.
+    wait_for_port "127.0.0.1" "$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE - 1))" 60
     if ! kill -0 "${MOCK_PID}" >/dev/null 2>&1; then
-      echo "Java mock engine exited before writing discovery files" >&2
-      tail -50 "${RUN_DIR}/mock_engine.log" >&2 || true
-      exit 1
+        echo "Java mock engine exited during startup" >&2
+        tail -50 "${RUN_DIR}/mock_engine.log" >&2 || true
+        exit 1
     fi
-    if [[ -s "${ENDPOINT_FILE}" ]]; then
-      break
+    for _ in $(seq 1 100); do
+        if ! kill -0 "${MOCK_PID}" >/dev/null 2>&1; then
+            echo "Java mock engine exited before writing discovery files" >&2
+            tail -50 "${RUN_DIR}/mock_engine.log" >&2 || true
+            exit 1
+        fi
+        if [[ -s "${ENDPOINT_FILE}" ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+    if [[ ! -s "${ENDPOINT_FILE}" ]]; then
+        echo "Java mock engine did not write endpoint file: ${ENDPOINT_FILE}" >&2
+        exit 1
     fi
-    sleep 0.1
-  done
-  if [[ ! -s "${ENDPOINT_FILE}" ]]; then
-    echo "Java mock engine did not write endpoint file: ${ENDPOINT_FILE}" >&2
-    exit 1
-  fi
 else
-  if [[ ! -f "${ENDPOINT_FILE}" ]]; then
-    echo "START_MOCK=0 requires ENDPOINT_FILE at ${ENDPOINT_FILE}" >&2
-    exit 1
-  fi
+    if [[ ! -f "${ENDPOINT_FILE}" ]]; then
+        echo "START_MOCK=0 requires ENDPOINT_FILE at ${ENDPOINT_FILE}" >&2
+        exit 1
+    fi
 fi
 
-mapfile -t FLEXLB_ENV_ARGS < <(python3 - "${ENDPOINT_FILE}" <<'PY'
+mapfile -t FLEXLB_ENV_ARGS < <(
+    python3 - "${ENDPOINT_FILE}" <<'PY'
 import json
 import sys
 
@@ -883,9 +884,10 @@ PY
 
 PROCESS_ENV_ARGS=()
 if [[ -f "${PROCESS_CONFIG_FILE}" ]]; then
-  while IFS= read -r -d '' process_env; do
-    PROCESS_ENV_ARGS+=("${process_env}")
-  done < <(python3 - "${PROCESS_CONFIG_FILE}" <<'PY'
+    while IFS= read -r -d '' process_env; do
+        PROCESS_ENV_ARGS+=("${process_env}")
+    done < <(
+        python3 - "${PROCESS_CONFIG_FILE}" <<'PY'
 import json
 import sys
 
@@ -897,12 +899,13 @@ for item in envs:
     if item[0] in {"FLEXLB_CONFIG", "MODEL_SERVICE_CONFIG", "FLEXLB_SYNC_CONSISTENCY_CONFIG", "LOG_LEVEL", "HIPPO_ROLE"}:
         sys.stdout.write(f"{str(item[0])}={str(item[1])}\0")
 PY
-  )
+    )
 fi
 
 PROCESS_FLEXLB_CONFIG=""
 if [[ -f "${PROCESS_CONFIG_FILE}" ]]; then
-  PROCESS_FLEXLB_CONFIG="$(python3 - "${PROCESS_CONFIG_FILE}" <<'PY'
+    PROCESS_FLEXLB_CONFIG="$(
+        python3 - "${PROCESS_CONFIG_FILE}" <<'PY'
 import json
 import sys
 
@@ -913,7 +916,7 @@ for item in envs:
         print(item[1], end="")
         break
 PY
-)"
+    )"
 fi
 FLEXLB_CONFIG="${FLEXLB_CONFIG:-${PROCESS_FLEXLB_CONFIG:-${DEFAULT_FLEXLB_CONFIG}}}"
 
@@ -924,7 +927,8 @@ FLEXLB_CONFIG="${FLEXLB_CONFIG:-${PROCESS_FLEXLB_CONFIG:-${DEFAULT_FLEXLB_CONFIG
 # victim can exist on any path (belt and braces).
 STRIP_PREEMPTION="${STRIP_PREEMPTION:-0}"
 if [[ "${STRIP_PREEMPTION}" == "1" && -n "${FLEXLB_CONFIG}" ]]; then
-  FLEXLB_CONFIG="$(python3 - "${FLEXLB_CONFIG}" <<'PY'
+    FLEXLB_CONFIG="$(
+        python3 - "${FLEXLB_CONFIG}" <<'PY'
 import json
 import sys
 
@@ -942,13 +946,14 @@ if isinstance(ordering, dict) and "preemption" in ordering:
 else:
     print(sys.argv[1], end="")
 PY
-)"
+    )"
 fi
 
 JAVA_HEAP_OPTS=()
 JVM_HEAP_SIZE=""
 if [[ -f "${PROCESS_CONFIG_FILE}" ]]; then
-  JVM_HEAP_SIZE="$(python3 - "${PROCESS_CONFIG_FILE}" <<'PY'
+    JVM_HEAP_SIZE="$(
+        python3 - "${PROCESS_CONFIG_FILE}" <<'PY'
 import json
 import sys
 
@@ -958,71 +963,72 @@ for item in payload.get("zone_process_setting", {}).get("process_info", {}).get(
         print(item[1])
         break
 PY
-)"
+    )"
 fi
 JVM_XMS="${FLEXLB_JVM_XMS:-${JVM_HEAP_SIZE}}"
 JVM_XMX="${FLEXLB_JVM_XMX:-${JVM_HEAP_SIZE}}"
 if [[ -n "${JVM_XMS}" ]]; then
-  JAVA_HEAP_OPTS+=(-Xms"${JVM_XMS}")
+    JAVA_HEAP_OPTS+=(-Xms"${JVM_XMS}")
 fi
 if [[ -n "${JVM_XMX}" ]]; then
-  JAVA_HEAP_OPTS+=(-Xmx"${JVM_XMX}")
+    JAVA_HEAP_OPTS+=(-Xmx"${JVM_XMX}")
 fi
 
 if [[ "${START_FLEXLB}" == "1" ]]; then
-  assert_ports_free "${FLEXLB_HTTP_PORT}" "${FLEXLB_MANAGEMENT_PORT}" "$((FLEXLB_HTTP_PORT + 2))"
-  if [[ "$(java_major java)" -lt 21 ]]; then
-    echo "Java 21 is required to build/start flexlb-api. Set JAVA21_HOME or JAVA_HOME." >&2
-    exit 1
-  fi
-  if [[ -n "${FLEXLB_START_CMD:-}" ]]; then
-    env "${FLEXLB_ENV_ARGS[@]}" "${PROCESS_ENV_ARGS[@]}" \
-      "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
-      bash -lc "${FLEXLB_START_CMD}" >"${RUN_DIR}/flexlb.log" 2>&1 &
-  else
-    if [[ ! -f "${FLEXLB_JAR}" ]]; then
-      (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-api -am package -DskipTests)
+    assert_ports_free "${FLEXLB_HTTP_PORT}" "${FLEXLB_MANAGEMENT_PORT}" "$((FLEXLB_HTTP_PORT + 2))"
+    if [[ "$(java_major java)" -lt 21 ]]; then
+        echo "Java 21 is required to build/start flexlb-api. Set JAVA21_HOME or JAVA_HOME." >&2
+        exit 1
     fi
-    # Suppress pv.log unless explicitly enabled (see the FLEXLB_PV_LOG note
-    # above). FLEXLB_START_CMD mode is caller-owned and left untouched.
-    MASTER_LOG_ARGS=()
-    if [[ "${FLEXLB_PV_LOG}" != "on" ]]; then
-      MASTER_LOG_ARGS+=(--logging.level.pvLogger=WARN)
+    if [[ -n "${FLEXLB_START_CMD:-}" ]]; then
+        env "${FLEXLB_ENV_ARGS[@]}" "${PROCESS_ENV_ARGS[@]}" \
+            "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
+            bash -lc "${FLEXLB_START_CMD}" >"${RUN_DIR}/flexlb.log" 2>&1 &
+    else
+        if [[ ! -f "${FLEXLB_JAR}" ]]; then
+            (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-api -am package -DskipTests)
+        fi
+        # Suppress pv.log unless explicitly enabled (see the FLEXLB_PV_LOG note
+        # above). FLEXLB_START_CMD mode is caller-owned and left untouched.
+        MASTER_LOG_ARGS=()
+        if [[ "${FLEXLB_PV_LOG}" != "on" ]]; then
+            MASTER_LOG_ARGS+=(--logging.level.pvLogger=WARN)
+        fi
+        env "${FLEXLB_ENV_ARGS[@]}" "${PROCESS_ENV_ARGS[@]}" \
+            "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
+            java -XX:StartFlightRecording=filename=${JFR_FILE},settings=profile,duration=${JFR_DURATION},disk=true,maxsize=256m,dumponexit=true "${JAVA_HEAP_OPTS[@]}" "${JAVA_MODULE_OPTS[@]}" "${JVM_SYSTEM_PROPS[@]}" -jar "${FLEXLB_JAR}" \
+            --server.port="${FLEXLB_HTTP_PORT}" \
+            --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
+            --spring.profiles.active="${SPRING_PROFILE:-default}" \
+            --flexlb.log.path="${FLEXLB_LOG_PATH}" \
+            --flexlb.monitor.metric-whitelist="${MASTER_METRIC_WHITELIST}" \
+            ${MASTER_LOG_ARGS[@]+"${MASTER_LOG_ARGS[@]}"} \
+            >"${RUN_DIR}/flexlb.log" 2>&1 &
     fi
-    env "${FLEXLB_ENV_ARGS[@]}" "${PROCESS_ENV_ARGS[@]}" \
-      "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
-      java -XX:StartFlightRecording=filename=${JFR_FILE},settings=profile,duration=${JFR_DURATION},disk=true,maxsize=256m,dumponexit=true "${JAVA_HEAP_OPTS[@]}" "${JAVA_MODULE_OPTS[@]}" "${JVM_SYSTEM_PROPS[@]}" -jar "${FLEXLB_JAR}" \
-      --server.port="${FLEXLB_HTTP_PORT}" \
-      --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
-      --spring.profiles.active="${SPRING_PROFILE:-default}" \
-      --flexlb.log.path="${FLEXLB_LOG_PATH}" \
-      --flexlb.monitor.metric-whitelist="${MASTER_METRIC_WHITELIST}" \
-      ${MASTER_LOG_ARGS[@]+"${MASTER_LOG_ARGS[@]}"} \
-      >"${RUN_DIR}/flexlb.log" 2>&1 &
-  fi
-  FLEXLB_PID="$!"
-  echo "FlexLB heap: Xms=${JVM_XMS:-JVM-default}, Xmx=${JVM_XMX:-JVM-default}"
-  if ! wait_for_port "127.0.0.1" "${FLEXLB_HTTP_PORT}" 60; then
-    if ! kill -0 "${FLEXLB_PID}" >/dev/null 2>&1; then
-      flexlb_exit_code=0
-      wait "${FLEXLB_PID}" || flexlb_exit_code=$?
-      echo "FlexLB exited before opening port ${FLEXLB_HTTP_PORT} (exit_code=${flexlb_exit_code})" >&2
+    FLEXLB_PID="$!"
+    echo "FlexLB heap: Xms=${JVM_XMS:-JVM-default}, Xmx=${JVM_XMX:-JVM-default}"
+    if ! wait_for_port "127.0.0.1" "${FLEXLB_HTTP_PORT}" 60; then
+        if ! kill -0 "${FLEXLB_PID}" >/dev/null 2>&1; then
+            flexlb_exit_code=0
+            wait "${FLEXLB_PID}" || flexlb_exit_code=$?
+            echo "FlexLB exited before opening port ${FLEXLB_HTTP_PORT} (exit_code=${flexlb_exit_code})" >&2
+        fi
+        exit 1
     fi
-    exit 1
-  fi
-  wait_for_endpoints_ready "${FLEXLB_HTTP_PORT}" "${N_PREFILL}" "${N_DECODE}"
-  if [[ "${FLEXLB_WARMUP_SECONDS:-10}" -gt 0 ]]; then
-    echo "Warming up FlexLB for ${FLEXLB_WARMUP_SECONDS:-10}s before starting load..."
-    sleep "${FLEXLB_WARMUP_SECONDS:-10}"
-  fi
-  assert_mock_engine_healthy
-  # Discovery can be healthy once and then degrade during warmup. Revalidate the
-  # complete engine set immediately before applying load.
-  wait_for_endpoints_ready "${FLEXLB_HTTP_PORT}" "${N_PREFILL}" "${N_DECODE}"
-  save_master_info "${RUN_DIR}/master_info_before.json"
+    wait_for_endpoints_ready "${FLEXLB_HTTP_PORT}" "${N_PREFILL}" "${N_DECODE}"
+    if [[ "${FLEXLB_WARMUP_SECONDS:-10}" -gt 0 ]]; then
+        echo "Warming up FlexLB for ${FLEXLB_WARMUP_SECONDS:-10}s before starting load..."
+        sleep "${FLEXLB_WARMUP_SECONDS:-10}"
+    fi
+    assert_mock_engine_healthy
+    # Discovery can be healthy once and then degrade during warmup. Revalidate the
+    # complete engine set immediately before applying load.
+    wait_for_endpoints_ready "${FLEXLB_HTTP_PORT}" "${N_PREFILL}" "${N_DECODE}"
+    save_master_info "${RUN_DIR}/master_info_before.json"
 fi
 
-CLIENT_START_EPOCH_MS="$(python3 - "${LOAD_CLIENT_START_DELAY_SECONDS}" <<'PY'
+CLIENT_START_EPOCH_MS="$(
+    python3 - "${LOAD_CLIENT_START_DELAY_SECONDS}" <<'PY'
 import sys
 import time
 print(int(time.time() * 1000 + float(sys.argv[1]) * 1000))
@@ -1068,7 +1074,7 @@ start_secondary_pollers
 # from run_meta.client_env — the merge heredoc that used to take it as
 # argv is gone, so this snapshot is its only path into the aggregate.
 write_client_env_snapshot() {
-  python3 - "${RUN_DIR}/client_env.json" "PRIORITY=" "$@" <<'PY'
+    python3 - "${RUN_DIR}/client_env.json" "PRIORITY=" "$@" <<'PY'
 import json
 import sys
 
@@ -1084,109 +1090,109 @@ PY
 }
 
 launch_java_load_client() {
-  local output_dir="$1"
-  local num_shards="$2"
-  local shard_index="$3"
-  local max_concurrency="$4"
-  local skip_server_latency="$5"
-  # M9: one client_env.json per run, written at the first launch.
-  if [[ ! -f "${RUN_DIR}/client_env.json" ]]; then
-    write_client_env_snapshot \
-      "TRACE_FILE=${TRACE_FILE}" \
-      "TARGET_ADDR=${TARGET_ADDR:-${FLEXLB_HTTP_ADDR}}" \
-      "GRPC_TARGET=${GRPC_TARGET:-}" \
-      "DURATION_S=${DURATION_S}" \
-      "MAX_CONCURRENCY=${max_concurrency}" \
-      "REPLAY_SPEED=${REPLAY_SPEED}" \
-      "LOAD_CLIENT_WORKERS=${LOAD_CLIENT_WORKERS}" \
-      "OUTPUT_DIR=${output_dir}" \
-      "NUM_SHARDS=${num_shards}" \
-      "SHARD_INDEX=${shard_index}" \
-      "LIMIT=${LIMIT}" \
-      "TIMEOUT_MS=${TIMEOUT_MS}" \
-      "SLA_TTFT_MS=${SLA_TTFT_MS}" \
-      "FETCH_OUTPUT_STREAM=${FETCH_OUTPUT_STREAM}" \
-      "FORCE_PRIORITY=${FORCE_PRIORITY}" \
-      "LOOP=${LOOP}" \
-      "SEND_MODE=${SEND_MODE}" \
-      "SEND_MODE_QPS=${SEND_MODE_QPS}" \
-      "RAMP_UP_SECONDS=${RAMP_UP_SECONDS}" \
-      "N_CHANNELS=${N_CHANNELS:-}" \
-      "EVENT_LOOP_THREADS=${EVENT_LOOP_THREADS:-}" \
-      "START_AT_EPOCH_MS=${CLIENT_START_EPOCH_MS}" \
-      "RESPONSE_TIMEOUT=${RESPONSE_TIMEOUT:-}" \
-      "SKIP_SERVER_LATENCY=${skip_server_latency}" \
-      "MODEL=${MODEL:-}" \
-      "API_KEY=${API_KEY:-}" \
-      "GRADIENT=${GRADIENT}" \
-      "GRADIENT_START_SPEED=${GRADIENT_START_SPEED}" \
-      "GRADIENT_MAX_SPEED=${GRADIENT_MAX_SPEED}" \
-      "MAX_INPUT_LEN=${MAX_INPUT_LEN}" \
-      "MAX_OUTPUT_LEN=${MAX_OUTPUT_LEN}" \
-      "PUSHGATEWAY_URL=${PUSHGATEWAY_URL}" \
-      "ENABLE_FALLBACK=${ENABLE_FALLBACK}" \
-      "ENDPOINTS_FILE=${ENDPOINTS_FILE:-}" \
-      "DRY_RUN=${DRY_RUN:-0}" \
-      "CLIENT_PACING_LAG_P99_LIMIT_MS=${CLIENT_PACING_LAG_P99_LIMIT_MS}"
-  fi
-  run_java_load_client \
-    "TRACE_FILE=${TRACE_FILE}" \
-    "TARGET_ADDR=${TARGET_ADDR:-${FLEXLB_HTTP_ADDR}}" \
-    "GRPC_TARGET=${GRPC_TARGET:-}" \
-    "DURATION_S=${DURATION_S}" \
-    "MAX_CONCURRENCY=${max_concurrency}" \
-    "REPLAY_SPEED=${REPLAY_SPEED}" \
-    "LOAD_CLIENT_WORKERS=${LOAD_CLIENT_WORKERS}" \
-    "OUTPUT_DIR=${output_dir}" \
-    "NUM_SHARDS=${num_shards}" \
-    "SHARD_INDEX=${shard_index}" \
-    "LIMIT=${LIMIT}" \
-    "TIMEOUT_MS=${TIMEOUT_MS}" \
-    "SLA_TTFT_MS=${SLA_TTFT_MS}" \
-    "FETCH_OUTPUT_STREAM=${FETCH_OUTPUT_STREAM}" \
-    "FORCE_PRIORITY=${FORCE_PRIORITY}" \
-    "LOOP=${LOOP}" \
-    "SEND_MODE=${SEND_MODE}" \
-    "SEND_MODE_QPS=${SEND_MODE_QPS}" \
-    "RAMP_UP_SECONDS=${RAMP_UP_SECONDS}" \
-    "N_CHANNELS=${N_CHANNELS:-}" \
-    "EVENT_LOOP_THREADS=${EVENT_LOOP_THREADS:-}" \
-    "START_AT_EPOCH_MS=${CLIENT_START_EPOCH_MS}" \
-    "RESPONSE_TIMEOUT=${RESPONSE_TIMEOUT:-}" \
-    "SKIP_SERVER_LATENCY=${skip_server_latency}" \
-    "MODEL=${MODEL:-}" \
-    "API_KEY=${API_KEY:-}" \
-    "GRADIENT=${GRADIENT}" \
-    "GRADIENT_START_SPEED=${GRADIENT_START_SPEED}" \
-    "GRADIENT_MAX_SPEED=${GRADIENT_MAX_SPEED}" \
-    "MAX_INPUT_LEN=${MAX_INPUT_LEN}" \
-    "MAX_OUTPUT_LEN=${MAX_OUTPUT_LEN}" \
-    "PUSHGATEWAY_URL=${PUSHGATEWAY_URL}" \
-    "ENABLE_FALLBACK=${ENABLE_FALLBACK}" \
-    "ENDPOINTS_FILE=${ENDPOINTS_FILE:-}" \
-    "DRY_RUN=${DRY_RUN:-0}"
+    local output_dir="$1"
+    local num_shards="$2"
+    local shard_index="$3"
+    local max_concurrency="$4"
+    local skip_server_latency="$5"
+    # M9: one client_env.json per run, written at the first launch.
+    if [[ ! -f "${RUN_DIR}/client_env.json" ]]; then
+        write_client_env_snapshot \
+            "TRACE_FILE=${TRACE_FILE}" \
+            "TARGET_ADDR=${TARGET_ADDR:-${FLEXLB_HTTP_ADDR}}" \
+            "GRPC_TARGET=${GRPC_TARGET:-}" \
+            "DURATION_S=${DURATION_S}" \
+            "MAX_CONCURRENCY=${max_concurrency}" \
+            "REPLAY_SPEED=${REPLAY_SPEED}" \
+            "LOAD_CLIENT_WORKERS=${LOAD_CLIENT_WORKERS}" \
+            "OUTPUT_DIR=${output_dir}" \
+            "NUM_SHARDS=${num_shards}" \
+            "SHARD_INDEX=${shard_index}" \
+            "LIMIT=${LIMIT}" \
+            "TIMEOUT_MS=${TIMEOUT_MS}" \
+            "SLA_TTFT_MS=${SLA_TTFT_MS}" \
+            "FETCH_OUTPUT_STREAM=${FETCH_OUTPUT_STREAM}" \
+            "FORCE_PRIORITY=${FORCE_PRIORITY}" \
+            "LOOP=${LOOP}" \
+            "SEND_MODE=${SEND_MODE}" \
+            "SEND_MODE_QPS=${SEND_MODE_QPS}" \
+            "RAMP_UP_SECONDS=${RAMP_UP_SECONDS}" \
+            "N_CHANNELS=${N_CHANNELS:-}" \
+            "EVENT_LOOP_THREADS=${EVENT_LOOP_THREADS:-}" \
+            "START_AT_EPOCH_MS=${CLIENT_START_EPOCH_MS}" \
+            "RESPONSE_TIMEOUT=${RESPONSE_TIMEOUT:-}" \
+            "SKIP_SERVER_LATENCY=${skip_server_latency}" \
+            "MODEL=${MODEL:-}" \
+            "API_KEY=${API_KEY:-}" \
+            "GRADIENT=${GRADIENT}" \
+            "GRADIENT_START_SPEED=${GRADIENT_START_SPEED}" \
+            "GRADIENT_MAX_SPEED=${GRADIENT_MAX_SPEED}" \
+            "MAX_INPUT_LEN=${MAX_INPUT_LEN}" \
+            "MAX_OUTPUT_LEN=${MAX_OUTPUT_LEN}" \
+            "PUSHGATEWAY_URL=${PUSHGATEWAY_URL}" \
+            "ENABLE_FALLBACK=${ENABLE_FALLBACK}" \
+            "ENDPOINTS_FILE=${ENDPOINTS_FILE:-}" \
+            "DRY_RUN=${DRY_RUN:-0}" \
+            "CLIENT_PACING_LAG_P99_LIMIT_MS=${CLIENT_PACING_LAG_P99_LIMIT_MS}"
+    fi
+    run_java_load_client \
+        "TRACE_FILE=${TRACE_FILE}" \
+        "TARGET_ADDR=${TARGET_ADDR:-${FLEXLB_HTTP_ADDR}}" \
+        "GRPC_TARGET=${GRPC_TARGET:-}" \
+        "DURATION_S=${DURATION_S}" \
+        "MAX_CONCURRENCY=${max_concurrency}" \
+        "REPLAY_SPEED=${REPLAY_SPEED}" \
+        "LOAD_CLIENT_WORKERS=${LOAD_CLIENT_WORKERS}" \
+        "OUTPUT_DIR=${output_dir}" \
+        "NUM_SHARDS=${num_shards}" \
+        "SHARD_INDEX=${shard_index}" \
+        "LIMIT=${LIMIT}" \
+        "TIMEOUT_MS=${TIMEOUT_MS}" \
+        "SLA_TTFT_MS=${SLA_TTFT_MS}" \
+        "FETCH_OUTPUT_STREAM=${FETCH_OUTPUT_STREAM}" \
+        "FORCE_PRIORITY=${FORCE_PRIORITY}" \
+        "LOOP=${LOOP}" \
+        "SEND_MODE=${SEND_MODE}" \
+        "SEND_MODE_QPS=${SEND_MODE_QPS}" \
+        "RAMP_UP_SECONDS=${RAMP_UP_SECONDS}" \
+        "N_CHANNELS=${N_CHANNELS:-}" \
+        "EVENT_LOOP_THREADS=${EVENT_LOOP_THREADS:-}" \
+        "START_AT_EPOCH_MS=${CLIENT_START_EPOCH_MS}" \
+        "RESPONSE_TIMEOUT=${RESPONSE_TIMEOUT:-}" \
+        "SKIP_SERVER_LATENCY=${skip_server_latency}" \
+        "MODEL=${MODEL:-}" \
+        "API_KEY=${API_KEY:-}" \
+        "GRADIENT=${GRADIENT}" \
+        "GRADIENT_START_SPEED=${GRADIENT_START_SPEED}" \
+        "GRADIENT_MAX_SPEED=${GRADIENT_MAX_SPEED}" \
+        "MAX_INPUT_LEN=${MAX_INPUT_LEN}" \
+        "MAX_OUTPUT_LEN=${MAX_OUTPUT_LEN}" \
+        "PUSHGATEWAY_URL=${PUSHGATEWAY_URL}" \
+        "ENABLE_FALLBACK=${ENABLE_FALLBACK}" \
+        "ENDPOINTS_FILE=${ENDPOINTS_FILE:-}" \
+        "DRY_RUN=${DRY_RUN:-0}"
 }
 
 if [[ "${LOAD_CLIENT_WORKERS}" -le 1 ]]; then
-  launch_java_load_client "${RUN_DIR}/load_client" 1 0 "${MAX_CONCURRENCY}" 0 \
-    | tee "${RUN_DIR}/client.stdout"
+    launch_java_load_client "${RUN_DIR}/load_client" 1 0 "${MAX_CONCURRENCY}" 0 |
+        tee "${RUN_DIR}/client.stdout"
 else
-  mkdir -p "${RUN_DIR}/load_client"
-  curl -fsS -X POST "http://${FLEXLB_HTTP_ADDR}/rtp_llm/server_latency/reset" >/dev/null
-  SHARD_MAX_CONCURRENCY=$(( (MAX_CONCURRENCY + LOAD_CLIENT_WORKERS - 1) / LOAD_CLIENT_WORKERS ))
-  for ((shard = 0; shard < LOAD_CLIENT_WORKERS; shard++)); do
-    shard_dir="${RUN_DIR}/load_client/shard_${shard}"
-    launch_java_load_client "${shard_dir}" "${LOAD_CLIENT_WORKERS}" "${shard}" \
-      "${SHARD_MAX_CONCURRENCY}" 1 \
-      >"${RUN_DIR}/client_shard_${shard}.stdout" 2>&1 &
-    CLIENT_PIDS+=("$!")
-    append_process_poll_pid "$!" "client_${shard}"
-  done
+    mkdir -p "${RUN_DIR}/load_client"
+    curl -fsS -X POST "http://${FLEXLB_HTTP_ADDR}/rtp_llm/server_latency/reset" >/dev/null
+    SHARD_MAX_CONCURRENCY=$(((MAX_CONCURRENCY + LOAD_CLIENT_WORKERS - 1) / LOAD_CLIENT_WORKERS))
+    for ((shard = 0; shard < LOAD_CLIENT_WORKERS; shard++)); do
+        shard_dir="${RUN_DIR}/load_client/shard_${shard}"
+        launch_java_load_client "${shard_dir}" "${LOAD_CLIENT_WORKERS}" "${shard}" \
+            "${SHARD_MAX_CONCURRENCY}" 1 \
+            >"${RUN_DIR}/client_shard_${shard}.stdout" 2>&1 &
+        CLIENT_PIDS+=("$!")
+        append_process_poll_pid "$!" "client_${shard}"
+    done
 
-  CLIENT_EXIT=0
-  for pid in "${CLIENT_PIDS[@]}"; do
-    wait "${pid}" || CLIENT_EXIT=$?
-  done
+    CLIENT_EXIT=0
+    for pid in "${CLIENT_PIDS[@]}"; do
+        wait "${pid}" || CLIENT_EXIT=$?
+    done
 fi
 
 # Phase B: the multi-worker merge heredoc (shard summary.json scan, validity
@@ -1203,37 +1209,37 @@ fi
 # data-missing. tmp+mv keeps a previously written client snapshot intact
 # when the fetch fails.
 if [[ "${START_FLEXLB}" == "1" ]]; then
-  if curl -fsS "http://${FLEXLB_HTTP_ADDR}/rtp_llm/server_latency" \
-      >"${RUN_DIR}/load_client/server_latency.json.tmp" 2>/dev/null; then
-    mv "${RUN_DIR}/load_client/server_latency.json.tmp" \
-      "${RUN_DIR}/load_client/server_latency.json"
-  else
-    rm -f "${RUN_DIR}/load_client/server_latency.json.tmp"
-    echo "WARNING: terminal server_latency fetch failed (master-side validity items will be data-missing)" >&2
-  fi
+    if curl -fsS "http://${FLEXLB_HTTP_ADDR}/rtp_llm/server_latency" \
+        >"${RUN_DIR}/load_client/server_latency.json.tmp" 2>/dev/null; then
+        mv "${RUN_DIR}/load_client/server_latency.json.tmp" \
+            "${RUN_DIR}/load_client/server_latency.json"
+    else
+        rm -f "${RUN_DIR}/load_client/server_latency.json.tmp"
+        echo "WARNING: terminal server_latency fetch failed (master-side validity items will be data-missing)" >&2
+    fi
 fi
 
 if [[ "${CLIENT_EXIT:-0}" -ne 0 ]]; then
-  # R12: best-effort consolidation on the load-client failure path so a
-  # failed client still leaves a consolidated (analyzable) directory; the
-  # CONSOLIDATED sentinel keeps this to one pass per script invocation.
-  consolidate_run_outputs_now
-  exit "${CLIENT_EXIT}"
+    # R12: best-effort consolidation on the load-client failure path so a
+    # failed client still leaves a consolidated (analyzable) directory; the
+    # CONSOLIDATED sentinel keeps this to one pass per script invocation.
+    consolidate_run_outputs_now
+    exit "${CLIENT_EXIT}"
 fi
 
 stop_secondary_pollers
 assert_mock_engine_healthy
 
 if [[ "${SLO_BATCH_DRAIN_SECONDS}" -gt 0 ]]; then
-  echo "Waiting ${SLO_BATCH_DRAIN_SECONDS}s for mock task status to drain..."
-  sleep "${SLO_BATCH_DRAIN_SECONDS}"
+    echo "Waiting ${SLO_BATCH_DRAIN_SECONDS}s for mock task status to drain..."
+    sleep "${SLO_BATCH_DRAIN_SECONDS}"
 fi
 
 assert_mock_engine_healthy
 if [[ "${START_FLEXLB}" == "1" ]]; then
-  wait_for_endpoints_ready "${FLEXLB_HTTP_PORT}" "${N_PREFILL}" "${N_DECODE}"
-  save_master_info "${RUN_DIR}/master_info_after.json"
-  save_master_prometheus "${RUN_DIR}/master_prometheus_after.prom" || true
+    wait_for_endpoints_ready "${FLEXLB_HTTP_PORT}" "${N_PREFILL}" "${N_DECODE}"
+    save_master_info "${RUN_DIR}/master_info_after.json"
+    save_master_prometheus "${RUN_DIR}/master_prometheus_after.prom" || true
 fi
 
 # Consolidate the run directory into the per-component JSON+log layout
@@ -1254,14 +1260,14 @@ echo "mock=${RUN_DIR}/mock.json (${RUN_DIR}/mock.log)"
 echo "master=${RUN_DIR}/master.json (${RUN_DIR}/master.log)"
 echo "client=${RUN_DIR}/client.json (${RUN_DIR}/client.log)"
 if [[ -f "${RUN_DIR}/client_events.jsonl" ]]; then
-  echo "client_events=${RUN_DIR}/client_events.jsonl"
+    echo "client_events=${RUN_DIR}/client_events.jsonl"
 else
-  echo "client_events=${RUN_DIR}/client_events.jsonl.gz"
+    echo "client_events=${RUN_DIR}/client_events.jsonl.gz"
 fi
 if [[ -f "${RUN_DIR}/engine_events.jsonl" ]]; then
-  echo "engine_events=${RUN_DIR}/engine_events.jsonl"
+    echo "engine_events=${RUN_DIR}/engine_events.jsonl"
 else
-  echo "engine_events=${RUN_DIR}/engine_events.jsonl.gz"
+    echo "engine_events=${RUN_DIR}/engine_events.jsonl.gz"
 fi
 echo "jfr=${JFR_FILE}"
 
@@ -1280,11 +1286,11 @@ consolidate_run_outputs_now
 # best-effort semantics as consolidation: a failure is a WARNING, never a
 # run failure. Must run with the run dir as CWD (the script locates all
 # inputs relative to os.getcwd()).
-if ( cd "${RUN_DIR}" && python3 "${SCRIPT_DIR}/aggregate_canvas_run.py" \
-    >"${RUN_DIR}/aggregate.json" ); then
-  :
+if (cd "${RUN_DIR}" && python3 "${SCRIPT_DIR}/aggregate_canvas_run.py" \
+    >"${RUN_DIR}/aggregate.json"); then
+    :
 else
-  echo "WARNING: aggregate_canvas_run.py failed; aggregate.json not written" >&2
+    echo "WARNING: aggregate_canvas_run.py failed; aggregate.json not written" >&2
 fi
 
 # TEST_VERDICT: read test_valid from the aggregate summary (the merge
@@ -1295,7 +1301,8 @@ fi
 # PERFORMANCE RUN semantics.
 AGGREGATE_FILE="${RUN_DIR}/aggregate.json"
 if [[ -f "${AGGREGATE_FILE}" ]]; then
-  TEST_VALID="$(python3 - "${AGGREGATE_FILE}" <<'PY'
+    TEST_VALID="$(
+        python3 - "${AGGREGATE_FILE}" <<'PY'
 import json
 import sys
 
@@ -1306,13 +1313,13 @@ except (OSError, ValueError, KeyError, TypeError):
 else:
     print("unknown" if value is None else str(bool(value)).lower())
 PY
-)"
-  if [[ "${TEST_VALID}" == "parse_error" ]]; then
-    echo "WARNING: could not read summary.test_valid from ${AGGREGATE_FILE}; no verdict (client exit code preserved)" >&2
-  elif [[ "${TEST_VALID}" == "false" ]]; then
-    echo "INVALID PERFORMANCE RUN: see validity_checks in ${AGGREGATE_FILE}" >&2
-    exit 1
-  fi
+    )"
+    if [[ "${TEST_VALID}" == "parse_error" ]]; then
+        echo "WARNING: could not read summary.test_valid from ${AGGREGATE_FILE}; no verdict (client exit code preserved)" >&2
+    elif [[ "${TEST_VALID}" == "false" ]]; then
+        echo "INVALID PERFORMANCE RUN: see validity_checks in ${AGGREGATE_FILE}" >&2
+        exit 1
+    fi
 else
-  echo "WARNING: ${AGGREGATE_FILE} missing; no test_valid verdict (client exit code preserved)" >&2
+    echo "WARNING: ${AGGREGATE_FILE} missing; no test_valid verdict (client exit code preserved)" >&2
 fi

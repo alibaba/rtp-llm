@@ -105,11 +105,14 @@ try:
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
-# frontend cannot load libpython3.10.so, so we need to load it manually
+# frontend cannot load libpython, so we need to load it manually
 import sysconfig
 from ctypes import cdll
 
-cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + "/libpython3.10.so")
+cdll.LoadLibrary(
+    sysconfig.get_config_var("LIBDIR")
+    + "/libpython%d.%d.so" % sys.version_info[:2]
+)
 
 try:
     # Alias for backward compatibility

@@ -28,11 +28,11 @@ public final class PriorityCostFunction {
     // sums its already-weighted parts and is never multiplied again.
     /** h(DECODE_SLOT_FULL): frees concurrency, may affect D admission. */
     public static final long H_DECODE_SLOT_FULL = 4L;
+
     /** h(DECODE_KV_FULL): KV-sensitive, released KV needs confirmation. */
     public static final long H_DECODE_KV_FULL = 8L;
 
-    private PriorityCostFunction() {
-    }
+    private PriorityCostFunction() {}
 
     /** Rank 0..4 of a normalized priority (30..70), clamped for safety. */
     public static int rank(int priority) {
@@ -40,8 +40,7 @@ public final class PriorityCostFunction {
                 MIN_PRIORITY_RANK,
                 Math.min(
                         MAX_PRIORITY_RANK,
-                        (priority - PRIORITY_RANK_BASE)
-                                / PRIORITY_POINTS_PER_RANK));
+                        (priority - PRIORITY_RANK_BASE) / PRIORITY_POINTS_PER_RANK));
     }
 
     /** Single-value victim cost: 1024^rank. */
@@ -89,9 +88,7 @@ public final class PriorityCostFunction {
     /** KV bucket of a reservation: ceil(kvTokens / 1024) (design doc 12.3). */
     public static long kvBucket(long kvTokens) {
         long nonNegativeTokens = Math.max(0, kvTokens);
-        return nonNegativeTokens == 0
-                ? 0
-                : 1 + (nonNegativeTokens - 1) / KV_TOKENS_PER_COST_BUCKET;
+        return nonNegativeTokens == 0 ? 0 : 1 + (nonNegativeTokens - 1) / KV_TOKENS_PER_COST_BUCKET;
     }
 
     /**
@@ -102,5 +99,4 @@ public final class PriorityCostFunction {
     public static long lengthWasteCost(long kvTokens) {
         return Math.max(1L, Math.round(Math.sqrt((double) kvBucket(kvTokens))));
     }
-
 }

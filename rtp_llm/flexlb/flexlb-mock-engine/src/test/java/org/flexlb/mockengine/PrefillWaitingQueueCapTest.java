@@ -43,19 +43,21 @@ class PrefillWaitingQueueCapTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BASE_PORT = 63100;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private ScheduledExecutorService scheduler;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
 
     @BeforeEach
     void setUp() {
-        scheduler = Executors.newScheduledThreadPool(4, runnable -> {
-            Thread thread = new Thread(runnable, "prefill-cap-test-scheduler");
-            thread.setDaemon(true);
-            return thread;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        4,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "prefill-cap-test-scheduler");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         services = new ConcurrentHashMap<>();
     }
 
@@ -84,7 +86,9 @@ class PrefillWaitingQueueCapTest {
             assertEquals(0, response.getErrorsCount(), "batch " + i + " should have no errors");
         }
         assertEquals(4, prefill.getWaitingCount(), "4 requests should be waiting (queued)");
-        assertEquals(4, prefill.getSnapshot().get("prefill_waiting_batches"),
+        assertEquals(
+                4,
+                prefill.getSnapshot().get("prefill_waiting_batches"),
                 "snapshot should report 4 queued batches");
 
         EngineRpcService.EnqueueBatchResponsePB rejected =
@@ -92,14 +96,20 @@ class PrefillWaitingQueueCapTest {
         assertEquals(0, rejected.getSuccessesCount(), "6th batch should not be accepted");
         assertEquals(1, rejected.getErrorsCount(), "6th batch should be rejected");
         String message = rejected.getErrors(0).getErrorInfo().getErrorMessage();
-        assertTrue(message.contains("prefill waiting queue full (backpressure)"),
+        assertTrue(
+                message.contains("prefill waiting queue full (backpressure)"),
                 "rejection must carry an explicit backpressure error, got: " + message);
-        assertTrue(message.contains("waiting=4 cap=4"),
+        assertTrue(
+                message.contains("waiting=4 cap=4"),
                 "rejection should report waiting/cap, got: " + message);
 
         // No residue from the rejection: still exactly 5 admitted requests inflight.
-        assertEquals(5, prefill.getInflightCount(), "rejected request must not leak pendingRequests");
-        assertEquals(4, prefill.getWaitingCount(), "rejected request must not leak waitingPrefillRequests");
+        assertEquals(
+                5, prefill.getInflightCount(), "rejected request must not leak pendingRequests");
+        assertEquals(
+                4,
+                prefill.getWaitingCount(),
+                "rejected request must not leak waitingPrefillRequests");
         assertEquals(5, prefill.getRunningCount(), "rejected request must not leak runningTasks");
         assertEquals("rejected", prefill.getRequestStates().get(6L));
 
@@ -116,36 +126,38 @@ class PrefillWaitingQueueCapTest {
         CountDownLatch blockersStarted = new CountDownLatch(4);
         CountDownLatch releaseScheduler = new CountDownLatch(1);
         for (int i = 0; i < 4; i++) {
-            scheduler.execute(() -> {
-                blockersStarted.countDown();
-                try {
-                    releaseScheduler.await();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            });
+            scheduler.execute(
+                    () -> {
+                        blockersStarted.countDown();
+                        try {
+                            releaseScheduler.await();
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    });
         }
         assertTrue(blockersStarted.await(1, TimeUnit.SECONDS));
 
         try {
             MockPerformanceModel model = model("1", 1);
             JavaMockEngineCluster.FastRpcService prefill = startPrefill(model);
-            JavaMockEngineCluster.FastRpcService decode = MockEngineTestSupport.decodeService(
-                    model, BASE_PORT + 1, services, scheduler, 1);
+            JavaMockEngineCluster.FastRpcService decode =
+                    MockEngineTestSupport.decodeService(
+                            model, BASE_PORT + 1, services, scheduler, 1);
 
             for (int i = 1; i <= 2; i++) {
-                EngineRpcService.EnqueueBatchResponsePB response = enqueue(
-                        prefill,
-                        batch(1500 + i, slot(0, inputWithDecode(i, 10, BASE_PORT + 1))));
+                EngineRpcService.EnqueueBatchResponsePB response =
+                        enqueue(
+                                prefill,
+                                batch(1500 + i, slot(0, inputWithDecode(i, 10, BASE_PORT + 1))));
                 assertEquals(1, response.getSuccessesCount());
             }
             long prefillOccupiedBefore = prefill.getOccupiedKvTokens();
             long decodeOccupiedBefore = decode.getOccupiedKvTokens();
             long decodeAvailableBefore = decode.getAvailableKvTokens();
 
-            EngineRpcService.EnqueueBatchResponsePB rejected = enqueue(
-                    prefill,
-                    batch(1503, slot(0, inputWithDecode(3, 10, BASE_PORT + 1))));
+            EngineRpcService.EnqueueBatchResponsePB rejected =
+                    enqueue(prefill, batch(1503, slot(0, inputWithDecode(3, 10, BASE_PORT + 1))));
 
             assertEquals(1, rejected.getErrorsCount());
             assertEquals(prefillOccupiedBefore, prefill.getOccupiedKvTokens());
@@ -164,8 +176,9 @@ class PrefillWaitingQueueCapTest {
 
         // Fill: 1 running + 2 waiting (cap 2), 4th rejected.
         for (int i = 1; i <= 3; i++) {
-            assertEquals(1, enqueue(prefill, batch(2000 + i, slot(0, input(i, 10))))
-                    .getSuccessesCount());
+            assertEquals(
+                    1,
+                    enqueue(prefill, batch(2000 + i, slot(0, input(i, 10)))).getSuccessesCount());
         }
         EngineRpcService.EnqueueBatchResponsePB rejected =
                 enqueue(prefill, batch(2004, slot(0, input(4, 10))));
@@ -207,10 +220,16 @@ class PrefillWaitingQueueCapTest {
     // ──────────── Harness ────────────
 
     private JavaMockEngineCluster.FastRpcService startPrefill(MockPerformanceModel model) {
-        JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                BASE_PORT, services, scheduler, model, 100,
-                new JavaMockEngineCluster.ClusterStats());
+        JavaMockEngineCluster.FastRpcService service =
+                new JavaMockEngineCluster.FastRpcService(
+                        "prefill",
+                        EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                        BASE_PORT,
+                        services,
+                        scheduler,
+                        model,
+                        100,
+                        new JavaMockEngineCluster.ClusterStats());
         services.put(BASE_PORT, service);
         return service;
     }
@@ -226,8 +245,9 @@ class PrefillWaitingQueueCapTest {
                 Map.of());
     }
 
-    private static void awaitInflightZero(JavaMockEngineCluster.FastRpcService service,
-                                          long timeoutMs) throws InterruptedException {
+    private static void awaitInflightZero(
+            JavaMockEngineCluster.FastRpcService service, long timeoutMs)
+            throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         while (System.nanoTime() < deadline) {
             if (service.getInflightCount() == 0) {
@@ -235,9 +255,12 @@ class PrefillWaitingQueueCapTest {
             }
             Thread.sleep(10);
         }
-        fail("inflight not zero: inflight=" + service.getInflightCount()
-                + " waiting=" + service.getWaitingCount()
-                + " running=" + service.getRunningCount());
+        fail(
+                "inflight not zero: inflight="
+                        + service.getInflightCount()
+                        + " waiting="
+                        + service.getWaitingCount()
+                        + " running="
+                        + service.getRunningCount());
     }
-
 }

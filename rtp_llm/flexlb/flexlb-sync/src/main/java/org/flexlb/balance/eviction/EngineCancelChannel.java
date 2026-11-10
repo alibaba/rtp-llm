@@ -10,9 +10,9 @@ import java.util.concurrent.CompletableFuture;
  *
  * <p>Contract highlights:
  * <ul>
- *   <li>the cancel is sent to the victim's original Prefill endpoint, which
- *       owns the P/D connection and propagates cancellation downstream;</li>
- *   <li>{@code ACCEPTED} only proves that Prefill installed the cancel intent;
+ *   <li>the cancel is sent to the victim's Decode endpoint, which
+ *       forwards cancellation to the original Prefill;</li>
+ *   <li>{@code ACCEPTED} only proves that Decode installed the cancel intent;
  *       resource settlement requires typed WorkerStatus {@code CANCELED};</li>
  *   <li>{@code request_id} identifies the victim request.</li>
  * </ul>
@@ -29,21 +29,19 @@ public interface EngineCancelChannel {
      * identically (the intent may still have landed; release stays gated on
      * the WorkerStatus report).
      */
-    CompletableFuture<CancelAck> cancel(CancelTarget target,
-                                        long requestId,
-                                        long timeoutMs);
+    CompletableFuture<CancelAck> cancel(CancelTarget target, long requestId, long timeoutMs);
 
     /**
      * Local delivery outcome. ACCEPTED and NOT_FOUND come from the engine
      * response; UNSUPPORTED and FAILED are local transport/capability branches.
      */
     enum CancelAck {
-        /** The addressed Prefill accepted the cancel intent. */
+        /** The addressed Decode accepted the cancel intent. */
         ACCEPTED,
-        /** The addressed Prefill does not own or know the request. */
+        /** The addressed Decode does not own or know the request. */
         NOT_FOUND,
         /**
-         * Prefill atomically fenced this request id while it was absent. Any
+         * Decode atomically fenced this request id while it was absent. Any
          * racing later Enqueue is rejected before reaching the scheduler.
          */
         REQUEST_FENCED,
@@ -52,5 +50,4 @@ public interface EngineCancelChannel {
         /** Transport-layer failure (RPC error/timeout, or unroutable cancel). */
         FAILED
     }
-
 }

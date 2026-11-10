@@ -35,15 +35,12 @@ class DecodeEndpointLayeredViewTest {
 
     private WorkerStatus status;
     private DecodeEndpoint endpoint;
-    private final Map<Long, DecodeEndpoint.ReservationHandle> reservations =
-            new HashMap<>();
+    private final Map<Long, DecodeEndpoint.ReservationHandle> reservations = new HashMap<>();
 
     @BeforeEach
     void setUp() {
-        status = EndpointTestSupport.workerStatus(
-                RoleType.DECODE, "10.0.0.1", 8080, 8081);
-        endpoint = new DecodeEndpoint(
-                status, EndpointTestSupport.noopEventSink());
+        status = EndpointTestSupport.workerStatus(RoleType.DECODE, "10.0.0.1", 8080, 8081);
+        endpoint = new DecodeEndpoint(status, EndpointTestSupport.noopEventSink());
         updateStatus(Map.of(), Map.of(), 20_000);
     }
 
@@ -109,9 +106,12 @@ class DecodeEndpointLayeredViewTest {
     void periodicAdmissionMetricsExposePhaseSplitByIpAndPort() {
         reserve(1L, 500, 508, 30);
         reserve(2L, 400, 408, 40);
-        updateStatus(Map.of(
-                "1", runningTask(1L, TaskPhase.KV_ALLOCATED, 256),
-                "2", runningTask(2L, TaskPhase.RUNNING, 256)), null, 10_000);
+        updateStatus(
+                Map.of(
+                        "1", runningTask(1L, TaskPhase.KV_ALLOCATED, 256),
+                        "2", runningTask(2L, TaskPhase.RUNNING, 256)),
+                null,
+                10_000);
         reserve(3L, 300, 308, 50);
         RequestSchedulerReporter reporter =
                 org.mockito.Mockito.mock(RequestSchedulerReporter.class);
@@ -119,16 +119,11 @@ class DecodeEndpointLayeredViewTest {
         endpoint.reportAdmissionMetrics(reporter);
 
         String endpointKey = "10.0.0.1:8080";
-        org.mockito.Mockito.verify(reporter)
-                .reportDecodeReservedCount(endpointKey, 1);
-        org.mockito.Mockito.verify(reporter)
-                .reportDecodeShadowKvReserved(endpointKey, 300L);
-        org.mockito.Mockito.verify(reporter)
-                .reportDecodeAcceptedCount(endpointKey, 1);
-        org.mockito.Mockito.verify(reporter)
-                .reportDecodeRunningCount(endpointKey, 1);
-        org.mockito.Mockito.verify(reporter)
-                .reportDecodeEngineLoad(endpointKey, 3);
+        org.mockito.Mockito.verify(reporter).reportDecodeReservedCount(endpointKey, 1);
+        org.mockito.Mockito.verify(reporter).reportDecodeShadowKvReserved(endpointKey, 300L);
+        org.mockito.Mockito.verify(reporter).reportDecodeAcceptedCount(endpointKey, 1);
+        org.mockito.Mockito.verify(reporter).reportDecodeRunningCount(endpointKey, 1);
+        org.mockito.Mockito.verify(reporter).reportDecodeEngineLoad(endpointKey, 3);
     }
 
     // ==================== calibrate: registry follows the reports ====================
@@ -157,8 +152,10 @@ class DecodeEndpointLayeredViewTest {
         // Same round lists it both running and finished: finished wins.
         TaskInfo finished = runningTask(1L, TaskPhase.RUNNING, 256);
         finished.setErrorCode(0);
-        updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)),
-                Map.of("1", finished), 10_000);
+        updateStatus(
+                Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)),
+                Map.of("1", finished),
+                10_000);
 
         assertFalse(isConfirmed(1L));
     }
@@ -174,7 +171,9 @@ class DecodeEndpointLayeredViewTest {
         endpoint.evictExpiredRequests(1, requestId -> false);
 
         assertFalse(isConfirmed(1L));
-        assertEquals(0, endpoint.resourceSnapshot().confirmed().size(),
+        assertEquals(
+                0,
+                endpoint.resourceSnapshot().confirmed().size(),
                 "tracked TTL removal must release the published confirmed slot");
         assertEquals(0, endpoint.routingView().totalLoad());
         assertTrue(endpoint.routingView().admissionVersion() > versionBefore);
@@ -185,14 +184,19 @@ class DecodeEndpointLayeredViewTest {
         reserve(1L, 500, 508, 30);
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
         long version = endpoint.routingView().admissionVersion();
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
-                beginPreemption(101L, List.of(1L),
-                        9L, 128, 136, 70));
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
-        assertTrue(endpoint.updatePreemption(
-                101L,
-                DecodeEndpoint.PreemptionUpdate.cancelReply(1L, PreemptionCancelPhase.CANCEL_REQUESTED)));
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.canceled(reservations.get(1L))));
+        assertEquals(
+                DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                beginPreemption(101L, List.of(1L), 9L, 128, 136, 70));
+        assertTrue(
+                endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
+        assertTrue(
+                endpoint.updatePreemption(
+                        101L,
+                        DecodeEndpoint.PreemptionUpdate.cancelReply(
+                                1L, PreemptionCancelPhase.CANCEL_REQUESTED)));
+        assertTrue(
+                endpoint.updatePreemption(
+                        101L, DecodeEndpoint.PreemptionUpdate.canceled(reservations.get(1L))));
         assertTrue(endpoint.finishPreemption(101L, DecodeEndpoint.PreemptionDecision.COMMIT));
 
         // A delayed Decode report cannot resurrect a recently canceled victim.
@@ -202,8 +206,8 @@ class DecodeEndpointLayeredViewTest {
         Thread.sleep(5);
         endpoint.evictExpiredRequests(1, requestId -> false);
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
-        assertTrue(isConfirmed(1L),
-                "the cancel fence follows the configured terminal retention TTL");
+        assertTrue(
+                isConfirmed(1L), "the cancel fence follows the configured terminal retention TTL");
     }
 
     @Test
@@ -211,12 +215,15 @@ class DecodeEndpointLayeredViewTest {
         reserve(1L, 500, 508, 30);
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
         long version = endpoint.routingView().admissionVersion();
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
-                beginPreemption(102L, List.of(1L),
-                        9L, 128, 136, 70));
-        assertTrue(endpoint.updatePreemption(102L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
+        assertEquals(
+                DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                beginPreemption(102L, List.of(1L), 9L, 128, 136, 70));
+        assertTrue(
+                endpoint.updatePreemption(102L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
 
-        assertTrue(endpoint.updatePreemption(102L, DecodeEndpoint.PreemptionUpdate.fenced(reservations.get(1L))));
+        assertTrue(
+                endpoint.updatePreemption(
+                        102L, DecodeEndpoint.PreemptionUpdate.fenced(reservations.get(1L))));
         assertTrue(endpoint.finishPreemption(102L, DecodeEndpoint.PreemptionDecision.COMMIT));
 
         assertFalse(isConfirmed(1L));
@@ -249,26 +256,44 @@ class DecodeEndpointLayeredViewTest {
     @Test
     void priorityCancelResponseTransitionPreservesProtocolOrder() {
         reserve(1L, 500, 508, 30);
-        updateStatus(Map.of("1", runningTask(
-                1L, TaskPhase.RUNNING, 256)), null, 10_000);
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
-                beginPreemption(101L, List.of(1L),
-                        9L, 700, 708, 70));
+        updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
+        assertEquals(
+                DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                beginPreemption(101L, List.of(1L), 9L, 700, 708, 70));
 
-        assertThrows(IllegalArgumentException.class,
-                () -> endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelReply(1L, PreemptionCancelPhase.CLAIMED)));
-        assertThrows(IllegalArgumentException.class,
-                () -> endpoint.updatePreemption(
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        endpoint.updatePreemption(
+                                101L,
+                                DecodeEndpoint.PreemptionUpdate.cancelReply(
+                                        1L, PreemptionCancelPhase.CLAIMED)));
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        endpoint.updatePreemption(
+                                101L,
+                                DecodeEndpoint.PreemptionUpdate.cancelReply(
+                                        1L, PreemptionCancelPhase.CANCEL_IN_FLIGHT)));
+
+        assertTrue(
+                endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
+        assertTrue(
+                endpoint.updatePreemption(
                         101L,
-                        DecodeEndpoint.PreemptionUpdate.cancelReply(1L, PreemptionCancelPhase.CANCEL_IN_FLIGHT)));
-
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
-        assertTrue(endpoint.updatePreemption(
-                101L,
-                DecodeEndpoint.PreemptionUpdate.cancelReply(1L, PreemptionCancelPhase.CANCEL_REQUESTED)));
-        assertFalse(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelReply(1L, PreemptionCancelPhase.NOT_FOUND_STALE)),
+                        DecodeEndpoint.PreemptionUpdate.cancelReply(
+                                1L, PreemptionCancelPhase.CANCEL_REQUESTED)));
+        assertFalse(
+                endpoint.updatePreemption(
+                        101L,
+                        DecodeEndpoint.PreemptionUpdate.cancelReply(
+                                1L, PreemptionCancelPhase.NOT_FOUND_STALE)),
                 "NOT_FOUND only applies to the in-flight RPC boundary");
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelReply(1L, PreemptionCancelPhase.CANCEL_UNKNOWN)),
+        assertTrue(
+                endpoint.updatePreemption(
+                        101L,
+                        DecodeEndpoint.PreemptionUpdate.cancelReply(
+                                1L, PreemptionCancelPhase.CANCEL_UNKNOWN)),
                 "a lost terminal after ACCEPTED remains transport-unknown");
     }
 
@@ -278,8 +303,8 @@ class DecodeEndpointLayeredViewTest {
         updateStatus(Map.of("2", runningTask(2L, TaskPhase.KV_ALLOCATED, 256)), null, 10_000);
         long version = endpoint.routingView().admissionVersion();
 
-        DecodeEndpoint.PreemptionBeginResult result = beginPreemption(
-                101L, List.of(2L), 9L, 700, 708, 70);
+        DecodeEndpoint.PreemptionBeginResult result =
+                beginPreemption(101L, List.of(2L), 9L, 700, 708, 70);
 
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, result);
         // Weak ACK boundary: victim accounting is untouched and the incoming
@@ -288,10 +313,13 @@ class DecodeEndpointLayeredViewTest {
         assertTrue(confirmedView(2L).claimedForPreemption());
         assertTrue(endpoint.resourceSnapshot().reserved().containsKey(9L));
         assertEquals(700, endpoint.routingView().inflightHardKv());
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
-        assertTrue(endpoint.updatePreemption(
-                101L,
-                DecodeEndpoint.PreemptionUpdate.cancelReply(2L, PreemptionCancelPhase.CANCEL_REQUESTED)));
+        assertTrue(
+                endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
+        assertTrue(
+                endpoint.updatePreemption(
+                        101L,
+                        DecodeEndpoint.PreemptionUpdate.cancelReply(
+                                2L, PreemptionCancelPhase.CANCEL_REQUESTED)));
         assertTrue(isConfirmed(2L));
         assertTrue(endpoint.routingView().admissionVersion() > version);
     }
@@ -300,7 +328,8 @@ class DecodeEndpointLayeredViewTest {
     void cancelAckAndUnknownKeepVictimCapacityUntilItsOwnInactivityExpiry() {
         var victim = reserve(2L, 400L, 408L, 30);
         updateStatus(Map.of("2", runningTask(2L, TaskPhase.RUNNING, 256)), null, 10_000);
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+        assertEquals(
+                DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 beginPreemption(101L, List.of(2L), 9L, 700L, 708L, 70));
         var incoming = endpoint.reservationHandle(9L);
         assertTrue(incoming != null);
@@ -308,13 +337,21 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(1, before.runningCount());
         assertEquals(700L, before.routing().inflightHardKv());
         assertEquals(708L, before.routing().inflightExpectedKv());
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
-        assertTrue(endpoint.updatePreemption(
-                101L,
-                DecodeEndpoint.PreemptionUpdate.cancelReply(2L, PreemptionCancelPhase.CANCEL_REQUESTED)));
+        assertTrue(
+                endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
+        assertTrue(
+                endpoint.updatePreemption(
+                        101L,
+                        DecodeEndpoint.PreemptionUpdate.cancelReply(
+                                2L, PreemptionCancelPhase.CANCEL_REQUESTED)));
         assertEquals(before.engineCapacityUsed(), endpoint.resourceSnapshot().engineCapacityUsed());
-        assertEquals(before.routing().inflightExpectedKv(), endpoint.routingView().inflightExpectedKv());
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelReply(2L, PreemptionCancelPhase.CANCEL_UNKNOWN)));
+        assertEquals(
+                before.routing().inflightExpectedKv(), endpoint.routingView().inflightExpectedKv());
+        assertTrue(
+                endpoint.updatePreemption(
+                        101L,
+                        DecodeEndpoint.PreemptionUpdate.cancelReply(
+                                2L, PreemptionCancelPhase.CANCEL_UNKNOWN)));
         assertEquals(1, endpoint.resourceSnapshot().runningCount());
 
         // Expiring the incoming request must not release a victim whose Cancel outcome is unknown.
@@ -346,7 +383,14 @@ class DecodeEndpointLayeredViewTest {
                         exact.requestId(),
                         exact.reservationToken() + 1L);
         DecodeEndpoint.PreemptionBeginResult result =
-                endpoint.beginPreemption(101L, List.of(stale), 9L, 700, 708, 70, new DecodeEndpoint.AdmissionCapacity(1, 100));
+                endpoint.beginPreemption(
+                        101L,
+                        List.of(stale),
+                        9L,
+                        700,
+                        708,
+                        70,
+                        new DecodeEndpoint.AdmissionCapacity(1, 100));
 
         assertEquals(DecodeEndpoint.PreemptionBeginResult.VICTIM_GONE, result);
         assertFalse(confirmedView(1L).claimedForPreemption());
@@ -359,9 +403,9 @@ class DecodeEndpointLayeredViewTest {
         updateStatus(Map.of("2", runningTask(2L, TaskPhase.KV_ALLOCATED, 256)), null, 10_000);
         long version = endpoint.routingView().admissionVersion();
 
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.VICTIM_GONE,
-                beginPreemption(101L, List.of(2L, 999L),
-                        9L, 700, 708, 70));
+        assertEquals(
+                DecodeEndpoint.PreemptionBeginResult.VICTIM_GONE,
+                beginPreemption(101L, List.of(2L, 999L), 9L, 700, 708, 70));
         assertFalse(confirmedView(2L).claimedForPreemption());
         assertFalse(endpoint.resourceSnapshot().reserved().containsKey(9L));
         assertEquals(version, endpoint.routingView().admissionVersion());
@@ -371,20 +415,26 @@ class DecodeEndpointLayeredViewTest {
     void beginPriorityPreemption_acceptsRunningAndRejectsAlreadyClaimedVictims() {
         reserve(1L, 500, 508, 30);
         reserve(2L, 400, 408, 30);
-        updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256),
-                "2", runningTask(2L, TaskPhase.KV_ALLOCATED, 256)), null, 10_000);
+        updateStatus(
+                Map.of(
+                        "1",
+                        runningTask(1L, TaskPhase.RUNNING, 256),
+                        "2",
+                        runningTask(2L, TaskPhase.KV_ALLOCATED, 256)),
+                null,
+                10_000);
 
         // RUNNING is engine-owned too and follows the same cancel path.
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
-                beginPreemption(101L, List.of(1L),
-                        9L, 700, 708, 70));
+        assertEquals(
+                DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                beginPreemption(101L, List.of(1L), 9L, 700, 708, 70));
 
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
-                beginPreemption(102L, List.of(2L),
-                        10L, 700, 708, 70));
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.VICTIM_ALREADY_CLAIMED,
-                beginPreemption(103L, List.of(2L),
-                        11L, 700, 708, 70));
+        assertEquals(
+                DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                beginPreemption(102L, List.of(2L), 10L, 700, 708, 70));
+        assertEquals(
+                DecodeEndpoint.PreemptionBeginResult.VICTIM_ALREADY_CLAIMED,
+                beginPreemption(103L, List.of(2L), 11L, 700, 708, 70));
     }
 
     @Test
@@ -393,21 +443,23 @@ class DecodeEndpointLayeredViewTest {
         // Keep a wide age gap so the provisional incoming reservation cannot
         // become TTL-eligible merely because this test runs on a loaded JVM.
         Thread.sleep(150);
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
-                beginPreemption(101L, List.of(1L),
-                        9L, 700, 708, 70));
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
+        assertEquals(
+                DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                beginPreemption(101L, List.of(1L), 9L, 700, 708, 70));
+        assertTrue(
+                endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
 
-        assertEquals(0, endpoint.evictExpiredRequests(
-                100, requestId -> false));
-        assertTrue(endpoint.resourceSnapshot().reserved().containsKey(1L),
+        assertEquals(0, endpoint.evictExpiredRequests(100, requestId -> false));
+        assertTrue(
+                endpoint.resourceSnapshot().reserved().containsKey(1L),
                 "generic TTL cleanup must not deduct a claimed victim");
-        assertEquals(1_200, endpoint.routingView().inflightHardKv(),
+        assertEquals(
+                1_200,
+                endpoint.routingView().inflightHardKv(),
                 "victim and provisional incoming remain fully charged");
 
         endpoint.finishPreemption(101L, DecodeEndpoint.PreemptionDecision.ABORT);
-        assertEquals(1, endpoint.evictExpiredRequests(
-                100, requestId -> false));
+        assertEquals(1, endpoint.evictExpiredRequests(100, requestId -> false));
         assertFalse(endpoint.resourceSnapshot().reserved().containsKey(1L));
         assertEquals(0, endpoint.routingView().inflightHardKv());
     }
@@ -416,11 +468,16 @@ class DecodeEndpointLayeredViewTest {
     void activeAfterNotFoundReleasesSyntheticHeldKvWithClaim() {
         reserve(1L, 500, 508, 30);
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 500)), null, 10_000);
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
-                beginPreemption(101L, List.of(1L),
-                        9L, 700, 708, 70));
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelReply(1L, PreemptionCancelPhase.NOT_FOUND_STALE)));
+        assertEquals(
+                DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                beginPreemption(101L, List.of(1L), 9L, 700, 708, 70));
+        assertTrue(
+                endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
+        assertTrue(
+                endpoint.updatePreemption(
+                        101L,
+                        DecodeEndpoint.PreemptionUpdate.cancelReply(
+                                1L, PreemptionCancelPhase.NOT_FOUND_STALE)));
         endpoint.finishPreemption(101L, DecodeEndpoint.PreemptionDecision.ABORT);
 
         // Decode disappears while NOT_FOUND is being reconciled. Its KV is
@@ -428,8 +485,12 @@ class DecodeEndpointLayeredViewTest {
         updateStatus(Map.of(), null, 10_000);
         assertEquals(9_500, endpoint.realKvAvailable());
 
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.active(reservations.get(1L))));
-        assertEquals(10_000, endpoint.realKvAvailable(),
+        assertTrue(
+                endpoint.updatePreemption(
+                        101L, DecodeEndpoint.PreemptionUpdate.active(reservations.get(1L))));
+        assertEquals(
+                10_000,
+                endpoint.realKvAvailable(),
                 "active reconciliation must release held KV before dropping the claim");
         assertFalse(confirmedView(1L).claimedForPreemption());
     }
@@ -438,33 +499,50 @@ class DecodeEndpointLayeredViewTest {
     void notFoundRetainsSyntheticKvUntilExactLeaseExpiration() {
         reserve(1L, 500, 508, 30);
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 500)), null, 10_000);
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
-                beginPreemption(104L, List.of(1L),
-                        9L, 700, 708, 70));
-        assertTrue(endpoint.updatePreemption(104L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
-        assertTrue(endpoint.updatePreemption(104L, DecodeEndpoint.PreemptionUpdate.cancelReply(1L, PreemptionCancelPhase.NOT_FOUND_STALE)));
+        assertEquals(
+                DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                beginPreemption(104L, List.of(1L), 9L, 700, 708, 70));
+        assertTrue(
+                endpoint.updatePreemption(104L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
+        assertTrue(
+                endpoint.updatePreemption(
+                        104L,
+                        DecodeEndpoint.PreemptionUpdate.cancelReply(
+                                1L, PreemptionCancelPhase.NOT_FOUND_STALE)));
 
         // Decode disappearance moves the victim's 500-token charge into a
         // synthetic hold. The 700-token provisional incoming reservation is
         // still independently owned by the live preemption attempt.
         updateStatus(Map.of(), null, 10_000);
         assertEquals(700, endpoint.routingView().inflightHardKv());
-        assertEquals(2, endpoint.routingView().totalLoad(),
+        assertEquals(
+                2,
+                endpoint.routingView().totalLoad(),
                 "victim and provisional incoming must both remain charged before abort");
         assertEquals(8_800, endpoint.realKvAvailable());
         endpoint.finishPreemption(104L, DecodeEndpoint.PreemptionDecision.ABORT);
 
-        assertEquals(0, endpoint.routingView().inflightHardKv(),
+        assertEquals(
+                0,
+                endpoint.routingView().inflightHardKv(),
                 "aborting the attempt releases only its provisional incoming reservation");
-        assertEquals(9_500, endpoint.realKvAvailable(),
+        assertEquals(
+                9_500,
+                endpoint.realKvAvailable(),
                 "aborting incoming work must not release the victim KV hold");
-        assertEquals(1, endpoint.routingView().totalLoad(),
+        assertEquals(
+                1,
+                endpoint.routingView().totalLoad(),
                 "the disappeared confirmed victim remains a synthetic slot");
 
-        assertTrue(endpoint.release(reservations.get(1L), DecodeEndpoint.ReleaseReason.EXPIRED).released());
+        assertTrue(
+                endpoint.release(reservations.get(1L), DecodeEndpoint.ReleaseReason.EXPIRED)
+                        .released());
         assertEquals(10_000, endpoint.realKvAvailable());
         assertEquals(0, endpoint.routingView().totalLoad());
-        assertFalse(endpoint.release(reservations.get(1L), DecodeEndpoint.ReleaseReason.EXPIRED).released(),
+        assertFalse(
+                endpoint.release(reservations.get(1L), DecodeEndpoint.ReleaseReason.EXPIRED)
+                        .released(),
                 "the exact local lease expires at most once");
         assertEquals(10_000, endpoint.realKvAvailable());
     }
@@ -476,10 +554,18 @@ class DecodeEndpointLayeredViewTest {
         reserve(1L, 500, 508, 30);
         reserve(2L, 400, 408, 30);
         reserve(3L, 300, 308, 30);
-        updateStatus(Map.of("2", runningTask(2L, TaskPhase.KV_ALLOCATED, 256),
-                "3", runningTask(3L, TaskPhase.RUNNING, 512)), null, 10_000);
+        updateStatus(
+                Map.of(
+                        "2",
+                        runningTask(2L, TaskPhase.KV_ALLOCATED, 256),
+                        "3",
+                        runningTask(3L, TaskPhase.RUNNING, 512)),
+                null,
+                10_000);
 
-        DecodeEndpointSnapshot snapshot = DecodeEndpointSnapshot.capture(endpoint, new DecodeEndpoint.AdmissionCapacity(4L, 90L));
+        DecodeEndpointSnapshot snapshot =
+                DecodeEndpointSnapshot.capture(
+                        endpoint, new DecodeEndpoint.AdmissionCapacity(4L, 90L));
         assertEquals(List.of(1L), ids(snapshot.reserved()));
         assertEquals(List.of(2L), ids(snapshot.accepted()));
         assertEquals(List.of(3L), ids(snapshot.running()));
@@ -489,11 +575,11 @@ class DecodeEndpointLayeredViewTest {
 
         // A cancel-requested entry is claimed by an in-flight eviction and
         // must not be offered to planning again.
-        beginPreemption(101L, List.of(2L),
-                20L, 64, 72, 70);
-        beginPreemption(102L, List.of(3L),
-                30L, 64, 72, 70);
-        DecodeEndpointSnapshot after = DecodeEndpointSnapshot.capture(endpoint, new DecodeEndpoint.AdmissionCapacity(4L, 90L));
+        beginPreemption(101L, List.of(2L), 20L, 64, 72, 70);
+        beginPreemption(102L, List.of(3L), 30L, 64, 72, 70);
+        DecodeEndpointSnapshot after =
+                DecodeEndpointSnapshot.capture(
+                        endpoint, new DecodeEndpoint.AdmissionCapacity(4L, 90L));
         assertTrue(after.accepted().isEmpty());
         assertTrue(after.running().isEmpty());
     }
@@ -504,26 +590,33 @@ class DecodeEndpointLayeredViewTest {
     void failureSettlementAnswersExactObligationWithoutReleasingEngineCapacity() {
         var reservation = reserve(701L, 400, 408, 30);
         DeliverySettlementTestSupport.dispatchDecode(endpoint, reservation);
-        assertFalse(endpoint.settleFailedRequest(reservation, DeliveryResult.Status.PREFILL_REJECTED));
+        assertFalse(
+                endpoint.settleFailedRequest(reservation, DeliveryResult.Status.PREFILL_REJECTED));
         assertEquals(1, endpoint.routingView().engineCapacityUsed());
         assertEquals(400, endpoint.routingView().inflightHardKv());
 
         updateStatus(Map.of("701", runningTask(701L, TaskPhase.RUNNING, 400)), null, 19_600);
-        assertFalse(endpoint.settleFailedRequest(reservation, DeliveryResult.Status.PREFILL_REJECTED));
+        assertFalse(
+                endpoint.settleFailedRequest(reservation, DeliveryResult.Status.PREFILL_REJECTED));
         assertEquals(1, endpoint.routingView().engineCapacityUsed());
         assertEquals(19_600, endpoint.routingView().realKvAvailable());
 
         updateStatus(Map.of(), Map.of("701", runningTask(701L, TaskPhase.RUNNING, 400)), 20_000);
-        assertTrue(endpoint.settleFailedRequest(reservation, DeliveryResult.Status.PREFILL_REJECTED));
-        assertTrue(endpoint.settleFailedRequest(reservation, DeliveryResult.Status.PREFILL_REJECTED));
+        assertTrue(
+                endpoint.settleFailedRequest(reservation, DeliveryResult.Status.PREFILL_REJECTED));
+        assertTrue(
+                endpoint.settleFailedRequest(reservation, DeliveryResult.Status.PREFILL_REJECTED));
         assertEquals(0, endpoint.routingView().engineCapacityUsed());
     }
 
     @Test
     void absentOldReservationIsCompleteWithoutTouchingTheReplacement() {
         var replacement = reserve(702L, 400, 408, 30);
-        var old = new DecodeEndpoint.ReservationHandle(replacement.endpointGenerationId(),
-                replacement.requestId(), replacement.reservationToken() + 1000);
+        var old =
+                new DecodeEndpoint.ReservationHandle(
+                        replacement.endpointGenerationId(),
+                        replacement.requestId(),
+                        replacement.reservationToken() + 1000);
         assertTrue(endpoint.settleFailedRequest(old, DeliveryResult.Status.NOT_SENT));
         assertTrue(endpoint.settleFailedRequest(old, DeliveryResult.Status.PREFILL_REJECTED));
         assertEquals(400, endpoint.routingView().inflightHardKv());
@@ -536,12 +629,16 @@ class DecodeEndpointLayeredViewTest {
     void rejectedVictimCannotCompletePreemptionOrReleaseItsCapacity() {
         var victim = reserve(703L, 400, 408, 30);
         updateStatus(Map.of("703", runningTask(703L, TaskPhase.RUNNING, 400)), null, 19_600);
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+        assertEquals(
+                DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 beginPreemption(704L, List.of(703L), 705L, 700, 708, 70));
-        assertTrue(endpoint.updatePreemption(704L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
-        assertTrue(endpoint.updatePreemption(
-                704L,
-                DecodeEndpoint.PreemptionUpdate.cancelReply(703L, PreemptionCancelPhase.CANCEL_UNKNOWN)));
+        assertTrue(
+                endpoint.updatePreemption(704L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
+        assertTrue(
+                endpoint.updatePreemption(
+                        704L,
+                        DecodeEndpoint.PreemptionUpdate.cancelReply(
+                                703L, PreemptionCancelPhase.CANCEL_UNKNOWN)));
         var before = endpoint.routingView();
 
         assertFalse(endpoint.settleFailedRequest(victim, DeliveryResult.Status.PREFILL_REJECTED));
@@ -563,8 +660,10 @@ class DecodeEndpointLayeredViewTest {
                 .orElseThrow(() -> new AssertionError("request " + requestId + " not tracked"));
     }
 
-    private void updateStatus(Map<String, TaskInfo> running, Map<String, TaskInfo> finished,
-                              long availableKvCacheTokens) {
+    private void updateStatus(
+            Map<String, TaskInfo> running,
+            Map<String, TaskInfo> finished,
+            long availableKvCacheTokens) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRunningTaskInfo(running);
         response.setFinishedTaskInfo(finished);
@@ -574,10 +673,7 @@ class DecodeEndpointLayeredViewTest {
     }
 
     private DecodeEndpoint.ReservationHandle reserve(
-            long requestId,
-            long hardKv,
-            long expectedKv,
-            int priority) {
+            long requestId, long hardKv, long expectedKv, int priority) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             assertTrue(pin != null);
             DecodeEndpoint.ReservationHandle reservation =
@@ -599,10 +695,16 @@ class DecodeEndpointLayeredViewTest {
             long hardKv,
             long expectedKv,
             int priority) {
-        List<DecodeEndpoint.ReservationHandle> victims = victimIds.stream()
-                .map(reservations::get)
-                .toList();
-        return endpoint.beginPreemption(attemptToken, victims, incomingRequestId, hardKv, expectedKv, priority, new DecodeEndpoint.AdmissionCapacity(
+        List<DecodeEndpoint.ReservationHandle> victims =
+                victimIds.stream().map(reservations::get).toList();
+        return endpoint.beginPreemption(
+                attemptToken,
+                victims,
+                incomingRequestId,
+                hardKv,
+                expectedKv,
+                priority,
+                new DecodeEndpoint.AdmissionCapacity(
                         Math.max(1, endpoint.routingView().totalLoad()), 100));
     }
 

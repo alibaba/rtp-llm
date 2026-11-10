@@ -70,8 +70,7 @@ class FollowerAsyncForwardingNettyTest {
             Integer.getInteger("flexlb.forwarding.capacity.queue", 4);
     private static final int REQUEST_COUNT =
             Integer.getInteger("flexlb.forwarding.capacity.requests", 32);
-    private static final int TARGET_QPS =
-            Integer.getInteger("flexlb.forwarding.capacity.qps", 500);
+    private static final int TARGET_QPS = Integer.getInteger("flexlb.forwarding.capacity.qps", 500);
     private static final long LEADER_DELAY_MS =
             Long.getLong("flexlb.forwarding.capacity.leader-delay-ms", 1000L);
     private static final long WARMUP_REQUEST_ID = 80_000L;
@@ -102,8 +101,8 @@ class FollowerAsyncForwardingNettyTest {
     @Timeout(value = 30, unit = TimeUnit.SECONDS)
     void slowMasterDoesNotOccupyOrQueueFollowerRequestThreads() throws Exception {
         try (SlowMaster master = SlowMaster.start(REQUEST_COUNT);
-             Follower follower = Follower.start(master.httpAddress(), REQUEST_COUNT);
-             Client client = Client.connect(follower.grpcPort())) {
+                Follower follower = Follower.start(master.httpAddress(), REQUEST_COUNT);
+                Client client = Client.connect(follower.grpcPort())) {
             client.warmUp(WARMUP_REQUEST_ID);
 
             long trafficStartNanos = System.nanoTime();
@@ -113,25 +112,31 @@ class FollowerAsyncForwardingNettyTest {
             }
 
             try {
-                boolean allRequestsForwarded =
-                        master.awaitAllRequests(Duration.ofSeconds(8));
-                boolean requestExecutorIdle = follower.waitForRequestExecutorIdle(
-                        Duration.ofSeconds(2));
-                printCapacitySummary(
-                        follower, master, allRequestsForwarded, requestExecutorIdle);
+                boolean allRequestsForwarded = master.awaitAllRequests(Duration.ofSeconds(8));
+                boolean requestExecutorIdle =
+                        follower.waitForRequestExecutorIdle(Duration.ofSeconds(2));
+                printCapacitySummary(follower, master, allRequestsForwarded, requestExecutorIdle);
 
-                assertTrue(allRequestsForwarded,
-                        () -> "slow Master received " + master.receivedRequestCount()
-                                + " of " + REQUEST_COUNT
-                                + " requests; follower rejections="
-                                + follower.rejections.get());
-                assertTrue(requestExecutorIdle,
-                        () -> "follower executor did not become idle: active="
-                                + follower.requestExecutor.getActiveCount()
-                                + ", queued="
-                                + follower.requestExecutor.getQueue().size());
+                assertTrue(
+                        allRequestsForwarded,
+                        () ->
+                                "slow Master received "
+                                        + master.receivedRequestCount()
+                                        + " of "
+                                        + REQUEST_COUNT
+                                        + " requests; follower rejections="
+                                        + follower.rejections.get());
+                assertTrue(
+                        requestExecutorIdle,
+                        () ->
+                                "follower executor did not become idle: active="
+                                        + follower.requestExecutor.getActiveCount()
+                                        + ", queued="
+                                        + follower.requestExecutor.getQueue().size());
 
-                assertEquals(0, follower.rejections.get(),
+                assertEquals(
+                        0,
+                        follower.rejections.get(),
                         "async forwarding must not reject follower request tasks");
                 master.assertExactlyOnceAndOneHop();
                 verify(follower.routeService, never()).route(any());
@@ -139,13 +144,14 @@ class FollowerAsyncForwardingNettyTest {
                 master.releaseResponses();
             }
 
-            assertTrue(client.awaitTerminals(Duration.ofSeconds(8)),
+            assertTrue(
+                    client.awaitTerminals(Duration.ofSeconds(8)),
                     () -> "only " + client.terminalCount() + " client RPCs terminated");
-            assertTrue(client.errors.isEmpty(),
-                    () -> "unexpected client errors: " + client.errors);
+            assertTrue(client.errors.isEmpty(), () -> "unexpected client errors: " + client.errors);
             client.assertExactlyOnce();
             follower.awaitRequestExecutorIdle(Duration.ofSeconds(2));
-            assertTrue(follower.waitForCallbackExecutorIdle(Duration.ofSeconds(2)),
+            assertTrue(
+                    follower.waitForCallbackExecutorIdle(Duration.ofSeconds(2)),
                     "forward callback executor did not drain");
             assertEquals(0, follower.channelRejections.get());
         }
@@ -153,15 +159,12 @@ class FollowerAsyncForwardingNettyTest {
 
     @Test
     @Timeout(value = 120, unit = TimeUnit.SECONDS)
-    @EnabledIfSystemProperty(
-            named = "flexlb.forwarding.capacity.benchmark",
-            matches = "true")
+    @EnabledIfSystemProperty(named = "flexlb.forwarding.capacity.benchmark", matches = "true")
     void benchmarkFollowerCapacityAgainstDelayedMaster() throws Exception {
         try (DelayedMaster master = DelayedMaster.start(LEADER_DELAY_MS);
-             Follower follower = Follower.start(
-                     master.httpAddress(), EXECUTOR_QUEUE_SIZE);
-             BenchmarkClient client = BenchmarkClient.connect(
-                     follower.grpcPort(), REQUEST_COUNT)) {
+                Follower follower = Follower.start(master.httpAddress(), EXECUTOR_QUEUE_SIZE);
+                BenchmarkClient client =
+                        BenchmarkClient.connect(follower.grpcPort(), REQUEST_COUNT)) {
             client.warmUp(WARMUP_REQUEST_ID);
 
             GcSnapshot gcBefore = GcSnapshot.capture();
@@ -185,52 +188,64 @@ class FollowerAsyncForwardingNettyTest {
                 sampler.close();
             }
 
-            boolean executorDrained = follower.waitForRequestExecutorIdle(
-                    Duration.ofSeconds(5));
-            boolean callbackExecutorDrained = follower.waitForCallbackExecutorIdle(
-                    Duration.ofSeconds(5));
+            boolean executorDrained = follower.waitForRequestExecutorIdle(Duration.ofSeconds(5));
+            boolean callbackExecutorDrained =
+                    follower.waitForCallbackExecutorIdle(Duration.ofSeconds(5));
             GcSnapshot gcAfter = GcSnapshot.capture();
-            CapacityResult result = CapacityResult.from(
-                    client,
-                    master,
-                    follower,
-                    sampler,
-                    gcBefore,
-                    gcAfter,
-                    trafficStartNanos,
-                    issuanceEndNanos,
-                    terminalEndNanos,
-                    rssBeforeBytes,
-                    threadsBefore,
-                    allTerminated,
-                    executorDrained,
-                    callbackExecutorDrained);
+            CapacityResult result =
+                    CapacityResult.from(
+                            client,
+                            master,
+                            follower,
+                            sampler,
+                            gcBefore,
+                            gcAfter,
+                            trafficStartNanos,
+                            issuanceEndNanos,
+                            terminalEndNanos,
+                            rssBeforeBytes,
+                            threadsBefore,
+                            allTerminated,
+                            executorDrained,
+                            callbackExecutorDrained);
             result.printJson();
 
-            assertTrue(allTerminated,
-                    () -> "benchmark left " + client.remainingTerminals()
-                            + " client RPCs pending; first_error=" + client.firstError());
-            assertEquals(0, master.duplicateRequests(),
-                    "Master must never receive a request_id twice");
-            assertEquals(0, master.invalidForwardHops(),
+            assertTrue(
+                    allTerminated,
+                    () ->
+                            "benchmark left "
+                                    + client.remainingTerminals()
+                                    + " client RPCs pending; first_error="
+                                    + client.firstError());
+            assertEquals(
+                    0, master.duplicateRequests(), "Master must never receive a request_id twice");
+            assertEquals(
+                    0,
+                    master.invalidForwardHops(),
                     "every forwarded request must carry forward_hop=1");
-            assertEquals(0, client.duplicateResponses(),
+            assertEquals(
+                    0,
+                    client.duplicateResponses(),
                     "client must receive at most one response per unary RPC");
-            assertEquals(0, client.duplicateTerminals(),
+            assertEquals(
+                    0,
+                    client.duplicateTerminals(),
                     "client must receive exactly one terminal callback per unary RPC");
-            assertEquals(0, follower.channelRejections.get(),
+            assertEquals(
+                    0,
+                    follower.channelRejections.get(),
                     "forward callback executor must not reject completions");
             assertTrue(executorDrained, "follower request executor did not drain");
-            assertTrue(callbackExecutorDrained,
-                    "forward callback executor did not drain");
+            assertTrue(callbackExecutorDrained, "forward callback executor did not drain");
             verify(follower.routeService, never()).route(any());
         }
     }
 
-    private static void printCapacitySummary(Follower follower,
-                                             SlowMaster master,
-                                             boolean allRequestsForwarded,
-                                             boolean requestExecutorIdle) {
+    private static void printCapacitySummary(
+            Follower follower,
+            SlowMaster master,
+            boolean allRequestsForwarded,
+            boolean requestExecutorIdle) {
         System.out.printf(
                 "Follower forwarding capacity: core=%d max=%d queue_capacity=%d qps=%d "
                         + "requests=%d master_received=%d pool_size=%d active=%d queued=%d "
@@ -253,17 +268,16 @@ class FollowerAsyncForwardingNettyTest {
         if (TARGET_QPS <= 0) {
             return;
         }
-        long targetNanos = trafficStartNanos
-                + (long) requestIndex * TimeUnit.SECONDS.toNanos(1) / TARGET_QPS;
+        long targetNanos =
+                trafficStartNanos + (long) requestIndex * TimeUnit.SECONDS.toNanos(1) / TARGET_QPS;
         long remainingNanos;
         while ((remainingNanos = targetNanos - System.nanoTime()) > 0) {
             LockSupport.parkNanos(remainingNanos);
         }
     }
 
-    private static void awaitCondition(BooleanSupplier condition,
-                                       Duration timeout,
-                                       String failureMessage) {
+    private static void awaitCondition(
+            BooleanSupplier condition, Duration timeout, String failureMessage) {
         assertTrue(waitUntil(condition, timeout), failureMessage);
     }
 
@@ -312,32 +326,41 @@ class FollowerAsyncForwardingNettyTest {
 
         private SlowMaster(int expectedSlowRequests) throws Exception {
             slowRequests = new CountDownLatch(expectedSlowRequests);
-            server = NettyServerBuilder
-                    .forAddress(new InetSocketAddress("127.0.0.1", 0))
-                    .directExecutor()
-                    .addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
-                        @Override
-                        public void schedule(
-                                FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
-                                StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB>
-                                        responseObserver) {
-                            if (request.getRequestId() == WARMUP_REQUEST_ID) {
-                                respond(responseObserver);
-                                return;
-                            }
-                            requestCounts.computeIfAbsent(
-                                    request.getRequestId(), ignored -> new AtomicInteger())
-                                    .incrementAndGet();
-                            forwardHops.put(request.getRequestId(), request.getForwardHop());
-                            pendingResponses.add(new PendingResponse(responseObserver));
-                            slowRequests.countDown();
-                            if (responsesReleased.get()) {
-                                drainResponses();
-                            }
-                        }
-                    })
-                    .build()
-                    .start();
+            server =
+                    NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
+                            .directExecutor()
+                            .addService(
+                                    new FlexlbServiceGrpc.FlexlbServiceImplBase() {
+                                        @Override
+                                        public void schedule(
+                                                FlexlbScheduleProtocol.FlexlbScheduleRequestPB
+                                                        request,
+                                                StreamObserver<
+                                                                FlexlbScheduleProtocol
+                                                                        .FlexlbScheduleResponsePB>
+                                                        responseObserver) {
+                                            if (request.getRequestId() == WARMUP_REQUEST_ID) {
+                                                respond(responseObserver);
+                                                return;
+                                            }
+                                            requestCounts
+                                                    .computeIfAbsent(
+                                                            request.getRequestId(),
+                                                            ignored -> new AtomicInteger())
+                                                    .incrementAndGet();
+                                            forwardHops.put(
+                                                    request.getRequestId(),
+                                                    request.getForwardHop());
+                                            pendingResponses.add(
+                                                    new PendingResponse(responseObserver));
+                                            slowRequests.countDown();
+                                            if (responsesReleased.get()) {
+                                                drainResponses();
+                                            }
+                                        }
+                                    })
+                            .build()
+                            .start();
         }
 
         static SlowMaster start(int expectedSlowRequests) throws Exception {
@@ -345,8 +368,7 @@ class FollowerAsyncForwardingNettyTest {
         }
 
         String httpAddress() {
-            return "127.0.0.1:"
-                    + (server.getPort() - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET);
+            return "127.0.0.1:" + (server.getPort() - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET);
         }
 
         boolean awaitAllRequests(Duration timeout) throws InterruptedException {
@@ -354,22 +376,22 @@ class FollowerAsyncForwardingNettyTest {
         }
 
         int receivedRequestCount() {
-            return requestCounts.values().stream()
-                    .mapToInt(AtomicInteger::get)
-                    .sum();
+            return requestCounts.values().stream().mapToInt(AtomicInteger::get).sum();
         }
 
         void assertExactlyOnceAndOneHop() {
             assertEquals(REQUEST_COUNT, requestCounts.size());
             for (long requestId = FIRST_REQUEST_ID;
-                 requestId < FIRST_REQUEST_ID + REQUEST_COUNT;
-                 requestId++) {
-                assertEquals(1, requestCounts.getOrDefault(
-                                requestId, new AtomicInteger()).get(),
+                    requestId < FIRST_REQUEST_ID + REQUEST_COUNT;
+                    requestId++) {
+                assertEquals(
+                        1,
+                        requestCounts.getOrDefault(requestId, new AtomicInteger()).get(),
                         "Master received a missing or duplicate request_id=" + requestId);
-                assertEquals(1, forwardHops.getOrDefault(requestId, -1),
-                        "forward_hop must be incremented exactly once for request_id="
-                                + requestId);
+                assertEquals(
+                        1,
+                        forwardHops.getOrDefault(requestId, -1),
+                        "forward_hop must be incremented exactly once for request_id=" + requestId);
             }
         }
 
@@ -387,11 +409,12 @@ class FollowerAsyncForwardingNettyTest {
 
         private static void respond(
                 StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {
-            observer.onNext(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
-                    .setSuccess(true)
-                    .setCode(200)
-                    .setEnqueuedByMaster(true)
-                    .build());
+            observer.onNext(
+                    FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                            .setSuccess(true)
+                            .setCode(200)
+                            .setEnqueuedByMaster(true)
+                            .build());
             observer.onCompleted();
         }
 
@@ -403,8 +426,7 @@ class FollowerAsyncForwardingNettyTest {
         }
 
         private record PendingResponse(
-                StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {
-        }
+                StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {}
     }
 
     private static final class DelayedMaster implements AutoCloseable {
@@ -413,43 +435,49 @@ class FollowerAsyncForwardingNettyTest {
         private final AtomicInteger receivedRequests = new AtomicInteger();
         private final AtomicInteger duplicateRequests = new AtomicInteger();
         private final AtomicInteger invalidForwardHops = new AtomicInteger();
-        private final ScheduledExecutorService responseTimer =
-                Executors.newScheduledThreadPool(4);
+        private final ScheduledExecutorService responseTimer = Executors.newScheduledThreadPool(4);
         private final Server server;
 
         private DelayedMaster(long responseDelayMs) throws Exception {
             this.responseDelayMs = responseDelayMs;
-            server = NettyServerBuilder
-                    .forAddress(new InetSocketAddress("127.0.0.1", 0))
-                    .directExecutor()
-                    .addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
-                        @Override
-                        public void schedule(
-                                FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
-                                StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB>
-                                        responseObserver) {
-                            if (request.getRequestId() == WARMUP_REQUEST_ID) {
-                                SlowMaster.respond(responseObserver);
-                                return;
-                            }
-                            int occurrences = requestCounts.computeIfAbsent(
-                                            request.getRequestId(), ignored -> new AtomicInteger())
-                                    .incrementAndGet();
-                            receivedRequests.incrementAndGet();
-                            if (occurrences > 1) {
-                                duplicateRequests.incrementAndGet();
-                            }
-                            if (request.getForwardHop() != 1) {
-                                invalidForwardHops.incrementAndGet();
-                            }
-                            responseTimer.schedule(
-                                    () -> SlowMaster.respond(responseObserver),
-                                    responseDelayMs,
-                                    TimeUnit.MILLISECONDS);
-                        }
-                    })
-                    .build()
-                    .start();
+            server =
+                    NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
+                            .directExecutor()
+                            .addService(
+                                    new FlexlbServiceGrpc.FlexlbServiceImplBase() {
+                                        @Override
+                                        public void schedule(
+                                                FlexlbScheduleProtocol.FlexlbScheduleRequestPB
+                                                        request,
+                                                StreamObserver<
+                                                                FlexlbScheduleProtocol
+                                                                        .FlexlbScheduleResponsePB>
+                                                        responseObserver) {
+                                            if (request.getRequestId() == WARMUP_REQUEST_ID) {
+                                                SlowMaster.respond(responseObserver);
+                                                return;
+                                            }
+                                            int occurrences =
+                                                    requestCounts
+                                                            .computeIfAbsent(
+                                                                    request.getRequestId(),
+                                                                    ignored -> new AtomicInteger())
+                                                            .incrementAndGet();
+                                            receivedRequests.incrementAndGet();
+                                            if (occurrences > 1) {
+                                                duplicateRequests.incrementAndGet();
+                                            }
+                                            if (request.getForwardHop() != 1) {
+                                                invalidForwardHops.incrementAndGet();
+                                            }
+                                            responseTimer.schedule(
+                                                    () -> SlowMaster.respond(responseObserver),
+                                                    responseDelayMs,
+                                                    TimeUnit.MILLISECONDS);
+                                        }
+                                    })
+                            .build()
+                            .start();
         }
 
         static DelayedMaster start(long responseDelayMs) throws Exception {
@@ -457,8 +485,7 @@ class FollowerAsyncForwardingNettyTest {
         }
 
         String httpAddress() {
-            return "127.0.0.1:"
-                    + (server.getPort() - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET);
+            return "127.0.0.1:" + (server.getPort() - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET);
         }
 
         int receivedRequests() {
@@ -501,63 +528,66 @@ class FollowerAsyncForwardingNettyTest {
             when(consistency.getLocalHostIp()).thenReturn("127.0.0.2");
 
             ConfigService configService = mock(ConfigService.class);
-            when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
+            when(configService.loadBalanceConfig())
+                    .thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
             EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
             channelEventLoop = new NioEventLoopGroup(1);
             // Match the production forwarder callback executor width so this
             // benchmark isolates the follower's inbound request executor.
-            channelExecutor = new ThreadPoolExecutor(
-                    16,
-                    16,
-                    5L,
-                    TimeUnit.MINUTES,
-                    new LinkedBlockingQueue<>(2000),
-                    runnable -> new Thread(
-                            runnable, "follower-forward-callback-test"),
-                    (runnable, executor) -> {
-                        channelRejections.incrementAndGet();
-                        new ThreadPoolExecutor.AbortPolicy()
-                                .rejectedExecution(runnable, executor);
-                    });
-            forwarder = new FlexlbGrpcForwarder(
-                    consistency,
-                    configService,
-                    healthReporter,
-                    channelEventLoop,
-                    channelExecutor);
+            channelExecutor =
+                    new ThreadPoolExecutor(
+                            16,
+                            16,
+                            5L,
+                            TimeUnit.MINUTES,
+                            new LinkedBlockingQueue<>(2000),
+                            runnable -> new Thread(runnable, "follower-forward-callback-test"),
+                            (runnable, executor) -> {
+                                channelRejections.incrementAndGet();
+                                new ThreadPoolExecutor.AbortPolicy()
+                                        .rejectedExecution(runnable, executor);
+                            });
+            forwarder =
+                    new FlexlbGrpcForwarder(
+                            consistency,
+                            configService,
+                            healthReporter,
+                            channelEventLoop,
+                            channelExecutor);
 
-            FlexlbServiceImpl service = new FlexlbServiceImpl(
-                    routeService,
-                    consistency,
-                    healthReporter,
-                    forwarder,
-                    configService,
-                    mock(BatchSchedulerReporter.class),
-                    mock(ServerScheduleLatencyRecorder.class),
-                    mock(RequestSchedulerReporter.class));
+            FlexlbServiceImpl service =
+                    new FlexlbServiceImpl(
+                            routeService,
+                            consistency,
+                            healthReporter,
+                            forwarder,
+                            configService,
+                            mock(BatchSchedulerReporter.class),
+                            mock(ServerScheduleLatencyRecorder.class),
+                            mock(RequestSchedulerReporter.class));
 
-            requestExecutor = new ThreadPoolExecutor(
-                    EXECUTOR_CORE_SIZE,
-                    EXECUTOR_MAX_SIZE,
-                    0L,
-                    TimeUnit.MILLISECONDS,
-                    new ArrayBlockingQueue<>(requestQueueCapacity),
-                    runnable -> new Thread(runnable, "follower-root-cause-test"),
-                    (runnable, executor) -> {
-                        rejections.incrementAndGet();
-                        new ThreadPoolExecutor.AbortPolicy()
-                                .rejectedExecution(runnable, executor);
-                    });
-            server = NettyServerBuilder
-                    .forAddress(new InetSocketAddress("127.0.0.1", 0))
-                    .executor(requestExecutor)
-                    .addService(service)
-                    .build()
-                    .start();
+            requestExecutor =
+                    new ThreadPoolExecutor(
+                            EXECUTOR_CORE_SIZE,
+                            EXECUTOR_MAX_SIZE,
+                            0L,
+                            TimeUnit.MILLISECONDS,
+                            new ArrayBlockingQueue<>(requestQueueCapacity),
+                            runnable -> new Thread(runnable, "follower-root-cause-test"),
+                            (runnable, executor) -> {
+                                rejections.incrementAndGet();
+                                new ThreadPoolExecutor.AbortPolicy()
+                                        .rejectedExecution(runnable, executor);
+                            });
+            server =
+                    NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
+                            .executor(requestExecutor)
+                            .addService(service)
+                            .build()
+                            .start();
         }
 
-        static Follower start(String masterHttpAddress, int requestQueueCapacity)
-                throws Exception {
+        static Follower start(String masterHttpAddress, int requestQueueCapacity) throws Exception {
             return new Follower(masterHttpAddress, requestQueueCapacity);
         }
 
@@ -567,25 +597,29 @@ class FollowerAsyncForwardingNettyTest {
 
         void awaitRequestExecutorIdle(Duration timeout) {
             awaitCondition(
-                    () -> requestExecutor.getActiveCount() == 0
-                            && requestExecutor.getQueue().isEmpty(),
+                    () ->
+                            requestExecutor.getActiveCount() == 0
+                                    && requestExecutor.getQueue().isEmpty(),
                     timeout,
                     "follower executor did not become idle: active="
                             + requestExecutor.getActiveCount()
-                            + ", queued=" + requestExecutor.getQueue().size());
+                            + ", queued="
+                            + requestExecutor.getQueue().size());
         }
 
         boolean waitForRequestExecutorIdle(Duration timeout) {
             return waitUntil(
-                    () -> requestExecutor.getActiveCount() == 0
-                            && requestExecutor.getQueue().isEmpty(),
+                    () ->
+                            requestExecutor.getActiveCount() == 0
+                                    && requestExecutor.getQueue().isEmpty(),
                     timeout);
         }
 
         boolean waitForCallbackExecutorIdle(Duration timeout) {
             return waitUntil(
-                    () -> channelExecutor.getActiveCount() == 0
-                            && channelExecutor.getQueue().isEmpty(),
+                    () ->
+                            channelExecutor.getActiveCount() == 0
+                                    && channelExecutor.getQueue().isEmpty(),
                     timeout);
         }
 
@@ -610,10 +644,7 @@ class FollowerAsyncForwardingNettyTest {
         private final Queue<Throwable> errors = new ConcurrentLinkedQueue<>();
 
         private Client(int grpcPort) {
-            channel = NettyChannelBuilder
-                    .forAddress("127.0.0.1", grpcPort)
-                    .usePlaintext()
-                    .build();
+            channel = NettyChannelBuilder.forAddress("127.0.0.1", grpcPort).usePlaintext().build();
             asyncStub = FlexlbServiceGrpc.newStub(channel);
             blockingStub = FlexlbServiceGrpc.newBlockingStub(channel);
         }
@@ -623,37 +654,43 @@ class FollowerAsyncForwardingNettyTest {
         }
 
         void warmUp(long requestId) {
-            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = blockingStub
-                    .withDeadlineAfter(5, TimeUnit.SECONDS)
-                    .schedule(request(requestId));
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response =
+                    blockingStub
+                            .withDeadlineAfter(5, TimeUnit.SECONDS)
+                            .schedule(request(requestId));
             assertTrue(response.getSuccess());
         }
 
         void schedule(long requestId) {
-            asyncStub.withDeadlineAfter(30, TimeUnit.SECONDS)
-                    .schedule(request(requestId), new StreamObserver<>() {
-                        @Override
-                        public void onNext(
-                                FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
-                            responseCounts.computeIfAbsent(
-                                    requestId, ignored -> new AtomicInteger())
-                                    .incrementAndGet();
-                        }
+            asyncStub
+                    .withDeadlineAfter(30, TimeUnit.SECONDS)
+                    .schedule(
+                            request(requestId),
+                            new StreamObserver<>() {
+                                @Override
+                                public void onNext(
+                                        FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
+                                    responseCounts
+                                            .computeIfAbsent(
+                                                    requestId, ignored -> new AtomicInteger())
+                                            .incrementAndGet();
+                                }
 
-                        @Override
-                        public void onError(Throwable error) {
-                            errors.add(error);
-                            terminals.countDown();
-                        }
+                                @Override
+                                public void onError(Throwable error) {
+                                    errors.add(error);
+                                    terminals.countDown();
+                                }
 
-                        @Override
-                        public void onCompleted() {
-                            completionCounts.computeIfAbsent(
-                                    requestId, ignored -> new AtomicInteger())
-                                    .incrementAndGet();
-                            terminals.countDown();
-                        }
-                    });
+                                @Override
+                                public void onCompleted() {
+                                    completionCounts
+                                            .computeIfAbsent(
+                                                    requestId, ignored -> new AtomicInteger())
+                                            .incrementAndGet();
+                                    terminals.countDown();
+                                }
+                            });
         }
 
         boolean awaitTerminals(Duration timeout) throws InterruptedException {
@@ -668,14 +705,16 @@ class FollowerAsyncForwardingNettyTest {
             assertEquals(REQUEST_COUNT, responseCounts.size());
             assertEquals(REQUEST_COUNT, completionCounts.size());
             for (long requestId = FIRST_REQUEST_ID;
-                 requestId < FIRST_REQUEST_ID + REQUEST_COUNT;
-                 requestId++) {
-                assertEquals(1, responseCounts.getOrDefault(
-                                requestId, new AtomicInteger()).get(),
+                    requestId < FIRST_REQUEST_ID + REQUEST_COUNT;
+                    requestId++) {
+                assertEquals(
+                        1,
+                        responseCounts.getOrDefault(requestId, new AtomicInteger()).get(),
                         "client received a missing or duplicate response for request_id="
                                 + requestId);
-                assertEquals(1, completionCounts.getOrDefault(
-                                requestId, new AtomicInteger()).get(),
+                assertEquals(
+                        1,
+                        completionCounts.getOrDefault(requestId, new AtomicInteger()).get(),
                         "client received a missing or duplicate completion for request_id="
                                 + requestId);
             }
@@ -706,10 +745,7 @@ class FollowerAsyncForwardingNettyTest {
         private final AtomicReference<String> firstError = new AtomicReference<>("");
 
         private BenchmarkClient(int grpcPort, int requestCount) {
-            channel = NettyChannelBuilder
-                    .forAddress("127.0.0.1", grpcPort)
-                    .usePlaintext()
-                    .build();
+            channel = NettyChannelBuilder.forAddress("127.0.0.1", grpcPort).usePlaintext().build();
             asyncStub = FlexlbServiceGrpc.newStub(channel);
             blockingStub = FlexlbServiceGrpc.newBlockingStub(channel);
             terminals = new CountDownLatch(requestCount);
@@ -724,56 +760,65 @@ class FollowerAsyncForwardingNettyTest {
         }
 
         void warmUp(long requestId) {
-            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = blockingStub
-                    .withDeadlineAfter(5, TimeUnit.SECONDS)
-                    .schedule(request(requestId));
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response =
+                    blockingStub
+                            .withDeadlineAfter(5, TimeUnit.SECONDS)
+                            .schedule(request(requestId));
             assertTrue(response.getSuccess());
         }
 
         void schedule(long requestId, int requestIndex) {
             requestStartedNanos[requestIndex] = System.nanoTime();
             long deadlineMs = Math.max(30_000L, LEADER_DELAY_MS * 5L);
-            asyncStub.withDeadlineAfter(deadlineMs, TimeUnit.MILLISECONDS)
-                    .schedule(request(requestId), new StreamObserver<>() {
-                        @Override
-                        public void onNext(
-                                FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
-                            if (!responseClaims.compareAndSet(requestIndex, 0, 1)) {
-                                duplicateResponseCount.incrementAndGet();
-                                return;
-                            }
-                            if (response.getSuccess()) {
-                                successfulLatencyNanos[requestIndex] =
-                                        System.nanoTime() - requestStartedNanos[requestIndex];
-                                successCount.incrementAndGet();
-                            } else {
-                                applicationFailureCount.incrementAndGet();
-                                firstError.compareAndSet("", "code=" + response.getCode()
-                                        + " message=" + response.getErrorMessage());
-                            }
-                        }
+            asyncStub
+                    .withDeadlineAfter(deadlineMs, TimeUnit.MILLISECONDS)
+                    .schedule(
+                            request(requestId),
+                            new StreamObserver<>() {
+                                @Override
+                                public void onNext(
+                                        FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
+                                    if (!responseClaims.compareAndSet(requestIndex, 0, 1)) {
+                                        duplicateResponseCount.incrementAndGet();
+                                        return;
+                                    }
+                                    if (response.getSuccess()) {
+                                        successfulLatencyNanos[requestIndex] =
+                                                System.nanoTime()
+                                                        - requestStartedNanos[requestIndex];
+                                        successCount.incrementAndGet();
+                                    } else {
+                                        applicationFailureCount.incrementAndGet();
+                                        firstError.compareAndSet(
+                                                "",
+                                                "code="
+                                                        + response.getCode()
+                                                        + " message="
+                                                        + response.getErrorMessage());
+                                    }
+                                }
 
-                        @Override
-                        public void onError(Throwable error) {
-                            rpcErrorCount.incrementAndGet();
-                            firstError.compareAndSet("", error.toString());
-                            finishTerminal();
-                        }
+                                @Override
+                                public void onError(Throwable error) {
+                                    rpcErrorCount.incrementAndGet();
+                                    firstError.compareAndSet("", error.toString());
+                                    finishTerminal();
+                                }
 
-                        @Override
-                        public void onCompleted() {
-                            finishTerminal();
-                        }
+                                @Override
+                                public void onCompleted() {
+                                    finishTerminal();
+                                }
 
-                        private void finishTerminal() {
-                            if (!terminalClaims.compareAndSet(requestIndex, 0, 1)) {
-                                duplicateTerminalCount.incrementAndGet();
-                                return;
-                            }
-                            terminalCount.incrementAndGet();
-                            terminals.countDown();
-                        }
-                    });
+                                private void finishTerminal() {
+                                    if (!terminalClaims.compareAndSet(requestIndex, 0, 1)) {
+                                        duplicateTerminalCount.incrementAndGet();
+                                        return;
+                                    }
+                                    terminalCount.incrementAndGet();
+                                    terminals.countDown();
+                                }
+                            });
         }
 
         boolean awaitTerminals(Duration timeout) throws InterruptedException {
@@ -828,8 +873,7 @@ class FollowerAsyncForwardingNettyTest {
 
     private static final class CapacitySampler implements AutoCloseable {
         private final Follower follower;
-        private final ScheduledExecutorService timer =
-                Executors.newSingleThreadScheduledExecutor();
+        private final ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
         private final AtomicInteger maxPoolSize = new AtomicInteger();
         private final AtomicInteger maxActive = new AtomicInteger();
         private final AtomicInteger maxQueue = new AtomicInteger();
@@ -851,12 +895,9 @@ class FollowerAsyncForwardingNettyTest {
 
         private void sample() {
             try {
-                maxPoolSize.accumulateAndGet(
-                        follower.requestExecutor.getPoolSize(), Math::max);
-                maxActive.accumulateAndGet(
-                        follower.requestExecutor.getActiveCount(), Math::max);
-                maxQueue.accumulateAndGet(
-                        follower.requestExecutor.getQueue().size(), Math::max);
+                maxPoolSize.accumulateAndGet(follower.requestExecutor.getPoolSize(), Math::max);
+                maxActive.accumulateAndGet(follower.requestExecutor.getActiveCount(), Math::max);
+                maxQueue.accumulateAndGet(follower.requestExecutor.getQueue().size(), Math::max);
                 maxCallbackPoolSize.accumulateAndGet(
                         follower.channelExecutor.getPoolSize(), Math::max);
                 maxCallbackActive.accumulateAndGet(
@@ -885,8 +926,8 @@ class FollowerAsyncForwardingNettyTest {
         static GcSnapshot capture() {
             long collections = 0;
             long collectionTimeMs = 0;
-            for (GarbageCollectorMXBean collector
-                    : ManagementFactory.getGarbageCollectorMXBeans()) {
+            for (GarbageCollectorMXBean collector :
+                    ManagementFactory.getGarbageCollectorMXBeans()) {
                 if (collector.getCollectionCount() >= 0) {
                     collections += collector.getCollectionCount();
                 }
@@ -988,26 +1029,22 @@ class FollowerAsyncForwardingNettyTest {
         }
 
         private static double perSecond(long count, long elapsedNanos) {
-            return elapsedNanos <= 0
-                    ? 0.0
-                    : count * 1_000_000_000.0 / elapsedNanos;
+            return elapsedNanos <= 0 ? 0.0 : count * 1_000_000_000.0 / elapsedNanos;
         }
 
         private static double percentileMillis(long[] sortedNanos, double percentile) {
             if (sortedNanos.length == 0) {
                 return 0.0;
             }
-            int index = Math.max(
-                    0,
-                    (int) Math.ceil(sortedNanos.length * percentile) - 1);
+            int index = Math.max(0, (int) Math.ceil(sortedNanos.length * percentile) - 1);
             return sortedNanos[index] / 1_000_000.0;
         }
 
         void printJson() {
-            long rssDeltaBytes = rssBeforeBytes < 0 || maxRssBytes < 0
-                    ? -1L
-                    : maxRssBytes - rssBeforeBytes;
-            System.out.printf(Locale.ROOT,
+            long rssDeltaBytes =
+                    rssBeforeBytes < 0 || maxRssBytes < 0 ? -1L : maxRssBytes - rssBeforeBytes;
+            System.out.printf(
+                    Locale.ROOT,
                     "FOLLOWER_FORWARDING_CAPACITY_SUMMARY "
                             + "{\"core\":%d,\"max\":%d,\"queue_capacity\":%d,"
                             + "\"target_qps\":%d,\"leader_delay_ms\":%d,\"requests\":%d,"
