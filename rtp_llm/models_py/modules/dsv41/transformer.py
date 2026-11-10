@@ -250,9 +250,9 @@ class V4Transformer(nn.Module):
                         _size = _blk.get("size", 0)
                         if _size < 256 * 2**20:
                             continue
+                        _fr = _blk.get("frames") or []
                         _frames = " > ".join(
-                            _f.get("name", "?")
-                            for _f in (_blk.get("frames") or [])[:10]
+                            _f.get("name", "?") for _f in _fr[-14:]
                         )
                         _blocks.append((_size, _frames))
                 _blocks.sort(reverse=True)
