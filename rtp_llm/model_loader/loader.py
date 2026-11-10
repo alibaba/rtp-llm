@@ -706,6 +706,20 @@ class ModelLoader:
         for layer_id, name, tensor in self.prepare_weights(convert_device):
             if convert_device != device:
                 tensor = tensor.to(device)
+            # Scratch/safetensors loads hand back views into whole shard
+            # storages.  Keeping the view also keeps the shard alive, which
+            # leaks ~1 GiB per layer here.  Compact non-Engram views so the
+            # shard can be released; Engram is loaded separately into host RAM.
+            try:
+                _view_bytes = tensor.numel() * tensor.element_size()
+                _storage_bytes = tensor.untyped_storage().nbytes()
+                if (
+                    "engram" not in name.lower()
+                    and _storage_bytes > _view_bytes * 2
+                ):
+                    tensor = tensor.clone()
+            except Exception:
+                pass
             if layer_id is not None:
                 weights.set_layer_weight(layer_id, name, tensor)
             else:
