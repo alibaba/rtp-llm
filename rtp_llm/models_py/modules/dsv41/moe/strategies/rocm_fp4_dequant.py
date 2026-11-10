@@ -20,6 +20,7 @@ activation exists) to cut both memory and decode weight bandwidth.
 
 from __future__ import annotations
 
+import functools
 from typing import Dict, Optional
 
 import torch
@@ -85,6 +86,14 @@ def _dequant_fp4_stack(
     return out
 
 
+@functools.cache
+def _has_record_expert_load() -> bool:
+    """EPLB load telemetry op; registered on CUDA builds only."""
+    from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+    return hasattr(rtp_llm_ops, "record_expert_load")
+
+
 @register_strategy
 class RocmFp4DequantStrategy(RoutedExpertsStrategy):
     name = "rocm_fp4_dequant"
@@ -138,7 +147,11 @@ class RocmFp4DequantStrategy(RoutedExpertsStrategy):
         eplb_layer=None,
     ) -> torch.Tensor:
         self.finalize_routing(indices, weights, eplb_layer)
-        if expert_load is not None and self.cfg.ep_size == 1:
+        if (
+            expert_load is not None
+            and self.cfg.ep_size == 1
+            and _has_record_expert_load()
+        ):
             expert_load.record_ids(indices)
         from .local_loop import _get_or_create_local_y
 
