@@ -5,10 +5,17 @@ import sys
 import time
 import traceback
 
+from rtp_llm.utils.prefill_supervisor import MODE_ENV as PREFILL_SUPERVISOR_MODE_ENV
+
 # Apply before torch/native imports can allocate memory or start worker threads.
 if __name__ == "__main__":
     from rtp_llm.utils.numa import configure_numa_interleave
+    from rtp_llm.utils.prefill_supervisor import enter_worker_cgroup, supervise_prefill
 
+    if os.environ.get(PREFILL_SUPERVISOR_MODE_ENV) == "1":
+        sys.exit(supervise_prefill(sys.argv[1:]))
+    if os.environ.get(PREFILL_SUPERVISOR_MODE_ENV) == "worker":
+        enter_worker_cgroup()
     configure_numa_interleave()
 
 import requests
@@ -34,6 +41,7 @@ from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
     DEFER_FIRST_SIGTERM_VALUE,
     ProcessManager,
+    RuntimeWatchdog,
 )
 from rtp_llm.utils.warmup import configure_warmup
 
@@ -592,12 +600,17 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
     return True
 
 
-def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs):
-    if not _should_run_startup_real_warmup(py_env_configs):
+def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs, *, required=False):
+    if not required and not _should_run_startup_real_warmup(py_env_configs):
         os.environ.pop(STARTUP_WARMUP_HEALTH_GATE_FILE_ENV, None)
         return None
 
-    gate_file = os.path.join(
+    managed_gate = (
+        os.environ.get(STARTUP_WARMUP_HEALTH_GATE_FILE_ENV)
+        if os.environ.get(PREFILL_SUPERVISOR_MODE_ENV) == "worker"
+        else None
+    )
+    gate_file = managed_gate or os.path.join(
         "/tmp",
         "rtp_llm_startup_warmup_ready_"
         f"{os.getpid()}_{int(py_env_configs.server_config.start_port)}",
@@ -633,10 +646,81 @@ def _mark_startup_warmup_health_gate_ready(gate_file):
         raise
 
 
+def _prefill_runtime_probe(server_port, timeout):
+    import grpc
+
+    from rtp_llm.cpp.model_rpc.model_rpc_client import (
+        _is_finished_response,
+        trans_input,
+    )
+    from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+
+    request = _new_startup_real_warmup_input(
+        _new_startup_real_warmup_request_id(0),
+        STARTUP_REAL_WARMUP_MIN_TOKEN_LEN,
+        max(1, int(timeout * 1000)),
+        max_new_tokens=0,
+    )
+    request_pb = trans_input(request)
+    try:
+        with grpc.insecure_channel(
+            f"127.0.0.1:{server_port}", options=[("grpc.enable_http_proxy", 0)]
+        ) as channel:
+            responses = RpcServiceStub(channel).GenerateStreamCall(
+                request_pb, timeout=timeout
+            )
+            finished = False
+            for response in responses:
+                if (
+                    response.request_id != request_pb.request_id
+                    or response.error_info.error_code
+                ):
+                    return False
+                finished = _is_finished_response(response)
+            return finished
+    except grpc.RpcError as error:
+        if error.code() == grpc.StatusCode.RESOURCE_EXHAUSTED:
+            return None
+        logging.warning("prefill watchdog local RPC failed code=%s", error.code())
+    return False
+
+
+def _create_prefill_watchdog(py_env_configs):
+    if not _role_is_prefill(py_env_configs) or not str_to_bool(
+        os.environ.get("RTP_LLM_PREFILL_WATCHDOG", "0")
+    ):
+        return None
+    pc = py_env_configs.parallelism_config
+    if int(os.environ.get("LOCAL_WORLD_SIZE", pc.world_size)) != pc.world_size:
+        raise ValueError("Prefill watchdog requires the compute world in one instance")
+    port = py_env_configs.server_config.rpc_server_port
+    return RuntimeWatchdog(
+        lambda timeout: _prefill_runtime_probe(port, timeout),
+        interval=float(os.environ.get("RTP_LLM_PREFILL_WATCHDOG_INTERVAL_S", "15")),
+        timeout=float(os.environ.get("RTP_LLM_PREFILL_WATCHDOG_TIMEOUT_S", "5")),
+        failure_threshold=int(os.environ.get("RTP_LLM_PREFILL_WATCHDOG_FAILURES", "3")),
+    )
+
+
+def _withdraw_readiness(gate_file):
+    try:
+        os.unlink(gate_file)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logging.exception("failed to withdraw Prefill readiness")
+
+
 def main():
     _install_hot_hook_runtime("main")
     py_env_configs: PyEnvConfigs = setup_args()
     setup_and_configure_server(py_env_configs)
+    if os.environ.get(PREFILL_SUPERVISOR_MODE_ENV) == "worker":
+        parallel = py_env_configs.parallelism_config
+        if parallel.local_world_size != parallel.world_size:
+            raise ValueError("in-container restart requires the full Prefill world")
+        if not _should_run_startup_real_warmup(py_env_configs):
+            raise ValueError("in-container restart requires DSV4 Prefill real warmup")
     start_server(py_env_configs)
 
 
@@ -702,7 +786,10 @@ def start_server(py_env_configs: PyEnvConfigs):
 
     # Initialize backend_process to None in case role_type is FRONTEND
     backend_process = None
-    startup_warmup_gate_file = _setup_startup_warmup_health_gate(py_env_configs)
+    watchdog = _create_prefill_watchdog(py_env_configs)
+    startup_warmup_gate_file = _setup_startup_warmup_health_gate(
+        py_env_configs, required=watchdog is not None
+    )
 
     try:
         if py_env_configs.role_config.role_type == RoleType.VIT:
@@ -748,6 +835,10 @@ def start_server(py_env_configs: PyEnvConfigs):
         # through the subsequent real requests, including cached-prefix probes.
         _maybe_run_startup_real_warmup(py_env_configs)
         _mark_startup_warmup_health_gate_ready(startup_warmup_gate_file)
+        if watchdog is not None:
+            process_manager.set_runtime_watchdog(
+                watchdog, lambda: _withdraw_readiness(startup_warmup_gate_file)
+            )
 
         logging.info(
             f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"
@@ -981,6 +1072,7 @@ def _new_startup_real_warmup_input(
     timeout_ms,
     token_id=STARTUP_REAL_WARMUP_TOKEN_ID,
     reuse=False,
+    max_new_tokens=None,
 ):
     from rtp_llm.config.generate_config import GenerateConfig
     from rtp_llm.utils.base_model_datatypes import GenerateInput
@@ -990,7 +1082,11 @@ def _new_startup_real_warmup_input(
         token_ids=torch.full((token_len,), token_id, dtype=torch.int32),
         mm_inputs=[],
         generate_config=GenerateConfig(
-            max_new_tokens=_get_startup_real_warmup_max_new_tokens(),
+            max_new_tokens=(
+                _get_startup_real_warmup_max_new_tokens()
+                if max_new_tokens is None
+                else max_new_tokens
+            ),
             top_k=1,
             top_p=1.0,
             temperature=0.0,
