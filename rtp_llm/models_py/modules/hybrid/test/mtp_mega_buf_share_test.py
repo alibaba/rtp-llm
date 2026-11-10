@@ -206,6 +206,8 @@ class MtpMegaBufShareTest(unittest.TestCase):
             setattr(moe, name, None)
         moe.gate_weight = None
         moe._hy4_fp32_router = False
+        moe._hy4_bf16_router_weight = None
+        moe._cmp_moe_streams = None
         moe.fused_moe = make_source(*VARIANTS[0])
         layer = GenericMoeDecoderLayer.__new__(GenericMoeDecoderLayer)
         nn.Module.__init__(layer)

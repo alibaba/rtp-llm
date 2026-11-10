@@ -37,6 +37,7 @@ Weight layout handling:
   init time (see ``Indexer.__init__``).
 """
 
+import os
 from typing import Optional, Union
 
 import torch
@@ -46,6 +47,7 @@ import triton.language as tl
 from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 MAX_K = 8192
+_DECODE_REDUCE_ENABLED = os.environ.get("RTP_LLM_HY4_HEAD_GATE_DECODE", "1") == "1"
 
 
 @triton.jit
@@ -269,7 +271,17 @@ def fused_logits_head_gate(
     # Detect transposed weight layout for coalesced 2D loads in large-T kernel.
     w_is_transposed = weight.stride(0) < weight.stride(1)
 
-    if T <= 32:
+    # HY4 uses high_precision without Hadamard. Keep its bounded decode
+    # reduction enabled by default; the environment switch permits rollback.
+    # Strided weight remains on the coalesced tiled path. Resolve at process
+    # startup; changing the switch requires restarting the process.
+    decode_reduce = (
+        high_precision
+        and 32 < T <= 128
+        and weight.stride(1) == 1
+        and _DECODE_REDUCE_ENABLED
+    )
+    if T <= 32 or decode_reduce:
         # small-T kernel: grid (T, N), one program per (t, n) pair.
         BLOCK_K = triton.next_power_of_2(K)
         num_warps = 4 if K >= 4096 else 2

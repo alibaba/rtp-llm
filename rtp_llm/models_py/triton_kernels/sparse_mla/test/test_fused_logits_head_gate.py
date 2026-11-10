@@ -1,12 +1,24 @@
 """Precision tests for fused_logits_head_gate (F3)."""
 
+import json
+import os
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import torch
+import triton
+import triton.testing
 from torch import nn
 
+from rtp_llm.models_py.triton_kernels.sparse_mla import (
+    fused_logits_head_gate as head_gate_module,
+)
 from rtp_llm.models_py.triton_kernels.sparse_mla.fused_logits_head_gate import (
     _baseline_logits_head_gate,
+    _cpu_launch,
+    _fused_logits_head_gate_kernel,
+    _fused_logits_head_gate_small_t_kernel,
     fused_logits_head_gate,
 )
 
@@ -97,6 +109,127 @@ class TestFusedLogitsHeadGate(unittest.TestCase):
                         ref.squeeze(-1).topk(topk, dim=-1).indices,
                     )
                 )
+
+    @staticmethod
+    def _independent_reference(
+        x: torch.Tensor, weight: torch.Tensor, qs: torch.Tensor, scale: float
+    ) -> torch.Tensor:
+        # FP64 GEMM is independent of both the Triton reduction and TF32 modes.
+        logits = x.double() @ weight.double().t()
+        return (logits * qs.reshape(logits.shape).double() * scale).float()[..., None]
+
+    def test_decode_reduce_reference_and_dispatch(self) -> None:
+        for rows in (32, 33, 64, 128, 129, 1024):
+            for transposed in (False, True):
+                x = torch.randn(rows, 6144, device="cuda", dtype=torch.bfloat16)
+                weight = torch.randn(32, 6144, device="cuda") * 0.02
+                if transposed:
+                    weight = weight.t().contiguous().t()
+                qs = torch.rand(rows, 32, device="cuda") + 0.1
+                scale = (6144 * 32) ** -0.5
+                ref = self._independent_reference(x, weight, qs, scale)
+                for enabled in ("0", "1"):
+                    with self.subTest(
+                        rows=rows, transposed=transposed, enabled=enabled
+                    ):
+                        with mock.patch.object(
+                            head_gate_module, "_DECODE_REDUCE_ENABLED", enabled == "1"
+                        ), mock.patch.object(
+                            _cpu_launch, "launch", wraps=_cpu_launch.launch
+                        ) as launch:
+                            out = fused_logits_head_gate(
+                                x, qs, weight, scale, high_precision=True
+                            )
+                        expected = (
+                            _fused_logits_head_gate_small_t_kernel
+                            if rows <= 32
+                            or (enabled == "1" and rows <= 128 and not transposed)
+                            else _fused_logits_head_gate_kernel
+                        )
+                        self.assertIs(launch.call_args.args[0], expected)
+                        torch.testing.assert_close(out, ref, atol=1e-7, rtol=1e-5)
+                        self.assertTrue(
+                            torch.equal(
+                                out.topk(8, dim=1).indices,
+                                ref.topk(8, dim=1).indices,
+                            )
+                        )
+
+    def test_decode_reduce_graph_changed_inputs(self) -> None:
+        for rows in (33, 64, 128):
+            with self.subTest(rows=rows), mock.patch.object(
+                head_gate_module, "_DECODE_REDUCE_ENABLED", True
+            ):
+                x = torch.randn(rows, 6144, device="cuda", dtype=torch.bfloat16)
+                weight = torch.randn(32, 6144, device="cuda") * 0.02
+                qs = torch.rand(rows, 32, 1, device="cuda") + 0.1
+                scale = (6144 * 32) ** -0.5
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        fused_logits_head_gate(
+                            x, qs, weight, scale, high_precision=True
+                        )
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    out = fused_logits_head_gate(
+                        x, qs, weight, scale, high_precision=True
+                    )
+                for _ in range(3):
+                    x.normal_()
+                    weight.normal_(std=0.02)
+                    qs.uniform_(0.1, 1.1)
+                    ref = self._independent_reference(x, weight, qs, scale)
+                    graph.replay()
+                    torch.testing.assert_close(out, ref, atol=1e-7, rtol=1e-5)
+                    self.assertTrue(
+                        torch.equal(
+                            out.topk(8, dim=1).indices,
+                            ref.topk(8, dim=1).indices,
+                        )
+                    )
+
+    @unittest.skipUnless(
+        os.environ.get("RTP_LLM_HEAD_GATE_BENCHMARK") == "1",
+        "set RTP_LLM_HEAD_GATE_BENCHMARK=1 to record graph latency",
+    )
+    def test_decode_reduce_benchmark(self) -> None:
+        results = []
+        for rows in (32, 33, 64, 128, 129, 1024):
+            x = torch.randn(rows, 6144, device="cuda", dtype=torch.bfloat16)
+            weight = torch.randn(32, 6144, device="cuda") * 0.02
+            qs = torch.rand(rows, 32, 1, device="cuda") + 0.1
+            scale = (6144 * 32) ** -0.5
+            ref = self._independent_reference(x, weight, qs, scale)
+            for enabled in ("0", "1"):
+                with mock.patch.object(
+                    head_gate_module, "_DECODE_REDUCE_ENABLED", enabled == "1"
+                ):
+
+                    def run() -> torch.Tensor:
+                        return fused_logits_head_gate(
+                            x, qs, weight, scale, high_precision=True
+                        )
+
+                    torch.testing.assert_close(run(), ref, atol=1e-7, rtol=1e-5)
+                    samples = [
+                        triton.testing.do_bench_cudagraph(run, rep=200) * 1000
+                        for _ in range(5)
+                    ]
+                results.append({"rows": rows, "enabled": enabled, "graph_us": samples})
+        report = {
+            "gpu": torch.cuda.get_device_name(),
+            "torch": torch.__version__,
+            "triton": triton.__version__,
+            "shape": {"K": 6144, "N": 32},
+            "results": results,
+        }
+        output = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "."))
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "head_gate_benchmark.json").write_text(json.dumps(report, indent=2))
+        print(json.dumps(report))
 
     def test_smaller_n(self):
         for T, K, N in [(32, 7168, 16), (32, 4096, 32), (32, 2048, 128)]:

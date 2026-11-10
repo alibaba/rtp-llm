@@ -109,6 +109,7 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
         experts.topk_ids_dtype = torch.int64
         layer = SimpleNamespace(
             _hy4_fp32_router=True,
+            _hy4_bf16_router_weight=None,
             gate_weight=gate_weight,
             gate=Mock(side_effect=AssertionError("BF16 gate used")),
             gate_chunk_rows=16,
@@ -148,7 +149,9 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
             generic_moe._cpu_ops, "DIRECT_ROUTER", True
         ), patch.object(
             generic_moe._cpu_ops, "no_module_hooks", return_value=True
-        ), patch.object(generic_moe._cpu_ops, "NATIVE_ALLOC", False), patch.object(
+        ), patch.object(
+            generic_moe._cpu_ops, "NATIVE_ALLOC", False
+        ), patch.object(
             generic_moe._prefill_optimization, "ENABLED", True
         ), patch.dict(
             "sys.modules",

@@ -4,6 +4,14 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "bf16_fp32_router_test",
+    srcs = ["bf16_fp32_router_test.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "launch_fusion_benchmark_test",
     srcs = ["launch_fusion_benchmark_test.py"],
     deps = py_test_deps,

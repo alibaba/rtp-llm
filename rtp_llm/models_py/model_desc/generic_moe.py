@@ -9,6 +9,7 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.kernels.cuda import prefill_cpu_ops as _cpu_ops
+from rtp_llm.models_py.kernels.cuda.mtp_frontend import no_module_hooks
 from rtp_llm.models_py.model_desc.block_map import (
     cpu_layer_group_ids,
     select_block_map_for_layer,
@@ -28,11 +29,14 @@ from rtp_llm.models_py.modules import (
     SelectTopk,
     SigmoidGateScaleAdd,
 )
+from rtp_llm.models_py.modules.base.cuda.bf16_fp32_router import (
+    bf16_fp32_router_logits,
+    prepare_bf16_fp32_router_weight,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
-from rtp_llm.models_py.kernels.cuda.mtp_frontend import no_module_hooks
 from rtp_llm.models_py.modules.hybrid.cmp_moe_streams import CmpMoeStreams
 from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
     Glm5Cmp,
@@ -210,6 +214,11 @@ class GenericMoeLayer(nn.Module):
                 weights, W.moe_gate, None, None, quant_config, hw_kernel_config
             )
             self.gate_weight = None
+        self._hy4_bf16_router_weight = (
+            prepare_bf16_fp32_router_weight(self.gate_weight)
+            if self._hy4_fp32_router
+            else None
+        )
         self.select_topk = SelectTopk(config=config)
         if moe_config.fake_balance_expert:
             self.fake_balance_expert = FakeBalanceExpert(
@@ -388,6 +397,7 @@ class GenericMoeLayer(nn.Module):
         clone.gate = self.gate
         clone.gate_weight = self.gate_weight
         clone._hy4_fp32_router = self._hy4_fp32_router
+        clone._hy4_bf16_router_weight = self._hy4_bf16_router_weight
         clone.select_topk = self.select_topk
         clone.fake_balance_expert = self.fake_balance_expert
         if share_mega_buf:
@@ -466,7 +476,9 @@ class GenericMoeLayer(nn.Module):
             topk_weights, topk_ids = native_routing
         else:
             if self._hy4_fp32_router:
-                router_logits = torch.matmul(hidden_states.float(), self.gate_weight)
+                router_logits = bf16_fp32_router_logits(
+                    hidden_states, self.gate_weight, self._hy4_bf16_router_weight
+                )
             elif self.gate_chunk_rows > 0 and num_tokens > 0:
                 router_logits = fixed_m_linear(
                     self.gate, hidden_states, self.gate_chunk_rows
