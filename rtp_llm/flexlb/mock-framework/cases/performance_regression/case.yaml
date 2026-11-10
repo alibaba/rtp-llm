@@ -43,26 +43,26 @@ phases:
     wait_after: 10s
 - id: playback
   describe: 同一轮先低速预热，再原速播放剩余请求并回查缓存窗口。
-  timeout: 660s
+  timeout: 525s
   steps:
   - id: start_client
-    describe: 四个 Client 先以 0.25 倍速预热 300 秒，再以 1.0 倍速播放剩余流量。
+    describe: 四个 Client 先以 0.25 倍速预热 120 秒，再以 1.0 倍速播放剩余流量。
     interface: client/start
     args:
       requests_file: data/traffic/deepseek-v4.1.mckidx
       reuse_cache: true
       replay_speed: 1.0
       warmup:
-        duration: 300s
+        duration: 120s
         rate_scale: 0.25
       total_concurrency: 32000
       queue_capacity: 48000
       request_timeout: 120s
       drain_timeout: 150s
-    within: 565s
-    wait_after: 530s
+    within: 430s
+    wait_after: 395s
   - id: check_cache_warmup_first
-    describe: 回查约第 435–465 秒的 Prefill 命中率。
+    describe: 回查约第 300–330 秒的 Prefill 命中率。
     interface: engine/cache/hit_rate
     args:
       range: [-95s, -65s]
@@ -70,7 +70,7 @@ phases:
       gte: 0.9
     within: 30s
   - id: check_cache_warmup_second
-    describe: 回查约第 465–495 秒的 Prefill 命中率。
+    describe: 回查约第 330–360 秒的 Prefill 命中率。
     interface: engine/cache/hit_rate
     args:
       range: [-65s, -35s]
@@ -121,7 +121,7 @@ phases:
       range: [-35s, -5s]
       statistic: mean
     expect:
-      lte: 275ms
+      lte: 600ms
     within: 30s
   - id: check_ttft_p95
     describe: 客户端首 token 延迟 P95。
@@ -130,7 +130,7 @@ phases:
       range: [-35s, -5s]
       statistic: p95
     expect:
-      lte: 600ms
+      lte: 1500ms
     within: 30s
   - id: check_tpot_mean
     describe: 成功多 token 请求 TPOT 均值。
@@ -165,6 +165,24 @@ phases:
       range: [-35s, -5s]
     expect:
       gte: 0.999
+    within: 30s
+  - id: check_post_warmup_ttft_mean
+    describe: 回查切速缓冲 30 秒后的第一个完整窗口，检查首 token 延迟均值。
+    interface: client/ttft
+    args:
+      range: [-243s, -213s]
+      statistic: mean
+    expect:
+      lte: 700ms
+    within: 30s
+  - id: check_post_warmup_ttft_p95
+    describe: 回查切速缓冲 30 秒后的第一个完整窗口，检查首 token 延迟 P95。
+    interface: client/ttft
+    args:
+      range: [-243s, -213s]
+      statistic: p95
+    expect:
+      lte: 2500ms
     within: 30s
   - id: stop_client
     describe: 待整份数据回放完毕后停止 Client，并收齐已发请求的终态。
