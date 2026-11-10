@@ -112,3 +112,13 @@ py_test(
     ],
     env = {"GPU_COUNT": "0"},
 )
+
+py_test(
+    name = "encode_executor_test",
+    srcs = ["encode_executor_test.py"],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+    ],
+    env = {"GPU_COUNT": "0"},
+)

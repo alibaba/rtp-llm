@@ -25,6 +25,7 @@ from rtp_llm.ops import (
     SpeculativeExecutionConfig,
     VitSeparation,
 )
+from rtp_llm.pipeline.encode_executor import BoundedEncodeExecutor
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
     get_role_names,
@@ -74,6 +75,7 @@ class Pipeline(object):
     ):
         self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
+        self._encode_executor = BoundedEncodeExecutor(max_workers=4)
         self._special_tokens: SpecialTokens = special_tokens
         self._mm_token: str = ""
         if mm_related_params:
@@ -97,7 +99,10 @@ class Pipeline(object):
         )
 
     async def close(self) -> None:
-        await self.backend_rpc_server_visitor.close()
+        try:
+            await self.backend_rpc_server_visitor.close()
+        finally:
+            self._encode_executor.shutdown()
 
     def encode(self, prompt: str):
         assert self.tokenizer is not None
@@ -178,8 +183,7 @@ class Pipeline(object):
         finally:
             backgroud_thread.join()
 
-    @torch.inference_mode()
-    def pipeline_async(  # type: ignore
+    async def pipeline_async(  # type: ignore
         self,
         prompt: str,
         request_id: int = None,
@@ -228,7 +232,7 @@ class Pipeline(object):
         # 在 tokenizer.encode(prompt) 之前解析及填充 banned_combo_token_ids，
         # 避免重复编码 prompt。
         parse_and_fill_banned_combo(prompt, generate_config, self.tokenizer)
-        token_ids = self.tokenizer.encode(prompt)
+        token_ids = await self._encode_executor.run(self.tokenizer.encode, prompt)
 
         # Prompt scoring constraints (max_new_tokens=1, non-streaming, no reuse/PD-sep) are
         # already enforced by validate() → enforce_prompt_scoring_constraints() during config creation.
@@ -272,14 +276,15 @@ class Pipeline(object):
         )
         kmonitor.report(GaugeMetrics.NUM_BEAMS_METRIC, generate_config.max_num_beams())
         kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, len(token_ids))
-        return self.generate_stream(
+        async for response in self.generate_stream(
             request_id,
             token_ids,
             mm_inputs,
             generate_config,
             headers=request_headers,
             **kwargs,
-        )
+        ):
+            yield response
 
     @staticmethod
     def process_stop_id(
