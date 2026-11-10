@@ -44,19 +44,19 @@ a1 ci job summary "$IMAGE_JOB_ID" --run "$IMAGE_RUN_ID" --repo "$CI_REPO" -f jso
 | `--branch` | 内部仓 CI 配方分支。 |
 | `github_source_repo`、`github_commit` | 源码仓地址和已推送的 40 位提交 SHA。 |
 | `pre-jobs` | 设为 `["mock-ci-case"]`，选择 Mock Case 测试范围。 |
-| `mock-cases` | Case ID 数组，默认 `["basic"]`。每个 ID 对应本次源码中的 `cases/<id>/case.yaml`，同一 ID 只能选一次。 |
-| `mock-large-cases` | 使用大 runner 的 Case ID 数组，默认包含 `master_ha_failover` 和 `performance_regression`。只决定资源规格，实际运行范围由 `mock-cases` 决定。 |
+| `mock-cases` | 选择 Case 和 runner，默认 `["basic"]`。每项可填 `<id>`、`<id>@8-32Gi` 或 `<id>@32-256Gi`。省略规格时用 `8-32Gi`，同一 Case ID 只能选一次。 |
+| `mock-scrape-interval` | 本次运行的 Prometheus 采集间隔，默认 `1s`。单独跑 HA 或 perf 时可传 `4s`。 |
 | `mock-case-image` | 第 1 步产出的完整环境镜像地址，或兼容的已有镜像。 |
 | `cancel-in-progress` | 设为 `false`，避免这次触发取消同一配方分支上已在运行的 CI。 |
 
-以下命令并行跑 `basic` 和 `master_ha_failover`。单独跑性能回归时，把 `mock-cases` 改为 `["performance_regression"]`。示例中的参数文件按 `a1 --params-file` 接受的字符串格式传值，AoneCI 会将数组和布尔参数解析为对应类型。
+以下命令让 `basic` 用 `8-32Gi`，HA 用 `32-256Gi`，两者并行执行。单独跑性能回归时，把 `mock-cases` 改为 `["performance_regression@32-256Gi"]`。示例中的参数文件按 `a1 --params-file` 接受的字符串格式传值，AoneCI 会将数组和布尔参数解析为对应类型。
 
 ```sh
 PARAMS_FILE=$(mktemp)
 cat > "$PARAMS_FILE" <<EOF
 {
   "pre-jobs": "[\"mock-ci-case\"]",
-  "mock-cases": "[\"basic\", \"master_ha_failover\"]",
+  "mock-cases": "[\"basic\", \"master_ha_failover@32-256Gi\"]",
   "github_source_repo": "${SOURCE_REPO:?}",
   "github_commit": "${SOURCE_SHA:?}",
   "mock-case-image": "${CASE_IMAGE:?}",
@@ -67,7 +67,7 @@ a1 ci pipeline run 1346 --repo "$CI_REPO" --branch "$RECIPE_REF" \
   --params-file "$PARAMS_FILE" -f json
 ```
 
-同一次运行会先执行一次 `mock-ci-case-build`。共享构建验证 Case 文件并按 runner 规格分组，随后为每个 Case 展开独立 Job。普通组使用 `8-32Gi`，大组使用 `32-256Gi`，Prometheus 采集间隔为 4 秒。各 Job 可以并行，独立上传报告。新增 Case 后直接传它的 ID 即可。
+同一次运行会先执行一次 `mock-ci-case-build`。共享构建验证 Case 文件并按 runner 规格分组，随后为每个 Case 展开独立 Job。各 Job 可以并行，独立上传报告。新增 Case 后直接传它的 ID 即可。
 
 ## 3. 下载和查看 Case 报告
 
