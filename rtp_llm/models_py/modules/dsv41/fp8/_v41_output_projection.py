@@ -18,7 +18,9 @@ from rtp_llm.models_py.modules.dsv41._fused_inv_rope_fp8_quant_triton import (
 def is_supported(o, freqs, weight, weight_scale) -> bool:
     """Static gate, safe to evaluate during graph capture; no device reads."""
     if (
-        o.device.type != "cuda"
+        weight is None
+        or weight_scale is None
+        or o.device.type != "cuda"
         or o.dtype != torch.bfloat16
         or o.ndim not in (3, 4)
         or o.numel() == 0
