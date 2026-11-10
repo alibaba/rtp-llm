@@ -77,26 +77,61 @@ def _fp4_unpack_to_fp32(
     return w_f * scale_f
 
 
+_FP4_WORKSPACES = {}
+
+
+def _fp4_workspace(weight_int8: torch.Tensor) -> dict:
+    out_dim, packed_in = weight_int8.shape
+    in_dim = packed_in * 2
+    key = (weight_int8.device.type, weight_int8.device.index, out_dim, in_dim)
+    ws = _FP4_WORKSPACES.get(key)
+    if ws is None:
+        kw = dict(device=weight_int8.device)
+        ws = {
+            "w_uint": torch.empty(out_dim, packed_in, dtype=torch.int32, **kw),
+            "low": torch.empty(out_dim, packed_in, dtype=torch.int32, **kw),
+            "high": torch.empty(out_dim, packed_in, dtype=torch.int32, **kw),
+            "indices": torch.empty(out_dim, in_dim, dtype=torch.int32, **kw),
+            "w_f": torch.empty(out_dim, in_dim, dtype=torch.float32, **kw),
+            "scale_rows": torch.empty(out_dim, in_dim // FP4_BLOCK, dtype=torch.float32, **kw),
+            "scale_f": torch.empty(out_dim, in_dim, dtype=torch.float32, **kw),
+            "out_f32": torch.empty(out_dim, in_dim, dtype=torch.float32, **kw),
+            "out": torch.empty(out_dim, in_dim, dtype=torch.bfloat16, **kw),
+        }
+        _FP4_WORKSPACES[key] = ws
+    return ws
+
+
 def _fp4_unpack_into(
     weight_int8: torch.Tensor,
     scale_ue8m0: torch.Tensor,
     lut: torch.Tensor,
-    out: torch.Tensor,
-) -> None:
-    """Capture-safe FP4 dequantization into a persistent BF16 workspace."""
+    ws: dict,
+) -> torch.Tensor:
+    """Allocation-free FP4 dequantization into a shared BF16 workspace.
+
+    Every intermediate is preallocated before graph capture.  Sharing one
+    workspace per unique matrix shape is safe because expert projections run
+    sequentially on the same stream; it also avoids the 48x per-expert copies
+    that a per-linear buffer would require.
+    """
     out_dim, packed_in = weight_int8.shape
     in_dim = packed_in * 2
-    w_uint = weight_int8.to(torch.int32) & 0xFF
-    low = w_uint & 0x0F
-    high = (w_uint >> 4) & 0x0F
-    interleaved = torch.empty(
-        out_dim, in_dim, dtype=torch.int64, device=weight_int8.device
+    w_uint = ws["w_uint"]
+    w_uint.copy_(weight_int8)
+    torch.bitwise_and(w_uint, 0xFF, out=w_uint)
+    torch.bitwise_and(w_uint, 0x0F, out=ws["low"])
+    torch.bitwise_right_shift(w_uint, 4, out=ws["high"])
+    ws["indices"][:, 0::2].copy_(ws["low"])
+    ws["indices"][:, 1::2].copy_(ws["high"])
+    torch.index_select(lut, 0, ws["indices"], out=ws["w_f"])
+    ws["scale_rows"].copy_(scale_ue8m0)
+    ws["scale_f"].view(out_dim, in_dim // FP4_BLOCK, FP4_BLOCK).copy_(
+        ws["scale_rows"].unsqueeze(-1)
     )
-    interleaved[:, 0::2] = low.long()
-    interleaved[:, 1::2] = high.long()
-    w_f = lut[interleaved]
-    scale_f = scale_ue8m0.to(torch.float32).repeat_interleave(FP4_BLOCK, 1)[:, :in_dim]
-    torch.mul(w_f, scale_f, out=out)
+    torch.mul(ws["w_f"], ws["scale_f"], out=ws["out_f32"])
+    ws["out"].copy_(ws["out_f32"])
+    return ws["out"]
 
 
 def _fp8_dequant_to_fp32(
@@ -181,7 +216,7 @@ class QuantizedLinear(nn.Module):
             # inside the captured region and the full expert set is not
             # duplicated in BF16 (which does not fit beside the KV pool).
             self._fp4_lut = _FP4_LUT.to(weight.device)
-            self._fp4_buf = None
+            self._fp4_buf = _fp4_workspace(weight)
             self.weight = weight
             self.scale = scale
             self.scale_gemm = None
@@ -206,8 +241,9 @@ class QuantizedLinear(nn.Module):
         """
         if self.storage == "fp4":
             if self._fp4_buf is not None:
-                _fp4_unpack_into(self.weight, self.scale, self._fp4_lut, self._fp4_buf)
-                return self._fp4_buf.to(out_dtype)
+                return _fp4_unpack_into(
+                    self.weight, self.scale, self._fp4_lut, self._fp4_buf
+                ).to(out_dtype)
             return _fp4_unpack_to_fp32(self.weight, self.scale).to(out_dtype)
         if self.storage == "fp8":
             return _fp8_dequant_to_fp32(self.weight, self.scale).to(out_dtype)
@@ -266,11 +302,15 @@ class QuantizedLinear(nn.Module):
             return F.linear(x, self.weight)
         if self.storage == "fp4":
             if torch.version.hip is not None:
-                w = _fp4_unpack_to_fp32(self.weight, self.scale).to(torch.bfloat16)
+                w = _fp4_unpack_into(
+                    self.weight, self.scale, self._fp4_lut, self._fp4_buf
+                )
                 return F.linear(x.to(torch.bfloat16), w).to(x.dtype)
             if self._fp4_buf is not None:
-                _fp4_unpack_into(self.weight, self.scale, self._fp4_lut, self._fp4_buf)
-                return F.linear(x.to(torch.bfloat16), self._fp4_buf).to(x.dtype)
+                w = _fp4_unpack_into(
+                    self.weight, self.scale, self._fp4_lut, self._fp4_buf
+                )
+                return F.linear(x.to(torch.bfloat16), w).to(x.dtype)
                 return self._fp4_forward_torch(x)
             return self._fp4_forward_deepgemm(x)
         # FP8: dequant to x's dtype on the fly.
