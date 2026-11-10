@@ -343,6 +343,29 @@ def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
     return get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
 
 
+def _dequant_wo_a_bf16_chunked(weight_fp8: torch.Tensor, scale) -> torch.Tensor:
+    """Exact bf16 dequant of block-128-scaled FP8 weights with bounded temps.
+
+    ``_fp8_dequant_to_fp32`` materializes full fp32 copies of weight and
+    expanded scales (~12x the weight bytes transient); on a card already
+    holding the checkpoint that spike OOMs (measured on L20 44GB). The
+    per-128-row bf16 chunking is bit-identical: e4m3 -> bf16 is exact and
+    power-of-two scales preserve the <=4 significand bits.
+    """
+    if scale.dtype == torch.int32:
+        # Packed int32 scales only occur on SM100+ paths; this fallback runs
+        # pre-SM100 where scales arrive as raw UE8M0 blocks.
+        return _fp8_dequant_to_fp32(weight_fp8, scale).to(torch.bfloat16)
+    n, k = weight_fp8.shape
+    out = torch.empty((n, k), dtype=torch.bfloat16, device=weight_fp8.device)
+    scales_f32 = scale.to(torch.float32)
+    for i in range(scales_f32.shape[0]):
+        rows = slice(i * 128, min((i + 1) * 128, n))
+        col_scale = scales_f32[i].repeat_interleave(128)[:k].to(torch.bfloat16)
+        out[rows] = weight_fp8[rows].to(torch.bfloat16) * col_scale
+    return out
+
+
 def _prepare_wo_a_stacked(
     weight_fp8: torch.Tensor, scale_raw: torch.Tensor, G: int, R: int, K: int
 ) -> tuple:
@@ -858,10 +881,8 @@ class AttentionFP8(nn.Module):
             )
         else:
             _stk_w, _stk_s = None, None
-            _stk_bf16 = (
-                _fp8_dequant_to_fp32(wo_a_w, wo_a_s)
-                .to(torch.bfloat16)
-                .view(n_groups_local, o_lora_rank, K_local)
+            _stk_bf16 = _dequant_wo_a_bf16_chunked(wo_a_w, wo_a_s).view(
+                n_groups_local, o_lora_rank, K_local
             )
         self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
         self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
@@ -985,6 +1006,24 @@ class AttentionFP8(nn.Module):
             HCA_STATE: (torch.float32, 2 * head_dim),
             INDEXER_STATE: (torch.float32, 2 * coff_idx * idx_hd),
         }
+
+        if tp_size > 1:
+            # V4.1 attention weights load replicated (sp_id) and modules keep
+            # TP-sliced contiguous copies; release the full-size originals
+            # from the layer dict so the construction peak approaches the
+            # sharded steady state (~4GB/rank across 40 layers — decisive on
+            # 44GB cards). Module-held references keep every tensor still in
+            # use alive; the V41 subclass reads compressor/indexer tags and
+            # module attributes only, never these popped tags.
+            for _tag in (
+                W.v4_attn_wq_b_w,
+                W.v4_attn_wq_b_s,
+                W.v4_attn_wo_a_w,
+                W.v4_attn_wo_a_s,
+                W.v4_attn_wo_b_w,
+                W.v4_attn_wo_b_s,
+            ):
+                layer_weights.pop(_tag, None)
 
     def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         """Bind CP context.  When active on a prefill call, ``forward``
