@@ -27,14 +27,44 @@ class V41Embedding(Embedding):
         return hidden.reshape(*input.shape, hidden.shape[-1])
 
 
+def _dequant_v41_mxfp8_weight(
+    weight: torch.Tensor, scales: torch.Tensor
+) -> torch.Tensor:
+    """Expand 32x32 E8M0 block scales and return a dense BF16 weight.
+
+    ROCm does not ship DeepGEMM's MXFP8 block-scaled GEMM.  Dequantizing the
+    checkpoint once at load preserves the checkpoint's exact E4M3 values and
+    E8M0 block scale semantics; it does not introduce a new quantization.
+    """
+    n, k = weight.shape
+    sb = scales.contiguous().view(torch.uint8)
+    if int(sb.max().item()) >= 255:
+        raise ValueError("V4.1 MXFP8 weight contains a non-finite E8M0 scale")
+    factor = torch.pow(2.0, sb.to(torch.float32) - 127.0)
+    factor = factor.repeat_interleave(32, dim=0).repeat_interleave(32, dim=1)
+    factor = factor[:n, :k]
+    out = weight.to(torch.float32)
+    out.mul_(factor)
+    return out.to(torch.bfloat16)
+
+
 class V41MXFP8Linear(torch.nn.Module):
     """Native 32x32 checkpoint blocks, expanded to per-row MXFP8 scales."""
 
     def __init__(self, weight: torch.Tensor, scales: torch.Tensor):
         super().__init__()
-        self.weight = weight
         self.N, self.K = weight.shape
-        self.weight_scales = self.pack_scales(scales)
+        # The V4.1 checkpoint stores one E4M3 value and one E8M0 scale per
+        # 32x32 block.  gfx942 has no DeepGEMM MXFP8 GEMM, so keep the exact
+        # dequantized BF16 weight instead of silently substituting a new
+        # quantization.  CUDA keeps the native packed-scale path.
+        self._rocm_bf16 = torch.version.hip is not None
+        if self._rocm_bf16:
+            self.weight = _dequant_v41_mxfp8_weight(weight, scales)
+            self.weight_scales = None
+        else:
+            self.weight = weight
+            self.weight_scales = self.pack_scales(scales)
 
     def pack_scales(self, scales: torch.Tensor) -> torch.Tensor:
         if scales.shape != ((self.N + 31) // 32, (self.K + 31) // 32):
@@ -52,6 +82,11 @@ class V41MXFP8Linear(torch.nn.Module):
         )
 
     def _quantize_input(self, x: torch.Tensor):
+        if self._rocm_bf16:
+            raise NotImplementedError(
+                "V41MXFP8Linear uses dequantized BF16 weights on ROCm; "
+                "group32 FP8 producer kernels are not available"
+            )
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
             sgl_per_token_group_quant_fp8,
         )
@@ -82,6 +117,11 @@ class V41MXFP8Linear(torch.nn.Module):
         remain closed for this linear. The caller owns the BF16 norm tensor.
         Input layout and disjoint BF16 output storage are caller preconditions.
         """
+        if self._rocm_bf16:
+            raise NotImplementedError(
+                "V41MXFP8Linear uses dequantized BF16 weights on ROCm; "
+                "forward_quantized requires the native MXFP8 GEMM"
+            )
         m = x_q.numel() // self.K
         shape = (*x_q.shape[:-1], self.N)
         output = (
@@ -114,6 +154,12 @@ class V41MXFP8Linear(torch.nn.Module):
     def forward(self, x: torch.Tensor, out=None):
         if x.numel() == 0:
             return out if out is not None else x.new_empty((*x.shape[:-1], self.N))
+        if self._rocm_bf16:
+            y = torch.nn.functional.linear(x, self.weight)
+            if out is not None:
+                out.copy_(y)
+                return out
+            return y
         return self.forward_quantized(*self._quantize_input(x), out=out)
 
 
