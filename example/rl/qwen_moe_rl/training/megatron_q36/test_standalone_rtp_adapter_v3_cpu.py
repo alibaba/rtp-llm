@@ -1,0 +1,242 @@
+"""CPU protocol tests only; these do not qualify native RPC or CUDA IPC."""
+import asyncio
+import ast
+import hashlib
+import importlib.util
+import os
+from pathlib import Path
+import sys
+import types
+import unittest
+import weakref
+from unittest.mock import patch
+
+
+class TransactionTest(unittest.TestCase):
+    def setUp(self):
+        self.events = []
+        events = self.events
+        self.torch = types.ModuleType('torch')
+        self.torch.bfloat16 = 'bf16'
+        self.torch.float32 = 'fp32'
+        self.torch.uint8 = 'uint8'
+        self.torch.device = lambda kind, index: f'{kind}:{index}'
+        self.torch.cuda = types.SimpleNamespace(current_device=lambda: 0)
+        distributed = types.ModuleType('torch.distributed')
+        distributed.is_initialized = lambda: True
+        distributed.get_world_size = lambda: 4
+        distributed.get_rank = lambda: 0
+        self.torch.distributed = distributed
+        ray = types.ModuleType('ray')
+        async def ensure(*args): return {'native_boot': 'boot', 'native_incarnation': 'boot-1'}
+        ray.get_actor = lambda _: types.SimpleNamespace(ensure_native_running=types.SimpleNamespace(remote=ensure))
+        backend = types.ModuleType('rtp_verl_backend')
+        class OriginalAdapter:
+            def _required_sources(self): return {'normal', 'x.linear_attn.A_log'}
+            def _local_ipc_binding(self, step): return {'bound': step, 'native_incarnation': 'boot-1'}
+            def _broadcast(self, obj): return obj
+            def _gather(self, obj): return [obj] * 4
+        backend.RTPServerAdapter = OriginalAdapter
+        backend.RTPReplica = type('RTPReplica', (), {})
+        native = types.ModuleType('rtp_native_server')
+        self.control = None
+        async def new_control(replica): return self.control
+        native._new_control = new_control
+        native._source = lambda: None
+        native._audit_root = lambda: Path('/unused')
+        native._write_json = lambda path, data: events.append(('record', data))
+        topology = types.ModuleType('rtp_topology')
+        topology.preserve_fp32_source = lambda name: name.endswith('A_log')
+        rollout = types.ModuleType('verl.workers.rollout.base')
+        rollout.BaseRollout = type('BaseRollout', (), {})
+        ipc = types.ModuleType('rtp_llm.utils.cuda_ipc')
+        ipc.CudaIpcV2 = types.SimpleNamespace(export_tensor=lambda value: b'local-ipc')
+        digest = types.ModuleType('q36_refit_bounded_digest_candidate')
+        class Workspace:
+            def __init__(self, device): events.append(('workspace', device))
+            def hash(self, value, name, source_digest):
+                source_digest.update(name.encode())
+                return hashlib.sha256(b'1234').hexdigest(), 4
+            def close(self): events.append('workspace-close')
+        digest.CudaDigestWorkspace = Workspace
+        modules = {'torch': self.torch, 'torch.distributed': distributed, 'ray': ray,
+                   'rtp_verl_backend': backend, 'rtp_native_server': native,
+                   'rtp_topology': topology, 'verl.workers.rollout.base': rollout,
+                   'rtp_llm.utils.cuda_ipc': ipc, 'q36_refit_bounded_digest_candidate': digest}
+        module_patch = patch.dict(sys.modules, modules)
+        module_patch.start()
+        self.addCleanup(module_patch.stop)
+        path = Path(__file__).resolve().parents[2] / 'adapter' / 'standalone_rtp_adapter_v3.py'
+        spec = importlib.util.spec_from_file_location('standalone_rtp_adapter', path)
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+        self.adapter = object.__new__(self.module.StandaloneRTPAdapter)
+        self.adapter.replica_rank = 0
+        self.adapter.tp_size = 4
+        self.adapter._last_sync_version = None
+        self.adapter._poisoned = False
+        self.adapter._unacknowledged_ipc = []
+
+    def tensor(self):
+        events = self.events
+        class Tensor:
+            device = 'cuda:0'
+            dtype = 'bf16'
+            shape = (2,)
+            def detach(self): return self
+            def to(self, dtype):
+                events.append(('dtype', dtype))
+                result = Tensor()
+                result.dtype = dtype
+                return result
+            def contiguous(self): return self
+            def cpu(self): return self
+            def view(self, dtype): return self
+            def numpy(self): return b'1234'
+        return Tensor()
+
+    def make_control(self, fail=False):
+        events = self.events
+        class Control:
+            count = 0
+            async def status(self): return [types.SimpleNamespace(phase='paused', model_version='v0')]
+            async def begin_update(self, **kwargs): return [types.SimpleNamespace(update_id='u1')]
+            async def push_weight(self, name, metadata):
+                events.append(('push', name))
+                if fail: raise RuntimeError('native push failed')
+                self.count += 1
+                return [types.SimpleNamespace(tp_rank=i, update_id='u1', received_weights=self.count) for i in range(4)]
+            async def commit_update(self):
+                events.append('commit')
+                return [types.SimpleNamespace(global_step=1, model_version='v1', received_weights=2,
+                                              applied_weights=2, tp_rank=i, tp_size=4, phase='paused') for i in range(4)]
+            async def close(self): events.append('close')
+        self.control = Control()
+
+    def iterator(self):
+        events, make_tensor = self.events, self.tensor
+        class Weights:
+            names = ['normal', 'x.linear_attn.A_log']
+            index = 0
+            pending = None
+            previous = None
+            def __aiter__(self): return self
+            async def __anext__(self):
+                if self.pending is not None: raise RuntimeError('next before ACK')
+                if self.previous is not None and self.previous() is not None:
+                    raise RuntimeError('previous source is retained across next allocation')
+                if self.index == len(self.names): raise StopAsyncIteration
+                name = self.names[self.index]
+                self.index += 1
+                self.pending = name
+                value = make_tensor()
+                self.previous = weakref.ref(value)
+                return name, value
+            def confirm_native_ack(self, name, proof):
+                if name != self.pending or not proof['all_rank_acked']: raise RuntimeError('bad proof')
+                events.append(('ack', name))
+                self.pending = None
+        return Weights()
+
+    def test_native_ack_precedes_next_and_commit(self):
+        self.make_control()
+        asyncio.run(self.adapter.update_weights(self.iterator(), global_steps=1))
+        self.assertLess(self.events.index(('push', 'normal')), self.events.index(('ack', 'normal')))
+        self.assertLess(self.events.index(('ack', 'normal')), self.events.index(('push', 'x.linear_attn.A_log')))
+        self.assertIn(('dtype', 'fp32'), self.events)
+        self.assertIn('commit', self.events)
+        record = next(x[1] for x in self.events if isinstance(x, tuple) and x[0] == 'record')
+        self.assertEqual(record['replica_rank'], 0)
+        self.assertEqual(record['native_boot'], 'boot')
+        self.assertEqual(record['hf_tensor_count'], record['native_received_weights'])
+        self.assertEqual([r['tp_rank'] for r in record['rank_status']], list(range(4)))
+        self.assertTrue(all(r['model_version'] == record['model_version'] for r in record['rank_status']))
+        self.assertGreater(record['finished_unix'], 0)
+
+    def test_failed_native_push_never_confirms(self):
+        self.make_control(fail=True)
+        with self.assertRaisesRegex(RuntimeError, 'native push failed'):
+            asyncio.run(self.adapter.update_weights(self.iterator(), global_steps=1))
+        self.assertTrue(self.adapter._poisoned)
+        self.assertFalse(any(isinstance(item, tuple) and item[0] == 'ack' for item in self.events))
+        self.assertNotIn('commit', self.events)
+
+    def test_controller_quiescence_and_real_probe_gate(self):
+        events = self.events
+        replica = object.__new__(self.module.StandaloneRTPReplica)
+        replica.replica_rank, replica.world_size = 0, 4
+        state = types.SimpleNamespace(generation_ready=True)
+        async def pause():
+            events.append('pause-controller')
+            state.generation_ready = False
+            return {'paused': True, 'statuses': [dict(tp_rank=i, tp_size=4, phase='paused', model_version='v1') for i in range(4)]}
+        async def probe(step, version):
+            events.append(('probe-controller', step, version))
+            state.generation_ready = True
+            return {'global_step': step, 'model_version': version}
+        replica._server_handle = types.SimpleNamespace(
+            pause_for_training=types.SimpleNamespace(remote=pause),
+            probe_synced_policy=types.SimpleNamespace(remote=probe))
+        async def native_control(operation): events.append(('native-control', operation))
+        replica._control = native_control
+        class ReadyControl:
+            async def status(self):
+                return [types.SimpleNamespace(phase='running', model_version='v1', global_step=1) for _ in range(4)]
+            async def close(self): pass
+        self.control = ReadyControl()
+        async def scenario():
+            await replica.abort_all_requests()
+            self.assertFalse(state.generation_ready)
+            await replica.resume_generation()
+            self.assertTrue(state.generation_ready)
+        asyncio.run(scenario())
+        self.assertEqual(events, ['pause-controller', ('native-control', 'resume'), ('probe-controller', 1, 'v1')])
+
+    def test_probe_failure_closes_admission_preserves_error(self):
+        events = self.events
+        replica = object.__new__(self.module.StandaloneRTPReplica)
+        replica.replica_rank, replica.world_size = 0, 4
+        state = types.SimpleNamespace(generation_ready=True)
+        async def pause():
+            events.append('pause-controller')
+            state.generation_ready = False
+            raise RuntimeError('pause failed after admission closed')
+        async def probe(step, version): raise RuntimeError('probe failed')
+        replica._server_handle = types.SimpleNamespace(
+            pause_for_training=types.SimpleNamespace(remote=pause),
+            probe_synced_policy=types.SimpleNamespace(remote=probe))
+        async def native_control(operation): pass
+        replica._control = native_control
+        class ReadyControl:
+            async def status(self):
+                return [types.SimpleNamespace(phase='running', model_version='v1', global_step=1) for _ in range(4)]
+            async def close(self): pass
+        self.control = ReadyControl()
+        with self.assertRaisesRegex(RuntimeError, 'probe failed'):
+            asyncio.run(replica.resume_generation())
+        self.assertFalse(state.generation_ready)
+        self.assertEqual(events, ['pause-controller'])
+
+    def test_actual_controller_interface_contract(self):
+        checkout = Path(os.environ.get('RTP_SOURCE', Path(__file__).resolve().parents[5]))
+        root = checkout / 'example/rl/qwen_moe_rl/adapter'
+        multi_source = (root / 'rtp_multinode_server.py').read_text()
+        native_source = (root / 'rtp_native_server.py').read_text()
+        def methods(source, classname):
+            tree = ast.parse(source)
+            cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == classname)
+            return {node.name: node for node in cls.body if isinstance(node, ast.AsyncFunctionDef)}
+        actual = methods(multi_source, 'MultiNodeRTPServer')
+        self.assertEqual([x.arg for x in actual['pause_for_training'].args.args], ['self'])
+        self.assertEqual([x.arg for x in actual['probe_synced_policy'].args.args], ['self', 'expected_step', 'expected_version'])
+        probe_text = ast.get_source_segment(multi_source, actual['probe_synced_policy'])
+        pause_text = ast.get_source_segment(multi_source, actual['pause_for_training'])
+        self.assertIn('self._generation_ready=True', probe_text)
+        self.assertIn('self.client.close_admission', pause_text)
+        base = methods(native_source, 'RTPServer')['probe_synced_policy']
+        base_text = ast.get_source_segment(native_source, base)
+        self.assertIn('rtp_sync_rank', base_text)
+        self.assertIn('full_source_sha256', base_text)
+
+
+if __name__ == '__main__': unittest.main()
