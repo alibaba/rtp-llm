@@ -336,6 +336,59 @@ TEST_F(MemoryLayoutStrategyTest, SparseMlaAndIndexerKeepByteScaleLayout) {
     }
 }
 
+TEST_F(MemoryLayoutStrategyTest, MlaModelKeepsOpaqueStateAsPhysicalPages) {
+    auto spec  = createTestKvCacheSpec(1, DataType::TYPE_FP32, 1, 1024, 1024, 0);
+    spec->type = KVCacheSpecType::OpaqueState;
+    CacheConfig cache_config;
+    cache_config.layer_num          = 1;
+    cache_config.use_mla            = true;
+    cache_config.dtype              = DataType::TYPE_FP32;
+    cache_config.seq_size_per_block = 1024;
+    initializeSingleGroup(cache_config, spec, 4);
+
+    const auto    pool = DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.group("default"));
+    const auto&   layout = pool.memory_layouts.front();
+    auto          kv     = torch::zeros({static_cast<int64_t>(layout.kv_block_pool_size_bytes)}, torch::kUInt8);
+    torch::Tensor scales;
+    MemoryLayoutStrategy strategy;
+    ASSERT_TRUE(strategy.init(layout, kv, scales, kv.data_ptr()));
+    EXPECT_EQ(strategy.getLayerCacheTensors().front().sizes().vec(), (std::vector<int64_t>{layout.block_num, 256}));
+}
+
+TEST_F(MemoryLayoutStrategyTest, LinearCacheTransferPartitionsEachHistoryChannelRange) {
+    LinearAttentionConfig linear;
+    linear.linear_num_key_heads   = 8;
+    linear.linear_num_value_heads = 16;
+    linear.linear_key_head_dim    = 16;
+    linear.linear_value_head_dim  = 16;
+    linear.linear_conv_kernel_dim = 4;
+    linear.ssm_state_dtype        = DataType::TYPE_FP32;
+    linear.conv_state_dtype       = DataType::TYPE_BF16;
+    KVCacheSpecDesc desc;
+    desc.tag        = "linear";
+    desc.cache_type = KVCacheSpecType::LinearAttention;
+    ParallelismConfig parallelism;
+    SpecBuildContext  ctx;
+    ctx.dtype                   = DataType::TYPE_BF16;
+    ctx.linear_attention_config = &linear;
+    ctx.parallelism_config      = &parallelism;
+    const auto decode           = std::dynamic_pointer_cast<LinearKVCacheSpec>(LinearKVCacheSpec::build(desc, ctx));
+    parallelism.tp_size         = 8;
+    const auto prefill          = std::dynamic_pointer_cast<LinearKVCacheSpec>(LinearKVCacheSpec::build(desc, ctx));
+    const auto source           = prefill->transferSegments(1, 0);
+    ASSERT_EQ(source.size(), 10u);
+    for (size_t rank = 0; rank < 8; ++rank) {
+        const auto destination = decode->transferSegments(8, rank);
+        ASSERT_EQ(destination.size(), source.size());
+        for (size_t segment = 0; segment < source.size(); ++segment) {
+            EXPECT_EQ(destination[segment].bytes, source[segment].bytes);
+            EXPECT_EQ(destination[segment].offset, 8 * source[segment].offset + rank * source[segment].bytes);
+        }
+        EXPECT_LE(destination.back().offset + destination.back().bytes, decode->block_size_bytes());
+    }
+    EXPECT_EQ(decode->block_size_bytes(), 8 * prefill->block_size_bytes());
+}
+
 TEST_F(MemoryLayoutStrategyTest, GetLayerCacheTensors) {
     auto ctx = createTestContext();
 

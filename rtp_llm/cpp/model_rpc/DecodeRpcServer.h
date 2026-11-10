@@ -115,7 +115,8 @@ private:
                                                       const std::vector<std::string>& peer_ips) const;
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
-                                                            const std::vector<std::string>& peer_ips) const;
+                                                            const std::vector<std::string>& peer_ips,
+                                                            bool collect_linear_shards = false) const;
     BroadcastLoadRequestPB buildBroadcastLoadRequest(const LoadKVCacheContext& load_context) const;
     static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
                                                const CacheTopology&          topology,

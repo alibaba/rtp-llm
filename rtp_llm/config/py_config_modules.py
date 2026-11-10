@@ -338,6 +338,7 @@ class VitConfig:
     DEFAULT_MM_TIMEOUT_MS: int = DEFAULT_MM_TIMEOUT_MS
     DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB: int = 100 * 1024
     DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB: int = 2 * 1024 * 1024
+    DEFAULT_MM_VIDEO_MAX_FRAMES: int = 64
     # Per-process byte budgets. Hashes live on CPU, independently of the
     # tensor-bearing embedding cache. Zero disables the respective cache.
     DEFAULT_MM_CACHE_GPU_MAX_BYTES: int = 2 * 1024 * 1024 * 1024
@@ -356,6 +357,7 @@ class VitConfig:
         self.mm_video_max_file_size_kb: int = (
             VitConfig.DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB
         )
+        self.mm_video_max_frames: int = VitConfig.DEFAULT_MM_VIDEO_MAX_FRAMES
         self.mm_cache_item_num: int = 10
         self.mm_cache_gpu_max_bytes: int = VitConfig.DEFAULT_MM_CACHE_GPU_MAX_BYTES
         self.mm_cache_cpu_max_bytes: int = VitConfig.DEFAULT_MM_CACHE_CPU_MAX_BYTES
@@ -444,6 +446,7 @@ class VitConfig:
             f"download_headers: {self.download_headers}\n"
             f"mm_image_max_file_size_kb: {self.mm_image_max_file_size_kb}\n"
             f"mm_video_max_file_size_kb: {self.mm_video_max_file_size_kb}\n"
+            f"mm_video_max_frames: {self.mm_video_max_frames}\n"
             f"mm_cache_item_num: {self.mm_cache_item_num}\n"
             f"mm_cache_gpu_max_bytes: {self.mm_cache_gpu_max_bytes}\n"
             f"mm_cache_cpu_max_bytes: {self.mm_cache_cpu_max_bytes}\n"

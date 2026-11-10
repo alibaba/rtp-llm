@@ -11,6 +11,11 @@
 namespace rtp_llm {
 
 struct LinearKVCacheSpec: public KVCacheSpec {
+    struct BlockSegment {
+        size_t offset;
+        size_t bytes;
+    };
+
     LinearKVCacheSpec(std::string tag                       = {},
                       uint32_t    seq_size_per_block        = 1,
                       uint32_t    kernel_seq_size_per_block = 1,
@@ -111,6 +116,12 @@ struct LinearKVCacheSpec: public KVCacheSpec {
             layout.v_row_bytes   = v_row_elems * item_size;
             layout.history_rows  = history_rows;
         }
+        spec->local_key_heads_ = local_k_heads;
+        spec->conv_history_    = linear.linear_conv_kernel_dim - 1;
+        spec->conv_qk_bytes_ =
+            static_cast<size_t>(linear.linear_key_head_dim) * local_k_heads * getTypeSize(spec->conv_state_dtype);
+        spec->conv_v_bytes_ =
+            static_cast<size_t>(linear.linear_value_head_dim) * local_v_heads * getTypeSize(spec->conv_state_dtype);
         return spec;
     }
 
@@ -138,6 +149,36 @@ struct LinearKVCacheSpec: public KVCacheSpec {
         return conv_elems * getTypeSize(conv_state_dtype);
     }
 
+    // The SSM region is head-major. Each convolution history row contains
+    // separate Q, K, V channel ranges, so a TP shard is not one byte slice.
+    std::vector<BlockSegment> transferSegments(size_t shard_count, size_t shard) const {
+        RTP_LLM_CHECK_WITH_INFO(shard_count > 0 && shard < shard_count && local_key_heads_ > 0
+                                    && local_key_heads_ % shard_count == 0 && local_kv_head_num % shard_count == 0,
+                                "invalid linear cache head partition: k=%u v=%u shard=%zu/%zu",
+                                local_key_heads_,
+                                local_kv_head_num,
+                                shard,
+                                shard_count);
+        const auto                ssm_bytes = k_block_size_bytes();
+        const auto                qk_bytes  = conv_qk_bytes_;
+        const auto                v_bytes   = conv_v_bytes_;
+        const auto                row_bytes = 2 * qk_bytes + v_bytes;
+        std::vector<BlockSegment> segments;
+        segments.reserve(1 + 3 * conv_history_);
+        auto append = [&](size_t offset, size_t bytes) {
+            const auto shard_bytes = bytes / shard_count;
+            segments.push_back({offset + shard * shard_bytes, shard_bytes});
+        };
+        append(0, ssm_bytes);
+        for (size_t row = 0; row < conv_history_; ++row) {
+            const auto offset = ssm_bytes + row * row_bytes;
+            append(offset, qk_bytes);
+            append(offset + qk_bytes, qk_bytes);
+            append(offset + 2 * qk_bytes, v_bytes);
+        }
+        return segments;
+    }
+
     rtp_llm::DataType memoryLayoutDType() const override {
         return memory_layout_dtype_;
     }
@@ -162,6 +203,11 @@ private:
 
     DataType ssm_state_dtype  = DataType::TYPE_INVALID;
     DataType conv_state_dtype = DataType::TYPE_INVALID;
+
+    uint32_t local_key_heads_ = 0;
+    size_t   conv_history_    = 0;
+    size_t   conv_qk_bytes_   = 0;
+    size_t   conv_v_bytes_    = 0;
 };
 
 }  // namespace rtp_llm

@@ -126,6 +126,9 @@ class BackendRPCServerVisitor:
         self.sp_config = sp_config
         self.source_role = source_role
         self.mm_model_config = mm_model_config
+        self._mm_layout_from_vit = (
+            getattr(model_config, "model_type", None) == "glm5_3_flash"
+        )
         self._mm_cache_routing = (
             vit_separation == VitSeparation.VIT_SEPARATION_REMOTE
             and getattr(pd_sep_config, "role_type", None) == RoleType.FRONTEND
@@ -321,7 +324,14 @@ class BackendRPCServerVisitor:
         ):
             keys = multimodal_cache_keys(input)
             metadata = None
-            if keys and len(keys) <= 256 and all(len(key) <= 4096 for key in keys):
+            # GLM video has one feature span per frame, with timestamp tokens
+            # supplied by ViT. Hash-only metadata cannot expand that layout.
+            if (
+                not getattr(self, "_mm_layout_from_vit", False)
+                and keys
+                and len(keys) <= 256
+                and all(len(key) <= 4096 for key in keys)
+            ):
                 vit_result = await self.master_client.get_backend_role_addrs(
                     block_cache_keys=[],
                     cache_key_block_size=self._cache_key_block_size(),

@@ -137,6 +137,14 @@ def init_vit_group_args(parser, vit_config):
         help="视频文件大小上限，单位为KB",
     )
     vit_group.add_argument(
+        "--mm_video_max_frames",
+        env_name="MM_VIDEO_MAX_FRAMES",
+        bind_to=(vit_config, "mm_video_max_frames"),
+        type=int,
+        default=VitConfig.DEFAULT_MM_VIDEO_MAX_FRAMES,
+        help="多模态视频最大采样帧数",
+    )
+    vit_group.add_argument(
         "--mm_cache_item_num",
         env_name="MM_CACHE_ITEM_NUM",
         bind_to=(vit_config, "mm_cache_item_num"),
