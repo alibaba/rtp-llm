@@ -1,7 +1,7 @@
 package org.flexlb.mock.client;
 
 import java.util.*;
-import org.flexlb.mock.protocol.Argument;
+import org.flexlb.mock.protocol.ControlServer.OptionalArgument;
 import com.fasterxml.jackson.annotation.JsonInclude;
 
 /**
@@ -30,13 +30,13 @@ public interface ClientProtocol {
      * Starts one replay using a concurrency budget shared by all Clients.
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    record Start(@Argument(optional=true) List<String> masters, String requests_file,
-                 @Argument(optional=true) Double qps, @Argument(optional=true) Double replay_speed,
+    record Start(@OptionalArgument List<String> masters, String requests_file,
+                 @OptionalArgument Double qps, @OptionalArgument Double replay_speed,
                  int total_concurrency, int queue_capacity,
                  long request_timeout_ms, long drain_timeout_ms,
-                 @Argument(optional=true) Boolean reuse_cache,
-                 @Argument(optional=true) Integer fallback_max_output_tokens,
-                 @Argument(optional=true) Warmup warmup) {
+                 @OptionalArgument Boolean reuse_cache,
+                 @OptionalArgument Integer fallback_max_output_tokens,
+                 @OptionalArgument Warmup warmup) {
         public Start(List<String> masters, String requests_file, Double qps, Double replay_speed,
                      int total_concurrency, int queue_capacity, long request_timeout_ms, long drain_timeout_ms) {
             this(masters, requests_file, qps, replay_speed, total_concurrency, queue_capacity,
@@ -63,13 +63,13 @@ public interface ClientProtocol {
      * Assigns one Client its request ordinals and concurrency budget for a replay.
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    record ClientReplayPlan(long sequence, @Argument(optional=true) List<String> masters, String requests_file,
+    record ClientReplayPlan(long sequence, @OptionalArgument List<String> masters, String requests_file,
                  long count, long first_index, int stride, long first_request_id, String sha256,
-                 @Argument(optional=true) Double qps, @Argument(optional=true) Double replay_speed,
+                 @OptionalArgument Double qps, @OptionalArgument Double replay_speed,
                  int concurrency, int queue_capacity, long request_timeout_ms, long drain_timeout_ms,
-                 @Argument(optional=true) Boolean reuse_cache,
-                 @Argument(optional=true) Integer fallback_max_output_tokens,
-                 @Argument(optional=true) Warmup warmup) {
+                 @OptionalArgument Boolean reuse_cache,
+                 @OptionalArgument Integer fallback_max_output_tokens,
+                 @OptionalArgument Warmup warmup) {
         public ClientReplayPlan(long sequence, List<String> masters, String requests_file, long count, long first_index,
                      int stride, long first_request_id, String sha256, Double qps, Double replay_speed,
                      int concurrency, int queue_capacity, long request_timeout_ms, long drain_timeout_ms) {

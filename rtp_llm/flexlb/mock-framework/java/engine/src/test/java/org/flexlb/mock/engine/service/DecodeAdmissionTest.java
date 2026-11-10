@@ -18,65 +18,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Exercises KV admission and cancellation through the Decode RPC.
+ */
 class DecodeAdmissionTest {
-    private static Set<Long> cacheKeys(LLMMockEngine node) {
-        return new HashSet<>(Arrays.stream(node.cacheManager().snapshot(-1, true).keys()).boxed().toList());
-    }
     @TempDir Path directory;
-    private static GenerateRequestPB input(String client, long id, int length, int timeout) {
-        return GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE).setRequestId(id).setClientId(client)
-            .setInput(GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(IntStream.rangeClosed(1, length).boxed().toList())
-                .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(4).setReuseCache(true).setTimeoutMs(timeout))).build();
-    }
-    private Harness node(boolean disableReuse) throws Exception {
-        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration("decode"));
-        ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2).put("reuse_cache", true)
-            .put("disable_decode_first_malloc_device_reuse", disableReuse);
-        var path = directory.resolve("config.json"); json.writeValue(path.toFile(), root);
-        return new Harness(LLMMockEngine.start(RtpConfig.load(path)));
-    }
-    private static void await(BooleanSupplier condition) throws Exception {
-        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-        while (!condition.getAsBoolean()) { if (System.nanoTime() >= end) fail("Condition timed out"); Thread.sleep(5); }
-    }
-    private static final class Harness implements AutoCloseable {
-        final LLMMockEngine node;
-        final ManagedChannel channel;
-        Harness(LLMMockEngine node) { this.node = node; channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build(); }
-        WorkerStatusPB status() { return RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS).getWorkerStatus(StatusVersionPB.getDefaultInstance()); }
-        @Override public void close() throws Exception { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); node.close(); }
-    }
-    private static final class Call implements AutoCloseable {
-        final Context.CancellableContext context = Context.current().withCancellation();
-        final BlockingQueue<Object> replies = new LinkedBlockingQueue<>();
-        final StreamObserver<GenerateRequestPB> request;
-        Call(Harness node, long rpcMs) throws Exception {
-            request = context.call(() -> {
-                var stub = RpcServiceGrpc.newStub(node.channel);
-                if (rpcMs > 0) stub = stub.withDeadlineAfter(rpcMs, TimeUnit.MILLISECONDS);
-                return stub.remoteGenerate(new StreamObserver<>() {
-                    @Override public void onNext(GenerateOutputsPB value) { replies.add(value); }
-                    @Override public void onError(Throwable error) { replies.add(error); }
-                    @Override public void onCompleted() { replies.add("completed"); }
-                });
-            });
-        }
-        void ack() throws Exception {
-            var value = replies.poll(3, TimeUnit.SECONDS);
-            assertInstanceOf(GenerateOutputsPB.class, value);
-            assertFalse(((GenerateOutputsPB) value).hasFlattenOutput());
-            assertTrue(((GenerateOutputsPB) value).getSupportsPrefillCompletion());
-        }
-        Throwable error(Status.Code expected) throws Exception {
-            var value = replies.poll(3, TimeUnit.SECONDS); assertInstanceOf(Throwable.class, value);
-            assertEquals(expected, Status.fromThrowable((Throwable) value).getCode()); return (Throwable) value;
-        }
-        @Override public void close() { context.cancel(null); }
-    }
-    private static long engineCode(Throwable error) throws Exception {
-        var trailers = Status.trailersFromThrowable(error);
-        return ErrorDetailsPB.parseFrom(trailers.get(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER))).getErrorCode();
-    }
 
     @Test void allocateAcknowledgementOwnsKvAndCancellationReleasesItWithoutPublishing() throws Exception {
         try (var node = node(false); var call = new Call(node, 0)) {
@@ -140,7 +86,7 @@ class DecodeAdmissionTest {
         for (boolean disabled : List.of(false, true)) {
             try (var node = node(disabled); var call = new Call(node, 0)) {
                 var input = input("p", 1, 5, 0);
-                var keys = org.flexlb.mock.protocol.MediaInput.cacheKeys(org.flexlb.mock.protocol.MediaInput.text(input.getInput()), 2);
+                var keys = org.flexlb.mock.protocol.MediaInput.sequence(org.flexlb.mock.protocol.MediaInput.text(input.getInput()), 2, 0, 1).keys();
                 try (var lease = node.node.cacheManager().acquire(6, List.of()).lease()) {
                     lease.publish(keys, 5);
                 }
@@ -185,7 +131,7 @@ class DecodeAdmissionTest {
                 } while (!"completed".equals(reply));
                 var all = allocate.getInput().toBuilder().addAllTokenIds(Collections.nCopies(5, 7)).build();
                 var full = new org.flexlb.mock.protocol.MediaInput.Prepared(all, spans);
-                var allKeys = org.flexlb.mock.protocol.MediaInput.cacheKeys(full, 2);
+                var allKeys = org.flexlb.mock.protocol.MediaInput.sequence(full, 2, 0, 1).keys();
                 // Three input tokens + four computed output tokens: three full blocks.
                 var expected = Set.copyOf(allKeys.subList(0, 3));
                 await(() -> cacheKeys(node.node).equals(expected));
@@ -261,6 +207,83 @@ class DecodeAdmissionTest {
             assertEquals(0, node.node.cacheManager().snapshot(0, false).heldBlocks());
             assertEquals(8, node.node.cacheManager().snapshot(0, false).availableBlocks());
             assertEquals(0, node.node.cacheManager().snapshot(-1, true).keys().length);
+        }
+    }
+
+    private static Set<Long> cacheKeys(LLMMockEngine node) {
+        return new HashSet<>(Arrays.stream(node.cacheManager().snapshot(-1, true).keys()).boxed().toList());
+    }
+
+    private static GenerateRequestPB input(String client, long id, int length, int timeout) {
+        return GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE).setRequestId(id).setClientId(client)
+            .setInput(GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(IntStream.rangeClosed(1, length).boxed().toList())
+                .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(4).setReuseCache(true).setTimeoutMs(timeout))).build();
+    }
+
+    private Harness node(boolean disableReuse) throws Exception {
+        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration("decode"));
+        ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2).put("reuse_cache", true)
+            .put("disable_decode_first_malloc_device_reuse", disableReuse);
+        var path = directory.resolve("config.json"); json.writeValue(path.toFile(), root);
+        return new Harness(LLMMockEngine.start(RtpConfig.load(path)));
+    }
+
+    private static void await(BooleanSupplier condition) throws Exception {
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (!condition.getAsBoolean()) { if (System.nanoTime() >= end) fail("Condition timed out"); Thread.sleep(5); }
+    }
+
+    private static long engineCode(Throwable error) throws Exception {
+        var trailers = Status.trailersFromThrowable(error);
+        return ErrorDetailsPB.parseFrom(trailers.get(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER))).getErrorCode();
+    }
+
+    /**
+     * Owns the local Decode engine and the channel used to call it.
+     */
+    private static final class Harness implements AutoCloseable {
+        final LLMMockEngine node;
+        final ManagedChannel channel;
+
+        Harness(LLMMockEngine node) { this.node = node; channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build(); }
+
+        @Override public void close() throws Exception { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); node.close(); }
+
+        WorkerStatusPB status() { return RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS).getWorkerStatus(StatusVersionPB.getDefaultInstance()); }
+    }
+
+    /**
+     * Drives one Decode RPC and exposes its responses to tests.
+     */
+    private static final class Call implements AutoCloseable {
+        final Context.CancellableContext context = Context.current().withCancellation();
+        final BlockingQueue<Object> replies = new LinkedBlockingQueue<>();
+        final StreamObserver<GenerateRequestPB> request;
+
+        Call(Harness node, long rpcMs) throws Exception {
+            request = context.call(() -> {
+                var stub = RpcServiceGrpc.newStub(node.channel);
+                if (rpcMs > 0) stub = stub.withDeadlineAfter(rpcMs, TimeUnit.MILLISECONDS);
+                return stub.remoteGenerate(new StreamObserver<>() {
+                    @Override public void onNext(GenerateOutputsPB value) { replies.add(value); }
+                    @Override public void onError(Throwable error) { replies.add(error); }
+                    @Override public void onCompleted() { replies.add("completed"); }
+                });
+            });
+        }
+
+        @Override public void close() { context.cancel(null); }
+
+        void ack() throws Exception {
+            var value = replies.poll(3, TimeUnit.SECONDS);
+            assertInstanceOf(GenerateOutputsPB.class, value);
+            assertFalse(((GenerateOutputsPB) value).hasFlattenOutput());
+            assertTrue(((GenerateOutputsPB) value).getSupportsPrefillCompletion());
+        }
+
+        Throwable error(Status.Code expected) throws Exception {
+            var value = replies.poll(3, TimeUnit.SECONDS); assertInstanceOf(Throwable.class, value);
+            assertEquals(expected, Status.fromThrowable((Throwable) value).getCode()); return (Throwable) value;
         }
     }
 }

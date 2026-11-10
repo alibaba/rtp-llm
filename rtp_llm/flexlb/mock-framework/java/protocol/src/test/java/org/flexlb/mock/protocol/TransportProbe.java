@@ -3,20 +3,52 @@ package org.flexlb.mock.protocol;
 import java.net.InetSocketAddress;
 import java.nio.file.*;
 import java.util.*;
+import org.flexlb.mock.protocol.ControlServer.OptionalArgument;
 
-/** Test-only transport peer. Does not simulate Master, Engine, traffic or Prometheus. */
+/**
+ * Starts a minimal control peer for transport tests.
+ */
 public final class TransportProbe {
-    public record Request(@Argument(optional=true) Long delay_ms,
-                          @Argument(optional=true) Double value,
-                          @Argument(optional=true) Boolean empty,
-                          @Argument(optional=true) Boolean invalid_result,
-                          @Argument(optional=true) Boolean crash) {}
+    public static void main(String[] args) throws Exception {
+        if (args.length == 1 && args[0].equals("exit")) System.exit(19);
+        try (var server = server()) {
+            Runtime.getRuntime().addShutdownHook(new Thread(server::close));
+            server.publishReady(Path.of(System.getenv("MOCK_READY_FILE")));
+            Thread.currentThread().join();
+        }
+    }
+
+    static ControlServer server() throws Exception {
+        var probe = new Implementation();
+        return new ControlServer(new InetSocketAddress("127.0.0.1", 0))
+            .route("probe/action", Request.class, MasterReceipt.class, probe::action)
+            .route("probe/masters", None.class, MasterSet.class, probe::masters)
+            .route("probe/metric", Request.class, MetricValue.class, probe::metric)
+            .route("probe/engines", None.class, PerMasterEngines.class, probe::engines)
+            .start();
+    }
+
+    public record Request(@OptionalArgument Long delay_ms,
+                          @OptionalArgument Double value,
+                          @OptionalArgument Boolean empty,
+                          @OptionalArgument Boolean invalid_result,
+                          @OptionalArgument Boolean crash) {}
+
     public record None() {}
+
     public record MasterRef(String id) {}
+
     public record MasterSet(List<MasterRef> instances) {}
+
     public record PerMasterEngines(Map<String, List<String>> instances) {}
+
     public record MasterReceipt(MasterSet affected) {}
+
     public record MetricValue(double value, String unit) {}
+
+    /**
+     * Supplies deterministic responses and failures for the control test peer.
+     */
     public static final class Implementation {
         public MasterReceipt action(Request args) {
             delay(args);
@@ -39,25 +71,6 @@ public final class TransportProbe {
                 try { Thread.sleep(args.delay_ms()); }
                 catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new IllegalStateException("Interrupted", error); }
             }
-        }
-    }
-
-    static ControlServer server() throws Exception {
-        var probe = new Implementation();
-        return new ControlServer(new InetSocketAddress("127.0.0.1", 0))
-            .route("probe/action", Request.class, MasterReceipt.class, probe::action)
-            .route("probe/masters", None.class, MasterSet.class, probe::masters)
-            .route("probe/metric", Request.class, MetricValue.class, probe::metric)
-            .route("probe/engines", None.class, PerMasterEngines.class, probe::engines)
-            .start();
-    }
-
-    public static void main(String[] args) throws Exception {
-        if (args.length == 1 && args[0].equals("exit")) System.exit(19);
-        try (var server = server()) {
-            Runtime.getRuntime().addShutdownHook(new Thread(server::close));
-            server.publishReady(Path.of(System.getenv("MOCK_READY_FILE")));
-            Thread.currentThread().join();
         }
     }
 }

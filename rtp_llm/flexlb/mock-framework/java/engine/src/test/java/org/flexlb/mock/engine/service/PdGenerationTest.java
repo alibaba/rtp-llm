@@ -39,7 +39,7 @@ class PdGenerationTest {
             var query=CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build();
             var ps=rpc.getCacheStatus(query);
             var ds=RpcServiceGrpc.newBlockingStub(d.channel).withDeadlineAfter(2,TimeUnit.SECONDS).getCacheStatus(query);
-            var base=org.flexlb.mock.protocol.MediaInput.cacheKeys(org.flexlb.mock.protocol.MediaInput.text(request),2);
+            var base=org.flexlb.mock.protocol.MediaInput.sequence(org.flexlb.mock.protocol.MediaInput.text(request), 2, 0, 1).keys();
             assertEquals(Set.of(base.get(3),base.get(7)),ps.getCacheKeysMap().keySet());
             assertTrue(ds.getCacheKeysMap().keySet().containsAll(base));
             assertEquals(8,ps.getBlockSize());assertEquals(128,ps.getTotalKvCache());
@@ -85,8 +85,8 @@ class PdGenerationTest {
             }
             // Cache identity must use the prepared hash, not the image placeholder token.
             var prepared = image(input(d, 0, 4, 1, 3000, true), vision.getPort()).toBuilder().clearMultimodalInputs().build();
-            var keys = org.flexlb.mock.protocol.MediaInput.cacheKeys(new org.flexlb.mock.protocol.MediaInput.Prepared(prepared,
-                List.of(MultimodalCacheSpanPB.newBuilder().setOffset(1).addRowHashes(777).build())), 2);
+            var keys = org.flexlb.mock.protocol.MediaInput.sequence(new org.flexlb.mock.protocol.MediaInput.Prepared(prepared,
+                List.of(MultimodalCacheSpanPB.newBuilder().setOffset(1).addRowHashes(777).build())), 2, 0, 1).keys();
             var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
             assertTrue(keys.stream().allMatch(cached.getCacheKeysMap()::containsKey));
             assertEquals(6, calls.size());
