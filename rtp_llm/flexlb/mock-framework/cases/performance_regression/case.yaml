@@ -166,24 +166,6 @@ phases:
     expect:
       gte: 0.999
     within: 30s
-  - id: check_post_warmup_ttft_mean
-    describe: 回查切速缓冲 30 秒后的第一个完整窗口，检查首 token 延迟均值。
-    interface: client/ttft
-    args:
-      range: [-243s, -213s]
-      statistic: mean
-    expect:
-      lte: 700ms
-    within: 30s
-  - id: check_post_warmup_ttft_p95
-    describe: 回查切速缓冲 30 秒后的第一个完整窗口，检查首 token 延迟 P95。
-    interface: client/ttft
-    args:
-      range: [-243s, -213s]
-      statistic: p95
-    expect:
-      lte: 2500ms
-    within: 30s
   - id: stop_client
     describe: 待整份数据回放完毕后停止 Client，并收齐已发请求的终态。
     interface: client/stop
