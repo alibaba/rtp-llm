@@ -117,7 +117,12 @@ class WeightManager:
         self._weights_loader: ModelLoader = model_weights_loader
         self._weight_module = self._weights_loader._model_weights_info
         self._non_owned_global_weights = frozenset(non_owned_global_weights)
-        self._working_stream: torch.cuda.Stream = torch.cuda.Stream(
+        # torch.xpu mirrors torch.cuda's Stream/stream() API; select it by the
+        # weight device so XPU does not hit "torch.cuda.Stream requires CUDA".
+        self._device_mod = (
+            torch.xpu if torch.device(self._device).type == "xpu" else torch.cuda
+        )
+        self._working_stream = self._device_mod.Stream(
             device=self._device,
         )
         # TODO: Consider the actual need for this lock. If updates are always
@@ -216,7 +221,7 @@ class WeightManager:
         logging.info(
             f"update weight request: {name}, shape: {tensor.shape}, device: {tensor.device}, dtype: {tensor.dtype}"
         )
-        with torch.cuda.stream(self._working_stream):
+        with self._device_mod.stream(self._working_stream):
             config = self._weights_loader.get_load_config()
             if "layers" in name:
                 # This is a layer-specific weight
