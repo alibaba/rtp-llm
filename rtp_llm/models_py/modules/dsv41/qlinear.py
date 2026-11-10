@@ -150,14 +150,20 @@ class QuantizedLinear(nn.Module):
         scale_gemm: Optional[torch.Tensor] = None,
     ) -> None:
         """Bind FP4 weight plus a prepacked DeepGEMM scale."""
+        from rtp_llm.models_py.modules.dsv41.sm80_support import (
+            use_reference_gemm_paths,
+        )
+
         self.weight = weight
         self.scale = scale
         self.scale_gemm = scale_gemm
-        if self.scale_gemm is None:
+        if self.scale_gemm is None and not use_reference_gemm_paths():
+            # The packed DeepGEMM layout is consumed by SM100 FP4 kernels only;
+            # reference paths dequantize from the raw UE8M0 scale instead.
             self.scale_gemm = prepare_fp4_weight_scale_for_deepgemm(
                 scale, self.out_features, self.in_features
             )
-        if self.scale_gemm.dtype != torch.int32:
+        if self.scale_gemm is not None and self.scale_gemm.dtype != torch.int32:
             raise TypeError(
                 f"expected packed FP4 scale int32, got {self.scale_gemm.dtype}"
             )
@@ -216,6 +222,17 @@ class QuantizedLinear(nn.Module):
         if self.storage == "bf16":
             return F.linear(x, self.weight)
         if self.storage == "fp4":
+            from rtp_llm.models_py.modules.dsv41.sm80_support import (
+                fp4_packed_to_bf16,
+                use_reference_gemm_paths,
+            )
+
+            if use_reference_gemm_paths():
+                # Pre-Blackwell reference: exact e2m1/ue8m0 -> BF16 dequant
+                # (validated against _FP4_LUT) + cuBLAS GEMM. The packed
+                # checkpoint tensors remain the resident weights.
+                w = fp4_packed_to_bf16(self.weight, self.scale)
+                return F.linear(x.to(torch.bfloat16), w).to(x.dtype)
             return self._fp4_forward_deepgemm(x)
         # FP8: dequant to x's dtype on the fly.
         w = self.dequant_weight(out_dtype=x.dtype)

@@ -26,9 +26,29 @@ class V41MXFP8Linear(torch.nn.Module):
 
     def __init__(self, weight: torch.Tensor, scales: torch.Tensor):
         super().__init__()
+        from rtp_llm.models_py.modules.dsv41.sm80_support import (
+            fp8_block32_to_bf16,
+            use_reference_gemm_paths,
+        )
+
         self.weight = weight
         self.N, self.K = weight.shape
-        self.weight_scales = self.pack_scales(scales)
+        self._reference_gemm = use_reference_gemm_paths()
+        if self._reference_gemm:
+            # Pre-Blackwell GPUs cannot run the SM100 DeepGEMM group-32 MXFP8
+            # recipe. The projections served by this class are small under TP
+            # (a couple of GB per rank), so dequantize them exactly once at
+            # load time (e4m3 x ue8m0 embeds losslessly into BF16) and keep
+            # the packed checkpoint tensors as the canonical weights.
+            if scales.shape != ((self.N + 31) // 32, (self.K + 31) // 32):
+                raise ValueError(
+                    f"Invalid V4.1 FP8 scales: {(self.N, self.K)}, {scales.shape}"
+                )
+            self._w_bf16 = fp8_block32_to_bf16(weight, scales)
+            self.weight_scales = None
+        else:
+            self._w_bf16 = None
+            self.weight_scales = self.pack_scales(scales)
 
     def pack_scales(self, scales: torch.Tensor) -> torch.Tensor:
         if scales.shape != ((self.N + 31) // 32, (self.K + 31) // 32):
@@ -103,6 +123,14 @@ class V41MXFP8Linear(torch.nn.Module):
     def forward(self, x: torch.Tensor, out=None):
         if x.numel() == 0:
             return out if out is not None else x.new_empty((*x.shape[:-1], self.N))
+        if self._reference_gemm:
+            y = torch.nn.functional.linear(
+                x.to(torch.bfloat16).reshape(-1, self.K), self._w_bf16
+            ).view(*x.shape[:-1], self.N)
+            if out is not None:
+                out.copy_(y)
+                return out
+            return y
         return self.forward_quantized(*self._quantize_input(x), out=out)
 
 
