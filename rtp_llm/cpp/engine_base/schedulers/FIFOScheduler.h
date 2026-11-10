@@ -80,7 +80,8 @@ private:
                                   size_t                   admitted_tokens,
                                   size_t                   admitted_max_seq_len,
                                   size_t                   admitted_sequence_count,
-                                  const GenerateStreamPtr& candidate) const;
+                                  const GenerateStreamPtr& candidate,
+                                  bool                     running_batch = false) const;
     size_t prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
     size_t prefillSeqLenWithCache(const GenerateStreamPtr& stream) const;
     size_t prefillTokenCostWithCache(const GenerateStreamPtr& stream) const;
@@ -132,6 +133,11 @@ private:
     // can share the same execution batch. Existing admission/token/KV limits remain
     // authoritative. Read once from PREFILL_ADMISSION_COALESCE_MS.
     const int prefill_admission_coalesce_ms_ = 0;
+    // Default-off experiment: allow a waiting prefill-only context to join the
+    // next step of an already running prefill batch. Prefill/decode mixing and
+    // all existing batch/token/KV limits remain rejected. Read once from
+    // PREFILL_ADMIT_WHILE_RUNNING.
+    const bool prefill_admit_while_running_ = false;
 
     // Consumed (exchanged to 0) from the const fillExtraMetrics() reporting hook.
     mutable std::atomic<int64_t> pending_group_fallback_count_ = 0;

@@ -22,6 +22,10 @@ int readPrefillAdmissionCoalesceMs() {
     return std::clamp(value, 0, 250);
 }
 
+bool readPrefillAdmitWhileRunning() {
+    return autil::EnvUtil::getEnv("PREFILL_ADMIT_WHILE_RUNNING", 0) != 0;
+}
+
 }  // namespace
 
 FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_config,
@@ -46,7 +50,8 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     prefill_cp_size_(parallelism_config.prefill_cp_config.is_enabled() ?
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
                          1),
-    prefill_admission_coalesce_ms_(readPrefillAdmissionCoalesceMs()) {
+    prefill_admission_coalesce_ms_(readPrefillAdmissionCoalesceMs()),
+    prefill_admit_while_running_(readPrefillAdmitWhileRunning()) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
                      "max_batch_tokens_without_cache is [%zu], cp_force_single_prefill is [%d], "
                      "prefill_cp_size is [%zu], max_inited_kv_cache_streams is [%zu], "
@@ -60,6 +65,7 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                      static_cast<long long>(poll_interval_.count()));
     RTP_LLM_LOG_INFO("prefill admission coalesce window is [%d] ms",
                      prefill_admission_coalesce_ms_);
+    RTP_LLM_LOG_INFO("prefill admit while running is [%d]", prefill_admit_while_running_);
 }
 
 FIFOScheduler::~FIFOScheduler() {
@@ -163,9 +169,29 @@ bool FIFOScheduler::evaluateRunningBatch(const ScheduleRuntime&   schedule_runti
             return true;
         }
     }
-    // prefill and decode not mixed together
+    // Prefill and decode must not be mixed. When the experiment is enabled, a
+    // prefill-only candidate may join the next step of an already running
+    // prefill-only batch; every token/sequence/batch limit still applies. The
+    // running streams' cached and uncached costs are charged by
+    // admitWaitingStreams() into schedule_runtime.
     if (!running_streams_.empty()) {
-        return false;
+        if (!prefill_admit_while_running_ || cp_force_single_prefill_ || !isPrefillOnly(new_stream)) {
+            return false;
+        }
+        for (const auto& stream : running_streams_) {
+            if (!stream || !isPrefillOnly(stream)) {
+                return false;
+            }
+        }
+        if (running_streams_.size() + admitted_stream_count + 1 > max_generate_batch_size_) {
+            return false;
+        }
+        return fitsPrefillTokenLimits(admitted_stream_count,
+                                      schedule_runtime.admitted_prefill_token_size_with_cache,
+                                      schedule_runtime.admitted_prefill_max_seq_len_with_cache,
+                                      schedule_runtime.admitted_prefill_sequence_count,
+                                      new_stream,
+                                      true);
     }
     // Conservative CP prefill mode: cap at one stream per round unless
     // runtime config explicitly allows CP prefill batching.
@@ -195,7 +221,32 @@ bool FIFOScheduler::evaluateRunningBatch(const std::list<GenerateStreamPtr>& str
         }
     }
     if (!running_streams_.empty()) {
-        return false;
+        if (!prefill_admit_while_running_ || cp_force_single_prefill_ || !isPrefillOnly(new_stream)) {
+            return false;
+        }
+        for (const auto& stream : running_streams_) {
+            if (!stream || !isPrefillOnly(stream)) {
+                return false;
+            }
+        }
+        if (running_streams_.size() + admitted_count + 1 > max_generate_batch_size_) {
+            return false;
+        }
+        size_t admitted_tokens         = 0;
+        size_t admitted_max_seq_len    = 0;
+        size_t admitted_sequence_count = 0;
+        for (const auto& stream : streams) {
+            admitted_tokens += prefillTokenCostWithCache(stream);
+            admitted_max_seq_len = std::max(admitted_max_seq_len, prefillSeqLenWithCache(stream));
+            admitted_sequence_count += static_cast<size_t>(stream->currentBatchSize());
+        }
+        for (const auto& stream : running_streams_) {
+            admitted_tokens += prefillTokenCostWithCache(stream);
+            admitted_max_seq_len = std::max(admitted_max_seq_len, prefillSeqLenWithCache(stream));
+            admitted_sequence_count += static_cast<size_t>(stream->currentBatchSize());
+        }
+        return fitsPrefillTokenLimits(
+            admitted_count, admitted_tokens, admitted_max_seq_len, admitted_sequence_count, new_stream, true);
     }
     if (cp_force_single_prefill_ && admitted_count > 0) {
         return false;
@@ -226,10 +277,12 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
                                            size_t                   admitted_tokens,
                                            size_t                   admitted_max_seq_len,
                                            size_t                   admitted_sequence_count,
-                                           const GenerateStreamPtr& candidate) const {
-    // Preserve the historical singleton fast path for all execution modes,
-    // including when the batch token budget is smaller than the prompt or zero.
-    if (admitted_stream_count == 0 && candidate->contextLength() + running_streams_.size() < int(max_seq_len_)) {
+                                           const GenerateStreamPtr& candidate,
+                                           bool                     running_batch) const {
+    // Preserve the historical singleton fast path for the empty-batch path.
+    // It must not bypass the quota when the candidate joins a running batch.
+    if (!running_batch && admitted_stream_count == 0
+        && candidate->contextLength() + running_streams_.size() < int(max_seq_len_)) {
         return true;
     }
 
@@ -375,6 +428,25 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     capture_execution_mode(already_admitted_streams);
 
     ScheduleRuntime schedule_runtime;
+    if (prefill_admit_while_running_ && !running_streams_.empty()) {
+        // A prefill candidate may join the next step of this running batch.
+        // Charge the running streams' existing footprint so the candidate
+        // cannot exceed the batch-token or uncached-prefill quota. Do not add
+        // them to admitted_stream_count: that counter covers this round's new
+        // admissions, while the sequence/token fields cover the whole batch.
+        for (const auto& stream : running_streams_) {
+            if (!stream || stream->getStatus() != StreamState::RUNNING) {
+                continue;
+            }
+            schedule_runtime.admitted_prefill_token_size_with_cache += prefillTokenCostWithCache(stream);
+            schedule_runtime.admitted_prefill_max_seq_len_with_cache =
+                std::max(schedule_runtime.admitted_prefill_max_seq_len_with_cache, prefillSeqLenWithCache(stream));
+            schedule_runtime.admitted_prefill_sequence_count += static_cast<size_t>(stream->currentBatchSize());
+            if (stream->isContextStream()) {
+                schedule_runtime.forward_prefill_token_size_without_cache += prefillTokenCostWithoutCache(stream);
+            }
+        }
+    }
     for (const auto& stream : already_admitted_streams) {
         if (!stream || stream->getStatus() != StreamState::RUNNING) {
             continue;

@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cstdlib>
 #include <future>
 #include <iostream>
 #include <limits>
@@ -4128,6 +4129,118 @@ TEST_F(FIFOSchedulerTest, prefillTokenLimitsPreserveReserveAndAvoidOverflow) {
     EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, max_size, 4, 1, prefill));
     EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 4, max_size, prefill));
     EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, max_size, 1, prefill));
+}
+
+TEST_F(FIFOSchedulerTest, prefillAdmitWhileRunningIsOptInAndPrefillOnly) {
+    ASSERT_EQ(unsetenv("PREFILL_ADMIT_WHILE_RUNNING"), 0);
+    {
+        auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
+            test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+        ASSERT_TRUE(cache_manager->init());
+        model_config.max_seq_len                                   = 8;
+        runtime_config.max_generate_batch_size                     = 4;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8;
+        FIFOScheduler scheduler(runtime_config,
+                                model_config,
+                                PDSepConfig{},
+                                ParallelismConfig{},
+                                ModelSpecificConfig{},
+                                cache_manager);
+        auto running_prefill = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 0);
+        auto candidate       = makeStream({5, 6, 7, 8}, model_config, runtime_config, resource_context, 0);
+        auto generation      = makeStream({9, 10}, model_config, runtime_config, resource_context, 2);
+        scheduler.running_streams_.push_back(running_prefill);
+        EXPECT_FALSE(scheduler.evaluateRunningBatch(FIFOScheduler::ScheduleRuntime{}, candidate));
+        EXPECT_FALSE(scheduler.evaluateRunningBatch(FIFOScheduler::ScheduleRuntime{}, generation));
+    }
+
+    ASSERT_EQ(setenv("PREFILL_ADMIT_WHILE_RUNNING", "1", 1), 0);
+    {
+        auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
+            test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+        ASSERT_TRUE(cache_manager->init());
+        model_config.max_seq_len                                   = 8;
+        runtime_config.max_generate_batch_size                     = 4;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8;
+        FIFOScheduler scheduler(runtime_config,
+                                model_config,
+                                PDSepConfig{},
+                                ParallelismConfig{},
+                                ModelSpecificConfig{},
+                                cache_manager);
+        auto running_prefill = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 0);
+        auto candidate       = makeStream({5, 6, 7, 8}, model_config, runtime_config, resource_context, 0);
+        auto generation      = makeStream({9, 10}, model_config, runtime_config, resource_context, 2);
+        scheduler.running_streams_.push_back(running_prefill);
+        EXPECT_TRUE(scheduler.evaluateRunningBatch(FIFOScheduler::ScheduleRuntime{}, candidate));
+        EXPECT_FALSE(scheduler.evaluateRunningBatch(FIFOScheduler::ScheduleRuntime{}, generation));
+
+        // A running generation stream keeps the prefill/decode separation even
+        // when the experiment is enabled.
+        scheduler.running_streams_.clear();
+        scheduler.running_streams_.push_back(generation);
+        EXPECT_FALSE(scheduler.evaluateRunningBatch(FIFOScheduler::ScheduleRuntime{}, candidate));
+    }
+    ASSERT_EQ(unsetenv("PREFILL_ADMIT_WHILE_RUNNING"), 0);
+}
+
+TEST_F(FIFOSchedulerTest, prefillAdmitWhileRunningChargesRunningTokenFootprint) {
+    ASSERT_EQ(setenv("PREFILL_ADMIT_WHILE_RUNNING", "1", 1), 0);
+    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
+        test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+    ASSERT_TRUE(cache_manager->init());
+    model_config.max_seq_len                                   = 8;
+    runtime_config.max_generate_batch_size                     = 4;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8;
+    FIFOScheduler scheduler(runtime_config,
+                            model_config,
+                            PDSepConfig{},
+                            ParallelismConfig{},
+                            ModelSpecificConfig{},
+                            cache_manager);
+    auto running_prefill = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 0);
+    auto candidate       = makeStream({5, 6, 7, 8}, model_config, runtime_config, resource_context, 0);
+    scheduler.running_streams_.push_back(running_prefill);
+
+    FIFOScheduler::ScheduleRuntime runtime;
+    runtime.admitted_prefill_token_size_with_cache  = 4;
+    runtime.admitted_prefill_max_seq_len_with_cache = 4;
+    runtime.admitted_prefill_sequence_count         = 1;
+    // Running cost 4 plus candidate 4 exceeds the 8-token budget even though
+    // the singleton fast path would otherwise accept the candidate.
+    EXPECT_FALSE(scheduler.evaluateRunningBatch(runtime, candidate));
+    EXPECT_TRUE(scheduler.evaluateRunningBatch(FIFOScheduler::ScheduleRuntime{}, candidate));
+    ASSERT_EQ(unsetenv("PREFILL_ADMIT_WHILE_RUNNING"), 0);
+}
+
+TEST_F(FIFOSchedulerTest, prefillAdmitWhileRunningRespectsUncachedQuota) {
+    ASSERT_EQ(setenv("PREFILL_ADMIT_WHILE_RUNNING", "1", 1), 0);
+    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
+        test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+    ASSERT_TRUE(cache_manager->init());
+    model_config.max_seq_len                                           = 8;
+    runtime_config.max_generate_batch_size                             = 4;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size         = 8;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = 1;
+    FIFOScheduler scheduler(runtime_config,
+                            model_config,
+                            PDSepConfig{},
+                            ParallelismConfig{},
+                            ModelSpecificConfig{},
+                            cache_manager);
+    auto running_prefill = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 0);
+    auto candidate       = makeStream({5, 6, 7, 8}, model_config, runtime_config, resource_context, 0);
+    // The running footprint is charged only for streams that actually own the
+    // execution batch; mark the fixture stream RUNNING instead of leaving it
+    // enqueued in WAITING.
+    running_prefill->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(running_prefill->moveToNext(), StreamState::RUNNING);
+    scheduler.running_streams_.push_back(running_prefill);
+    std::list<GenerateStreamPtr> waiting{candidate};
+    scheduler.admitWaitingStreams(waiting, {});
+    EXPECT_EQ(waiting.size(), 1);
+    EXPECT_FALSE(candidate->hasEvent(StreamEvents::CanRun));
+    ASSERT_EQ(unsetenv("PREFILL_ADMIT_WHILE_RUNNING"), 0);
 }
 
 TEST_F(FIFOSchedulerTest, fullBudgetPrefillOnlyDoesNotMixWithGeneration) {
