@@ -249,6 +249,16 @@ class ModelLoader:
                 global_weights[name] = tensor[0].to(device)
         model_weights.weights = weights
         model_weights.global_weights = global_weights
+        import os as _os
+        if _os.environ.get("DSV41_DEBUG_MEM") == "1":
+            import torch as _torch
+            _torch.cuda.synchronize()
+            print(
+                f"[mem] loader returned allocated="
+                f"{_torch.cuda.memory_allocated() / 2**30:.2f} GiB "
+                f"reserved={_torch.cuda.memory_reserved() / 2**30:.2f} GiB",
+                flush=True,
+            )
         return model_weights
 
     def _load_weight(self, device: str):
