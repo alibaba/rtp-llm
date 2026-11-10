@@ -22,8 +22,15 @@ def supports_bf16() -> bool:
 
 
 def is_supported(logits: torch.Tensor, visible: torch.Tensor, topk: int = 512) -> bool:
+    from rtp_llm.models_py.modules.dsv41.sm80_support import (
+        use_reference_gemm_paths,
+    )
+
     return (
         _TOPK_V3_OK
+        # topk_v3's fatbin carries no pre-SM100 kernel image ("no kernel image
+        # is available" on A100); callers fall back to masked torch.topk.
+        and not use_reference_gemm_paths()
         and torch.version.hip is None
         and logits.is_cuda
         and (
