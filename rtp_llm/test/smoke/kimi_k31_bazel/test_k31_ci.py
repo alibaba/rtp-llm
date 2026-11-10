@@ -324,11 +324,13 @@ class K31CiTest(unittest.TestCase):
         )
         for role, blocks, port in (("prefill", 96, 27280), ("decode", 192, 28280)):
             item[role].update(test_block_num=blocks, evidence_port=port)
-        pd_config.validate_config(item, local_role="prefill")
-        self.assertTrue(item["kda_nvfp4"])
-        self.assertTrue(item["dsa_nvfp4"])
-        item["kda_nvfp4"] = False
-        pd_config.validate_config(item, local_role="prefill")
+        with patch.dict("os.environ", {}, clear=True):
+            pd_config.validate_config(item, local_role="prefill")
+        self.assertFalse(item["kda_nvfp4"])
+        self.assertFalse(item["dsa_nvfp4"])
+        item["dsa_nvfp4"] = True
+        with patch.dict("os.environ", KDA_NVFP4="1", DSA_NVFP4="0"):
+            pd_config.validate_config(item, local_role="prefill")
         self.assertFalse(item["kda_nvfp4"])
         self.assertTrue(item["dsa_nvfp4"])
         item["fp8_kv_cache"] = True

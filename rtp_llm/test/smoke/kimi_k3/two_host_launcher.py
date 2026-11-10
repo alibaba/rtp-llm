@@ -65,7 +65,7 @@ def validate(config):
     for key in ("kda_nvfp4", "dsa_nvfp4"):
         if key in config and type(config[key]) is not bool:
             raise ValueError(f"{key} must be boolean")
-        config[key] = parse_nvfp4_flag(key.upper(), config.get(key), default=True)
+        config[key] = parse_nvfp4_flag(key.upper(), config.get(key))
     if type(decode_dp_size(config)) is not int or decode_dp_size(config) not in (1, 2):
         raise ValueError("The smoke supports Decode DP1 or DP2")
     for key in ("fp8_gemm", "fp8_kv_cache", "cache_store_rdma_mode"):

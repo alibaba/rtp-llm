@@ -98,6 +98,27 @@ TEST_F(MtpStreamCommitTest, EosWinsWhenTheSameUpdateAlsoReachesMaxLength) {
     EXPECT_EQ(aux.speculative_metrics.at("generated_tokens"), 2);
 }
 
+TEST_F(MtpStreamCommitTest, LateVerifyCannotAppendAfterPendingGenerateDone) {
+    auto stream = makeStream(10);
+    stream->generate_status_->status.store(StreamState::RUNNING);
+    stream->generateConfig()->stop_words_list = {{4, 5}};
+
+    update(stream, {4, 5}, 1, 3);
+    ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+    ASSERT_EQ(stream->getStatus(), StreamState::RUNNING);
+    auto terminal = stream->nextOutput(10);
+    ASSERT_TRUE(terminal.ok());
+    ASSERT_TRUE(terminal.value().generate_outputs.at(0).finished);
+    ASSERT_EQ(terminal.value().generate_outputs.at(0).aux_info.output_len, 2);
+
+    update(stream, {6}, 0, 3);
+    EXPECT_EQ(stream->seqLength(), 5);
+    EXPECT_EQ(stream->getSPOutputBuffer()->tokens[0][0].item<int32_t>(), 5);
+    auto next = stream->nextOutput(10);
+    ASSERT_FALSE(next.ok());
+    EXPECT_EQ(next.status().code(), ErrorCode::FINISHED);
+}
+
 TEST_F(MtpStreamCommitTest, ForcedFixtureNeverEntersNormalAcceptanceTotals) {
     auto stream = makeStream(4);
     update(stream, {4, 5, 6, 7}, 3, 3, true);

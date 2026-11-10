@@ -233,7 +233,10 @@ class K31TwoHostSmokeTest(unittest.TestCase):
     def test_nvfp4_config_resolution_survives_remote_environment(self):
         with patch.dict(os.environ, {}, clear=True):
             regular, = smoke.stage_configs(base_config())
-            self.assertTrue(regular["kda_nvfp4"] and regular["dsa_nvfp4"])
+        with patch.dict(os.environ, KDA_NVFP4="1", DSA_NVFP4="1"):
+            received = smoke.launcher.validate(regular)
+            self.assertFalse(received["kda_nvfp4"])
+            self.assertFalse(received["dsa_nvfp4"])
         with patch.dict(os.environ, KDA_NVFP4="0", DSA_NVFP4="1"):
             regular, = smoke.stage_configs(base_config())
         with patch.dict(os.environ, KDA_NVFP4="1", DSA_NVFP4="0"):

@@ -1290,6 +1290,11 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] spec update", streamLogTag().c_str());
+    // An in-flight verify can complete after the final output is queued but
+    // before the scheduler commits the FINISHED state.
+    if (!update_info.force_update_info && hasEventWithoutLock(StreamEvents::GenerateDone)) {
+        return;
+    }
     if (!prepareUpdateWithoutLock(update_info.error_info, update_info.force_update_info)) {
         return;
     }

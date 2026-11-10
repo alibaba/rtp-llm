@@ -64,15 +64,21 @@ Prepacked/calibrated NVFP4 exports are not inputs to this online mode.
 
 ## Two-host smoke
 
-`example/k3/kimi_k31_full_model_two_host_pd_smoke.sh` defaults both switches
-to enabled. Explicit flags override JSON config booleans (`kda_nvfp4`,
-`dsa_nvfp4`), which override the controller's environment and then the enabled
-smoke defaults. Resolved values are saved and sent explicitly to both peers.
+The manual and Bazel K3.1 two-host smoke tests default to FP8 with both NVFP4
+switches off. The manual runner resolves each switch from the CLI, then the JSON
+config (`kda_nvfp4`, `dsa_nvfp4`), then the controller environment
+(`KDA_NVFP4`, `DSA_NVFP4`). It saves the resolved values and sends them to both
+peers.
 
 ```bash
-# Both enabled: full regular + long smoke with native MTP.
+# Default: full regular + long smoke with FP8 and native MTP.
 example/k3/kimi_k31_full_model_two_host_pd_smoke.sh \
   --config /path/to/pair.json --output /path/to/new-result
+
+# Opt in to NVFP4 for both KDA and DSA projections.
+example/k3/kimi_k31_full_model_two_host_pd_smoke.sh \
+  --config /path/to/pair.json --output /path/to/new-fp4-result \
+  --kda-nvfp4 --dsa-nvfp4
 
 # KDA-only ablation; alternatively set the two JSON booleans or environment.
 example/k3/kimi_k31_full_model_two_host_pd_smoke.sh \
