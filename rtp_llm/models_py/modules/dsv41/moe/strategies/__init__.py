@@ -33,6 +33,9 @@ from .grouped_fp4 import (  # noqa: F401  ep_size==1 + kernel
     GroupedFP4Strategy,
     _has_fp8_fp4_grouped_kernel,
 )
+from .rocm_fp4_dequant import (  # noqa: F401  hip + ep_size==1 bf16-dequant
+    RocmFp4DequantStrategy,
+)
 from .deepep import DeepEPStrategy  # noqa: F401  targeted tests/experiments
 from .local_loop import LocalLoopStrategy  # noqa: F401  universal fallback
 

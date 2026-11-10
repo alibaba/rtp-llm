@@ -89,7 +89,10 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
-        return True
+        # Every forward variant runs DeepGEMM fp8_fp4 GEMMs (directly or via
+        # QuantizedLinear), so this "universal" fallback is CUDA-only; ROCm
+        # uses rocm_fp4_dequant instead of silently failing at forward time.
+        return torch.version.hip is None
 
     def setup_weights(self, layer_weights: Dict) -> None:
         """Build per-expert ``Expert`` ModuleList from EP-sliced stacks.
