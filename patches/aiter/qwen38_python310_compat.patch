@@ -1,0 +1,40 @@
+diff --git a/aiter/ops/triton/_triton_kernels/gemm/batched/batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant.py b/aiter/ops/triton/_triton_kernels/gemm/batched/batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant.py
+--- a/aiter/ops/triton/_triton_kernels/gemm/batched/batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant.py
++++ b/aiter/ops/triton/_triton_kernels/gemm/batched/batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant.py
+@@ -25,14 +25,15 @@
+ )
+ 
+ 
+-@triton.heuristics(
+-    {
++_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_kernel_heuristics = {
+         "EVEN_K": lambda args: (args["K"] % args["SPLITK_BLOCK_SIZE"] == 0)
+         and (args["SPLITK_BLOCK_SIZE"] % args["BLOCK_SIZE_K"] == 0),
+         "EVEN_MN": lambda args: (args["M"] % args["BLOCK_SIZE_M"] == 0)
+         and (args["N"] % args["BLOCK_SIZE_N"] == 0),
+     }
+-)
++
++
++@triton.heuristics(_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_kernel_heuristics)
+ @triton.jit(
+     repr=_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_repr,
+     do_not_specialize=["M", "N"],
+@@ -255,13 +256,14 @@
+     return acc
+ 
+ 
+-@triton.heuristics(
+-    {
++_batched_gemm_a8w8_splitk_reduce_per_token_quant_kernel_heuristics = {
+         "ONE_TILE": lambda args: args["N"] <= args["BLOCK_SIZE_N"],
+         "EVEN_MN": lambda args: (args["M"] % args["BLOCK_SIZE_M"] == 0)
+         and (args["N"] % args["BLOCK_SIZE_N"] == 0),
+     }
+-)
++
++
++@triton.heuristics(_batched_gemm_a8w8_splitk_reduce_per_token_quant_kernel_heuristics)
+ @triton.jit(
+     repr=_batched_gemm_a8w8_splitk_reduce_per_token_quant_repr,
+     do_not_specialize=["M"],
