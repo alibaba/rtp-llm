@@ -1,0 +1,97 @@
+# AGENTS.md
+
+This file provides guidance to agents when working with code in this repository.
+
+## 项目开发技能
+
+FlexLB 的开发技能统一维护在本目录下的 `skills/`，以仓库中的版本为准：
+
+- 开发、修复、重构和审核时，读取 [flexlb-development](skills/flexlb-development/SKILL.md)。
+- 跨组件流程与职责设计按需读取 [workflow-first-design](skills/workflow-first-design/SKILL.md)。
+- 具体类和方法实现按需读取 [evidence-first-implementation](skills/evidence-first-implementation/SKILL.md)。
+
+不依赖开发者个人技能目录中的副本；后续新增的 FlexLB 技能也放在这里。
+
+仓库根目录的 `.agents/skills/flexlb-development` 是指向本目录
+`skills/flexlb-development` 的相对符号链接。因此从仓库根目录、`rtp_llm` 或
+`rtp_llm/flexlb` 启动 Codex 均可发现 `$flexlb-development`。正文只维护一份，
+不在这些目录重复建立同名技能入口；相关实现和设计技能由主技能按需引用。
+
+## 可读性：核心开发与审核要求
+
+可读性是 FlexLB 的核心质量要求，适用于生产代码、测试、注释和文档。
+判断标准是：第一次接触这段代码、了解基本业务的读者，能直接看懂变量存了什么、
+状态表示什么、方法做了什么，以及为什么需要这个分支，而不必依赖作者口头解释或追踪多层实现。
+代码能运行、测试通过，不代表满足可读性要求。
+
+- **用具体、常见的词表达用途。** 名称优先说明业务对象和实际动作，不使用显得高级但含义
+  模糊的词汇。不要单独用 ownership、terminal、settlement、proof 等抽象词概括不同职责。
+  必须使用协议或领域术语时，在首次出现处用简单语言说明它对应哪个字段、对象或行为。
+- **变量名要说明保存的内容，状态名要说明正在发生的事。** 布尔值应能读成一个明确判断，
+  例如“是否正在等待引擎的 Finished 上报”。相较于 `awaitingTerminal`，
+  `waitingForWorkerFinishedReport` 更直接地说明等待谁、等待什么。
+  状态字段还应说明何时设置、何时清除，以及对调度、容量统计和请求清理的影响。
+- **方法名必须与实际效果一致。** 只清除容量记账状态的方法，不能用
+  `clearRequestOwnership` 这样的名字暗示整个请求的关联都被清除。
+  反过来，名称只表示修改一个字段的方法，也不应隐含删除记录、释放资源或通知调度器等操作。
+  优先修正命名和职责，不用长篇注释解释一个具有误导性的名字。
+- **不同含义分开表达。** “引擎当前是否在执行”“是否占用容量”“是否收到完成反馈”
+  “是否保留请求关联”是不同问题，不能用一个含糊的状态或多个难以理解的布尔组合混在一起。
+  状态转换应能从相邻代码中看清条件和结果，避免为了显得抽象而增加跳转层次。
+- **注释解释业务原因和约束。** 用具体对象描述保留什么、释放什么、等待什么；必要时给一个
+  简短请求示例。避免用另一组抽象术语重复代码，也不要依赖修改历史才能理解当前行为。
+- **审核时逐项检查可读性。** 对新增或修改的名称、状态和方法，检查读者能否仅根据命名及
+  附近代码准确判断用途和影响。需要反复追问“这个变量是干什么的”或“这个方法到底清掉什么”
+  才能理解时，应调整命名或结构后再提交审核。规则适用于当前改动，不要求顺带重构无关代码。
+
+## Java 成员组织顺序
+
+类流程说明应来自实际实现和调用方，说明入口、主要处理步骤、异步交接及结束条件。
+按该流程审核成员布局，不根据 `start`、`stop` 等名字猜测行为。
+
+使用 `tools/order_java_members.py` 统一整个 FlexLB 项目的 Java 成员顺序：
+
+- 静态字段及初始化块在前，实例字段及初始化块随后，构造器放在方法之前。
+- 方法按 `public → protected → 包级 → private` 分组；组内依据源码调用关系先放入口，
+  再放它调用的方法。独立入口保留原有相对顺序；业务重要性由开发者结合流程说明审核。
+- 内部类型放在方法之后并递归整理。字段按静态/实例、final/可变、基本/引用类型留白，
+  保留静态和实例初始化操作各自的顺序，以及 Lombok 构造器依赖的实例字段顺序。
+- 注释随对应成员移动。脚本不解析自然语言流程或 `MemberOrder` 声明；Spotless 负责换行和缩进。
+
+从本目录运行，默认覆盖所有模块、测试及工具中的 Java 文件，跳过 `target`：
+
+```bash
+python3 -m pip install -r tools/java-member-order-requirements.txt
+python3 tools/order_java_members.py --check
+python3 tools/order_java_members.py --apply
+./mvnw spotless:apply -Pspotless-check
+./mvnw spotless:check -Pspotless-check
+```
+
+可传文件或目录缩小范围；`--diff` 预览差异，`--patch` 输出补丁。
+检查发现待排序文件返回 1，解析或内容校验失败返回 2。应用前先完成整批校验；
+不得把成员排序或语法树校验当作完整的业务正确性证明。
+
+## Java Javadoc 格式
+
+创建或修改类之前，先判断是否需要类说明；流程类需补齐简短说明，已有准确说明则保留。
+先读实现和调用方确认流程，再据此组织成员或修改实现，完成后核对说明与代码一致。
+类说明默认 1–3 句话，概括职责、主流程和必要边界。
+自解释且无自定义行为的简单 record、纯字段 DTO 和枚举可以不写类注释；
+有单位、特殊值、身份、校验或生命周期约束时需说明，局部含义优先写在字段或方法旁。
+不罗列全部方法、状态或实现细节，局部约束放在对应代码附近，避免注释盖过主体逻辑。
+
+新增或修改 Javadoc 时，统一使用多行格式，即使只有一句说明也不压缩成单行。
+`/**` 和 `*/` 各自独占一行，说明文字放在中间以 `*` 开头的行上。
+
+```java
+/**
+ * Exposes whether application warm-up has completed.
+ */
+```
+
+## 提交检查
+
+从仓库根目录运行 `python3 -m pre_commit run --hook-stage pre-commit`，
+检查暂存的 FlexLB Java 文件的成员顺序，以及改动类的 Javadoc。
+Spotless 使用本分支的 Maven profile，单独运行 `./mvnw spotless:check -Pspotless-check`。

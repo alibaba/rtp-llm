@@ -9,6 +9,18 @@ repos:
       - id: trailing-whitespace
 
     # Formatters
+  - repo: local
+    hooks:
+      - id: flexlb-java-conventions
+        name: Check FlexLB Java member order and changed-class Javadoc
+        entry: python rtp_llm/flexlb/tools/check_flexlb_java.py
+        language: python
+        additional_dependencies:
+          - tree-sitter==0.23.2
+          - tree-sitter-java==0.23.5
+        files: ^rtp_llm/flexlb/.*\.java$
+        require_serial: true
+
   - repo: https://github.com/psf/black-pre-commit-mirror
     rev: 24.8.0
     hooks:
