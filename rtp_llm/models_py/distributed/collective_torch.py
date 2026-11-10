@@ -895,6 +895,9 @@ def barrier(group: Group) -> None:
     Args:
         group: Process group to use
     """
+    if os.environ.get("DSV41_CAPTURE_SYNC_NOOP"):
+        print("[cap] skip barrier", flush=True)
+        return
     process_group = _get_group(group)
     torch.distributed.barrier(group=process_group)
 
