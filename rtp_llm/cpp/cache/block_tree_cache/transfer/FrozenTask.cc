@@ -74,7 +74,8 @@ void writeBlocks(std::ostream& out, const std::vector<FrozenTask::BlockInfo>& bl
 }  // namespace
 
 FrozenTask::PreparedExecution FrozenTask::prepare(ExecutionInfo execution) {
-    RTP_LLM_CHECK_WITH_INFO(execution.trace_id != 0, "frozen execution requires a nonzero trace");
+    RTP_LLM_CHECK_WITH_INFO(validTransferExecutionTrace(execution.trace_id),
+                            "frozen execution requires a valid trace");
     std::vector<TargetPool>                        targets;
     std::unordered_map<IBlockPool*, size_t>        pool_indices;
     std::unordered_map<IBlockPool*, std::unordered_set<BlockIdxType>> seen;
@@ -170,8 +171,13 @@ FrozenTask::Snapshot FrozenTask::snapshot() const noexcept {
 std::string FrozenTask::debugString() const {
     const auto         current = snapshot();
     std::ostringstream out;
-    out << std::boolalpha << "FrozenTask{trace=" << execution_.trace_id
-        << ",operation=" << std::quoted(execution_.operation) << ",request=";
+    out << std::boolalpha << "FrozenTask{trace=";
+    if (const auto* numeric = std::get_if<uint64_t>(&execution_.trace_id)) {
+        out << *numeric << ",execution_type=transfer";
+    } else {
+        out << std::quoted(std::get<std::string>(execution_.trace_id)) << ",execution_type=kvcm_read";
+    }
+    out << ",operation=" << std::quoted(execution_.operation) << ",request=";
     writeOptional(out, execution_.request_id);
     out << ",workflow=" << execution_.workflow_id << ",parent_trace=" << execution_.parent_trace_id
         << ",remote=" << execution_.remote << ",expected_rank_count=" << execution_.expected_rank_count
@@ -200,9 +206,19 @@ std::string FrozenTask::debugString() const {
         writeBlocks(out, descriptor.sources);
         out << ",targets=";
         writeBlocks(out, descriptor.targets);
+        if (descriptor.rank) {
+            out << ",rank=" << *descriptor.rank << ",group_tag=" << std::quoted(descriptor.group_tag)
+                << ",source_uri=" << std::quoted(descriptor.source_uri);
+        }
         out << '}';
     }
-    out << "],rank_snapshots=";
+    out << "],failure_reason=";
+    if (failure_.execution_diagnostics) {
+        out << std::quoted(failure_.execution_diagnostics->failure_reason);
+    } else {
+        out << "unknown";
+    }
+    out << ",rank_snapshots=";
     if (!failure_.execution_diagnostics) {
         out << "unknown";
     } else {
@@ -231,6 +247,10 @@ std::string FrozenTask::debugString() const {
             writeErrors(out, rank.block_errors);
             out << ",buffer_safe=";
             writeOptional(out, rank.buffer_safe);
+            out << ",worker_transfer_status=";
+            writeOptional(out, rank.worker_transfer_status);
+            out << ",sdk_failed=";
+            writeOptional(out, rank.sdk_failed);
             out << '}';
         }
         out << ']';

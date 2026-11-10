@@ -158,7 +158,7 @@ TEST_F(FrozenExecutionTest, ActualExecutionTraceOwnsDeduplicatedTargetsBeforeBus
     EXPECT_EQ(completions, 1u);
     const auto frozen = dispatcher.frozenTasks();
     ASSERT_EQ(frozen.size(), 1u);
-    EXPECT_EQ(frozen[0]->execution().trace_id, executor->submitted_traces[0]);
+    EXPECT_EQ(std::get<uint64_t>(frozen[0]->execution().trace_id), executor->submitted_traces[0]);
     EXPECT_EQ(frozen[0]->execution().parent_trace_id, parent_trace);
     EXPECT_EQ(frozen[0]->execution().workflow_id, 900u);
     EXPECT_EQ(frozen[0]->execution().request_id, 73);
@@ -168,7 +168,7 @@ TEST_F(FrozenExecutionTest, ActualExecutionTraceOwnsDeduplicatedTargetsBeforeBus
     EXPECT_EQ(frozen[0]->execution().descriptors.size(), 2u);
     EXPECT_EQ(frozen[0]->snapshot().target_block_count, 1u);
     ASSERT_NE(frozen[0]->failure().execution_diagnostics, nullptr);
-    EXPECT_EQ(frozen[0]->failure().execution_diagnostics->trace_id, executor->submitted_traces[0]);
+    EXPECT_EQ(std::get<uint64_t>(frozen[0]->failure().execution_diagnostics->trace_id), executor->submitted_traces[0]);
     EXPECT_TRUE(host_->isAllocated(target));
     EXPECT_EQ(host_->treeRefCount(target), 1u);
     frozen[0]->unfreeze();

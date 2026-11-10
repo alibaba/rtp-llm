@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSetResource.h"
@@ -110,6 +111,18 @@ inline ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
 }
 enum class TransferRpcDispatchState { NOT_SUBMITTED, POSSIBLY_SUBMITTED, SUBMITTED };
 
+// Preserve the existing execution identity and its namespace: ordinary transfer
+// uses a numeric trace, while KVCM READ uses the original string from its request.
+using TransferExecutionTrace = std::variant<uint64_t, std::string>;
+
+inline bool validTransferExecutionTrace(const TransferExecutionTrace& trace) noexcept {
+    if (const auto* numeric = std::get_if<uint64_t>(&trace)) {
+        return *numeric != 0;
+    }
+    const auto* remote = std::get_if<std::string>(&trace);
+    return remote && !remote->empty();
+}
+
 // A snapshot of one participant in one actual execution. A missing status is
 // unknown, never an implicit successful RPC. Local executions have remote=false.
 struct TransferRankSnapshot {
@@ -130,10 +143,13 @@ struct TransferRankSnapshot {
     std::optional<CacheCopyError> worker_copy_error;
     std::vector<CacheCopyError>   block_errors;
     std::optional<bool>           buffer_safe;
+    std::optional<int>            worker_transfer_status;
+    std::optional<bool>           sdk_failed;
 };
 
 struct TransferExecutionDiagnostics {
-    uint64_t                          trace_id{0};
+    TransferExecutionTrace            trace_id{uint64_t{0}};
+    std::string                       failure_reason;
     std::vector<TransferRankSnapshot> ranks;
 };
 

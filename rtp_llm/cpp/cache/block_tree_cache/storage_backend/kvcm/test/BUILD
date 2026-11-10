@@ -120,6 +120,30 @@ cc_test_wrapper(
 )
 
 cc_test_wrapper(
+    name = "kvcm_frozen_task_test",
+    testonly = True,
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = [
+        "KVCMFrozenTaskTest.cc",
+        "KVCMMockTestBase.h",
+        "MockKVCMClient.h",
+    ],
+    copts = ["-fno-access-control"] + copts(),
+    tags = [
+        "L20_CU13",
+        "exclusive-if-local",
+    ],
+    target_compatible_with = select({
+        "//:using_remote_kv_cache": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = kvcm_backend_test_deps + [
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:sdk_buffer_safety",
+    ],
+)
+
+cc_test_wrapper(
     name = "kvcm_local_test",
     testonly = True,
     exec_properties = {"gpu": "L20_CU13"},

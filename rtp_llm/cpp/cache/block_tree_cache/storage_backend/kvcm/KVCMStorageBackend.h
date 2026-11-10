@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 class RemoteOperationRequestPB;
@@ -57,6 +58,8 @@ public:
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
     // Local READ completion evidence; this accessor does not issue a query RPC.
     const TransferTaskRegistry& taskRegistry() const;
+    // Retained non-protected READ targets. No query or automatic thaw runs here.
+    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
 
     // Optional EOS publication; true means handled/skipped, not committed.
     bool captureCompletedDecode(const BatchKVCacheResource& resource,

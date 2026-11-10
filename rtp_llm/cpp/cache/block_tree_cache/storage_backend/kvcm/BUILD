@@ -49,6 +49,7 @@ cc_library(
         ":group_policy",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/block_tree_cache:block_tree_task_pool",
+        "//rtp_llm/cpp/cache/block_tree_cache:transfer_common",
         "//rtp_llm/cpp/cache/block_tree_cache:transfer_buffer_safety",
         "//rtp_llm/cpp/cache/block_tree_cache:transfer_task_registry",
         "//rtp_llm/cpp/metrics:metrics",

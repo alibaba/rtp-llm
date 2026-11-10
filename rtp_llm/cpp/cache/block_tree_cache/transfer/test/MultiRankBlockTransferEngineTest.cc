@@ -685,7 +685,7 @@ TEST_F(MultiRankBlockTransferEngineTest, FrozenExecutionKeepsWireTraceAndSeparat
     auto records = dispatcher->frozenTasks();
     ASSERT_EQ(records.size(), 1u);
     const auto& record = *records.front();
-    EXPECT_NE(record.execution().trace_id, parent_trace);
+    EXPECT_NE(std::get<uint64_t>(record.execution().trace_id), parent_trace);
     EXPECT_EQ(record.execution().parent_trace_id, parent_trace);
     EXPECT_EQ(record.execution().workflow_id, 1234u);
     EXPECT_EQ(record.execution().request_id, 42);
@@ -716,7 +716,7 @@ TEST_F(MultiRankBlockTransferEngineTest, FrozenExecutionKeepsWireTraceAndSeparat
         std::lock_guard<std::mutex> lock(state->mutex);
         ASSERT_EQ(state->requests.size(), 2u);
         for (const auto& request : state->requests)
-            EXPECT_EQ(request.transfer_trace_id(), record.execution().trace_id);
+            EXPECT_EQ(request.transfer_trace_id(), std::get<uint64_t>(record.execution().trace_id));
     }
     EXPECT_EQ(pool->treeRefCount(target), 1u);
     records.front()->unfreeze();

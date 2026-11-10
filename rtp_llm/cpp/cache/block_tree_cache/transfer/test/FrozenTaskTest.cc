@@ -356,5 +356,47 @@ TEST(FrozenTaskTest, DiagnosticsRetainEveryRankOutcomeAndAllEndpointRoles) {
     EXPECT_NE(task.debugString().find("state=RELEASED"), std::string::npos);
 }
 
+TEST(FrozenTaskTest, RemoteReadPreservesStringIdentityAndRejectsAnotherTraceNamespace) {
+    auto pool = makePool("remote-target");
+    const auto block = heldBlock(pool);
+    auto info = execution(33, {}, {{pool, block, 0}});
+    info.trace_id = std::string("33");
+    info.operation = "remote_read";
+    info.descriptors.front().source_tier = Tier::REMOTE;
+    info.descriptors.front().rank = 0;
+    info.descriptors.front().group_tag = "default";
+    info.descriptors.front().source_uri = "pace://original-source";
+    auto diagnostics = std::make_shared<TransferExecutionDiagnostics>();
+    diagnostics->trace_id = uint64_t{33};
+    auto failure = unknownResult();
+    failure.execution_diagnostics = diagnostics;
+    EXPECT_ANY_THROW(FrozenTask(FrozenTask::prepare(info), failure));
+    EXPECT_FALSE(pool->isFrozen(block));
+
+    auto invalid = info;
+    invalid.trace_id = std::string{};
+    EXPECT_ANY_THROW(FrozenTask::prepare(std::move(invalid)));
+    diagnostics->trace_id = info.trace_id;
+    diagnostics->failure_reason = "rpc_timeout";
+    TransferRankSnapshot rank;
+    rank.rank = 0;
+    rank.worker_transfer_status = 3;
+    rank.sdk_failed = false;
+    diagnostics->ranks.push_back(rank);
+    FrozenTask task(FrozenTask::prepare(std::move(info)), std::move(failure));
+    task.freeze();
+    EXPECT_EQ(std::get<std::string>(task.execution().trace_id), "33");
+    EXPECT_EQ(pool->treeRefCount(block), 2u);
+    const auto log = task.debugString();
+    for (const auto* field : {"trace=\"33\"", "execution_type=kvcm_read", "failure_reason=\"rpc_timeout\"",
+                              "source_uri=\"pace://original-source\"", "group_tag=\"default\"",
+                              "worker_transfer_status=3", "sdk_failed=false"}) {
+        EXPECT_NE(log.find(field), std::string::npos) << field << '\n' << log;
+    }
+    task.unfreeze();
+    task.unfreeze();
+    EXPECT_EQ(pool->treeRefCount(block), 1u);
+}
+
 }  // namespace
 }  // namespace rtp_llm

@@ -757,6 +757,7 @@ TEST(KVCMLocalTest, EnabledReadQuarantinesUnprovenSdkErrorsButNotExplicitSafeRes
             const bool unknown = !safe;
             EXPECT_EQ(static_cast<bool>(backend.backend->protected_quarantine_), enabled && unknown);
             EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), !enabled && unknown);
+            EXPECT_EQ(backend->frozenTasks().size(), !enabled && unknown ? 1u : 0u);
             EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + (unknown ? 1u : 0u));
             std::lock_guard<std::mutex> lock(backend.backend->quarantine_mutex_);
             EXPECT_EQ(
@@ -798,8 +799,9 @@ TEST(KVCMLocalTest, CallerBufferSafetyDoesNotProveRemoteAllocationQuiescence) {
             ASSERT_TRUE(backend.backend->write(std::move(task)));
             ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
             EXPECT_EQ(static_cast<bool>(backend.backend->protected_quarantine_), enabled && unknown);
-            EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), !enabled && unknown);
-            EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + (unknown ? 1u : 0u));
+            EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+            EXPECT_TRUE(backend->frozenTasks().empty());
+            EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + (enabled && unknown ? 1u : 0u));
         }
     }
 }

@@ -246,6 +246,7 @@ TEST(KVCMWorkerRegistryTest, LocalAsyncQueuePreservesReadOwnersForRejectionAndEx
     EXPECT_EQ(registryState(*backend.backend, "block_tree_read_1"), RegistryState::BUFFER_SAFE);
     EXPECT_EQ(registryState(*backend.backend, "block_tree_read_2"), RegistryState::BUFFER_SAFE);
     EXPECT_EQ(backend->taskRegistry().size(), 3u);
+    EXPECT_TRUE(backend->frozenTasks().empty());
 }
 
 TEST(KVCMWorkerRegistryTest, WarningThresholdNeverCapsReadAdmissionOrDeletesEvidence) {

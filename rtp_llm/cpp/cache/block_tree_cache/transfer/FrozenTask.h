@@ -39,10 +39,13 @@ public:
         Tier                   target_tier{Tier::NONE};
         std::vector<BlockInfo> sources;
         std::vector<BlockInfo> targets;
+        std::optional<size_t>  rank{};
+        std::string            group_tag{};
+        std::string            source_uri{};
     };
 
     struct ExecutionInfo {
-        uint64_t                    trace_id{0};
+        TransferExecutionTrace      trace_id{uint64_t{0}};
         std::string                 operation;
         std::optional<int64_t>      request_id;
         uint64_t                    workflow_id{0};
