@@ -393,6 +393,10 @@ def _sparse_paged_grouped_split_kernel(
     BLOCK_N: tl.constexpr,
     WITH_GATE: tl.constexpr = False,
     OUT_BTHD: tl.constexpr = False,
+    STRIDED_GATE: tl.constexpr = False,
+    stride_gate_b=0,
+    stride_gate_s=0,
+    stride_gate_h=0,
 ):
     """Tensor-core grouped sparse paged GQA.
 
@@ -504,9 +508,7 @@ def _sparse_paged_grouped_split_kernel(
             scores = tl.where(valid[None, :], scores, float("-inf"))
             next_max = tl.maximum(maximum, tl.max(scores, 1))
             alpha = tl.where(next_max == float("-inf"), 0.0, tl.exp(maximum - next_max))
-            weights = tl.where(
-                valid[None, :], tl.exp(scores - next_max[:, None]), 0.0
-            )
+            weights = tl.where(valid[None, :], tl.exp(scores - next_max[:, None]), 0.0)
             # The softmax normalizer stays in raw probability space; only the PV
             # operand carries the per-token V scale.
             normalizer = normalizer * alpha + tl.sum(weights, 1)
@@ -520,9 +522,7 @@ def _sparse_paged_grouped_split_kernel(
             scores = tl.where(valid[None, :], scores, float("-inf"))
             next_max = tl.maximum(maximum, tl.max(scores, 1))
             alpha = tl.where(next_max == float("-inf"), 0.0, tl.exp(maximum - next_max))
-            weights = tl.where(
-                valid[None, :], tl.exp(scores - next_max[:, None]), 0.0
-            )
+            weights = tl.where(valid[None, :], tl.exp(scores - next_max[:, None]), 0.0)
             acc = acc * alpha[:, None] + tl.dot(weights.to(tl.bfloat16), values)
             normalizer = normalizer * alpha + tl.sum(weights, 1)
             maximum = next_max
@@ -533,11 +533,18 @@ def _sparse_paged_grouped_split_kernel(
             # Same quantised sigmoid math as the merge kernel: the gate
             # rounds to bf16 before the fp32 multiply, so single-split and
             # multi-split requests stay bit-identical.
-            gate_offset = (
-                (batch * QUERY_LEN + query) * H_Q + kv_head * GROUP_SIZE + heads
-            )
+            if STRIDED_GATE:
+                gate_offset = (
+                    batch * stride_gate_b
+                    + query * stride_gate_s
+                    + (kv_head * GROUP_SIZE + heads) * stride_gate_h
+                )
+            else:
+                gate_offset = (
+                    (batch * QUERY_LEN + query) * H_Q + kv_head * GROUP_SIZE + heads
+                ) * D
             gate = tl.load(
-                gate_ptr + gate_offset[:, None] * D + rd[None, :],
+                gate_ptr + gate_offset[:, None] + rd[None, :],
                 mask=live[:, None],
                 other=0.0,
             ).to(tl.float32)
@@ -573,6 +580,10 @@ def _merge_sparse_paged_splits_kernel(
     QUERIES,
     WITH_GATE: tl.constexpr,
     OUT_BTHD: tl.constexpr = False,
+    STRIDED_GATE: tl.constexpr = False,
+    stride_gate_b=0,
+    stride_gate_s=0,
+    stride_gate_h=0,
 ):
     row = tl.program_id(0)
     splits = tl.arange(0, NUM_SPLITS)
@@ -593,12 +604,38 @@ def _merge_sparse_paged_splits_kernel(
         query = row % QUERIES
         offset = ((batch * QUERIES + query) * HEADS + head) * D + rd
         if WITH_GATE:
-            gate = tl.load(gate_ptr + offset).to(tl.float32)
+            if STRIDED_GATE:
+                gate_offset = (
+                    batch * stride_gate_b
+                    + query * stride_gate_s
+                    + head * stride_gate_h
+                    + rd
+                )
+            else:
+                gate_offset = offset
+            gate = tl.load(gate_ptr + gate_offset).to(tl.float32)
             sigmoid = tl.sigmoid(gate).to(tl.bfloat16).to(tl.float32)
             out = out.to(tl.bfloat16).to(tl.float32) * sigmoid
     else:
         offset = row * D + rd
     tl.store(out_ptr + offset, out.to(out_ptr.dtype.element_ty))
+
+
+def _output_gate_layout_supported(
+    gate: torch.Tensor, *, allow_strided: bool, graph_capture: bool
+) -> bool:
+    """Allow padded token rows only for an explicitly opted-in eager caller."""
+    if gate.is_contiguous():
+        return True
+    if not allow_strided or graph_capture or gate.dim() != 4:
+        return False
+    batch, queries, heads, dim = gate.shape
+    return (
+        gate.stride(3) == 1
+        and gate.stride(2) == dim
+        and gate.stride(1) >= heads * dim
+        and (batch <= 1 or gate.stride(0) >= queries * gate.stride(1))
+    )
 
 
 def sparse_paged_gqa_attn(
@@ -618,6 +655,7 @@ def sparse_paged_gqa_attn(
     fp16_pv: bool = False,
     validate_selected: bool = True,
     bthd_output: bool = False,
+    allow_strided_output_gate: bool = False,
 ) -> torch.Tensor:
     """Attend to request-local token indices in a paged main MHA cache.
 
@@ -648,6 +686,10 @@ def sparse_paged_gqa_attn(
             ``[B, H, S, D]``. Only the SM90 tensor-core grouped path honours
             this; other geometries raise. Combined with a strided BTHD query
             view this removes both per-request layout clones.
+        allow_strided_output_gate: internal main eager prefix-reuse caller may
+            pass a gate with padded token rows, e.g. the first 3072 columns of
+            a physical ``[T,3840]`` projection. Heads and head dimensions must
+            remain packed. This opt-in does not apply during graph capture.
     """
     if q.dim() != 4 or q.dtype != torch.bfloat16 or not q.is_cuda:
         raise ValueError("q must be a rank-4 BF16 CUDA tensor")
@@ -656,10 +698,15 @@ def sparse_paged_gqa_attn(
         output_gate.shape == (batch, query_len, q_heads, head_dim)
         and output_gate.dtype == torch.bfloat16
         and output_gate.device == q.device
-        and output_gate.is_contiguous()
+        and _output_gate_layout_supported(
+            output_gate,
+            allow_strided=allow_strided_output_gate,
+            graph_capture=graph_capture,
+        )
     ):
         raise ValueError(
-            "QSA output gate must be contiguous BF16 [B,S,H,D] on the query device"
+            "QSA output gate must be contiguous BF16 [B,S,H,D] on the query "
+            "device, or use explicitly enabled eager padded token rows"
         )
     if q_heads <= 0 or head_dim <= 0 or head_dim & (head_dim - 1):
         raise ValueError("query heads must be positive and head_dim a power of two")
@@ -801,9 +848,14 @@ def sparse_paged_gqa_attn(
     block_table = block_table.contiguous()
     kv_lens = kv_lens.contiguous()
     selected = selected.contiguous()
+    gate_strides = (0, 0, 0) if output_gate is None else output_gate.stride()[:3]
+    strided_gate = output_gate is not None and not output_gate.is_contiguous()
     output = torch.empty(
-        (batch, query_len, q_heads, head_dim) if bthd_output
-        else (batch, q_heads, query_len, head_dim),
+        (
+            (batch, query_len, q_heads, head_dim)
+            if bthd_output
+            else (batch, q_heads, query_len, head_dim)
+        ),
         device=q.device,
         dtype=q.dtype,
     )
@@ -871,13 +923,19 @@ def sparse_paged_gqa_attn(
             BLOCK_N=block_n,
             WITH_GATE=output_gate is not None,
             OUT_BTHD=bthd_output,
+            STRIDED_GATE=strided_gate,
+            stride_gate_b=gate_strides[0],
+            stride_gate_s=gate_strides[1],
+            stride_gate_h=gate_strides[2],
             num_warps=warps,
             num_stages=stages,
         )
         if splits > 1:
             if not bthd_output and output_gate is not None:
                 output = torch.empty(
-                    (batch, query_len, q_heads, head_dim), device=q.device, dtype=q.dtype
+                    (batch, query_len, q_heads, head_dim),
+                    device=q.device,
+                    dtype=q.dtype,
                 ).transpose(1, 2)
             _merge_sparse_paged_splits_kernel[(batch * q_heads * query_len,)](
                 partial,
@@ -889,6 +947,10 @@ def sparse_paged_gqa_attn(
                 QUERIES=query_len,
                 WITH_GATE=output_gate is not None,
                 OUT_BTHD=bthd_output,
+                STRIDED_GATE=strided_gate,
+                stride_gate_b=gate_strides[0],
+                stride_gate_s=gate_strides[1],
+                stride_gate_h=gate_strides[2],
             )
         return output
     splits = min(8, triton.next_power_of_2(triton.cdiv(selected_width, block_k)))
@@ -989,6 +1051,10 @@ def sparse_paged_gqa_attn(
             HEADS=q_heads,
             QUERIES=query_len,
             WITH_GATE=output_gate is not None,
+            STRIDED_GATE=strided_gate,
+            stride_gate_b=gate_strides[0],
+            stride_gate_s=gate_strides[1],
+            stride_gate_h=gate_strides[2],
         )
     elif output_gate is not None:
         output = output * torch.sigmoid(output_gate.transpose(1, 2))

@@ -570,6 +570,76 @@ py_test(
 )
 
 py_test(
+    name = "qsa_validation_once_test",
+    srcs = ["qsa_validation_once_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "qsa_three_kernel_dispatch_test",
+    srcs = ["qsa_three_kernel_dispatch_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "qsa_prefill_projection_three_kernel_test",
+    srcs = ["qsa_prefill_projection_three_kernel_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "qsa_three_kernel_benchmark_test",
+    srcs = ["qsa_three_kernel_benchmark_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["manual", "H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "qsa_projection_validation_benchmark_test",
+    srcs = [
+        "qsa_projection_validation_benchmark_test.py",
+        "qsa_three_kernel_benchmark_test.py",
+        "indexer_prefix_reuse_triton_test.py",
+    ],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["manual", "H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "qsa_validation_once_benchmark_test",
+    srcs = ["qsa_validation_once_benchmark_test.py", "indexer_prefix_reuse_triton_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["manual", "H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "qsa_strided_output_gate_test",
+    srcs = ["qsa_strided_output_gate_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "qsa_dual_table_verdict_test",
+    srcs = ["qsa_dual_table_verdict_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "residual_prefill_up_mix_test",
     srcs = ["residual_prefill_up_mix_test.py", "residual_norm_fp8_test.py"],
     deps = ["//rtp_llm:testlib"],

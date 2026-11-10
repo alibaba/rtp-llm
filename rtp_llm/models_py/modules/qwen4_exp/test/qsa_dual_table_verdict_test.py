@@ -14,9 +14,10 @@ This test locks the replacement contract:
 * the dual-table verdict matches the two single-table verdicts' bitwise AND
   across valid and adversarial geometries (both tables, B > 1, boundary
   blocks, empty required windows and the 4096-lane bound);
-* the production (non-strict) geometry path enqueues exactly two device
-  kernels per layer and still traps invalid tables with one assert whose
-  message keeps both cache names;
+* the non-strict geometry path enqueues exactly two device kernels per call
+  without a forward scope, or per equivalent table/capacity/stream inside
+  one explicit forward scope, and still traps invalid tables with one
+  assert whose message keeps both cache names;
 * unsupported geometries fall back to the combined single-table verdicts with
   identical results;
 * new table shapes do not add compiled variants (fixed lanes,
@@ -38,22 +39,27 @@ def _table(rows, width):
     table = torch.zeros((len(rows), width), dtype=torch.int32, device=_DEV)
     for index, row in enumerate(rows):
         if row:
-            table[index, : len(row)] = torch.tensor(
-                row, dtype=torch.int32, device=_DEV
-            )
+            table[index, : len(row)] = torch.tensor(row, dtype=torch.int32, device=_DEV)
     return table
 
 
 class _DualCase:
     def __init__(
-        self, tag, kv_rows, kv_width, kv_required, kv_pool, state_rows,
-        state_width, state_required, state_pool, valid,
+        self,
+        tag,
+        kv_rows,
+        kv_width,
+        kv_required,
+        kv_pool,
+        state_rows,
+        state_width,
+        state_required,
+        state_pool,
+        valid,
     ):
         self.tag = tag
         self.kv_table = _table(kv_rows, kv_width)
-        self.kv_required = torch.tensor(
-            kv_required, dtype=torch.int32, device=_DEV
-        )
+        self.kv_required = torch.tensor(kv_required, dtype=torch.int32, device=_DEV)
         self.kv_pool = kv_pool
         self.state_table = _table(state_rows, state_width)
         self.state_required = torch.tensor(
@@ -66,98 +72,194 @@ class _DualCase:
 _CASES = [
     _DualCase(
         "both_valid",
-        [[1, 2, 3, 0], [5, 6, 7, 9]], 4, [3, 3], 16,
-        [[1, 2], [4, 5]], 3, [2, 2], 16,
+        [[1, 2, 3, 0], [5, 6, 7, 9]],
+        4,
+        [3, 3],
+        16,
+        [[1, 2], [4, 5]],
+        3,
+        [2, 2],
+        16,
         True,
     ),
     _DualCase(
         "kv_required_column_unallocated",
-        [[1, 0, 0, 0]], 4, [2], 16,
-        [[1, 2]], 3, [2], 16,
+        [[1, 0, 0, 0]],
+        4,
+        [2],
+        16,
+        [[1, 2]],
+        3,
+        [2],
+        16,
         False,
     ),
     _DualCase(
         "state_required_column_unallocated",
-        [[1, 2, 3, 0]], 4, [3], 16,
-        [[1, 0]], 3, [2], 16,
+        [[1, 2, 3, 0]],
+        4,
+        [3],
+        16,
+        [[1, 0]],
+        3,
+        [2],
+        16,
         False,
     ),
     _DualCase(
         "kv_required_uncovered",
-        [[1, 2, 3, 0]], 4, [5], 16,
-        [[1, 2]], 3, [2], 16,
+        [[1, 2, 3, 0]],
+        4,
+        [5],
+        16,
+        [[1, 2]],
+        3,
+        [2],
+        16,
         False,
     ),
     _DualCase(
         "state_required_uncovered",
-        [[1, 2, 3, 0]], 4, [3], 16,
-        [[1, 2]], 3, [4], 16,
+        [[1, 2, 3, 0]],
+        4,
+        [3],
+        16,
+        [[1, 2]],
+        3,
+        [4],
+        16,
         False,
     ),
     _DualCase(
         "kv_negative_required",
-        [[1, 2, 3, 0]], 4, [-1], 16,
-        [[1, 2]], 3, [2], 16,
+        [[1, 2, 3, 0]],
+        4,
+        [-1],
+        16,
+        [[1, 2]],
+        3,
+        [2],
+        16,
         False,
     ),
     _DualCase(
         "state_negative_required",
-        [[1, 2, 3, 0]], 4, [3], 16,
-        [[1, 2]], 3, [-2], 16,
+        [[1, 2, 3, 0]],
+        4,
+        [3],
+        16,
+        [[1, 2]],
+        3,
+        [-2],
+        16,
         False,
     ),
     _DualCase(
         "kv_stale_column_out_of_pool",
-        [[1, 2, 0, 0], [3, 0, 0, 17]], 4, [2, 1], 16,
-        [[1, 2]], 3, [2], 16,
+        [[1, 2, 0, 0], [3, 0, 0, 17]],
+        4,
+        [2, 1],
+        16,
+        [[1, 2]],
+        3,
+        [2],
+        16,
         False,
     ),
     _DualCase(
         "state_stale_column_out_of_pool",
-        [[1, 2, 3, 0]], 4, [3], 16,
-        [[1, 2, 18]], 3, [2], 16,
+        [[1, 2, 3, 0]],
+        4,
+        [3],
+        16,
+        [[1, 2, 18]],
+        3,
+        [2],
+        16,
         False,
     ),
     _DualCase(
         "kv_pool_boundary",
-        [[1, 15, 0, 0]], 4, [2], 16,
-        [[1, 2]], 3, [2], 16,
+        [[1, 15, 0, 0]],
+        4,
+        [2],
+        16,
+        [[1, 2]],
+        3,
+        [2],
+        16,
         True,
     ),
     _DualCase(
         "state_pool_boundary_exceeded",
-        [[1, 2, 3, 0]], 4, [3], 16,
-        [[1, 16]], 3, [2], 16,
+        [[1, 2, 3, 0]],
+        4,
+        [3],
+        16,
+        [[1, 16]],
+        3,
+        [2],
+        16,
         False,
     ),
     _DualCase(
         "kv_required_equals_width",
-        [[1, 2, 3, 4]], 4, [4], 16,
-        [[1, 2, 3]], 3, [3], 16,
+        [[1, 2, 3, 4]],
+        4,
+        [4],
+        16,
+        [[1, 2, 3]],
+        3,
+        [3],
+        16,
         True,
     ),
     _DualCase(
         "empty_required_windows",
-        [[1, 2, 3, 0]], 4, [0], 16,
-        [[1, 2]], 3, [0], 16,
+        [[1, 2, 3, 0]],
+        4,
+        [0],
+        16,
+        [[1, 2]],
+        3,
+        [0],
+        16,
         True,
     ),
     _DualCase(
         "batch_mixed_one_bad_state_row",
-        [[1, 2], [3, 4], [5, 6]], 2, [2, 2, 2], 16,
-        [[1, 2], [0, 0], [4, 5]], 3, [2, 2, 2], 16,
+        [[1, 2], [3, 4], [5, 6]],
+        2,
+        [2, 2, 2],
+        16,
+        [[1, 2], [0, 0], [4, 5]],
+        3,
+        [2, 2, 2],
+        16,
         False,
     ),
     _DualCase(
         "production_asymmetric_widths",
-        [[((i % 4000) + 1) for i in range(55)]], 55, [55], 4096,
-        [[((i % 4000) + 1) for i in range(110)]], 110, [110], 4096,
+        [[((i % 4000) + 1) for i in range(55)]],
+        55,
+        [55],
+        4096,
+        [[((i % 4000) + 1) for i in range(110)]],
+        110,
+        [110],
+        4096,
         True,
     ),
     _DualCase(
         "lane_bound_4096",
-        [[(i % 63) + 1 for i in range(64)]] * 64, 64, [64] * 64, 64,
-        [[(i % 63) + 1 for i in range(64)]] * 64, 64, [64] * 64, 64,
+        [[(i % 63) + 1 for i in range(64)]] * 64,
+        64,
+        [64] * 64,
+        64,
+        [[(i % 63) + 1 for i in range(64)]] * 64,
+        64,
+        [64] * 64,
+        64,
         True,
     ),
 ]
@@ -347,6 +449,89 @@ class IncrementalGeometryLaunchTest(unittest.TestCase):
             f"the async assert, got {len(kernels)}: {kernels}",
         )
 
+    def test_equivalent_layers_enqueue_one_pair_in_each_forward_scope(self):
+        from torch.profiler import ProfilerActivity, profile
+
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+            qsa_validation_step,
+        )
+
+        context, indexer, rope, args, device = _geometry_fixture()
+        token_count = sum(args["lengths"])
+        with patch.dict(os.environ, {"RTP_LLM_QSA_STRICT_VALIDATION": "0"}):
+            # Warm plan construction and Triton compilation outside capture.
+            self._run_geometry(context, indexer, rope, token_count, device)
+            torch.cuda.synchronize()
+            with profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]
+            ) as prof:
+                for _ in range(2):
+                    with qsa_validation_step():
+                        for _ in range(3):
+                            self._run_geometry(
+                                context, indexer, rope, token_count, device
+                            )
+                torch.cuda.synchronize()
+        path = os.path.join(tempfile.mkdtemp(prefix="qsa_validation_once_"), "t.json")
+        prof.export_chrome_trace(path)
+        with open(path) as handle:
+            events = json.load(handle)["traceEvents"]
+        kernels = [event["name"] for event in events if event.get("cat") == "kernel"]
+        self.assertEqual(len(kernels), 4, kernels)
+        self.assertEqual(
+            sum("_dual_table_required_blocks_kernel" in k for k in kernels), 2
+        )
+        self.assertEqual(sum("_assert_async_cuda_kernel" in k for k in kernels), 2)
+
+    def test_different_cuda_streams_each_enqueue_their_own_checks(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime import qsa_step_plan
+
+        context, indexer, rope, args, device = _geometry_fixture()
+        token_count = sum(args["lengths"])
+        with patch.dict(os.environ, {"RTP_LLM_QSA_STRICT_VALIDATION": "0"}):
+            self._run_geometry(context, indexer, rope, token_count, device)
+            current = torch.cuda.current_stream(device)
+            other = torch.cuda.Stream(device=device)
+            other.wait_stream(current)  # Metadata producer precedes both streams.
+            with patch.object(
+                qsa_step_plan,
+                "_side_tables_verdict",
+                wraps=qsa_step_plan._side_tables_verdict,
+            ) as verdict, qsa_step_plan.qsa_validation_step():
+                self._run_geometry(context, indexer, rope, token_count, device)
+                self._run_geometry(context, indexer, rope, token_count, device)
+                with torch.cuda.stream(other):
+                    self._run_geometry(context, indexer, rope, token_count, device)
+                    self._run_geometry(context, indexer, rope, token_count, device)
+                self.assertEqual(verdict.call_count, 2)
+            current.wait_stream(other)
+            torch.cuda.synchronize()
+
+    def test_cuda_table_mutation_in_scope_rechecks_invalid_verdict(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+            qsa_validation_step,
+        )
+
+        for tag, field in (
+            ("indexer_kv_inputs", "kv_cache_kernel_block_id_device"),
+            ("indexer_state_inputs", "kv_cache_block_id_device"),
+        ):
+            with self.subTest(tag=tag):
+                context, indexer, rope, args, device = _geometry_fixture()
+                token_count = sum(args["lengths"])
+                with patch.dict(os.environ, {"RTP_LLM_QSA_STRICT_VALIDATION": "0"}):
+                    self._run_geometry(context, indexer, rope, token_count, device)
+                    # Inspect the real CUDA verdict without poisoning this test
+                    # process's context with a device assert; no writer is run.
+                    with patch(
+                        "torch._assert_async"
+                    ) as assert_async, qsa_validation_step():
+                        self._run_geometry(context, indexer, rope, token_count, device)
+                        getattr(getattr(context, tag), field)[0, 0] = 0
+                        self._run_geometry(context, indexer, rope, token_count, device)
+                        self.assertEqual(assert_async.call_count, 2)
+                        self.assertFalse(bool(assert_async.call_args[0][0].item()))
+
     def test_invalid_tables_still_assert_once_with_both_cache_names(self):
         from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
             clear_step_plan_cache,
@@ -362,9 +547,11 @@ class IncrementalGeometryLaunchTest(unittest.TestCase):
                 token_count = sum(args["lengths"])
                 table = getattr(
                     getattr(context, table_attr),
-                    "kv_cache_kernel_block_id_device"
-                    if tag == "indexer_kv"
-                    else "kv_cache_block_id_device",
+                    (
+                        "kv_cache_kernel_block_id_device"
+                        if tag == "indexer_kv"
+                        else "kv_cache_block_id_device"
+                    ),
                 )
                 table[0, 0] = 0  # unallocated required column
                 with patch.dict(
@@ -394,9 +581,9 @@ class IncrementalGeometryLaunchTest(unittest.TestCase):
         clear_step_plan_cache()
         context, indexer, rope, args, device = _geometry_fixture()
         token_count = sum(args["lengths"])
-        with patch.dict(
-            os.environ, {"RTP_LLM_QSA_STRICT_VALIDATION": "0"}
-        ), patch("torch._assert_async") as assert_async:
+        with patch.dict(os.environ, {"RTP_LLM_QSA_STRICT_VALIDATION": "0"}), patch(
+            "torch._assert_async"
+        ) as assert_async:
             # Warm the plan build, then measure a plan-hit layer call.
             self._run_geometry(context, indexer, rope, token_count, device)
             assert_async.reset_mock()
@@ -414,9 +601,9 @@ class IncrementalGeometryLaunchTest(unittest.TestCase):
         context, indexer, rope, args, device = _geometry_fixture()
         token_count = sum(args["lengths"])
         context.indexer_kv_inputs.kv_cache_kernel_block_id_device[0, 0] = 0
-        with patch.dict(
-            os.environ, {"RTP_LLM_QSA_STRICT_VALIDATION": "1"}
-        ), patch("torch._assert_async") as assert_async:
+        with patch.dict(os.environ, {"RTP_LLM_QSA_STRICT_VALIDATION": "1"}), patch(
+            "torch._assert_async"
+        ) as assert_async:
             with self.assertRaisesRegex(RuntimeError, "indexer_kv"):
                 self._run_geometry(context, indexer, rope, token_count, device)
         assert_async.assert_not_called()
@@ -444,8 +631,10 @@ class DualTableVariantTest(unittest.TestCase):
             kv_table = _table([kv_row] * batch, kv_width)
             state_table = _table([state_row] * batch, state_width)
             required = torch.full(
-                (batch,), min(kv_width, state_width),
-                dtype=torch.int32, device=_DEV,
+                (batch,),
+                min(kv_width, state_width),
+                dtype=torch.int32,
+                device=_DEV,
             )
             dual_required_blocks_verdict(
                 kv_table,

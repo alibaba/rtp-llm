@@ -232,3 +232,12 @@ def project_fp8_pair(x, first, second):
             out[: rows.shape[0]].reshape(*x.shape[:-1], projection.weight.shape[0])
         )
     return tuple(outputs)
+
+
+def prepare_fp8_pair(first, second):
+    """Prepare the SM90 prefill projection without changing generic pair dispatch."""
+    if torch.version.hip is not None or not torch.cuda.is_available():
+        return None
+    from .qsa_fp8_pair import prepare_fp8_pair as prepare
+
+    return prepare(first, second)

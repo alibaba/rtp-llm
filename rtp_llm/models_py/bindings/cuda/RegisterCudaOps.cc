@@ -11,6 +11,7 @@
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
 #include "rtp_llm/models_py/bindings/common/kernels/moe/ep_utils.h"
+#include <pybind11/stl.h>
 
 namespace rtp_llm {
 
@@ -48,6 +49,22 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
 
     rtp_ops_m.def(
         "per_token_quant_fp8", &per_token_quant_fp8, py::arg("input"), py::arg("output_q"), py::arg("output_s"));
+
+    rtp_ops_m.def("qsa_prefill_fp8_available", &qsa_prefill_fp8_available);
+    rtp_ops_m.def("qsa_prefill_fp8_quant", &qsa_prefill_fp8_quant, py::arg("input"));
+    rtp_ops_m.def("qsa_prefill_fp8_project",
+                  &qsa_prefill_fp8_project,
+                  py::arg("input"),
+                  py::arg("packed_weight_t"),
+                  py::arg("column_scales"));
+    py::class_<QsaFp8ProjectionGuard>(rtp_ops_m, "QsaFp8ProjectionGuard")
+        .def(py::init<const std::array<at::Tensor, 4>&>(), py::arg("sources"))
+        .def("project",
+             &QsaFp8ProjectionGuard::project,
+             py::arg("input"),
+             py::arg("packed_weight_t"),
+             py::arg("column_scales"),
+             py::arg("current_sources"));
 
     // NVFP4 mm/quant live in rtp_kernel.nvfp4. Keep the grouped experts
     // quantizers here; they are not part of that port.

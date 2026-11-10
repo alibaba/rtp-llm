@@ -14,14 +14,17 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
 from .qsa_cache_views import (
     _block_table,
     _required_blocks_verdict,
-    _side_tables_verdict,
     _typed_2d_pool,
     _validate_required_blocks,
     qsa_assert_valid,
     qsa_strict_validation_enabled,
 )
 from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
-from .qsa_step_plan import get_prefill_step_plan, host_input_mirror
+from .qsa_step_plan import (
+    get_prefill_step_plan,
+    host_input_mirror,
+    validate_side_tables_for_step,
+)
 
 
 def _draft_incremental_prefill_geometry(
@@ -50,8 +53,9 @@ def _draft_incremental_prefill_geometry(
     GPU lengths and rebuilding the same device tensors per layer would add
     host work without seeing new metadata (the ``_target_verify_plan``
     precedent).  What stays per layer here is what IS layer-local: this
-    layer's pool views and block tables, and their required-blocks verdicts
-    enqueued before any pool mutation.
+    layer's pool views and block tables. Equivalent required-blocks checks
+    may share an earlier submission in the explicit eager-forward epoch;
+    every snapshot/write still follows its verdict and assert on that stream.
     """
     step = get_prefill_step_plan(
         self,
@@ -142,22 +146,15 @@ def _draft_incremental_prefill_geometry(
                         "to an unallocated or out-of-range physical block"
                     )
     else:
-        # Both verdict groups validate step-frozen inputs (the same table
-        # tensors and required-column vectors for every layer of a step)
-        # against this layer's pool block counts, so one dual-table
-        # reduction plus one async assert replaces the two separate
-        # verdict/assert pairs per layer (six device launches -> two).
-        qsa_assert_valid(
-            _side_tables_verdict(
-                kv_table,
-                step.required_kv_columns,
-                state_table,
-                step.required_state_columns_device,
-                kv_pool_blocks=int(kv_pool.shape[0]),
-                state_pool_blocks=int(state_pool.shape[0]),
-            ),
-            "QSA cache 'indexer_kv'/'indexer_state' block table does not cover "
-            "or resolve the draft incremental tail",
+        # Keep the original dual-table verdict and async assert before any
+        # pool snapshot/write. Only equivalent tables/capacities on the same
+        # stream in one explicit model-forward epoch reuse that submission.
+        validate_side_tables_for_step(
+            step,
+            kv_table,
+            state_table,
+            kv_pool_blocks=int(kv_pool.shape[0]),
+            state_pool_blocks=int(state_pool.shape[0]),
         )
 
     return IncrementalPrefillPlan(

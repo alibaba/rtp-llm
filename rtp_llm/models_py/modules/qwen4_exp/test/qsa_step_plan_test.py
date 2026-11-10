@@ -46,9 +46,7 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
         # RTP_LLM_QSA_STRICT_VALIDATION=1 (e.g. exported for a strict bench
         # run) must not flip these assertions; the strict-bypass test
         # overrides this to "1" itself.
-        strict_off = patch.dict(
-            "os.environ", {"RTP_LLM_QSA_STRICT_VALIDATION": "0"}
-        )
+        strict_off = patch.dict("os.environ", {"RTP_LLM_QSA_STRICT_VALIDATION": "0"})
         strict_off.start()
         self.addCleanup(strict_off.stop)
         self.stats0 = qsa_step_plan.step_plan_cache_stats()
@@ -90,9 +88,7 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
     def _mirror_readbacks(self):
         return qsa_step_plan.step_plan_cache_stats()["mirror_readbacks"]
 
-    def _context(
-        self, prefixes, lengths, *, shared=None, layer=0, is_mtp_draft=False
-    ):
+    def _context(self, prefixes, lengths, *, shared=None, layer=0, is_mtp_draft=False):
         """One per-layer context; ``shared`` reuses a previous step's inputs."""
         batch = len(lengths)
         input_lengths = torch.tensor(lengths, dtype=torch.int32)
@@ -104,9 +100,7 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
         cu_kv[1:] = (prefix_lengths + input_lengths).cumsum(0)
         positions = []
         for prefix, length in zip(prefixes, lengths):
-            positions.extend(
-                [pos, pos, pos] for pos in range(prefix, prefix + length)
-            )
+            positions.extend([pos, pos, pos] for pos in range(prefix, prefix + length))
         position_ids = torch.tensor(positions, dtype=torch.int32).reshape(-1)
         # Both tables use in-range physical ids (< 8 pool blocks, id zero
         # reserved); the two pools may share the same logical->physical map.
@@ -215,6 +209,43 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
             {"hits": 1, "invalidations": 0, "misses": 1},
         )
 
+    def test_forward_scope_reuses_only_equivalent_layer_capacity_verdicts(self):
+        first = self._context([8], [5])
+        shared = (
+            first.main_inputs,
+            first.indexer_kv_inputs,
+            first.indexer_state_inputs,
+        )
+        same_capacity = self._context([8], [5], shared=shared, layer=0)
+        larger_capacity = self._context([8], [5], shared=shared, layer=1)
+        with patch.object(
+            qsa_step_plan,
+            "_side_tables_verdict",
+            wraps=qsa_step_plan._side_tables_verdict,
+        ) as verdict:
+            with qsa_step_plan.qsa_validation_step():
+                first_plan = self._geometry(first, 5)
+                same_plan = self._geometry(same_capacity, 5)
+                self.assertIs(first_plan.step, same_plan.step)
+                self.assertIsNot(first_plan.kv_pool, same_plan.kv_pool)
+                self.assertEqual(verdict.call_count, 1)
+                self._geometry(larger_capacity, 5)
+                self.assertEqual(verdict.call_count, 2)
+            with qsa_step_plan.qsa_validation_step():
+                self._geometry(first, 5)
+                self.assertEqual(verdict.call_count, 3)
+
+    def test_strict_geometry_keeps_host_failure_inside_forward_scope(self):
+        context = self._context([8], [5])
+        context.indexer_kv_inputs.kv_cache_kernel_block_id_device[0, 0] = 0
+        with patch.dict(
+            "os.environ", {"RTP_LLM_QSA_STRICT_VALIDATION": "1"}
+        ), patch.object(qsa_step_plan, "_side_tables_verdict") as verdict:
+            with qsa_step_plan.qsa_validation_step():
+                with self.assertRaisesRegex(RuntimeError, "indexer_kv"):
+                    self._geometry(context, 5)
+        verdict.assert_not_called()
+
     def test_inplace_position_edit_invalidates_the_entry_and_rebuilds(self):
         context = self._context([8], [5])
         plan_one = self._geometry(context, 5)
@@ -236,9 +267,7 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
 
     def test_strict_validation_bypasses_the_cache(self):
         context = self._context([8], [5])
-        with patch.dict(
-            "os.environ", {"RTP_LLM_QSA_STRICT_VALIDATION": "1"}
-        ):
+        with patch.dict("os.environ", {"RTP_LLM_QSA_STRICT_VALIDATION": "1"}):
             plan_one = self._geometry(context, 5)
             plan_two = self._geometry(context, 5)
         self.assertIsNot(plan_two.step, plan_one.step)
@@ -293,7 +322,9 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
 
         found = qsa_step_plan.lookup_prefill_step_plan(context.main_inputs, 5)
         self.assertIs(found, plan.step)
-        self.assertEqual(found.kv_lens_rows[0].reshape(-1).tolist(), [9, 10, 11, 12, 13])
+        self.assertEqual(
+            found.kv_lens_rows[0].reshape(-1).tolist(), [9, 10, 11, 12, 13]
+        )
         self.assertEqual(found.cu_host, [0, 5])
         self.assertEqual(
             found.padded_kv_lens.shape,
@@ -360,9 +391,7 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
         )
 
     def test_host_mirror_passes_host_sources_through(self):
-        inputs = SimpleNamespace(
-            prefix_lengths=torch.tensor([4, 8], dtype=torch.int32)
-        )
+        inputs = SimpleNamespace(prefix_lengths=torch.tensor([4, 8], dtype=torch.int32))
         readbacks0 = self._mirror_readbacks()
         mirror = qsa_step_plan.host_input_mirror(inputs, "prefix_lengths")
         self.assertIs(mirror, inputs.prefix_lengths)
@@ -384,9 +413,7 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
         self.assertEqual(self._mirror_readbacks(), readbacks0 + 1)
         # A rebound tensor (a fresh step materialising new inputs) refreshes
         # the mirror even when the values are identical.
-        inputs.prefix_lengths = torch.tensor(
-            [4, 8], dtype=torch.int32, device="cuda"
-        )
+        inputs.prefix_lengths = torch.tensor([4, 8], dtype=torch.int32, device="cuda")
         mirror_three = qsa_step_plan.host_input_mirror(inputs, "prefix_lengths")
         self.assertIsNot(mirror_three, mirror_one)
         self.assertEqual(mirror_three.tolist(), [4, 8])

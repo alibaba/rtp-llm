@@ -40,8 +40,10 @@ from __future__ import annotations
 
 import math
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from itertools import accumulate
+from threading import local
 from typing import Any
 
 import torch
@@ -64,6 +66,7 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
 
 from .qsa_cache_views import (
     _block_table,
+    _side_tables_verdict,
     qsa_assert_valid,
     qsa_strict_validation_enabled,
 )
@@ -102,6 +105,127 @@ _STEP_PLAN_CACHE: "OrderedDict[tuple, tuple[Any, Qwen4ExpPrefillStepPlan]]" = (
 )
 _STEP_PLAN_STATS = {"hits": 0, "misses": 0, "invalidations": 0}
 
+# A plan may survive multiple forwards in the bounded plan cache, whereas a
+# block-table verdict may only be reused inside ONE eager model forward.
+# The model entry establishes this explicit epoch; direct/component callers
+# without it retain the original per-call checks. Thread-local state keeps
+# concurrent model threads independent, and nested forwards restore the outer
+# epoch when they finish.
+_SIDE_VALIDATION_LOCAL = local()
+
+
+@contextmanager
+def qsa_validation_step():
+    """Scope side-table validation reuse to one synchronous eager forward.
+
+    Production block tables and required-column vectors are frozen for this
+    forward after their producer's stream dependency has been established.
+    Inference tensors have no version counter: their values MUST NOT be edited
+    in place during this scope. A producer that changes them must end this
+    scope and start a new one (or use the uncached path). Version-tracked
+    normal tensor edits and rebinds are checked on every lookup; untracked
+    native/data writes also require the frozen-metadata contract. The next
+    forward always gets a new epoch, even when it reuses exactly the same
+    inputs objects, tensor addresses and plan.
+
+    Capture has no reusable host verdict: every graph records its own device
+    checks. Query capture only once at entry, without initializing CUDA in CPU
+    callers. Capturing starts outside the model-forward scope in production.
+    """
+    previous = getattr(_SIDE_VALIDATION_LOCAL, "entries", None)
+    capturing = torch.cuda.is_initialized() and torch.cuda.is_current_stream_capturing()
+    _SIDE_VALIDATION_LOCAL.entries = None if capturing else {}
+    try:
+        yield
+    finally:
+        _SIDE_VALIDATION_LOCAL.entries = previous
+
+
+def _side_validation_tensor_key(tensor: torch.Tensor) -> tuple:
+    # Metadata only: no tensor values, content hashes, copies or synchronization.
+    # Include the owner as well as storage/layout; Tensor.data assignment and
+    # differently-strided aliases must not inherit another view's verdict.
+    return (
+        id(tensor),
+        tensor.data_ptr(),
+        None if torch.is_inference(tensor) else tensor._version,
+        tuple(tensor.shape),
+        tuple(tensor.stride()),
+        tensor.dtype,
+        tensor.device,
+    )
+
+
+def _side_validation_stream_key(device: torch.device) -> tuple:
+    if device.type == "cuda":
+        return (device, torch.cuda.current_stream(device).cuda_stream)
+    return (device, None)
+
+
+def validate_side_tables_for_step(
+    step: Any,
+    kv_table: torch.Tensor,
+    state_table: torch.Tensor,
+    *,
+    kv_pool_blocks: int,
+    state_pool_blocks: int,
+) -> None:
+    """Enqueue the original verdict/assert once per equivalent eager-step use.
+
+    A cache hit means the checks were ENQUEUED earlier on the same stream,
+    never that the CUDA boolean was read on the host. This remains before
+    every consumer's snapshot/write by stream ordering. Capacities are part
+    of the key because pools themselves remain layer-local. Other modes,
+    strict callers and callers without a model-forward epoch keep the old
+    validation path.
+    """
+    tensors = (
+        kv_table,
+        step.required_kv_columns,
+        state_table,
+        step.required_state_columns_device,
+    )
+    entries = getattr(_SIDE_VALIDATION_LOCAL, "entries", None)
+    reusable = (
+        entries is not None
+        and step.mode == MODE_PREFIX_REUSE
+        and not bool(getattr(step.main_inputs, "is_cuda_graph", False))
+        and not qsa_strict_validation_enabled()
+    )
+    key = None
+    if reusable:
+        key = (
+            id(step),
+            _side_validation_stream_key(kv_table.device),
+            kv_pool_blocks,
+            state_pool_blocks,
+            tuple(_side_validation_tensor_key(tensor) for tensor in tensors),
+        )
+        if key in entries:
+            return
+    qsa_assert_valid(
+        _side_tables_verdict(
+            kv_table,
+            step.required_kv_columns,
+            state_table,
+            step.required_state_columns_device,
+            kv_pool_blocks=kv_pool_blocks,
+            state_pool_blocks=state_pool_blocks,
+        ),
+        "QSA cache 'indexer_kv'/'indexer_state' block table does not cover "
+        "or resolve the draft incremental tail",
+    )
+    if reusable:
+        # Retain owners so ids/data_ptrs cannot be recycled inside this epoch.
+        # Do not record if either verdict construction or assert dispatch throws.
+        entries[key] = (
+            step,
+            tensors,
+            # Retain the original storages too: a Tensor.data rebind can keep
+            # its Python owner while releasing/recycling the old allocation.
+            tuple(tensor.untyped_storage() for tensor in tensors),
+        )
+
 
 def step_plan_cache_stats() -> dict:
     """Cache counters for benches and diagnostics (hits/misses/invalidations)."""
@@ -117,6 +241,9 @@ def clear_step_plan_cache() -> None:
     _STEP_PLAN_CACHE.clear()
     _MIRROR_CACHE.clear()
     _PREFILL_FACTS_CACHE.clear()
+    entries = getattr(_SIDE_VALIDATION_LOCAL, "entries", None)
+    if entries is not None:
+        entries.clear()
 
 
 def _tensor_fingerprint(tensor: Any) -> tuple[int, int] | None:
@@ -233,9 +360,9 @@ class PrefillMirrorFacts:
 # edit (version bump) or a fresh step's tensors recompute the facts; the
 # layers of one step only read the frozen values.
 _PREFILL_FACTS_LIMIT = 64
-_PREFILL_FACTS_CACHE: "OrderedDict[tuple, tuple[torch.Tensor, torch.Tensor, PrefillMirrorFacts, tuple]]" = (
-    OrderedDict()
-)
+_PREFILL_FACTS_CACHE: (
+    "OrderedDict[tuple, tuple[torch.Tensor, torch.Tensor, PrefillMirrorFacts, tuple]]"
+) = OrderedDict()
 _PREFILL_FACTS_STATS = {"computes": 0}
 
 
@@ -416,10 +543,16 @@ class Qwen4ExpPrefillStepPlan:
 
 
 def _cache_regions(context: Any) -> tuple:
-    return (context.main_inputs, context.indexer_kv_inputs, context.indexer_state_inputs)
+    return (
+        context.main_inputs,
+        context.indexer_kv_inputs,
+        context.indexer_state_inputs,
+    )
 
 
-def _collect_region_fingerprints(regions: tuple) -> tuple[dict[str, tuple[int, int] | None], ...]:
+def _collect_region_fingerprints(
+    regions: tuple,
+) -> tuple[dict[str, tuple[int, int] | None], ...]:
     """Fingerprint the metadata tensors the legacy build value-compared.
 
     The legacy ``_validate_mode_and_metadata`` check compares the three cache
@@ -461,7 +594,10 @@ def _regions_agree_metadata_only(context: Any, plan: Qwen4ExpPrefillStepPlan) ->
                 return False
         if getattr(inputs, "context_parallel_info", None) is not None:
             return False
-    if _collect_region_fingerprints(_cache_regions(context)) != plan.region_fingerprints:
+    if (
+        _collect_region_fingerprints(_cache_regions(context))
+        != plan.region_fingerprints
+    ):
         return False
     from .pd_publication import validate_pd_cache_inputs
 
@@ -784,9 +920,7 @@ def _build_step_grid_prep(
     required_state_columns_device = device_i32[cursor : cursor + batch_size]
     # The host mirror of the state-columns segment ([5B + 2, 6B + 2) of the
     # [prefixes, lengths, cu, cu_kv, required_kv, required_state] batch).
-    required_state_columns = host_i32[
-        5 * batch_size + 2 : 6 * batch_size + 2
-    ]
+    required_state_columns = host_i32[5 * batch_size + 2 : 6 * batch_size + 2]
 
     # One pinned int64 batch: the prefixes plus the [T]-grade position
     # tables the rope builders consume (block starts and the MRoPE block
@@ -1056,9 +1190,7 @@ def build_incremental_step_plan(
     # device copies below cast the source tensor without a host round trip.
     prefixes_host = host_input_mirror(main_inputs, "prefix_lengths")
     prefix_values = prefixes_host.tolist()
-    invalid_prefix = any(
-        value <= 0 if draft else value < 0 for value in prefix_values
-    )
+    invalid_prefix = any(value <= 0 if draft else value < 0 for value in prefix_values)
     if invalid_prefix:
         requirement = "nonzero" if draft else "non-negative"
         raise RuntimeError(
@@ -1138,13 +1270,17 @@ def build_incremental_step_plan(
     expected_cu_kv = prep.cu_kv_seqlens
     # int32 headroom is host arithmetic on the mirror values; no device read.
     int32_max = torch.iinfo(torch.int32).max
-    if max(
-        prefix + length for prefix, length in zip(prefix_values, lengths)
-    ) > int32_max:
+    if (
+        max(prefix + length for prefix, length in zip(prefix_values, lengths))
+        > int32_max
+    ):
         raise RuntimeError(
             "qwen4_exp QSA draft incremental prefill positions exceed int32"
         )
-    if sum(prefix + length for prefix, length in zip(prefix_values, lengths)) > int32_max:
+    if (
+        sum(prefix + length for prefix, length in zip(prefix_values, lengths))
+        > int32_max
+    ):
         raise RuntimeError(
             "qwen4_exp QSA draft incremental prefill cumulative KV lengths "
             "exceed int32"
@@ -1230,9 +1366,7 @@ def build_incremental_step_plan(
             position_rows = position_ids.reshape(token_count, index_factor)
             if qsa_strict_validation_enabled():
                 if not bool(
-                    mrope_decode_tail_verdict_packed(
-                        position_rows, expected_cu, ratio
-                    )
+                    mrope_decode_tail_verdict_packed(position_rows, expected_cu, ratio)
                 ):
                     # Slow path only on failure: the legacy per-request
                     # validation reproduces the exact error and its order.
@@ -1247,9 +1381,7 @@ def build_incremental_step_plan(
                 # per-request assert chain; a violation traps fail-stop at the
                 # next host synchronization.
                 qsa_assert_valid(
-                    mrope_decode_tail_verdict_packed(
-                        position_rows, expected_cu, ratio
-                    ),
+                    mrope_decode_tail_verdict_packed(position_rows, expected_cu, ratio),
                     "qwen4_exp QSA unfinished MRoPE compression group requires "
                     "a consecutive equal-axis text tail ending at the maximum "
                     "position",
@@ -1427,8 +1559,7 @@ def build_incremental_step_plan(
         batch_size=batch_size,
         max_len=max(lengths),
         max_ctx_len=max(
-            (prefix + length) // ratio
-            for prefix, length in zip(prefix_values, lengths)
+            (prefix + length) // ratio for prefix, length in zip(prefix_values, lengths)
         ),
         head_dim=head_dim,
         head_num=head_num,

@@ -49,6 +49,7 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
     has_nonzero_prefill_prefix,
     host_input_mirror,
+    qsa_validation_step,
 )
 from rtp_llm.models_py.modules import FMHAImplBase
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
@@ -123,6 +124,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
         self.layer_idx = layer_idx
         self.is_mtp_draft = bool(getattr(model_config, "is_mtp", False))
         self.qsa_indexer: Optional[Qwen4ExpQSAIndexer] = None
+        self._qsa_fp8_pair = None
         if not getattr(model_config, "enable_qwen4_qsa", False):
             return
         self.qsa_rope_config = model_config.attn_config.rope_config
@@ -168,6 +170,16 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             W.qwen4_indexer_qk_proj_w,
             getattr(self.qsa_indexer, "qk_projection", None),
         )
+        if not self.is_mtp_draft:
+            from rtp_llm.models_py.modules.base.common.fp8_linear import (
+                prepare_fp8_pair,
+            )
+
+            # Weights are frozen after construction. Packing once keeps weight
+            # copies and scale expansion out of the per-layer launch sequence.
+            self._qsa_fp8_pair = prepare_fp8_pair(
+                self.gate, self.qsa_indexer.qk_projection
+            )
 
     def _qsa_selected_indices(
         self,
@@ -437,31 +449,47 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 from rtp_llm.models_py.modules.base.common.fp8_linear import (
                     project_fp8_pair,
                 )
+                from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import (
+                    SparseGqaFmhaImpl,
+                )
 
                 with record_function_range("qwen4.qsa.indexer"):
                     prepared = None
-                    # Every packed window up to the context bound -- decode and
-                    # draft graphs, target verification and the prefill plan
-                    # window (previously the 33..4092 hole, which quantized the
-                    # same hidden states twice per layer, once for the gate and
-                    # once for the indexer q/k projection) -- shares the pair's
-                    # single input quantization. Both projections keep their
-                    # own weight scale and GEMM; the shared quant is bit-exact
-                    # for the input bytes and both outputs.
+                    # Share input quantization across the projection pair.
+                    # Supported eager prefix prefill also packs the two GEMMs;
+                    # other modes keep the original independent GEMMs/scales.
                     if (
                         type(self.qsa_indexer) is Qwen4ExpQSAIndexer
                         and hidden_states.ndim == 2
-                        and 1 <= hidden_states.shape[0] <= 32768
+                        and hidden_states.shape[0] > 0
                         and not any(
                             name in self.qsa_indexer.__dict__
                             for name in ("project", "project_raw", "split_projected")
                         )
                     ):
-                        prepared = project_fp8_pair(
-                            hidden_states,
-                            self.gate,
-                            self.qsa_indexer.qk_projection,
-                        )
+                        pair = getattr(self, "_qsa_fp8_pair", None)
+                        if (
+                            pair is not None
+                            and type(fmha_impl) is SparseGqaFmhaImpl
+                            and not bool(getattr(self, "is_mtp_draft", False))
+                            and bool(qsa_runtime.main_inputs.is_prefill)
+                            and not bool(qsa_runtime.main_inputs.is_target_verify)
+                            and not bool(qsa_runtime.main_inputs.is_cuda_graph)
+                            and has_nonzero_prefill_prefix(qsa_runtime.main_inputs)
+                        ):
+                            # The ragged prefill consumer accepts the two column
+                            # views directly, without a gate/QK copy kernel.
+                            prepared = pair.project(
+                                hidden_states,
+                                first=self.gate,
+                                second=self.qsa_indexer.qk_projection,
+                            )
+                        if prepared is None:
+                            prepared = project_fp8_pair(
+                                hidden_states,
+                                self.gate,
+                                self.qsa_indexer.qk_projection,
+                            )
                     if prepared is None:
                         gate = self.gate(hidden_states)
                         selected = self._qsa_selected_indices(
@@ -474,10 +502,6 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                             qsa_runtime,
                             projected=self.qsa_indexer.split_projected(projected_qk),
                         )
-                from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import (
-                    SparseGqaFmhaImpl,
-                )
-
                 trusted_setter = getattr(
                     fmha_impl, "set_trusted_selected_indices", None
                 )
@@ -1471,7 +1495,11 @@ class Qwen4ExpModel(Qwen35Model):
         if head_graph is not None:
             head_graph.clear_activation()
         try:
-            outputs = self._forward_with_ple_prefetch(inputs, fmha_impl)
+            # Side-cache tables are frozen during one model forward. A fresh
+            # scope prevents reusing a prior step's enqueued validation when
+            # inference tensors keep their storage but receive new contents.
+            with qsa_validation_step():
+                outputs = self._forward_with_ple_prefetch(inputs, fmha_impl)
             transaction = (
                 self._ple_target_transaction
                 if head_graph is not None and head_graph.enabled

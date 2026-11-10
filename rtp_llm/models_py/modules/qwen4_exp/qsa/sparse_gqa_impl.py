@@ -444,10 +444,24 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 )
             )
             and gate.dtype == torch.bfloat16
-            and gate.is_contiguous()
+            and self._output_gate_layout_supported(gate)
         ):
             return self.forward(qkv, kv_cache, layer_idx, output_gate=gate)
         return self.forward(qkv, kv_cache, layer_idx) * torch.sigmoid(gate)
+
+    def _output_gate_layout_supported(self, gate: torch.Tensor) -> bool:
+        if gate.is_contiguous():
+            return True
+        # Only the main eager prefix-reuse bridge carries row strides to its
+        # paged kernels. Decode, verify and draft graph consumers stay packed.
+        return (
+            gate.dim() == 2
+            and gate.stride(1) == 1
+            and gate.stride(0) >= self.q_width
+            and not self._is_mtp_draft
+            and not self.attn_inputs.is_cuda_graph
+            and self._is_prefix_reuse_prefill()
+        )
 
     def forward(
         self,
@@ -471,7 +485,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             output_gate.shape == (qkv.shape[0], self.q_width)
             and output_gate.dtype == torch.bfloat16
             and output_gate.device == qkv.device
-            and output_gate.is_contiguous()
+            and self._output_gate_layout_supported(output_gate)
             and (
                 self.is_target_verify
                 or not self.is_prefill
@@ -661,9 +675,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
 
         lengths = [
             int(length)
-            for length in host_input_mirror(
-                self.attn_inputs, "input_lengths"
-            ).tolist()
+            for length in host_input_mirror(self.attn_inputs, "input_lengths").tolist()
         ]
         if (
             not lengths
@@ -908,6 +920,13 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 validate_selected=validate_selected,
                 output_gate=request_gate,
                 bthd_output=fused_layout,
+                allow_strided_output_gate=(
+                    request_gate is not None
+                    and not request_gate.is_contiguous()
+                    and not self._is_mtp_draft
+                    and not self.attn_inputs.is_cuda_graph
+                    and self._is_prefix_reuse_prefill()
+                ),
                 **self._paged_kv_scale_args(kv_cache),
             )
             if fused_layout:
