@@ -18,6 +18,8 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
     private final VitScheduler scheduler;
     private final VitPreparation preparation;
     private final VitGeometryCapture geometryCapture = VitGeometryCapture.fromEnvironment();
+
+    VitGeometryCapture geometryCapture() { return geometryCapture; }
     private final String instance=UUID.randomUUID().toString();
     private final ExecutorService replies=Executors.newVirtualThreadPerTaskExecutor();
     private volatile boolean closed;
