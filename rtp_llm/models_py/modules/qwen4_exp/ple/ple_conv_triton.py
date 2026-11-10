@@ -70,7 +70,16 @@ def _ple_conv(
     tl.store(Output + offset, output, valid)
 
 
-def try_ple_conv(gated, normed, initial, weight, dilation, *, residual=None):
+def try_ple_conv(
+    gated,
+    normed,
+    initial,
+    weight,
+    dilation,
+    *,
+    residual=None,
+    tune_bf16_prefill=False,
+):
     if not (
         gated.is_cuda
         and torch.version.hip is None
@@ -109,7 +118,19 @@ def try_ple_conv(gated, normed, initial, weight, dilation, *, residual=None):
     ):
         return None
     output = torch.empty_like(gated)
-    _ple_conv[(triton.cdiv(gated.numel(), 1024),)](
+    # Smaller tiles reduce register pressure on the measured long SM90
+    # prefill path. Keep the common, speculative and decode-roll tile intact.
+    block = (
+        512
+        if tune_bf16_prefill
+        and residual is not None
+        and gated.shape[0] == 1
+        and 8192 <= gated.shape[1] <= 32768
+        and gated.shape[1] % 64 == 0
+        and torch.cuda.get_device_capability(gated.device) == (9, 0)
+        else 1024
+    )
+    _ple_conv[(triton.cdiv(gated.numel(), block),)](
         gated,
         normed,
         initial if initial is not None else normed,
@@ -125,7 +146,7 @@ def try_ple_conv(gated, normed, initial, weight, dilation, *, residual=None):
         HAS_RESIDUAL=residual is not None,
         INITIAL_BATCH_STRIDE=initial.stride(0) if initial is not None else 0,
         INITIAL_ROW_STRIDE=initial.stride(1) if initial is not None else 0,
-        BLOCK=1024,
+        BLOCK=block,
         num_warps=4,
     )
     return output
