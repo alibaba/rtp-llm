@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import sys
 
-V5_SHA256 = 'b1adfbd8a300197568af4c3b6706e35bc46f34f07b4e368571b0f697354e10e1'
+V5_SHA256 = 'b308e4dc3f15e8e3a10ce7890bb79b0d20309653fb56a7b05469f520724156fb'
 
 
 def _verify_v5():

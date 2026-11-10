@@ -21,6 +21,14 @@ from rtp_topology import preserve_fp32_source
 from verl.workers.rollout.base import BaseRollout
 
 
+def _source_preparation_failures(gathered):
+    """Report only source identifiers and controlled failure metadata."""
+    return [{'rank': rank, 'name': row.get('name') if isinstance(row.get('name'), str) else '<invalid-name>',
+             'stage': row.get('error_stage'),
+             'error_type': row.get('error_type'), 'ipc_details': row.get('ipc_details')}
+            for rank, row in enumerate(gathered) if row.get('error')]
+
+
 class StandaloneRTPReplica(RTPReplica):
     async def _control(self, operation):
         control = await _new_control(self.replica_rank)
@@ -181,27 +189,49 @@ class StandaloneRTPAdapter(RTPServerAdapter):
             async for name, tensor in weights:
                 item = {'name': name, 'error': None}
                 value = None
+                stage = 'check_expected_name'
                 try:
-                    if name not in self.hf_sources or name in seen:
+                    if name not in self.hf_sources:
                         raise RuntimeError('unexpected or duplicate HF source: ' + str(name))
+                    stage = 'check_duplicate'
+                    if name in seen:
+                        raise RuntimeError('unexpected or duplicate HF source: ' + str(name))
+                    stage = 'validate_device'
                     if tensor.device != torch.device('cuda', torch.cuda.current_device()):
                         raise RuntimeError('received source must belong to the local rollout GPU')
+                    stage = 'validate_dtype'
                     target_dtype = torch.float32 if preserve_fp32_source(name) else torch.bfloat16
                     if tensor.dtype not in (torch.float32, torch.bfloat16):
                         raise RuntimeError('unsupported checkpoint source dtype')
+                    stage = 'cast_contiguous'
                     value = tensor.detach().to(dtype=target_dtype).contiguous()
                     self._unacknowledged_ipc = [value]
+                    stage = 'digest'
                     digest, source_bytes = workspace.hash(value, name, source_digest)
+                    stage = 'export_ipc'
                     item.update(shape=list(value.shape), dtype=str(value.dtype),
                                 sha256=digest, source_bytes=source_bytes,
                                 metadata=CudaIpcV2.export_tensor(value))
                 except BaseException as error:
                     item['error'] = repr(error)
+                    item['error_stage'] = stage
+                    item['error_type'] = type(error).__name__
+                    if stage == 'export_ipc':
+                        try:
+                            item['ipc_details'] = {'source_is_view': tensor._base is not None,
+                                'source_storage_offset': tensor.storage_offset(),
+                                'export_is_view': value._base is not None,
+                                'export_storage_offset': value.storage_offset(),
+                                'allocator_config': os.environ.get('PYTORCH_CUDA_ALLOC_CONF') or
+                                                    os.environ.get('PYTORCH_ALLOC_CONF')}
+                        except BaseException:
+                            item['ipc_details'] = {'unavailable': True}
                 gathered = self._gather(item)
                 outcome = None
                 if self.is_leader:
                     try:
-                        if any(row['error'] for row in gathered): raise RuntimeError('source preparation failed')
+                        failures = _source_preparation_failures(gathered)
+                        if failures: raise RuntimeError('source preparation failed: ' + json.dumps(failures, sort_keys=True))
                         if any(any(row[key] != gathered[0][key] for key in ('name', 'shape', 'dtype', 'sha256')) for row in gathered):
                             raise RuntimeError('rollout TP ranks disagree on received source')
                         replies = await control.push_weight(name, [row['metadata'] for row in gathered])

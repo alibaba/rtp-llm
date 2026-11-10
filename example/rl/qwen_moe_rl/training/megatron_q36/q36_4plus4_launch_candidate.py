@@ -21,12 +21,12 @@ SOURCES = {
   'onpolicy_standalone_candidate.py': '8c36ff1bb662fa5ba5177c1f4e17646664c81fe93790087f00d3c10178f468a8',
   'q36_4plus4_claim_loader.py': 'a735df08ee8ff64f71bb681d6acbaf40af82cfb7f4046f0085f8ca9dab347ad2',
   'q36_4plus4_claim_guard.py': 'd6faa983a2d404a33d106fec026f1049cc68aa0ceb392e0a6e948cdd7185197c',
-  'q36_standalone_bootstrap_selector.py': 'f921d6b4fc82246fc702d2afcec278ae2d4c763924539200ac3ecf409dd34c6e',
-  'standalone_bootstrap_rpc_v6.py': 'e8caff16e23780db8ec592fa050d6ead8fce6de0395dbd4ff2ac3ec2d25ff02c',
+  'q36_standalone_bootstrap_selector.py': 'b7e38388c47c2ae9b558edd120934a9a6bc5ab067fafb6f5bdc6050034f69446',
+  'standalone_bootstrap_rpc_v6.py': '6c92bdb89c6e83659e4036debea191f77e88e01cb716d18acc02c082fb019e0d',
   'standalone_bootstrap_v4.py': 'd3c993deb80505b578b97fd5222ff396dec4f0b5362dc6937aa503ff211e66a8'},
  'Q36_ADAPTER_DIR': {
-  'standalone_rtp_adapter_v3.py': '746017e37515ecacbbd17e822d8665a619a21fd04b27ca327b246890cbca6c35',
-  'standalone_rtp_adapter_v4.py': '2b918782db5107752212184343afd0cf4710f99a6b841147071151163e4cdb71',
+  'standalone_rtp_adapter_v3.py': '60c7fc2daeb73a85353b1ae4d03bf50dfd48ce82cd22c6fec0498df013453006',
+  'standalone_rtp_adapter_v4.py': 'd7d502f27b71e4ef5d6e950a3df3e9555e55373e86024da713de79548a336597',
   'rtp_cleanup.py': '4506fe79022d0d02f14118ee30d65f1a935a4bb63e51d538831287fb663bdb5b'},
  'Q36_DISAGG_CODE_DIR': {
   'verl_nixl_guarded.py': 'fbd10229677060126e09a9840fa4b34a758ea76170d965daa39e45839a609237',
@@ -95,8 +95,8 @@ def preflight(env):
         if env.get('RLLM_RTP_KEEP_KV_CACHE') != '1' or env.get('RTP_LLM_RL_MODE') != '1':
             raise RuntimeError('resident KV requires explicit native keep and RL mode')
         verify_sources(env, {
-          'Q36_CODE_DIR': {'standalone_bootstrap_v5.py':'1e25f1b0f9f546173fd623413dfcf63545af1d53bf155c419e3fbfd69c5d448c'},
-          'Q36_ADAPTER_DIR': {'standalone_rtp_adapter_v5.py':'b1adfbd8a300197568af4c3b6706e35bc46f34f07b4e368571b0f697354e10e1'}})
+          'Q36_CODE_DIR': {'standalone_bootstrap_v5.py':'b934d6812d788e21918bd2a18e00c1147129da177ab558c6d0decaffd7a9d6b4'},
+          'Q36_ADAPTER_DIR': {'standalone_rtp_adapter_v5.py':'b308e4dc3f15e8e3a10ce7890bb79b0d20309653fb56a7b05469f520724156fb'}})
     import rtp_cleanup
     if rtp_cleanup._qualified_owner_count() != 1:
         raise RuntimeError('cleanup must select exactly one qualified native owner')

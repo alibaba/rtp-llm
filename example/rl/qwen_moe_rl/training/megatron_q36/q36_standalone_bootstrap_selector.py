@@ -7,8 +7,8 @@ from pathlib import Path
 import sys
 
 V4_SHA256 = 'd3c993deb80505b578b97fd5222ff396dec4f0b5362dc6937aa503ff211e66a8'
-V5_SHA256 = '1e25f1b0f9f546173fd623413dfcf63545af1d53bf155c419e3fbfd69c5d448c'
-RPC_SHA256 = 'e8caff16e23780db8ec592fa050d6ead8fce6de0395dbd4ff2ac3ec2d25ff02c'
+V5_SHA256 = 'b934d6812d788e21918bd2a18e00c1147129da177ab558c6d0decaffd7a9d6b4'
+RPC_SHA256 = '6c92bdb89c6e83659e4036debea191f77e88e01cb716d18acc02c082fb019e0d'
 
 
 def select_bootstrap():

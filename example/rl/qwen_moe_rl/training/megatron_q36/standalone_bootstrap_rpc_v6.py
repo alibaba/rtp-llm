@@ -14,7 +14,7 @@ def _load_v5():
     spec = importlib.machinery.PathFinder.find_spec(name, sys.path)
     loaded = sys.modules.get(name)
     if (source.is_symlink() or not source.is_file() or
-        hashlib.sha256(source.read_bytes()).hexdigest() != '1e25f1b0f9f546173fd623413dfcf63545af1d53bf155c419e3fbfd69c5d448c' or
+        hashlib.sha256(source.read_bytes()).hexdigest() != 'b934d6812d788e21918bd2a18e00c1147129da177ab558c6d0decaffd7a9d6b4' or
         spec is None or not spec.origin or Path(spec.origin).resolve() != source or
         loaded is not None and Path(getattr(loaded, '__file__', '')).resolve() != source):
         raise RuntimeError('RPC bootstrap v5 source identity mismatch')

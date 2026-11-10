@@ -28,7 +28,7 @@ class TransactionTest(unittest.TestCase):
         distributed.get_rank = lambda: 0
         self.torch.distributed = distributed
         ray = types.ModuleType('ray')
-        async def ensure(*args): return {'native_boot': 'boot', 'native_incarnation': 'boot-1'}
+        async def ensure(*args): return {'native_boot': 0, 'native_incarnation': 'boot-1'}
         ray.get_actor = lambda _: types.SimpleNamespace(ensure_native_running=types.SimpleNamespace(remote=ensure))
         backend = types.ModuleType('rtp_verl_backend')
         class OriginalAdapter:
@@ -147,7 +147,7 @@ class TransactionTest(unittest.TestCase):
         self.assertIn('commit', self.events)
         record = next(x[1] for x in self.events if isinstance(x, tuple) and x[0] == 'record')
         self.assertEqual(record['replica_rank'], 0)
-        self.assertEqual(record['native_boot'], 'boot')
+        self.assertEqual(record['native_boot'], 0)
         self.assertEqual(record['hf_tensor_count'], record['native_received_weights'])
         self.assertEqual([r['tp_rank'] for r in record['rank_status']], list(range(4)))
         self.assertTrue(all(r['model_version'] == record['model_version'] for r in record['rank_status']))
@@ -158,6 +158,29 @@ class TransactionTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'native push failed'):
             asyncio.run(self.adapter.update_weights(self.iterator(), global_steps=1))
         self.assertTrue(self.adapter._poisoned)
+        self.assertFalse(any(isinstance(item, tuple) and item[0] == 'ack' for item in self.events))
+        self.assertNotIn('commit', self.events)
+
+    def test_nonleader_source_error_fails_all_without_ack_or_next(self):
+        self.make_control()
+        iterator = self.iterator()
+        def gather(item):
+            rows = [dict(item) for _ in range(4)]
+            if 'name' in item:
+                rows[2].update(error='secret tensor payload', error_type='RuntimeError',
+                               error_stage='export_ipc', ipc_details={'source_is_view':True})
+            return rows
+        self.adapter._gather = gather
+        with self.assertRaises(RuntimeError) as caught:
+            asyncio.run(self.adapter.update_weights(iterator, global_steps=1))
+        text = str(caught.exception)
+        self.assertIn('export_ipc', text)
+        self.assertIn('"rank": 2', text)
+        self.assertNotIn('secret tensor payload', text)
+        self.assertEqual(iterator.index, 1)
+        self.assertEqual(iterator.pending, 'normal')
+        self.assertTrue(self.adapter._poisoned)
+        self.assertTrue(self.adapter._unacknowledged_ipc)
         self.assertFalse(any(isinstance(item, tuple) and item[0] == 'ack' for item in self.events))
         self.assertNotIn('commit', self.events)
 
