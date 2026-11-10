@@ -336,7 +336,7 @@ P/D 已补 `rtp_llm_{context,generate}_batch_size`、执行 Token 数、最长�
 
 ViT 使用相同的物理元数据与 Prometheus instance 发现；QPS、Embedding 队列/等待/Forward/合批、请求图片数/输出长度，以及缓存命中/未命中/在途合并/淘汰和逻辑驻留量均按 real 名称导出。实际读取时提供 rtp_llm_vit_image_fetch_rt_us（μs）；成功完成图片准备后采样总耗时、下载及其余耗时（ms）。其余耗时包括读尺寸、内容摘要和几何计算。跳过读取时这些指标无样本。py_rtp_vit_preprocess_queue_size 是尚未完成准备的工作数（含排队和执行），py_rtp_vit_embedding_rt 仅计成功工作的就绪排队加 Forward，py_rtp_vit_request_rt 覆盖阻塞媒体调用的成功/失败全程，包括缓存命中等待但不含 RPC 传输和输出编码。未实现的像素预处理和 CUDA Graph 指标不补零。详见 [指标覆盖与边界](../views/README.md)。
 
-事件指标统一通过 EventMetrics.observe 记录。Prometheus 使用无客户端分位数的 Summary，导出累计 `_sum` / `_count`，不再导出同名窗口均值 Gauge；抓取和空闲期间不清零。单实例和跨实例均值均使用 sum/count 的区间增量比值，跨实例先分别汇总，再相除。KMonitor 在事件发生时以原名逐样本提交，由 SDK 保留样本数、总和及极值，不再从周期快照提交事件均值或累计辅助量。SDK 出口在构造时选定，没有全局 observer 或原始样本队列；业务埋点不区分 SDK。周期线程只负责状态、原生窗口计数和已计算的速率。Prometheus 的事件 QPS 和 ViT embedding TPS 导出原名加 `_total` 的累计 Counter，由查询 `rate(...[1m])` 计算每秒速率；读取不清零、不推进窗口，多次抓取不会消费事件。KMonitor 仍以原名提交原始计数，由 SDK 计算速率；原生 TPS 窗口计数和已计算的速率快照保持 Gauge。原有 Forward 最近值与 Histogram 口径保持不变。 下表的 `engine/decode/tps` 用于衡量按墙钟计的已提交输出 token 速率。
+事件指标由业务调用方选择类型。逐次样本通过 `EventMetrics.observe` 记录，累加量通过 `EventMetrics.add` 或 `increment` 记录。Prometheus 对逐次样本使用无客户端分位数的 Summary，导出累计 `_sum` / `_count`，不再导出同名窗口均值 Gauge；抓取和空闲期间不清零。单实例和跨实例均值均使用 sum/count 的区间增量比值，跨实例先分别汇总，再相除。KMonitor 在事件发生时以原名逐样本提交，由 SDK 保留样本数、总和及极值，不再从周期快照提交事件均值或累计辅助量。公共层选择上报后端，KMonitor 的有界发送队列逐条转发样本和增量。周期线程只负责状态、原生窗口计数和已计算的速率。Prometheus 的事件 QPS 和 ViT embedding TPS 导出原名加 `_total` 的累计 Counter，由查询 `rate(...[1m])` 计算每秒速率；读取不清零、不推进窗口，多次抓取不会消费事件。KMonitor 仍以原名提交原始计数，由 SDK 计算速率；原生 TPS 窗口计数和已计算的速率快照保持 Gauge。原有 Forward 最近值与 Histogram 口径保持不变。 下表的 `engine/decode/tps` 用于衡量按墙钟计的已提交输出 token 速率。
 
 累计量预建 0，抓取不清零；分母为 0 不补比率。以下查询在 Python `execution/step/` 的对应指标接口中实现，直接调用本次托管 Prometheus：
 

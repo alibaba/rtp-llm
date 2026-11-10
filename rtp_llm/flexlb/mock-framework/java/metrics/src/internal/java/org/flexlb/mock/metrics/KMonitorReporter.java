@@ -5,11 +5,56 @@ import com.taobao.kmonitor.impl.KMonitorConfig;
 import io.prometheus.client.Collector.MetricFamilySamples;
 import java.util.*;
 
-/** Internal SDK transport. MetricsOutput supplies the single sending owner after initialization. */
+/**
+ * Maps event kinds and state snapshots to native KMonitor metrics.
+ */
 public final class KMonitorReporter implements MetricReporter {
-    private final Set<String> registered = new HashSet<>();
+    private final Map<String, MetricType> registered = new HashMap<>();
+
     private KMonitor monitor;
+
     private long interval;
+
+    public KMonitorReporter() { }
+
+    KMonitorReporter(KMonitor monitor) { this.monitor = Objects.requireNonNull(monitor); }
+
+    @Override public synchronized void initialize(Map<String,String> env) {
+        if (monitor != null) throw new IllegalStateException("KMonitor reporter already initialized");
+        interval = configure(env);
+        try {
+            KMonitorFactory.start();
+            if (!KMonitorFactory.isStarted()) throw new IllegalStateException("KMonitor SDK failed to start");
+            // Match native FlexMonitorFactory: install global tags after start, before creating the monitor.
+            KMonitorFactory.addGlobalTags(new ImmutableMetricTags(MetricTags.fromEnvironment(env)));
+            monitor = Objects.requireNonNull(KMonitorFactory.getKMonitor("rtp_llm"), "KMonitor instance unavailable");
+        } catch (RuntimeException | Error error) { KMonitorFactory.stop(); throw error; }
+        Runtime.getRuntime().addShutdownHook(new Thread(KMonitorFactory::stop, "mock-kmonitor-close"));
+        System.getLogger(getClass().getName()).log(System.Logger.Level.INFO, "Engine metrics backend: kmonitor");
+    }
+
+    @Override public long intervalMillis() { return interval; }
+
+    @Override public void observe(String name, EventKind kind, Map<String, String> tags, double value) {
+        if (monitor == null) throw new IllegalStateException("KMonitor reporter is not initialized");
+        register(name, kind == EventKind.DELTA ? MetricType.QPS : MetricType.GAUGE);
+        monitor.report(name, new ImmutableMetricTags(tags), value);
+    }
+
+    @Override public void report(List<MetricFamilySamples> snapshot) {
+        if (monitor == null) throw new IllegalStateException("KMonitor reporter is not initialized");
+        for (var family : snapshot) {
+            // Prometheus counters/histograms are local query helpers, not native Gauge observations.
+            if (family.type != io.prometheus.client.Collector.Type.GAUGE) continue;
+            for (var sample : family.samples) {
+                if (!Double.isFinite(sample.value)) continue;
+                register(sample.name, MetricType.GAUGE);
+                var tags = new HashMap<String,String>();
+                for (int i = 0; i < sample.labelNames.size(); i++) tags.put(sample.labelNames.get(i), sample.labelValues.get(i));
+                monitor.report(sample.name, new ImmutableMetricTags(tags), sample.value);
+            }
+        }
+    }
 
     static long configure(Map<String, String> env) {
         String host = env.getOrDefault("kmonitorSinkAddress", env.getOrDefault("HIPPO_SLAVE_IP", "127.0.0.1"));
@@ -34,50 +79,13 @@ public final class KMonitorReporter implements MetricReporter {
         throw new IllegalArgumentException("Invalid " + key);
     }
 
-    @Override public synchronized void initialize(Map<String,String> env) {
-        if (monitor != null) throw new IllegalStateException("KMonitor reporter already initialized");
-        interval = configure(env);
-        try {
-            KMonitorFactory.start();
-            if (!KMonitorFactory.isStarted()) throw new IllegalStateException("KMonitor SDK failed to start");
-            // Match native FlexMonitorFactory: install global tags after start, before creating the monitor.
-            KMonitorFactory.addGlobalTags(new ImmutableMetricTags(MetricTags.fromEnvironment(env)));
-            monitor = Objects.requireNonNull(KMonitorFactory.getKMonitor("rtp_llm"), "KMonitor instance unavailable");
-        } catch (RuntimeException | Error error) { KMonitorFactory.stop(); throw error; }
-        Runtime.getRuntime().addShutdownHook(new Thread(KMonitorFactory::stop, "mock-kmonitor-close"));
-        System.getLogger(getClass().getName()).log(System.Logger.Level.INFO, "Engine metrics backend: kmonitor");
-    }
-
-    @Override public long intervalMillis() { return interval; }
-
-    public KMonitorReporter() { }
-    KMonitorReporter(KMonitor monitor) { this.monitor = Objects.requireNonNull(monitor); }
-
     private void register(String name, MetricType type) {
-        if (registered.add(name) && !monitor.register(name, type)) {
-            registered.remove(name);
-            throw new IllegalStateException("Cannot register KMonitor metric: " + name);
+        var previous = registered.get(name);
+        if (previous != null) {
+            if (previous != type) throw new IllegalStateException("Inconsistent KMonitor metric type: " + name);
+            return;
         }
-    }
-
-    @Override public void observe(String name, Map<String, String> tags, double value) {
-        if (monitor == null) throw new IllegalStateException("KMonitor reporter is not initialized");
-        register(name, EventMetrics.isRate(name) ? MetricType.QPS : MetricType.GAUGE);
-        monitor.report(name, new ImmutableMetricTags(tags), value);
-    }
-
-    @Override public void report(List<MetricFamilySamples> snapshot) {
-        if (monitor == null) throw new IllegalStateException("KMonitor reporter is not initialized");
-        for (var family : snapshot) {
-            // Prometheus counters/histograms are local query helpers, not native Gauge observations.
-            if (family.type != io.prometheus.client.Collector.Type.GAUGE) continue;
-            for (var sample : family.samples) {
-                if (!Double.isFinite(sample.value)) continue;
-                register(sample.name, MetricType.GAUGE);
-                var tags = new HashMap<String,String>();
-                for (int i = 0; i < sample.labelNames.size(); i++) tags.put(sample.labelNames.get(i), sample.labelValues.get(i));
-                monitor.report(sample.name, new ImmutableMetricTags(tags), sample.value);
-            }
-        }
+        if (!monitor.register(name, type)) throw new IllegalStateException("Cannot register KMonitor metric: " + name);
+        registered.put(name, type);
     }
 }
