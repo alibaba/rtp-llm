@@ -22,6 +22,9 @@ public:
     bool findMemoryMr(void* mem_info, void* buf, uint64_t size, bool gpu, bool adopted) override;
 
     bool isRdmaMode() override;
+    uint64_t minRegistrationSize() const override {
+        return min_reg_mem_size_;
+    }
 
 private:
     std::shared_ptr<arpc::RdmaMempool> rdma_mempool_;

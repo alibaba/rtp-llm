@@ -6,6 +6,8 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
+#include <limits>
+
 namespace rtp_llm {
 
 RdmaConnection::RdmaConnection(const std::shared_ptr<MemoryUtil>&                              memory_util,
@@ -46,7 +48,7 @@ RdmaConnection::getConcatWriteBlocks(const std::vector<std::shared_ptr<RdmaConne
     std::vector<std::shared_ptr<RdmaConnectionWriteBlock>> concat_blocks;
     std::shared_ptr<RdmaConnectionWriteBlock>              current_block;
     for (auto& block : sorted_blocks) {
-        if (current_block != nullptr && current_block->appendBlock(block)) {
+        if (current_block != nullptr && current_block->appendBlock(block, *memory_util_)) {
             continue;
         }
         current_block = block;
@@ -234,7 +236,8 @@ RdmaConnectionWriteBlock::RdmaConnectionWriteBlock(const std::shared_ptr<BlockBu
     }
 }
 
-bool RdmaConnectionWriteBlock::appendBlock(const std::shared_ptr<RdmaConnectionWriteBlock>& append_block) {
+bool RdmaConnectionWriteBlock::appendBlock(const std::shared_ptr<RdmaConnectionWriteBlock>& append_block,
+                                           MemoryUtil&                                      memory_util) {
     // mem should be same
     if (block_->gpu_mem != append_block->block_->gpu_mem || block_->adopted != append_block->block_->adopted) {
         return false;
@@ -255,6 +258,13 @@ bool RdmaConnectionWriteBlock::appendBlock(const std::shared_ptr<RdmaConnectionW
         return false;
     }
 
+    // Contiguous staged blocks can still belong to different local MRs.
+    const uint64_t len = uint64_t{block_->len} + append_block->block_->len;
+    if (len > std::numeric_limits<uint32_t>::max()
+        || (block_->adopted && !memory_util.isMemoryMr(block_->addr.get(), len, block_->gpu_mem, true))) {
+        return false;
+    }
+
     if (sub_blocks_.empty()) {
         // first time, save this block to sub
         sub_blocks_.push_back(
@@ -265,7 +275,7 @@ bool RdmaConnectionWriteBlock::appendBlock(const std::shared_ptr<RdmaConnectionW
         peer_block_ = std::make_shared<BlockBufferInfo>(*peer_block_);
     }
 
-    block_->len += append_block->block_->len;
+    block_->len = static_cast<uint32_t>(len);
     peer_block_->set_len(peer_block_->len() + append_block->peer_block_->len());
     sub_blocks_.push_back(append_block);
 

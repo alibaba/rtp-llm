@@ -17,6 +17,9 @@ public:
     bool isRdmaMode() {
         return impl_->isRdmaMode();
     }
+    uint64_t minRegistrationSize() const override {
+        return impl_->minRegistrationSize();
+    }
     bool deregUserMr(void* buf, bool gpu) {
         return impl_->deregUserMr(buf, gpu);
     }

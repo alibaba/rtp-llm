@@ -15,7 +15,7 @@ public:
                              const std::shared_ptr<BlockBufferInfo>& peer_block_,
                              WriteBlockDoneCallback                  callback_);
 
-    bool appendBlock(const std::shared_ptr<RdmaConnectionWriteBlock>& block);
+    bool appendBlock(const std::shared_ptr<RdmaConnectionWriteBlock>& block, MemoryUtil& memory_util);
 
     const std::shared_ptr<BlockBuffer>& getBlock() const {
         return block_;
