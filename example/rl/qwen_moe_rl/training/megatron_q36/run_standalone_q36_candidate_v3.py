@@ -14,6 +14,23 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 
 
+def propagate_runtime_env(runtime, source):
+    """Carry qualified paths into Ray workers without forwarding GPU masks."""
+    env = runtime.setdefault('env_vars', {})
+    selected = {'PYTHONPATH', 'LD_LIBRARY_PATH', 'LD_PRELOAD', 'CUDNN_HOME', 'NVTE_FLASH_ATTN',
+                'NVTE_FUSED_ATTN', 'NVTE_UNFUSED_ATTN', 'WARM_UP', 'MODEL_WARM_UP',
+                'LOAD_PYTHON_MODEL', 'ENABLE_CUDA_GRAPH', 'ENABLE_NATIVE_CUDA_GRAPH',
+                'ENABLE_LAYER_MICRO_BATCH', 'HF_HUB_OFFLINE', 'TRANSFORMERS_OFFLINE', 'PYTHONDONTWRITEBYTECODE',
+                'UCX_MODULES', 'UCX_TLS', 'UCX_NET_DEVICES', 'UCX_LOG_LEVEL',
+                'UCX_IB_ROCE_REACHABILITY_MODE', 'PYTORCH_CUDA_ALLOC_CONF',
+                'TORCH_EXTENSIONS_DIR', 'CUDA_HOME', 'TORCH_CUDA_ARCH_LIST', 'MAX_JOBS', 'PATH'}
+    for name, value in source.items():
+        if name in selected or name.startswith(('RTP_', 'RLLM_', 'Q36_', 'QWEN36_', 'Q397_')):
+            env[name] = value
+    env.pop('CUDA_VISIBLE_DEVICES', None)
+    return runtime
+
+
 def validate(config):
     from q36_launch_contract import validate as validate_tp4
     from q36_nonshared_launch_contract import SR_MANIFEST_SHA, require_real_integrations
@@ -86,18 +103,7 @@ def main(config: DictConfig):
     dataset = Dataset.load_data(os.environ['RLLM_PYTHON_TOOL_TRAIN_JSONL'])
     if len(dataset) < config.rllm.data.train_batch_size:
         raise ValueError('dataset is smaller than the requested task batch')
-    runtime = ray_runtime_env.get_ppo_ray_runtime_env()
-    env = runtime.setdefault('env_vars', {})
-    selected = {'PYTHONPATH', 'LD_LIBRARY_PATH', 'LD_PRELOAD', 'CUDNN_HOME', 'NVTE_FLASH_ATTN',
-                'NVTE_FUSED_ATTN', 'NVTE_UNFUSED_ATTN', 'WARM_UP', 'MODEL_WARM_UP',
-                'LOAD_PYTHON_MODEL', 'ENABLE_CUDA_GRAPH', 'ENABLE_NATIVE_CUDA_GRAPH',
-                'ENABLE_LAYER_MICRO_BATCH', 'HF_HUB_OFFLINE', 'TRANSFORMERS_OFFLINE', 'PYTHONDONTWRITEBYTECODE',
-                'UCX_MODULES', 'UCX_TLS', 'UCX_NET_DEVICES', 'UCX_LOG_LEVEL',
-                'UCX_IB_ROCE_REACHABILITY_MODE', 'PYTORCH_CUDA_ALLOC_CONF'}
-    for name, value in os.environ.items():
-        if name in selected or name.startswith(('RTP_', 'RLLM_', 'Q36_', 'QWEN36_')):
-            env[name] = value
-    env.pop('CUDA_VISIBLE_DEVICES', None)
+    runtime = propagate_runtime_env(ray_runtime_env.get_ppo_ray_runtime_env(), os.environ)
     run_name = Path(os.environ['Q36_RUN_ROOT']).name
     print(OmegaConf.to_yaml(config), flush=True)
     try:

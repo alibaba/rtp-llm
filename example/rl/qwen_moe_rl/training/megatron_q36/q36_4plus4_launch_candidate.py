@@ -15,7 +15,7 @@ import time
 SOURCES = {
  'Q36_CODE_DIR': {
   'q36_4plus4_recipe.py': '3944fd0bb0c7fc613507f54006cdb1592fe67fbb37e5563825f6d61924b2f4cb',
-  'run_standalone_q36_candidate_v3.py': '6378b814fed623fde292e7552165aecce1aa13893c7305e7e3bdbba5e54b20a1',
+  'run_standalone_q36_candidate_v3.py': 'c3a9d610f593b1baa84e6e4c7033bbc7bd0e4e97bc920b63d8095c670e764316',
   'onpolicy_standalone_candidate.py': '8c36ff1bb662fa5ba5177c1f4e17646664c81fe93790087f00d3c10178f468a8',
   'q36_4plus4_claim_loader.py': '0075f76555d41822bfd23d3879165aa754b0b0f19484f99ec3f5166dfbe0c5ac',
   'q36_4plus4_claim_guard.py': '8bbfcd82128c1c2ac4018ec1f9fd101547389523077acbbd4c3435c5321f9e0e',
