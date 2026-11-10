@@ -729,9 +729,16 @@ def warmup_v41_prefill_jit(model, *, device):
     # Shared experts can retain V4's FP8/FP4 linears even though attention
     # and Engram use MXFP8. MegaMoE's symmetric-memory kernels already warm
     # themselves in strategy.setup_runtime(), outside this local lock.
-    common.warmup_dense_gemm_jit(
-        common._collect_dsv4_dense_gemm_shapes(model), max_m=max_m, device=device
+    # DeepGEMM JIT targets SM90/SM100 (griddepcontrol/PDL); on reference GPUs
+    # no deep_gemm kernel ever runs, so compiling them would fail in ptxas.
+    from rtp_llm.models_py.modules.dsv41.sm80_support import (
+        use_reference_gemm_paths,
     )
+
+    if not use_reference_gemm_paths():
+        common.warmup_dense_gemm_jit(
+            common._collect_dsv4_dense_gemm_shapes(model), max_m=max_m, device=device
+        )
     warmup_v41_dense_jit(model, max_m=max_m, device=device)
     warmup_v41_shared_expert_jit(model, max_m=max_m, device=device)
     warmup_v41_hc_jit(model.v4, max_m=max_m, device=device)
