@@ -372,7 +372,6 @@ class BaseModel(object):
         max_generate_batch_size: int,
         vit_config: VitConfig,
         merge_lora: bool,
-        device_resource_config: DeviceResourceConfig,
         force_cpu_load_weights: bool = False,
     ):
         model = cls(
@@ -386,7 +385,6 @@ class BaseModel(object):
             max_generate_batch_size=max_generate_batch_size,
             vit_config=vit_config,
             merge_lora=merge_lora,
-            device_resource_config=device_resource_config,
             force_cpu_load_weights=force_cpu_load_weights,
         )
         return model.load_embedding_weight()

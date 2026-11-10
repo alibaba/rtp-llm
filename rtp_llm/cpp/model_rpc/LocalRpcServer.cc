@@ -444,7 +444,11 @@ ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB&                   
                                        grpc::ServerContext* server_context) {
     output.reset();
     try {
-        output = QueryConverter::transQuery(&input_pb);
+        try {
+            output = QueryConverter::transQuery(&input_pb);
+        } catch (const std::exception& e) {
+            return ErrorInfo(ErrorCode::INVALID_PARAMS, std::string("Request parsing error: ") + e.what());
+        }
         auto support = validateInputRuntimeSupport(*output);
         if (!support.ok()) { return support; }
         if (mm_processor_ != nullptr && (output->multimodal_inputs || output->v41_inputs)) {

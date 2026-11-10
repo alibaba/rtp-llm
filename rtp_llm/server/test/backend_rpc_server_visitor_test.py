@@ -1304,6 +1304,7 @@ class BackendRPCServerVisitorTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(input.generate_config.enable_device_cache)
         self.assertFalse(input.generate_config.enable_memory_cache)
         self.assertFalse(input.generate_config.enable_remote_cache)
+        self.assertFalse(input.generate_config.enable_disk_cache)
 
     def test_check_sp_supported_disables_sp_with_input_embeddings(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
@@ -1341,6 +1342,7 @@ class BackendRPCServerVisitorTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(embedding_input.generate_config.enable_device_cache)
         self.assertFalse(embedding_input.generate_config.enable_memory_cache)
         self.assertFalse(embedding_input.generate_config.enable_remote_cache)
+        self.assertFalse(embedding_input.generate_config.enable_disk_cache)
 
     def test_empty_input_embeddings_keeps_reuse_flags(self):
         input = make_generate_input(

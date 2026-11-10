@@ -318,3 +318,18 @@ py_test(
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
 )
+
+py_test(
+    name = "input_embedding_graph_integration_test",
+    srcs = ["input_embedding_graph_integration_test.py"],
+    data = [":test_cuda_graph_runner", "//:th_transformer"],
+    deps = [":cuda_graph_test_utils", "//rtp_llm/test/model_test/test_util"],
+    env = {
+        "LOAD_METHOD": "scratch",
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "TEST_USING_DEVICE": "CUDA",
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+    },
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+    tags = ["RTX_5000_PRO_CU13"],
+)

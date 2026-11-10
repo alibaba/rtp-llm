@@ -28,6 +28,30 @@ TOKENS_PER_BLOCK = 8
 KERNEL_BLOCK_TABLE_WIDTH = 8
 
 
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
+
+class InputEmbeddingOverrideModel:
+    """Exercise the shared request input-embedding injector in a captured graph."""
+
+    def prepare_fmha_impl(
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: str | None = None,
+    ):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        token_values = inputs.input_ids.to(torch.bfloat16).unsqueeze(1)
+        hidden_offsets = torch.arange(
+            HIDDEN_SIZE, dtype=torch.bfloat16, device=inputs.input_ids.device
+        ).unsqueeze(0)
+        inputs_embeds = token_values * 10 + hidden_offsets
+        return PyModelOutputs(
+            GptModelBase.apply_input_embeddings(self, inputs_embeds, inputs)
+        )
+
+
 class TaggedBlockTableModel:
     """Small graph-safe model whose output exposes both tag-local block tables."""
 
@@ -1836,6 +1860,144 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     tuple(output.mtp_target_hidden_states.shape),
                 )
                 torch.testing.assert_close(output.mtp_target_hidden_states, expected)
+
+    def test_generation_prefill_replays_dynamic_input_embeddings(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_generation_prefill(
+            InputEmbeddingOverrideModel(),
+            1,
+            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [4],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+        )
+
+        def base_output(inputs: PyModelInputs) -> torch.Tensor:
+            return inputs.input_ids.to(torch.bfloat16).unsqueeze(1) * 10 + torch.arange(
+                HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+            ).unsqueeze(0)
+
+        inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
+        inputs.input_embeddings = [
+            torch.full((2, HIDDEN_SIZE), 7, dtype=torch.float32, device="cuda")
+        ]
+        inputs.input_embeddings_locs = torch.tensor([1], dtype=torch.int32)
+        self.assertTrue(runner.canRun(inputs))
+        output = runner.forward(inputs)
+        torch.cuda.synchronize()
+        expected = base_output(inputs)
+        expected[1:3] = 7
+        torch.testing.assert_close(output.hidden_states, expected)
+
+        # A following request without overrides must clear the capture-owned
+        # mask instead of reusing locations from the previous replay.
+        clean_inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 3, "aux": 4})
+        self.assertTrue(runner.canRun(clean_inputs))
+        clean_output = runner.forward(clean_inputs)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            clean_output.hidden_states, base_output(clean_inputs)
+        )
+
+        # Segment count, locations, lengths, values, and source dtype are all
+        # dynamic request data and may change between graph replays.
+        segmented_inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 5, "aux": 6})
+        segmented_inputs.input_embeddings = [
+            torch.full((1, HIDDEN_SIZE), -2, dtype=torch.bfloat16, device="cuda"),
+            torch.full((1, HIDDEN_SIZE), 9, dtype=torch.float32, device="cuda"),
+        ]
+        segmented_inputs.input_embeddings_locs = torch.tensor([0, 3], dtype=torch.int32)
+        self.assertTrue(runner.canRun(segmented_inputs))
+        segmented_output = runner.forward(segmented_inputs)
+        torch.cuda.synchronize()
+        segmented_expected = base_output(segmented_inputs)
+        segmented_expected[0] = -2
+        segmented_expected[3] = 9
+        torch.testing.assert_close(segmented_output.hidden_states, segmented_expected)
+
+        # Shrinking inside the same capture bucket must clear both live and
+        # padded mask rows. Growing again must not resurrect the old tail.
+        for seq_len in (2, 4):
+            with self.subTest(clean_seq_len=seq_len):
+                resized_inputs = _build_prefill_inputs(
+                    GROUP_TAGS, {"full": 1, "aux": 2}, seq_len=seq_len
+                )
+                self.assertTrue(runner.canRun(resized_inputs))
+                resized_output = runner.forward(resized_inputs)
+                torch.cuda.synchronize()
+                torch.testing.assert_close(
+                    resized_output.hidden_states, base_output(resized_inputs)
+                )
+
+        invalid_inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
+        invalid_inputs.input_embeddings = [
+            torch.zeros((2, HIDDEN_SIZE), dtype=torch.bfloat16, device="cuda")
+        ]
+        invalid_inputs.input_embeddings_locs = torch.tensor([3], dtype=torch.int32)
+        self.assertFalse(runner.canRun(invalid_inputs))
+
+    def test_input_embedding_prefill_then_decode_graph(self) -> None:
+        model = InputEmbeddingOverrideModel()
+        prefill_runner = CudaGraphRunner()
+        prefill_runner.init_generation_prefill(
+            model,
+            1,
+            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [4],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+        )
+        decode_runner = CudaGraphRunner()
+        decode_runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            64,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [1, 2],
+            GROUP_TAGS,
+        )
+        prefill_inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
+        prefill_inputs.input_embeddings = [
+            torch.full((4, HIDDEN_SIZE), -7, dtype=torch.bfloat16, device="cuda")
+        ]
+        prefill_inputs.input_embeddings_locs = torch.tensor([0], dtype=torch.int32)
+        self.assertTrue(prefill_runner.canRun(prefill_inputs))
+        prefill_output = prefill_runner.forward(prefill_inputs)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            prefill_output.hidden_states,
+            torch.full((4, HIDDEN_SIZE), -7, dtype=torch.bfloat16, device="cuda"),
+        )
+
+        # Gather emits no prompt embeddings after prefill. The independent
+        # decode capture must remain usable for every supported batch bucket.
+        for batch_size in (1, 2, 1):
+            with self.subTest(decode_batch_size=batch_size):
+                inputs = _build_decode_inputs(
+                    GROUP_TAGS, {"full": 1, "aux": 2}, batch_size=batch_size
+                )
+                self.assertTrue(decode_runner.canRun(inputs))
+                output = decode_runner.forward(inputs)
+                torch.cuda.synchronize()
+                expected = inputs.input_ids.to(torch.bfloat16).unsqueeze(1) * 10
+                expected = expected + torch.arange(
+                    HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+                ).unsqueeze(0)
+                torch.testing.assert_close(output.hidden_states, expected)
+
+        # A caller bypassing gather must fail closed rather than silently
+        # dropping embeddings in a graph captured without the override buffers.
+        invalid_decode = _build_decode_inputs(
+            GROUP_TAGS, {"full": 1, "aux": 2}, batch_size=1
+        )
+        invalid_decode.input_embeddings = [
+            torch.zeros((1, HIDDEN_SIZE), dtype=torch.bfloat16, device="cuda")
+        ]
+        invalid_decode.input_embeddings_locs = torch.tensor([0], dtype=torch.int32)
+        self.assertFalse(decode_runner.canRun(invalid_decode))
+
 
 
 if __name__ == "__main__":

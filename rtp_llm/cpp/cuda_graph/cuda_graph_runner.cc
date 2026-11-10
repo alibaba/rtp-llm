@@ -417,6 +417,24 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
                            py_model_inputs.input_hiddens,
                            inputs.input_hiddens.numel() * inputs.input_hiddens.element_size());
     }
+    if (isGenerationPrefillCudaGraph()) {
+        auto& overrides = py_model_inputs.cuda_graph_input_embedding_overrides;
+        auto& mask      = py_model_inputs.cuda_graph_input_embedding_mask;
+        RTP_LLM_CHECK_WITH_INFO(overrides.defined() && mask.defined(),
+                                "full prefill CUDA graph input embedding buffers are not initialized");
+        mask.zero_();
+        if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+            const auto* locs = inputs.input_embeddings_locs.data_ptr<int32_t>();
+            for (size_t i = 0; i < inputs.input_embeddings->size(); ++i) {
+                const auto& embedding = inputs.input_embeddings->at(i);
+                const int   loc       = locs[i];
+                const int   length    = static_cast<int>(embedding.size(0));
+                overrides.narrow(0, loc, length).copy_(embedding, /*non_blocking=*/true);
+                mask.narrow(0, loc, length).fill_(true);
+            }
+        }
+    }
+
 }
 
 void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
@@ -439,23 +457,6 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // 2.2.3 draft model do auto-agressive forward
     // for now we only support 2.2.1 and 2.2.3 in deocode cuda graph, and 2.2.2 will be support in prefill cuda graph.
 
-    if (isGenerationPrefillCudaGraph()) {
-        auto& overrides = py_model_inputs.cuda_graph_input_embedding_overrides;
-        auto& mask      = py_model_inputs.cuda_graph_input_embedding_mask;
-        RTP_LLM_CHECK_WITH_INFO(overrides.defined() && mask.defined(),
-                                "full prefill CUDA graph input embedding buffers are not initialized");
-        mask.zero_();
-        if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
-            const auto* locs = inputs.input_embeddings_locs.data_ptr<int32_t>();
-            for (size_t i = 0; i < inputs.input_embeddings->size(); ++i) {
-                const auto& embedding = inputs.input_embeddings->at(i);
-                const int   loc       = locs[i];
-                const int   length    = static_cast<int>(embedding.size(0));
-                overrides.narrow(0, loc, length).copy_(embedding, /*non_blocking=*/true);
-                mask.narrow(0, loc, length).fill_(true);
-            }
-        }
-    }
     if (isGenerationPrefillCudaGraph()) {
         // Generation-prefill owns its host metadata lifetime: wait for both
         // staging copies and the preceding replay before CPU mutation. This

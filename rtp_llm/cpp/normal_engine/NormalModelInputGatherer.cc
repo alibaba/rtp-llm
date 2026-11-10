@@ -303,6 +303,9 @@ absl::Status gatherInputEmbeddingsForContextBatch(const GenerateStreamPtr&      
         }
         const int64_t chunk_start = stream->prefixLength();
         const int64_t chunk_end = chunk_start + current_token_count;
+        if (!stream->useChunkWindow() && (locs[i] < chunk_start || locs[i] + embedding.size(0) > chunk_end)) {
+            return absl::InvalidArgumentError("input_embeddings segment falls outside current context batch");
+        }
         const int64_t start = std::max<int64_t>(locs[i], chunk_start);
         const int64_t end = std::min<int64_t>(locs[i] + embedding.size(0), chunk_end);
         if (start >= end) { continue; }
@@ -827,6 +830,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         deviceInputEnabled() ? publishInt32ToCuda(prefix_lengths_host, host_holder) : prefix_lengths_host;
     if (model_input.custom_output_indexes.defined()) {
         model_input.custom_output_indexes = model_input.custom_output_indexes.narrow(0, 0, custom_output_count);
+    }
     if (!gathered_input_embeddings.empty()) {
         model_input.input_embeddings      = std::move(gathered_input_embeddings);
         model_input.input_embeddings_locs = torch::tensor(gathered_input_embedding_locs, torch::kInt32);

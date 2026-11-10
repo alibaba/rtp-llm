@@ -794,7 +794,6 @@ void PyWrappedModel::rejectContextParallelInputEmbeddings(const ExecProperties& 
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
-    rejectContextParallelInputEmbeddings(device_props_, inputs);
 
     // Establish the cleanup guard before touching inputs: both the performance
     // wrapper and host-buffer retention can throw. A failed async prepare must
@@ -828,6 +827,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
+        rejectContextParallelInputEmbeddings(device_props_, inputs);
         PyContextParallelParams cp_params;
         if (device_props_.enable_prefill_cp && has_context_request) {
             // CP accepts pure-prefill batches without MTP/speculative hidden states;

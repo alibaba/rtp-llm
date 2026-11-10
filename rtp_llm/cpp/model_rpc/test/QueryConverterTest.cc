@@ -23,6 +23,64 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
+class TestLocalRpcServer: public LocalRpcServer {
+public:
+    using LocalRpcServer::prepareInput;
+
+    void setParallelismConfig(const ParallelismConfig& parallelism_config) {
+        maga_init_params_.parallelism_config = parallelism_config;
+    }
+};
+
+// Only request preparation is exercised; no model or scheduler is needed.
+class RequestParsingEngine: public EngineBase {
+public:
+    RequestParsingEngine(): EngineBase(EngineInitParams()) {}
+
+    std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
+        ADD_FAILURE() << "request parsing must not enqueue inference";
+        return nullptr;
+    }
+    void enqueue(std::shared_ptr<GenerateStream>&) override {
+        ADD_FAILURE() << "request parsing must not enqueue inference";
+    }
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("request parsing only");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+};
+
+class TestPrefillRpcServer: public PrefillRpcServer {
+public:
+    void initRequestParsingEngine() {
+        engine_ = std::make_shared<RequestParsingEngine>();
+    }
+
+    void setParallelismConfig(const ParallelismConfig& parallelism_config) {
+        maga_init_params_.parallelism_config = parallelism_config;
+    }
+};
+
+static void fillValidInputEmbeddingsRequest(GenerateInputPB& input) {
+    input.set_request_id(123);
+    input.add_token_ids(0);
+    input.add_token_ids(1);
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+    auto* embedding_pb        = input_embeddings_pb->add_embeddings();
+    embedding_pb->set_data_type(TensorPB::FP32);
+    embedding_pb->add_shape(1);
+    embedding_pb->add_shape(4);
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f};
+    embedding_pb->set_fp32_data(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
+    input_embeddings_pb->add_embedding_locs(0);
+}
+
+
 TEST_F(QueryConverterTest, PrefillOnlyFlagWithZeroMaxNewTokensMeansPrefillOnly) {
     for (const bool enable_disk_cache : {false, true}) {
         SCOPED_TRACE(enable_disk_cache);

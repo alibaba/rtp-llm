@@ -2661,6 +2661,79 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillPositionIdsCopy
     EXPECT_EQ(combo_position_ids, toVec<int>(model_input.combo_position_ids));
 }
 
+TEST_F(ChunkedPrefillBatchStreamProcessorTest, testInputEmbeddingsAcrossChunksAndDecodeTransition) {
+    cache_config_ = makeMhaCacheConfig(1, 16, 1, 1, 4, rtp_llm::DataType::TYPE_FP16);
+    ResourceContext context;
+    context.cache_manager = std::make_shared<KVCacheManager>(cache_config_);
+    processor_ = make_unique<NormalBatchStreamProcessor>(
+        model_config_, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config_, false);
+    auto make_stream = [&](const std::vector<int32_t>& tokens) {
+        auto input = std::make_shared<GenerateInput>();
+        input->input_ids = hostIntBuffer(tokens);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        input->need_release_resource = false;  // IDs below are fixtures, not pool allocations.
+        auto result = std::make_shared<NormalGenerateStream>(
+            input, model_config_, RuntimeConfig{}, context, nullptr);
+        result->generate_status_->status = StreamState::RUNNING;
+        return result;
+    };
+    auto stream = make_stream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16});
+    stream->setChunkSize(4);
+    const auto embedding = torch::arange(8 * 10, torch::kFloat32).reshape({8, 10});
+    stream->generateInput()->input_embeddings = {embedding};
+    stream->generateInput()->input_embeddings_locs = {2};
+    setKvCacheBlocks(stream, {1, 2, 3, 4});
+
+    auto decode_stream = make_stream({99});
+    decode_stream->setIsContextStream(false);
+    setKvCacheBlocks(decode_stream, {5, 6, 7, 8});
+    std::vector<torch::Tensor> slices;
+    const std::vector<int> expected_rows = {2, 4, 2, 0};
+    const std::vector<int> expected_locs = {3, 1, 1};
+    for (int chunk = 0; chunk < 4; ++chunk) {
+        SCOPED_TRACE(chunk);
+        ASSERT_TRUE(stream->useChunkWindow());
+        EXPECT_EQ(stream->prefixLength(), chunk * 4);
+        // Deliberately put context first: packing still places the decode row
+        // before the current context window, so every location includes +1.
+        StreamGroups groups({stream, decode_stream});
+        TensorHolder holder;
+        auto result = processor_->gatherModelInput(groups, holder);
+        ASSERT_TRUE(result.ok()) << result.status().ToString();
+        const auto& inputs = result.value();
+        EXPECT_EQ(toVec<int>(inputs.prefix_lengths), (std::vector<int>{chunk * 4}));
+        EXPECT_EQ(toVec<int>(inputs.combo_tokens),
+                  (std::vector<int>{99, chunk * 4 + 1, chunk * 4 + 2, chunk * 4 + 3, chunk * 4 + 4}));
+        if (expected_rows[chunk] == 0) {
+            EXPECT_FALSE(inputs.input_embeddings.has_value());
+            EXPECT_FALSE(inputs.input_embeddings_locs.defined());
+        } else {
+            ASSERT_TRUE(inputs.input_embeddings.has_value());
+            ASSERT_EQ(inputs.input_embeddings->size(), 1);
+            const auto& slice = inputs.input_embeddings->at(0);
+            EXPECT_TRUE(slice.is_cuda());
+            EXPECT_EQ(slice.size(0), expected_rows[chunk]);
+            EXPECT_EQ(toVec<int>(inputs.input_embeddings_locs), (std::vector<int>{expected_locs[chunk]}));
+            slices.push_back(slice.cpu());
+        }
+        if (chunk != 3) {
+            stream->advanceChunk();
+        }
+    }
+    ASSERT_EQ(slices.size(), 3);
+    EXPECT_TRUE(torch::equal(torch::cat(slices, 0), embedding));
+
+    // Retain request-owned embeddings while entering decode. They must not
+    // leak into the next model input and disable decode CUDA graph replay.
+    stream->setIsContextStream(false);
+    StreamGroups decode_groups({stream, decode_stream});
+    TensorHolder holder;
+    auto result = processor_->gatherModelInput(decode_groups, holder);
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
+    EXPECT_FALSE(result.value().input_embeddings.has_value());
+    EXPECT_FALSE(result.value().input_embeddings_locs.defined());
+}
+
 TEST_F(ChunkedPrefillBatchStreamProcessorTest, testAllAttentionChunkInputsPreservePrefixesAndCacheRows) {
     struct AttentionCase {
         const char*    tag;
@@ -3150,7 +3223,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsMixedWithDecodeStreams
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
     addr1.initGroups(cache_config.topologyPtr());
-    addr1.setBatchBlocks(0, 0, {1, 2, 3, 4});
+    addr1.setBatchBlocks(0, "default", {1, 2, 3, 4});
     stream1->setKVCache(addr1);
 
     // 创建带有 input_embeddings 的 context stream

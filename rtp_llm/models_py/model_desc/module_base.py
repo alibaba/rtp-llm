@@ -278,8 +278,8 @@ class GptModelBase(nn.Module):
                 )
             return torch.where(graph_mask.unsqueeze(1), graph_overrides, inputs_embeds)
 
-        if inputs.input_embeddings is not None and len(inputs.input_embeddings) > 0:
-            locs = inputs.input_embeddings_locs
+        if getattr(inputs, "input_embeddings", None):
+            locs = getattr(inputs, "input_embeddings_locs", None)
             if locs is None:
                 raise ValueError("input_embeddings_locs must be set")
             if inputs_embeds.dim() != 2:
@@ -351,7 +351,7 @@ class GptModelBase(nn.Module):
 
     @staticmethod
     def _has_input_embeddings(inputs: PyModelInputs) -> bool:
-        return inputs.input_embeddings is not None and len(inputs.input_embeddings) > 0
+        return bool(getattr(inputs, "input_embeddings", None))
 
     def _reject_input_embeddings(self, inputs: PyModelInputs) -> None:
         if self._has_input_embeddings(inputs):

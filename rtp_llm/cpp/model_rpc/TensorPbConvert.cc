@@ -82,6 +82,10 @@ void TensorPbConvert::validate(const TensorPB& tensor_pb) {
 
 at::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
     if (tensor_pb.shape_size() == 0 && tensor_pb.fp32_data().empty() && tensor_pb.int32_data().empty() && tensor_pb.fp16_data().empty() && tensor_pb.bf16_data().empty()) {
+        if (tensor_pb.data_type() != TensorPB::FP32 && tensor_pb.data_type() != TensorPB::FP16
+            && tensor_pb.data_type() != TensorPB::BF16 && tensor_pb.data_type() != TensorPB::INT32) {
+            throw std::runtime_error("Unsupported data type.");
+        }
         auto dtype = tensor_pb.data_type() == TensorPB::FP16 ? at::kHalf : tensor_pb.data_type() == TensorPB::BF16 ? at::kBFloat16 : tensor_pb.data_type() == TensorPB::INT32 ? at::kInt : at::kFloat;
         return at::empty({0}, at::TensorOptions().dtype(dtype));
     }

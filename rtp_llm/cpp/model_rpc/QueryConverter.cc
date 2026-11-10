@@ -624,8 +624,9 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
                 break;
             }
         }
+        auto* hidden_states_pb = flatten_output->mutable_all_hidden_states();
         if (all_hidden_states.defined()) {
-            transTensorPB(flatten_output->mutable_all_hidden_states(), all_hidden_states.contiguous());
+            transTensorPB(hidden_states_pb, all_hidden_states.contiguous());
         }
     }
 

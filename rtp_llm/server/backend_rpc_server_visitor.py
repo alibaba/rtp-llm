@@ -94,6 +94,7 @@ def disable_token_only_reuse_for_input_embeddings(input: GenerateInput) -> None:
     input.generate_config.enable_device_cache = False
     input.generate_config.enable_memory_cache = False
     input.generate_config.enable_remote_cache = False
+    input.generate_config.enable_disk_cache = False
 
 
 class BackendRPCServerVisitor:
@@ -776,7 +777,7 @@ class BackendRPCServerVisitor:
                 elif isinstance(e, FtRuntimeException):
                     route_span.set_attribute(
                         trace_attrs.RTP_LLM_ERROR_CODE,
-                        int(getattr(e, "rtp_error_code", e.exception_type)),
+                        int(e.rtp_error_code if e.rtp_error_code is not None else e.exception_type),
                     )
                     if not route_error_type:
                         route_error_type = "RouteError"
@@ -919,7 +920,6 @@ class BackendRPCServerVisitor:
 
         try:
             self.fill_request_info(input)
-            disable_token_only_reuse_for_input_embeddings(input)
             input.generate_config.validate()
             self._validate_input(input)
             self.check_sp_supported(input)

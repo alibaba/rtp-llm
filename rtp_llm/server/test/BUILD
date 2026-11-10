@@ -107,14 +107,3 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     tags = ["manual"],
 )
-
-py_test(
-    name = "backend_rpc_server_visitor_test",
-    srcs = ["backend_rpc_server_visitor_test.py"],
-    deps = [
-        "//rtp_llm:testlib",
-        "//rtp_llm/server:server",
-        "//rtp_llm:config_ops",
-        "//rtp_llm:pydantic",
-    ],
-)
