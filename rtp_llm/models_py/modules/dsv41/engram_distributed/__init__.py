@@ -5,7 +5,8 @@ config: storage policy, limits and gang/cohort membership.
 checkpoint: ShardPublisher owns and loads local backing.
 placement: pure shard geometry and NUMA/GPU placement planning.
 manifest: bounded metadata parsing and layout validation.
-exchange: EngramStartup coordinates ranks through one TCPStore protocol.
+exchange: EngramStartup stages a package for the worker.
+resident: independently owned host Fabric backing and startup descriptors.
 local: LocalCudaStartup transports same-host GPU file descriptors.
 storage: FabricEngramStorage owns backing, CUDA mappings, views and graph leases.
 runtime: EngramRuntime owns package handoff and model binding in one worker.
