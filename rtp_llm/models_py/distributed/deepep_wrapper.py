@@ -138,6 +138,19 @@ class DeepepWrapperConfig:
     # Low-latency generation parameter
     ll_num_max_token_per_rank: int = 0
 
+    def __post_init__(self):
+        # Model loading and the final router must allocate the same buffer.
+        override = int(os.environ.get("DEEPEP_LL_NUM_MAX_TOKEN", "0"))
+        if self.use_deepep_low_latency and override > 0:
+            self.ll_num_max_token = max(self.ll_num_max_token, override)
+            self.ll_num_max_token_per_rank = max(
+                self.ll_num_max_token_per_rank,
+                self.calc_low_latency_max_token_per_rank(
+                    self.ll_num_max_token, self.tp_size, None
+                ),
+            )
+
+
     @classmethod
     def from_config_adapter(
         cls, config_adapter: MoEConfigAdapter, ll_num_max_token_per_rank: int = 0
