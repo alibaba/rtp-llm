@@ -748,6 +748,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                                          : SP_TYPE_NONE)
                          .c_str());
     }
+#if USING_ASCEND
+    // FLA-NPU recurrent decode caps at 8 tokens per sequence; MTP verify runs K+1.
+    if (params.model_config_.linear_attention_config.linear_num_key_heads > 0) {
+        RTP_LLM_CHECK_WITH_INFO(propose_params->gen_num_per_circle + 1 <= 8,
+                                "Ascend GDN MTP requires gen_num_per_cycle <= 7 (FLA-NPU recurrent operator "
+                                "caps verify at 8 tokens per sequence), got %d",
+                                static_cast<int>(propose_params->gen_num_per_circle));
+    }
+#endif
     data_type_                  = params.model_config_.data_type;
     hidden_size_                = params.model_config_.hidden_size * params.model_config_.hc_mult;
     propose_step_               = propose_params->gen_num_per_circle;
