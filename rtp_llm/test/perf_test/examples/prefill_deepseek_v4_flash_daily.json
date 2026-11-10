@@ -8,24 +8,54 @@
     "topology": {"tp": 4, "dp": 1, "pp": 1, "ep": 4}
   },
   "engine": {
-    "max_seq_len": 204801,
+    "max_seq_len": 1048576,
     "max_batch_tokens": 6600000,
     "concurrency_limit": 32,
-    "args": {"reuse_cache": 1},
-    "env": {"TOKENIZERS_PARALLELISM": "false"}
+    "args": {
+      "cp_rotate_method": "ALL_GATHER",
+      "cache_store_rdma_connect_timeout_ms": 800,
+      "reuse_cache": 1,
+      "load_cache_timeout_ms": 30000,
+      "fp8_kv_cache": 1,
+      "reserver_runtime_mem_mb": 81920,
+      "memory_cache_size_mb": 100000,
+      "enable_memory_cache": 1,
+      "cp_force_single_prefill": 0,
+      "frontend_server_count": 1,
+      "think_start_tag": "<think>",
+      "think_mode": 1,
+      "think_end_tag": "</think>",
+      "prefill_cp_kv_cache_sharded": 1,
+      "kernel_seq_size_per_block": 128,
+      "seq_size_per_block": 256,
+      "dsv4_hca_state_pool_blocks": 200,
+      "memory_cache_sync_timeout_ms": 60000,
+      "max_batch_tokens_without_cache": 150000
+    },
+    "env": {
+      "TOKENIZERS_PARALLELISM": "false",
+      "DG_JIT_CPP_STANDARD": "20",
+      "DG_JIT_PRINT_COMPILER_COMMAND": "1",
+      "DG_JIT_PRINT_LOAD_TIME": "1",
+      "DSV4_CHUNK_TOKENS": "12288",
+      "DSV4_TRAP_INVALID_KV_ACCESS": "0",
+      "PREFILL_CACHE_HIT_METRIC_ENABLE": "1",
+      "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True,large_segment_size_mb:1024",
+      "DG_MEGA_MOE_NVLINK_BARRIER_TIMEOUT_SECS": "300"
+    }
   },
   "workload": {
     "kind": "cache_grid",
     "transport": "dashsc_input_ids",
-    "cache_alignment": 256,
-    "commit_tail_tokens": 256,
-    "probe_block_size": 256,
+    "cache_alignment": 1024,
+    "commit_tail_tokens": 1024,
+    "probe_block_size": 1024,
     "measure_runs": 2,
     "workspace_tokens": 6600000,
-    "seed": 20261110,
+    "seed": 2026,
     "traffic_request_batches": {
       "distribution_file": "req_distribution.json",
-      "num_cases": 10000,
+      "num_cases": 100,
       "batch_sizes": [1, 2, 4, 8, 16, 24, 32],
       "min_input_tokens": 16384,
       "max_input_tokens": 204800
@@ -34,9 +64,9 @@
   "execution": {
     "backend": "aone",
     "resource": "daily",
-    "gpu_type": "H20_CU13",
-    "shard_count": 32,
-    "max_parallel": 4
+    "gpu_type": "SM103_CU13",
+    "shard_count": 1,
+    "max_parallel": 1
   },
   "output": {"result_root": "perf_test_results"},
   "regression": {},
