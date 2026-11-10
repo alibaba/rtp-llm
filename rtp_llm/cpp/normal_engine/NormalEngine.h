@@ -85,6 +85,7 @@ private:
     bool isDSpark() override;
 
 private:
+    int64_t                                       previous_execution_release_us_ = 0;
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
     std::unique_ptr<Executor>                     executor_;

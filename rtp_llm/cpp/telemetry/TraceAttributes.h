@@ -67,6 +67,15 @@ inline constexpr const char* kAttrRtpLlmAllocateRtUs         = "rtp_llm.allocate
 inline constexpr const char* kAttrRtpLlmPollLocalOutputRtUs  = "rtp_llm.poll_local_output_rt_us";
 inline constexpr const char* kAttrRtpLlmPollRemoteOutputRtUs = "rtp_llm.poll_remote_output_rt_us";
 inline constexpr const char* kAttrRtpLlmPhaseTruncated       = "rtp_llm.phase.truncated";
+// Cache-only scheduler idle overlapping this request's pending load. Shared
+// windows may appear on several requests; do not sum them across requests.
+inline constexpr const char* kAttrRtpLlmPrefillCacheExposedWaitUs = "rtp_llm.prefill.cache_exposed_wait_us";
+// Enqueue-to-CanRun: waiting for FIFO admission, before cache loading starts.
+inline constexpr const char* kAttrRtpLlmPrefillAdmissionQueueWaitUs    = "rtp_llm.prefill.admission_queue_wait_us";
+inline constexpr const char* kAttrRtpLlmPrefillKvCacheAcquireWallUs    = "rtp_llm.prefill.kv_cache_acquire_wall_us";
+inline constexpr const char* kAttrRtpLlmPrefillEarlyBatchPrepareWallUs = "rtp_llm.prefill.early_batch_prepare_wall_us";
+inline constexpr const char* kAttrRtpLlmPrefillPreviousBatchWaitUs     = "rtp_llm.prefill.previous_batch_wait_us";
+inline constexpr const char* kAttrRtpLlmPrefillFinalPrepareWallUs      = "rtp_llm.prefill.final_prepare_wall_us";
 // Frontend-to-prefill handoff delay on the master coalescing path: from the
 // frontend wall clock stamped into GenerateInputPB.start_time by trans_input()
 // to the moment the prefill node creates the logical span in buildSlotContexts.

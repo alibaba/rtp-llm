@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
+#include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
@@ -1010,6 +1011,16 @@ absl::Status NormalEngine::step() try {
         }
     }
 
+    if (telemetry::TelemetryRuntime::isActive()) {
+        const auto dispatch_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        for (const auto& stream : streams) {
+            if (stream->isContextStream()) {
+                stream->recordPrefillDispatchTime(dispatch_time_us);
+                stream->recordPrefillPreviousReleaseTime(previous_execution_release_us_);
+            }
+        }
+    }
+
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
@@ -1039,6 +1050,10 @@ absl::Status NormalEngine::step() try {
         if (propose_params_) {
             step_profiler_.finishStep();
         }
+    }
+
+    if (!streams.empty()) {
+        previous_execution_release_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
     }
 
     // report step metrics

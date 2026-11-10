@@ -313,6 +313,7 @@ void LoadAsyncContext::markAborted() {
         if (error_info_.ok()) {
             error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load context aborted");
         }
+        completion_time_us_.store(autil::TimeUtility::currentTimeInMicroSeconds());
         state_.store(State::FAILED);
     }
     notifyCompletion();
@@ -423,6 +424,7 @@ bool LoadAsyncContext::settle(bool success, bool host_success) {
         if (!completed_successfully && error_info_.ok()) {
             error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load settlement failed");
         }
+        completion_time_us_.store(autil::TimeUtility::currentTimeInMicroSeconds());
         state_.store(completed_successfully ? State::SUCCEEDED : State::FAILED);
     }
     notifyCompletion();
@@ -443,6 +445,7 @@ bool LoadAsyncContext::onTaskFail() {
         if (error_info_.ok()) {
             error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load task failed");
         }
+        completion_time_us_.store(autil::TimeUtility::currentTimeInMicroSeconds());
         state_.store(State::FAILED);
     }
     notifyCompletion();
@@ -468,6 +471,7 @@ void LoadAsyncContext::finishIfReadyLocked(bool& notify, SettlementReadyCallback
     } else if (!has_host_failure_) {
         device_ready_blocks_ = matched_device_host_blocks_;
     }
+    completion_time_us_.store(autil::TimeUtility::currentTimeInMicroSeconds());
     state_.store(local_load_succeeded_ && backend_error_.ok() ? State::SUCCEEDED : State::FAILED);
     notify = true;
 }

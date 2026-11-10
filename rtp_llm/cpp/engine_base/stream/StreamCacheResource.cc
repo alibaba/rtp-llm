@@ -504,9 +504,19 @@ bool StreamCacheResource::loadCacheDone() {
         if (!allocator_load_context_->done()) {
             return false;
         }
-        const ErrorInfo error   = allocator_load_context_->errorInfo();
-        const bool      success = allocator_load_context_->success();
-        const auto      status  = finalizeAllocatorLoad();
+        const ErrorInfo error        = allocator_load_context_->errorInfo();
+        const bool      success      = allocator_load_context_->success();
+        const auto      load_context = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
+        const int64_t   completed_us = load_context ? load_context->completionTimeUs() : 0;
+        if (completed_us > 0) {
+            stream_->endCacheExposedWaitWithoutLock(completed_us);
+        }
+        const auto status = finalizeAllocatorLoad();
+        if (status.ok()) {
+            // Successful pages were ready when the transfer settled, even if the
+            // scheduler only observes them after another batch finishes.
+            stream_->recordKvReadyTime(success && completed_us > 0 ? completed_us : currentTimeUs());
+        }
         if (!success && !absl::IsUnavailable(status)) {
             RTP_LLM_LOG_WARNING(
                 "block tree load failed, stream=%ld error=%s", stream_->streamId(), error.ToString().c_str());
