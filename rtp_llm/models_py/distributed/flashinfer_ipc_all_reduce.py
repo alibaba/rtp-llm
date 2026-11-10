@@ -14,6 +14,8 @@ import logging
 import torch
 import torch.distributed as dist
 
+from rtp_llm.models_py.distributed.collective_utils import exchange_group_state
+
 
 class IpcInitializationError(RuntimeError):
     """All ranks agreed that local IPC setup failed; NCCL is still usable."""
@@ -187,9 +189,12 @@ class FlashInferIpcAllReduce:
             error = str(exc)
         # Even a rank with zero calls or invalid local metadata must exchange
         # its verdict before returning, so peers cannot wait alone.
-        peers = [None] * dist.get_world_size(self.group)
-        dist.all_gather_object(
-            peers, (error, self.capture_calls, handle, offsets), group=self.group
+        # Handles, offsets and verdicts are host metadata. Exchange them on
+        # the existing CPU store instead of copying objects through NCCL/GPU.
+        peers = exchange_group_state(
+            self.group,
+            [error, self.capture_calls, handle, offsets],
+            "ipc_graph_registration",
         )
         if any(p[0] is not None or p[1] != self.capture_calls for p in peers):
             raise RuntimeError("IPC capture metadata differs across TP ranks")

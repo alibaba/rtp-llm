@@ -13,6 +13,7 @@ from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.models_py.distributed import all_reduce
 from rtp_llm.models_py.distributed import collective_torch as collective
+from rtp_llm.models_py.utils import arch
 from rtp_llm.ops import ParallelismConfig
 
 
@@ -85,9 +86,7 @@ class CollectiveInitializationTest(unittest.TestCase):
                 return_value="/tmp/unused",
             )
         )
-        self.stack.enter_context(
-            patch("rtp_llm.models_py.utils.arch.is_cuda", return_value=False)
-        )
+        self.stack.enter_context(patch.object(arch, "is_cuda", return_value=False))
         self.stack.enter_context(
             patch.object(
                 all_reduce,

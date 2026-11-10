@@ -40,32 +40,75 @@ class TpRegisteredInputTest(unittest.TestCase):
                 workspace.group = object()
                 workspace.capture_calls = local_calls
                 workspace.ops.get_graph_buffer_ipc_meta.return_value = (
-                    b"local",
+                    list(range(64)),
                     [] if local_error else [0],
                 )
 
-                def exchange(peers, value, group):
-                    peers[:] = [
+                def exchange(group, value, tag):
+                    return [
                         value,
                         (
                             "peer error" if peer_error else None,
                             peer_calls,
-                            b"peer",
+                            list(range(64)),
                             [0],
                         ),
                     ]
 
                 with (
                     patch("torch.cuda.is_current_stream_capturing", return_value=False),
-                    patch("torch.distributed.get_world_size", return_value=2),
                     patch(
-                        "torch.distributed.all_gather_object", side_effect=exchange
+                        "rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce.exchange_group_state",
+                        side_effect=exchange,
                     ) as gather,
+                    patch(
+                        "torch.distributed.all_gather_object",
+                        side_effect=AssertionError("GPU metadata exchange"),
+                    ),
                 ):
                     with self.assertRaisesRegex(RuntimeError, "across TP ranks"):
                         workspace.finish_graph_capture()
                 gather.assert_called_once()
                 workspace.ops.register_graph_buffers.assert_not_called()
+
+    def test_capture_registration_keeps_zero_and_nonzero_exchange_on_cpu(self):
+        for calls in (0, 2):
+            with self.subTest(calls=calls):
+                workspace = self.workspace(True)
+                workspace.group = object()
+                workspace.capture_calls = calls
+                handle, offsets = list(range(64)), [0, 16]
+                workspace.ops.get_graph_buffer_ipc_meta.return_value = handle, offsets
+                peer = [None, calls, list(reversed(handle)), [4, 20]]
+
+                def exchange(group, state, tag):
+                    return [state, peer]
+
+                with (
+                    patch("torch.cuda.is_current_stream_capturing", return_value=False),
+                    patch(
+                        "rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce.exchange_group_state",
+                        side_effect=exchange,
+                    ) as exchange_state,
+                    patch(
+                        "torch.distributed.all_gather_object",
+                        side_effect=AssertionError("GPU metadata exchange"),
+                    ),
+                    patch(
+                        "torch.cuda.synchronize",
+                        side_effect=AssertionError("device synchronization"),
+                    ),
+                ):
+                    workspace.finish_graph_capture()
+                exchange_state.assert_called_once()
+                self.assertEqual(workspace.capture_calls, 0)
+                if calls:
+                    workspace.ops.register_graph_buffers.assert_called_once_with(
+                        73, [handle, peer[2]], [offsets, peer[3]]
+                    )
+                else:
+                    workspace.ops.get_graph_buffer_ipc_meta.assert_not_called()
+                    workspace.ops.register_graph_buffers.assert_not_called()
 
     def test_large_prefill_requires_opt_in_exact_domain_and_eager_execution(self):
         workspace = self.workspace(False)
