@@ -601,8 +601,13 @@ class _PinnedSharedTable:
         self.weight = self.storage[:weight_bytes].view(weight.dtype).view(weight.shape)
         self.scales = self.storage[weight_bytes:].view(torch.uint8).view(scales.shape)
         self.device = torch.device(device)
-        from cuda.bindings import runtime
+        # cuda.bindings on CUDA; ctypes libamdhip64 shim with identical call
+        # signatures on ROCm (hipHostRegister pins the tmpfs MAP_SHARED pages
+        # once for all ranks - never register the MAP_PRIVATE safetensors mmap
+        # in place: long-term pinning COWs it per process, ~92 GiB per rank).
+        from rtp_llm.models_py.modules.dsv41._engram_hip_uva import host_pin_runtime
 
+        runtime = host_pin_runtime()
         with torch.cuda.device(self.device):
             (result,) = runtime.cudaHostRegister(
                 self.storage.data_ptr(), total_bytes, 3  # Portable | Mapped
@@ -611,16 +616,31 @@ class _PinnedSharedTable:
                 self._lease_finalizer()
                 raise RuntimeError(f"Engram cudaHostRegister failed: {result}")
         self._lookup_events = []
+        self.runtime = runtime
         self._registration_finalizer = weakref.finalize(
             self, self._unregister, runtime, self.storage, self._lookup_events
         )
-        if not self.storage.is_pinned():
+        if torch.version.hip is not None:
+            # Verify the mapping functionally instead of trusting is_pinned()
+            # semantics for HIP-registered shmem: read the first 64 KiB from
+            # the device side and compare against the host bytes.
+            probe = self.cuda_view(self.storage[: 64 * 1024])
+            device_sum = int(probe.to(torch.int64).sum().item())
+            host_sum = int(self.storage[: 64 * 1024].to(torch.int64).sum().item())
+            if device_sum != host_sum:
+                self._registration_finalizer()
+                self._lease_finalizer()
+                raise RuntimeError(
+                    "HIP UVA device read of the Engram shared table did not "
+                    "match host memory"
+                )
+        elif not self.storage.is_pinned():
             self._registration_finalizer()
             self._lease_finalizer()
             raise RuntimeError("CUDA did not recognize the Engram shared pinned pages")
-        self.runtime = runtime
         logger.info(
-            "Engram CUDA-registered %.2f GiB shared pinned host RAM on %s",
+            "Engram %s-registered %.2f GiB shared pinned host RAM on %s",
+            "HIP" if torch.version.hip is not None else "CUDA",
             total_bytes / 1024**3,
             self.device,
         )
@@ -2208,7 +2228,7 @@ class Engram(nn.Module):
                     )
                 pinned = None
                 identity = None
-                if target.type == "cuda" and torch.version.hip is None:
+                if target.type == "cuda":
                     parts = [str(root.resolve()), prefix]
                     for suffix in ("embed.weight", "embed.scale"):
                         path = root / weight_map[prefix + suffix]
@@ -2221,39 +2241,31 @@ class Engram(nn.Module):
                             ]
                         )
                     identity = "|".join(parts)
-                    pinned = _PinnedSharedTable(table, scales, identity, target)
-                    table, scales = pinned.weight, pinned.scales
-                else:
+                    # One physical tmpfs copy (MAP_SHARED) that every rank
+                    # maps and registers - CUDA via cuda.bindings, ROCm via
+                    # the libamdhip64 shim. Registering the MAP_PRIVATE
+                    # safetensors mmap in place instead would COW ~92 GiB of
+                    # private anonymous pages per rank under long-term pins.
+                    try:
+                        pinned = _PinnedSharedTable(table, scales, identity, target)
+                        table, scales = pinned.weight, pinned.scales
+                    except Exception as table_error:  # noqa: BLE001
+                        if (
+                            torch.version.hip is None
+                            or os.getenv("DSV41_ENGRAM_HIP_UVA", "1") != "1"
+                        ):
+                            raise
+                        logger.warning(
+                            "Engram shared pinned table unavailable on ROCm "
+                            "(%s); falling back to the host gather (decode "
+                            "graph capture stays disabled for Engram)",
+                            table_error,
+                        )
+                        pinned = None
+                        identity = None
+                if pinned is None:
                     _prefault_host_tensor(table, prefix + "embed.weight")
                     _prefault_host_tensor(scales, prefix + "embed.scale")
-                    if (
-                        target.type == "cuda"
-                        and torch.version.hip is not None
-                        and os.getenv("DSV41_ENGRAM_HIP_UVA", "1") == "1"
-                    ):
-                        # ROCm UVA: hipHostRegister the safetensors mmap IN
-                        # PLACE (page cache shared across ranks; no tmpfs or
-                        # anonymous copy). The decode gather then runs as a
-                        # device-side Triton kernel reading host pages over
-                        # UVA (graph-capturable) instead of a D2H host gather
-                        # that would break HIP graph capture. Falls back to
-                        # the host gather if registration is unavailable.
-                        try:
-                            from rtp_llm.models_py.modules.dsv41._engram_hip_uva import (
-                                HipRegisteredTable,
-                            )
-
-                            pinned = HipRegisteredTable(
-                                table, scales, prefix, target
-                            )
-                        except Exception as register_error:  # noqa: BLE001
-                            logger.warning(
-                                "Engram HIP UVA registration failed (%s); "
-                                "using host gather (decode graphs disabled "
-                                "for this table)",
-                                register_error,
-                            )
-                            pinned = None
                 embedding = HostEngramEmbedding(
                     table,
                     scales,
