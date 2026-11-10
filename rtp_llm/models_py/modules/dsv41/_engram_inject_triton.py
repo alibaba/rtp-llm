@@ -43,7 +43,9 @@ def engram_inject_kernel(
     rstd *= tl.rsqrt(tl.sum(key * key, 0) / DIM + EPS)
     dot = tl.sum(hidden * q * k * key, 0) * rstd * (DIM**-0.5)
     gate_input = tl.sqrt(tl.maximum(tl.abs(dot), 1.0e-6))
-    gate_input = tl.extra.cuda.libdevice.copysign(gate_input, dot)
+    # Portable copysign: gate_input is non-negative here, so select the sign
+    # with a predicate instead of the CUDA-only libdevice symbol.
+    gate_input = tl.where(dot < 0, -gate_input, gate_input)
     gate = tl.sigmoid(gate_input)
     if HAS_MASK:
         gate = tl.where(tl.load(Mask + token), gate, 0)
