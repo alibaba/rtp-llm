@@ -12,6 +12,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_STATE_TAG,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
+    _MAX_SCORE_WORKSPACE_BYTES,
     apply_partial_rope,
     build_qsa_rope,
     build_qsa_rope_from_logical_positions,
@@ -658,6 +659,9 @@ def _incremental_prefill_selection(
         qsa_paged_indexer_score,
     )
 
+    if not draft:
+        return _select_prefix_prefill_chunks(rotated_q, score_weights, plan)
+
     # The draft has at most one compression group's worth of rows per
     # request. Pad only that short dimension so all requests share one
     # paged-score launch and one top-k selection. Invalid rows have zero
@@ -698,3 +702,60 @@ def _incremental_prefill_selection(
     return selected.index_select(
         0, torch.tensor(valid_rows, dtype=torch.int64, device=q.device)
     )
+
+
+def _select_prefix_prefill_chunks(q, weights, plan):
+    """Bound score storage without padding the batch to its longest request."""
+    from rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score import (
+        qsa_paged_indexer_score,
+    )
+
+    columns = int(plan.max_ctx_len)
+    chunk_rows = max(1, _MAX_SCORE_WORKSPACE_BYTES // max(1, columns * 4))
+    # Preserve the MMA producer used by a long batch even for a short tail.
+    minimum_rows = min(16, chunk_rows) if max(plan.lengths) >= 16 else 1
+    output = torch.empty(
+        (q.shape[0], int(plan.token_budget) + int(plan.ratio) - 1),
+        dtype=torch.int32,
+        device=q.device,
+    )
+    offset = 0
+    for request, length in enumerate(plan.lengths):
+        table = plan.kv_table[request : request + 1]
+        for start in range(0, length, chunk_rows):
+            end = min(start + chunk_rows, length)
+            rows = end - start
+            queries = q[offset + start : offset + end]
+            row_weights = weights[offset + start : offset + end]
+            contexts = plan.compressed_lengths[request : request + 1, start:end]
+            if rows < minimum_rows:
+                padding = minimum_rows - rows
+                queries = torch.cat((queries, queries[-1:].expand(padding, -1, -1)))
+                row_weights = torch.cat(
+                    (row_weights, row_weights[-1:].expand(padding, -1))
+                )
+                contexts = torch.cat(
+                    (contexts, contexts.new_zeros((1, padding))), dim=1
+                )
+            logits = qsa_paged_indexer_score(
+                queries.unsqueeze(0),
+                row_weights,
+                plan.kv_pool.flatten(0, 1),
+                table,
+                contexts.contiguous(),
+                block_size=int(plan.kv_entries_per_block),
+                max_ctx_len=columns,
+                validate_block_table=False,
+            )
+            selected = select_qsa_paged_tokens(
+                logits[:rows],
+                plan.visible_lengths[request, start:end].to(torch.int32),
+                compress_ratio=int(plan.ratio),
+                token_budget=int(plan.token_budget),
+                validate_lengths=False,
+                scores_are_masked=True,
+            )
+            output[offset + start : offset + end].copy_(selected)
+            del logits, selected
+        offset += length
+    return output

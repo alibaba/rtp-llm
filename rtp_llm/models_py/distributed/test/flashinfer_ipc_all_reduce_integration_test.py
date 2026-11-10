@@ -214,6 +214,50 @@ def _worker(rank, store):
     dist.destroy_process_group()
 
 
+def _expandable_worker(rank, store):
+    from rtp_llm.config.collective_config import CollectiveConfig
+    from rtp_llm.config.server_config_setup import set_parallelism_config
+    from rtp_llm.models_py.distributed import all_reduce as all_reduce_module
+    from rtp_llm.ops import ParallelismConfig
+
+    torch.cuda.set_device(rank)
+    torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+    assert torch.cuda.memory._snapshot()["allocator_settings"]["expandable_segments"]
+    device = torch.device("cuda", rank)
+    dist.init_process_group(
+        "nccl",
+        init_method="file://" + store,
+        rank=rank,
+        world_size=2,
+        timeout=datetime.timedelta(seconds=90),
+    )
+    pc = ParallelismConfig()
+    pc.tp_size = pc.ep_size = pc.world_size = pc.local_world_size = 2
+    pc.world_rank = rank
+    set_parallelism_config(pc)
+    for backend in ("auto", "sm120_ipc"):
+        communicator = all_reduce_module.init_all_reduce(
+            dist.group.WORLD, device, pc, CollectiveConfig(backend)
+        )
+        assert communicator is None
+        value = torch.full((4, 2560), rank + 1, dtype=torch.bfloat16, device=device)
+        dist.all_reduce(value)
+        torch.testing.assert_close(value, torch.full_like(value, 3), rtol=0, atol=0)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        all_reduce_module.begin_graph_capture()
+        with torch.cuda.graph(graph):
+            dist.all_reduce(value)
+        all_reduce_module.end_graph_capture()
+        value.fill_(rank + 2)
+        graph.replay()
+        torch.testing.assert_close(value, torch.full_like(value, 5), rtol=0, atol=0)
+        # Release NCCL's captured communicator before destroying its process group.
+        graph.reset()
+        all_reduce_module.destroy_all_reduce()
+    dist.destroy_process_group()
+
+
 class FlashInferIpcAllReduceIntegrationTest(unittest.TestCase):
     @unittest.skipUnless(
         torch.cuda.device_count() == 2 and torch.version.hip is None,
@@ -223,6 +267,19 @@ class FlashInferIpcAllReduceIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             mp.spawn(
                 _worker, args=(str(Path(directory) / "store"),), nprocs=2, join=True
+            )
+
+    @unittest.skipUnless(
+        torch.cuda.device_count() == 2 and torch.version.hip is None,
+        "requires two CUDA GPUs",
+    )
+    def test_expandable_allocator_uses_nccl_before_graph_capture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            mp.spawn(
+                _expandable_worker,
+                args=(str(Path(directory) / "store"),),
+                nprocs=2,
+                join=True,
             )
 
 

@@ -77,14 +77,16 @@ def select_qsa_paged_tokens(
     )
     selected_block_count = min(block_topk, int(block_logits.shape[1]))
     if selected_block_count:
-        block_ids = torch.arange(
-            int(block_logits.shape[1]), device=block_logits.device
-        ).unsqueeze(0)
-        masked_logits = torch.where(
-            block_ids < complete_blocks.unsqueeze(1),
-            block_logits,
-            torch.full_like(block_logits, float("-inf")),
-        )
+        masked_logits = block_logits
+        if not scores_are_masked:
+            block_ids = torch.arange(
+                int(block_logits.shape[1]), device=block_logits.device
+            ).unsqueeze(0)
+            masked_logits = torch.where(
+                block_ids < complete_blocks.unsqueeze(1),
+                block_logits,
+                torch.full_like(block_logits, float("-inf")),
+            )
         values, blocks = torch.topk(masked_logits, selected_block_count, dim=-1)
         valid = torch.isfinite(values)
         block_tokens = blocks.unsqueeze(-1) * compress_ratio + torch.arange(

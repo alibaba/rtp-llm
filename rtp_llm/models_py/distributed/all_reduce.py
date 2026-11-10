@@ -181,6 +181,11 @@ def _capability_error(device, options):
         ):
             return "direct peer access unavailable"
         if options.all_reduce_backend == "sm120_ipc":
+            # Read the effective allocator state, including runtime settings.
+            # Legacy CUDA IPC cannot export expandable (VMM) graph segments.
+            settings = torch.cuda.memory._snapshot()["allocator_settings"]
+            if settings["expandable_segments"]:
+                return "IPC graph registration does not support expandable_segments"
             from flashinfer.comm import cuda_ipc, vllm_ar
 
             if not hasattr(cuda_ipc, "cudart") or not hasattr(

@@ -194,9 +194,8 @@ def qsa_paged_indexer_score(
     max_blocks = block_table.shape[1]
     if max_ctx_len is None:
         max_ctx_len = int(context_lens.max())
-    logits = torch.empty((M, max_ctx_len), device=q_bf16.device, dtype=torch.float32)
     if M == 0 or max_ctx_len == 0:
-        return logits
+        return torch.empty((M, max_ctx_len), device=q_bf16.device, dtype=torch.float32)
     if (
         next_n >= 16
         and H == 4
@@ -219,6 +218,7 @@ def qsa_paged_indexer_score(
             max_ctx_len=max_ctx_len,
         )
 
+    logits = torch.empty((M, max_ctx_len), device=q_bf16.device, dtype=torch.float32)
     # The flattened (batch, token) rows are contiguous, each with H * D values.
     grid = (M, triton.cdiv(max_ctx_len, block_n))
     _qsa_paged_score_kernel[grid](

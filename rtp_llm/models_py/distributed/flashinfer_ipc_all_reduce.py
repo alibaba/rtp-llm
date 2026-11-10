@@ -91,27 +91,60 @@ class FlashInferIpcAllReduce:
             error = exc
         dist.all_gather_object(peers, error is None, group=group)
         if not all(peers):
-            self._release_local()
+            self._release_shared()
             raise IpcInitializationError(
                 "IPC registration failed on a TP rank"
             ) from error
 
-    def _release_local(self):
-        # Cleanup never contains a collective: partial construction is allowed.
-        actions = []
+    def _close_local(self):
+        closed = True
         if self.handle:
-            actions.append((self.ops.dispose, self.handle))
-            self.handle = 0
-        actions.extend((self._close_mapping, p) for p in self._opened)
-        actions.extend((self.ipc.cudart.cudaFree, p) for p in self._allocated)
-        self._opened = []
-        self._allocated = []
-        for function, pointer in actions:
             try:
-                function(pointer)
+                self.ops.dispose(self.handle)
+                self.handle = 0
             except Exception:
-                logging.exception("Failed to release local IPC allocation")
-        self.rank_data = None
+                closed = False
+                logging.exception("Failed to dispose IPC workspace")
+        pending = []
+        for pointer in self._opened:
+            try:
+                self._close_mapping(pointer)
+            except Exception:
+                closed = False
+                pending.append(pointer)
+                logging.exception("Failed to close IPC mapping")
+        self._opened = pending
+        if not self.handle:
+            self.rank_data = None
+        return closed
+
+    def _free_local(self):
+        pending = []
+        for pointer in self._allocated:
+            try:
+                self.ipc.cudart.cudaFree(pointer)
+            except Exception:
+                pending.append(pointer)
+                logging.exception("Failed to free IPC allocation")
+        self._allocated = pending
+
+    def _release_local(self):
+        # Before handles are exchanged, no peer can have imported this memory.
+        if self._close_local():
+            self._free_local()
+
+    def _release_shared(self):
+        # CUDA requires every importer to close before the exporter frees.
+        # A barrier around the whole cleanup does not order these two phases.
+        closed = self._close_local()
+        peers = exchange_group_state(self.group, closed, "ipc_close_mappings")
+        if all(peers):
+            self._free_local()
+        else:
+            # Keep raw exports alive until process exit if any close failed.
+            logging.error(
+                "Retaining IPC allocations: a TP rank could not close mappings"
+            )
 
     def _close_mapping(self, pointer):
         self.ipc.cudart.CUDART_CHECK(self._close_ipc(pointer))
@@ -209,5 +242,5 @@ class FlashInferIpcAllReduce:
         if self.handle:
             torch.cuda.synchronize(self.device)
             dist.barrier(group=self.group)
-            self._release_local()
+            self._release_shared()
             dist.barrier(group=self.group)

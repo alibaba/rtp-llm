@@ -1,3 +1,4 @@
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -76,6 +77,125 @@ class AllReduceUnitTest(unittest.TestCase):
         ):
             self.assertIs(self.init(), factory.return_value)
             self.assertEqual(factory.call_args.args[2].all_reduce_backend, "sm120_ipc")
+
+    def test_expandable_allocator_falls_back_before_ipc_allocation(self):
+        for backend in ("auto", "sm120_ipc"):
+            with self.subTest(backend=backend):
+                all_reduce_module.destroy_all_reduce()
+                with (
+                    patch.object(torch.cuda, "is_available", return_value=True),
+                    patch.object(
+                        torch.cuda, "get_device_capability", return_value=(12, 0)
+                    ),
+                    patch.object(torch.cuda, "device_count", return_value=2),
+                    patch.object(
+                        torch.cuda, "can_device_access_peer", return_value=True
+                    ),
+                    patch.object(
+                        torch.cuda.memory,
+                        "_snapshot",
+                        return_value={
+                            "allocator_settings": {"expandable_segments": True}
+                        },
+                    ),
+                    patch.object(all_reduce_module, "IpcAllReduce") as factory,
+                ):
+                    self.assertIsNone(self.init(CollectiveConfig(backend)))
+                factory.assert_not_called()
+
+    def test_peer_expandable_allocator_keeps_all_ranks_on_nccl(self):
+        def peer_failed(group, value, tag):
+            if tag == "capabilities":
+                return [value, [value[0], value[1], "expandable_segments"]]
+            return self.agree(group, value, tag)
+
+        with (
+            patch.object(
+                all_reduce_module, "exchange_group_state", side_effect=peer_failed
+            ),
+            patch.object(all_reduce_module, "_capability_error", return_value=None),
+            patch.object(all_reduce_module, "IpcAllReduce") as factory,
+        ):
+            self.assertIsNone(self.init())
+        factory.assert_not_called()
+
+    def test_ipc_cleanup_waits_for_every_importer_and_retains_failed_closes(self):
+        for fail_close in (False, True):
+            with self.subTest(fail_close=fail_close):
+                closed = set()
+                freed = set()
+                errors = []
+                rank_zero_closed = threading.Event()
+                barrier = threading.Barrier(2, timeout=10)
+                verdicts = [False, False]
+                workspaces = []
+                for rank in range(2):
+                    workspace = FlashInferIpcAllReduce.__new__(FlashInferIpcAllReduce)
+                    workspace.group = rank
+                    workspace.device = self.device
+                    workspace.handle = rank + 1
+                    workspace.rank_data = object()
+                    workspace._opened = [1 - rank]
+                    workspace._allocated = [rank]
+                    workspace.ops = MagicMock()
+
+                    def close(pointer, rank=rank):
+                        if rank == 1:
+                            self.assertTrue(rank_zero_closed.wait(5))
+                        if rank == 1 and fail_close:
+                            raise RuntimeError("injected close failure")
+                        closed.add(rank)
+                        if rank == 0:
+                            rank_zero_closed.set()
+
+                    def free(pointer):
+                        self.assertEqual(closed, {0, 1})
+                        freed.add(pointer)
+
+                    workspace._close_mapping = close
+                    workspace.ipc = SimpleNamespace(
+                        cudart=SimpleNamespace(cudaFree=free)
+                    )
+                    workspaces.append(workspace)
+
+                def agree_closed(group, value, tag):
+                    self.assertEqual(tag, "ipc_close_mappings")
+                    verdicts[group] = value
+                    barrier.wait()
+                    return list(verdicts)
+
+                def destroy(workspace):
+                    try:
+                        workspace.destroy()
+                    except BaseException as error:
+                        errors.append(error)
+
+                with (
+                    patch.object(torch.cuda, "synchronize"),
+                    patch.object(
+                        all_reduce_module.dist,
+                        "barrier",
+                        side_effect=lambda **_: barrier.wait(),
+                    ),
+                    patch(
+                        "rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce.exchange_group_state",
+                        side_effect=agree_closed,
+                    ),
+                ):
+                    threads = [
+                        threading.Thread(target=destroy, args=(w,)) for w in workspaces
+                    ]
+                    for thread in threads:
+                        thread.start()
+                    for thread in threads:
+                        thread.join(15)
+                    self.assertFalse(any(thread.is_alive() for thread in threads))
+                self.assertEqual(errors, [])
+                self.assertEqual(freed, set() if fail_close else {0, 1})
+                self.assertEqual(
+                    [len(w._allocated) for w in workspaces],
+                    [1, 1] if fail_close else [0, 0],
+                )
 
     def test_explicit_nccl_never_probes_or_allocates(self):
         with (

@@ -1,3 +1,4 @@
+import math
 from unittest import TestCase, main, skipUnless
 from unittest.mock import patch
 
@@ -668,6 +669,136 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
         )
 
     @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
+    def test_prefix_prefill_score_chunks_preserve_selection_and_bound_storage(self):
+        from types import SimpleNamespace
+
+        from rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score import (
+            qsa_paged_indexer_score,
+        )
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime import qsa_prefill
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
+            select_qsa_paged_tokens,
+        )
+
+        torch.manual_seed(73)
+        device = torch.device("cuda")
+        lengths = [257, 3]
+        prefixes = [3840, 256]
+        rows = max(lengths)
+        visible = (
+            torch.tensor(prefixes, device=device)[:, None]
+            + torch.arange(rows, device=device)
+            + 1
+        )
+        valid = (
+            torch.arange(rows, device=device)[None, :]
+            < torch.tensor(lengths, device=device)[:, None]
+        )
+        visible = torch.where(valid, visible, 0).to(torch.int32)
+        columns = max((p + n) // 4 for p, n in zip(prefixes, lengths))
+        block_size = 32
+        table_width = (columns + block_size - 1) // block_size
+        table = torch.arange(
+            1, 2 * table_width + 1, device=device, dtype=torch.int32
+        ).view(2, table_width)
+        pool = torch.randn(
+            2 * table_width + 1, block_size, 128, device=device, dtype=torch.bfloat16
+        )
+        q = torch.randn(sum(lengths), 4, 128, device=device, dtype=torch.bfloat16)
+        weights = torch.full((sum(lengths), 4), 1 / math.sqrt(128), device=device)
+        row_map = torch.cat(
+            (
+                torch.arange(rows, device=device),
+                torch.arange(rows, device=device).clamp_max(2) + lengths[0],
+            )
+        )
+        for token_budget in (8, 2048):
+            for zero_scores in (False, True):
+                with self.subTest(token_budget=token_budget, zero_scores=zero_scores):
+                    row_weights = torch.zeros_like(weights) if zero_scores else weights
+                    logits = qsa_paged_indexer_score(
+                        q[row_map].view(2, rows, 4, 128),
+                        row_weights[row_map],
+                        pool.flatten(0, 1),
+                        table,
+                        visible // 4,
+                        block_size=block_size,
+                        max_ctx_len=columns,
+                    )
+                    expected = select_qsa_paged_tokens(
+                        logits,
+                        visible.flatten(),
+                        compress_ratio=4,
+                        token_budget=token_budget,
+                    )
+                    expected = torch.cat(
+                        (expected[: lengths[0]], expected[rows : rows + lengths[1]])
+                    )
+                    plan = SimpleNamespace(
+                        lengths=lengths,
+                        max_ctx_len=columns,
+                        ratio=4,
+                        token_budget=token_budget,
+                        kv_pool=pool,
+                        kv_table=table,
+                        compressed_lengths=visible // 4,
+                        visible_lengths=visible,
+                        kv_entries_per_block=block_size,
+                    )
+                    budget = 16 * columns * 4
+                    calls = []
+
+                    def score(*args, **kwargs):
+                        queries = args[0]
+                        calls.append(tuple(queries.shape))
+                        self.assertEqual(queries.shape[0], 1)
+                        self.assertLessEqual(
+                            queries.shape[0] * queries.shape[1] * columns * 4, budget
+                        )
+                        return qsa_paged_indexer_score(*args, **kwargs)
+
+                    with (
+                        patch.object(qsa_prefill, "_MAX_SCORE_WORKSPACE_BYTES", budget),
+                        patch(
+                            "rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score.qsa_paged_indexer_score",
+                            side_effect=score,
+                        ),
+                    ):
+                        actual = qsa_prefill._select_prefix_prefill_chunks(
+                            q, row_weights, plan
+                        )
+                    self.assertGreater(len(calls), 2)
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
+    def test_long_prefix_score_keeps_one_mma_output_allocation(self):
+        from rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score import (
+            qsa_paged_indexer_score,
+        )
+
+        device = torch.device("cuda")
+        columns = 65536
+        q = torch.ones(1, 32, 4, 128, device=device, dtype=torch.bfloat16)
+        weights = torch.ones(32, 4, device=device)
+        pool = torch.ones(2 * 32, 128, device=device, dtype=torch.bfloat16)
+        table = torch.ones(1, columns // 32, device=device, dtype=torch.int32)
+        contexts = torch.full((1, 32), columns, device=device, dtype=torch.int32)
+        qsa_paged_indexer_score(
+            q, weights, pool, table, contexts, block_size=32, max_ctx_len=columns
+        )
+        with patch("torch.empty", wraps=torch.empty) as allocate:
+            logits = qsa_paged_indexer_score(
+                q, weights, pool, table, contexts, block_size=32, max_ctx_len=columns
+            )
+        allocations = [
+            call
+            for call in allocate.call_args_list
+            if call.args and call.args[0] == (32, columns)
+        ]
+        self.assertEqual(len(allocations), 1)
+        torch.testing.assert_close(logits, torch.full_like(logits, 512), rtol=0, atol=0)
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
     def test_target_prefix_reuse_accepts_mixed_cold_and_hot_rows(self):
         device = torch.device("cuda")
         indexer = self._decode_indexer()
@@ -698,8 +829,11 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
             validate_block_table,
         ):
             self.assertFalse(validate_block_table)
-            return torch.zeros(
-                q.shape[0] * q.shape[1], max_ctx_len, dtype=torch.float32, device=device
+            return torch.where(
+                torch.arange(max_ctx_len, device=device)[None, :]
+                < lengths.reshape(-1, 1),
+                0.0,
+                -float("inf"),
             )
 
         with patch(
@@ -753,8 +887,11 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
         with patch(
             "rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
-            side_effect=lambda q, weight, pool, table, lengths, **kwargs: torch.zeros(
-                q.shape[1], kwargs["max_ctx_len"], dtype=torch.float32, device=device
+            side_effect=lambda q, weight, pool, table, lengths, **kwargs: torch.where(
+                torch.arange(kwargs["max_ctx_len"], device=device)[None, :]
+                < lengths.reshape(-1, 1),
+                0.0,
+                -float("inf"),
             ),
         ):
             selected = context.select_draft_prefix_reuse_prefill_tokens(
