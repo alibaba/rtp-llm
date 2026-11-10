@@ -186,7 +186,7 @@ class FrontendWorker:
             if generate_response.generate_texts:
                 text = generate_response.generate_texts[0] or text
         if not text and output_ids:
-            text = self.pipeline.decode(output_ids)
+            text = self.pipeline.tokenizer.decode(output_ids)
         return {
             "output_ids": output_ids,
             "output_tokens": len(output_ids),
