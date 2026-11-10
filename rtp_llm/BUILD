@@ -128,6 +128,7 @@ requirement([
     "openai",
     "oss2",
     "pyOpenSSL",
+    "cryptography",
     "requests",
     "nest_asyncio",
     "blobfile",

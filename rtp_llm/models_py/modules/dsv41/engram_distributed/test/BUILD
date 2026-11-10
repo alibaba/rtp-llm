@@ -57,6 +57,16 @@ py_test(
 )
 
 py_test(
+    name = "test_resident_network",
+    size = "small",
+    srcs = ["test_resident_network.py", "test_startup.py"],
+    deps = [_ENGRAM + ":core"],
+    env = _CPU_ENV,
+    tags = ["engram_distributed_cpu"],
+    legacy_create_init = 0,
+)
+
+py_test(
     name = "test_checkpoint_runtime",
     size = "small",
     srcs = ["test_checkpoint_runtime.py", "test_layout.py"],

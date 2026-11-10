@@ -5,7 +5,10 @@ package(default_visibility = ["//visibility:public"])
 py_library(
     name = "core",
     srcs = glob(["*.py"]),
-    deps = ["//rtp_llm:numa"],
+    deps = [
+        "//rtp_llm:cryptography",
+        "//rtp_llm:numa",
+    ],
 )
 
 py_library(
