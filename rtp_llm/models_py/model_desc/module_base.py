@@ -104,6 +104,18 @@ class GptModelBase(nn.Module):
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
         if self.kv_cache is not None:
+            if __import__("os").environ.get("DSV41_DEBUG_MEM") == "1":
+                _total = 0
+                for _lid in range(self.kv_cache.layer_count):
+                    for _c in self.kv_cache.get_layer_cache_groups(_lid):
+                        _total += _c.kv_cache_base.numel() * _c.kv_cache_base.element_size()
+                        if getattr(_c, "kv_scale_base", None) is not None:
+                            _total += _c.kv_scale_base.numel() * _c.kv_scale_base.element_size()
+                print(
+                    f"[mem] kv_cache bytes={_total / 2**30:.2f} GiB "
+                    f"layers={self.kv_cache.layer_count}",
+                    flush=True,
+                )
             num_layers = self.kv_cache.layer_count
             layer0_caches = (
                 self.kv_cache.get_layer_cache_groups(0) if num_layers > 0 else []
