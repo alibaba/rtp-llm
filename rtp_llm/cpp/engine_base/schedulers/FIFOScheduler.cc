@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
+#include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -772,6 +773,31 @@ void FIFOScheduler::updateCacheExposedWait() {
                 && std::any_of(loading_cache_group_queue_.front().begin(),
                                loading_cache_group_queue_.front().end(),
                                [](const auto& stream) { return stream->getStatus() == StreamState::LOADING_CACHE; })));
+    if (telemetry::TelemetryRuntime::isActive()) {
+        const auto observation_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        // When ordinary or group waiters also remain, an empty batch has more
+        // than one possible blocker; do not attribute that interval to cache.
+        const bool cache_only_stall =
+            waiting_for_cache && waiting_streams_.empty() && waiting_group_queue_.empty() && !need_fill_fake_stream_;
+        const auto observe_stream = [cache_only_stall, observation_time_us](const GenerateStreamPtr& stream) {
+            if (!stream->isContextStream() || stream->getStatus() != StreamState::LOADING_CACHE) {
+                return;
+            }
+            if (cache_only_stall) {
+                stream->startCacheExposedWait(observation_time_us);
+            } else {
+                stream->endCacheExposedWait(observation_time_us);
+            }
+        };
+        for (const auto& stream : loading_cache_streams_) {
+            observe_stream(stream);
+        }
+        if (!loading_cache_group_queue_.empty()) {
+            for (const auto& stream : loading_cache_group_queue_.front()) {
+                observe_stream(stream);
+            }
+        }
+    }
     if (waiting_for_cache) {
         if (!cache_exposed_wait_start_) {
             cache_exposed_wait_start_ = std::chrono::steady_clock::now();

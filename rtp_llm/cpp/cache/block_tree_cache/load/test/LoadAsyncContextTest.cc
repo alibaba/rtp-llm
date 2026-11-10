@@ -301,8 +301,10 @@ TEST(LoadAsyncContextTest, OnDoneRunsOnceWhenCommittedTransferCompletes) {
 
     ASSERT_TRUE(context->commit());
     EXPECT_FALSE(context->done());
+    EXPECT_EQ(context->completionTimeUs(), 0);
     EXPECT_TRUE(context->completeTransfers(1, true));
     EXPECT_TRUE(context->done());
+    EXPECT_GT(context->completionTimeUs(), 0);
     EXPECT_EQ(callback_count, 1u);
     EXPECT_EQ(commits, 1u);
     EXPECT_EQ(aborts, 0u);

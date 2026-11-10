@@ -1,4 +1,5 @@
 #include "c10/util/intrusive_ptr.h"
+#include "autil/TimeUtility.h"
 #include "torch/all.h"
 #include <algorithm>
 #include <cstdlib>
@@ -15,6 +16,9 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
+#include "rtp_llm/cpp/telemetry/PhaseSpanSynthesizer.h"
+#include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
+#include "opentelemetry/exporters/memory/in_memory_span_exporter_factory.h"
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
 #include "gtest/gtest.h"
@@ -328,14 +332,14 @@ TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
 
 TEST_F(NormalEngineTest, testCacheManagerInitFailureDoesNotPublishPartialState) {
     ModelConfig model;
-    model.num_layers                   = 1;
-    model.attn_config.head_num         = 1;
-    model.attn_config.kv_head_num      = 1;
-    model.attn_config.size_per_head    = 1;
+    model.num_layers                          = 1;
+    model.attn_config.head_num                = 1;
+    model.attn_config.kv_head_num             = 1;
+    model.attn_config.size_per_head           = 1;
     model.attn_config.tokens_per_block        = 1;
     model.attn_config.kernel_tokens_per_block = 1;
-    model.kv_cache_spec_descs          = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
-    const auto config                  = CacheConfigCreator::createWarmupConfig(model, {});
+    model.kv_cache_spec_descs                 = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
+    const auto config                         = CacheConfigCreator::createWarmupConfig(model, {});
 
     auto            previous  = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
     auto            candidate = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
@@ -535,6 +539,96 @@ TEST_F(NormalEngineTest, testPrefillOnlyReturnsOneEmptyOutput) {
     EXPECT_EQ(stream->seqLength(), input_length);
     EXPECT_EQ(stream->outputTokenLen(), 0);
     EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+}
+
+TEST_F(NormalEngineTest, testPrefillTimelineFromActualForward) {
+    namespace memory_exporter = opentelemetry::exporter::memory;
+    telemetry::TelemetryRuntime::shutdown(5000);
+    std::shared_ptr<memory_exporter::InMemorySpanData> span_data;
+    auto                       exporter = memory_exporter::InMemorySpanExporterFactory::Create(span_data);
+    telemetry::TelemetryConfig trace_config;
+    trace_config.enabled = true;
+    trace_config.role    = "prefill";
+    ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), trace_config));
+
+    GenerateStream::TimeInfo times;
+    bool                     request_ok = false;
+    {
+        CustomConfig config;
+        config.role_type                       = RoleType::PREFILL;
+        auto engine                            = createMockEngine(config);
+        auto query                             = std::make_shared<GenerateInput>();
+        query->begin_time_us                   = autil::TimeUtility::currentTimeInMicroSeconds();
+        query->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+        query->generate_config                 = std::make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 0;
+        auto stream                            = engine->enqueue(query);
+        auto output                            = stream->nextOutput();
+        request_ok =
+            output.ok() && output.value().generate_outputs.size() == 1 && output.value().generate_outputs[0].finished;
+        const auto first_times = stream->getTimeInfo();
+        ASSERT_EQ(first_times.prefill_previous_release_us, 0);
+        stream->recordPrefillPreviousReleaseTime(first_times.prefill_forward_time_us + 1);
+        times = stream->getTimeInfo();
+        EXPECT_EQ(times.prefill_previous_release_us, 0);
+    }
+
+    EXPECT_TRUE(request_ok);
+    EXPECT_GT(times.begin_time_us, 0);
+    EXPECT_TRUE(times.running_started);
+    EXPECT_GE(times.scheduler_enqueue_time_us, times.begin_time_us);
+    EXPECT_LE(times.scheduler_enqueue_time_us, times.can_run_time_us);
+    EXPECT_LE(times.can_run_time_us, times.kv_ready_time_us);
+    EXPECT_LE(times.kv_ready_time_us, times.prefill_dispatch_time_us);
+    EXPECT_LE(times.prefill_dispatch_time_us, times.prefill_forward_time_us);
+    EXPECT_GT(times.prefill_forward_time_us, 0);
+    EXPECT_LE(times.prefill_previous_release_us, times.prefill_dispatch_time_us);
+
+    auto                   parent = telemetry::TelemetryRuntime::tracer()->StartSpan("prefill_actual_forward");
+    telemetry::PhaseTiming timing;
+    timing.begin_time_us               = times.begin_time_us;
+    timing.running_started             = times.running_started;
+    timing.running_started_time_us     = times.running_started_time_us;
+    timing.generation_done             = times.generation_done;
+    timing.generation_done_time_us     = times.generation_done_time_us;
+    timing.synthesis_end_time_us       = autil::TimeUtility::currentTimeInMicroSeconds();
+    timing.scheduler_enqueue_time_us   = times.scheduler_enqueue_time_us;
+    timing.can_run_time_us             = times.can_run_time_us;
+    timing.kv_ready_time_us            = times.kv_ready_time_us;
+    timing.prefill_previous_release_us = times.prefill_previous_release_us;
+    timing.prefill_dispatch_time_us    = times.prefill_dispatch_time_us;
+    timing.prefill_forward_time_us     = times.prefill_forward_time_us;
+    EXPECT_LE(times.prefill_forward_time_us, timing.synthesis_end_time_us);
+    EXPECT_TRUE(telemetry::TelemetryRuntime::isActive());
+    telemetry::synthesizePhaseSpans(parent, timing, telemetry::PhaseRole::Prefill, request_ok);
+    parent->End();
+    EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
+
+    const auto                                 spans           = span_data->GetSpans();
+    const opentelemetry::sdk::trace::SpanData* exported_parent = nullptr;
+    for (const auto& span : spans) {
+        if (span->GetName() == "prefill_actual_forward") {
+            exported_parent = span.get();
+        }
+    }
+    ASSERT_NE(exported_parent, nullptr);
+    const auto& attrs = exported_parent->GetAttributes();
+    const auto  value = [&](const char* key) {
+        auto it = attrs.find(key);
+        return it == attrs.end() ? int64_t{-1} : opentelemetry::nostd::get<int64_t>(it->second);
+    };
+    const int64_t admission = value(telemetry::kAttrRtpLlmPrefillAdmissionQueueWaitUs);
+    const int64_t acquire   = value(telemetry::kAttrRtpLlmPrefillKvCacheAcquireWallUs);
+    const int64_t early     = value(telemetry::kAttrRtpLlmPrefillEarlyBatchPrepareWallUs);
+    const int64_t previous  = value(telemetry::kAttrRtpLlmPrefillPreviousBatchWaitUs);
+    const int64_t final     = value(telemetry::kAttrRtpLlmPrefillFinalPrepareWallUs);
+    EXPECT_GE(admission, 0);
+    EXPECT_GE(acquire, 0);
+    EXPECT_EQ(early, 0);
+    EXPECT_GE(previous, 0);
+    EXPECT_GE(final, 0);
+    EXPECT_EQ(admission + acquire + early + previous + final,
+              times.prefill_forward_time_us - times.scheduler_enqueue_time_us);
 }
 
 TEST_F(NormalEngineTest, testDecodeRoleRejectsPrefillOnlyBeforeScheduling) {

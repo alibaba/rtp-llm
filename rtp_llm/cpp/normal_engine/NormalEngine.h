@@ -82,6 +82,7 @@ private:
     bool isDSpark() override;
 
 private:
+    int64_t                                       previous_execution_release_us_ = 0;
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
     bool                                          cpu_tp_shutdown_ = false;
@@ -102,8 +103,8 @@ private:
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
     StepWindowProfiler                            step_profiler_;
     // Engine-loop counter; advances even when profiling is disabled and never resets between captures.
-    int64_t                                       execute_step_ = 0;
-    int                                           reserve_step_ = 0;
+    int64_t execute_step_ = 0;
+    int     reserve_step_ = 0;
 };
 
 }  // namespace rtp_llm

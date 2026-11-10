@@ -114,9 +114,12 @@ public:
     void                  onDone(DoneCallback callback) override;
     bool                  done() const override;
     bool                  success() const override;
-    ErrorInfo             errorInfo() const override;
-    void                  deferRelease(std::shared_ptr<BatchKVCacheResource> resource);
-    MallocStatus          mallocStatus() const;
+    int64_t               completionTimeUs() const {
+        return completion_time_us_.load();
+    }
+    ErrorInfo    errorInfo() const override;
+    void         deferRelease(std::shared_ptr<BatchKVCacheResource> resource);
+    MallocStatus mallocStatus() const;
 
 private:
     void markAborted();
@@ -159,6 +162,7 @@ private:
     std::mutex backend_match_mutex_;
 
     std::atomic<State>                                    state_{State::PENDING};
+    std::atomic<int64_t>                                  completion_time_us_{0};
     std::atomic<MallocStatus>                             malloc_status_{MallocStatus::NONE};
     mutable std::mutex                                    mutex_;
     std::condition_variable                               cv_;

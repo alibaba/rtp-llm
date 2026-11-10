@@ -232,6 +232,22 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
+TEST_F(GenerateStreamTest, CacheExposedWaitIncludesRetriedLoadWindow) {
+    GenerateStreamBuilder builder;
+    auto                  stream = builder.createContextStream({1, 2, 3});
+    stream->recordLoadingCacheStartTime();
+    const auto first_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    stream->startCacheExposedWait(first_start_us);
+    stream->endCacheExposedWait(first_start_us + 100);
+    stream->recordLoadingCacheDoneTime();
+    EXPECT_EQ(stream->getTimeInfo().cache_exposed_wait_us, 100);
+
+    // A retry enters LOADING_CACHE again after the first completion marker.
+    stream->startCacheExposedWait(autil::TimeUtility::currentTimeInMicroSeconds() - 1000);
+    stream->recordLoadingCacheDoneTime();
+    EXPECT_GE(stream->getTimeInfo().cache_exposed_wait_us, 1100);
+}
+
 TEST_F(GenerateStreamTest, PublishedVerifiedDraftCountsIgnoreFinishedRowsInSharedRound) {
     autil::EnvGuard perf("PERF_TEST", "0");
     auto            builder = GenerateStreamBuilder();

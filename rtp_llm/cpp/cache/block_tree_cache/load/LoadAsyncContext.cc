@@ -351,6 +351,7 @@ void LoadAsyncContext::markAborted() {
         if (error_info_.ok()) {
             error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load context aborted");
         }
+        completion_time_us_.store(autil::TimeUtility::currentTimeInMicroSeconds());
         state_.store(State::FAILED);
     }
     notifyCompletion();
@@ -472,6 +473,7 @@ bool LoadAsyncContext::settle(bool success, bool host_success) {
         if (!completed_successfully && error_info_.ok()) {
             error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load settlement failed");
         }
+        completion_time_us_.store(autil::TimeUtility::currentTimeInMicroSeconds());
         state_.store(completed_successfully ? State::SUCCEEDED : State::FAILED);
     }
     notifyCompletion();
@@ -492,6 +494,7 @@ bool LoadAsyncContext::onTaskFail() {
         if (error_info_.ok()) {
             error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load task failed");
         }
+        completion_time_us_.store(autil::TimeUtility::currentTimeInMicroSeconds());
         state_.store(State::FAILED);
     }
     notifyCompletion();
@@ -520,6 +523,7 @@ void LoadAsyncContext::finishIfReadyLocked(bool& notify, SettlementReadyCallback
     if (local_load_succeeded_ && backend_error_.ok() && remote_read_started_at_) {
         remote_gpu_ready_at_ = RemoteRestoreTiming::Clock::now();
     }
+    completion_time_us_.store(autil::TimeUtility::currentTimeInMicroSeconds());
     state_.store(local_load_succeeded_ && backend_error_.ok() ? State::SUCCEEDED : State::FAILED);
     notify = true;
 }

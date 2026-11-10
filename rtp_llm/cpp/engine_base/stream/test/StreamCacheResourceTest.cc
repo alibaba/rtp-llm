@@ -1121,10 +1121,18 @@ TEST_F(StreamCacheResourceTest, testCacheLoadFailureKeepsDeviceReuseMetrics) {
     resource.malloc_begin_time_us_                    = resource.load_wait_begin_time_us_;
 
     auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST});
+    stream_->recordLoadingCacheStartTime();
+    const auto exposed_start_us = currentTimeUs();
+    stream_->startCacheExposedWait(exposed_start_us);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
     ASSERT_TRUE(load_context->completeTransfers(1, false));
     ASSERT_EQ(load_context->mallocStatus(), MallocStatus::NONE);
+    const auto completed_us = load_context->completionTimeUs();
+    ASSERT_GT(completed_us, exposed_start_us);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
     resource.allocator_load_context_ = load_context;
     ASSERT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(stream_->getTimeInfo().cache_exposed_wait_us, completed_us - exposed_start_us);
 
     EXPECT_EQ(stream_->reuseLength(), 2);
     EXPECT_EQ(stream_->initialReuseLength(), 2);
@@ -1572,8 +1580,19 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadContextGatesReadinessUntilDone)
 
     EXPECT_TRUE(resource.asyncLoadCache());
     EXPECT_FALSE(resource.loadCacheDone());
+    stream_->recordLoadingCacheStartTime();
+    const auto exposed_start_us = currentTimeUs();
+    stream_->startCacheExposedWait(exposed_start_us);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
     EXPECT_TRUE(load_context->completeTransfers(1, true));
-    EXPECT_TRUE(resource.loadCacheDone());
+    const auto completed_us = load_context->completionTimeUs();
+    ASSERT_GT(completed_us, exposed_start_us);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    stream_->reportEvent(StreamEvents::CanRun);
+    stream_->reportEvent(StreamEvents::LoadInitiated);
+    stream_->generate_status_->status = StreamState::LOADING_CACHE;
+    EXPECT_EQ(stream_->moveToNext(), StreamState::WAITING);
+    EXPECT_EQ(stream_->getTimeInfo().cache_exposed_wait_us, completed_us - exposed_start_us);
     EXPECT_EQ(resource.allocator_load_context_, nullptr);
     EXPECT_FALSE(stream_->hasError());
 }

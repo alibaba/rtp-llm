@@ -916,20 +916,27 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         const auto             time_info  = stream->getTimeInfo();
         const bool             request_ok = prefill_context.error_status.ok() && !exception_unwinding;
         telemetry::PhaseTiming phase_timing;
-        phase_timing.begin_time_us           = time_info.begin_time_us;
-        phase_timing.running_started         = time_info.running_started;
-        phase_timing.running_started_time_us = time_info.running_started_time_us;
-        phase_timing.first_token_committed   = time_info.first_token_committed;
-        phase_timing.first_token_time_us     = time_info.first_token_time_us;
-        phase_timing.generation_done         = time_info.generation_done;
-        phase_timing.generation_done_time_us = time_info.generation_done_time_us;
-        phase_timing.synthesis_end_time_us   = currentTimeUs();
-        phase_timing.request_id              = prefill_context.request_id;
-        phase_timing.error_type              = request_ok ?
-                                                   nullptr :
-                                                   (!prefill_context.error_status.ok() ?
-                                                        telemetry::grpcStatusCodeName(prefill_context.error_status.error_code()) :
-                                                        "Exception");
+        phase_timing.begin_time_us               = time_info.begin_time_us;
+        phase_timing.running_started             = time_info.running_started;
+        phase_timing.running_started_time_us     = time_info.running_started_time_us;
+        phase_timing.first_token_committed       = time_info.first_token_committed;
+        phase_timing.first_token_time_us         = time_info.first_token_time_us;
+        phase_timing.generation_done             = time_info.generation_done;
+        phase_timing.generation_done_time_us     = time_info.generation_done_time_us;
+        phase_timing.synthesis_end_time_us       = currentTimeUs();
+        phase_timing.request_id                  = prefill_context.request_id;
+        phase_timing.scheduler_enqueue_time_us   = time_info.scheduler_enqueue_time_us;
+        phase_timing.can_run_time_us             = time_info.can_run_time_us;
+        phase_timing.kv_ready_time_us            = time_info.kv_ready_time_us;
+        phase_timing.prefill_previous_release_us = time_info.prefill_previous_release_us;
+        phase_timing.prefill_dispatch_time_us    = time_info.prefill_dispatch_time_us;
+        phase_timing.prefill_forward_time_us     = time_info.prefill_forward_time_us;
+        phase_timing.cache_exposed_wait_us       = time_info.cache_exposed_wait_us;
+        phase_timing.error_type                  = request_ok ?
+                                                       nullptr :
+                                                       (!prefill_context.error_status.ok() ?
+                                                            telemetry::grpcStatusCodeName(prefill_context.error_status.error_code()) :
+                                                            "Exception");
         telemetry::synthesizePhaseSpans(
             prefill_context.trace_span_guard->sharedSpan(), phase_timing, telemetry::PhaseRole::Prefill, request_ok);
         if (request_ok && time_info.generation_done) {
