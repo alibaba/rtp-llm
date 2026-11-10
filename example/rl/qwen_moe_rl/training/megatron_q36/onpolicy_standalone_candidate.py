@@ -149,6 +149,11 @@ def install(backend_module):
         )
         groups = group.spawn(prefix_set=workers.keys())
         self.actor_rollout_wg = groups[str(pool_role)]
+        if os.environ.get('Q36_STRICT_4PLUS4_CLAIM') == '1':
+            from q36_4plus4_claim_loader import load_guard
+            guard = load_guard()
+            guard.validate_role_ownership(_collect_gpu_identities(self.actor_rollout_wg.workers),
+                                          'training', guard.load_claim())
         self.actor_rollout_wg.init_model()
 
         self.llm_server_manager = backend_module.LLMServerManager.create(
@@ -164,6 +169,10 @@ def install(backend_module):
             max_gpus=int(os.environ.get('Q36_DISAGG_MAX_GPUS', '32')),
             max_nodes=int(os.environ.get('Q36_DISAGG_MAX_NODES', '8')),
         )
+        if os.environ.get('Q36_STRICT_4PLUS4_CLAIM') == '1':
+            from q36_4plus4_claim_loader import load_guard
+            guard = load_guard()
+            guard.validate_pool_ownership(ownership, guard.load_claim())
         print('Q36_DISAGG_GPU_OWNERSHIP ' + json.dumps(ownership, sort_keys=True), flush=True)
         self.async_rollout_manager = backend_module.AgentLoopManager.create(
             config=config, llm_client=self.llm_server_manager.get_client(),

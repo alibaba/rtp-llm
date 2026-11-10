@@ -1,5 +1,6 @@
 import importlib.util
 import asyncio
+import sys
 from pathlib import Path
 from types import SimpleNamespace as NS
 import unittest
@@ -102,6 +103,31 @@ class OnPolicyStandaloneTest(unittest.TestCase):
         self.backend.config.actor_rollout_ref.rollout.checkpoint_engine.backend = 'naive'
         with self.assertRaises(ValueError): self.backend._init_colocated_workers()
         self.assertEqual(self.events, [])
+
+    def test_strict_training_identity_checked_before_model_or_native_start(self):
+        loader = NS(load_guard=lambda: guard)
+        guard = NS(load_claim=lambda: {'claim': 'frozen'},
+                   validate_role_ownership=lambda rows, role, claim: self.events.append('trainer-identity'),
+                   validate_pool_ownership=lambda ownership, claim: self.events.append('pool-identity'))
+        with patch.dict('os.environ', {'Q36_STRICT_4PLUS4_CLAIM': '1'}), \
+             patch.dict(sys.modules, {'q36_4plus4_claim_loader': loader}), \
+             patch.object(candidate, '_collect_gpu_identities', lambda workers: [{'gpu_uuid': 'claimed'}]):
+            self.backend._init_colocated_workers()
+        self.assertLess(self.events.index('trainer-identity'), self.events.index('actor-init'))
+        self.assertLess(self.events.index('actor-init'), self.events.index(('server', None, None)))
+        self.assertIn('pool-identity', self.events)
+
+    def test_bad_training_identity_never_starts_model(self):
+        def reject(*args): raise RuntimeError('wrong GPU assignment')
+        guard = NS(load_claim=lambda: {}, validate_role_ownership=reject)
+        loader = NS(load_guard=lambda: guard)
+        with patch.dict('os.environ', {'Q36_STRICT_4PLUS4_CLAIM': '1'}), \
+             patch.dict(sys.modules, {'q36_4plus4_claim_loader': loader}), \
+             patch.object(candidate, '_collect_gpu_identities', lambda workers: []):
+            with self.assertRaisesRegex(RuntimeError, 'wrong GPU'):
+                self.backend._init_colocated_workers()
+        self.assertNotIn('actor-init', self.events)
+        self.assertNotIn(('server', None, None), self.events)
 
     def test_install_is_idempotent(self):
         method = self.module.VerlBackend._init_colocated_workers

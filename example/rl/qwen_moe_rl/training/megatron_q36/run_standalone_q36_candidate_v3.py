@@ -20,6 +20,11 @@ def validate(config):
     validate_tp4(config)
     if config.rllm.get('async_training', {}).get('enable', False):
         raise ValueError('on-policy candidate requires async_training.enable=false')
+    if os.environ.get('Q36_ONPOLICY_NO_CONCURRENT_ROLLOUT') == '1':
+        if os.environ.get('Q36_STRICT_4PLUS4_CLAIM') != '1':
+            raise ValueError('v4 on-policy training requires the strict 4+4 task-owned claim')
+        from q36_4plus4_claim_loader import load_guard
+        load_guard().load_claim()
     checkpoint = config.actor_rollout_ref.rollout.checkpoint_engine
     candidates = {'rtp_full_hf_nccl': 'verl_full_hf_nccl', 'rtp_nixl_guarded': 'verl_nixl_guarded'}
     if candidates.get(checkpoint.backend) != checkpoint.custom_backend_module:
@@ -100,6 +105,13 @@ def main(config: DictConfig):
                                 namespace='q36-' + run_name)
         validate_cluster(ray, allowed, os.environ['Q36_RAY_SESSION_NAME'],
                          ray.get_runtime_context().get_session_name())
+        if os.environ.get('Q36_STRICT_4PLUS4_CLAIM') == '1':
+            from q36_4plus4_claim_loader import load_guard
+            guard = load_guard()
+            claim = guard.load_claim()
+            guard.verify_attached_session(ray, claim)
+            supervisors = guard.verify_supervisors(ray, claim)
+            print('Q36_4PLUS4_SUPERVISORS ' + json.dumps(supervisors, sort_keys=True), flush=True)
         trainer = AgentTrainer(config=config, backend='verl', agent_flow=python_math_agent,
                                evaluator=python_math_evaluator, train_dataset=dataset, val_dataset=None)
         trainer.train()

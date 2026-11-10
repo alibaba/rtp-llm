@@ -29,6 +29,16 @@ StandaloneRTPAdapter = base.StandaloneRTPAdapter
 
 
 class StandaloneRTPReplica(base.StandaloneRTPReplica):
+    async def launch_servers(self):
+        if os.environ.get('Q36_STRICT_4PLUS4_CLAIM') == '1':
+            import asyncio
+            from onpolicy_standalone_candidate import _worker_gpu_identity
+            from q36_4plus4_claim_loader import load_guard
+            rows = await asyncio.gather(*[worker.__ray_call__.remote(_worker_gpu_identity) for worker in self.workers])
+            guard = load_guard()
+            guard.validate_role_ownership(rows, 'rollout', guard.load_claim())
+        return await super().launch_servers()
+
     async def abort_all_requests(self, reject_request: bool = False):
         if type(reject_request) is not bool:
             raise TypeError('reject_request must be a boolean')

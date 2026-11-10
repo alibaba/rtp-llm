@@ -234,6 +234,41 @@ class TransactionTest(unittest.TestCase):
         asyncio.run(scenario())
         self.assertEqual(state.count, 2)
 
+    def test_rollout_identity_is_checked_before_native_server_launch(self):
+        replica = object.__new__(self.module.StandaloneRTPReplica)
+        events = []
+        async def inspect(_fn): return {'gpu_uuid': 'expected'}
+        replica.workers = [types.SimpleNamespace(__ray_call__=types.SimpleNamespace(remote=inspect))]
+        guard = types.SimpleNamespace(load_claim=lambda: {'run': 'expected'},
+            validate_role_ownership=lambda rows, role, claim: events.append(('verified', role)))
+        loader = types.ModuleType('q36_4plus4_claim_loader')
+        loader.load_guard = lambda: guard
+        onpolicy = types.ModuleType('onpolicy_standalone_candidate')
+        onpolicy._worker_gpu_identity = lambda worker: worker
+        async def native_start(_self): events.append('native-start')
+        with patch.dict(os.environ, {'Q36_STRICT_4PLUS4_CLAIM': '1'}), \
+             patch.dict(sys.modules, {'q36_4plus4_claim_loader': loader, 'onpolicy_standalone_candidate': onpolicy}), \
+             patch.object(self.module.base.StandaloneRTPReplica, 'launch_servers', native_start, create=True):
+            asyncio.run(replica.launch_servers())
+        self.assertEqual(events, [('verified', 'rollout'), 'native-start'])
+
+    def test_bad_rollout_identity_never_starts_native_server(self):
+        replica = object.__new__(self.module.StandaloneRTPReplica)
+        async def inspect(_fn): return {'gpu_uuid': 'wrong'}
+        replica.workers = [types.SimpleNamespace(__ray_call__=types.SimpleNamespace(remote=inspect))]
+        def reject(*args): raise RuntimeError('wrong rollout identity')
+        guard = types.SimpleNamespace(load_claim=lambda: {}, validate_role_ownership=reject)
+        loader = types.ModuleType('q36_4plus4_claim_loader')
+        loader.load_guard = lambda: guard
+        onpolicy = types.ModuleType('onpolicy_standalone_candidate')
+        onpolicy._worker_gpu_identity = lambda worker: worker
+        async def forbidden(_self): self.fail('native must not start')
+        with patch.dict(os.environ, {'Q36_STRICT_4PLUS4_CLAIM': '1'}), \
+             patch.dict(sys.modules, {'q36_4plus4_claim_loader': loader, 'onpolicy_standalone_candidate': onpolicy}), \
+             patch.object(self.module.base.StandaloneRTPReplica, 'launch_servers', forbidden, create=True):
+            with self.assertRaisesRegex(RuntimeError, 'wrong rollout identity'):
+                asyncio.run(replica.launch_servers())
+
     def test_changed_v3_source_is_rejected_before_import(self):
         with tempfile.TemporaryDirectory() as folder:
             fake = Path(folder).resolve()
