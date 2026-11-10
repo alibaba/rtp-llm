@@ -181,6 +181,16 @@ def _record_http_status(trace_state, status_code: int) -> None:
     trace_state.set_attribute(trace_attrs.HTTP_STATUS_CODE, status_code)
 
 
+def _record_awi_mapping(request_id: int, raw_request: Any) -> None:
+    """Bridge the evaluator's id to the engine id for non-/awi endpoints too."""
+    headers = getattr(raw_request, "headers", None)
+    if headers is None:
+        return
+    awi_request_id = str(headers.get("X-AWI-Request-ID") or "")
+    if awi_request_id:
+        awi_telemetry.record_mapping(awi_request_id, int(request_id), 0, 0)
+
+
 class FrontendServer(object):
     def __init__(
         self,
@@ -419,6 +429,7 @@ class FrontendServer(object):
                 self.server_id,
                 sequence,
             )
+            _record_awi_mapping(req[request_id_field_name], raw_request)
             request_headers = extract_request_headers(
                 getattr(raw_request, "headers", None)
             )
@@ -590,6 +601,7 @@ class FrontendServer(object):
             self.server_id,
             sequence,
         )
+        _record_awi_mapping(request_id, raw_request)
 
         # Trace entry point: only chat completions get an HTTP SERVER span.
         # Returns None when telemetry is disabled; all calls below are no-ops then.

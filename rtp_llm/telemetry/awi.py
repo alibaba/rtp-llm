@@ -96,9 +96,9 @@ def load_raw_events() -> List[Dict[str, Any]]:
 
 
 def _aggregate_prefill(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    by_request: Dict[int, Dict[str, Any]] = {}
+    by_request: Dict[Any, Dict[str, Any]] = {}
     for event in events:
-        request_id = int(event["request_id"])
+        request_id = event["request_id"]
         current = by_request.get(request_id)
         if current is None:
             by_request[request_id] = {
@@ -117,9 +117,9 @@ def _aggregate_prefill(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]
 
 
 def _aggregate_decode(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    by_step: Dict[Tuple[int, int], Dict[str, Any]] = {}
+    by_step: Dict[Tuple[str, int], Dict[str, Any]] = {}
     for event in events:
-        key = (int(event["request_id"]), int(event["step"]))
+        key = (str(event["request_id"]), int(event["step"]))
         elapsed = float(event["elapsed_ms"])
         current = by_step.get(key)
         if current is None:
@@ -156,7 +156,7 @@ def _latest_resident(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def _first_reuse(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen: Dict[int, Dict[str, Any]] = {}
     for event in events:
-        request_id = int(event["request_id"])
+        request_id = str(event["request_id"])
         if request_id not in seen:
             seen[request_id] = {
                 "kind": "reuse",
@@ -179,6 +179,31 @@ def _captures(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def aggregate_events(raw: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    mappings = load_mappings()
+    numeric_to_awi = {
+        int(key): str(row.get("awi_request_id"))
+        for key, row in mappings.items()
+        if row.get("awi_request_id")
+    }
+
+    def awi_id(value: Any) -> Any:
+        try:
+            return numeric_to_awi.get(int(value), value)
+        except (TypeError, ValueError):
+            return value
+
+    normalized: List[Dict[str, Any]] = []
+    for row in raw:
+        row = dict(row)
+        if "request_id" in row:
+            row["request_id"] = awi_id(row["request_id"])
+        if row.get("kind") == "resident":
+            row["sequences"] = [
+                dict(seq, request_id=awi_id(seq.get("request_id")))
+                for seq in row.get("sequences") or []
+            ]
+        normalized.append(row)
+    raw = normalized
     buckets: Dict[str, List[Dict[str, Any]]] = {
         "prefill": [],
         "decode": [],
