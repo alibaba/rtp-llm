@@ -74,6 +74,7 @@ cc_library(
     ],
     deps = [
         ":dspark_cuda_graph_budget",
+        "//rtp_llm/cpp/awi:awi_telemetry",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/models_py/bindings:op_defs",
     ],

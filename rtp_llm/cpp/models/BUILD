@@ -180,6 +180,7 @@ cc_library(
         "*.cc",
     ], exclude = ["ModelInputsLogger.cc"]),
     deps = [
+        "//rtp_llm/cpp/awi:awi_telemetry",
         ":model_inputs_logger",
         ":model_types",
         ":eplb",

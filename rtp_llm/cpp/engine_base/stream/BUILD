@@ -32,6 +32,7 @@ cc_library(
     hdrs = ["CompleteTokenIds.h"],
     srcs = ["CompleteTokenIds.cc"],
     deps = [
+        "//rtp_llm/cpp/awi:awi_telemetry",
         ":generate_types",
         ":generate_config",
         "//rtp_llm/cpp/utils:error_code",
