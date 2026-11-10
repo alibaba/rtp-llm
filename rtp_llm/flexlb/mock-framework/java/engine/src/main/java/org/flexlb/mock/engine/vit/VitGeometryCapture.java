@@ -35,7 +35,7 @@ final class VitGeometryCapture {
     private final String owner;
     private final Mac mac;
     private final ArrayBlockingQueue<String> pending = new ArrayBlockingQueue<>(2048);
-    private final Set<String> seen = new HashSet<>();
+    private Set<String> seen = new HashSet<>();
     private final Path directory;
     private int dropped;
     private boolean closed;
@@ -54,12 +54,13 @@ final class VitGeometryCapture {
 
     static void checkArm(VitNode.CaptureArm request, byte[] key) throws GeneralSecurityException {
         long now = System.currentTimeMillis();
-        if (request.start() <= 0 || request.start() > now + 300_000
+        if (request.run() <= 0 || request.run() > request.start() || request.start() > now + 300_000
                 || request.end() <= request.start() || request.end() - request.start() > 300_000) {
             throw new IllegalArgumentException("invalid_capture_window");
         }
         verify(new SecretKeySpec(key, "HmacSHA256"), request.expires(), request.signature(),
-                "vit-capture-arm-v1\n" + request.start() + "\n" + request.end() + "\n" + request.expires());
+                "vit-capture-arm-v2\n" + request.run() + "\n" + request.start() + "\n"
+                        + request.end() + "\n" + request.expires());
     }
 
     long start() { return start; }
@@ -163,6 +164,7 @@ final class VitGeometryCapture {
                             if (System.currentTimeMillis() >= end + DRAIN_MS && pending.isEmpty()) {
                                 closed = true;
                                 emit(stream, "[\"end\"," + seen.size() + "," + dropped + "]");
+                                seen = Set.of();
                                 break;
                             }
                         }

@@ -17,18 +17,32 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
     private final VitCache cache;
     private final VitScheduler scheduler;
     private final VitPreparation preparation;
-    private volatile VitGeometryCapture geometryCapture;
+    private final Map<Long, VitGeometryCapture> geometryCaptures = new ConcurrentHashMap<>();
+    private volatile List<VitGeometryCapture> activeCaptures = List.of();
+    private long captureRun;
+    private VitGeometryCapture lastCapture;
 
     synchronized VitNode.CaptureState armCapture(VitNode.CaptureArm request, byte[] key) throws Exception {
         VitGeometryCapture.checkArm(request, key);
-        var capture = geometryCapture;
-        if (capture == null || capture.start() != request.start()) {
-            if ((capture != null && (!capture.finished() || request.start() <= capture.start()))
-                    || request.start() <= System.currentTimeMillis()) {
+        if (request.run() != captureRun) {
+            if (request.run() != request.start() || request.start() <= System.currentTimeMillis()
+                    || geometryCaptures.values().stream().anyMatch(capture -> !capture.finished())) {
+                throw new IllegalArgumentException("capture_window_unavailable");
+            }
+            geometryCaptures.clear();
+            lastCapture = null;
+            captureRun = request.run();
+        }
+        var capture = geometryCaptures.get(request.start());
+        if (capture == null) {
+            if (request.start() <= System.currentTimeMillis()
+                    || lastCapture != null && lastCapture.end() != request.start()) {
                 throw new IllegalArgumentException("capture_window_unavailable");
             }
             capture = new VitGeometryCapture(request.start(), request.end(), key);
-            geometryCapture = capture;
+            geometryCaptures.put(request.start(), capture);
+            lastCapture = capture;
+            activeCaptures = geometryCaptures.values().stream().filter(item -> !item.finished()).toList();
         }
         if (capture.end() != request.end()) throw new IllegalArgumentException("capture_window_conflict");
         var geometry = new VitNode.CaptureGeometry(config.patch(), config.merge(), config.minPixels(), config.maxTokens());
@@ -36,7 +50,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
     }
 
     VitNode.CaptureChunk readCapture(VitNode.CaptureRead request) throws Exception {
-        var capture = geometryCapture;
+        var capture = geometryCaptures.get(request.start());
         if (capture == null) throw new IllegalArgumentException("capture_not_armed");
         return capture.read(request);
     }
@@ -136,8 +150,9 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
                 var entry=MultimodalHashEntryPB.newBuilder().setKey(key);String tier=cache.tier(key);
                 entry.setEmbeddingHit(!tier.isEmpty()).setEmbeddingTier(tier);
                 if (image != null) {
-                    var capture = geometryCapture;
-                    if (capture != null) capture.record(image);
+                    for (var capture : activeCaptures) {
+                        if (!capture.finished()) capture.record(image);
+                    }
                     entry.setHashHit(true).setEntryGeneration(instance + ":" + key).addSplitSize(image.rows())
                             .setFeatureHashes(VitGeometry.hashes(image.featureIdentity(), image.rows()));
                 }
