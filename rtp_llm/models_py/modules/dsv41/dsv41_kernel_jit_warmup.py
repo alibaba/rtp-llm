@@ -364,6 +364,12 @@ def warmup_v41_engram_jit(model, *, max_m, device):
     layers = [layer.engram for layer in model.v4.layers if layer.engram is not None]
     if not layers or max_m <= 0:
         return
+    if any(getattr(layer.embed_tokens, "_uva", None) is None for layer in layers):
+        # ROCm host-only Engram tables are served by CPU lookup/staging; there
+        # is no device UVA lookup kernel or SM grid to precompile.
+        prepare_engram_cpu_lookup(model, max_m=max_m)
+        logging.info("[DSV41 Engram] host-staging lookup ready; skipped UVA JIT")
+        return
     layout = state.layout
     # HostEngramEmbedding passes the physical SM count captured at UVA setup
     # to lookup_host_rows. A DeepGEMM SM cap must not truncate lookup coverage.
