@@ -2077,8 +2077,6 @@ void CudaGraphRunner::logCudaGraphPoolMemory(const char* phase) {
 void CudaGraphRunner::initCapture() {
     std::fprintf(stderr, "[capi] enter\n"); std::fflush(stderr);
     c10::InferenceMode inference_guard(true);
-void CudaGraphRunner::initCapture() {
-    c10::InferenceMode inference_guard(true);
 
     if (enable_cuda_graph_) {
         RTP_LLM_LOG_INFO("CUDA graph capture is enabled");
