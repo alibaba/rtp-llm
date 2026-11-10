@@ -1276,6 +1276,9 @@ class DeepSeekV4Model(GptModelBase):
                 )
             )
         if _is_decode_fmha(fmha_impl) or bool(getattr(attn, "is_target_verify", False)):
+            import os as _os
+            if _os.environ.get("DSV41_TRACE_CAPTURE"):
+                print("[cap] dispatch forward_decode", flush=True)
             return forward_decode(
                 self.v4,
                 self.kv_cache,

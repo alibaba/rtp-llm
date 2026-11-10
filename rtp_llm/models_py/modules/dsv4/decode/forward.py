@@ -432,6 +432,8 @@ def forward_decode(
     ``[B, q_len]``, dispatch to :func:`forward_layers`, then re-pack to
     ``[T_total, dim]`` for the sampler.
     """
+    if os.environ.get("DSV41_TRACE_CAPTURE"):
+        print("[cap] forward_decode entry", flush=True)
     from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
         DSv4DecodeFmhaImpl,
     )
@@ -488,6 +490,8 @@ def forward_decode(
                 torch.zeros((0, v4_args.dim), dtype=torch.bfloat16, device=param_dev)
             )
 
+    if os.environ.get("DSV41_TRACE_CAPTURE"):
+        print("[cap] metadata done", flush=True)
     B = meta.batch_size
     q_len = meta.q_len_per_req
     _rt_on = _rt.ENABLED
