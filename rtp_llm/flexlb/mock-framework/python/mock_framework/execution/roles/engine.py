@@ -55,17 +55,7 @@ class EngineRole:
         return rpc
 
     async def scale_out(self, role, count):
-        async with self.lock:
-            if role not in ROLES or role not in self.environment or not 1 <= count <= 1024:
-                raise ExecutionError('scale_out requires a configured Engine role and count in 1..1024')
-            result = []
-            for _ in range(count):
-                index = self.counters.get(role, 0)
-                self.counters[role] = index + 1
-                result.append(self._register_instance(*await self._start_instance(role, index)))
-            if self.monitoring and self.monitoring.baselined:
-                await self.monitoring.baseline([item['id'] for item in self.topology.active() if item['rpc'] in result])
-            return result
+        return await self._start_roles({role: count}, concurrency=1)
 
     async def scale_in(self, role, targets, count):
         async with self.lock:
@@ -99,46 +89,44 @@ class EngineRole:
             return [item['rpc'] for item in selected]
 
     async def start(self):
+        counts = {role: self.environment[role]['deployment']['replicas'] for role in self.recipes if role in ROLES}
+        if counts:
+            timeout = sum(float(duration(self.recipes[role]['startup_timeout'])) * count for role, count in counts.items())
+            await self.supervisor.guard(self._start_roles(counts, INITIAL_START_CONCURRENCY), timeout)
+
+    async def _start_roles(self, counts, concurrency):
         async with self.lock:
-            jobs_by_role, next_registration = [], {}
-            timeout = 0.0
-            for role, recipe in self.recipes.items():
-                if role not in ROLES:
-                    continue
-                count = self.environment[role]['deployment']['replicas']
-                if not 1 <= count <= 1024:
-                    raise ExecutionError(f'{role} startup requires a replica count in 1..1024')
-                first = self.counters.get(role, 0)
-                self.counters[role] = first + count
-                next_registration[role] = first
-                jobs_by_role.append([(role, index) for index in range(first, first + count)])
-                timeout += float(duration(recipe['startup_timeout'])) * count
-            if not jobs_by_role:
-                return
+            if any(role not in ROLES or role not in self.environment or not 1 <= count <= 1024
+                   for role, count in counts.items()):
+                raise ExecutionError('Engine startup requires configured roles and counts in 1..1024')
+            next_registration = {role: self.counters.get(role, 0) for role in counts}
+            jobs_by_role = [[(role, index) for index in range(first, first + counts[role])]
+                            for role, first in next_registration.items()]
 
             # Interleave roles while keeping a single budget for all in-flight starts.
             jobs = (job for group in zip_longest(*jobs_by_role) for job in group if job is not None)
-            ready = {}
+            ready, result = {}, []
 
             async def worker():
                 for role, index in jobs:
+                    self.counters[role] = index + 1
                     ready[role, index] = await self._start_instance(role, index)
                     # Keep scale-in selection stable even if readiness arrives out of order.
                     first = next_registration[role]
                     while (role, first) in ready:
-                        self._register_instance(*ready.pop((role, first)))
+                        result.append(self._register_instance(*ready.pop((role, first))))
                         first += 1
                     next_registration[role] = first
 
-            async def start_workers():
-                try:
-                    async with asyncio.TaskGroup() as group:
-                        for _ in range(min(INITIAL_START_CONCURRENCY, sum(map(len, jobs_by_role)))):
-                            group.create_task(worker())
-                except ExceptionGroup as errors:
-                    raise errors.exceptions[0] from errors
-
-            await self.supervisor.guard(start_workers(), timeout)
+            try:
+                async with asyncio.TaskGroup() as group:
+                    for _ in range(min(concurrency, sum(counts.values()))):
+                        group.create_task(worker())
+            except ExceptionGroup as errors:
+                raise errors.exceptions[0] from errors
+            if self.monitoring and self.monitoring.baselined:
+                await self.monitoring.baseline([item['id'] for item in self.topology.active() if item['rpc'] in result])
+            return result
 
     async def close(self):
         names = [name for name, _ in self.supervisor.children if name in self.processes]
