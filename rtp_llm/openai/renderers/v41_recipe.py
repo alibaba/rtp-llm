@@ -143,6 +143,20 @@ class PromptTokenizer:
         return ids
 
 
+def _normalize_thinking_default(default):
+    """Normalize the renderer's THINK_MODE default to a boolean.
+
+    The renderer forwards the canonical THINK_MODE string ("disabled" /
+    "adaptive" / "enabled") rather than a bool; ``bool("disabled")`` is
+    truthy, which would silently enable thinking-by-default. Disabled
+    spellings map to False; every other value keeps the historical
+    truthy behaviour.
+    """
+    if isinstance(default, str):
+        return default.strip().lower() not in ("disabled", "0", "false", "")
+    return default
+
+
 def resolve_thinking(request: dict, default: bool) -> tuple[bool, int]:
     kwargs = request.get("chat_template_kwargs") or {}
     extra = request.get("extra_configs") or {}
@@ -169,7 +183,7 @@ def resolve_thinking(request: dict, default: bool) -> tuple[bool, int]:
     elif effort is not None:
         thinking = True
     else:
-        thinking = default
+        thinking = _normalize_thinking_default(default)
     # The existing explicit zero budget remains a hard request-level limit.
     if request.get("thinking_budget") == 0 or extra.get("max_thinking_tokens") == 0:
         thinking = False

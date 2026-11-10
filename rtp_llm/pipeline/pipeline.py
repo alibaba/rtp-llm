@@ -116,16 +116,31 @@ class Pipeline(object):
         generate_env_config,
         **kwargs: Any,
     ) -> GenerateConfig:
-        if isinstance(generate_config, dict):
-            config = GenerateConfig.create_generate_config(generate_config, **kwargs)
-        else:
-            # 认为是从frontend_worker传递进来的，不需要再处理一遍
-            config = generate_config
-        config.add_special_tokens(special_tokens)
-        config.convert_select_tokens(vocab_size, tokenizer)
-        config.add_thinking_params(tokenizer, generate_env_config)
-        config.add_stop_ids_from_str(tokenizer)
-        return config
+        try:
+            if isinstance(generate_config, dict):
+                config = GenerateConfig.create_generate_config(
+                    generate_config, **kwargs
+                )
+            else:
+                # 认为是从frontend_worker传递进来的，不需要再处理一遍
+                config = generate_config
+            config.add_special_tokens(special_tokens)
+            config.convert_select_tokens(vocab_size, tokenizer)
+            config.add_thinking_params(tokenizer, generate_env_config)
+            config.add_stop_ids_from_str(tokenizer)
+            return config
+        except FtRuntimeException as e:
+            # Validation raised before enqueue bypasses the visitor's
+            # set_aux_info wrapper; attach zeroed aux_info so structured
+            # error responses keep the standard shape.
+            if not getattr(e, "aux_info", None):
+                e.aux_info = {
+                    "input_len": 0,
+                    "output_len": 0,
+                    "step_output_len": 0,
+                    "reuse_len": 0,
+                }
+            raise
 
     def __call__(
         self, prompt: str, urls: Optional[List[str]] = None, **kwargs: Any
