@@ -37,7 +37,7 @@ final class PrefillRpcServer implements AutoCloseable {
     private final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1,
         Thread.ofPlatform().daemon().name("rtp-pd-deadline").factory());
     private final Map<Long, Call> active = new HashMap<>();
-    private final Map<Long, GeneratedOutput> outputs = new LinkedHashMap<>();
+    private final Map<Long, GenerateResponseStream> outputs = new LinkedHashMap<>();
     private final Map<Long, Fence> fences = new LinkedHashMap<>();
 
     private long nextOutputSweep;
@@ -245,7 +245,7 @@ final class PrefillRpcServer implements AutoCloseable {
 
     void fetch(long id, StreamObserver<GenerateOutputsPB> observer) {
         var response = (ServerCallStreamObserver<GenerateOutputsPB>) observer;
-        GeneratedOutput output; Fence fence;
+        GenerateResponseStream output; Fence fence;
         synchronized (this) { output = outputs.get(id); fence = fences.get(id); }
         if (fence != null && fence.preempted() && fence.expires() > System.nanoTime()) {
             response.onError(preempted()); return;
@@ -383,9 +383,9 @@ final class PrefillRpcServer implements AutoCloseable {
         }
     }
 
-    private GeneratedOutput newOutput(long id, long attachMillis) {
+    private GenerateResponseStream newOutput(long id, long attachMillis) {
         // Retain only the registry key, never the Call or its input token data.
-        return new GeneratedOutput(workers, deadlines, attachMillis > 0 ? attachMillis : TimeUnit.MINUTES.toMillis(10), expired -> {
+        return new GenerateResponseStream(workers, deadlines, attachMillis > 0 ? attachMillis : TimeUnit.MINUTES.toMillis(10), expired -> {
             synchronized (this) { outputs.remove(id, expired); }
         });
     }
@@ -496,7 +496,7 @@ final class PrefillRpcServer implements AutoCloseable {
     private final class Call {
         GenerateInputPB input;
 
-        final GeneratedOutput output;
+        final GenerateResponseStream output;
 
         final boolean deferred;
 

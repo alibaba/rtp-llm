@@ -19,100 +19,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Exercises Prefill and Decode together over the native gRPC protocol.
+ */
 class PdGenerationTest {
     @TempDir Path directory;
-    private Harness node(String role, int blocks, int millis) throws Exception { return node(role, blocks, millis, Map.of()); }
-    private Harness node(String role, int blocks, int millis, Map<String, Object> models) throws Exception {
-        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration(role));
-        ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2).put("reuse_cache", true);
-        // This suite exercises native batch admission as well as individual PD calls.
-        if (role.equals("prefill")) ((ObjectNode) root.path("component").path("config")).put("mock.scheduler.mode", "group");
-        ((ObjectNode) root.path("component").path("config")).put("test_block_num", blocks + 1);
-        ((ObjectNode) root.path("component").path("config").path("mock.compute").path("forward")).put("expression", Integer.toString(millis));
-        models.forEach((key, value) -> {
-            var compute = (ObjectNode) root.path("component").path("config").path("mock.compute");
-            if (key.equals("settings")) ((ObjectNode) root.path("component").path("config")).setAll((ObjectNode) json.valueToTree(value));
-            else if (key.equals("mock.compute")) compute.setAll((ObjectNode) json.valueToTree(value));
-            else compute.set(key, json.valueToTree(value));
-        });
-        var path = directory.resolve(role + ".json"); json.writeValue(path.toFile(), root);
-        return new Harness(LLMMockEngine.start(RtpConfig.load(path)));
-    }
-    private static final class Harness implements AutoCloseable {
-        final LLMMockEngine node; final ManagedChannel channel;
-        Harness(LLMMockEngine node) { this.node = node; channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build(); }
-        WorkerStatusPB status() { return RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS).getWorkerStatus(StatusVersionPB.getDefaultInstance()); }
-        @Override public void close() throws Exception { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); node.close(); }
-    }
-    private static GenerateInputPB input(Harness d, long id, int length, int output, int timeout, boolean incremental) {
-        int port = Integer.parseInt(d.node.rpcAddress().split(":")[1]);
-        return GenerateInputPB.newBuilder().setRequestId(id).setPriority(7).addAllTokenIds(IntStream.rangeClosed(1, length).boxed().toList())
-            .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(output).setTimeoutMs(timeout).setReuseCache(true)
-                .setCanUsePdSeparation(true).setReturnIncremental(incremental).addRoleAddrs(RoleAddrPB.newBuilder()
-                    .setRole(RoleAddrPB.RoleType.DECODE).setIp("127.0.0.1").setGrpcPort(port))).build();
-    }
-    private static void await(BooleanSupplier condition) throws Exception {
-        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(4);
-        while (!condition.getAsBoolean()) { if (System.nanoTime() >= end) fail("Condition timed out"); Thread.sleep(5); }
-    }
-    private static final class Call implements AutoCloseable {
-        final Context.CancellableContext context = Context.current().withCancellation();
-        final BlockingQueue<Object> outputs = new LinkedBlockingQueue<>();
-        Call(Harness p, GenerateInputPB input) { this(p, input, false); }
-        Call(Harness p, GenerateInputPB input, boolean fetch) { context.run(() -> {
-            var observer = new StreamObserver<GenerateOutputsPB>() {
-            @Override public void onNext(GenerateOutputsPB value) { outputs.add(value); }
-            @Override public void onError(Throwable error) { outputs.add(error); }
-            @Override public void onCompleted() { outputs.add("completed"); }
-            };
-            if (fetch) RpcServiceGrpc.newStub(p.channel).fetchResponse(FetchRequestPB.newBuilder().setRequestId(input.getRequestId()).build(), observer);
-            else RpcServiceGrpc.newStub(p.channel).generateStreamCall(input, observer);
-        }); }
-        Object next() throws Exception { var value = outputs.poll(4, TimeUnit.SECONDS); assertNotNull(value); return value; }
-        GenerateOutputsPB output(int count, boolean finished, int width) throws Exception {
-            var value = next(); assertInstanceOf(GenerateOutputsPB.class, value, String.valueOf(value)); var output = (GenerateOutputsPB) value;
-            var flat = output.getFlattenOutput(); assertEquals(count, flat.getAuxInfo(0).getOutputLen());
-            assertEquals(finished, flat.getFinished(0)); assertEquals(width, flat.getOutputIds().getShape(2));
-            assertEquals(width * 4, flat.getOutputIds().getInt32Data().size()); assertTrue(flat.getAuxInfo(0).getPdSep());
-            return output;
-        }
-        void completeOutput(int expected) throws Exception {
-            int length = 0;
-            while (true) {
-                var value = next(); assertInstanceOf(GenerateOutputsPB.class, value);
-                var flat = ((GenerateOutputsPB) value).getFlattenOutput();
-                int width = Math.toIntExact(flat.getOutputIds().getShape(2)); length += width;
-                assertEquals(length, flat.getAuxInfo(0).getOutputLen());
-                assertEquals(width * 4, flat.getOutputIds().getInt32Data().size());
-                assertTrue(width <= GeneratedOutput.MAX_FRAME_TOKENS);
-                if (flat.getFinished(0)) break;
-            }
-            assertEquals(expected, length); assertEquals("completed", next());
-        }
-        Throwable errorAfterProgress(Status.Code expected, int maximum) throws Exception {
-            int length = 0;
-            while (true) {
-                var value = next();
-                if (value instanceof Throwable error) { assertEquals(expected, Status.fromThrowable(error).getCode()); return error; }
-                assertInstanceOf(GenerateOutputsPB.class, value);
-                var flat = ((GenerateOutputsPB) value).getFlattenOutput();
-                length += flat.getOutputIds().getShape(2);
-                assertEquals(length, flat.getAuxInfo(0).getOutputLen());
-                assertTrue(length <= maximum); assertFalse(flat.getFinished(0));
-            }
-        }
-        Throwable error(Status.Code expected) throws Exception { var value = next(); assertInstanceOf(Throwable.class, value);
-            assertEquals(expected, Status.fromThrowable((Throwable) value).getCode()); return (Throwable) value; }
-        @Override public void close() { context.cancel(null); }
-    }
-    private static GenerateInputPB image(GenerateInputPB input, int port) {
-        var result = input.toBuilder().addMultimodalInputs(MultimodalInputPB.newBuilder()
-            .setMultimodalType(1).setMultimodalUrl("image"))
-            .setTokenIds(1, org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN);
-        result.getGenerateConfigBuilder().addRoleAddrs(RoleAddrPB.newBuilder()
-            .setRole(RoleAddrPB.RoleType.VIT).setIp("127.0.0.1").setGrpcPort(port));
-        return result.build();
-    }
 
     @Test void shardedPrefillTransfersSemanticInputToUnshardedDecode() throws Exception {
         try(var p=node("prefill",16,1,Map.of("settings",Map.of("prefill_cp_size",4)));
@@ -320,26 +231,6 @@ class PdGenerationTest {
             assertEquals(0, p.status().getRunningTaskInfoCount()); assertEquals(0, d.status().getRunningTaskInfoCount());
             assertEquals(32, p.status().getAvailableKvCache()); assertEquals(32, d.status().getAvailableKvCache());
         }
-    }
-
-    private static long code(Throwable error) throws Exception {
-        return ErrorDetailsPB.parseFrom(Status.trailersFromThrowable(error).get(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER))).getErrorCode();
-    }
-    private static double metric(Harness node, String name, String label) throws Exception {
-        try (var stream = java.net.URI.create((String) node.node.endpoints().get("metrics")).toURL().openStream()) {
-            return LocalRpcTest.sample(new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8), name, label);
-        }
-    }
-
-    private static EnqueueBatchResponsePB enqueue(Harness p, long ttl, GenerateInputPB... inputs) {
-        var slot = EnqueueBatchDpSlotPB.newBuilder();
-        for (var input : inputs) slot.addRequests(EnqueueBatchExternalInputPB.newBuilder().setInput(input));
-        return RpcServiceGrpc.newBlockingStub(p.channel).withDeadlineAfter(4, TimeUnit.SECONDS).enqueueBatch(
-            EnqueueBatchRequestPB.newBuilder().setBatchId(81).setFetchAttachTimeoutMs(ttl).addDpSlots(slot).build());
-    }
-    private static CancelStatusPB cancel(Harness p, long id) {
-        return RpcServiceGrpc.newBlockingStub(p.channel).withDeadlineAfter(3, TimeUnit.SECONDS)
-            .cancel(CancelRequestPB.newBuilder().setRequestId(id).build()).getStatus();
     }
 
     @Test void singleTokenBatchAndGroupCompleteWithoutDecodeForwardAndRetainFetchOutput() throws Exception {
@@ -882,6 +773,7 @@ class PdGenerationTest {
             }
         }
     }
+
     @Test void masterBatchWaitsForAllDecodePreparationsAndExecutesOnePrefillForward() throws Exception {
         var settings = Map.<String, Object>of("settings", Map.of("concurrency_limit", 4, "max_batch_tokens_size", 100));
         try (var p = node("prefill", 16, 10, settings); var d = node("decode", 8, 1);
@@ -960,6 +852,145 @@ class PdGenerationTest {
                 assertEquals("completed", call.next());
             }
         }
+    }
+
+    private Harness node(String role, int blocks, int millis) throws Exception { return node(role, blocks, millis, Map.of()); }
+
+    private Harness node(String role, int blocks, int millis, Map<String, Object> models) throws Exception {
+        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration(role));
+        ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2).put("reuse_cache", true);
+        // This suite exercises native batch admission as well as individual PD calls.
+        if (role.equals("prefill")) ((ObjectNode) root.path("component").path("config")).put("mock.scheduler.mode", "group");
+        ((ObjectNode) root.path("component").path("config")).put("test_block_num", blocks + 1);
+        ((ObjectNode) root.path("component").path("config").path("mock.compute").path("forward")).put("expression", Integer.toString(millis));
+        models.forEach((key, value) -> {
+            var compute = (ObjectNode) root.path("component").path("config").path("mock.compute");
+            if (key.equals("settings")) ((ObjectNode) root.path("component").path("config")).setAll((ObjectNode) json.valueToTree(value));
+            else if (key.equals("mock.compute")) compute.setAll((ObjectNode) json.valueToTree(value));
+            else compute.set(key, json.valueToTree(value));
+        });
+        var path = directory.resolve(role + ".json"); json.writeValue(path.toFile(), root);
+        return new Harness(LLMMockEngine.start(RtpConfig.load(path)));
+    }
+
+    private static GenerateInputPB input(Harness d, long id, int length, int output, int timeout, boolean incremental) {
+        int port = Integer.parseInt(d.node.rpcAddress().split(":")[1]);
+        return GenerateInputPB.newBuilder().setRequestId(id).setPriority(7).addAllTokenIds(IntStream.rangeClosed(1, length).boxed().toList())
+            .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(output).setTimeoutMs(timeout).setReuseCache(true)
+                .setCanUsePdSeparation(true).setReturnIncremental(incremental).addRoleAddrs(RoleAddrPB.newBuilder()
+                    .setRole(RoleAddrPB.RoleType.DECODE).setIp("127.0.0.1").setGrpcPort(port))).build();
+    }
+
+    private static void await(BooleanSupplier condition) throws Exception {
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(4);
+        while (!condition.getAsBoolean()) { if (System.nanoTime() >= end) fail("Condition timed out"); Thread.sleep(5); }
+    }
+
+    private static GenerateInputPB image(GenerateInputPB input, int port) {
+        var result = input.toBuilder().addMultimodalInputs(MultimodalInputPB.newBuilder()
+            .setMultimodalType(1).setMultimodalUrl("image"))
+            .setTokenIds(1, org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN);
+        result.getGenerateConfigBuilder().addRoleAddrs(RoleAddrPB.newBuilder()
+            .setRole(RoleAddrPB.RoleType.VIT).setIp("127.0.0.1").setGrpcPort(port));
+        return result.build();
+    }
+
+    private static long code(Throwable error) throws Exception {
+        return ErrorDetailsPB.parseFrom(Status.trailersFromThrowable(error).get(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER))).getErrorCode();
+    }
+
+    private static double metric(Harness node, String name, String label) throws Exception {
+        try (var stream = java.net.URI.create((String) node.node.endpoints().get("metrics")).toURL().openStream()) {
+            return LocalRpcTest.sample(new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8), name, label);
+        }
+    }
+
+    private static EnqueueBatchResponsePB enqueue(Harness p, long ttl, GenerateInputPB... inputs) {
+        var slot = EnqueueBatchDpSlotPB.newBuilder();
+        for (var input : inputs) slot.addRequests(EnqueueBatchExternalInputPB.newBuilder().setInput(input));
+        return RpcServiceGrpc.newBlockingStub(p.channel).withDeadlineAfter(4, TimeUnit.SECONDS).enqueueBatch(
+            EnqueueBatchRequestPB.newBuilder().setBatchId(81).setFetchAttachTimeoutMs(ttl).addDpSlots(slot).build());
+    }
+
+    private static CancelStatusPB cancel(Harness p, long id) {
+        return RpcServiceGrpc.newBlockingStub(p.channel).withDeadlineAfter(3, TimeUnit.SECONDS)
+            .cancel(CancelRequestPB.newBuilder().setRequestId(id).build()).getStatus();
+    }
+
+    /**
+     * Owns a local mock engine and the gRPC channel used by the test.
+     */
+    private static final class Harness implements AutoCloseable {
+        final LLMMockEngine node;
+        final ManagedChannel channel;
+
+        Harness(LLMMockEngine node) { this.node = node; channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build(); }
+
+        @Override public void close() throws Exception { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); node.close(); }
+
+        WorkerStatusPB status() { return RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS).getWorkerStatus(StatusVersionPB.getDefaultInstance()); }
+    }
+
+    /**
+     * Opens a Prefill stream and exposes its responses to the test.
+     */
+    private static final class Call implements AutoCloseable {
+        final Context.CancellableContext context = Context.current().withCancellation();
+        final BlockingQueue<Object> outputs = new LinkedBlockingQueue<>();
+
+        Call(Harness p, GenerateInputPB input) { this(p, input, false); }
+
+        Call(Harness p, GenerateInputPB input, boolean fetch) { context.run(() -> {
+            var observer = new StreamObserver<GenerateOutputsPB>() {
+            @Override public void onNext(GenerateOutputsPB value) { outputs.add(value); }
+            @Override public void onError(Throwable error) { outputs.add(error); }
+            @Override public void onCompleted() { outputs.add("completed"); }
+            };
+            if (fetch) RpcServiceGrpc.newStub(p.channel).fetchResponse(FetchRequestPB.newBuilder().setRequestId(input.getRequestId()).build(), observer);
+            else RpcServiceGrpc.newStub(p.channel).generateStreamCall(input, observer);
+        }); }
+
+        @Override public void close() { context.cancel(null); }
+
+        GenerateOutputsPB output(int count, boolean finished, int width) throws Exception {
+            var value = next(); assertInstanceOf(GenerateOutputsPB.class, value, String.valueOf(value)); var output = (GenerateOutputsPB) value;
+            var flat = output.getFlattenOutput(); assertEquals(count, flat.getAuxInfo(0).getOutputLen());
+            assertEquals(finished, flat.getFinished(0)); assertEquals(width, flat.getOutputIds().getShape(2));
+            assertEquals(width * 4, flat.getOutputIds().getInt32Data().size()); assertTrue(flat.getAuxInfo(0).getPdSep());
+            return output;
+        }
+
+        Object next() throws Exception { var value = outputs.poll(4, TimeUnit.SECONDS); assertNotNull(value); return value; }
+
+        void completeOutput(int expected) throws Exception {
+            int length = 0;
+            while (true) {
+                var value = next(); assertInstanceOf(GenerateOutputsPB.class, value);
+                var flat = ((GenerateOutputsPB) value).getFlattenOutput();
+                int width = Math.toIntExact(flat.getOutputIds().getShape(2)); length += width;
+                assertEquals(length, flat.getAuxInfo(0).getOutputLen());
+                assertEquals(width * 4, flat.getOutputIds().getInt32Data().size());
+                assertTrue(width <= GenerateResponseStream.MAX_FRAME_TOKENS);
+                if (flat.getFinished(0)) break;
+            }
+            assertEquals(expected, length); assertEquals("completed", next());
+        }
+
+        Throwable errorAfterProgress(Status.Code expected, int maximum) throws Exception {
+            int length = 0;
+            while (true) {
+                var value = next();
+                if (value instanceof Throwable error) { assertEquals(expected, Status.fromThrowable(error).getCode()); return error; }
+                assertInstanceOf(GenerateOutputsPB.class, value);
+                var flat = ((GenerateOutputsPB) value).getFlattenOutput();
+                length += flat.getOutputIds().getShape(2);
+                assertEquals(length, flat.getAuxInfo(0).getOutputLen());
+                assertTrue(length <= maximum); assertFalse(flat.getFinished(0));
+            }
+        }
+
+        Throwable error(Status.Code expected) throws Exception { var value = next(); assertInstanceOf(Throwable.class, value);
+            assertEquals(expected, Status.fromThrowable((Throwable) value).getCode()); return (Throwable) value; }
     }
 
 }

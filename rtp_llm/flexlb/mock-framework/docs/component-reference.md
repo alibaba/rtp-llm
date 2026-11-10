@@ -409,7 +409,7 @@ real 的依据为 `cpp/engine_base/stream/GenerateStream.cc`、`GenerateStateMac
 
 Scheduler 只发布累计进度，删除逐轮输出等待标记、网络可写性筛选及 OUTPUT 调度阶段。`Listener.progressed(request)` 是可合并的锁外变化通知；RPC 读取不可变的 `request.progress()`，计算不依赖通知完成。正常结束和 KV 释放发生在计算侧，最后一个进度通知排在终态通知之前。
 
-`GeneratedOutput` 替代消息缓冲队列，输出积压状态为 O(1)，按 generated/sent 游标即时生成固定合成 token，单帧最多 4096 token。D 不提前构造每轮响应。P 转发 D 的帧时只保留累计长度与最新元信息；传输 Inbox 的两帧受控拉取仍有固定上限。积压进度允许合并，不能用收到的帧数推断 Forward 次数。终态错误优先于尚未发送的数据，成功必须先补齐数据再结束。
+`GenerateResponseStream` 替代消息缓冲队列，输出积压状态为 O(1)，按 generated/sent 游标即时生成固定合成 token，单帧最多 4096 token。D 不提前构造每轮响应。P 转发 D 的帧时只保留累计长度与最新元信息；传输 Inbox 的两帧受控拉取仍有固定上限。积压进度允许合并，不能用收到的帧数推断 Forward 次数。终态错误优先于尚未发送的数据，成功必须先补齐数据再结束。
 
 GENERATE 后 D 不因 P 输出流断连或取消而停止；初始 ALLOCATE/LOAD、D 自身超时、显式调度取消和节点关闭保持其原有约束。该假设只用于合成 Mock，不模拟链路故障导致的生产行为。
 

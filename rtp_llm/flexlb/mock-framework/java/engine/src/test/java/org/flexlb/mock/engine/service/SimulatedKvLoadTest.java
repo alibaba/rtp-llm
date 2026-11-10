@@ -3,6 +3,7 @@ package org.flexlb.mock.engine.service;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.flexlb.mock.engine.scheduler.RequestState;
+import org.flexlb.mock.engine.service.DecodeRpcServer.SimulatedKvLoad;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 

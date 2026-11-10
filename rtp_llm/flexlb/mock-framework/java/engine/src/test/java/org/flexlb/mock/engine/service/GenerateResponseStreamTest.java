@@ -8,47 +8,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.AfterEach;
 import static org.junit.jupiter.api.Assertions.*;
 
-class GeneratedOutputTest {
+/**
+ * Verifies frame coalescing and delivery lifecycle for the response stream.
+ */
+class GenerateResponseStreamTest {
     private final ManualDeadline deadlines = new ManualDeadline();
-    private static class ManualDeadline extends ScheduledThreadPoolExecutor {
-        Runnable expiration;
-        ManualDeadline() { super(1); setRemoveOnCancelPolicy(true); }
-        @Override public ScheduledFuture<?> schedule(Runnable action, long delay, TimeUnit unit) {
-            assertEquals(TimeUnit.MINUTES.toNanos(10), unit.toNanos(delay));
-            expiration = action;
-            return super.schedule(action, 1, TimeUnit.DAYS);
-        }
-    }
-    @AfterEach void closeDeadlines() { deadlines.shutdownNow(); }
-    private GeneratedOutput output(Executor executor) {
-        return new GeneratedOutput(executor, deadlines, 10000, ignored -> {});
-    }
 
-    private static class Observer extends ServerCallStreamObserver<GenerateOutputsPB> {
-        volatile boolean ready, cancelled, completed;
-        Runnable onReady, onCancel;
-        Throwable failure;
-        int received, frames, finals;
-        @Override public void onNext(GenerateOutputsPB value) {
-            if (!value.hasFlattenOutput()) return;
-            var flat = value.getFlattenOutput(); int width = Math.toIntExact(flat.getOutputIds().getShape(2));
-            assertTrue(width <= GeneratedOutput.MAX_FRAME_TOKENS);
-            received += width; frames++;
-            assertEquals(received, flat.getAuxInfo(0).getOutputLen());
-            assertEquals(width * 4, flat.getOutputIds().getInt32Data().size());
-            if (flat.getFinished(0)) finals++;
-        }
-        @Override public void onError(Throwable error) { failure = error; }
-        @Override public void onCompleted() { completed = true; }
-        @Override public boolean isCancelled() { return cancelled; }
-        @Override public void setOnCancelHandler(Runnable handler) { onCancel = handler; }
-        @Override public boolean isReady() { return ready; }
-        @Override public void setOnReadyHandler(Runnable handler) { onReady = handler; }
-        @Override public void setCompression(String compression) {}
-        @Override public void request(int count) {}
-        @Override public void setMessageCompression(boolean enabled) {}
-        @Override public void disableAutoInboundFlowControl() {}
-    }
+    @AfterEach void closeDeadlines() { deadlines.shutdownNow(); }
 
     @Test void lateFetchRetainsOnlyProgressAndBuildsBoundedFramesOnDemand() {
         var tasks = new ArrayDeque<Runnable>();
@@ -62,7 +28,7 @@ class GeneratedOutputTest {
         assertEquals(0, observer.frames); assertFalse(observer.completed);
         observer.ready = true; observer.onReady.run(); tasks.remove().run();
         assertEquals(100000, observer.received);
-        assertEquals((100000 + GeneratedOutput.MAX_FRAME_TOKENS - 1) / GeneratedOutput.MAX_FRAME_TOKENS, observer.frames);
+        assertEquals((100000 + GenerateResponseStream.MAX_FRAME_TOKENS - 1) / GenerateResponseStream.MAX_FRAME_TOKENS, observer.frames);
         assertEquals(1, observer.finals); assertTrue(observer.completed); assertTrue(output.discardable());
     }
 
@@ -117,8 +83,8 @@ class GeneratedOutputTest {
 
     @Test void completedUnwritableOutputExpiresAndRemovesRegistryEntry() {
         var tasks = new ArrayDeque<Runnable>(); var observer = new Observer();
-        var registry = new java.util.HashMap<Long, GeneratedOutput>();
-        var output = new GeneratedOutput(tasks::add, deadlines, 10000, expired -> registry.remove(7L, expired));
+        var registry = new java.util.HashMap<Long, GenerateResponseStream>();
+        var output = new GenerateResponseStream(tasks::add, deadlines, 10000, expired -> registry.remove(7L, expired));
         registry.put(7L, output);
         output.attach(observer, () -> fail("Output expiry must not cancel computation"));
         output.advance(7, 42, 100, AuxInfoPB.getDefaultInstance(), true);
@@ -147,7 +113,7 @@ class GeneratedOutputTest {
         };
         observer.ready = true;
         try (var threads = Executors.newVirtualThreadPerTaskExecutor()) {
-            var output = new GeneratedOutput(threads, deadlines, 10000, expired -> removed.set(true));
+            var output = new GenerateResponseStream(threads, deadlines, 10000, expired -> removed.set(true));
             output.attach(observer, () -> fail("Delivery expiry must not cancel computation"));
             output.advance(7, 42, 1, AuxInfoPB.getDefaultInstance(), true);
             assertTrue(entered.await(2, TimeUnit.SECONDS)); output.finish(null);
@@ -161,7 +127,7 @@ class GeneratedOutputTest {
 
     @Test void deliveredOutputCancelsItsDeadlineAndCannotExpireLater() {
         var tasks = new ArrayDeque<Runnable>(); var observer = new Observer(); observer.ready = true;
-        var output = new GeneratedOutput(tasks::add, deadlines, 10000, expired -> fail("Already delivered"));
+        var output = new GenerateResponseStream(tasks::add, deadlines, 10000, expired -> fail("Already delivered"));
         output.attach(observer, () -> {});
         output.advance(7, 42, 1, AuxInfoPB.getDefaultInstance(), true); output.finish(null);
         tasks.remove().run();
@@ -179,5 +145,51 @@ class GeneratedOutputTest {
         var notified = new java.util.concurrent.atomic.AtomicBoolean();
         second.attach(cancelled, () -> notified.set(true)); cancelled.cancelled = true; cancelled.onCancel.run();
         tasks.remove().run(); assertTrue(notified.get()); assertEquals(0, cancelled.frames);
+    }
+
+    private GenerateResponseStream output(Executor executor) {
+        return new GenerateResponseStream(executor, deadlines, 10000, ignored -> {});
+    }
+
+    /**
+     * Lets tests trigger delivery expiry without waiting for the scheduled deadline.
+     */
+    private static class ManualDeadline extends ScheduledThreadPoolExecutor {
+        Runnable expiration;
+        ManualDeadline() { super(1); setRemoveOnCancelPolicy(true); }
+        @Override public ScheduledFuture<?> schedule(Runnable action, long delay, TimeUnit unit) {
+            assertEquals(TimeUnit.MINUTES.toNanos(10), unit.toNanos(delay));
+            expiration = action;
+            return super.schedule(action, 1, TimeUnit.DAYS);
+        }
+    }
+
+    /**
+     * Records responses and lets tests control stream readiness and cancellation.
+     */
+    private static class Observer extends ServerCallStreamObserver<GenerateOutputsPB> {
+        volatile boolean ready, cancelled, completed;
+        Runnable onReady, onCancel;
+        Throwable failure;
+        int received, frames, finals;
+        @Override public void onNext(GenerateOutputsPB value) {
+            if (!value.hasFlattenOutput()) return;
+            var flat = value.getFlattenOutput(); int width = Math.toIntExact(flat.getOutputIds().getShape(2));
+            assertTrue(width <= GenerateResponseStream.MAX_FRAME_TOKENS);
+            received += width; frames++;
+            assertEquals(received, flat.getAuxInfo(0).getOutputLen());
+            assertEquals(width * 4, flat.getOutputIds().getInt32Data().size());
+            if (flat.getFinished(0)) finals++;
+        }
+        @Override public void onError(Throwable error) { failure = error; }
+        @Override public void onCompleted() { completed = true; }
+        @Override public boolean isCancelled() { return cancelled; }
+        @Override public void setOnCancelHandler(Runnable handler) { onCancel = handler; }
+        @Override public boolean isReady() { return ready; }
+        @Override public void setOnReadyHandler(Runnable handler) { onReady = handler; }
+        @Override public void setCompression(String compression) {}
+        @Override public void request(int count) {}
+        @Override public void setMessageCompression(boolean enabled) {}
+        @Override public void disableAutoInboundFlowControl() {}
     }
 }

@@ -2,6 +2,9 @@ package org.flexlb.mock.engine.service;
 
 import io.grpc.*;
 import io.grpc.stub.*;
+import java.util.HashSet;
+import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.*;
@@ -10,8 +13,11 @@ import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.RtpControl;
 import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.RtpTransferResult;
 import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
+import org.flexlb.mock.engine.scheduler.RequestState;
 
-/** Native ALLOCATE/LOAD/GENERATE protocol. Queue membership and progress stay behind EngineScheduler. */
+/**
+ * Handles the native ALLOCATE/LOAD/GENERATE protocol for Decode.
+ */
 final class DecodeRpcServer implements AutoCloseable {
     private final RtpRpcService.Config config;
     private final EngineLoop engine;
@@ -22,7 +28,7 @@ final class DecodeRpcServer implements AutoCloseable {
     private final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1,
         Thread.ofPlatform().daemon().name("rtp-decode-output-deadline").factory());
     private final SimulatedKvLoad transfer = new SimulatedKvLoad();
-    private enum Stage { ALLOCATING, ALLOCATED, LOADING, LOADED, GENERATING, FINISHING }
+
     private boolean closed;
 
     DecodeRpcServer(RtpRpcService.Config config, Object executionLock, EngineLoop engine, Runnable recordCancellation, java.util.function.Supplier<Runnable> trackRequest) {
@@ -34,57 +40,24 @@ final class DecodeRpcServer implements AutoCloseable {
         this.recordCancellation = recordCancellation;
     }
 
+    @Override public void close() {
+        synchronized (executionLock) {
+            if (closed) return;
+            closed = true;
+            engine.close();
+        }
+        transfer.close();
+        deadlines.shutdownNow();
+        transport.shutdown();
+    }
+
     StreamObserver<GenerateRequestPB> open(StreamObserver<GenerateOutputsPB> observer) {
         return new Call((ServerCallStreamObserver<GenerateOutputsPB>) observer, Context.current());
     }
 
-    private final class Call implements StreamObserver<GenerateRequestPB>, EngineScheduler.Listener {
-        final ServerCallStreamObserver<GenerateOutputsPB> response;
-        final GeneratedOutput delivery;
-        final Runnable rpcCompleted;
-        final long started = System.nanoTime();
-        final long rpcDeadline;
-        GenerateInputPB input;
-        String client;
-        EngineScheduler.Request request;
-        volatile boolean terminal;
-        Stage stage = Stage.ALLOCATING;
-        SimulatedKvLoad.Execution transfer;
-        int token;
+    EngineScheduler.Status snapshot(long latestFinished) { return engine.status(latestFinished); }
 
-        Call(ServerCallStreamObserver<GenerateOutputsPB> response, Context context) {
-            this.response = response;
-            rpcCompleted=trackRequest.get();
-            rpcDeadline = context.getDeadline() == null ? Long.MAX_VALUE
-                : RpcMessages.after(started, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
-            delivery = new GeneratedOutput(transport, deadlines, TimeUnit.MINUTES.toMillis(10), ignored -> {});
-            delivery.attach(response, () -> {
-                boolean expired = context.getDeadline() != null && context.getDeadline().isExpired();
-                disconnected(this, expired ? Status.DEADLINE_EXCEEDED.withDescription("Decode RPC deadline expired")
-                    : Status.CANCELLED.withDescription("Decode RPC cancelled"), expired ? 603 : 8100);
-            });
-        }
-        @Override public void onNext(GenerateRequestPB frame) { accept(this, frame); }
-        @Override public void onError(Throwable error) { disconnected(this, Status.CANCELLED.withDescription("Decode stream closed"), 8100); }
-        @Override public void onCompleted() {
-            synchronized (executionLock) {
-                if (stage != Stage.GENERATING && stage != Stage.FINISHING) stop(this, Status.CANCELLED.withDescription("P closed before generation"), 8100);
-            }
-        }
-        @Override public void allocated(EngineScheduler.Request request) { acknowledge(this); }
-        @Override public void progressed(EngineScheduler.Request request) {
-            var progress = request.progress();
-            int elapsedUs = (int) Math.min(Integer.MAX_VALUE, (System.nanoTime() - started) / 1000);
-            var info = AuxInfoPB.newBuilder().setInputLen(input.getTokenIdsCount())
-                .setIterCount(progress.iterations() + 1).setPrefixLen(request.reused()).setTotalReuseLen(request.reused())
-                .setLocalReuseLen(request.reused()).setPdSep(true)
-                .setCostTimeUs(elapsedUs).setFirstTokenCostTimeUs(elapsedUs);
-            delivery.advance(input.getRequestId(), token, progress.generated(), info.build(), progress.finished());
-        }
-        @Override public void terminal(EngineScheduler.Request request, RequestFailure failure) {
-            ended(this, RpcErrors.status(failure), RpcErrors.code(failure));
-        }
-    }
+    void checkHealthy() { engine.checkHealthy(); }
 
     private void accept(Call call, GenerateRequestPB frame) {
         try {
@@ -140,6 +113,7 @@ final class DecodeRpcServer implements AutoCloseable {
         catch (StatusRuntimeException error) { stop(call, error.getStatus(), error.getStatus().getCode() == Status.Code.INVALID_ARGUMENT ? 605 : 0); }
             catch (RuntimeException error) { stop(call, Status.INTERNAL.withDescription("Decode frame failed: " + error.getMessage()), 0); }
     }
+
     private void validate(GenerateRequestPB request) {
         if (request.getStage() != RemoteStage.ALLOCATE || !request.hasInput() || request.getClientId().isBlank()
                 || request.getInput().getRequestId() != request.getRequestId())
@@ -152,15 +126,6 @@ final class DecodeRpcServer implements AutoCloseable {
                 || generation.getTimeoutMs() < 0 || generation.getMaxNewTokens() < 1 || generation.getMinNewTokens() < 0
                 || generation.getMinNewTokens() > generation.getMaxNewTokens() || generation.getNumBeams() < 0 || generation.getNumReturnSequences() < 0)
             throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid decode allocation settings"), 605);
-    }
-
-    private void acknowledge(Call call) {
-        synchronized (executionLock) {
-            if (!live(call)) return;
-            call.stage = Stage.ALLOCATED;
-        }
-        try { send(call, GenerateOutputsPB.newBuilder().setSupportsPrefillCompletion(true).build()); }
-        catch (RuntimeException error) { stop(call, Status.CANCELLED.withDescription("ALLOCATE acknowledgement failed"), 8100); }
     }
 
     private void startLoad(Call call) {
@@ -202,11 +167,39 @@ final class DecodeRpcServer implements AutoCloseable {
         return true;
     }
 
+    private void stop(Call call, Status status, long code) {
+        synchronized (executionLock) {
+            if (call.terminal) return;
+            if (call.request == null) ended(call, status, code);
+            else engine.abortRequest(call.request, RpcErrors.scheduling(status, code));
+        }
+    }
+
+    private void ended(Call call, Status status, long code) {
+        synchronized (executionLock) {
+            if (call.terminal) return;
+            call.terminal = true;
+            call.rpcCompleted.run();
+            if (status.getCode() == Status.Code.CANCELLED) recordCancellation.run();
+            if (call.transfer != null) call.transfer.cancel();
+            call.delivery.finish(status.isOk() ? null : RpcErrors.failure(status, code));
+        }
+    }
+
     private void send(Call call, GenerateOutputsPB output) {
         synchronized (executionLock) {
             if (call.terminal || call.response.isCancelled()) throw Status.CANCELLED.asRuntimeException();
             call.delivery.add(output);
         }
+    }
+
+    private void acknowledge(Call call) {
+        synchronized (executionLock) {
+            if (!live(call)) return;
+            call.stage = Stage.ALLOCATED;
+        }
+        try { send(call, GenerateOutputsPB.newBuilder().setSupportsPrefillCompletion(true).build()); }
+        catch (RuntimeException error) { stop(call, Status.CANCELLED.withDescription("ALLOCATE acknowledgement failed"), 8100); }
     }
 
     private void disconnected(Call call, Status status, long code) {
@@ -219,34 +212,127 @@ final class DecodeRpcServer implements AutoCloseable {
         }
     }
 
-    private void stop(Call call, Status status, long code) {
-        synchronized (executionLock) {
-            if (call.terminal) return;
-            if (call.request == null) ended(call, status, code);
-            else engine.abortRequest(call.request, RpcErrors.scheduling(status, code));
+    private enum Stage { ALLOCATING, ALLOCATED, LOADING, LOADED, GENERATING, FINISHING }
+
+    /**
+     * Tracks one Decode RPC through allocation, loading and generation.
+     */
+    private final class Call implements StreamObserver<GenerateRequestPB>, EngineScheduler.Listener {
+        final ServerCallStreamObserver<GenerateOutputsPB> response;
+        final GenerateResponseStream delivery;
+        final Runnable rpcCompleted;
+        final long started = System.nanoTime();
+        final long rpcDeadline;
+        GenerateInputPB input;
+        String client;
+        EngineScheduler.Request request;
+        volatile boolean terminal;
+        Stage stage = Stage.ALLOCATING;
+        SimulatedKvLoad.Execution transfer;
+        int token;
+
+        Call(ServerCallStreamObserver<GenerateOutputsPB> response, Context context) {
+            this.response = response;
+            rpcCompleted=trackRequest.get();
+            rpcDeadline = context.getDeadline() == null ? Long.MAX_VALUE
+                : RpcMessages.after(started, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
+            delivery = new GenerateResponseStream(transport, deadlines, TimeUnit.MINUTES.toMillis(10), ignored -> {});
+            delivery.attach(response, () -> {
+                boolean expired = context.getDeadline() != null && context.getDeadline().isExpired();
+                disconnected(this, expired ? Status.DEADLINE_EXCEEDED.withDescription("Decode RPC deadline expired")
+                    : Status.CANCELLED.withDescription("Decode RPC cancelled"), expired ? 603 : 8100);
+            });
         }
-    }
-    private void ended(Call call, Status status, long code) {
-        synchronized (executionLock) {
-            if (call.terminal) return;
-            call.terminal = true;
-            call.rpcCompleted.run();
-            if (status.getCode() == Status.Code.CANCELLED) recordCancellation.run();
-            if (call.transfer != null) call.transfer.cancel();
-            call.delivery.finish(status.isOk() ? null : RpcErrors.failure(status, code));
+        @Override public void onNext(GenerateRequestPB frame) { accept(this, frame); }
+        @Override public void onError(Throwable error) { disconnected(this, Status.CANCELLED.withDescription("Decode stream closed"), 8100); }
+        @Override public void onCompleted() {
+            synchronized (executionLock) {
+                if (stage != Stage.GENERATING && stage != Stage.FINISHING) stop(this, Status.CANCELLED.withDescription("P closed before generation"), 8100);
+            }
+        }
+        @Override public void allocated(EngineScheduler.Request request) { acknowledge(this); }
+        @Override public void progressed(EngineScheduler.Request request) {
+            var progress = request.progress();
+            int elapsedUs = (int) Math.min(Integer.MAX_VALUE, (System.nanoTime() - started) / 1000);
+            var info = AuxInfoPB.newBuilder().setInputLen(input.getTokenIdsCount())
+                .setIterCount(progress.iterations() + 1).setPrefixLen(request.reused()).setTotalReuseLen(request.reused())
+                .setLocalReuseLen(request.reused()).setPdSep(true)
+                .setCostTimeUs(elapsedUs).setFirstTokenCostTimeUs(elapsedUs);
+            delivery.advance(input.getRequestId(), token, progress.generated(), info.build(), progress.finished());
+        }
+        @Override public void terminal(EngineScheduler.Request request, RequestFailure failure) {
+            ended(this, RpcErrors.status(failure), RpcErrors.code(failure));
         }
     }
 
-    EngineScheduler.Status snapshot(long latestFinished) { return engine.status(latestFinished); }
-    void checkHealthy() { engine.checkHealthy(); }
-    @Override public void close() {
-        synchronized (executionLock) {
-            if (closed) return;
-            closed = true;
-            engine.close();
+    /**
+     * Simulates zero-time KV loading asynchronously and holds resources until it quiesces.
+     */
+    static final class SimulatedKvLoad implements AutoCloseable {
+        private final Object lock = new Object();
+        private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
+        private final Set<Execution> active = new HashSet<>();
+
+        private boolean closed;
+
+        /** Ownership transfers only on a successful return. The zero-time model executes asynchronously. */
+        public Execution submit(RequestState.Use use) {
+            Objects.requireNonNull(use);
+            synchronized (lock) {
+                if (closed) throw new IllegalStateException("Transfer executor is closed");
+                var execution = new Execution(use);
+                active.add(execution);
+                try { workers.execute(execution::run); }
+                catch (RuntimeException error) { active.remove(execution); throw error; }
+                return execution;
+            }
         }
-        transfer.close();
-        deadlines.shutdownNow();
-        transport.shutdown();
+
+        @Override public void close() {
+            synchronized (lock) {
+                if (!closed) {
+                    closed = true;
+                    active.forEach(Execution::cancel);
+                    workers.shutdown();
+                }
+            }
+            try {
+                if (!workers.awaitTermination(3, TimeUnit.SECONDS)) throw new IllegalStateException("KV transfer did not quiesce");
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted closing KV transfer", error);
+            }
+        }
+
+        public enum State { COMPLETED, CANCELLED, FAILED }
+
+        public record Outcome(State state, RuntimeException error) {}
+
+        /**
+         * Tracks cancellation and releases the KV reference before reporting completion.
+         */
+        public final class Execution {
+            private final RequestState.Use use;
+            private final CompletableFuture<Outcome> completion = new CompletableFuture<>();
+            private boolean cancelled, terminal;
+            private Execution(RequestState.Use use) { this.use = use; }
+            public CompletionStage<Outcome> completion() { return completion.minimalCompletionStage(); }
+            public boolean cancel() {
+                synchronized (lock) {
+                    if (terminal) return false;
+                    cancelled = true;
+                    return true;
+                }
+            }
+            private void run() {
+                State state;
+                synchronized (lock) { terminal = true; state = cancelled ? State.CANCELLED : State.COMPLETED; }
+                RuntimeException failure = null;
+                try { use.close(); }
+                catch (RuntimeException error) { state = State.FAILED; failure = error; }
+                synchronized (lock) { active.remove(this); }
+                completion.complete(new Outcome(state, failure));
+            }
+        }
     }
 }

@@ -330,7 +330,7 @@ protocol 供 Client、P 接入层和 ViT 共用媒体输入与 RPC；图片几�
 ViT 的终态分三步：VitScheduler 只完成已准备图片的计算阶段 Future，不依赖 VitCache；VitPreparation.Task 等待阶段结果，统一调用 VitCache.publish 发布成功/失败，随后移除任务、释放准入额度。VitCache 保留同 key 的共享结果条目、等待者和驻留淘汰，不再从 pending 数量推导执行额度。mm_inflight_inputs 来源于 Preparation 的在途任务数，包含发布尚未返回的任务。排队取消通过阶段 Future 返回给任务所有者；已经选入 Forward 的工作保留到实际完成。关闭同样由 Preparation 收口任务终态，Cache.close 仅关闭缓存驻留。
 
 
-SimulatedKvLoad 位于 service 包，负责 Decode 端零耗时的异步 KV 加载。Decode 通过 EngineLoop 提交加载结果后回复 LOAD ACK。Prefill 收到 ACK 后通过一次调度操作结束源请求，再释放源 KV 引用。 KvCacheManager/BlockTree 目前固定为 RTP Full-KV，保留已有模块，不声明仅替换 EngineScheduler 就能兼容任意后端，也不增加缓存抽象或新模块。
+DecodeRpcServer 内的 SimulatedKvLoad 负责 Decode 端零耗时的异步 KV 加载。Decode 通过 EngineLoop 提交加载结果后回复 LOAD ACK。Prefill 收到 ACK 后通过一次调度操作结束源请求，再释放源 KV 引用。 KvCacheManager/BlockTree 目前固定为 RTP Full-KV，保留已有模块，不声明仅替换 EngineScheduler 就能兼容任意后端，也不增加缓存抽象或新模块。
 
 共享指代码复用，不是不同实例共享资源。RtpRpcService 负责协议路由和查询结果编码。PrefillRpcServer 管理 P 的本地单 token、P/D 和显式组接入，DecodeRpcServer 管理 D 的协议会话。两者保留原生校验、输入准备、协议顺序和响应投递，通过 EngineScheduler.Request 句柄与 EngineLoop 交互。RpcMessages 转换完整输入和观测快照，RpcErrors 转换原生错误码；KV、队列、计算和本地完成条件由后端 EngineScheduler 管理。`AbstractRtpScheduler` 中的 RTP 控制事件定义生成许可和交接结果；共享 EngineScheduler 只提供扩展点，不定义所有后端必须经历的状态推进序列。RtpFifoScheduler 负责普通 FIFO 准入，RtpPrefillGroupScheduler 单独负责显式组调度；两者共用基类，无 gRPC/protobuf/执行器依赖。
 
@@ -414,7 +414,7 @@ WorkerStatus 按 real 输出 phase/is_waiting。活动任务的 execution_time_m
 
 ### 合成输出与 P/D 链路假设
 
-RPC GeneratedOutput 每请求只保存生成长度、发送游标、合成 token ID、固定大小的 AuxInfo、握手和终态标记。没有响应列表或逐轮 token 数组。可写时按两游标的差值即时构造增量 protobuf，单帧最多 4096 token，最后一份数据交付后再 onCompleted。未附着 Fetch、慢消费者和阻塞的 onNext 均不反向暂停计算；RPC 自身和网络栈的在途帧不计入这份固定大小状态。合并后的帧不保留原 Forward 边界，Client TTFT/TPOT 反映实际交付，计算侧指标仍按每轮原始事件统计。
+RPC GenerateResponseStream 每请求只保存生成长度、发送游标、合成 token ID、固定大小的 AuxInfo、握手和终态标记。没有响应列表或逐轮 token 数组。可写时按两游标的差值即时构造增量 protobuf，单帧最多 4096 token，最后一份数据交付后再 onCompleted。未附着 Fetch、慢消费者和阻塞的 onNext 均不反向暂停计算；RPC 自身和网络栈的在途帧不计入这份固定大小状态。合并后的帧不保留原 Forward 边界，Client TTFT/TPOT 反映实际交付，计算侧指标仍按每轮原始事件统计。
 
 P/D 输出链路假定健康，不用链路拥塞或发送失败模拟 D 性能。ALLOCATE/LOAD 未完成时仍必须满足协议与 KV 就绪；GENERATE 接受后，P 断连或取消该输出流不撤销 D 的计算，D 继续到 EOS、长度上限、自身 deadline 或节点关闭。输出不可达可能丢响应；不新增重传、落盘或故障恢复流程。Scheduler 的显式 finish/cancel 仍可终止请求。
 
