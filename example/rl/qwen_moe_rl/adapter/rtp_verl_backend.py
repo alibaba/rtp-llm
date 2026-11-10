@@ -1,6 +1,7 @@
 """FSDP-to-RTP transactions with one native TP replica per training rank group."""
 from __future__ import annotations
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -193,7 +194,29 @@ class RTPServerAdapter(BaseRollout):
 
     @torch.no_grad()
     async def update_weights(self,weights,global_steps=None,**kwargs):
+        # Private opt-in: own the reusable bounded staging workspace for the
+        # full transaction, including failure/iterator unwind. This wrapper is
+        # intentionally outside the source/ACK handling below.
+        digest_workspaces=[]
+        try:
+            return await self._update_weights_digest_impl(weights,global_steps,digest_workspaces,**kwargs)
+        finally:
+            import sys
+            in_flight_error=sys.exc_info()[0] is not None
+            for workspace in digest_workspaces:
+                try:workspace.close()
+                except BaseException:
+                    if not in_flight_error:raise
+
+    async def _update_weights_digest_impl(self,weights,global_steps,digest_workspaces,**kwargs):
         if kwargs.get('peft_config') is not None:raise NotImplementedError('RTP updates full model parameters')
+        profile=None
+        if os.environ.get('Q36_RTP_PROFILE_REFIT','0')=='1':
+            from q36_source_binding import verify_source
+            verify_source('q36_refit_timing')
+            from q36_refit_timing import RefitTimings
+            profile=RefitTimings(True)
+        stage=lambda name: profile.stage(name) if profile is not None else contextlib.nullcontext()
         _source()
         from rtp_llm.utils.cuda_ipc import CudaIpcV2
         control=None;failure=None;before=None;tensors=[];aliases={};source_digest=hashlib.sha256()
@@ -223,10 +246,11 @@ class RTPServerAdapter(BaseRollout):
         if self.is_leader:
             try:
                 if failure is not None:raise RuntimeError(failure)
-                control=await _new_control(self.replica_rank);before=(await control.status())[0]
-                if before.phase=='running':await control.pause()
-                await control.begin_update(global_step=int(global_steps or 0),
-                    max_buffer_bytes=int(os.environ.get('RLLM_RTP_UPDATE_BUFFER_BYTES',str(16*1024**3))))
+                with stage('rpc_setup_status_pause_begin'):
+                    control=await _new_control(self.replica_rank);before=(await control.status())[0]
+                    if before.phase=='running':await control.pause()
+                    await control.begin_update(global_step=int(global_steps or 0),
+                        max_buffer_bytes=int(os.environ.get('RLLM_RTP_UPDATE_BUFFER_BYTES',str(16*1024**3))))
                 setup={'error':None,'before_version':before.model_version}
             except BaseException as exc:setup={'error':repr(exc)}
         setup=self._broadcast(setup)
@@ -234,9 +258,10 @@ class RTPServerAdapter(BaseRollout):
         ack_bytes = 0
         last_progress = None
         # Exhaust this FSDP collective iterator even after a native transaction failure.
-        for name,tensor in weights:
+        for name,tensor in (profile.iterate(weights) if profile is not None else weights):
             if failure is not None:continue
-            source_names=self._gather(name)
+            with stage('tp_name_gather'):
+                source_names=self._gather(name)
             if len(set(source_names))!=1:
                 failure='trainer export name order differs across TP ranks: '+str(source_names)
                 continue
@@ -255,19 +280,37 @@ class RTPServerAdapter(BaseRollout):
                     raise RuntimeError(f'Export for {name} is on {tensor.device}, expected CPU or {local_device}')
                 # An offloaded FSDP2 export is staged on this TP worker's own GPU
                 # for this tensor only. Native readers retain the buffer until ACK.
-                value=tensor.detach().to(device=local_device, dtype=dtype).contiguous()
+                with stage('device_stage_cast_contiguous'):
+                    value=tensor.detach().to(device=local_device, dtype=dtype).contiguous()
                 self._unacknowledged_ipc=[value]
                 # Keep the packed expert in one host buffer for both SHA
                 # passes. Updating with prefix and bytes separately preserves the digest.
-                payload=memoryview(value.cpu().view(torch.uint8).numpy()).cast('B')
-                checksum=hashlib.sha256(payload).hexdigest()
-                item.update(shape=list(value.shape),dtype=str(value.dtype),sha256=checksum,metadata=CudaIpcV2.export_tensor(value))
-                source_digest.update(name.encode()+b'\0'+str(tuple(value.shape)).encode()+b'\0'+str(value.dtype).encode()+b'\0')
-                source_digest.update(payload)
-                source_bytes=payload.nbytes
-                del payload
+                if os.environ.get('Q36_REFIT_BOUNDED_DIGEST','0')=='1':
+                    from q36_source_binding import verify_source
+                    verify_source('q36_refit_bounded_digest_candidate')
+                    from q36_refit_bounded_digest_candidate import CudaDigestWorkspace
+                    if not digest_workspaces:
+                        digest_workspaces.append(CudaDigestWorkspace(local_device))
+                    with stage('bounded_device_to_host_and_sha256'):
+                        checksum,source_bytes=digest_workspaces[0].hash(value,name,source_digest)
+                else:
+                    with stage('device_to_host_for_hash'):
+                        payload=memoryview(value.cpu().view(torch.uint8).numpy()).cast('B')
+                    with stage('host_sha256'):
+                        checksum=hashlib.sha256(payload).hexdigest()
+                with stage('ipc_export_and_device_fence'):
+                    metadata=CudaIpcV2.export_tensor(value)
+                item.update(shape=list(value.shape),dtype=str(value.dtype),sha256=checksum,metadata=metadata)
+                if os.environ.get('Q36_REFIT_BOUNDED_DIGEST','0')!='1':
+                    with stage('host_sha256'):
+                        source_digest.update(name.encode()+b'\0'+str(tuple(value.shape)).encode()+b'\0'+str(value.dtype).encode()+b'\0')
+                        source_digest.update(payload)
+                    source_bytes=payload.nbytes
+                    del payload
             except BaseException as exc:item['error']=repr(exc)
-            rank_items=self._gather(item);outcome=None
+            with stage('tp_metadata_gather'):
+                rank_items=self._gather(item)
+            outcome=None
             if self.is_leader:
                 try:
                     errors=[x['error'] for x in rank_items if x['error'] is not None]
@@ -275,14 +318,18 @@ class RTPServerAdapter(BaseRollout):
                     for peer in rank_items:
                         if any(peer[k]!=rank_items[0][k] for k in ['name','shape','dtype','sha256']):
                             raise RuntimeError('TP source tensor identity differs across training ranks')
-                    await control.push_weight(name,[x['metadata'] for x in rank_items]);outcome={'error':None}
+                    with stage('rpc_push_through_native_ack'):
+                        await control.push_weight(name,[x['metadata'] for x in rank_items])
+                    outcome={'error':None}
                 except BaseException as exc:outcome={'error':repr(exc)}
-            outcome=self._broadcast(outcome)
+            with stage('tp_ack_broadcast'):
+                outcome=self._broadcast(outcome)
             if outcome['error'] is not None:failure=outcome['error'];continue
             # Native ACK synchronizes all reads and owns its pending group copies.
             self._unacknowledged_ipc=[];value=None
             tensors.append({k:item[k] for k in ['name','shape','dtype','sha256']})
             ack_bytes += source_bytes
+            if profile is not None:profile.record_bytes(source_bytes)
             now = time.monotonic()
             if self.is_leader and (last_progress is None or now-last_progress >= 30 or len(tensors) == len(self.hf_sources)):
                 progress = dict(step=int(global_steps or 0), acked_sources=len(tensors),
@@ -302,7 +349,9 @@ class RTPServerAdapter(BaseRollout):
                 if aliases:
                     embedding=next(x for x in tensors if x['name'].endswith('embed_tokens.weight'))
                     if aliases['lm_head.weight']!=embedding['sha256']:raise RuntimeError('tied head and embedding differ')
-                replies=await control.commit_update();committed=replies[0]
+                with stage('rpc_commit_through_native_ack'):
+                    replies=await control.commit_update()
+                committed=replies[0]
                 if committed.model_version==setup['before_version'] or committed.global_step!=int(global_steps or 0):
                     raise RuntimeError('RTP did not publish the expected new policy version')
                 if committed.received_weights!=len(tensors) or committed.applied_weights<=0:
@@ -339,4 +388,14 @@ class RTPServerAdapter(BaseRollout):
         if self.is_leader:
             _write_json(_audit_root()/f'rtp_sync_rank{self.replica_rank}_step{int(global_steps or 0)}.json',record)
             print(json.dumps({k:v for k,v in record.items() if k!='tensors'}),flush=True)
+        if profile is not None:
+            timing=profile.snapshot()
+            timing.update(global_rank=self.global_rank,tp_rank=self.tp_rank,replica_rank=self.replica_rank,
+                          global_step=int(global_steps or 0),leader=self.is_leader,
+                          status='committed',native_applied_weights=finish['applied_weights'])
+            try:
+                _write_json(_audit_root()/f'rtp_refit_timing_rank{self.global_rank}_step{int(global_steps or 0)}.json',timing)
+            except OSError as error:
+                print(f'RTP refit timing file unavailable: {error}', flush=True)
+            print('Q36_RTP_REFIT_TIMING '+json.dumps(timing,sort_keys=True),flush=True)
         self._unacknowledged_ipc=[]
