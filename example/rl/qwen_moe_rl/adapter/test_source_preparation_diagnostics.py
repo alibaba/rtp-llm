@@ -20,9 +20,9 @@ class SourceDiagnosticsTest(unittest.TestCase):
                  'error_type':'ValueError'}]
         got = scope['_source_preparation_failures'](rows)
         self.assertEqual(got, [{'rank':1,'name':'model.layers.2.foo','stage':'export_ipc','error_type':'RuntimeError',
-                                'ipc_details':{'source_is_view':True,'source_storage_offset':4}},
+                                'ipc_details':{'source_is_view':True,'source_storage_offset':4},'ipc_error':None},
                                {'rank':2,'name':'<invalid-name>','stage':'check_expected_name','error_type':'ValueError',
-                                'ipc_details':None}])
+                                'ipc_details':None,'ipc_error':None}])
         self.assertNotIn('secret', repr(got))
         self.assertNotIn('payload', repr(got))
 

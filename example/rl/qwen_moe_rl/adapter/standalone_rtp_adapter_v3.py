@@ -7,6 +7,7 @@ TP4/EP1, one rollout replica only; actual GPU qualification is mandatory.
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import time
@@ -21,11 +22,33 @@ from rtp_topology import preserve_fp32_source
 from verl.workers.rollout.base import BaseRollout
 
 
+def _safe_ipc_error(error):
+    """Expose only known static IPC/tool errors and a numeric driver status."""
+    line = str(error).splitlines()[0][:256] if str(error) else ''
+    if line == 'Ninja is required to load C++ extensions (pip install ninja to get it)':
+        return {'text': line, 'cuda_error_code': None}
+    match = re.fullmatch(r'cuMemGetAddressRange failed \(([0-9]{1,10})\); IPC v2 requires a CUDA allocation exportable by cudaIpcGetMemHandle', line)
+    if match:
+        return {'text': line, 'cuda_error_code': int(match.group(1))}
+    cuda_messages = {'invalid argument', 'operation not supported', 'invalid device pointer',
+                     'invalid resource handle', 'out of memory', 'unknown error',
+                     'invalid device ordinal', 'initialization error', 'invalid device context'}
+    for operation in ('cudaIpcGetMemHandle', 'cudaGetDeviceProperties'):
+        if any(line == operation + ': ' + message for message in cuda_messages):
+            return {'text': line, 'cuda_error_code': None}
+    static = {'IPC v2 requires a contiguous CUDA tensor',
+              'IPC v2 requires a nonempty tensor with at most 8 dimensions',
+              'IPC v2 supports BF16, FP16, or FP32 weights', 'Tensor exceeds its CUDA allocation'}
+    if line in static: return {'text': line, 'cuda_error_code': None}
+    return {'text': '[redacted: unrecognized IPC error]', 'cuda_error_code': None}
+
+
 def _source_preparation_failures(gathered):
     """Report only source identifiers and controlled failure metadata."""
     return [{'rank': rank, 'name': row.get('name') if isinstance(row.get('name'), str) else '<invalid-name>',
              'stage': row.get('error_stage'),
-             'error_type': row.get('error_type'), 'ipc_details': row.get('ipc_details')}
+             'error_type': row.get('error_type'), 'ipc_details': row.get('ipc_details'),
+             'ipc_error': row.get('ipc_error')}
             for rank, row in enumerate(gathered) if row.get('error')]
 
 
@@ -217,6 +240,7 @@ class StandaloneRTPAdapter(RTPServerAdapter):
                     item['error_stage'] = stage
                     item['error_type'] = type(error).__name__
                     if stage == 'export_ipc':
+                        item['ipc_error'] = _safe_ipc_error(error)
                         try:
                             item['ipc_details'] = {'source_is_view': tensor._base is not None,
                                 'source_storage_offset': tensor.storage_offset(),

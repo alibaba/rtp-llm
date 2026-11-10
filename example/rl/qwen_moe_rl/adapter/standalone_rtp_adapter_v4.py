@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import sys
 
-V3_SHA256 = '60c7fc2daeb73a85353b1ae4d03bf50dfd48ce82cd22c6fec0498df013453006'
+V3_SHA256 = 'c9ca358974ba6d3048a9d98d4c33bb2d0bc45652ba805b588f1690a28d449307'
 root = Path(os.environ['Q36_ADAPTER_DIR']).resolve(strict=True)
 source = root / 'standalone_rtp_adapter_v3.py'
 spec = importlib.machinery.PathFinder.find_spec('standalone_rtp_adapter_v3', sys.path)
