@@ -631,6 +631,15 @@ class V4Transformer(nn.Module):
             if routing_metadata is not None
             else {}
         )
+        if os.environ.get("DSV41_TRACE_CAPTURE"):
+            n = getattr(self, "_cap_trace_count", 0)
+            if n < 3:
+                self._cap_trace_count = n + 1
+                print(
+                    f"[cap] forward_decode stream={torch.cuda.current_stream().cuda_stream} "
+                    f"capturing={torch.cuda.is_current_stream_capturing()}",
+                    flush=True,
+                )
         layer_forward_range = _profiler.make_layer_forward_range()
         for layer_idx, layer in enumerate(self.layers):
             with layer_forward_range(layer_idx):
