@@ -82,8 +82,8 @@ def worker_setup():
             import q36_text_bridge_candidate
             q36_text_bridge_candidate.install_for_verl()
         elif fullname == 'rllm.trainer.verl.utils':
-            import q36_rllm_sync_compat
-            q36_rllm_sync_compat.install()
+            _locked_import('q36_rllm_sync_compat',
+                'c2c3c356f142923bc407db6ba2c479ae6f7dc56b357bdfeaa523f203691287b0').install()
         elif fullname == 'verl.checkpoint_engine':
             import q36_checkpoint_manager_compat
             q36_checkpoint_manager_compat.install(module)

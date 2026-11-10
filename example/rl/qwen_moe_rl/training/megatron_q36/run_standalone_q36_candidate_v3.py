@@ -17,7 +17,7 @@ from omegaconf import DictConfig, OmegaConf
 def propagate_runtime_env(runtime, source):
     """Carry qualified paths into Ray workers without forwarding GPU masks."""
     env = runtime.setdefault('env_vars', {})
-    selected = {'PYTHONPATH', 'LD_LIBRARY_PATH', 'LD_PRELOAD', 'CUDNN_HOME', 'NVTE_FLASH_ATTN',
+    selected = {'PYTHONPATH', 'LD_LIBRARY_PATH', 'LD_PRELOAD', 'CUDNN_HOME', 'CUDNN_PATH', 'NVTE_FLASH_ATTN',
                 'NVTE_FUSED_ATTN', 'NVTE_UNFUSED_ATTN', 'WARM_UP', 'MODEL_WARM_UP',
                 'LOAD_PYTHON_MODEL', 'ENABLE_CUDA_GRAPH', 'ENABLE_NATIVE_CUDA_GRAPH',
                 'ENABLE_LAYER_MICRO_BATCH', 'HF_HUB_OFFLINE', 'TRANSFORMERS_OFFLINE', 'PYTHONDONTWRITEBYTECODE',
