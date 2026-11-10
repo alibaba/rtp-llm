@@ -350,8 +350,13 @@ class CkptDatabase(BaseDatabase):
                 loader = PerExpertParallelLoader(stacked_key_config, **loader_kwargs)
             else:
                 loader = ParallelLoader(**loader_kwargs)
+            from rtp_llm.awi_telemetry import record_weight_placement
+
             try:
-                yield from loader.iterate_weights()
+                for item in loader.iterate_weights():
+                    if isinstance(item, (tuple, list)) and len(item) == 2:
+                        record_weight_placement(item[0], item[1])
+                    yield item
             finally:
                 loader.loader.close()
 
