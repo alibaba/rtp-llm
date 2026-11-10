@@ -1436,6 +1436,10 @@ def _collect_local_loop_strategy_shapes(
             continue
         weight_stack = getattr(strategy, weight_attr)
         scale_stack_t = getattr(strategy, scale_attr)
+        if scale_stack_t is None:
+            # Pre-SM100 LocalLoop keeps no packed DeepGEMM scales; its FP4
+            # GEMMs never JIT there, so there is nothing to warm.
+            continue
         if weight_stack.dim() != 3:
             continue
         expert_idx = torch.zeros((1,), dtype=torch.long, device=weight_stack.device)
