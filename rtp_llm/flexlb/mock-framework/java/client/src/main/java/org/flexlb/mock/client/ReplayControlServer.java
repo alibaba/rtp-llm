@@ -273,7 +273,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                     for (String peer : peers) {
                         if (unavailable.contains(peer) || states.containsKey(peer) && states.get(peer).done()) continue;
                         try {
-                            var state = JSON.treeToValue(call(peer, "worker/state", new Sequence(number)), State.class);
+                            var state = JSON.treeToValue(call(peer, "worker/state", new Sequence(number), 5_000), State.class);
                             states.put(peer, state);
                             if (!state.errors().isEmpty()) error(peer + ": " + state.errors().getFirst());
                         } catch (Exception failure) { error(peer + ": " + failure); unavailable.add(peer); }
