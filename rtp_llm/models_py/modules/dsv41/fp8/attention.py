@@ -21,11 +21,22 @@ from contextlib import contextmanager, suppress
 from functools import lru_cache
 from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 
-import deep_gemm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
+from rtp_llm.utils.module_util import has_module
+
+if has_module("deep_gemm"):
+    import deep_gemm
+    from deep_gemm.utils.layout import (
+        get_mn_major_tma_aligned_packed_ue8m0_tensor,
+    )
+else:
+    # ROCm wheels do not ship DeepGEMM. Every consumer of these symbols is
+    # gated on SM100 capability; hitting None here means a gate is missing.
+    deep_gemm = None
+    get_mn_major_tma_aligned_packed_ue8m0_tensor = None
 
 from rtp_llm.models_py.modules.dsv41._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,

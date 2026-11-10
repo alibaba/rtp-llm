@@ -3,7 +3,6 @@
 import weakref
 
 import torch
-from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.base.common.embedding import Embedding
@@ -31,6 +30,10 @@ class V41MXFP8Linear(torch.nn.Module):
         self.weight_scales = self.pack_scales(scales)
 
     def pack_scales(self, scales: torch.Tensor) -> torch.Tensor:
+        from deep_gemm.utils.layout import (
+            get_mn_major_tma_aligned_packed_ue8m0_tensor,
+        )
+
         if scales.shape != ((self.N + 31) // 32, (self.K + 31) // 32):
             raise ValueError(
                 f"Invalid V4.1 FP8 scales: {(self.N, self.K)}, {scales.shape}"
@@ -135,7 +138,7 @@ def merge_v41_qkv_weights(weights, q_weight, q_scale, kv_weight, kv_scale):
         return None
     merged_w = torch.cat((qw.view(torch.uint8), kw.view(torch.uint8))).view(qw.dtype)
     merged_s = torch.cat((qs.view(torch.uint8), ks.view(torch.uint8))).view(qs.dtype)
-    linear = V41MXFP8Linear(merged_w, merged_s)
+    linear = _v4_fp8_linear(merged_w, merged_s)
     weights[q_weight], weights[kv_weight] = merged_w.split((qw.shape[0], kw.shape[0]))
     weights[q_scale], weights[kv_scale] = merged_s.split((qs.shape[0], ks.shape[0]))
     return linear
@@ -148,6 +151,10 @@ def iter_fp8_linears() -> list:
 
 def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
     """V4 ckpt UE8M0 ``[N/128, K/128]`` to DeepGEMM int32-packed scale."""
+    from deep_gemm.utils.layout import (
+        get_mn_major_tma_aligned_packed_ue8m0_tensor,
+    )
+
     n_blk, _ = scale.shape
     n = n_blk * 128
     idx = torch.arange(n, device=scale.device) // 128
@@ -157,6 +164,14 @@ def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
 
 def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors."""
+    if torch.version.hip is not None and s.dtype == torch.float8_e8m0fnu:
+        # No DeepGEMM MXFP8/UE8M0 kernels exist for gfx942; dequantize the
+        # blocked FP8 weight exactly to BF16 once and run hipBLASLt GEMMs.
+        from rtp_llm.models_py.modules.dsv41.rocm_linear import (
+            V41RocmBf16Linear,
+        )
+
+        return V41RocmBf16Linear(w, s)
     if _is_v41_fp8_scale(w, s):
         return V41MXFP8Linear(w, s)
     raw_scale = s
@@ -175,7 +190,7 @@ def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
     s = weights[scale_key]
     if _is_v41_fp8_scale(w, s):
         return _v4_fp8_linear(w, s)
-    if s.dtype == torch.float8_e8m0fnu:
+    if s.dtype == torch.float8_e8m0fnu and torch.version.hip is None:
         s = _repack_v4_fp8_scale_to_int32(s)
         weights[scale_key] = s
     return _v4_fp8_linear(w, s)

@@ -2139,7 +2139,9 @@ class Engram(nn.Module):
                     )
                 pinned = None
                 identity = None
-                if target.type == "cuda":
+                # HIP reports device type "cuda"; its UVA pinning path needs
+                # cuda.bindings, so keep ROCm on the host-resident table.
+                if target.type == "cuda" and torch.version.hip is None:
                     parts = [str(root.resolve()), prefix]
                     for suffix in ("embed.weight", "embed.scale"):
                         path = root / weight_map[prefix + suffix]
@@ -2164,7 +2166,7 @@ class Engram(nn.Module):
                     scale_group=scale_group,
                     scale_identity=identity,
                 )
-            if target.type == "cuda":
+            if target.type == "cuda" and torch.version.hip is None:
                 with torch.cuda.device(target):
                     from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 

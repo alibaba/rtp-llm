@@ -52,7 +52,12 @@ def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tenso
     """F.linear(x, weight) with BF16 operands and FP32 accumulation/output."""
     leading_shape = x.shape[:-1]
     x_2d = x.reshape(-1, x.shape[-1])
-    out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight)
+    if _CUBLAS_GEMM_BF16_BF16_FP32 is not None:
+        out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight)
+    else:
+        # ROCm registers no bf16xbf16->fp32 GEMM op; the BF16->FP32 upcast is
+        # exact, so the FP32 accumulation/output contract is preserved.
+        out_2d = torch.mm(x_2d.float(), weight.t().float())
     return out_2d.reshape(*leading_shape, weight.shape[0])
 
 
