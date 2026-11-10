@@ -814,6 +814,7 @@ class FrontendServer(object):
                 prompt_token_ids=input_ids,
                 generate_config=generate_config,
                 headers=headers,
+                generate_env_config=self.py_env_configs.generate_env_config,
             )
             final = None
             async for response in stream:
