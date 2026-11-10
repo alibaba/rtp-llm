@@ -618,11 +618,17 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
     }
 }
 
-void PrefillRpcServer::publishPrefillCache(PrefillGenerateContext& prefill_context) {
+bool PrefillRpcServer::publishPrefillCache(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     auto stream = prefill_context.getStream();
     if (!stream || stream->hasError() || !stream->hasEvent(StreamEvents::GenerateDone)) {
-        return;
+        RTP_LLM_LOG_WARNING(
+            "request [%ld] prefill cache publication skipped: stream=%d has_error=%d generate_done=%d",
+            prefill_context.request_id,
+            static_cast<int>(stream != nullptr),
+            static_cast<int>(stream && stream->hasError()),
+            static_cast<int>(stream && stream->hasEvent(StreamEvents::GenerateDone)));
+        return false;
     }
     // A normal prefill is already terminal by the time decode has loaded its
     // KV. Wait for the scheduler commit and the output worker without
@@ -632,14 +638,14 @@ void PrefillRpcServer::publishPrefillCache(PrefillGenerateContext& prefill_conte
         RTP_LLM_LOG_WARNING("request [%ld] prefill cache publication deferred: lifecycle not terminal within %ld ms",
                             prefill_context.request_id,
                             kPrefillCachePublicationWaitMs);
-        return;
+        return false;
     }
     if (!stream->waitPendingAsyncBookkeeping(kPrefillCachePublicationWaitMs)) {
         RTP_LLM_LOG_WARNING(
             "request [%ld] prefill cache publication deferred: pending async bookkeeping not drained within %ld ms",
             prefill_context.request_id,
             kPrefillCachePublicationWaitMs);
-        return;
+        return false;
     }
     // Idempotent: the deferred-release worker may already have run. Publishing
     // here makes the completed prefix visible before the P->D response can let
@@ -649,6 +655,7 @@ void PrefillRpcServer::publishPrefillCache(PrefillGenerateContext& prefill_conte
                      prefill_context.request_id,
                      stream->seqLength(),
                      static_cast<int>(stream->isFinished()));
+    return true;
 }
 
 void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
@@ -737,16 +744,15 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             RTP_LLM_LOG_ERROR("request [%ld] generate output size is 0", request_id);
             break;
         }
-        bool finished_output = false;
-        for (int i = 0; i < response.flatten_output().finished_size(); ++i) {
-            finished_output = finished_output || response.flatten_output().finished(i);
-        }
-        // Publish only after decode reports completion and before its final
-        // response is forwarded. At this point the prefill stream is terminal,
-        // the prompt keys are final, and the next session cannot start yet.
-        if (finished_output && !prefill_context.cache_published) {
-            publishPrefillCache(prefill_context);
-            prefill_context.cache_published = true;
+        // Publish as soon as the prefill stream is terminal, before forwarding
+        // any decode output that could acknowledge the request. The previous
+        // version keyed only on the response's finished flag; this deployment
+        // forwards the final decode chunk without that flag, so the terminal
+        // stream event is the reliable signal. The call is idempotent and is
+        // retried on later chunks if the stream is not terminal yet.
+        if (!prefill_context.cache_published && prefill_context.getStream()
+            && prefill_context.getStream()->hasEvent(StreamEvents::GenerateDone)) {
+            prefill_context.cache_published = publishPrefillCache(prefill_context);
         }
         for (size_t i = 0; i < response.flatten_output().aux_info_size(); i++) {
             response.mutable_flatten_output()->mutable_aux_info(i)->set_pd_sep(true);
@@ -865,6 +871,12 @@ grpc::Status PrefillRpcServer::finishStream(PrefillGenerateContext& prefill_cont
     EXECUTE_STAGE_FUNC(remoteLoadCacheEnd, prefill_context);
     EXECUTE_STAGE_FUNC(remoteGenerate, prefill_context);
     EXECUTE_STAGE_FUNC(pollRemoteOutput, prefill_context);
+    // Last chance: if the terminal event only became visible after the output
+    // loop, publish before finishStream returns. The success/skip diagnostics
+    // make a silent no-op impossible.
+    if (!prefill_context.cache_published) {
+        prefill_context.cache_published = publishPrefillCache(prefill_context);
+    }
     prefill_context.stat_info.nextStage();
     return grpc::Status::OK;
 }

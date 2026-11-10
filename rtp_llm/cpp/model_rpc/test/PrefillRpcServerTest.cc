@@ -1032,6 +1032,14 @@ TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoReportsPrefillReuseForLongContex
 }
 
 TEST_F(PrefillRpcServerTest, pollRemoteOutputForwardsTokensWithoutAuxInfo) {
+    class TerminalStream final: public NormalGenerateStream {
+    public:
+        using NormalGenerateStream::NormalGenerateStream;
+        void markTerminal() {
+            reportEvent(StreamEvents::GenerateDone);
+            generate_status_->status.store(StreamState::FINISHED, std::memory_order_release);
+        }
+    };
     class DecodeService final: public RpcService::Service {
     public:
         grpc::Status RemoteGenerate(grpc::ServerContext*,
@@ -1039,7 +1047,9 @@ TEST_F(PrefillRpcServerTest, pollRemoteOutputForwardsTokensWithoutAuxInfo) {
             for (int token : {11, 12}) {
                 GenerateOutputsPB response;
                 auto*             flat = response.mutable_flatten_output();
-                flat->add_finished(token == 12);
+                // This deployment forwards the final chunk without the finished
+                // flag; publication must key on the terminal prefill event.
+                flat->add_finished(false);
                 auto* ids = flat->mutable_output_ids();
                 ids->set_data_type(TensorPB::INT32);
                 for (int dim : {1, 1, 1}) {
@@ -1085,8 +1095,10 @@ TEST_F(PrefillRpcServerTest, pollRemoteOutputForwardsTokensWithoutAuxInfo) {
     ModelConfig model;
     model.max_seq_len = 32;
     model.vocab_size  = 128;
-    context->setStream(std::make_shared<NormalGenerateStream>(
-        context->generate_input, model, RuntimeConfig{}, ResourceContext{}, nullptr));
+    auto stream = std::make_shared<TerminalStream>(
+        context->generate_input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+    stream->markTerminal();
+    context->setStream(stream);
     auto channel  = grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials());
     context->stub = RpcService::NewStub(channel);
     context->client_context = std::make_shared<grpc::ClientContext>();
@@ -1098,9 +1110,9 @@ TEST_F(PrefillRpcServerTest, pollRemoteOutputForwardsTokensWithoutAuxInfo) {
     EXPECT_FALSE(context->hasError());
     ASSERT_EQ(writer.outputs.size(), 2);
     EXPECT_FALSE(writer.outputs[0].flatten_output().finished(0));
-    EXPECT_TRUE(writer.outputs[1].flatten_output().finished(0));
+    EXPECT_FALSE(writer.outputs[1].flatten_output().finished(0));
     ASSERT_EQ(writer.published_at_write.size(), 2);
-    EXPECT_FALSE(writer.published_at_write[0]);
+    EXPECT_TRUE(writer.published_at_write[0]);
     EXPECT_TRUE(writer.published_at_write[1]);
     EXPECT_TRUE(context->cache_published);
     for (const auto& output : writer.outputs) {
