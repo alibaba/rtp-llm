@@ -25,6 +25,12 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_gather as _capture_all_gather,
+    all_reduce as _capture_all_reduce,
+)
+
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from .local_loop import LocalLoopStrategy
 
@@ -70,13 +76,9 @@ class RocmEPStrategy(RoutedExpertsStrategy):
         return self._local.get_eplb_weights()
 
     def _gather(self, tensor: torch.Tensor) -> torch.Tensor:
-        out = torch.empty(
-            (self._ep_world * tensor.shape[0],) + tuple(tensor.shape[1:]),
-            dtype=tensor.dtype,
-            device=tensor.device,
-        )
-        dist.all_gather_into_tensor(out, tensor.contiguous(), group=self._ep_group)
-        return out
+        # Route through the capture-aware ROCm collective wrapper.  Raw
+        # dist.all_gather_into_tensor crashes RCCL graph capture on MI300.
+        return _capture_all_gather(tensor.contiguous(), Group.TP)
 
     def _forward_chunk(
         self,
@@ -96,9 +98,13 @@ class RocmEPStrategy(RoutedExpertsStrategy):
             local_start=self.cfg.local_expert_start,
             local_end=self.cfg.local_expert_end,
         )
-        out = torch.empty((n, self.cfg.dim), dtype=torch.float32, device=x.device)
-        dist.reduce_scatter_tensor(out, y_all.contiguous(), group=self._ep_group)
-        return out
+        # RCCL has no capture-safe reduce-scatter wrapper here.  All-reduce the
+        # partial expert outputs and slice this rank's token block instead; the
+        # result is identical and the collective is graph-capturable.
+        y_sum = _capture_all_reduce(
+            y_all.contiguous(), Group.TP, inplace=False
+        )
+        return y_sum[self._ep_rank * n : (self._ep_rank + 1) * n]
 
     def forward(
         self,
