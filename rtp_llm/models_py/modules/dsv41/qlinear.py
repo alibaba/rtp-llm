@@ -142,6 +142,7 @@ class QuantizedLinear(nn.Module):
         self.weight = None
         self.scale = None
         self.scale_gemm = None
+        self._weight_bf16 = None
 
     def bind_fp4_weight(
         self,
@@ -150,6 +151,18 @@ class QuantizedLinear(nn.Module):
         scale_gemm: Optional[torch.Tensor] = None,
     ) -> None:
         """Bind FP4 weight plus a prepacked DeepGEMM scale."""
+        if torch.version.hip is not None:
+            # ROCm has no FP4 GEMM.  Materialize the exact dequantized BF16
+            # weight once, before graph capture; per-token dequant would both
+            # be far too slow and perform a host->device LUT copy inside the
+            # captured region.
+            self._weight_bf16 = _fp4_unpack_to_fp32(weight, scale).to(
+                torch.bfloat16
+            ).contiguous()
+            self.weight = None
+            self.scale = None
+            self.scale_gemm = None
+            return
         self.weight = weight
         self.scale = scale
         self.scale_gemm = scale_gemm
@@ -169,6 +182,8 @@ class QuantizedLinear(nn.Module):
         with fused fp{4,8}_gemm that never materializes the dequantized weight.
         """
         if self.storage == "fp4":
+            if self._weight_bf16 is not None:
+                return self._weight_bf16.to(out_dtype)
             return _fp4_unpack_to_fp32(self.weight, self.scale).to(out_dtype)
         if self.storage == "fp8":
             return _fp8_dequant_to_fp32(self.weight, self.scale).to(out_dtype)
@@ -226,6 +241,8 @@ class QuantizedLinear(nn.Module):
         if self.storage == "bf16":
             return F.linear(x, self.weight)
         if self.storage == "fp4":
+            if self._weight_bf16 is not None:
+                return F.linear(x.to(torch.bfloat16), self._weight_bf16).to(x.dtype)
             if torch.version.hip is not None:
                 return self._fp4_forward_torch(x)
             return self._fp4_forward_deepgemm(x)
