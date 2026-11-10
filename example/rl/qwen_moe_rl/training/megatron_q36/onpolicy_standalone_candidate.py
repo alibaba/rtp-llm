@@ -30,6 +30,31 @@ def _collect_gpu_identities(workers):
     return ray.get([worker.__ray_call__.remote(_worker_gpu_identity) for worker in workers])
 
 
+def _bind_claimed_pool(pool, role):
+    """Constrain every verl placement-group bundle to the claimed Ray node."""
+    import ray
+    from q36_4plus4_claim_loader import load_guard
+    if role not in ('training', 'rollout'):
+        raise ValueError('invalid 4+4 role')
+    expected = load_guard().load_claim()[role]
+    key = 'node:' + expected['ip']
+    alive = [row for row in ray.nodes() if row.get('Alive')]
+    owners = [row for row in alive if row.get('Resources', {}).get(key, 0) >= 0.0004]
+    if (len(owners) != 1 or owners[0].get('NodeID') != expected['node_id'] or
+        owners[0].get('NodeManagerAddress') != expected['ip'] or
+        any(row.get('Resources', {}).get(key, 0) > 0 for row in alive if row is not owners[0])):
+        raise RuntimeError('claimed Ray node resource is missing, ambiguous, or changed')
+    if pool.pgs is not None:
+        raise RuntimeError('cannot bind a resource pool after placement groups exist')
+    if pool.accelerator_type not in (None, key):
+        raise RuntimeError('existing pool accelerator resource conflicts with node binding')
+    # Pinned RayResourcePool.get_placement_groups adds accelerator_type as
+    # a 1e-4 custom resource to every one-GPU bundle. Ray's node:<IP>
+    # resource exists only on that node, including with PACK placement.
+    pool.accelerator_type = key
+    return key
+
+
 def audit_gpu_pools(trainer_workers, replicas, *, allowed_node_ips, expected_train,
                     expected_rollout, max_gpus=32, max_nodes=8,
                     require_separate_nodes=True, collect=_collect_gpu_identities):
@@ -134,6 +159,8 @@ def install(backend_module):
 
         self.resource_pool_manager.create_resource_pool()
         pool = self.resource_pool_manager.get_resource_pool(pool_role)
+        if os.environ.get('Q36_STRICT_4PLUS4_CLAIM') == '1':
+            _bind_claimed_pool(pool, 'training')
         # Resource-pool mapping may use ActorRollout; worker behavior must not.
         worker = backend_module.RayClassWithInitArgs(
             cls=self.role_worker_mapping[pool_role],

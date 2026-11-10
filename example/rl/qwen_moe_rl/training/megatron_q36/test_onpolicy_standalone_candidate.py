@@ -111,9 +111,11 @@ class OnPolicyStandaloneTest(unittest.TestCase):
                    validate_pool_ownership=lambda ownership, claim: self.events.append('pool-identity'))
         with patch.dict('os.environ', {'Q36_STRICT_4PLUS4_CLAIM': '1'}), \
              patch.dict(sys.modules, {'q36_4plus4_claim_loader': loader}), \
+             patch.object(candidate, '_bind_claimed_pool', lambda pool, role: self.events.append('trainer-node-bind')), \
              patch.object(candidate, '_collect_gpu_identities', lambda workers: [{'gpu_uuid': 'claimed'}]):
             self.backend._init_colocated_workers()
         self.assertLess(self.events.index('trainer-identity'), self.events.index('actor-init'))
+        self.assertLess(self.events.index('trainer-node-bind'), self.events.index(('group-pool', 'training-pool')))
         self.assertLess(self.events.index('actor-init'), self.events.index(('server', None, None)))
         self.assertIn('pool-identity', self.events)
 
@@ -123,6 +125,7 @@ class OnPolicyStandaloneTest(unittest.TestCase):
         loader = NS(load_guard=lambda: guard)
         with patch.dict('os.environ', {'Q36_STRICT_4PLUS4_CLAIM': '1'}), \
              patch.dict(sys.modules, {'q36_4plus4_claim_loader': loader}), \
+             patch.object(candidate, '_bind_claimed_pool', lambda pool, role: None), \
              patch.object(candidate, '_collect_gpu_identities', lambda workers: []):
             with self.assertRaisesRegex(RuntimeError, 'wrong GPU'):
                 self.backend._init_colocated_workers()
@@ -132,6 +135,27 @@ class OnPolicyStandaloneTest(unittest.TestCase):
     def test_install_is_idempotent(self):
         method = self.module.VerlBackend._init_colocated_workers
         self.assertIs(candidate.install(self.module), method)
+
+    def test_claimed_node_resource_binding_and_rejection(self):
+        claim = {'training': {'ip': '10.44.49.51', 'node_id': 'node1'},
+                 'rollout': {'ip': '10.44.33.31', 'node_id': 'node2'}}
+        nodes = [{'Alive': True, 'NodeID': row['node_id'], 'NodeManagerAddress': row['ip'],
+                  'Resources': {'node:' + row['ip']: 1.0, 'GPU': 4}} for row in claim.values()]
+        loader = NS(load_guard=lambda: NS(load_claim=lambda: claim))
+        ray = NS(nodes=lambda: nodes)
+        with patch.dict(sys.modules, {'q36_4plus4_claim_loader': loader, 'ray': ray}):
+            for role in ('training', 'rollout'):
+                pool = NS(pgs=None, accelerator_type=None)
+                key = candidate._bind_claimed_pool(pool, role)
+                self.assertEqual(key, 'node:' + claim[role]['ip'])
+                self.assertEqual(pool.accelerator_type, key)
+            with self.assertRaisesRegex(RuntimeError, 'after placement groups'):
+                candidate._bind_claimed_pool(NS(pgs=['already-created'], accelerator_type=None), 'training')
+            with self.assertRaisesRegex(RuntimeError, 'conflicts'):
+                candidate._bind_claimed_pool(NS(pgs=None, accelerator_type='accelerator_type:other'), 'training')
+            nodes[1]['Resources']['node:10.44.49.51'] = 1.0
+            with self.assertRaisesRegex(RuntimeError, 'ambiguous'):
+                candidate._bind_claimed_pool(NS(pgs=None, accelerator_type=None), 'training')
 
     def test_overlap_fails_before_sync(self):
         def collect(workers):

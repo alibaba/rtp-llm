@@ -29,6 +29,18 @@ StandaloneRTPAdapter = base.StandaloneRTPAdapter
 
 
 class StandaloneRTPReplica(base.StandaloneRTPReplica):
+    async def init_standalone(self, resource_pool=None):
+        if os.environ.get('Q36_STRICT_4PLUS4_CLAIM') == '1':
+            from onpolicy_standalone_candidate import _bind_claimed_pool
+            if resource_pool is None:
+                from verl.single_controller.ray.base import RayResourcePool
+                if self.nnodes != 1 or self.gpus_per_replica_node != 4:
+                    raise ValueError('strict 4+4 rollout requires one four-GPU replica')
+                resource_pool = RayResourcePool(process_on_nodes=[4], use_gpu=True,
+                    max_colocate_count=2, name_prefix=f'q36_rollout_{self.replica_rank}')
+            _bind_claimed_pool(resource_pool, 'rollout')
+        return await super().init_standalone(resource_pool=resource_pool)
+
     async def launch_servers(self):
         if os.environ.get('Q36_STRICT_4PLUS4_CLAIM') == '1':
             import asyncio

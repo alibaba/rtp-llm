@@ -107,6 +107,31 @@ class TransactionTest(unittest.TestCase):
             def numpy(self): return b'1234'
         return Tensor()
 
+    def test_strict_standalone_binds_rollout_before_worker_creation(self):
+        events = self.events
+        class Pool:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+        async def parent_init(replica, resource_pool=None):
+            events.append(('parent-init', resource_pool))
+        parent = self.module.base.StandaloneRTPReplica
+        parent.init_standalone = parent_init
+        self.addCleanup(delattr, parent, 'init_standalone')
+        binding = types.SimpleNamespace(_bind_claimed_pool=lambda pool, role: events.append(('bind', role, pool)))
+        base = types.SimpleNamespace(RayResourcePool=Pool)
+        replica = object.__new__(self.module.StandaloneRTPReplica)
+        replica.nnodes = 1
+        replica.gpus_per_replica_node = 4
+        replica.replica_rank = 0
+        with patch.dict(os.environ, {'Q36_STRICT_4PLUS4_CLAIM':'1'}), \
+             patch.dict(sys.modules, {'onpolicy_standalone_candidate':binding,
+                                      'verl.single_controller.ray.base':base}):
+            asyncio.run(replica.init_standalone())
+        self.assertEqual(events[0][:2], ('bind', 'rollout'))
+        self.assertEqual(events[1][0], 'parent-init')
+        self.assertIs(events[0][2], events[1][1])
+        self.assertEqual(events[1][1].kwargs['process_on_nodes'], [4])
+
     def make_control(self, fail=False):
         events = self.events
         class Control:

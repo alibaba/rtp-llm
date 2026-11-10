@@ -16,14 +16,14 @@ SOURCES = {
  'Q36_CODE_DIR': {
   'q36_4plus4_recipe.py': '3944fd0bb0c7fc613507f54006cdb1592fe67fbb37e5563825f6d61924b2f4cb',
   'run_standalone_q36_candidate_v3.py': '6378b814fed623fde292e7552165aecce1aa13893c7305e7e3bdbba5e54b20a1',
-  'onpolicy_standalone_candidate.py': '05b8eb35666a68dc031aa465a0e7fa90cf01ceca407746763f60b63c75dbf15d',
+  'onpolicy_standalone_candidate.py': '8c36ff1bb662fa5ba5177c1f4e17646664c81fe93790087f00d3c10178f468a8',
   'q36_4plus4_claim_loader.py': '0075f76555d41822bfd23d3879165aa754b0b0f19484f99ec3f5166dfbe0c5ac',
   'q36_4plus4_claim_guard.py': '8bbfcd82128c1c2ac4018ec1f9fd101547389523077acbbd4c3435c5321f9e0e',
   'q36_standalone_bootstrap_selector.py': '76917010ec8cf2782b4f0323b19811d109f48d27daabf5645be758fe2e117d9f',
   'standalone_bootstrap_v4.py': 'd3c993deb80505b578b97fd5222ff396dec4f0b5362dc6937aa503ff211e66a8'},
  'Q36_ADAPTER_DIR': {
   'standalone_rtp_adapter_v3.py': 'b849f17ab606e0554db3802eb43979dd10cedd64361cc8082f716c173cf64f5c',
-  'standalone_rtp_adapter_v4.py': '0e455e9e8e0b363c09cda22bcd674cdb4775784463e798c595c6c07b8e0d5e83',
+  'standalone_rtp_adapter_v4.py': '45bf62e56e7dbdc7955536aa083854d16db87774d7cfad3348090cc0ccba6afe',
   'rtp_cleanup.py': '4506fe79022d0d02f14118ee30d65f1a935a4bb63e51d538831287fb663bdb5b'},
  'Q36_DISAGG_CODE_DIR': {
   'verl_nixl_guarded.py': '72716bd1e687b8a005cf0400a7ec998c5e440937268a301c0cc47b47cba3f1c8',
