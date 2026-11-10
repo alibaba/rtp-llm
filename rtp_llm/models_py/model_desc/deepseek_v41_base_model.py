@@ -617,7 +617,15 @@ class DeepSeekV4Model(GptModelBase):
             getattr(init_resource, "max_batch_tokens_size", 0)
         )
         if self._materialized:
-            if self._v4_args.v41_config is not None:
+            # DeepGEMM/JIT warmup targets SM89+ kernels. On A100 (SM80) the
+            # model executes the reference dequant paths, so warming the
+            # native kernel family would fail before the first request.
+            warmup_capable = (
+                torch.cuda.is_available()
+                and getattr(torch.version, "hip", None) is None
+                and tuple(torch.cuda.get_device_capability()) >= (8, 9)
+            )
+            if self._v4_args.v41_config is not None and warmup_capable:
                 from rtp_llm.models_py.modules.dsv41.dsv41_kernel_jit_warmup import (
                     warmup_v41_decode_jit,
                     warmup_v41_prefill_jit,

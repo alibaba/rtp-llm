@@ -33,6 +33,30 @@ from rtp_llm.models_py.modules.dsv41.quant_layouts import (
 FP8_BLOCK = 128
 FP4_BLOCK = 32
 
+
+def device_capability() -> tuple[int, int]:
+    if not torch.cuda.is_available():
+        return (0, 0)
+    return tuple(torch.cuda.get_device_capability())
+
+
+def native_fp4_gemm_available() -> bool:
+    """True when the SM100 DeepGEMM FP8xFP4 kernels can execute here.
+
+    A100 (SM80) and other pre-Hopper devices have no FP8/FP4 tensor cores;
+    they must decode the original packed checkpoint values in the forward
+    path instead of calling this kernel family.
+    """
+    if getattr(torch.version, "hip", None) is not None:
+        return False
+    if device_capability()[0] != 10:
+        return False
+    try:
+        import deep_gemm
+    except Exception:
+        return False
+    return hasattr(deep_gemm, "fp8_fp4_gemm_nt")
+
 # FP4 e2m1 lookup: 4-bit raw -> fp32 value
 _FP4_LUT = torch.tensor(
     [
@@ -153,11 +177,14 @@ class QuantizedLinear(nn.Module):
         self.weight = weight
         self.scale = scale
         self.scale_gemm = scale_gemm
-        if self.scale_gemm is None:
+        # The packed int32 scale layout is a DeepGEMM/SM100 contract. Do not
+        # build it on devices that will decode through the reference path:
+        # that would import/JIT DeepGEMM kernels the device cannot run.
+        if self.scale_gemm is None and native_fp4_gemm_available():
             self.scale_gemm = prepare_fp4_weight_scale_for_deepgemm(
                 scale, self.out_features, self.in_features
             )
-        if self.scale_gemm.dtype != torch.int32:
+        if self.scale_gemm is not None and self.scale_gemm.dtype != torch.int32:
             raise TypeError(
                 f"expected packed FP4 scale int32, got {self.scale_gemm.dtype}"
             )
@@ -216,7 +243,13 @@ class QuantizedLinear(nn.Module):
         if self.storage == "bf16":
             return F.linear(x, self.weight)
         if self.storage == "fp4":
-            return self._fp4_forward_deepgemm(x)
+            if native_fp4_gemm_available():
+                return self._fp4_forward_deepgemm(x)
+            # SM<100: decode the original packed FP4 rows and UE8M0 block
+            # scales on the fly. Correctness reference; the grouped Triton
+            # path replaces this for throughput.
+            w = self.dequant_weight(out_dtype=x.dtype)
+            return F.linear(x, w)
         # FP8: dequant to x's dtype on the fly.
         w = self.dequant_weight(out_dtype=x.dtype)
         return F.linear(x, w)

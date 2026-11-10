@@ -38,6 +38,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
+from ...qlinear import native_fp4_gemm_available
 from ...quant_layouts import prepare_fp4_weight_scale_for_deepgemm
 from ..expert import Expert
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
@@ -121,18 +122,32 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         self._W2_s = stacked_routed["w2_s"]
         self._W3_w = stacked_routed["w3_w"]
         self._W3_s = stacked_routed["w3_s"]
-        self._W1_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W1_s, cfg.moe_inter_dim, cfg.dim, self._W1_s.shape[0]
-        )
-        self._W2_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W2_s, cfg.dim, cfg.moe_inter_dim, self._W2_s.shape[0]
-        )
-        self._W3_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W3_s, cfg.moe_inter_dim, cfg.dim, self._W3_s.shape[0]
-        )
-        self._W1_s_gemm_t = self._W1_s_gemm.transpose(-1, -2)
-        self._W2_s_gemm_t = self._W2_s_gemm.transpose(-1, -2)
-        self._W3_s_gemm_t = self._W3_s_gemm.transpose(-1, -2)
+        # Packed DeepGEMM scales are only valid where the SM100 grouped
+        # FP8xFP4 kernel exists. On A100 the reference decode path consumes
+        # the raw UE8M0 scales bound on each Expert.
+        native_fp4 = native_fp4_gemm_available()
+        if native_fp4:
+            self._W1_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W1_s, cfg.moe_inter_dim, cfg.dim, self._W1_s.shape[0]
+            )
+            self._W2_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W2_s, cfg.dim, cfg.moe_inter_dim, self._W2_s.shape[0]
+            )
+            self._W3_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W3_s, cfg.moe_inter_dim, cfg.dim, self._W3_s.shape[0]
+            )
+        else:
+            self._W1_s_gemm = self._W1_s
+            self._W2_s_gemm = self._W2_s
+            self._W3_s_gemm = self._W3_s
+        if native_fp4:
+            self._W1_s_gemm_t = self._W1_s_gemm.transpose(-1, -2)
+            self._W2_s_gemm_t = self._W2_s_gemm.transpose(-1, -2)
+            self._W3_s_gemm_t = self._W3_s_gemm.transpose(-1, -2)
+        else:
+            self._W1_s_gemm_t = None
+            self._W2_s_gemm_t = None
+            self._W3_s_gemm_t = None
 
         def _expert_at(global_idx: int) -> Optional[Expert]:
             if not cfg.local_expert_start <= global_idx < cfg.local_expert_end:
@@ -224,6 +239,7 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             topk_max_n = _topk_dispatch_max_n()
             if (
                 _bs1_fast_enabled()
+                and native_fp4_gemm_available()
                 and self.cfg.ep_size == 1
                 and (topk_max_n > 0)
                 and (T <= topk_max_n)

@@ -3,7 +3,13 @@
 import weakref
 
 import torch
-from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
+try:  # DeepGEMM is a platform dependency, not an import-time requirement.
+    from deep_gemm.utils.layout import (
+        get_mn_major_tma_aligned_packed_ue8m0_tensor,
+    )
+except Exception:  # pragma: no cover - CPU/import-only environments
+    get_mn_major_tma_aligned_packed_ue8m0_tensor = None
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.base.common.embedding import Embedding
@@ -21,6 +27,17 @@ class V41Embedding(Embedding):
         return hidden.reshape(*input.shape, hidden.shape[-1])
 
 
+def _native_fp8_gemm_available() -> bool:
+    """DeepGEMM FP8 kernels need SM89+; A100 (SM80) uses the reference path."""
+    if getattr(torch.version, "hip", None) is not None:
+        return False
+    if not torch.cuda.is_available():
+        return False
+    if get_mn_major_tma_aligned_packed_ue8m0_tensor is None:
+        return False
+    return tuple(torch.cuda.get_device_capability()) >= (8, 9)
+
+
 class V41MXFP8Linear(torch.nn.Module):
     """Native 32x32 checkpoint blocks, expanded to per-row MXFP8 scales."""
 
@@ -28,7 +45,26 @@ class V41MXFP8Linear(torch.nn.Module):
         super().__init__()
         self.weight = weight
         self.N, self.K = weight.shape
-        self.weight_scales = self.pack_scales(scales)
+        self._fallback = not _native_fp8_gemm_available()
+        self._raw_scales = scales if self._fallback else None
+        self._fallback_weight = None
+        self.weight_scales = None if self._fallback else self.pack_scales(scales)
+
+    def _dequant_weight(self) -> torch.Tensor:
+        """Decode the original 32x32 FP8 blocks to BF16 once, on device.
+
+        This is only reachable on pre-SM89 devices where the weights are
+        already resident; the Engram tables never pass through this class.
+        """
+        if self._fallback_weight is None:
+            rows = torch.arange(self.N, device=self.weight.device) // 32
+            cols = torch.arange(self.K, device=self.weight.device) // 32
+            scale = self._raw_scales.float().index_select(0, rows)
+            scale = scale.index_select(1, cols)
+            decoded = self.weight.float() * scale
+            self._fallback_weight = decoded.to(torch.bfloat16)
+            self._raw_scales = None
+        return self._fallback_weight
 
     def pack_scales(self, scales: torch.Tensor) -> torch.Tensor:
         if scales.shape != ((self.N + 31) // 32, (self.K + 31) // 32):
@@ -41,6 +77,15 @@ class V41MXFP8Linear(torch.nn.Module):
         )
 
     def _quantize_input(self, x: torch.Tensor):
+        if self._fallback:
+            # Keep the caller's BF16 tensor; forward_quantized detects this
+            # sentinel pair and decodes the resident FP8 blocks instead.
+            flat = (
+                x
+                if x.ndim == 2 and x.shape[1] == self.K and not x.requires_grad
+                else x.reshape(-1, self.K)
+            )
+            return flat.contiguous(), None
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
             sgl_per_token_group_quant_fp8,
         )
@@ -71,6 +116,21 @@ class V41MXFP8Linear(torch.nn.Module):
         remain closed for this linear. The caller owns the BF16 norm tensor.
         Input layout and disjoint BF16 output storage are caller preconditions.
         """
+        if self._fallback:
+            if x_q.dtype == torch.float8_e4m3fn:
+                raise RuntimeError(
+                    "A100 reference V41MXFP8Linear cannot consume a foreign FP8 "
+                    "activation; callers must use _quantize_input on this module"
+                )
+            shape = (*x_q.shape[:-1], self.N)
+            result = torch.nn.functional.linear(
+                x_q.reshape(-1, self.K),
+                self._dequant_weight().to(x_q.dtype),
+            ).reshape(shape)
+            if out is not None:
+                out.copy_(result)
+                return out
+            return result
         m = x_q.numel() // self.K
         shape = (*x_q.shape[:-1], self.N)
         output = (
@@ -103,6 +163,14 @@ class V41MXFP8Linear(torch.nn.Module):
     def forward(self, x: torch.Tensor, out=None):
         if x.numel() == 0:
             return out if out is not None else x.new_empty((*x.shape[:-1], self.N))
+        if self._fallback:
+            result = torch.nn.functional.linear(
+                x, self._dequant_weight().to(x.dtype)
+            )
+            if out is not None:
+                out.copy_(result)
+                return out
+            return result
         return self.forward_quantized(*self._quantize_input(x), out=out)
 
 
