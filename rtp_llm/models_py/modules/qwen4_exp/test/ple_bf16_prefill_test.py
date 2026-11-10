@@ -1,6 +1,5 @@
 """Whole-sequence BF16 PLE projections preserve every resumable page state."""
 
-import os
 import unittest
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -106,15 +105,14 @@ class PLEBF16PrefillTest(unittest.TestCase):
                         calls.append((tuple(x.shape), tuple(weight.shape)))
                         return original_linear(x, weight, *args, **kwargs)
 
-                    with patch.dict(
-                        os.environ, {"QWEN4_PLE_BF16_PREFILL": "0"}
+                    with patch.object(
+                        self.layer, "_bf16_prefill_enabled", return_value=False
                     ), patch.object(F, "linear", record_linear):
                         expected, expected_states = self.call(inputs)
                     self.assertEqual(len(calls), 2 * (length // 64))
                     self.assertTrue(all(shape[0] == (1, 64, 2560) for shape in calls))
                     calls.clear()
                     with (
-                        patch.dict(os.environ, {"QWEN4_PLE_BF16_PREFILL": "1"}),
                         patch.object(F, "linear", record_linear),
                         record_conv_launches() as conv_launches,
                     ):
@@ -145,11 +143,11 @@ class PLEBF16PrefillTest(unittest.TestCase):
                 with self.subTest(length=length):
                     inputs = list(self.inputs(length))
                     inputs[2] = None
-                    with patch.dict(os.environ, {"QWEN4_PLE_BF16_PREFILL": "0"}):
+                    with patch.object(
+                        self.layer, "_bf16_prefill_enabled", return_value=False
+                    ):
                         expected, expected_states = self.call(inputs)
-                    with patch.dict(
-                        os.environ, {"QWEN4_PLE_BF16_PREFILL": "1"}
-                    ), record_conv_launches() as conv_launches:
+                    with record_conv_launches() as conv_launches:
                         actual, actual_states = self.call(inputs)
                     self.assertEqual(
                         conv_launches, [(512 if length >= 8192 else 1024, 4, False)]
@@ -159,40 +157,36 @@ class PLEBF16PrefillTest(unittest.TestCase):
                     for actual_state, expected_state in zip(actual_states, expected_states):
                         self.assert_exact(actual_state, expected_state)
 
-    def test_default_off_and_unqualified_inputs_keep_original_route(self):
+    def test_default_on_and_unqualified_inputs_keep_original_route(self):
         hidden, embeddings, _, _ = self.inputs(128)
         enabled = self.layer._bf16_prefill_enabled
-        with patch.dict(os.environ):
-            os.environ.pop("QWEN4_PLE_BF16_PREFILL", None)
-            self.assertFalse(enabled(hidden, embeddings, 64))
-        with patch.dict(os.environ, {"QWEN4_PLE_BF16_PREFILL": "1"}):
-            self.assertTrue(enabled(hidden, embeddings, 64))
-            self.assertFalse(enabled(hidden, embeddings, 128))
-            self.assertFalse(enabled(hidden[:, :127], embeddings[:, :127], 64))
-            for length in (129, 32769):
-                self.assertFalse(
-                    enabled(
-                        hidden[:, :1].expand(1, length, 10240),
-                        embeddings[:, :1].expand(1, length, 2560),
-                        64,
-                    )
-                )
-            self.assertFalse(enabled(hidden[:, :, :-1], embeddings, 64))
-            self.assertFalse(enabled(hidden, embeddings[:, :, :-1], 64))
-            self.assertFalse(enabled(hidden.float(), embeddings, 64))
-            self.assertFalse(enabled(hidden, embeddings.float(), 64))
+        self.assertTrue(enabled(hidden, embeddings, 64))
+        self.assertFalse(enabled(hidden, embeddings, 128))
+        self.assertFalse(enabled(hidden[:, :127], embeddings[:, :127], 64))
+        for length in (129, 32769):
             self.assertFalse(
-                enabled(hidden.expand(2, -1, -1), embeddings.expand(2, -1, -1), 64)
+                enabled(
+                    hidden[:, :1].expand(1, length, 10240),
+                    embeddings[:, :1].expand(1, length, 2560),
+                    64,
+                )
             )
-            with patch.object(self.layer, "key_proj", self.layer.key_proj.float()):
+        self.assertFalse(enabled(hidden[:, :, :-1], embeddings, 64))
+        self.assertFalse(enabled(hidden, embeddings[:, :, :-1], 64))
+        self.assertFalse(enabled(hidden.float(), embeddings, 64))
+        self.assertFalse(enabled(hidden, embeddings.float(), 64))
+        self.assertFalse(
+            enabled(hidden.expand(2, -1, -1), embeddings.expand(2, -1, -1), 64)
+        )
+        with patch.object(self.layer, "key_proj", self.layer.key_proj.float()):
+            self.assertFalse(enabled(hidden, embeddings, 64))
+        with patch.object(self.layer, "value_projection", SimpleNamespace()):
+            self.assertFalse(enabled(hidden, embeddings, 64))
+        for capability in ((8, 0), (10, 0), (12, 0)):
+            with patch.object(
+                torch.cuda, "get_device_capability", return_value=capability
+            ):
                 self.assertFalse(enabled(hidden, embeddings, 64))
-            with patch.object(self.layer, "value_projection", SimpleNamespace()):
-                self.assertFalse(enabled(hidden, embeddings, 64))
-            for capability in ((8, 0), (10, 0), (12, 0)):
-                with patch.object(
-                    torch.cuda, "get_device_capability", return_value=capability
-                ):
-                    self.assertFalse(enabled(hidden, embeddings, 64))
 
 
 if __name__ == "__main__":

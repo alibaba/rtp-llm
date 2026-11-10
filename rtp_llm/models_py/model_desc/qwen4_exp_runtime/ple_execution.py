@@ -1,6 +1,5 @@
 """PLE page planning, embedding lookup and execution for one model."""
 
-import os
 from collections.abc import Mapping
 from typing import Any
 
@@ -114,7 +113,7 @@ class PLEExecution:
         *,
         graph_mode,
     ):
-        if os.environ.get("QWEN4_PLE_DECODE_PLAN", "0") != "1":
+        if not ids.is_cuda or torch.version.hip is not None:
             return None
         if graph_mode:
             if not getattr(state_inputs, "is_exact_cuda_graph_batch", False):

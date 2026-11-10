@@ -1,6 +1,5 @@
 """Exercise PLE planner dispatch through the serving runtime, not just the leaf."""
 
-import os
 import unittest
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
@@ -27,8 +26,6 @@ _WIDTH = 10240
 _STATE = 9
 _CONTEXT = 2
 _PAGES = 3
-_PLAN = "QWEN4_PLE_DECODE_PLAN"
-_TAIL = "QWEN4_PLE_DECODE_TAIL"
 _S1_BATCHES = (1, 17, 64, 65, 128, 256, 257, 1025)
 
 
@@ -205,6 +202,16 @@ class _RuntimeFixture:
 
 
 @contextmanager
+def _reference_s1_dispatch():
+    """Exercise the unfused paths without adding production configuration."""
+    with (
+        patch.object(PLEExecution, "_try_decode_plan", return_value=None),
+        patch.object(ple_conv_triton, "try_ple_conv", return_value=None),
+    ):
+        yield
+
+
+@contextmanager
 def _record_dispatch(module, name):
     original = getattr(module, name)
     calls = []
@@ -241,13 +248,12 @@ class PLEDecodeExpansionTest(unittest.TestCase):
             with self.subTest(batch=batch):
                 fixture = _RuntimeFixture(batch, 1, target=False)
                 before = fixture.snapshot()
-                with patch.dict(os.environ, {_PLAN: "0", _TAIL: "0"}):
+                with _reference_s1_dispatch():
                     expected = fixture.forward()
                     expected_pools = fixture.snapshot()
                 fixture.restore(before)
                 del before
                 with (
-                    patch.dict(os.environ, {_PLAN: "1", _TAIL: "1"}),
                     _record_dispatch(
                         ple_decode_plan_triton, "try_plan_decode_cache"
                     ) as plan,
@@ -270,8 +276,7 @@ class PLEDecodeExpansionTest(unittest.TestCase):
         before = fixture.snapshot()
 
         def capture(enabled, initial):
-            value = str(int(enabled))
-            with patch.dict(os.environ, {_PLAN: value, _TAIL: value}):
+            with nullcontext() if enabled else _reference_s1_dispatch():
                 warmup_stream = torch.cuda.Stream()
                 warmup_stream.wait_stream(torch.cuda.current_stream())
                 with torch.cuda.stream(warmup_stream):
@@ -291,7 +296,7 @@ class PLEDecodeExpansionTest(unittest.TestCase):
                     plan, [({"graph_mode": True}, True)] if enabled else []
                 )
                 self.assertEqual(
-                    conv, [({"roll_state": True}, True)] if enabled else []
+                    conv, [({"roll_state": True}, enabled)]
                 )
             return graph, output
 
@@ -398,12 +403,9 @@ class PLEDecodeExpansionTest(unittest.TestCase):
                 fixture = _RuntimeFixture(batch, width, target=True)
                 before = fixture.snapshot()
                 expected, timeline, history = fixture.reference()
-                with (
-                    patch.dict(os.environ, {_PLAN: "1"}),
-                    _record_dispatch(
-                        ple_commit_triton, "gather_target_read_state"
-                    ) as gather,
-                ):
+                with _record_dispatch(
+                    ple_commit_triton, "gather_target_read_state"
+                ) as gather:
                     actual = fixture.forward()
                 self.assertEqual(gather, [({"strict": True}, True)])
                 self.assert_exact(actual, expected)
@@ -428,10 +430,9 @@ class PLEDecodeExpansionTest(unittest.TestCase):
         fixture = _RuntimeFixture(65, 2, target=True)
         fixture.context_table[0, 0] = 0
         before = fixture.snapshot()
-        with (
-            patch.dict(os.environ, {_PLAN: "1"}),
-            _record_dispatch(ple_commit_triton, "gather_target_read_state") as gather,
-        ):
+        with _record_dispatch(
+            ple_commit_triton, "gather_target_read_state"
+        ) as gather:
             with self.assertRaisesRegex(RuntimeError, "unallocated logical page"):
                 fixture.forward()
         self.assertEqual(gather, [({"strict": True}, False)])
@@ -447,8 +448,11 @@ class PLEDecodeExpansionTest(unittest.TestCase):
         )
         before = fixture.snapshot()
         errors = []
-        for enabled in ("0", "1"):
-            with patch.dict(os.environ, {_PLAN: enabled}):
+        for enabled in (False, True):
+            reference = patch.object(
+                ple_commit_triton, "gather_target_read_state", return_value=None
+            )
+            with nullcontext() if enabled else reference:
                 with self.assertRaisesRegex(
                     RuntimeError, "unallocated logical page"
                 ) as error:
@@ -536,19 +540,18 @@ class PLEDecodeExpansionTest(unittest.TestCase):
     def _check_target_graph(self, batch, width):
         fixture = _RuntimeFixture(batch, width, target=True, graph=True)
         coordinator = fixture.coordinator
-        with patch.dict(os.environ, {_PLAN: "1"}):
-            warmup_stream = torch.cuda.Stream()
-            warmup_stream.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(warmup_stream):
-                fixture.forward()
-            coordinator.clear_speculative_target_graph_capture()
-            graph = torch.cuda.CUDAGraph()
-            with _record_dispatch(
-                ple_commit_triton, "gather_target_read_state"
-            ) as gather:
-                with torch.cuda.graph(graph):
-                    output = fixture.forward()
-            self.assertEqual(gather, [({"strict": False}, True)])
+        warmup_stream = torch.cuda.Stream()
+        warmup_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup_stream):
+            fixture.forward()
+        coordinator.clear_speculative_target_graph_capture()
+        graph = torch.cuda.CUDAGraph()
+        with _record_dispatch(
+            ple_commit_triton, "gather_target_read_state"
+        ) as gather:
+            with torch.cuda.graph(graph):
+                output = fixture.forward()
+        self.assertEqual(gather, [({"strict": False}, True)])
         coordinator.save_speculative_target_graph_capture(fixture.batch)
         accepted = torch.arange(batch, device="cuda", dtype=torch.int32) % width + 1
         for step, start in enumerate((63, 127)):

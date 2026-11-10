@@ -4,7 +4,6 @@ The C++ executor owns TP consensus. Captured stages retain their addresses in
 ``graph_registry``; releasing an active commit only releases its undo record.
 """
 
-import os
 from collections.abc import Callable, Mapping
 from typing import Optional
 
@@ -126,7 +125,7 @@ class PLETransactionCoordinator:
             )
 
         gathered = None
-        if graph_capture or os.environ.get("QWEN4_PLE_DECODE_PLAN", "0") == "1":
+        if hyper_states.is_cuda and torch.version.hip is None:
             from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
                 gather_target_read_state,
             )

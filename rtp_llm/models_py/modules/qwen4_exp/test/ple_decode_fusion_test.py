@@ -1,6 +1,5 @@
 """Exact SM90 decode tail, eager validity and Graph replay contracts."""
 
-import os
 import unittest
 from unittest.mock import patch
 
@@ -49,16 +48,13 @@ class PLEDecodeFusionTest(unittest.TestCase):
             )
 
     def test_tail_output_and_all_nine_state_rows(self):
-        flag = "QWEN4_PLE_DECODE_TAIL"
         for batch in (1, 16, 32, 64, 65, 128, 256):
             with self.subTest(batch=batch):
                 fixture = TailFixture(batch)
                 before = fixture.initial.clone()
-                with patch.dict(os.environ):
-                    os.environ.pop(flag, None)
-                    with patch.object(ple_conv_triton, "try_ple_conv", side_effect=AssertionError):
-                        expected = fixture.call()
-                with patch.dict(os.environ, {flag: "1"}), patch.object(
+                with patch.object(ple_conv_triton, "try_ple_conv", return_value=None):
+                    expected = fixture.call()
+                with patch.object(
                     ple_conv_triton, "try_ple_conv", wraps=ple_conv_triton.try_ple_conv
                 ) as launch:
                     actual = fixture.call()
@@ -80,21 +76,37 @@ class PLEDecodeFusionTest(unittest.TestCase):
 
     def test_tail_graph_reads_new_values(self):
         fixture = TailFixture(3)
-        flag = "QWEN4_PLE_DECODE_TAIL"
-        with patch.dict(os.environ, {flag: "1"}):
-            fixture.call()
-            torch.cuda.synchronize()
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                actual = fixture.call()
+        fixture.call()
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = fixture.call()
         for _ in range(2):
             fixture.initial.normal_()
             fixture.normed.normal_()
             fixture.gated.normal_()
-            with patch.dict(os.environ, {flag: "0"}):
+            with patch.object(ple_conv_triton, "try_ple_conv", return_value=None):
                 expected = fixture.call()
             graph.replay()
             self.assert_exact(actual, expected)
+
+    def test_tail_unqualified_device_keeps_original_route(self):
+        fixture = TailFixture(3)
+        with patch.object(ple_conv_triton, "try_ple_conv", return_value=None):
+            expected = fixture.call()
+        with patch.object(torch.cuda, "get_device_capability", return_value=(8, 0)):
+            self.assertIsNone(
+                ple_conv_triton.try_ple_conv(
+                    fixture.gated,
+                    fixture.normed,
+                    fixture.initial,
+                    fixture.conv_weight,
+                    3,
+                    roll_state=True,
+                )
+            )
+            actual = fixture.call()
+        self.assert_exact(actual, expected)
 
     def test_cache_plan_cross_page_independent_tables(self):
         lengths = torch.tensor([63, 64, 65, 128], device="cuda", dtype=torch.int32)

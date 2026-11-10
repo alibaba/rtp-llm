@@ -1,5 +1,4 @@
 import math
-import os
 from contextlib import contextmanager
 from typing import List, Optional
 
@@ -603,10 +602,9 @@ class Qwen4ExpPLELayer(nn.Module):
         return grouped_rms_norm(x, gamma, self.hidden_size, self.norm_eps)
 
     def _bf16_prefill_enabled(self, hyper_states, embeddings, page_size):
-        """Opt in to the measured single-request SM90 BF16 projection path."""
+        """Select the qualified single-request SM90 BF16 projection path."""
         return (
-            os.environ.get("QWEN4_PLE_BF16_PREFILL", "0") == "1"
-            and page_size == 64
+            page_size == 64
             and hyper_states.is_cuda
             and torch.version.hip is None
             and hyper_states.shape[0] == 1
@@ -1010,7 +1008,7 @@ class Qwen4ExpPLELayer(nn.Module):
         gated_value, gated_value_normed = self._gated_values(
             hyper_state, token_history_step, embeddings=embeddings
         )
-        if os.environ.get("QWEN4_PLE_DECODE_TAIL", "0") == "1":
+        if hyper_state.is_cuda and torch.version.hip is None:
             from .ple_conv_triton import try_ple_conv
 
             fused = try_ple_conv(
