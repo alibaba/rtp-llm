@@ -86,14 +86,15 @@ def _select_ep8():
 
 def worker_setup():
     _select_ep8()
-    import standalone_bootstrap_v3
-    standalone_bootstrap_v3.worker_setup()
+    from q36_standalone_bootstrap_selector import select_bootstrap
+    select_bootstrap().worker_setup()
 
 
 def install_driver():
     _select_ep8()
-    import standalone_bootstrap_v3
-    standalone_bootstrap_v3.install_driver()
+    from q36_standalone_bootstrap_selector import select_bootstrap
+    selected = select_bootstrap()
+    selected.install_driver()
     from rllm.trainer.verl import ray_runtime_env
     original = ray_runtime_env.get_ppo_ray_runtime_env
     if getattr(original, '_q36_ep8_worker', False):
@@ -102,7 +103,7 @@ def install_driver():
     @functools.wraps(original)
     def runtime():
         result = original()
-        if result.get('worker_process_setup_hook') != 'standalone_bootstrap_v3.worker_setup':
+        if result.get('worker_process_setup_hook') != selected.__name__ + '.worker_setup':
             raise RuntimeError('unexpected standalone worker setup chain')
         result['worker_process_setup_hook'] = 'q36_ep8_worker_bootstrap_candidate.worker_setup'
         result.setdefault('env_vars', {}).pop('CUDA_VISIBLE_DEVICES', None)

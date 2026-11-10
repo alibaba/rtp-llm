@@ -70,8 +70,8 @@ def validate_cluster(ray, allowed, expected_session, actual_session):
 @hydra.main(config_path='pkg://rllm.trainer.config', config_name='unified', version_base=None)
 def main(config: DictConfig):
     allowed = validate(config)
-    import standalone_bootstrap_v3
-    standalone_bootstrap_v3.install_driver()
+    from q36_standalone_bootstrap_selector import select_bootstrap
+    select_bootstrap().install_driver()
     import ray
     from rllm.data import Dataset
     from rllm.trainer import AgentTrainer
