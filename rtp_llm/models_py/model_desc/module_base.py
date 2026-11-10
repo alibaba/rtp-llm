@@ -139,6 +139,8 @@ class GptModelBase(nn.Module):
         is_cuda_graph: bool = False,
         cuda_graph_selection_mode: Optional[str] = None,
     ) -> AttentionImpl | dict[str, AttentionImpl]:
+        if __import__("os").environ.get("DSV41_TRACE_CAPTURE"):
+            print(f"[cap] prepare_fmha_impl enter graph={is_cuda_graph} mode={cuda_graph_selection_mode}", flush=True)
         attention_inputs = get_attention_inputs_value(inputs)
         if isinstance(attention_inputs, Mapping):
             fmha_group_tags = self._get_fmha_group_tags()
