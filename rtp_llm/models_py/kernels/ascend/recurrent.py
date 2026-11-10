@@ -99,6 +99,78 @@ def _fused_recurrent_decode_device(
     return out.reshape(batch, 1, *out.shape[1:]).to(q.dtype), initial_state
 
 
+_TOKENS_ACTUAL_SEQ_LENGTHS_CACHE: dict[tuple[str, int, int], torch.Tensor] = {}
+
+
+def _tokens_actual_seq_lengths(
+    device: torch.device, batch: int, token_count: int
+) -> torch.Tensor:
+    """``[0, T, T, ...]`` cuSeqlens-style metadata for a T-token step.
+
+    Cached per (device, batch, token_count) so aclgraph capture records a
+    stable address (host-built tensors would H2D-sync during capture).
+    """
+
+    key = (str(device), batch, token_count)
+    cached = _TOKENS_ACTUAL_SEQ_LENGTHS_CACHE.get(key)
+    if cached is None:
+        cached = torch.cat([
+            torch.zeros(1, dtype=torch.int32, device=device),
+            torch.full((batch,), token_count, dtype=torch.int32, device=device),
+        ])
+        _TOKENS_ACTUAL_SEQ_LENGTHS_CACHE[key] = cached
+    return cached
+
+
+def _fused_recurrent_tokens_device(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float,
+    initial_state: torch.Tensor,
+    block_map: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    seq_size_per_block: int,
+    token_count: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Multi-token (target-verify, T = k + 1 <= 8) step, single AscendC launch.
+
+    The kernel keeps the recurrence in FP32 across the T tokens and writes one
+    BF16 snapshot per token page, so only the first write page is seeded from
+    the committed page. Device-side page gathering and cached cuSeqlens keep
+    the step capture-safe.
+    """
+
+    from rtp_llm.models_py.kernels.ascend.paged_state import (
+        seed_state_segment,
+        speculative_state_indices,
+    )
+
+    ascendc = _get_ascendc_ops()
+    batch = q.shape[0]
+    read_idx, write_idxs = speculative_state_indices(
+        block_map, sequence_lengths, int(seq_size_per_block), token_count
+    )
+    seed_state_segment(initial_state, read_idx, write_idxs[0])
+    # (batch, T) -> batch-major flat token order expected by the operator.
+    state_indices = torch.stack(write_idxs, dim=1).reshape(-1)
+    result = ascendc.npu_recurrent_gated_delta_rule(
+        q.reshape(-1, *q.shape[2:]).to(torch.bfloat16),
+        k.reshape(-1, *k.shape[2:]).to(torch.bfloat16),
+        v.reshape(-1, *v.shape[2:]).to(torch.bfloat16),
+        initial_state,
+        beta=beta.reshape(-1, beta.shape[-1]).to(torch.bfloat16),
+        scale=float(scale),
+        actual_seq_lengths=_tokens_actual_seq_lengths(q.device, batch, token_count),
+        ssm_state_indices=state_indices.to(torch.int32),
+        g=g.reshape(-1, g.shape[-1]).float(),
+    )
+    out = result[0] if isinstance(result, (tuple, list)) else result
+    return out.reshape(batch, token_count, *out.shape[1:]).to(q.dtype), initial_state
+
+
 def _resolve_state_pages(
     block_map: Optional[torch.Tensor],
     sequence_lengths: Optional[torch.Tensor],
@@ -237,20 +309,24 @@ def fused_recurrent_gated_delta_rule(
         q = l2norm_fwd(q)
         k = l2norm_fwd(k)
 
-    # Standard decode (one token per sequence): device-metadata path shared by
-    # eager and aclgraph capture — no D2H, single AscendC consumer.  Multi-
-    # token speculative decode (T <= 8) keeps the host-metadata path below,
-    # which is eager-only (target-verify never runs inside the decode graph).
+    # Device-metadata path shared by eager and aclgraph capture (single- and
+    # multi-token alike); the host-metadata fallback below only serves
+    # non-2-D block maps.
     if (
-        token_count == 1
+        token_count >= 1
         and block_map is not None
         and sequence_lengths is not None
         and block_map.ndim == 2
         and block_map.shape[0] == batch
     ):
-        return _fused_recurrent_decode_device(
+        if token_count == 1:
+            return _fused_recurrent_decode_device(
+                q, k, v, g, beta, scale, initial_state,
+                block_map, sequence_lengths, int(seq_size_per_block),
+            )
+        return _fused_recurrent_tokens_device(
             q, k, v, g, beta, scale, initial_state,
-            block_map, sequence_lengths, int(seq_size_per_block),
+            block_map, sequence_lengths, int(seq_size_per_block), token_count,
         )
 
     read_pages, write_pages = _resolve_state_pages(

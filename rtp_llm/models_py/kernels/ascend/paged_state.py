@@ -51,6 +51,36 @@ def decode_state_indices(
     return read_idx, write_idx
 
 
+def speculative_state_indices(
+    block_map: torch.Tensor,
+    sequence_lengths_plus_1: torch.Tensor,
+    seq_size_per_block: int,
+    token_count: int,
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    """Gather the read page and per-token write pages for a T-token step.
+
+    Multi-token variant of :func:`decode_state_indices` (target verify, T =
+    K+1); same read/write page semantics. Independent ``(batch,)`` device
+    tensors keep the step aclgraph-capturable and each index contiguous for
+    the triton page-row migration.
+    """
+
+    length = sequence_lengths_plus_1.reshape(-1).to(torch.int64)
+    max_col = block_map.shape[1]
+    read_col = ((length - 2).clamp_min(0) // seq_size_per_block).clamp(max=max_col - 1)
+    write_col0 = (length - 1).clamp_min(0) // seq_size_per_block
+    read_idx = block_map.gather(1, read_col.view(-1, 1)).squeeze(1)
+    write_idxs = []
+    for t in range(token_count):
+        # Out-of-range entries become the null block (0), the engine's
+        # reserved page.
+        col = (write_col0 + t).clamp(min=0, max=max_col - 1)
+        page = block_map.gather(1, col.view(-1, 1)).squeeze(1)
+        in_range = (write_col0 + t) < max_col
+        write_idxs.append(torch.where(in_range, page, torch.zeros_like(page)))
+    return read_idx, write_idxs
+
+
 def paged_row_view(seg_view: torch.Tensor) -> tuple[torch.Tensor, int, int]:
     """Derive a 2D page-row view ``[pages, page_stride]`` from a segment view.
 
@@ -107,4 +137,9 @@ def seed_state_segment(
     migrate_state_rows(seg_view, src, write_idx)
 
 
-__all__ = ["decode_state_indices", "paged_row_view", "seed_state_segment"]
+__all__ = [
+    "decode_state_indices",
+    "speculative_state_indices",
+    "paged_row_view",
+    "seed_state_segment",
+]

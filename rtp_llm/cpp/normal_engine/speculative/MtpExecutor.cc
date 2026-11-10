@@ -985,6 +985,19 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             // dspark use DSparkModelRole to call commit func, and token_per_bs is different
             // so another model is required
             if (enable_cuda_graph || is_dspark_) {
+#if USING_ASCEND
+                // Same wrapper as CUDA; the only difference is DSpARK's
+                // CUDA-only commit role being rejected.
+                RTP_LLM_CHECK_WITH_INFO(!is_dspark_,
+                                        "[speculative decoding] DSpARK is not supported on Ascend");
+                RTP_LLM_LOG_INFO("[speculative decoding] Ascend: creating draft prefill model");
+                sp_prefill_draft_model_.reset(new PyWrappedModel(model_params,
+                                                                  params.py_sp_model,
+                                                                  true,
+                                                                  false,
+                                                                  DSparkModelRole::NONE,
+                                                                  draft_graph_allowed));
+#else
                 RTP_LLM_LOG_INFO("[speculative decoding] creating draft prefill model");
                 // Ordinary MTP captures a prefill graph. DSpARK keeps the same
                 // runtime slot but constructs a gamma+1 decode-graph commit wrapper.
@@ -996,6 +1009,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                        is_dspark_ ? DSparkModelRole::COMMIT : DSparkModelRole::NONE,
                                        draft_graph_allowed,
                                        dspark_prefill_commit_only_));
+#endif
             }
         }
         break;  // NOTE: only support one mtp model now
