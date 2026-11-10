@@ -3,7 +3,7 @@
   "capture_duration_seconds": 300,
   "avg_qps": 1054.56,
   "avg_input_tokens": 90192.02,
-  "cache_key_block_size_tokens": 512,
+  "theoretical_hit_rate_block_size_tokens": 512,
   "theoretical_prefix_hit_rate_pct": 86.97,
   "theoretical_prefix_hit_rate_last_minute_pct": 93.07
 }
