@@ -16,6 +16,7 @@ public:
     struct Analysis {
         long double trustedBacklogLatencyWeightedSumMs = 0.0L;
         int64_t trustedBacklogInflight = 0;
+        double minimumTrustedBacklogLatencyMs = std::numeric_limits<double>::infinity();
         int64_t trustedInflight = 0;
         size_t trustedUnknownBusyNodeCount = 0;
         double targetInflight = 0.0;

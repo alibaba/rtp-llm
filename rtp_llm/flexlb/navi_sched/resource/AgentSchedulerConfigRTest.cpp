@@ -29,6 +29,34 @@ TEST(AgentSchedulerConfigRTest, testRetiredLearningRateConfigCannotBeEnabled)
     EXPECT_EQ(before.agentConfigHash, masterConfig.get().agentConfigHash);
 }
 
+TEST(AgentSchedulerConfigRTest, testMinimumLatencyAdmissionCanBeToggled)
+{
+    SchedulerConfigR masterConfig;
+    EXPECT_EQ("latency", masterConfig.get().config.overloadControlStrategy);
+    const auto update = [&](const std::string &patch) {
+        SchedulerConfigR::Request request;
+        request.update = true;
+        request.configJson = patch;
+        SchedulerConfigResponseDataPtr response;
+        bool waitingForAgents = false;
+        EXPECT_TRUE(masterConfig.processRequest(request, response, waitingForAgents));
+        EXPECT_TRUE(response && response->accepted);
+        EXPECT_FALSE(waitingForAgents);
+    };
+    update(R"({"overload_control_strategy":"min_latency"})");
+    EXPECT_EQ("min_latency", masterConfig.get().config.overloadControlStrategy);
+    update(R"({"queue_overload_start_cycle_multiplier":12})");
+    EXPECT_EQ("min_latency", masterConfig.get().config.overloadControlStrategy);
+    EXPECT_EQ(12, masterConfig.get().config.queueOverloadStartCycleMultiplier);
+    update(R"({"overload_control_strategy":"post_cost_latency"})");
+    EXPECT_EQ("post_cost_latency", masterConfig.get().config.overloadControlStrategy);
+    update(R"({"queue_overload_start_cycle_multiplier":13})");
+    EXPECT_EQ("post_cost_latency", masterConfig.get().config.overloadControlStrategy);
+    EXPECT_EQ(13, masterConfig.get().config.queueOverloadStartCycleMultiplier);
+    update(R"({"overload_control_strategy":"latency"})");
+    EXPECT_EQ("latency", masterConfig.get().config.overloadControlStrategy);
+}
+
 TEST(AgentSchedulerConfigRTest, testServiceConfigCarriesRuntimeParameters)
 {
     NaviSchedConfig serviceConfig;

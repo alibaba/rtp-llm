@@ -44,7 +44,7 @@ Master 字段在 Master 内生效，Agent 字段通过已有的 Master->Agent �
   max_wait_schedule_time_ms           调度批次最多等待的时间，单位毫秒。
   queue_overload_start_cycle_multiplier  开始过载限流的排队周期倍数，0 表示关闭。
   queue_overload_full_cycle_multiplier   达到满限流的排队周期倍数。
-  overload_control_strategy           execution_utilization（默认）或 latency；设置延迟阈值自动选择 latency。
+  overload_control_strategy           execution_utilization（默认）、latency（平均积压）、min_latency（最小可信积压）或 post_cost_latency（选址后按目标组排队）。
   execution_utilization_global_scaling 整集群聚合 running/waiting 后放缩，默认 false。
   execution_utilization_target        等效 Prefill 执行占比目标，默认 1.10（110%）。
   execution_utilization_kp            PI 比例系数，默认 0.05。

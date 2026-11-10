@@ -411,9 +411,11 @@ private:
     std::vector<size_t> _responseDeliveryFailedIndexes;
     std::vector<NaviSchedQueueOverloadRandomDecision> _queueOverloadRandomDecisions;
     bool _queueOverloadEvaluated = false;
+    bool _queueOverloadAfterCost = false;
     bool _allColdUtilizationAdmission = false;
     bool _executionUtilizationAdmission = false;
     double _queueOverloadAveragePredictedLatencyMs = 0.0;
+    double _queueOverloadAdmissionPredictedLatencyMs = 0.0;
     double _queueOverloadDropProbability = 0.0;
     int64_t _queueOverloadScheduleCycleMs = 0;
     int64_t _queueOverloadStartCycleMultiplier = 0;

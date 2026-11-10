@@ -153,6 +153,10 @@ ColdStartRoutingPlan buildRoutingPlan(
             plan.trustedNodes.emplace_back(nodeIndex);
             plan.analysis.trustedInflight += inflight;
             if (!unknownBusyBacklog) {
+                if (std::isfinite(backlogLatencyMs) && backlogLatencyMs >= 0.0) {
+                    plan.analysis.minimumTrustedBacklogLatencyMs =
+                        std::min(plan.analysis.minimumTrustedBacklogLatencyMs, backlogLatencyMs);
+                }
                 const auto backlogRequestCount =
                     node.usesUnifiedLatencyPrediction()
                         ? std::max(inflight,

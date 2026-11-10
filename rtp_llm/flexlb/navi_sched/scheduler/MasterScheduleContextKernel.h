@@ -21,6 +21,7 @@ class MasterScheduleContextData;
 class MasterScheduleContextKernel : public navi::Kernel {
     friend class ::NaviSchedResourceTest;
     friend class ScheduleReplayRunner;
+    friend class MasterScheduleResultKernel;
 
 public:
     static const std::string KERNEL_ID;
@@ -70,6 +71,8 @@ private:
     ClusterExecutionUtilization _clusterExecutionUtilization;
     ExecutionUtilizationController _executionUtilizationController;
     bool _executionUtilizationLimitEnabled = false;
+    bool _useMinimumBacklogForAdmission = false;
+    bool _useSelectedQueueForAdmission = false;
     ExecutionUtilizationController::Config _executionUtilizationConfig;
     double _averageExecutionUtilization = 0.0;
     size_t _executionUtilizationReportingNodes = 0;
@@ -104,6 +107,9 @@ public:
     void def(navi::KernelDefBuilder &builder) const override;
     navi::ErrorCode compute(navi::KernelComputeContext &ctx) override;
     static void recordReplayAdmission(NaviSchedScheduleContext &context);
+    static void applySelectedQueueAdmission(NaviSchedScheduleContext &context,
+                                            MasterScheduleR &scheduleResource,
+                                            const std::function<uint64_t()> &randomDraw = {});
 
 protected:
     struct FrozenExecutionInputAudit {

@@ -144,6 +144,8 @@ void SchedulerConfigR::Config::Jsonize(JsonWrapper &json)
 bool SchedulerConfigR::Config::valid() const
 {
     if ((overloadControlStrategy != "latency" &&
+         overloadControlStrategy != "min_latency" &&
+         overloadControlStrategy != "post_cost_latency" &&
          overloadControlStrategy != "execution_utilization") ||
         !executionUtilization.valid() || !cost.valid() || maxWaitScheduleCount == 0 ||
         maxWaitScheduleTimeMs < 10 ||
@@ -1001,7 +1003,9 @@ bool SchedulerConfigR::applyPatch(const Config &current, const std::string &conf
         for (auto &[name, value] : patch) {
             merged[name] = std::move(value);
         }
-        if (patch.find("overload_control_strategy") == patch.end() &&
+        if (current.overloadControlStrategy != "min_latency" &&
+            current.overloadControlStrategy != "post_cost_latency" &&
+            patch.find("overload_control_strategy") == patch.end() &&
             (patch.find("queue_overload_start_cycle_multiplier") != patch.end() ||
              patch.find("queue_overload_full_cycle_multiplier") != patch.end())) {
             merged["overload_control_strategy"] = std::string("latency");

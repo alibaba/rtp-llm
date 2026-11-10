@@ -14,6 +14,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <optional>
 #include <tuple>
 #include <unordered_set>
 #include <unordered_map>
@@ -88,6 +89,10 @@ navi::ErrorCode MasterScheduleContextKernel::compute(navi::KernelComputeContext 
         const auto schedulerConfig = _schedulerConfigR->get();
         _executionUtilizationLimitEnabled =
             schedulerConfig.config.overloadControlStrategy == "execution_utilization";
+        _useMinimumBacklogForAdmission =
+            schedulerConfig.config.overloadControlStrategy == "min_latency";
+        _useSelectedQueueForAdmission =
+            schedulerConfig.config.overloadControlStrategy == "post_cost_latency";
         if (_executionUtilizationConfig.globalScaling !=
             schedulerConfig.config.executionUtilization.globalScaling) {
             _executionUtilizationController.reset();
@@ -500,6 +505,14 @@ bool MasterScheduleContextKernel::prepareAdmission(
         if (allCold) {
             return true;
         }
+        if (_useSelectedQueueForAdmission) {
+            updateExecutionUtilization(context, false);
+            context._queueOverloadAfterCost = true;
+            context._queueOverloadScheduleCycleMs = _maxWaitScheduleTimeMs;
+            context._queueOverloadStartCycleMultiplier = _queueOverloadStartCycleMultiplier;
+            context._queueOverloadFullCycleMultiplier = _queueOverloadFullCycleMultiplier;
+            return true;
+        }
     }
     return applyQueueOverloadLimit(contextData, randomDraw);
 }
@@ -569,6 +582,7 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
     context._queueOverloadRandomDecisions.clear();
     context._queueOverloadEvaluated = false;
     context._queueOverloadAveragePredictedLatencyMs = 0.0;
+    context._queueOverloadAdmissionPredictedLatencyMs = 0.0;
     context._queueOverloadDropProbability = 0.0;
     context._queueOverloadScheduleCycleMs = _maxWaitScheduleTimeMs;
     context._queueOverloadStartCycleMultiplier = _queueOverloadStartCycleMultiplier;
@@ -591,11 +605,16 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
             ? static_cast<double>(coldStartAnalysis.trustedBacklogLatencyWeightedSumMs /
                                   coldStartAnalysis.trustedBacklogInflight)
             : 0.0;
+    const auto minimumPredictedLatencyMs = coldStartAnalysis.minimumTrustedBacklogLatencyMs;
+    const auto admissionPredictedLatencyMs =
+        _useMinimumBacklogForAdmission && std::isfinite(minimumPredictedLatencyMs)
+            ? minimumPredictedLatencyMs
+            : averagePredictedLatencyMs;
     auto dropProbability =
         executionUtilizationMode
             ? 0.0
             : calculateQueueOverloadDropProbability(
-                  averagePredictedLatencyMs, _maxWaitScheduleTimeMs,
+                  admissionPredictedLatencyMs, _maxWaitScheduleTimeMs,
                   _queueOverloadStartCycleMultiplier, _queueOverloadFullCycleMultiplier);
     if (executionUtilizationMode) {
         dropProbability = _executionUtilizationController.probability();
@@ -603,6 +622,10 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
     }
     context._queueOverloadEvaluated = true;
     context._queueOverloadAveragePredictedLatencyMs = averagePredictedLatencyMs;
+    context._queueOverloadAdmissionPredictedLatencyMs = admissionPredictedLatencyMs;
+    if (context._replay && _useMinimumBacklogForAdmission && !executionUtilizationMode) {
+        context._replay->schedulerInfo["queue_overload_minimum_latency"] = true;
+    }
     context._queueOverloadDropProbability = dropProbability;
     const auto requestCount = context.requestCount();
     if (dropProbability <= 0.0) {
@@ -649,7 +672,7 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
                 return false;
             }
             context._decisions[storageIndex].predictedQueueLatencyMs =
-                averagePredictedLatencyMs;
+                admissionPredictedLatencyMs;
             continue;
         }
         NaviSchedScheduleContext::DeferredResponse deferred;
@@ -658,7 +681,7 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
         deferred.decision.scheduleId = context._scheduleId;
         deferred.decision.scheduleTimeUs = context._scheduleTimeUs;
         deferred.decision.reason = "rate_limited";
-        deferred.decision.predictedQueueLatencyMs = averagePredictedLatencyMs;
+        deferred.decision.predictedQueueLatencyMs = admissionPredictedLatencyMs;
         context._deferredResponses.emplace_back(std::move(deferred));
     }
     if (routed) {
@@ -680,10 +703,10 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
     context._queueOverloadRejectedRequestCount = rejectedRequestCount;
     NAVI_KERNEL_LOG(DEBUG,
                     "overload limit evaluated, executionUtilizationMode [%d], "
-                    "averagePredictedLatencyMs [%.3f], dropProbability [%.6f], "
+                    "averagePredictedLatencyMs [%.3f], admissionPredictedLatencyMs [%.3f], dropProbability [%.6f], "
                     "requests [%lu], rejected [%lu]",
                     static_cast<int>(executionUtilizationMode), averagePredictedLatencyMs,
-                    dropProbability, requestCount, rejectedRequestCount);
+                    admissionPredictedLatencyMs, dropProbability, requestCount, rejectedRequestCount);
     return routed || !context._requests.empty();
 }
 
@@ -1214,12 +1237,88 @@ bool MasterScheduleResultKernel::prepareContext(NaviSchedScheduleContext &contex
     }
     const auto preparedUs = autil::TimeUtility::monotonicTimeUs();
     context._resultPrepareUs = preparedUs - resultBeginUs;
+    if (context._queueOverloadAfterCost) {
+        applySelectedQueueAdmission(context, *_masterScheduleR);
+    }
     logAdmissionPredictions(context);
     _masterScheduleR->recordColdStartRouting(context._coldStartRoutingStats);
     context.attachLatencyModelGlobals(*_masterLatencyModelR);
     context._scheduleRequestCompletion.reset();
     context._resultAuditUs = autil::TimeUtility::monotonicTimeUs() - preparedUs;
     return true;
+}
+
+void MasterScheduleResultKernel::applySelectedQueueAdmission(
+    NaviSchedScheduleContext &context, MasterScheduleR &scheduleResource,
+    const std::function<uint64_t()> &randomDraw)
+{
+    if (!context._queueOverloadAfterCost || context._queueOverloadEvaluated) {
+        return;
+    }
+    struct BatchAdmission {
+        double probability;
+        bool rejected;
+    };
+    std::vector<std::optional<BatchAdmission>> admissionByNode(context.nodeCount());
+    size_t evaluated = 0;
+    size_t rejected = 0;
+    double totalQueueMs = 0.0;
+    double totalProbability = 0.0;
+    for (size_t index = 0; index < context._decisions.size(); ++index) {
+        auto &decision = context._decisions[index];
+        const auto nodeIndex = context._selectedNodeIndexes[index];
+        if (decision.reason != "cost_selected" || nodeIndex >= admissionByNode.size()) {
+            continue;
+        }
+        const auto queueMs = decision.predictedQueueLatencyMs;
+        auto &admission = admissionByNode[nodeIndex];
+        if (!admission) {
+            const auto probability = MasterScheduleContextKernel::calculateQueueOverloadDropProbability(
+                queueMs, context._queueOverloadScheduleCycleMs,
+                context._queueOverloadStartCycleMultiplier, context._queueOverloadFullCycleMultiplier);
+            uint64_t sample = 0;
+            bool drop = probability >= 1.0;
+            if (probability > 0.0 && probability < 1.0) {
+                thread_local multi_call::RandomGenerator randomGenerator(
+                    autil::TimeUtility::currentTimeInMicroSeconds());
+                sample = randomDraw ? randomDraw() : randomGenerator.get();
+                drop = static_cast<double>(sample) / std::numeric_limits<uint64_t>::max() < probability;
+            }
+            // One dispatch batch per node shares a queue prediction and a batch ID.
+            admission = BatchAdmission{probability, drop};
+            if (context._replay && probability > 0.0 && probability < 1.0) {
+                context._queueOverloadRandomDecisions.push_back(
+                    {index, sample, probability, !drop});
+            }
+        }
+        ++evaluated;
+        if (std::isfinite(queueMs)) {
+            totalQueueMs += queueMs;
+        }
+        totalProbability += admission->probability;
+        if (admission->rejected) {
+            ++rejected;
+            context._selectedNodeIndexes[index] = NaviSchedScheduleContext::INVALID_NODE_INDEX;
+            decision.reason = "rate_limited";
+            decision.target = {};
+            decision.batchId = 0;
+            decision.expectedBatchSize = 0;
+            decision.predictedCacheHitTokenCount = 0;
+            decision.predictedExecutionLatencyMs = 0.0;
+            decision.latencyPrediction.reset();
+        }
+    }
+    if (evaluated == 0) {
+        return;
+    }
+    context._queueOverloadEvaluated = true;
+    context._queueOverloadRequestCount = evaluated;
+    context._queueOverloadRejectedRequestCount = rejected;
+    context._queueOverloadAveragePredictedLatencyMs = totalQueueMs / evaluated;
+    context._queueOverloadAdmissionPredictedLatencyMs = totalQueueMs / evaluated;
+    context._queueOverloadDropProbability = totalProbability / evaluated;
+    scheduleResource.recordQueueOverload(evaluated, rejected,
+        context._queueOverloadAdmissionPredictedLatencyMs, context._queueOverloadDropProbability);
 }
 
 void MasterScheduleResultKernel::recordReplayAdmission(NaviSchedScheduleContext &context)
@@ -1265,8 +1364,11 @@ void MasterScheduleResultKernel::recordReplayAdmission(NaviSchedScheduleContext 
             context._coldStartRoutingStats.minimumRampedTargetInflight;
         schedulerInfo["cold_start_evaluated"] = context._coldStartRoutingStats.evaluated;
         schedulerInfo["queue_overload_evaluated"] = context._queueOverloadEvaluated;
+        schedulerInfo["queue_overload_after_cost"] = context._queueOverloadAfterCost;
         schedulerInfo["queue_overload_average_predicted_latency_ms"] =
             context._queueOverloadAveragePredictedLatencyMs;
+        schedulerInfo["queue_overload_admission_predicted_latency_ms"] =
+            context._queueOverloadAdmissionPredictedLatencyMs;
         schedulerInfo["queue_overload_drop_probability"] =
             context._queueOverloadDropProbability;
         schedulerInfo["queue_overload_schedule_cycle_ms"] =
