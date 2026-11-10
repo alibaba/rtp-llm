@@ -1626,6 +1626,7 @@ TEST(LoadAsyncContextTest, LocalOnlyAdoptionPredicateAndBoundedInlineWait) {
     // as soon as that single transfer completes.
     {
         TransferDescriptor device_descriptor;
+        device_descriptor.source_tier = Tier::DEVICE;
         TransferDescriptor host_tail_descriptor;
         host_tail_descriptor.source_tier = Tier::HOST;
         auto mixed_context =
