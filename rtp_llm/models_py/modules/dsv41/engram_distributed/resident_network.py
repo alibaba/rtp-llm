@@ -52,23 +52,34 @@ def _private(info, kind):
         raise ExchangeError("UNSAFE_RESIDENT_LOCAL_STATE")
 
 
-def _cipher(env):
+def read_key_file(path):
+    """Read one bounded private key snapshot; never return unvalidated bytes."""
     from cryptography.fernet import Fernet
 
-    path = Path(env.get(KEY_ENV, ""))
+    path = Path(path)
     if not path.is_absolute():
         raise config.ShardConfigError("RESIDENT_KEY_FILE_REQUIRED")
     with os.fdopen(
         os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb"
     ) as f:
         _private(os.fstat(f.fileno()), stat.S_ISREG)
-        key = f.read(129).strip()
+        raw = f.read(129)
+    if len(raw) > 128:
+        raise config.ShardConfigError("INVALID_RESIDENT_KEY")
+    key = raw.strip()
     if len(key) != 44:
         raise config.ShardConfigError("INVALID_RESIDENT_KEY")
     try:
-        return Fernet(key)
+        Fernet(key)
     except (ValueError, TypeError):
         raise config.ShardConfigError("INVALID_RESIDENT_KEY") from None
+    return key
+
+
+def _cipher(env):
+    from cryptography.fernet import Fernet
+
+    return Fernet(read_key_file(env.get(KEY_ENV, "")))
 
 
 def endpoints(env, count):

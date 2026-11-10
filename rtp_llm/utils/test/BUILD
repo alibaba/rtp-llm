@@ -215,7 +215,10 @@ py_test(
 py_test(
     name = "prefill_supervisor_test",
     srcs = ["prefill_supervisor_test.py"],
-    deps = ["//rtp_llm:utils"],
+    deps = [
+        "//rtp_llm:utils",
+        "//rtp_llm/models_py/modules/dsv41/engram_distributed:core",
+    ],
 )
 
 py_test(

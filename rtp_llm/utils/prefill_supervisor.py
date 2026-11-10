@@ -1,16 +1,19 @@
 """Keep a resident Engram owner across local Prefill worker restarts."""
 
 import ctypes
+import hashlib
 import logging
 import os
 import shlex
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from uuid import UUID
 
 MODE_ENV = "RTP_LLM_IN_CONTAINER_RESTART"
 OWNER_ARGS_ENV = "RTP_LLM_RESIDENT_OWNER_ARGS"
@@ -18,6 +21,8 @@ WORKER_CGROUP_ENV = "RTP_LLM_WORKER_CGROUP"
 STOP_TIMEOUT_ENV = "RTP_LLM_SUPERVISOR_STOP_TIMEOUT_S"
 READY_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
 OWNER_MODULE = "rtp_llm.models_py.modules.dsv41.engram_distributed.resident"
+DEFAULT_OWNER_KEY_FILE = "/mnt/fuse/.rtp-engram-local/owner.key"
+_MODEL_METADATA_LIMIT = 16 * 1024 * 1024
 _LOGGER = logging.getLogger(__name__)
 _POLL_S = 0.1
 _REAP_TIMEOUT_S = 10
@@ -284,6 +289,86 @@ def _prepare_model_mounts(env):
     return result
 
 
+def _model_manifest_revision(checkpoint):
+    """Hash bounded model metadata, not the full weight tensor contents."""
+    digest = hashlib.sha256(b"rtp-engram-model-manifest-v1\0")
+    for name in ("config.json", "model.safetensors.index.json"):
+        with os.fdopen(
+            os.open(Path(checkpoint) / name, os.O_RDONLY | os.O_NONBLOCK), "rb"
+        ) as source:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > _MODEL_METADATA_LIMIT:
+                raise ValueError("invalid or oversized Engram model metadata")
+            data = source.read(_MODEL_METADATA_LIMIT + 1)
+        if len(data) > _MODEL_METADATA_LIMIT:
+            raise ValueError("oversized Engram model metadata")
+        digest.update(name.encode() + b"\0" + len(data).to_bytes(8, "big") + data)
+    return "manifest@" + digest.hexdigest()
+
+
+def _prepare_network_identity(env, directory):
+    """Resolve opt-in defaults once; workers only see the immutable local key."""
+    from rtp_llm.models_py.modules.dsv41.engram_distributed.resident_network import (
+        KEY_ENV,
+        STATE_ENV,
+        read_key_file,
+    )
+
+    result = dict(env)
+    if "RTP_ENGRAM_RESIDENT_DIR" in result:
+        raise ValueError("tcp resident transport does not use a shared directory")
+    state = Path(result.get(STATE_ENV, str(directory / "owner-state")))
+    if not state.is_absolute():
+        raise ValueError("resident local state requires an absolute path")
+    state.mkdir(mode=0o700, exist_ok=True)
+    info = state.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or info.st_mode & 0o077
+    ):
+        raise ValueError("resident local state must be private and owned by this user")
+    result[STATE_ENV] = str(state)
+    key = read_key_file(result.get(KEY_ENV, DEFAULT_OWNER_KEY_FILE))
+    snapshot = directory / "owner.key"
+    with os.fdopen(
+        os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600),
+        "wb",
+    ) as target:
+        target.write(key)
+    result[KEY_ENV] = str(snapshot)
+    if "RTP_ENGRAM_RESIDENT_GENERATION" not in result:
+        identity = hashlib.sha256(
+            b"rtp-engram-resident-generation-v1\0" + key
+        ).digest()[:16]
+        result["RTP_ENGRAM_RESIDENT_GENERATION"] = str(UUID(bytes=identity, version=5))
+    generation = result["RTP_ENGRAM_RESIDENT_GENERATION"]
+    if str(UUID(generation)) != generation:
+        raise ValueError("invalid resident generation")
+    if "RTP_ENGRAM_MODEL_REVISION" not in result:
+        result["RTP_ENGRAM_MODEL_REVISION"] = _model_manifest_revision(
+            result["RTP_ENGRAM_CHECKPOINT"]
+        )
+    revision = result["RTP_ENGRAM_MODEL_REVISION"]
+    if not 0 < len(revision) <= 256:
+        raise ValueError("invalid resident model revision")
+    count = result.get("ENGRAM_SHARD_COUNT", "")
+    if (
+        "RTP_ENGRAM_STORAGE" not in result
+        and count.isascii()
+        and count.isdecimal()
+        and int(count) > 1
+    ):
+        result["RTP_ENGRAM_STORAGE"] = "host_shared"
+    _LOGGER.info(
+        "prefill event=resident_identity_ready generation=%s revision=%s identity_source=%s",
+        generation,
+        revision,
+        "explicit" if "RTP_ENGRAM_RESIDENT_GENERATION" in env else "group_key",
+    )
+    return result
+
+
 def supervise_prefill(args):
     logging.basicConfig(
         level=logging.INFO,
@@ -293,17 +378,25 @@ def supervise_prefill(args):
     _enable_subreaper()
     worker_env = {**os.environ, MODE_ENV: "worker"}
     worker_env.setdefault("RTP_LLM_PREFILL_WATCHDOG", "1")
-    owner_args = shlex.split(worker_env.pop(OWNER_ARGS_ENV, ""))
     stop_timeout = int(os.environ.get(STOP_TIMEOUT_ENV, "300"))
     if not 1 <= stop_timeout <= 3600:
         raise ValueError(f"{STOP_TIMEOUT_ENV} must be between 1 and 3600")
-    transport = worker_env.get("RTP_ENGRAM_RESIDENT_TRANSPORT", "file")
+    transport = worker_env.setdefault(
+        "RTP_ENGRAM_RESIDENT_TRANSPORT",
+        "file" if "RTP_ENGRAM_RESIDENT_DIR" in worker_env else "tcp",
+    )
     if transport not in ("file", "tcp"):
         raise ValueError("invalid resident transport")
-    if not worker_env.get("RTP_ENGRAM_RESIDENT_GENERATION") or (
-        transport == "file" and not worker_env.get("RTP_ENGRAM_RESIDENT_DIR")
+    if transport == "file" and (
+        not worker_env.get("RTP_ENGRAM_RESIDENT_GENERATION")
+        or not worker_env.get("RTP_ENGRAM_RESIDENT_DIR")
     ):
         raise ValueError("in-container Prefill restart requires resident Engram")
+    owner_args = shlex.split(
+        worker_env.pop(
+            OWNER_ARGS_ENV, "--discover --device 0" if transport == "tcp" else ""
+        )
+    )
     worker_cmd = [sys.executable, "-m", "rtp_llm.start_server", *args]
     supervisor = PrefillSupervisor(worker_cmd, worker_env, None, stop_timeout)
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -311,7 +404,7 @@ def supervise_prefill(args):
     _LOGGER.info(
         "prefill event=supervisor_started stop_timeout_s=%s generation=%s instance=%s pid=%d transport=%s",
         stop_timeout,
-        worker_env["RTP_ENGRAM_RESIDENT_GENERATION"],
+        worker_env.get("RTP_ENGRAM_RESIDENT_GENERATION", "auto"),
         socket.gethostname(),
         os.getpid(),
         transport,
@@ -320,10 +413,8 @@ def supervise_prefill(args):
         with tempfile.TemporaryDirectory(prefix="rtp-prefill-") as directory:
             try:
                 if transport == "tcp":
-                    state = Path(directory) / "owner-state"
-                    state.mkdir(mode=0o700)
-                    worker_env["RTP_ENGRAM_RESIDENT_STATE_DIR"] = str(state)
                     worker_env = _prepare_model_mounts(worker_env)
+                    worker_env = _prepare_network_identity(worker_env, Path(directory))
                     supervisor.worker_env = worker_env
                 if owner_args and not supervisor.stopping:
                     supervisor.owner = subprocess.Popen(

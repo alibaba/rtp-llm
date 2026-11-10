@@ -19,32 +19,44 @@ Owner 由 Supervisor 启动，与 Worker 是兄弟进程。杀 Worker 不会沿�
 
 ## 不需要共享目录
 
-配置 `RTP_ENGRAM_RESIDENT_TRANSPORT=tcp` 后，每个 Owner 直接提供自己的描述，默认端口 29484；没有中心协调进程，不写共享盘，不复制 ready.json，也没有文件心跳。权重数据仍通过 CUDA VMM/Fabric 访问，TCP 只用于启动连接和身份校验。
+开启容器内恢复后默认使用 TCP，每个 Owner 直接提供自己的描述，默认端口 29484；没有中心协调进程，不写共享盘，不复制 ready.json，也没有文件心跳。权重数据仍通过 CUDA VMM/Fabric 访问，TCP 只用于启动连接和身份校验。
 
 每个容器仅保留自己的私有本地文件：
 
-- 每代独立的认证密钥文件，权限 0600；通过部署凭据机制分别下发，同组内容一致。环境变量只传路径，不传密钥。
+- 同组一致的认证密钥文件，默认 `/mnt/fuse/.rtp-engram-local/owner.key`，权限 0600，由部署侧分别下发到每个容器。Supervisor 启动时复制到自身私有目录；后续源文件轮换不改变正在运行的 Owner 或 Worker 重启所用的密钥。密钥不写进 env 或日志。
 - Supervisor 创建的临时状态目录，保存 generation 占位和描述摘要，供本容器重启后的 Worker 校验 allocation 未被替换。目录不与其他容器共享，不保存 Fabric 访问句柄。
 
 请求和响应均认证加密；随机 challenge 防止旧响应冒充当前存活 Owner。generation、模型版本、分片、描述和本地摘要均校验；错误不降级为重新加载或覆盖原权重。网络请求有大小、并发和时间限制；错误日志限频，避免错误请求刷屏。
 
 ## 配置
 
-| 项目 | 配置/约束 |
-|---|---|
-| 容器内恢复 | `RTP_LLM_IN_CONTAINER_RESTART=1` |
-| 启动 Owner | `RTP_LLM_RESIDENT_OWNER_ARGS=--discover --device 0` |
-| 网络发现 | `RTP_ENGRAM_RESIDENT_TRANSPORT=tcp` |
-| 权重存储 | `RTP_ENGRAM_STORAGE=host_shared`；GPU shared 需对应配置 |
-| 分片数 | `ENGRAM_SHARD_COUNT` 与同组 Owner 数一致 |
-| 本代标识 | `RTP_ENGRAM_RESIDENT_GENERATION`：同组相同 UUID，换代必须更换 |
-| 模型版本 | `RTP_ENGRAM_MODEL_REVISION`：同组一致的不可变版本 |
-| 认证 | `RTP_ENGRAM_RESIDENT_KEY_FILE`：本地绝对路径；每次换代换密钥 |
-| 地址 | 默认复用 gang 成员发现；可显式设置 `RTP_ENGRAM_RESIDENT_ENDPOINTS=host:port,...`，同组顺序一致 |
-| 网络 | 同组可达 Owner 端口；容器时钟需同步以验证短时效令牌 |
-| 模型 | 复用现有 checkpoint；Supervisor 负责远端模型挂载并向子进程传本地路径 |
+已有共享 Engram Prefill 配置上，只新增一个业务开关，**仅配置在 Prefill role**：
 
-TCP 模式不得同时设置旧的 `RTP_ENGRAM_RESIDENT_DIR`。`RTP_ENGRAM_RESIDENT_STATE_DIR` 由 Supervisor 自动生成，无需 ASI 配共享盘。
+```bash
+RTP_LLM_IN_CONTAINER_RESTART=1
+```
+
+仍需在每个容器预置同组一致的 0600 认证文件（上文默认路径）；这不是共享目录。
+现有 checkpoint、gang 成员、`ENGRAM_SHARD_COUNT` 和存储模式继续复用。
+未显式指定存储模式、且已有分片数大于 1 时，本开关内自动选 `host_shared`。
+Decode 和不开启该开关的部署不执行这些自动配置。
+
+| 自动配置 | 行为 |
+|---|---|
+| Owner | 自动启动 `--discover --device 0` |
+| 发现 | TCP，复用 gang 成员，默认端口 29484 |
+| generation | 从本组密钥确定性生成，同组一致；换组换代需轮换密钥 |
+| 模型标识 | 从 checkpoint 的 config 和索引生成稳定摘要；这是元数据标识，不是全量权重校验和 |
+| 状态 | Supervisor 私有本地目录；摘要和密钥快照跨 Worker 重启保留 |
+| 挂载 | Supervisor 复用现有 checkpoint，向子进程传本地路径 |
+
+原先列出的 `RTP_LLM_RESIDENT_OWNER_ARGS`、`RTP_ENGRAM_RESIDENT_TRANSPORT`、
+`RTP_ENGRAM_RESIDENT_GENERATION`、`RTP_ENGRAM_MODEL_REVISION`、
+`RTP_ENGRAM_RESIDENT_KEY_FILE` 和 `RTP_ENGRAM_RESIDENT_ENDPOINTS` 都保留为高级覆盖项，
+普通部署无需逐个设置。显式设置空 Owner args 可保持纯消费者模式。
+
+TCP 模式不得同时设置旧的 `RTP_ENGRAM_RESIDENT_DIR`。旧文件模式须显式选择或保留原目录配置。
+同组必须可达 Owner 端口、时钟同步、模型版本一致；不能在旧消费者仍在线时就地改权重。
 
 ## 故障与责任边界
 

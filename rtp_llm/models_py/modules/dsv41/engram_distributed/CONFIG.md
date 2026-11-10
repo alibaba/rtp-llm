@@ -232,18 +232,20 @@ Worker 启动时通过 Owner 的认证只读接口取得 Fabric 描述，完成�
 [Engram 常驻与容器内恢复](../../../../../docs/backend/engram_resident_recovery.md)。
 
 ```bash
-export RTP_ENGRAM_STORAGE=host_shared
-export ENGRAM_SHARD_COUNT=4
-export RTP_ENGRAM_RESIDENT_TRANSPORT=tcp
-export RTP_ENGRAM_RESIDENT_GENERATION=5fdfe813-a0a0-4db4-b324-cc8d7a597c77
-export RTP_ENGRAM_MODEL_REVISION='immutable-model-revision'
-export RTP_ENGRAM_CHECKPOINT=/models/deepseek-v41
-# 每个容器各自的本地密钥文件，同组同代内容一致，权限 0600。
-export RTP_ENGRAM_RESIDENT_KEY_FILE=/run/secrets/engram-owner.key
+# 在现有共享 Engram Prefill 配置上，只新增此开关：
 export RTP_LLM_IN_CONTAINER_RESTART=1
-export RTP_LLM_RESIDENT_OWNER_ARGS='--discover --device 0'
 exec python -m rtp_llm.start_server
 ```
+
+默认认证文件为每个容器各自的 `/mnt/fuse/.rtp-engram-local/owner.key`，同组内容一致、0600。
+Supervisor 自动快照密钥，默认使用 TCP 并启动 `--discover --device 0` Owner。
+generation 从本组密钥确定性生成，模型元数据标识从 checkpoint 的 config/索引生成。
+这不代替全量权重校验；模型不得在线原地替换。已有 checkpoint、分片数和存储配置继续复用。
+未提供存储模式、且已有分片数大于 1 时，本开关内自动选择 `host_shared`。
+上述自动配置不作用于未开启此开关的 Decode 或普通部署。
+
+需覆盖默认行为时，仍可设置 `RTP_ENGRAM_RESIDENT_KEY_FILE`、`RTP_ENGRAM_RESIDENT_GENERATION`、
+`RTP_ENGRAM_MODEL_REVISION`、`RTP_ENGRAM_RESIDENT_TRANSPORT` 或 `RTP_LLM_RESIDENT_OWNER_ARGS`。
 
 默认从 gang 成员发现 Owner，使用独立端口 29484。也可显式配置
 `RTP_ENGRAM_RESIDENT_ENDPOINTS=host0:29484,host1:29484,...`，同组顺序一致。
@@ -255,7 +257,7 @@ Owner 描述保存在自身内存中，请求/响应认证加密并绑定随机 
 每卡仍应用 `RTP_ENGRAM_GPU_RESERVE_BYTES`，需为权重、KV cache 和运行峰值预留空间。
 Owner 与消费者需处于受控 IMEX 域并具备设备权限。
 
-旧文件传输模式仅为兼容保留，未设置 transport 时按旧 `RTP_ENGRAM_RESIDENT_DIR` 配置解释；
+旧文件传输模式仅为兼容保留，有旧 `RTP_ENGRAM_RESIDENT_DIR` 时按文件模式配置解释；
 本方案不启用它。TCP 模式禁止同时设置 `RTP_ENGRAM_RESIDENT_DIR`。
 未设置 resident 参数的部署继续使用原有路径。
 
@@ -269,8 +271,9 @@ Owner 丢失后不得在同一代重建 allocation。受影响共享组由平台
 
 ```bash
 export RTP_LLM_IN_CONTAINER_RESTART=1
-# 本容器负责发布一个分片时设置。纯消费者不配置此项。
-export RTP_LLM_RESIDENT_OWNER_ARGS='--shard 0 --host-id storage-node-0 --device 0'
+# 默认自动发现并启动本容器 Owner；以下是可选的显式覆盖。
+# export RTP_LLM_RESIDENT_OWNER_ARGS='--shard 0 --host-id storage-node-0 --device 0'
+# 纯消费者可显式设置 RTP_LLM_RESIDENT_OWNER_ARGS=''
 # 平台需要为 worker OOM 提供独立 cgroup 时配置。
 export RTP_LLM_WORKER_CGROUP=/sys/fs/cgroup/prefill-worker
 export RTP_LLM_SUPERVISOR_STOP_TIMEOUT_S=300
