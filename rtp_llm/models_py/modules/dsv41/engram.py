@@ -1171,6 +1171,16 @@ class HostEngramEmbedding:
                     # This covers queued eager uses. The generation lease,
                     # retained by metadata snapshots, owns future replays.
                     uva[1].record_stream(torch.cuda.current_stream(indices.device))
+        if torch.cuda.is_current_stream_capturing():
+            # Diagnostic bring-up only: HIP graphs cannot issue the D2H copy
+            # required by host-RAM lookup.  Capture a correctly shaped zero so
+            # the rest of the graph can be validated; real staging must be
+            # wired before correctness is claimed.
+            return torch.zeros(
+                (*indices.shape, self.weight.shape[1]),
+                dtype=torch.bfloat16,
+                device=device,
+            )
         indices = indices.detach().to(device="cpu", dtype=torch.int64)
         valid = indices >= 0
         flat = indices.clamp_min(0).flatten()
