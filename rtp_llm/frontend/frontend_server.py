@@ -780,6 +780,80 @@ class FrontendServer(object):
         except Exception as e:
             return ORJSONResponse(format_exception(e), status_code=500)
 
+    async def awi_generate(self, req: Union[str, Dict[str, Any]], raw_request):
+        """AWI pretokenized benchmark generate.
+
+        Uses the exact request ``input_ids`` (never a text round-trip),
+        propagates ``X-AWI-Request-ID`` into the scheduler observations via
+        the correlation-header path, and returns OpenAI-compatible usage
+        counts plus a decoded message.
+        """
+        try:
+            if isinstance(req, str):
+                req = json.loads(req)
+            input_ids = req.get("input_ids")
+            if not isinstance(input_ids, list) or not input_ids:
+                return ORJSONResponse(
+                    {"error": "input_ids must be a non-empty list"}, status_code=400
+                )
+            max_tokens = int(req.get("max_tokens", 16))
+            extra = req.get("extra_configs") or {}
+            generate_config: Dict[str, Any] = {"max_new_tokens": max_tokens}
+            if extra.get("min_new_tokens") is not None:
+                generate_config["min_new_tokens"] = int(extra["min_new_tokens"])
+            if extra.get("ignore_eos") is not None:
+                generate_config["ignore_eos"] = bool(extra["ignore_eos"])
+            headers: Dict[str, str] = {}
+            if raw_request is not None:
+                awi_request_id = raw_request.headers.get("X-AWI-Request-ID")
+                if awi_request_id:
+                    headers["x-awi-request-id"] = awi_request_id
+            assert self._frontend_worker is not None
+            stream = self._frontend_worker.pipeline.pipeline_async(
+                prompt="",
+                prompt_token_ids=input_ids,
+                generate_config=generate_config,
+                headers=headers,
+            )
+            final = None
+            async for response in stream:
+                final = response
+            if final is None:
+                return ORJSONResponse(
+                    {"error": "engine produced no response"}, status_code=500
+                )
+            output = final.generate_outputs.generate_outputs[0]
+            aux = output.aux_info
+            output_ids = (
+                output.output_ids.flatten().tolist()
+                if output.output_ids is not None
+                else []
+            )
+            text = ""
+            if output_ids:
+                text = self._frontend_worker.pipeline.tokenizer.decode(output_ids)
+            prompt_tokens = int(aux.input_len) if aux else len(input_ids)
+            completion_tokens = int(aux.output_len) if aux else len(output_ids)
+            return ORJSONResponse(
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": text},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens,
+                    },
+                    "awi_request_id": headers.get("x-awi-request-id", ""),
+                }
+            )
+        except Exception as e:
+            return ORJSONResponse(format_exception(e), status_code=500)
+
     def tokenizer_encode(self, req: Union[str, Dict[Any, Any]]):
         try:
             if isinstance(req, str):

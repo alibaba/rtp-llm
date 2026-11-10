@@ -214,21 +214,33 @@ class Pipeline(object):
             else []
         )
 
-        if len(prompt) == 0:
-            raise FtRuntimeException(
-                ExceptionType.EMPTY_PROMPT_ERROR,
-                "prompt should have at least one token!",
-            )
-        if type(prompt) is not str:
-            raise FtRuntimeException(
-                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                "expect string prompt, actual: " + str(prompt),
-            )
-        # 生成式推荐：由开关控制，默认关闭、对非推荐场景零侵入。
-        # 在 tokenizer.encode(prompt) 之前解析及填充 banned_combo_token_ids，
-        # 避免重复编码 prompt。
-        parse_and_fill_banned_combo(prompt, generate_config, self.tokenizer)
-        token_ids = self.tokenizer.encode(prompt)
+        prompt_token_ids = kwargs.pop("prompt_token_ids", None)
+        if prompt_token_ids is not None:
+            # AWI pretokenized benchmark entry: use the exact request token
+            # ids; never detokenize/re-encode through text (a 1M-token
+            # round-trip is lossy for arbitrary ids and prohibitively slow).
+            token_ids = [int(t) for t in prompt_token_ids]
+            if len(token_ids) == 0:
+                raise FtRuntimeException(
+                    ExceptionType.EMPTY_PROMPT_ERROR,
+                    "prompt_token_ids should have at least one token!",
+                )
+        else:
+            if len(prompt) == 0:
+                raise FtRuntimeException(
+                    ExceptionType.EMPTY_PROMPT_ERROR,
+                    "prompt should have at least one token!",
+                )
+            if type(prompt) is not str:
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    "expect string prompt, actual: " + str(prompt),
+                )
+            # 生成式推荐：由开关控制，默认关闭、对非推荐场景零侵入。
+            # 在 tokenizer.encode(prompt) 之前解析及填充 banned_combo_token_ids，
+            # 避免重复编码 prompt。
+            parse_and_fill_banned_combo(prompt, generate_config, self.tokenizer)
+            token_ids = self.tokenizer.encode(prompt)
 
         # Prompt scoring constraints (max_new_tokens=1, non-streaming, no reuse/PD-sep) are
         # already enforced by validate() → enforce_prompt_scoring_constraints() during config creation.

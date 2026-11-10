@@ -441,6 +441,12 @@ class FrontendApp(object):
             client_config=client_config,
         )
 
+        # AWI: ensure the outbound-fetch audit probe runs in this frontend
+        # process too (idempotent; backend ranks install their own).
+        from rtp_llm.utils.awi_startup import install_startup_network_probe
+
+        install_startup_network_probe()
+
         logging.info(
             f"frontend app rank_id = {self.server_config.rank_id}, "
             f"server_port = {self.server_config.server_port}, frontend_server_id = {self.server_config.frontend_server_id}"
@@ -945,6 +951,80 @@ class FrontendApp(object):
         async def encode(req: Union[str, Dict[Any, Any]], request: Request):
             check_not_draining(request)
             return self.frontend_server.tokenize(req)
+
+        # AWI adaptation-evaluator contract endpoints.
+        # example {"input_ids":[1,2,3],"max_tokens":256,
+        #          "extra_configs":{"min_new_tokens":256,"ignore_eos":true}}
+        @app.post("/awi/generate")
+        async def awi_generate(
+            req: Union[str, Dict[Any, Any]], raw_request: RawRequest
+        ):
+            check_not_draining(raw_request)
+            return await self.frontend_server.awi_generate(req, raw_request)
+
+        # example {"operation_id":"op1","request_ids":["r1"],"context_tokens":1048576}
+        @app.post("/awi/barrier")
+        async def awi_barrier(req: Union[str, Dict[Any, Any]], request: Request):
+            check_not_draining(request)
+            if isinstance(req, str):
+                req = json.loads(req)
+            result = await self.grpc_client.post_request("awi_barrier", req or {})
+            if isinstance(result, dict) and "error" in result:
+                return ORJSONResponse(result, status_code=502)
+            return result
+
+        @app.get("/awi/observations")
+        async def awi_observations(request: Request):
+            operation_id = request.query_params.get("operation_id", "")
+            result = await self.grpc_client.post_request(
+                "awi_observations", {"operation_id": operation_id}
+            )
+            if isinstance(result, dict) and "error" in result:
+                return ORJSONResponse(result, status_code=502)
+            backends = result.get("backends", [])
+            build = None
+            configuration = None
+            weights: list = []
+            events: list = []
+            fetches = 0
+            fetches_complete = True
+            for backend in backends:
+                if build is None and backend.get("build_info_json"):
+                    build = json.loads(backend["build_info_json"])
+                if configuration is None and backend.get("configuration_json"):
+                    configuration = json.loads(backend["configuration_json"])
+                if backend.get("weights_json"):
+                    parsed = json.loads(backend["weights_json"])
+                    weights.extend(
+                        parsed if isinstance(parsed, list) else parsed.get("weights", [])
+                    )
+                events.extend(backend.get("events", []))
+                count = int(backend.get("startup_network_fetches", -1))
+                if count < 0:
+                    fetches_complete = False
+                else:
+                    fetches += count
+            from rtp_llm.utils.awi_startup import (
+                probe_installed,
+                startup_network_fetches,
+            )
+
+            if probe_installed():
+                fetches += startup_network_fetches()
+            else:
+                # Never report an unmeasured zero as a measurement.
+                fetches_complete = False
+            return ORJSONResponse(
+                {
+                    "build": build or {"source": {"internal": "", "public": ""}},
+                    "configuration": configuration or {},
+                    "startup_network_fetches": fetches if fetches_complete else -1,
+                    "weights": weights,
+                    "events": events,
+                    "backends_reported": len(backends),
+                    "errors": result.get("errors", []),
+                }
+            )
 
         if self.frontend_server.is_embedding:
             # embedding

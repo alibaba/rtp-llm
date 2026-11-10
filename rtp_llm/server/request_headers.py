@@ -2,6 +2,7 @@ import json
 from typing import Any, Dict, Mapping, Optional
 
 REQUEST_HEADER_NAMES = (
+    "x-awi-request-id",
     "user_id",
     "x-dashscope-uid",
     "x-dashscope-service",
@@ -20,6 +21,7 @@ REQUEST_HEADER_NAMES = (
     "x-dashscope-datainspection",
 )
 CORRELATION_HEADER_NAMES = (
+    "x-awi-request-id",
     "x-dashscope-request-id",
     "x-dashscope-requestid",
     "x-request-id",

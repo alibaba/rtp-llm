@@ -91,6 +91,11 @@ def startup_network_fetches() -> int:
         return _fetch_count
 
 
+def probe_installed() -> bool:
+    with _lock:
+        return _installed
+
+
 def build_configuration_json(py_env_configs, engine=None) -> str:
     """Effective configuration derived from the live engine objects."""
     context_tokens = -1

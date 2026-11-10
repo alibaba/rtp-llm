@@ -14,6 +14,55 @@ from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.utils.time_util import Timer
 
 
+def _awi_event_to_dict(e) -> Dict[str, Any]:
+    """Typed AwiEventPB -> dict. Sentinel -1/empty fields are omitted so each
+    event carries only the contract fields its type actually records."""
+    d: Dict[str, Any] = {"type": e.type, "rank": int(e.rank)}
+    if e.operation_id:
+        d["operation_id"] = e.operation_id
+    if e.request_id >= 0:
+        d["request_id"] = int(e.request_id)
+    if e.awi_request_id:
+        d["awi_request_id"] = e.awi_request_id
+    for field in (
+        "input_tokens",
+        "start_ns",
+        "end_ns",
+        "step",
+        "kv_tokens",
+        "reserved_tokens",
+        "hit_tokens",
+        "concurrency",
+        "context_tokens",
+    ):
+        value = int(getattr(e, field))
+        if value >= 0:
+            d[field] = value
+    if int(e.graph_replay) != -1:
+        d["graph_replay"] = int(e.graph_replay)
+    if e.elapsed_ms > 0:
+        d["elapsed_ms"] = float(e.elapsed_ms)
+    if e.backend:
+        d["backend"] = e.backend
+    if e.failure_kind:
+        d["failure_kind"] = e.failure_kind
+    if e.detail_json:
+        d["detail"] = json.loads(e.detail_json)
+    return d
+
+
+def _awi_observations_to_dict(response, address: str) -> Dict[str, Any]:
+    return {
+        "address": address,
+        "rank": int(response.rank),
+        "build_info_json": response.build_info_json,
+        "configuration_json": response.configuration_json,
+        "weights_json": response.weights_json,
+        "startup_network_fetches": int(response.startup_network_fetches),
+        "events": [_awi_event_to_dict(e) for e in response.events],
+    }
+
+
 class GrpcClientWrapper:
     """Wrapper for direct gRPC calls to replace async_request_server"""
 
@@ -294,10 +343,60 @@ class GrpcClientWrapper:
             logging.error(f"Update scheduler info failed: {e}")
             return {"error": f"Failed to update scheduler info: {str(e)}"}
 
+    async def awi_barrier(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """Arm (or with an empty operation_id, disarm) the AWI probe on all ranks."""
+        barrier_pb = getattr(pb2, "AwiBarrierRequestPB", None)
+        if barrier_pb is None:
+            return {"error": "AwiBarrier RPC unavailable in this build"}
+        request = barrier_pb(
+            operation_id=str(req.get("operation_id", "")),
+            request_ids=[str(r) for r in req.get("request_ids", [])],
+            context_tokens=int(req.get("context_tokens", 0)),
+        )
+        errors = []
+        for addr in self.dp_addresses:
+            try:
+                await self._ensure_dp_connection(addr)
+                await self._dp_stubs[addr].AwiBarrier(request, timeout=10)
+            except Exception as e:
+                errors.append(f"{addr}: {e}")
+        if errors:
+            logging.error(f"AwiBarrier failed on some addresses: {errors}")
+            return {"error": f"AwiBarrier failed on some addresses: {errors}"}
+        return {"status": "ok"}
+
+    async def awi_observations(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """Collect per-rank AWI observations from all DP backends."""
+        obs_pb = getattr(pb2, "AwiObservationsRequestPB", None)
+        if obs_pb is None:
+            return {"error": "AwiObservations RPC unavailable in this build"}
+        request = obs_pb(operation_id=str(req.get("operation_id", "")))
+        backends: List[Dict[str, Any]] = []
+        errors = []
+        for addr in self.dp_addresses:
+            try:
+                await self._ensure_dp_connection(addr)
+                response = await self._dp_stubs[addr].AwiObservations(request, timeout=60)
+                backends.append(_awi_observations_to_dict(response, addr))
+            except Exception as e:
+                logging.warning(f"Get AWI observations from {addr} failed: {e}")
+                errors.append(f"{addr}: {e}")
+        if not backends:
+            return {"error": f"No backend observations available: {errors}"}
+        return {
+            "status": "ok" if not errors else "partial",
+            "backends": backends,
+            "errors": errors,
+        }
+
     async def post_request(self, uri: str, req: Dict[str, Any]) -> Dict[str, Any]:
         """Generic POST request handler - routes to appropriate method based on URI"""
         try:
-            if uri == "health_check":
+            if uri == "awi_barrier":
+                return await self.awi_barrier(req)
+            elif uri == "awi_observations":
+                return await self.awi_observations(req)
+            elif uri == "health_check":
                 return await self.health_check()
             elif uri == "cache_status":
                 return await self.get_cache_status(req)
