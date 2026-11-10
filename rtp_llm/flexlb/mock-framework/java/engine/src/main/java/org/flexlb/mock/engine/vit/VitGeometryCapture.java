@@ -4,7 +4,6 @@ import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.io.RandomAccessFile;
-import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -22,6 +21,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.zip.GZIPOutputStream;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import org.flexlb.mock.engine.EngineMain.Address;
 
 /** Temporary, opt-in anonymous media geometry for a Frontend capture window. */
 final class VitGeometryCapture {
@@ -32,6 +32,7 @@ final class VitGeometryCapture {
     private final long start;
     private final long end;
     private final SecretKeySpec key;
+    private final String owner;
     private final Mac mac;
     private final ArrayBlockingQueue<String> pending = new ArrayBlockingQueue<>(2048);
     private final Set<String> seen = new HashSet<>();
@@ -60,6 +61,9 @@ final class VitGeometryCapture {
         this.key = new SecretKeySpec(key, "HmacSHA256");
         directory = Path.of("/tmp/rtp-vit-capture", Long.toString(start));
         try {
+            String ip = System.getenv("RequestedIP");
+            if (ip == null || ip.isBlank()) ip = Address.local().advertise();
+            owner = HEX.formatHex(MessageDigest.getInstance("SHA-256").digest(ip.getBytes(StandardCharsets.UTF_8)));
             mac = Mac.getInstance("HmacSHA256");
             mac.init(this.key);
         } catch (GeneralSecurityException failure) {
@@ -101,8 +105,6 @@ final class VitGeometryCapture {
                 HEX.parseHex(request.signature()))) {
             throw new SecurityException("invalid_capture_signature");
         }
-        String hostname = InetAddress.getLocalHost().getHostName();
-        String owner = HEX.formatHex(MessageDigest.getInstance("SHA-256").digest(hostname.getBytes(StandardCharsets.UTF_8)));
         if (!owner.equals(request.owner())) throw new IllegalArgumentException("capture_owner_mismatch");
 
         Archive archive = sealed;
