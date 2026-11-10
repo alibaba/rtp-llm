@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Host Fabric shards owned independently of the RTP worker processes."""
+"""Fabric shards owned independently of the RTP worker processes."""
 from __future__ import annotations
 
 import argparse
@@ -22,6 +22,7 @@ from .config import (
     StorageMode,
     StoragePolicy,
     capacity_from_environ,
+    gpu_reserve_bytes,
     parse_numa,
     resolve_checkpoint,
     startup_timeout,
@@ -37,6 +38,8 @@ from .exchange import (
 from .manifest import prepare_manifest
 
 _LOGGER = logging.getLogger(__name__)
+HEARTBEAT_INTERVAL_SECONDS = 2.0
+HEARTBEAT_MAX_AGE_SECONDS = 30.0
 
 
 def _check_private(info, is_expected_type):
@@ -52,7 +55,10 @@ def _read_descriptor(path):
     with os.fdopen(
         os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb"
     ) as source:
-        _check_private(os.fstat(source.fileno()), stat.S_ISREG)
+        info = os.fstat(source.fileno())
+        _check_private(info, stat.S_ISREG)
+        if abs(time.time() - info.st_mtime) > HEARTBEAT_MAX_AGE_SECONDS:
+            raise FileNotFoundError("STALE_RESIDENT_ENGRAM_SHARD")
         return decode(source.read(MAX_MESSAGE + 1))
 
 
@@ -75,8 +81,8 @@ class ResidentGeneration:
 
     def __init__(self, env, *, checkpoint=None):
         policy = StoragePolicy.from_environ(env)
-        if policy.mode != StorageMode.HOST_SHARED:
-            raise ShardConfigError("RESIDENT_ENGRAM_REQUIRES_HOST_SHARED")
+        if policy.mode not in (StorageMode.HOST_SHARED, StorageMode.GPU_SHARED):
+            raise ShardConfigError("RESIDENT_ENGRAM_REQUIRES_FABRIC_SHARED")
         root = Path(env.get(RESIDENT_DIR_ENV, ""))
         if not root.is_absolute():
             raise ShardConfigError("RESIDENT_ENGRAM_REQUIRES_ABSOLUTE_DIRECTORY")
@@ -126,7 +132,10 @@ class ResidentGeneration:
                     slot = self._slot(shard)
                     _check_private(slot.lstat(), stat.S_ISDIR)
                     doc = _read_descriptor(slot / "ready.json")
-                    if doc.get("shard") != shard or doc.get("memory_kind") != "host":
+                    if (
+                        doc.get("shard") != shard
+                        or doc.get("memory_kind") != self.options.policy.memory_kind
+                    ):
                         raise ExchangeError("RESIDENT_ENGRAM_DESCRIPTOR_MISMATCH")
                     documents.append(doc)
                 break
@@ -153,7 +162,15 @@ class ResidentGeneration:
         )
 
 
-def serve_shard(generation, env, shard, host_id, device, should_stop):
+def serve_shard(generation, env, shard, host_id, device, should_stop, gpu_devices=None):
+    memory_kind = generation.options.policy.memory_kind
+    if memory_kind == "gpu":
+        gpu_devices = tuple(gpu_devices or (device,))
+        reserve = gpu_reserve_bytes(env)
+    else:
+        if gpu_devices is not None:
+            raise ShardConfigError("RESIDENT_ENGRAM_GPU_DEVICES_REQUIRE_GPU_SHARED")
+        reserve = 0
     numa = parse_numa(env.get("RTP_ENGRAM_LOCAL_NUMA"))
     allocation_limit, total_limit = capacity_from_environ(env)
     path = generation.claim(shard)
@@ -168,6 +185,9 @@ def serve_shard(generation, env, shard, host_id, device, should_stop):
             generation.options.shards.shard_count,
             device=device,
             numa=numa,
+            memory_kind=memory_kind,
+            gpu_devices=gpu_devices,
+            gpu_reserve_bytes=reserve,
             max_allocation_bytes=allocation_limit,
             budget_bytes=total_limit,
             release_input_page_cache=env.get("RTP_ENGRAM_RELEASE_INPUT_PAGE_CACHE")
@@ -183,8 +203,27 @@ def serve_shard(generation, env, shard, host_id, device, should_stop):
             generation.generation,
             shard,
         )
+        next_heartbeat = time.monotonic() + HEARTBEAT_INTERVAL_SECONDS
+        heartbeat_failed = False
         while not should_stop():
             time.sleep(0.25)
+            now = time.monotonic()
+            if now >= next_heartbeat and not should_stop():
+                next_heartbeat = now + HEARTBEAT_INTERVAL_SECONDS
+                try:
+                    os.utime(path, None, follow_symlinks=False)
+                    heartbeat_failed = False
+                except OSError as error:
+                    # A metadata outage blocks fresh attaches. Preserve the
+                    # allocation for workers that already hold mappings.
+                    if not heartbeat_failed:
+                        _LOGGER.warning(
+                            "engram event=resident_heartbeat_failed generation=%s shard=%d errno=%s",
+                            generation.generation,
+                            shard,
+                            error.errno,
+                        )
+                    heartbeat_failed = True
     finally:
         try:
             path.unlink(missing_ok=True)
@@ -194,12 +233,17 @@ def serve_shard(generation, env, shard, host_id, device, should_stop):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Hold one resident host Engram shard.")
+    parser = argparse.ArgumentParser(
+        description="Hold one resident Fabric Engram shard."
+    )
     parser.add_argument(
         "--shard", type=int, required=True, help="zero-based shard index"
     )
     parser.add_argument("--host-id", required=True, help="unique storage node identity")
     parser.add_argument("--device", type=int, default=0, help="visible CUDA ordinal")
+    parser.add_argument(
+        "--gpu-devices", type=int, nargs="+", help="GPU backing ordinals"
+    )
     args = parser.parse_args()
     if not 0 < len(args.host_id) <= 256 or args.device < 0:
         parser.error("invalid storage host ID or device ordinal")
@@ -214,7 +258,13 @@ def main():
         signal.signal(sig, request_stop)
     generation = ResidentGeneration(os.environ)
     serve_shard(
-        generation, os.environ, args.shard, args.host_id, args.device, lambda: stopping
+        generation,
+        os.environ,
+        args.shard,
+        args.host_id,
+        args.device,
+        lambda: stopping,
+        gpu_devices=args.gpu_devices,
     )
 
 

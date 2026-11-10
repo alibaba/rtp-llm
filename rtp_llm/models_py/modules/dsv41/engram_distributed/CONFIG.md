@@ -1,6 +1,6 @@
 # 分布式 Engram：启用、拓扑与启动交换
 
-更新时间 2026-11-10。默认由每个存储 host 的 RTP worker 持有一片 Engram。Prefill 的 `host_shared` 也可接入独立常驻 Owner。GPU 在线直接读取映射后的内存。
+更新时间 2026-11-10。默认由每个存储 host 的 RTP worker 持有一片 Engram。Prefill 的 `host_shared` 和 `gpu_shared` 也可接入独立常驻 Owner。GPU 在线直接读取映射后的内存。
 
 ## 最小配置
 
@@ -226,7 +226,7 @@ cohort Store 关闭不释放分片；映射和 backing 保持到 worker 退出�
 ### Prefill 使用独立常驻 Owner
 
 在每个存储 host 启动一个独立 Owner 进程，放在 `python-worker` 容器及其回收范围之外。
-Owner 通过自己的 checkpoint 挂载加载一片 host NUMA backing，持有 CUDA VMM 分配并导出 Fabric handle。
+Owner 通过自己的 checkpoint 挂载加载一片 host NUMA 或 GPU HBM backing，持有 CUDA VMM 分配并导出 Fabric handle。
 各 Prefill 实例启动时独立导入同一代分片。RTP 校验模型布局、hash ABI 和 GPU 读回样本后完成 warmup，
 在线请求继续直接读 Fabric 映射。重启后的消费者复用已加载的分片，只重建自身模型和映射。
 
@@ -247,11 +247,19 @@ exec python -m rtp_llm.models_py.modules.dsv41.engram_distributed.resident \
   --shard 0 --host-id storage-node-0 --device 0
 ```
 
+使用 GPU HBM 时，Owner 与消费者设置 `RTP_ENGRAM_STORAGE=gpu_shared`。Owner 可通过
+`--gpu-devices 0 1 2 3` 在指定的本机可见 GPU 上分配同一片，默认使用 `--device` 指定的卡。
+每张卡仍应用 `RTP_ENGRAM_GPU_RESERVE_BYTES`，平台需为权重、KV cache 和运行峰值预留显存。
+
 部署时生成新的 UUID，给同代 Owner 和消费者注入相同值。每片启动时独占其发布目录，
 写完后原子发布 `ready.json`。该片一旦认领便不允许在同一代重建，避免同代名称混用新旧分配。
 每个消费者在 `RTP_ENGRAM_COHORT_TIMEOUT`（默认 1800 秒）内等待全部分片。
 设置任一 resident 环境变量即进入显式校验，缺失、超时、版本或数据不匹配使启动失败。
 未配置 resident 参数的部署继续使用原有路径。
+
+Owner 每两秒更新描述符的 mtime，消费者把超过 30 秒的描述符视为未就绪并有界等待。
+共享卷需要跨节点可见的 mtime、原子 mkdir/rename 和同步的节点时钟。发布卷写入故障时，
+Owner 保留已有 backing，存量消费者在线读取 GPU 映射。恢复后以同一文件的下一次心跳开放新导入。
 
 单实例收到 SIGKILL、SIGTERM 或触发业务容器级 OOM 时，平台仅摘流和恢复该实例。
 运行时回收该实例的进程和 CUDA 映射。新请求由路由发到其他就绪的完整 Prefill 实例。
@@ -263,6 +271,22 @@ Owner 收到信号后撤下描述文件并释放分片，平台在该代退休�
 Owner 进程崩溃可能留下描述文件，导入和 GPU 样本校验仍是消费者的启动门槛。
 Owner 丢失时按故障代处理，平台停止向受影响组接流并用新 UUID 重建该代。
 当前实现覆盖消费者生命周期隔离，Owner、宿主机、IMEX 或整个 Fabric 域故障需要另外的副本和路由切换。
+
+### 可选的 Prefill 本地运行期 watchdog
+
+在单业务实例内承载完整计算 world 的 Prefill 可设置 `RTP_LLM_PREFILL_WATCHDOG=1`。
+正常启动和 warmup 完成后，父进程定期走 loopback gRPC 发一个双 token 的本地 Prefill-only 请求。
+请求禁用 P→D 和缓存复用，只验证本实例能完成实际推理。收到明确的资源耗尽响应时中断失败计数。
+连续失败达到阈值后先撤销 `/health` 就绪门，再按既有失败路径回收该实例的子进程并以失败码退出。
+容器的拉起、退避和重调度由 ASI 执行。
+
+| 环境变量 | 默认值 |
+| --- | --- |
+| `RTP_LLM_PREFILL_WATCHDOG_INTERVAL_S` | 15 秒 |
+| `RTP_LLM_PREFILL_WATCHDOG_TIMEOUT_S` | 5 秒 |
+| `RTP_LLM_PREFILL_WATCHDOG_FAILURES` | 连续 3 次 |
+
+先在目标负载下验收探测开销和误判率。业务 P→D 链路、跨实例流量和共享组路由仍由实际链路指标和平台探测验收。
 
 ## 校验边界
 
