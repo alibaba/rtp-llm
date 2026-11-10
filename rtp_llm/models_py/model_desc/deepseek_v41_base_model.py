@@ -600,7 +600,16 @@ class DeepSeekV4Model(GptModelBase):
             v4._allocate_mtp_last_hidden_buffer(device, mtp_last_hidden_capacity)
 
     def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
+        def _mem(tag):
+            if os.environ.get("DSV41_DEBUG_MEM") == "1":
+                import torch as _t
+                print(
+                    f"[mem] {tag} allocated={_t.cuda.memory_allocated() / 2**30:.2f} GiB",
+                    flush=True,
+                )
+        _mem("before super.initialize")
         super().initialize(init_resource)
+        _mem("after super.initialize")
         if (
             self._v4_args.v41_config is not None
             and torch.version.hip is None
@@ -688,6 +697,7 @@ class DeepSeekV4Model(GptModelBase):
             self._v4_args.max_tokens_per_rank = runtime_resolved_max_tokens_per_rank
         if bool(getattr(self._v4_args, "commit_only", False)):
             return self._initialize_commit_only(init_resource, device_str)
+        _mem("before V4Transformer meta")
         logging.info(
             "[DeepSeekV4Model] building V4Transformer via factory (layers=%d, globals=%d) ...",
             len(self.weight.weights),
@@ -706,6 +716,7 @@ class DeepSeekV4Model(GptModelBase):
                     )
         finally:
             torch.set_default_dtype(prev_dtype)
+        _mem("after V4Transformer meta")
         if self._captures_aux_hidden:
             self.v4.set_aux_hidden_capture_layer_ids(self._capture_aux_hidden_layer_ids)
         for layer in self.v4.layers:
