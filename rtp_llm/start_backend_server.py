@@ -98,9 +98,20 @@ def local_rank_start(
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
         install_oom_dump()
+        def _mem(tag):
+            if os.environ.get("DSV41_DEBUG_MEM") == "1":
+                import torch as _t
+                print(
+                    f"[mem] {tag} allocated={_t.cuda.memory_allocated() / 2**30:.2f} GiB "
+                    f"reserved={_t.cuda.memory_reserved() / 2**30:.2f} GiB",
+                    flush=True,
+                )
+        _mem("before backend_manager import")
         from rtp_llm.server.backend_manager import BackendManager
+        _mem("after backend_manager import")
 
         backend_manager = BackendManager(py_env_configs)
+        _mem("after backend_manager init")
         backend_manager.start()
         # Defer these handlers until model loading completes.
         signal.signal(signal.SIGTERM, signal_handler)
