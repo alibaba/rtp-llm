@@ -16,13 +16,17 @@ not speculative trees.
 
 Apply `patches/atom/qwen38_replayssm.patch` to ATOM
 0.1.8+g9af739efc and `patches/aiter/qwen38_flydsl_gdn_mtp.patch` to
-amd-aiter 0.1.26.dev12+gcbccc02fd.qsaimagev1. FlyDSL is 0.3.4.1.
-The internal installer pins source, patch and output hashes and applies both
+amd-aiter 0.1.29+rocm7.2.0.git97d2389. FlyDSL is 0.4.2.
+Also apply `patches/aiter/qwen38_python310_compat.patch`: it moves
+heuristics dictionaries outside decorators so Python 3.10 source inspection
+can find the Triton function. Numerical function bodies are unchanged.
+The internal installer pins source, patch and output hashes and applies these patches
 after wheel installation; it rejects unreviewed changes. No C++ RTP rebuild
 is required for this Python/kernel-generator adapter.
 
-GPU regression:
-`python patches/atom/tests/test_flydsl_gdn_mtp.py`
+GPU regressions:
+`python patches/atom/tests/test_flydsl_gdn_mtp.py` and
+`python patches/atom/tests/test_hybrid_gdn_graph.py`
 It compares outputs and all candidate states against Triton, then continues
 from each possible accepted prefix with reused destination slots. Tested B=2/4,
 width=2/3/4, BF16 activations, FP32 states; tolerance atol=.005, rtol=.01.

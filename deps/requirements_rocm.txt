@@ -5,13 +5,13 @@ torch==2.9.1+git7e1940d
 torchvision==0.24.0+rocm7.2.0.gitb919bd0c
 triton==3.8.0+amd.rocm7.2.0.git111ff227
 triton-kernels==1.0.0+amd.rocm7.2.0.git111ff227
-amd-aiter @ https://search-ad.cn-hangzhou-k.oss-internal.aliyun-inc.com/xingjunna/qwen4/amd_aiter-0.1.26.dev12%2Bgcbccc02fd.qsaimagev1-cp310-cp310-linux_x86_64.whl
+amd-aiter @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/amd_aiter-0.1.29%2Brocm7.2.0.git97d2389-cp310-cp310-linux_x86_64.whl
 atom @ https://search-ad.cn-hangzhou-k.oss-internal.aliyun-inc.com/xingjunna/qwen4/atom-0.1.8%2Bg9af739efc-py3-none-any.whl
 # FLA kernels directly import FlyDSL (including private flydsl._mlir APIs), so
 # pin it explicitly rather than relying on AITER's transitive dependency.
-# The pinned amd-aiter wheel requires 0.3.4.1. Use the hash-verified mirror
-# artifact because direct PyPI downloads are very slow in this environment.
-flydsl @ https://mirrors.aliyun.com/pypi/packages/ea/65/3752be0c2a6a05ee373511ac2dec8bf336b26c23e1ad21a4febbb3f856ce/flydsl-0.3.4.1-cp310-cp310-manylinux_2_27_x86_64.whl
+# The pinned amd-aiter 0.1.29 wheel requires FlyDSL 0.4.2.
+# requirements_lock_rocm.txt pins the artifact SHA-256.
+flydsl @ https://files.pythonhosted.org/packages/3a/98/1be63b435e7116cf076e3bd631d1d7d390b2c2e83aa2fa78be8a70d0e0e0/flydsl-0.4.2-cp310-cp310-manylinux_2_27_x86_64.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/rocm/amd_smi.tar ; platform_machine == "x86_64"
 pyrsmi==0.2.0
 pyyaml==6.0.2

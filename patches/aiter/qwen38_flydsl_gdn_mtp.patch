@@ -1,7 +1,7 @@
 diff --git a/aiter/ops/flydsl/kernels/gdr_decode.py b/aiter/ops/flydsl/kernels/gdr_decode.py
 --- a/aiter/ops/flydsl/kernels/gdr_decode.py
 +++ b/aiter/ops/flydsl/kernels/gdr_decode.py
-@@ -605,6 +605,8 @@
+@@ -601,6 +601,8 @@
      # Unused here; a parameter so it joins the cache key.
      WAVES_PER_EU: int = 0,
      min_live_slot: int = 0,
@@ -10,7 +10,7 @@ diff --git a/aiter/ops/flydsl/kernels/gdr_decode.py b/aiter/ops/flydsl/kernels/g
  ):
      """Gated delta rule over a speculative draft window.
  
-@@ -628,7 +630,7 @@
+@@ -624,7 +626,7 @@
      NO_STATE_WRITE = bool(disable_state_update)
      assert not TREE or SNAPSHOT, "the EAGLE tree is the snapshot mode's"
      assert not TREE or len(inter_strides) == 5, "tree needs a snapshot buffer"
@@ -19,7 +19,7 @@ diff --git a/aiter/ops/flydsl/kernels/gdr_decode.py b/aiter/ops/flydsl/kernels/g
  
      # Only an f32 snapshot reloads exactly; a narrower one rounds.
      LOSSLESS_SNAPSHOT = TREE and "f32" in inter_dtype
-@@ -766,7 +768,12 @@
+@@ -762,7 +764,12 @@
          if const_expr(CHAIN):
              token_slots = [_slot_at(t) for t in range_constexpr(seq_length)]
  
@@ -31,9 +31,9 @@ diff --git a/aiter/ops/flydsl/kernels/gdr_decode.py b/aiter/ops/flydsl/kernels/g
 +            )
 +        elif const_expr(CHAIN):
              nacc_view = _gview(num_accepted, None, (batch_size, 1), (1, 1))
-             read_token = fx.Int32(
-                 _load_vec(cp_i32, fx.slice(nacc_view, (b_i, None)), 1, fx.Int32)
-@@ -852,6 +859,18 @@
+             read_token = (
+                 fx.Int32(
+@@ -851,6 +858,18 @@
                  vec_shape,
                  (state_strides[1], state_strides[2], VALUES_PER_THREAD_K, 1),
              )
@@ -52,7 +52,7 @@ diff --git a/aiter/ops/flydsl/kernels/gdr_decode.py b/aiter/ops/flydsl/kernels/g
  
          # One descriptor for the sequence's whole record: a step is a layout
          # dimension, since the window's own span stays well inside 32 bits.
-@@ -1114,6 +1133,20 @@
+@@ -1111,6 +1130,20 @@
                      for ki in range_constexpr(WARP_TILE_K_ITERS):
                          sq_vecs[ki] = sq_vecs[ki] * scale_vec
  
@@ -73,7 +73,7 @@ diff --git a/aiter/ops/flydsl/kernels/gdr_decode.py b/aiter/ops/flydsl/kernels/g
                  dot_kq_vec = fx.Vector.from_elements(
                      [f32_0 for i in range_constexpr(VALUES_PER_THREAD_K)], fx.Float32
                  )
-@@ -1182,8 +1215,15 @@
+@@ -1179,8 +1212,15 @@
  
                      if warp_k_vec_start == 0:
                          _write_q()
@@ -91,7 +91,7 @@ diff --git a/aiter/ops/flydsl/kernels/gdr_decode.py b/aiter/ops/flydsl/kernels/g
                      write_slot = token_slots[sq_i]
                      write_view = _state_at(write_slot)
  
-@@ -1208,8 +1248,12 @@
+@@ -1205,8 +1245,12 @@
                                      state_num,
                                  )
  
@@ -109,7 +109,7 @@ diff --git a/aiter/ops/flydsl/kernels/gdr_decode.py b/aiter/ops/flydsl/kernels/g
 diff --git a/aiter/ops/flydsl/linear_attention_kernels.py b/aiter/ops/flydsl/linear_attention_kernels.py
 --- a/aiter/ops/flydsl/linear_attention_kernels.py
 +++ b/aiter/ops/flydsl/linear_attention_kernels.py
-@@ -763,6 +763,7 @@
+@@ -766,6 +766,7 @@
      has_tree,
      disable_state_update,
      stream,
@@ -117,7 +117,7 @@ diff --git a/aiter/ops/flydsl/linear_attention_kernels.py b/aiter/ops/flydsl/lin
  ):
      batch_size, seq_length, num_k_heads, head_k_dim = query.shape
      num_v_heads = value.shape[-2]
-@@ -830,6 +831,8 @@
+@@ -833,6 +834,8 @@
                  has_tree,
                  disable_state_update,
                  min_live_slot=min_live_slot,
@@ -126,10 +126,10 @@ diff --git a/aiter/ops/flydsl/linear_attention_kernels.py b/aiter/ops/flydsl/lin
                  **kwargs_,
              )
  
-@@ -1067,3 +1070,36 @@
-         disable_state_update=disable_state_update,
-         stream=stream,
-     )
+@@ -1304,3 +1307,36 @@
+             specialization_key=key,
+         )
+     return out
 +
 +
 +def flydsl_gdr_mtp_rtp(query, key, value, a, b, dt_bias, A_log, state, out,
