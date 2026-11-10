@@ -257,6 +257,10 @@ def try_project_quantized_qkv(attn, x, quantized_input=None, *, pdl: bool = Fals
     """Decode-only projection with an explicit, forward-local quantized Q."""
     if os.environ.get("DSV41_FUSED_QUERY_QUANT", "1") != "1":
         return None
+    try:
+        import deep_gemm  # noqa: F401
+    except ImportError:
+        return None
     linear = getattr(attn, "wq_a_wkv", None)
     if not isinstance(attn.wq_b, V41MXFP8Linear):
         return None

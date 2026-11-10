@@ -516,7 +516,8 @@ def hipgraph_capture_all_reduce(
     global _trtllm_fallback_warned
 
     if (
-        process_group is not None
+        os.environ.get("DSV41_CAPTURE_NO_TRTLLM", "0") != "1"
+        and process_group is not None
         and _is_hidden_size_supported_for_trtllm(tensor.shape[-1])
         and _is_trtllm_allreduce_ready()
     ):

@@ -223,6 +223,10 @@ def try_fused_qkv_rope_cache(
     positive slots trigger the existing device trap gate. Unsupported shapes
     return None before modifying inputs, and backend errors propagate.
     """
+    try:
+        import deep_gemm  # noqa: F401
+    except ImportError:
+        return None
     if (
         not isinstance(eps, (int, float))
         or eps < 0
