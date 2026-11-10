@@ -73,7 +73,7 @@ a1 ci pipeline run 1346 --repo "$CI_REPO" --branch "$RECIPE_REF" \
 
 同一次运行会先执行一次 `mock-ci-case-build`。共享构建成功后，每个选中的 Case 在独立 Job 中运行，worker 有空位就能并行。某个 Case 失败时，另一个仍可跑完并上传自己的报告。可选 ID 由配方分支注册，当前 `performance_regression` 还没有 CI Job。
 
-## 3. 查看结果
+## 3. 下载和查看 Case 报告
 
 将触发返回的 Run ID 填入 `RUN_ID`。先用 `run get` 回读源码 SHA、Case 列表和运行状态，再用 `job list` 查看共享构建及各 Case 的状态。
 
@@ -83,9 +83,21 @@ a1 ci job list --run "$RUN_ID" --repo "$CI_REPO" -f json
 a1 ci artifact list --run "$RUN_ID" --repo "$CI_REPO" -f json
 ```
 
-从制品列表复制目标 Job 对应的 `mock-case-<Job ID>-<配方提交>` 名称，填入 `ARTIFACT_NAME`。用独立的输出文件保存各 Case 的报告。Case 执行失败时也可下载已上传的报告。
+从制品列表复制目标 Case 的完整 `name`，填入 `ARTIFACT_NAME`。例如 `basic` 的报告名称以 `mock-case-mock-ci-case-basic-` 开头，`mock-case-runtime-` 开头的是共享 Java 运行包。Case 执行失败时也可下载已上传的报告。
+
+下载文件是 AoneCI 的 ZIP 归档，内含 `mock-case-result.tar.gz`。每个 Case 解包到自己的目录。
 
 ```sh
+REPORT_DIR=$(mktemp -d)
 a1 ci artifact download "$ARTIFACT_NAME" --run "$RUN_ID" --repo "$CI_REPO" \
-  --output "${ARTIFACT_NAME}.tar.gz"
+  --output "$REPORT_DIR/artifact.zip"
+unzip -p "$REPORT_DIR/artifact.zip" mock-case-result.tar.gz | tar -xzf - -C "$REPORT_DIR"
+
+RESULT_DIR="$REPORT_DIR/mock-case-result/result"
+cat "$REPORT_DIR/mock-case-result/exit-code"
+cat "$RESULT_DIR/result.json"
 ```
+
+- `result.json` 是 Case 总结，包含运行状态和错误。若在 Case 启动前失败，先看 Job 的 `run-case` 日志和报告里的 `exit-code`。
+- `gates.jsonl` 记录每项门禁的实际值和判定，`events.jsonl` 记录运行时间线。
+- 如需回看曲线，保留完整的 `result/` 目录，将 `RESULT_DIR` 传给 [View 指南](view-guide.md) 中的 `mock-view`。曲线依赖报告中保留的 Prometheus 数据。
