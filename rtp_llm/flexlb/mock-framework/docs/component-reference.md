@@ -170,7 +170,7 @@ environment:
           seed: 20260922
 ```
 
-RtpConfig 只加载 ComputeSpec；ComputeModel 组合 FormulaForward、可选噪声、DecodeStepModel 和 StoppingModel。非默认 Decode 进度参数只允许配置在 D，P/D 都可以配置 EOS。旧字段、未知字段、null、错误类型或缺少必要 seed 明确拒绝，没有别名和兼容分支。模型校验来自 Java，Python 只编译组件配置结构。effective-config 只保存生效值及解析后的模型参数，原始输入由 Runner 的 config.json 保留；不再产生 pending_config。
+RtpConfig 通过 ComputeModel 加载计算配置。ComputeModel 组合 FormulaForward、可选噪声、DecodeStepModel 和 StoppingModel，各模型负责校验自己的配置。非默认 Decode 进度参数只允许配置在 D，P/D 都可以配置 EOS。旧字段、未知字段、null、错误类型或缺少必要 seed 明确拒绝，没有别名和兼容分支。模型校验来自 Java，Python 只编译组件配置结构。effective-config 只保存生效值及解析后的模型参数，原始输入由 Runner 的 config.json 保留；不再产生 pending_config。
 
 调度前 Compute.prepare 固定请求快照、本轮进度和 KV 需求。Forward 完成后 Compute.completed 按 EOS 和长度上限截断本轮输出，返回 committedTokens/finished。EngineScheduler 只校验请求仍有效并提交结果、更新队列、处理资源和 PD；不判断正常结束是 EOS 还是达到上限。取消、超时、关闭和计算失败仍走独立失败路径，不能成为正常 finished，也不能因旧回调再提交 token。
 

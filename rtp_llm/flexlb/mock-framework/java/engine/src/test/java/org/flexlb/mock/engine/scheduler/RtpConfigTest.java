@@ -8,13 +8,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Verifies RTP engine configuration parsing and validation.
+ */
 class RtpConfigTest {
     private static final ObjectMapper JSON = new ObjectMapper();
+
     @TempDir Path directory;
-    private RtpConfig load(ObjectNode value) throws Exception {
-        var path = directory.resolve("component.json"); JSON.writeValue(path.toFile(), value); return RtpConfig.load(path);
-    }
-    private ObjectNode root() { return JSON.valueToTree(LLMMockEngineTest.configuration("prefill")); }
 
     @Test void schedulerModeSelectsPolicyAndRejectsUnknownValues() throws Exception {
         var root = root();
@@ -85,7 +85,7 @@ class RtpConfigTest {
         compute.putObject("eos").put("probability", .1);
         assertThrows(Exception.class, () -> load(root));
         ((ObjectNode) compute.path("eos")).put("seed", 42);
-        assertEquals(.1, load(root).compute().configuration().eos().probability());
+        assertEquals(.1, load(root).compute().effectiveSettings().get("mock.compute.eos.probability").doubleValue());
         ((ObjectNode) compute.path("eos")).put("extra", 1); assertThrows(Exception.class, () -> load(root));
         compute.remove("eos"); compute.putObject("decode").put("tokens.per.step", 2.6);
         assertThrows(IllegalArgumentException.class, () -> load(root));
@@ -103,15 +103,17 @@ class RtpConfigTest {
         config.put("seq_size_per_block", 16); config.remove("mock.compute");
         assertThrows(Exception.class, () -> load(root));
     }
+
     @Test void fractionalDecodeModelLoadsAndItsEffectiveConfigurationCanBeReadBack() throws Exception {
         var root = root(); root.put("component_role", "decode");
         var config = (ObjectNode) root.path("component").path("config");
         ((ObjectNode) config.path("mock.compute")).putObject("decode").put("tokens.per.step", 2.6);
         var model = load(root);
-        assertEquals(2.6, model.compute().configuration().decode().tokens_per_step());
+        assertEquals(2.6, model.compute().effectiveSettings().get("mock.compute.decode.tokens.per.step").doubleValue());
         ((ObjectNode) root.path("component")).set("config", model.effective());
-        assertEquals(2.6, load(root).compute().configuration().decode().tokens_per_step());
+        assertEquals(2.6, load(root).compute().effectiveSettings().get("mock.compute.decode.tokens.per.step").doubleValue());
     }
+
     @Test void acceptsOnlyLocalLru() throws Exception {
         var root = root();
         var config = (ObjectNode) root.path("component").path("config");
@@ -231,6 +233,7 @@ class RtpConfigTest {
             assertThrows(IllegalArgumentException.class, () -> RtpConfig.fromEnvironment(parsed.id(), parsed.role(), env));
         }
     }
+
     @Test void resolvesNativeAutomaticBudgetsAndPreservesExplicitOverrides() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         config.remove("max_batch_tokens_size");
@@ -242,12 +245,6 @@ class RtpConfigTest {
         config.put("max_batch_tokens_size", 50); assertEquals(50, load(root).maxBatchTokens());
         config.put("max_batch_tokens_size", 0).put("max_seq_len", Integer.MAX_VALUE);
         assertThrows(IllegalArgumentException.class, () -> load(root));
-    }
-
-    private static java.util.Map<String, String> environmentOf(JsonNode config) {
-        var env = new java.util.HashMap<String, String>();
-        config.fields().forEachRemaining(e -> env.put(e.getKey().toUpperCase(java.util.Locale.ROOT).replace('.', '_'), e.getValue().asText()));
-        return env;
     }
 
     @Test void usesExplicitRoutingIdentityWithoutReadingCheckpoint() throws Exception {
@@ -290,6 +287,18 @@ class RtpConfigTest {
             ((ObjectNode) root.path("component").path("config")).put("mock.cache.total.blocks", invalid);
             assertThrows(IllegalArgumentException.class, () -> load(root));
         }
+    }
+
+    private RtpConfig load(ObjectNode value) throws Exception {
+        var path = directory.resolve("component.json"); JSON.writeValue(path.toFile(), value); return RtpConfig.load(path);
+    }
+
+    private ObjectNode root() { return JSON.valueToTree(LLMMockEngineTest.configuration("prefill")); }
+
+    private static java.util.Map<String, String> environmentOf(JsonNode config) {
+        var env = new java.util.HashMap<String, String>();
+        config.fields().forEachRemaining(e -> env.put(e.getKey().toUpperCase(java.util.Locale.ROOT).replace('.', '_'), e.getValue().asText()));
+        return env;
     }
 
 }

@@ -14,6 +14,7 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.execution.LLMMockEngine;
+import org.flexlb.mock.engine.forward.ComputeModel;
 import org.flexlb.mock.engine.scheduler.LLMMockEngineTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -515,7 +516,11 @@ class PdGenerationTest {
     }
 
     @Test void eosLengthIsStableAcrossRoundWidths() throws Exception {
-        int expected = new org.flexlb.mock.engine.forward.StoppingModel(new org.flexlb.mock.engine.forward.StoppingSpec(.2, 42L)).complete("77", 0, 20, 3, 20, false).committedTokens();
+        var compute = ComputeModel.fromJson(new ObjectMapper().readTree("""
+            {"forward":{"expression":"1"},"eos":{"probability":0.2,"seed":42}}
+            """));
+        var generation = new ComputeModel.Request("77", 0, 5, 0, 3, 20, 25, false);
+        int expected = compute.completed(new ComputeModel.Plan(generation, 20)).committedTokens();
         for (int width : new int[]{1, 4}) {
             try (var p = node("prefill", 16, 1, Map.of("eos", Map.of("probability", .2, "seed", 42)));
                     var d = node("decode", 16, 1, Map.of("decode", Map.of("tokens.per.step", width), "eos", Map.of("probability", .2, "seed", 42)))) {

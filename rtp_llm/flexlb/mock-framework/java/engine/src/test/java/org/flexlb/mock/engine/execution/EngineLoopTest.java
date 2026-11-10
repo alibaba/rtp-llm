@@ -1,8 +1,9 @@
 package org.flexlb.mock.engine.execution;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.*;
-import org.flexlb.mock.engine.forward.ComputeSpec;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.forward.*;
 import org.flexlb.mock.engine.scheduler.EngineScheduler.QueueSnapshot;
@@ -13,44 +14,10 @@ import org.flexlb.mock.engine.scheduler.TaskHistory;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Exercises scheduling, simulated compute and wakeups in the engine loop.
+ */
 class EngineLoopTest {
-    private static EngineScheduler.Work work(String id) {
-        var item = new ForwardBatch.Request(id, 4, 0, 8, 0, 4, 0, List.of());
-        return new EngineScheduler.Work(new Object(), new ForwardBatch(id, List.of(item)));
-    }
-
-    /** Two policies with different queue order exercise the same execution loop. */
-    private static class Policy implements EngineScheduler {
-        final Deque<Work> queue = new ArrayDeque<>();
-        final BlockingQueue<String> finished = new LinkedBlockingQueue<>();
-        final List<Work> failures = new ArrayList<>();
-        final List<Runnable> notices = new ArrayList<>();
-        final boolean newestFirst;
-        final BlockingQueue<Work> scheduled = new LinkedBlockingQueue<>();
-        Work cancelled;
-        Policy(boolean newestFirst) { this.newestFirst = newestFirst; }
-        public Work schedule() { var work = newestFirst ? queue.pollLast() : queue.pollFirst(); if (work != null) scheduled.add(work); return work; }
-        public void processOutputs(Work work, SimulatedCompute.Outcome result) { finished.add(work.batch().id()); }
-        public void failForward(Work work, RuntimeException error) { failures.add(work); }
-        public boolean isForwardCancelled(Work work) { return cancelled == work; }
-        public void prepareKvAndCheckTimeouts() {}
-        public long nextDeadline() { return Long.MAX_VALUE; }
-        public List<Task> tasks() { return List.of(); }
-        public void transferCompleted(Request request, TransferResult result) { throw new UnsupportedOperationException(); }
-        public List<Runnable> takeNotifications() { var result = List.copyOf(notices); notices.clear(); return result; }
-        public void close() { queue.clear(); }
-        public List<Request> requests() { return List.of(); }
-        public QueueSnapshot queues() { return new QueueSnapshot(queue.size(), 0, 0, 0); }
-        public Request enqueue(Input input, Listener listener) { throw new UnsupportedOperationException(); }
-        public List<InputResult> enqueue(List<InputItem> batch) { throw new UnsupportedOperationException(); }
-        public void control(Request request, Control event) { throw new UnsupportedOperationException(); }
-        public void abort(Request request, RequestFailure failure) { throw new UnsupportedOperationException(); }
-        public RequestState.Use beginTransfer(Request request) { throw new UnsupportedOperationException(); }
-    }
-    private EngineLoop engine(Object lock, Policy policy, String expression) {
-        return new EngineLoop(lock, (domain, cache, finished) -> policy, new TaskHistory(), new org.flexlb.mock.engine.cache.KvCacheManager(1, 1, 0), new ComputeModel(new ComputeSpec(new ComputeSpec.Forward(expression, null), null, null)), Role.prefill, "test");
-    }
-
     @Test void healthChecksExposeLoopFailures() throws Exception {
         var fail = new java.util.concurrent.atomic.AtomicBoolean();
         var policy = new Policy(false) {
@@ -158,6 +125,7 @@ class EngineLoopTest {
             assertEquals("forward", policy.finished.poll(2, TimeUnit.SECONDS));
         } finally { release.countDown(); }
     }
+
     @Test void idleLoopSleepsAndOnlyWakesForTheNearestDeadline() throws Exception {
         var calls = new java.util.concurrent.atomic.AtomicInteger();
         var expired = new CompletableFuture<Void>();
@@ -202,7 +170,7 @@ class EngineLoopTest {
                     lease.close(); super.processOutputs(work, result);
                 }
             };
-            try (var loop = new EngineLoop(policy, (domain, storage, finished) -> policy, new TaskHistory(), cache, new ComputeModel(new ComputeSpec(new ComputeSpec.Forward("1", null), null, null)), Role.prefill, "capacity")) {
+            try (var loop = new EngineLoop(policy, (domain, storage, finished) -> policy, new TaskHistory(), cache, compute("1"), Role.prefill, "capacity")) {
                 loop.wakeUp();
                 assertTrue(tried.await(2, TimeUnit.SECONDS));
                 Thread.sleep(100);
@@ -211,6 +179,52 @@ class EngineLoopTest {
                 assertEquals("capacity", policy.finished.poll(2, TimeUnit.SECONDS));
             } finally { owner.close(); }
         }
+    }
+
+    private static EngineScheduler.Work work(String id) {
+        var item = new ForwardBatch.Request(id, 4, 0, 8, 0, 4, 0, List.of());
+        return new EngineScheduler.Work(new Object(), new ForwardBatch(id, List.of(item)));
+    }
+
+    private EngineLoop engine(Object lock, Policy policy, String expression) throws IOException {
+        return new EngineLoop(lock, (domain, cache, finished) -> policy, new TaskHistory(), new org.flexlb.mock.engine.cache.KvCacheManager(1, 1, 0), compute(expression), Role.prefill, "test");
+    }
+
+    private static ComputeModel compute(String expression) throws IOException {
+        var config = new ObjectMapper().createObjectNode();
+        config.putObject("forward").put("expression", expression);
+        return ComputeModel.fromJson(config);
+    }
+
+    /**
+     * Lets tests exercise the same loop with two different queue orders.
+     */
+    private static class Policy implements EngineScheduler {
+        final Deque<Work> queue = new ArrayDeque<>();
+        final BlockingQueue<String> finished = new LinkedBlockingQueue<>();
+        final List<Work> failures = new ArrayList<>();
+        final List<Runnable> notices = new ArrayList<>();
+        final boolean newestFirst;
+        final BlockingQueue<Work> scheduled = new LinkedBlockingQueue<>();
+        Work cancelled;
+        Policy(boolean newestFirst) { this.newestFirst = newestFirst; }
+        public Work schedule() { var work = newestFirst ? queue.pollLast() : queue.pollFirst(); if (work != null) scheduled.add(work); return work; }
+        public void processOutputs(Work work, SimulatedCompute.Outcome result) { finished.add(work.batch().id()); }
+        public void failForward(Work work, RuntimeException error) { failures.add(work); }
+        public boolean isForwardCancelled(Work work) { return cancelled == work; }
+        public void prepareKvAndCheckTimeouts() {}
+        public long nextDeadline() { return Long.MAX_VALUE; }
+        public List<Task> tasks() { return List.of(); }
+        public void transferCompleted(Request request, TransferResult result) { throw new UnsupportedOperationException(); }
+        public List<Runnable> takeNotifications() { var result = List.copyOf(notices); notices.clear(); return result; }
+        public void close() { queue.clear(); }
+        public List<Request> requests() { return List.of(); }
+        public QueueSnapshot queues() { return new QueueSnapshot(queue.size(), 0, 0, 0); }
+        public Request enqueue(Input input, Listener listener) { throw new UnsupportedOperationException(); }
+        public List<InputResult> enqueue(List<InputItem> batch) { throw new UnsupportedOperationException(); }
+        public void control(Request request, Control event) { throw new UnsupportedOperationException(); }
+        public void abort(Request request, RequestFailure failure) { throw new UnsupportedOperationException(); }
+        public RequestState.Use beginTransfer(Request request) { throw new UnsupportedOperationException(); }
     }
 
 }
