@@ -946,6 +946,15 @@ class FrontendApp(object):
             check_not_draining(request)
             return self.frontend_server.tokenize(req)
 
+        # AWI evaluator contract endpoints (/awi/generate, /awi/barrier,
+        # /awi/observations). Failures here must not take down serving.
+        try:
+            from rtp_llm.frontend.awi_endpoints import register_awi_routes
+
+            register_awi_routes(app, self)
+        except Exception:
+            logging.exception("[awi] endpoint registration failed")
+
         if self.frontend_server.is_embedding:
             # embedding
             @app.post("/v1/embeddings/similarity")

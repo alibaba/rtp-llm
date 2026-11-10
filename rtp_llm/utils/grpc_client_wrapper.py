@@ -294,6 +294,68 @@ class GrpcClientWrapper:
             logging.error(f"Update scheduler info failed: {e}")
             return {"error": f"Failed to update scheduler info: {str(e)}"}
 
+    async def awi_command(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """Send an AWI telemetry command to tp_rank 0 of every DP group.
+
+        Each leader fans the command out to its TP ranks (see
+        LocalRpcServer::AwiCommand). Per-rank results across all DP groups are
+        aggregated here; every rank's JSON document is returned under
+        ``results`` so the frontend can build one whole-model observation.
+        """
+        request = pb2.AwiCommandRequestPB(
+            command_id=str(req.get("command_id", "")),
+            op=str(req.get("op", "collect")),
+            operation_id=str(req.get("operation_id", "")),
+            request_ids=[str(r) for r in req.get("request_ids", [])],
+            context_tokens=int(req.get("context_tokens", 0)),
+        )
+
+        async def send_to_address(address: str):
+            await self._ensure_dp_connection(address)
+            return await self._dp_stubs[address].AwiCommand(request, timeout=65)
+
+        addresses = self.dp_addresses
+        responses = await asyncio.gather(
+            *(send_to_address(address) for address in addresses),
+            return_exceptions=True,
+        )
+
+        results = []
+        errors = []
+        for address, response in zip(addresses, responses):
+            if isinstance(response, Exception):
+                errors.append(f"{address}: {response}")
+                continue
+            for result in response.results:
+                entry = {
+                    "world_rank": result.world_rank,
+                    "dp_rank": result.dp_rank,
+                    "tp_rank": result.tp_rank,
+                    "local_rank": result.local_rank,
+                    "pid": result.pid,
+                    "success": result.success,
+                    "command_id": result.command_id,
+                    "dp_address": address,
+                    "error": result.error,
+                    "payload": None,
+                }
+                if result.json_payload:
+                    try:
+                        entry["payload"] = json.loads(result.json_payload)
+                    except Exception as parse_error:  # noqa: BLE001
+                        entry["error"] = f"payload parse failed: {parse_error}"
+                results.append(entry)
+                if not result.success:
+                    errors.append(
+                        f"{address}/world_rank={result.world_rank}: {result.error}"
+                    )
+
+        return {
+            "status": "ok" if not errors else "error",
+            "results": results,
+            "errors": errors,
+        }
+
     async def post_request(self, uri: str, req: Dict[str, Any]) -> Dict[str, Any]:
         """Generic POST request handler - routes to appropriate method based on URI"""
         try:
@@ -311,6 +373,8 @@ class GrpcClientWrapper:
                 return await self.dump_torch_allocator(req)
             elif uri == "update_scheduler_info":
                 return await self.update_scheduler_info(req)
+            elif uri == "awi_command":
+                return await self.awi_command(req)
             else:
                 # Default case - return empty success
                 return {"status": "ok"}

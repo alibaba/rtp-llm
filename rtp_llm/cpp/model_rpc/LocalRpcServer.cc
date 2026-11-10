@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
+#include "rtp_llm/cpp/model_rpc/AwiRankStore.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/multimodal_processor/MMProcessorConfig.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
@@ -1167,6 +1168,96 @@ grpc::Status LocalRpcServer::DumpTorchAllocatorInternal(grpc::ServerContext*    
         }
         throw;
     }
+}
+
+grpc::Status LocalRpcServer::AwiCommand(grpc::ServerContext*         context,
+                                        const AwiCommandRequestPB*   request,
+                                        AwiCommandResponsePB*        response) {
+    response->Clear();
+    if (maga_init_params_.parallelism_config.tp_rank != 0) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "awi_command must be sent to tp_rank 0");
+    }
+    RTP_LLM_LOG_INFO("awi_command from %s op=%s command_id=%s",
+                     context->peer().c_str(),
+                     request->op().c_str(),
+                     request->command_id().c_str());
+
+    if (maga_init_params_.parallelism_config.tp_size <= 1) {
+        AwiRankResultPB single;
+        const auto      status = AwiCommandInternal(context, request, &single);
+        if (!status.ok()) {
+            return status;
+        }
+        response->add_results()->Swap(&single);
+        return grpc::Status::OK;
+    }
+    if (!tp_broadcaster_) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "tp broadcaster unavailable for awi command");
+    }
+
+    std::vector<AwiCommandRequestPB> requests(tp_broadcaster_->workerNum(), *request);
+    auto                             rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& context,
+                       const AwiCommandRequestPB&                  internal_request,
+                       grpc::CompletionQueue*                      completion_queue) {
+        return stub->AsyncAwiCommandInternal(context.get(), internal_request, completion_queue);
+    };
+    auto broadcast_result = tp_broadcaster_->broadcast<AwiCommandRequestPB, AwiRankResultPB>(
+        requests, /*timeout_ms=*/60000, rpc_call, std::nullopt, "awi_command");
+    if (!broadcast_result) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "failed to broadcast awi command to tp group");
+    }
+    try {
+        broadcast_result->waitDone();
+    } catch (const std::exception& exception) {
+        RTP_LLM_LOG_WARNING("awi command broadcast failed command_id=%s: %s",
+                            request->command_id().c_str(),
+                            exception.what());
+        return grpc::Status(grpc::StatusCode::INTERNAL, "awi command broadcast failed");
+    }
+    if (!broadcast_result->success()) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "awi command broadcast to tp group failed");
+    }
+    for (const auto& rank_result : broadcast_result->responses()) {
+        response->add_results()->CopyFrom(rank_result);
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::AwiCommandInternal(grpc::ServerContext*       context,
+                                                const AwiCommandRequestPB* request,
+                                                AwiRankResultPB*           response) {
+    response->Clear();
+    const auto& parallelism_config = maga_init_params_.parallelism_config;
+    response->set_world_rank(parallelism_config.world_rank);
+    response->set_dp_rank(parallelism_config.dp_rank);
+    response->set_tp_rank(parallelism_config.tp_rank);
+    response->set_local_rank(parallelism_config.local_rank);
+    response->set_pid(getpid());
+    response->set_command_id(request->command_id());
+
+    const std::string& op = request->op();
+    if (op == "collect") {
+        response->set_success(true);
+        response->set_json_payload(AwiRankStore::instance().collectJson(request->operation_id()));
+        return grpc::Status::OK;
+    }
+    if (op == "barrier") {
+        if (request->operation_id().empty()) {
+            response->set_success(false);
+            response->set_error("barrier requires operation_id");
+            return grpc::Status::OK;
+        }
+        AwiRankStore::instance().armBarrier(request->operation_id(),
+                                           {request->request_ids().begin(), request->request_ids().end()},
+                                           request->context_tokens());
+        response->set_success(true);
+        response->set_json_payload("{\"armed\":true}");
+        return grpc::Status::OK;
+    }
+    response->set_success(false);
+    response->set_error("unknown awi op: " + op);
+    return grpc::Status::OK;
 }
 
 grpc::Status

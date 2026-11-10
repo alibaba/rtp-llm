@@ -1,5 +1,18 @@
 import importlib
+import os as _os
 from typing import Any
+
+# AWI evaluator contract: count real outbound network connections from the
+# very start of every server process (frontend, backend ranks, spawned
+# children re-import this package). Counting only; never blocks. Kill
+# switch: AWI_NET_GUARD=0.
+if _os.environ.get("AWI_NET_GUARD", "1").strip().lower() not in ("0", "false", "off"):
+    try:
+        from rtp_llm.utils.awi_telemetry import StartupNetworkGuard as _AwiNetGuard
+
+        _AwiNetGuard.install()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def __getattr__(name: str) -> Any:

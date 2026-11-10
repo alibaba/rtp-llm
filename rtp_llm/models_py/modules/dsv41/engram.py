@@ -2121,7 +2121,17 @@ class Engram(nn.Module):
             with safe_open(
                 root / weight_map[name], framework="pt", device="cpu"
             ) as file:
-                return file.get_tensor(name)
+                tensor = file.get_tensor(name)
+            # Engram offload policy: every Engram checkpoint key is loaded
+            # into host RAM and stays there. Record the placement at this
+            # authoritative host-resident point for the AWI census.
+            try:
+                from rtp_llm.model_loader.awi_recorder import register_host_tensor
+
+                register_host_tensor(name, tensor)
+            except Exception:  # noqa: BLE001
+                pass
+            return tensor
 
         embedding = None
         try:

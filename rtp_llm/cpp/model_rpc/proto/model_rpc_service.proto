@@ -622,6 +622,36 @@ message TorchAllocatorDumpResponsePB {
     repeated TorchAllocatorDumpResultPB results = 1;
 }
 
+// AWI evaluator telemetry channel (contract: evaluator-protocol.md).
+// AwiCommand is sent to each DP group's tp_rank 0 and fanned out to every TP
+// rank, mirroring the DumpTorchAllocator broadcast. Per-rank replies carry
+// JSON documents assembled from real execution artifacts only.
+message AwiCommandRequestPB {
+    string command_id = 1;
+    // "collect": drain this rank's recorded events/barriers into json_payload.
+    // "barrier": arm an operation-scoped admission/residency probe.
+    string op = 2;
+    string operation_id = 3;
+    repeated string request_ids = 4;
+    int64 context_tokens = 5;
+}
+
+message AwiRankResultPB {
+    int64 world_rank = 1;
+    int64 dp_rank = 2;
+    int64 tp_rank = 3;
+    int64 local_rank = 4;
+    int64 pid = 5;
+    bool success = 6;
+    string json_payload = 7;
+    string error = 8;
+    string command_id = 9;
+}
+
+message AwiCommandResponsePB {
+    repeated AwiRankResultPB results = 1;
+}
+
 message CheckHealthResponsePB {
     string health = 1;
 }
@@ -1115,6 +1145,8 @@ service RpcService {
     rpc DumpTorchAllocator(TorchAllocatorDumpRequestPB) returns (TorchAllocatorDumpResponsePB);
     rpc DumpTorchAllocatorInternal(TorchAllocatorDumpRequestPB) returns (TorchAllocatorDumpResultPB);
     rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
+    rpc AwiCommand(AwiCommandRequestPB) returns (AwiCommandResponsePB);
+    rpc AwiCommandInternal(AwiCommandRequestPB) returns (AwiRankResultPB);
 
     rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);

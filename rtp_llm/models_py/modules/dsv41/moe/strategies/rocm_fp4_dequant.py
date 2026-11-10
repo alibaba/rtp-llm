@@ -117,15 +117,25 @@ class RocmFp4DequantStrategy(RoutedExpertsStrategy):
         """
         from rtp_llm.utils.model_weight import W
 
-        self._W1 = _dequant_fp4_stack(
-            layer_weights.pop(W.v4_routed_w1_w), layer_weights.pop(W.v4_routed_w1_s)
-        )
-        self._W2 = _dequant_fp4_stack(
-            layer_weights.pop(W.v4_routed_w2_w), layer_weights.pop(W.v4_routed_w2_s)
-        )
-        self._W3 = _dequant_fp4_stack(
-            layer_weights.pop(W.v4_routed_w3_w), layer_weights.pop(W.v4_routed_w3_s)
-        )
+        sources = {
+            1: (layer_weights.pop(W.v4_routed_w1_w), layer_weights.pop(W.v4_routed_w1_s)),
+            2: (layer_weights.pop(W.v4_routed_w2_w), layer_weights.pop(W.v4_routed_w2_s)),
+            3: (layer_weights.pop(W.v4_routed_w3_w), layer_weights.pop(W.v4_routed_w3_s)),
+        }
+        self._W1 = _dequant_fp4_stack(*sources[1])
+        self._W2 = _dequant_fp4_stack(*sources[2])
+        self._W3 = _dequant_fp4_stack(*sources[3])
+        try:
+            from rtp_llm.model_loader.awi_recorder import register_transform
+
+            for index, resident in ((1, self._W1), (2, self._W2), (3, self._W3)):
+                register_transform(
+                    list(sources[index]),
+                    [resident],
+                    f"packed_e2m1_ue8m0_group32_to_bf16_stack_w{index}",
+                )
+        except Exception:  # noqa: BLE001
+            pass
         # sp_v4_routed_w1/w2 shard the inter dim across TP ranks under
         # pure-TP MoE; detect it from the resident shape vs the global
         # config value and reduce partial sums in forward.

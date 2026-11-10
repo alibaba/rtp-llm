@@ -118,6 +118,12 @@ class ModelLoader:
         self._load_dynamic_weights(weights, device)
         # load eplb weight
         self._init_eplb_weight(weights, device)
+        try:
+            from rtp_llm.model_loader.awi_recorder import snapshot_loader
+
+            snapshot_loader(self, weights, device)
+        except Exception:  # noqa: BLE001
+            logging.exception("[awi] weight census snapshot failed")
         return weights
 
     def load_lora_weights(self, adapter_name: str, lora_path: str, device: str = "cpu"):

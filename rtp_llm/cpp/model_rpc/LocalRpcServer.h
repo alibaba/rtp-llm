@@ -80,6 +80,14 @@ public:
     grpc::Status
     UpdateSchedulerInfo(grpc::ServerContext* context, const UpdateSchedulerInfoRequestPB* request, EmptyPB* response);
 
+    // AWI evaluator telemetry (evaluator-protocol.md). AwiCommand must be sent
+    // to tp_rank 0 of each DP group; it fans the command out to every TP rank
+    // through tp_broadcaster_, mirroring DumpTorchAllocator.
+    grpc::Status AwiCommand(grpc::ServerContext* context, const AwiCommandRequestPB* request, AwiCommandResponsePB* response);
+
+    grpc::Status
+    AwiCommandInternal(grpc::ServerContext* context, const AwiCommandRequestPB* request, AwiRankResultPB* response);
+
     KVCacheInfo getCacheStatusInfo(int64_t latest_cache_version, bool need_cache_keys);
 
     WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version);

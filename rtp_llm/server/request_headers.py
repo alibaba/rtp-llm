@@ -10,6 +10,9 @@ REQUEST_HEADER_NAMES = (
     "x-dashscope-requestid",
     "x-request-id",
     "dashscope-request-id",
+    # AWI evaluator contract: propagated into RequestInfoPB.request_id so
+    # scheduler observations carry the benchmark's own request identity.
+    "x-awi-request-id",
     "trace-id",
     "traceparent",
     "x-trace-id",
@@ -20,6 +23,7 @@ REQUEST_HEADER_NAMES = (
     "x-dashscope-datainspection",
 )
 CORRELATION_HEADER_NAMES = (
+    "x-awi-request-id",
     "x-dashscope-request-id",
     "x-dashscope-requestid",
     "x-request-id",

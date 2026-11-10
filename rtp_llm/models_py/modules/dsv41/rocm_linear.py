@@ -15,6 +15,8 @@ keeps activations in BF16, so ``forward_quantized`` is intentionally not
 supported here.
 """
 
+import logging
+
 import torch
 
 
@@ -69,6 +71,18 @@ class V41RocmBf16Linear(torch.nn.Module):
         # reporting; the FP8 payload is fully consumed by the dequant.
         self.weight_scales = scales
         self.weight = dequantize_blocked_fp8_weight(weight, scales)
+        try:
+            from rtp_llm.model_loader.awi_recorder import register_transform
+
+            register_transform(
+                [weight, scales],
+                [self.weight, self.weight_scales],
+                "blocked_fp8_e4m3_ue8m0_to_bf16_exact",
+            )
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).debug(
+                "awi transform registration skipped", exc_info=True
+            )
 
     def forward(self, x: torch.Tensor, out=None):
         if x.numel() == 0:
