@@ -1,6 +1,7 @@
 package org.flexlb.mock.client;
 
 import com.fasterxml.jackson.databind.*;
+import com.fasterxml.jackson.databind.node.BooleanNode;
 import java.io.*;
 import java.net.*;
 import java.net.http.*;
@@ -9,26 +10,23 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 
-/** Mirrors Frontend MasterService heartbeat selection; topology.json replaces VIP discovery. */
+/**
+ * Probes Master endpoints from the Runner topology and publishes a primary and optional backup.
+ */
 final class MasterDiscovery implements AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
+
     private final Path topology;
     private final Set<String> allowed;
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofMillis(500)).build();
     private final ExecutorService probes = Executors.newFixedThreadPool(4);
     private final ScheduledExecutorService refresh = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, Host> hosts = new HashMap<>();
+
     private volatile List<String> routes = List.of();
     private volatile Exception failure;
     private String primary;
 
-    private static final class Host {
-        final String http, rpc;
-        boolean healthy, leader;
-        int failures;
-        long lastProbe;
-        Host(String http, String rpc) { this.http = http; this.rpc = rpc; }
-    }
     MasterDiscovery(Path topology, List<String> allowed) throws Exception {
         this.topology = topology;
         this.allowed = allowed == null ? null : Set.copyOf(allowed);
@@ -40,26 +38,19 @@ final class MasterDiscovery implements AutoCloseable {
             }, 1, 1, TimeUnit.SECONDS);
         } catch (Exception error) { close(); throw error; }
     }
+
+    @Override public void close() {
+        refresh.shutdownNow(); probes.shutdownNow(); http.shutdownNow();
+        try { refresh.awaitTermination(2, TimeUnit.SECONDS); probes.awaitTermination(2, TimeUnit.SECONDS); }
+        catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+    }
+
+    List<String> routes() { check(); return routes; }
+
     void check() {
         if (failure != null) throw new IllegalStateException("Master discovery failed", failure);
     }
-    List<String> routes() { check(); return routes; }
 
-    private JsonNode heartbeat(Host host) {
-        try {
-            var request = HttpRequest.newBuilder(URI.create(host.http + "/rtp_llm/master/info"))
-                .timeout(Duration.ofMillis(500)).header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString("{}")).build();
-            var response = http.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() == 200) {
-                var value = JSON.readTree(response.body());
-                if (value != null && value.isObject()) return value;
-            }
-        } catch (IOException | IllegalArgumentException error) {
-            // Failed heartbeats are availability observations, not playback infrastructure errors.
-        } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
-        return null;
-    }
     private void update() throws Exception {
         var nodes = JSON.readTree(topology.toFile());
         if (nodes == null || !nodes.isArray()) throw new IOException("Invalid topology array");
@@ -75,7 +66,7 @@ final class MasterDiscovery implements AutoCloseable {
             if (!discovered.add(rpc)) throw new IOException("Duplicate Master endpoint");
             hosts.computeIfAbsent(rpc, k -> new Host(address, rpc));
         }
-        // Frontend continues probing cached healthy hosts when discovery temporarily omits them.
+        // Probe previously healthy hosts even when the latest complete topology omits them.
         hosts.values().stream().filter(h -> h.healthy).forEach(h -> discovered.add(h.rpc));
         var pending = new LinkedHashMap<Host, Future<JsonNode>>();
         for (String rpc : discovered) {
@@ -88,6 +79,10 @@ final class MasterDiscovery implements AutoCloseable {
             host.lastProbe = System.nanoTime();
             if (value == null) {
                 if (++host.failures >= 2) host.healthy = false;
+            } else if (value.has("ready") && !BooleanNode.TRUE.equals(value.get("ready"))) {
+                host.failures++;
+                host.healthy = false;
+                host.leader = false;
             } else {
                 host.healthy = true; host.failures = 0;
                 String leader = value.path("real_master_host").asText();
@@ -109,9 +104,31 @@ final class MasterDiscovery implements AutoCloseable {
         Host backup = healthy.stream().filter(h -> !h.leader && !h.rpc.equals(chosen)).findFirst().orElse(null);
         routes = backup == null ? List.of(primary) : List.of(primary, backup.rpc);
     }
-    @Override public void close() {
-        refresh.shutdownNow(); probes.shutdownNow(); http.shutdownNow();
-        try { refresh.awaitTermination(2, TimeUnit.SECONDS); probes.awaitTermination(2, TimeUnit.SECONDS); }
-        catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+
+    private JsonNode heartbeat(Host host) {
+        try {
+            var request = HttpRequest.newBuilder(URI.create(host.http + "/rtp_llm/master/info"))
+                .timeout(Duration.ofMillis(500)).header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{}")).build();
+            var response = http.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                var value = JSON.readTree(response.body());
+                if (value != null && value.isObject()) return value;
+            }
+        } catch (IOException | IllegalArgumentException error) {
+            // Failed heartbeats are availability observations, not playback infrastructure errors.
+        } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+        return null;
+    }
+
+    /**
+     * Stores the last health and leadership observations for one Master endpoint.
+     */
+    private static final class Host {
+        final String http, rpc;
+        boolean healthy, leader;
+        int failures;
+        long lastProbe;
+        Host(String http, String rpc) { this.http = http; this.rpc = rpc; }
     }
 }
