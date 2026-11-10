@@ -52,14 +52,14 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
         this.id = id; this.topology = topology; this.directory = directory;
         api = new ControlServer(new InetSocketAddress("127.0.0.1", 0)).route("client/start", Start.class, Ack.class, this::start)
             .route("client/stop", Empty.class, Summary.class, this::stop)
-            .route("worker/prepare", WorkerPlan.class, Ack.class, this::prepare)
+            .route("worker/prepare", ClientReplayPlan.class, Ack.class, this::prepare)
             .route("worker/begin", Begin.class, Ack.class, this::begin)
             .route("worker/halt", Sequence.class, Ack.class, this::halt)
             .route("worker/state", Sequence.class, State.class, this::state)
             .metrics(metrics::scrape).start();
     }
 
-    @Override public synchronized Ack prepare(WorkerPlan args) throws Exception {
+    @Override public synchronized Ack prepare(ClientReplayPlan args) throws Exception {
         if (closed || session != null && (args.sequence() <= session.plan.sequence() || !session.state().done()))
             throw new IllegalStateException("Previous Client playback has not ended or stale prepare");
         var playback = directory.resolve("playback/" + args.sequence());
@@ -117,7 +117,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                 if (created.stop || closed) throw new IOException("Client start stopped during preparation");
                 long count = ClientProtocol.requestCount(total, i, clients);
                 int slots = args.concurrency() / clients + (i < args.concurrency() % clients ? 1 : 0);
-                call(created.peers.get(i), "worker/prepare", new WorkerPlan(created.number, args.masters(), args.requests_file(),
+                call(created.peers.get(i), "worker/prepare", new ClientReplayPlan(created.number, args.masters(), args.requests_file(),
                     count, i, clients, created.firstId, identity, args.qps(), args.replay_speed(), slots,
                     args.queue_capacity(), args.request_timeout_ms(), args.drain_timeout_ms(), args.reuse_cache(),
                     args.fallback_max_output_tokens()));
@@ -298,7 +298,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
      * Owns one round of local playback, from pacing through drain.
      */
     static final class Session implements AutoCloseable {
-        private final WorkerPlan plan;
+        private final ClientReplayPlan plan;
         private final BackendRpcClient client;
         private final RequestJournal journal;
         private final MasterDiscovery discovery;
@@ -321,7 +321,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
 
         private long issued, finished, drainDeadline = Long.MAX_VALUE;
 
-        Session(WorkerPlan plan, ClientMetrics metrics, Path topology, Path evidence, String id,
+        Session(ClientReplayPlan plan, ClientMetrics metrics, Path topology, Path evidence, String id,
                      int imageToken, int blockSize, long seed, int prefillCpSize) throws Exception {
             this.imageToken = imageToken; this.blockSize = blockSize;
             this.plan = plan; this.metrics = metrics;
@@ -360,7 +360,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
             LockSupport.unpark(dispatcher);
         }
 
-        static void play(WorkerPlan plan, long startNanos, int imageToken, Consumer<Item> submit) throws IOException, InterruptedException {
+        static void play(ClientReplayPlan plan, long startNanos, int imageToken, Consumer<Item> submit) throws IOException, InterruptedException {
             try (var indexed = new IndexedTrafficReader(Path.of(plan.requests_file()))) {
                 long expected = ClientProtocol.requestCount(indexed.count, plan.first_index(), plan.stride());
                 if (!indexed.identity.equals(plan.sha256()) || expected != plan.count())

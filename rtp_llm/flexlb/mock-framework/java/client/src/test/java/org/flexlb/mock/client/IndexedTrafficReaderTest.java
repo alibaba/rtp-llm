@@ -52,7 +52,7 @@ class IndexedTrafficReaderTest {
         var header = ByteBuffer.wrap(data);
         data[Math.toIntExact(header.getLong(56) + header.getLong(112 + 20))] ^= 1;
         Files.write(path, data);
-        var plan = new WorkerPlan(1, null, path.toString(), 2, 0, 2048, 100, identity, null, 2.0, 1, 4, 1000, 1000);
+        var plan = new ClientReplayPlan(1, null, path.toString(), 2, 0, 2048, 100, identity, null, 2.0, 1, 4, 1000, 1000);
         var items = new ArrayList<Session.Item>();
         long past = System.nanoTime() - 2_000_000_000;
         Session.play(plan, past, MediaInput.IMAGE_TOKEN, items::add);
@@ -74,7 +74,7 @@ class IndexedTrafficReaderTest {
             long past = System.nanoTime() - 1_000_000_000;
             var expected = List.of(List.of(0L, 20_000_000L, 40_000_000L), List.of(10_000_000L, 30_000_000L));
             for (int worker = 0; worker < 2; worker++) {
-                var plan = new WorkerPlan(1, null, path.toString(), expected.get(worker).size(), worker, 2,
+                var plan = new ClientReplayPlan(1, null, path.toString(), expected.get(worker).size(), worker, 2,
                     100, input.identity, 100.0, null, 1, 4, 1000, 1000);
                 var times = new ArrayList<Long>();
                 Session.play(plan, past, MediaInput.IMAGE_TOKEN, item -> times.add(assertDoesNotThrow(() ->

@@ -51,8 +51,8 @@ class RequestJournalTest {
         }
     }
 
-    static ClientProtocol.WorkerPlan plan() {
-        return new ClientProtocol.WorkerPlan(1, null, "/unused.mckidx", 1, 0, 1, 100, "0".repeat(64), 1.0, null, 1, 1, 3000, 1000);
+    static ClientProtocol.ClientReplayPlan plan() {
+        return new ClientProtocol.ClientReplayPlan(1, null, "/unused.mckidx", 1, 0, 1, 100, "0".repeat(64), 1.0, null, 1, 1, 3000, 1000);
     }
 
     static List<JsonNode> read(Path path) throws IOException {
