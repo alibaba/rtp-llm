@@ -15,6 +15,7 @@ from opentelemetry.trace import SpanKind, StatusCode
 from rtp_llm.telemetry import attributes as attrs
 from rtp_llm.telemetry import tracing, vit_media
 from rtp_llm.telemetry.vit_rpc import (
+    INTERNAL_REQUEST_ID_METADATA_KEY,
     VitClientTraceInterceptor,
     VitServerTraceInterceptor,
     vit_client_span,
@@ -267,7 +268,26 @@ class VitRpcTraceTest(unittest.TestCase):
                 )
                 self.assertEqual(span.status.status_code, StatusCode.ERROR)
 
-    def test_cache_probe_has_no_fabricated_request_id_or_media_attributes(self):
+    def test_cache_probe_uses_request_id_from_rpc_metadata(self):
+        root = tracing.start_server_span("frontend", {})
+        probe = SimpleNamespace(
+            keys=["private-key"], inputs=request(0), HasField=lambda name: False
+        )
+        with vit_client_span(
+            "GetMultimodalHashes",
+            "localhost:1234",
+            probe,
+            [(INTERNAL_REQUEST_ID_METADATA_KEY, "99")],
+        ):
+            pass
+        root.finish()
+        child = next(s for s in self.spans(2) if s.kind == SpanKind.CLIENT)
+        self.assertEqual(child.attributes[attrs.REQUEST_ID], "99")
+        self.assertNotIn(attrs.RTP_LLM_VIT_INPUT_COUNT, child.attributes)
+        self.assertTrue(child.attributes[attrs.RTP_LLM_VIT_CACHE_PROBE])
+        self.assertEqual(child.attributes[attrs.RTP_LLM_VIT_KEY_COUNT], 1)
+
+    def test_cache_probe_without_any_request_id_is_not_exported(self):
         root = tracing.start_server_span("frontend", {})
         probe = SimpleNamespace(
             keys=["private-key"], inputs=request(0), HasField=lambda name: False
@@ -275,11 +295,8 @@ class VitRpcTraceTest(unittest.TestCase):
         with vit_client_span("GetMultimodalHashes", "localhost:1234", probe):
             pass
         root.finish()
-        child = next(s for s in self.spans(2) if s.kind == SpanKind.CLIENT)
-        self.assertNotIn(attrs.REQUEST_ID, child.attributes)
-        self.assertNotIn(attrs.RTP_LLM_VIT_INPUT_COUNT, child.attributes)
-        self.assertTrue(child.attributes[attrs.RTP_LLM_VIT_CACHE_PROBE])
-        self.assertEqual(child.attributes[attrs.RTP_LLM_VIT_KEY_COUNT], 1)
+        spans = self.spans(1)
+        self.assertEqual(spans[0].name, "frontend")
 
     def test_disabled_path_does_not_load_sdk_or_change_rpc(self):
         tracing.reset_telemetry_for_test()

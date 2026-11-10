@@ -27,7 +27,7 @@ GEN_AI_RESPONSE_FINISH_REASONS = "gen_ai.response.finish_reasons"
 # whether a span is an LLM call at all (belt-and-braces alongside the platform
 # classification trio below, since the LLM-view matching rule is not publicly
 # documented).
-GEN_AI_OPERATION_NAME = "gen_ai.operation.name"  # value: "chat"
+GEN_AI_OPERATION_NAME = "gen_ai.operation.name"  # e.g. "chat" or "embeddings"
 GEN_AI_SYSTEM = "gen_ai.system"  # value: "rtp_llm"
 
 # --- OTel stable server endpoint attributes (CLIENT spans) ---
@@ -75,6 +75,9 @@ ACS_ARMS_TENANT_SPAN_POLICY = "acs.arms.tenant.span.policy"  # value: "mask"
 RTP_LLM_EXTERNAL_REQUEST_ID = "rtp_llm.external_request_id"
 # Explicit lookup companion to the standard OTel trace_id, not a business ID.
 RTP_LLM_REQUEST_TRACE_ID = "rtp_llm.request_trace_id"
+# Batch-level ViT work can serve multiple request IDs; per-media child spans
+# still carry the singular request_id used by Unitrace indexing.
+RTP_LLM_REQUEST_IDS = "rtp_llm.request_ids"
 RTP_LLM_PD_SEP = "rtp_llm.pd_sep"
 RTP_LLM_VIT_INPUT_COUNT = "rtp_llm.vit.input_count"
 RTP_LLM_VIT_KEY_COUNT = "rtp_llm.vit.key_count"

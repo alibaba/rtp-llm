@@ -95,10 +95,11 @@ def _end(span, error=None, end_ns=None, failure_attributes=None):
 
 
 class MediaTrace:
-    def __init__(self, span, index, input_id):
+    def __init__(self, span, index, input_id, request_id):
         self.span = span
         self.index = index
         self.input_id = input_id
+        self.request_id = str(request_id)
         self.detached = False
         self.context = tracing.trace.set_span_in_context(span)
         self.request_trace_id = format(span.get_span_context().trace_id, "032x")
@@ -121,13 +122,15 @@ class MediaTrace:
             with self._lock:
                 if self._ended:
                     return None
+                span_attributes = dict(attributes or {})
+                span_attributes[trace_attrs.REQUEST_ID] = self.request_id
+                span_attributes[trace_attrs.RTP_LLM_REQUEST_TRACE_ID] = (
+                    self.request_trace_id
+                )
                 return tracing.get_tracer().start_span(
                     PREFIX + name,
                     context=self.context,
-                    attributes={
-                        **(attributes or {}),
-                        trace_attrs.RTP_LLM_REQUEST_TRACE_ID: self.request_trace_id,
-                    },
+                    attributes=span_attributes,
                     start_time=start_ns,
                     links=links,
                 )
@@ -235,7 +238,7 @@ def bind(media):
 
 
 def _new_media(inputs, request_id):
-    if not tracing.is_telemetry_active():
+    if request_id in (None, "", 0) or not tracing.is_telemetry_active():
         return ()
     state = tracing.CURRENT_TRACE_STATE.get()
     if state is None:
@@ -256,12 +259,17 @@ def _new_media(inputs, request_id):
                     MEDIA + "index": index,
                     MEDIA + "url": item.url,
                     MEDIA + "type": int(item.mm_type),
+                    trace_attrs.GEN_AI_OPERATION_NAME: "embeddings",
+                    trace_attrs.GEN_AI_SYSTEM: "rtp_llm",
+                    trace_attrs.GEN_AI_SPAN_KIND: "LLM",
+                    trace_attrs.LINGJI_FLAG: True,
+                    trace_attrs.ACS_ARMS_TENANT_SPAN_POLICY: "mask",
                 },
             )
             if not span.is_recording():
                 span.end()
                 continue
-            result.append(MediaTrace(span, index, id(item)))
+            result.append(MediaTrace(span, index, id(item), request_id))
     except Exception:
         for media in result:
             media.finish()
@@ -288,10 +296,13 @@ def request(method):
         if current() or not tracing.is_telemetry_active():
             return method(*args, **kwargs)
         try:
-            arguments = signature.bind(*args, **kwargs).arguments
-            media = _new_media(
-                arguments.get("mm_inputs", ()), arguments.get("request_id", 0)
-            )
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            arguments = bound.arguments
+            request_id = arguments.get("request_id")
+            if request_id in (None, "", 0):
+                request_id = arguments.get("external_request_id")
+            media = _new_media(arguments.get("mm_inputs", ()), request_id)
         except Exception:
             media = ()
         error = None
@@ -455,6 +466,9 @@ def embedding_batch(method):
                 + "batch.media_count": sum(len(item.mm_inputs) for item in items),
                 PREFIX + "batch.work_item_count": len(items),
                 PREFIX + "timing_scope": "host_call",
+                trace_attrs.RTP_LLM_REQUEST_IDS: sorted(
+                    {member.request_id for member in media}
+                ),
             }
             batch = media[0].start("embedding.batch", attributes, links=links)
             if batch is not None:
