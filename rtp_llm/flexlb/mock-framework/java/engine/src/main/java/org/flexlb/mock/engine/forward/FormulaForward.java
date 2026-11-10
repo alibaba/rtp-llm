@@ -5,7 +5,9 @@ import java.util.*;
 import java.util.function.ToDoubleFunction;
 import org.flexlb.balance.prediction.ArithmeticFormula;
 
-/** Uses the real Master's formula engine; no copied parser or historical calibration fallback. */
+/**
+ * Uses the real Master's formula engine; no copied parser or historical calibration fallback.
+ */
 public final class FormulaForward {
     private static final Map<String, ToDoubleFunction<ForwardBatch.Request>> REQUEST_VARIABLES = variables();
     private static final Map<String, Integer> INDICES;

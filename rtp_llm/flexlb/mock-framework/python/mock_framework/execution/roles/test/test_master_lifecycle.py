@@ -423,9 +423,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
             "scrape_interval": "250ms",
         }
     output = tmp_path / "result"
-    result = asyncio.run(
-        run_case(case, prepare_launch(recipe, case, tmp_path), output)
-    )
+    result = asyncio.run(run_case(case, prepare_launch(recipe, case, tmp_path), output))
     assert result["status"] == "PASS", result
     values = {
         v["step"]: v["result"] for v in logs(output) if v["event"] == "step_finished"

@@ -45,11 +45,11 @@ P/D/V 的资源候选绑定同一个 CI 镜像，按实际节点架构选择资�
 2. **创建部署。** 在该服务下新建多组部署。填写部署名、服务配置版本、地域/代理、配额组和各 zone 副本。按下表选择正式角色类型和 HTTP 端口。
 3. **接好发现。** 为每个 zone 注册本部署独立的 VIP 域名，在 zone 的服务发现配置中绑定。Master 的 `MODEL_SERVICE_CONFIG.role_endpoints` 指向本部署的 P/D/V，使用 `vipserver` 发现和 `protocol: http`。`FLEXLB_CONFIG.cacheMatching.type` 设为 `LOCAL_SYNC`。Frontend 的 `MODEL_SERVICE_CONFIG.master_endpoint` 指向本部署的 Master VIP。独立 ViT 使用 `VIT_SEPARATION=2`、`MM_TRANSPORT_MODE=grpc`，流式返回启用 `FETCH_OUTPUT_STREAM=1`。
 
-| Zone | `zone_type` | 参考 HTTP 端口与探针 | 发现与调用 |
-| --- | --- | --- | --- |
-| Prefill / Decode / ViT | `PY_PREFILL` / `PY_DECODE` / `PY_VIT` | `8088 /health` | VIP 注册 HTTP 端口，Master 按 HTTP 发现将端口加 1 得到 Engine gRPC 端口。 |
-| Master | `PY_MASTER` | `7001 /health` | VIP 注册 HTTP 端口，原生 Master gRPC 端口为 HTTP + 2。 |
-| Frontend | `PY_FRONT_APP` | `20550 /frontend_health` | 入口 VIP 注册 Frontend HTTP 端口。 |
+| Zone                   | `zone_type`                           | 参考 HTTP 端口与探针     | 发现与调用                                                                |
+| ---------------------- | ------------------------------------- | ------------------------ | ------------------------------------------------------------------------- |
+| Prefill / Decode / ViT | `PY_PREFILL` / `PY_DECODE` / `PY_VIT` | `8088 /health`           | VIP 注册 HTTP 端口，Master 按 HTTP 发现将端口加 1 得到 Engine gRPC 端口。 |
+| Master                 | `PY_MASTER`                           | `7001 /health`           | VIP 注册 HTTP 端口，原生 Master gRPC 端口为 HTTP + 2。                    |
+| Frontend               | `PY_FRONT_APP`                        | `20550 /frontend_health` | 入口 VIP 注册 Frontend HTTP 端口。                                        |
 
 ## 4. 配置 zone 并发布
 
@@ -62,10 +62,10 @@ P/D/V 的资源候选绑定同一个 CI 镜像，按实际节点架构选择资�
 
 使用支持显式 Prefill CP 的 Frontend。Frontend 和 Mock Prefill 的 `SEQ_SIZE_PER_BLOCK` 都填 **CP 前的基础块大小**，`PREFILL_CP_SIZE` 填相同值，Frontend 额外设 `PREFILL_CP_KV_CACHE_SHARDED=1`。两端按基础块滚动哈希，每组取最后一个 key，Master 的路由跨度为基础块大小 × CP。Mock P/D 的 `CACHE_KEY_HASH_SEED` 与 Frontend 生效值对齐。
 
-| 示例 | Frontend 和 Mock Prefill 的基础块 / CP | Master 路由跨度 |
-| --- | --- | --- |
-| DeepSeek V4.1 CP4 | `128 / 4` | 512 token，取 K4、K8… |
-| GLM-5.3 CP8 | `64 / 8` | 512 token，取 K8、K16… |
+| 示例              | Frontend 和 Mock Prefill 的基础块 / CP | Master 路由跨度        |
+| ----------------- | -------------------------------------- | ---------------------- |
+| DeepSeek V4.1 CP4 | `128 / 4`                              | 512 token，取 K4、K8…  |
+| GLM-5.3 CP8       | `64 / 8`                               | 512 token，取 K8、K16… |
 
 Mock 的基础块默认 64，Prefill CP 默认 1。CP 大于 1 时，`CP_FORCE_SINGLE_PREFILL` 默认开启，设为 `0` 可同轮接纳多个 Prefill。Mock Decode 固定 CP1，基础块按目标 Decode 填写。
 
@@ -75,15 +75,15 @@ Mock 的 WorkerStatus 上报 Prefill TP 为 CP size、Decode TP 为 1、DP 为 1
 
 P/D 按每实例的**逻辑 block**配置。先用该角色的每块 token 数换算目标 token 容量，再填块数。CP 只改变每块代表的 token 数，填写的块数保持原值。
 
-| 参数 | 单位与含义 |
-| --- | --- |
-| `TEST_BLOCK_NUM` | 必填，至少 2。Device block 数，含一个 null block。可用 Device 容量为 `TEST_BLOCK_NUM - 1`。 |
-| `MOCK_CACHE_TOTAL_BLOCKS` | 统一缓存能保留的 block 数，不含 null block。默认等于可用 Device 容量，至少为该值。 |
-| `RESERVE_BLOCK_RATIO` | 首次分配预留的 Device 百分比，默认 5。按可用 Device block 数向下取整。 |
-| `REUSE_CACHE` | 默认 `false`。启用前缀复用时，角色和请求都要允许复用，且 Device 前缀索引已开启。 |
-| `ENABLE_DEVICE_CACHE` | 默认 `true`。控制本地前缀查找和发布。设为 `false` 时，请求执行仍会分配 KV block。 |
-| `ENABLE_REMOTE_CACHE` | 默认 `false`。Mock 启动时校验此值，设为 `true` 会拒绝启动。 |
-| `ENABLE_MEMORY_CACHE` | 默认 `false`。Mock 启动时校验此值，设为 `true` 会拒绝启动。 |
+| 参数                      | 单位与含义                                                                                  |
+| ------------------------- | ------------------------------------------------------------------------------------------- |
+| `TEST_BLOCK_NUM`          | 必填，至少 2。Device block 数，含一个 null block。可用 Device 容量为 `TEST_BLOCK_NUM - 1`。 |
+| `MOCK_CACHE_TOTAL_BLOCKS` | 统一缓存能保留的 block 数，不含 null block。默认等于可用 Device 容量，至少为该值。          |
+| `RESERVE_BLOCK_RATIO`     | 首次分配预留的 Device 百分比，默认 5。按可用 Device block 数向下取整。                      |
+| `REUSE_CACHE`             | 默认 `false`。启用前缀复用时，角色和请求都要允许复用，且 Device 前缀索引已开启。            |
+| `ENABLE_DEVICE_CACHE`     | 默认 `true`。控制本地前缀查找和发布。设为 `false` 时，请求执行仍会分配 KV block。           |
+| `ENABLE_REMOTE_CACHE`     | 默认 `false`。Mock 启动时校验此值，设为 `true` 会拒绝启动。                                 |
+| `ENABLE_MEMORY_CACHE`     | 默认 `false`。Mock 启动时校验此值，设为 `true` 会拒绝启动。                                 |
 
 这三个 `ENABLE_*` 参数使用默认值时可省略。模拟本地前缀复用时，显式设置 `REUSE_CACHE=true`。需要扩大统一缓存容量时，调整 `MOCK_CACHE_TOTAL_BLOCKS`。
 
@@ -93,11 +93,11 @@ P/D 按每实例的**逻辑 block**配置。先用该角色的每块 token 数�
 
 每个 P/D/V zone 必填 `MOCK_COMPUTE_FORWARD_EXPRESSION`。结果为**每个 Forward batch 的毫秒数**。按目标模型、负载和角色校准。下列公式仅展示写法。
 
-| 角色 | Forward 公式示例 | 同时配置 |
-| --- | --- | --- |
-| Prefill | `110 + 0.0032 * sum(computeTokens)` | `computeTokens` 是实际重算 token。用 `CONCURRENCY_LIMIT` 控制每轮请求数，按需要设置 `MAX_BATCH_TOKENS_SIZE` 和 `MAX_BATCH_TOKENS_WITHOUT_CACHE`。 |
-| Decode | `15 + 0.1 * batchSize` | 用 `CONCURRENCY_LIMIT` 控制每轮请求数。每轮耗时与每轮产出量共同决定 TPOT。 |
-| ViT | `43` 或 `2 + 0.00001 * totalImagePixels` | 用 `VIT_GPU_MAX_BATCH_SIZE`、`VIT_GPU_BATCH_WAIT_MS` 控制合批。用 `VIT_CONCURRENCY`、`VIT_MAX_QUEUE_SIZE` 控制准备并发和等待额度。公式只模拟 Forward，图片下载与排队另计。 |
+| 角色    | Forward 公式示例                         | 同时配置                                                                                                                                                                   |
+| ------- | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Prefill | `110 + 0.0032 * sum(computeTokens)`      | `computeTokens` 是实际重算 token。用 `CONCURRENCY_LIMIT` 控制每轮请求数，按需要设置 `MAX_BATCH_TOKENS_SIZE` 和 `MAX_BATCH_TOKENS_WITHOUT_CACHE`。                          |
+| Decode  | `15 + 0.1 * batchSize`                   | 用 `CONCURRENCY_LIMIT` 控制每轮请求数。每轮耗时与每轮产出量共同决定 TPOT。                                                                                                 |
+| ViT     | `43` 或 `2 + 0.00001 * totalImagePixels` | 用 `VIT_GPU_MAX_BATCH_SIZE`、`VIT_GPU_BATCH_WAIT_MS` 控制合批。用 `VIT_CONCURRENCY`、`VIT_MAX_QUEUE_SIZE` 控制准备并发和等待额度。公式只模拟 Forward，图片下载与排队另计。 |
 
 - **投机解码。** 只在 Decode 配 `MOCK_COMPUTE_DECODE_TOKENS_PER_STEP`，默认 1。设为 `2.6` 时，每请求每轮产出 2 或 3 个 token，长期均值为 2.6。Mock 用这个值模拟接受后的产出量。
 - **EOS。** P/D 可配 `MOCK_COMPUTE_EOS_PROBABILITY`，默认 0，按 token 判断。概率在 0 和 1 之间时必填整数 `MOCK_COMPUTE_EOS_SEED`。请求的 `min_new_tokens` 和 `ignore_eos` 控制 EOS 是否生效，`max_new_tokens` 和剩余上下文限制最终长度。

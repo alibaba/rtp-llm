@@ -8,7 +8,9 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 import org.flexlb.mock.protocol.Role;
 
-/** Cross-language component test only; not an Engine or production launcher. */
+/**
+ * Cross-language component test only; not an Engine or production launcher.
+ */
 public final class ComputeProbe {
     public static void main(String[] args) throws Exception {
         var root = new ObjectMapper().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)

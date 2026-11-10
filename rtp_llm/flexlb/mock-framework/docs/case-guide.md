@@ -14,11 +14,11 @@
 
 ### Case、Phase 和 Step
 
-| 层次 | 必填字段 | 可选字段 |
-| --- | --- | --- |
-| Case | `id`、`describe`、`environment`、`phases` | `name`、`view` |
-| Phase | `id`、`describe`、`timeout`、`steps` | |
-| Step | `id`、`describe`、`interface` | `args`、`expect`、`within`、`wait_after`、`background` |
+| 层次  | 必填字段                                  | 可选字段                                               |
+| ----- | ----------------------------------------- | ------------------------------------------------------ |
+| Case  | `id`、`describe`、`environment`、`phases` | `name`、`view`                                         |
+| Phase | `id`、`describe`、`timeout`、`steps`      |                                                        |
+| Step  | `id`、`describe`、`interface`             | `args`、`expect`、`within`、`wait_after`、`background` |
 
 `environment` 按角色声明 `master`、`prefill`、`decode`、`vit`、`client`。P/D 必须写 `engine: rtp`。`deployment.replicas` 默认 1，表示独立 JVM 数。Client 的 `qps`、`total_concurrency` 是所有副本的合计，由 `client/start` 的参数指定。本地启动器会拒绝当前无法落实的 `resources` 和 `heap` 限制。
 
@@ -41,15 +41,15 @@ phases:
       - id: check_master_leader
         describe: 确认唯一主节点，等待发现传播
         interface: master/get
-        args: {is_leader: true}
-        expect: {count: 1}
+        args: { is_leader: true }
+        expect: { count: 1 }
         within: 10s
         wait_after: 2s
       - id: get_leader_prefill_engines
         describe: 读取主 Master 看到的 Prefill 地址
         interface: master/engine/get
         args:
-          targets: {ref: steps.check_master_leader}
+          targets: { ref: steps.check_master_leader }
           role: prefill
 ```
 

@@ -1,4 +1,4 @@
-mock.compute.forward.expression: '43.38148559976551'
+mock.compute.forward.expression: "43.38148559976551"
 vit_concurrency: 128
 gpu_max_batch_size: 128
 patch_size: 14

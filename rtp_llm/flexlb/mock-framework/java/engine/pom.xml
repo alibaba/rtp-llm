@@ -1,45 +1,159 @@
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
-<modelVersion>4.0.0</modelVersion>
-<parent><groupId>org.flexlb.mock</groupId><artifactId>mock-framework</artifactId><version>1.0-SNAPSHOT</version><relativePath>../../pom.xml</relativePath></parent>
-<artifactId>mock-engine-service</artifactId>
-<dependencies>
-<dependency><groupId>org.flexlb.mock</groupId><artifactId>mock-metrics</artifactId><version>${project.version}</version></dependency>
-<dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>5.8.2</version><scope>test</scope></dependency>
-<dependency><groupId>javax.annotation</groupId><artifactId>javax.annotation-api</artifactId><version>1.3.2</version></dependency>
-<dependency><groupId>org.flexlb</groupId><artifactId>flexlb-grpc</artifactId><version>1.0.0-SNAPSHOT</version>
-   <exclusions><exclusion><groupId>*</groupId><artifactId>*</artifactId></exclusion></exclusions></dependency>
-<!-- Native CacheStatusPB uses the primitive cache map from flexlb-common. -->
-<dependency><groupId>it.unimi.dsi</groupId><artifactId>fastutil</artifactId><version>8.5.15</version></dependency>
-<dependency><groupId>io.grpc</groupId><artifactId>grpc-netty</artifactId><version>1.65.0</version></dependency>
-<dependency><groupId>io.grpc</groupId><artifactId>grpc-protobuf</artifactId><version>1.65.0</version></dependency>
-<dependency><groupId>io.grpc</groupId><artifactId>grpc-stub</artifactId><version>1.65.0</version></dependency>
-<dependency><groupId>com.google.protobuf</groupId><artifactId>protobuf-java</artifactId><version>3.25.1</version></dependency>
-<dependency><groupId>org.flexlb</groupId><artifactId>flexlb-common</artifactId><version>1.0.0-SNAPSHOT</version>
-      <exclusions><exclusion><groupId>*</groupId><artifactId>*</artifactId></exclusion></exclusions>
-    </dependency>
-<dependency><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId><version>2.18.3</version></dependency>
-<dependency><groupId>org.ow2.asm</groupId><artifactId>asm</artifactId><version>9.7</version></dependency>
-<dependency><groupId>org.flexlb.mock</groupId><artifactId>mock-protocol</artifactId><version>${project.version}</version></dependency>
-</dependencies>
-<profiles><profile>
-  <id>internal-discovery</id>
+<project
+  xmlns="http://maven.apache.org/POM/4.0.0"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd"
+>
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>org.flexlb.mock</groupId>
+    <artifactId>mock-framework</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <relativePath>../../pom.xml</relativePath>
+  </parent>
+  <artifactId>mock-engine-service</artifactId>
   <dependencies>
-    <dependency><groupId>org.flexlb</groupId><artifactId>vipserver</artifactId><version>1.0.0-SNAPSHOT</version></dependency>
+    <dependency>
+      <groupId>org.flexlb.mock</groupId>
+      <artifactId>mock-metrics</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.8.2</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>javax.annotation</groupId>
+      <artifactId>javax.annotation-api</artifactId>
+      <version>1.3.2</version>
+    </dependency>
+    <dependency>
+      <groupId>org.flexlb</groupId>
+      <artifactId>flexlb-grpc</artifactId>
+      <version>1.0.0-SNAPSHOT</version>
+      <exclusions>
+        <exclusion>
+          <groupId>*</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <!-- Native CacheStatusPB uses the primitive cache map from flexlb-common. -->
+    <dependency>
+      <groupId>it.unimi.dsi</groupId>
+      <artifactId>fastutil</artifactId>
+      <version>8.5.15</version>
+    </dependency>
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-netty</artifactId>
+      <version>1.65.0</version>
+    </dependency>
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-protobuf</artifactId>
+      <version>1.65.0</version>
+    </dependency>
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-stub</artifactId>
+      <version>1.65.0</version>
+    </dependency>
+    <dependency>
+      <groupId>com.google.protobuf</groupId>
+      <artifactId>protobuf-java</artifactId>
+      <version>3.25.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.flexlb</groupId>
+      <artifactId>flexlb-common</artifactId>
+      <version>1.0.0-SNAPSHOT</version>
+      <exclusions>
+        <exclusion>
+          <groupId>*</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.18.3</version>
+    </dependency>
+    <dependency>
+      <groupId>org.ow2.asm</groupId>
+      <artifactId>asm</artifactId>
+      <version>9.7</version>
+    </dependency>
+    <dependency>
+      <groupId>org.flexlb.mock</groupId>
+      <artifactId>mock-protocol</artifactId>
+      <version>${project.version}</version>
+    </dependency>
   </dependencies>
-  <build><resources>
-    <resource><directory>src/main/resources</directory></resource>
-    <resource><directory>src/internal/resources</directory></resource>
-  </resources></build>
-</profile></profiles>
-<build><plugins>    <plugin>
-    <groupId>org.apache.maven.plugins</groupId><artifactId>maven-shade-plugin</artifactId><version>3.5.3</version>
-    <executions><execution><phase>package</phase><goals><goal>shade</goal></goals><configuration>
-      <createDependencyReducedPom>false</createDependencyReducedPom>
-      <shadedArtifactAttached>true</shadedArtifactAttached><shadedClassifierName>all</shadedClassifierName>
-      <filters><filter><artifact>*:*</artifact><excludes><exclude>META-INF/*.SF</exclude><exclude>META-INF/*.DSA</exclude><exclude>META-INF/*.RSA</exclude></excludes></filter></filters>
-      <transformers>
-        <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
-        <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer"><mainClass>org.flexlb.mock.engine.EngineMain</mainClass></transformer>
-      </transformers>
-    </configuration></execution></executions>
-  </plugin></plugins></build></project>
+  <profiles>
+    <profile>
+      <id>internal-discovery</id>
+      <dependencies>
+        <dependency>
+          <groupId>org.flexlb</groupId>
+          <artifactId>vipserver</artifactId>
+          <version>1.0.0-SNAPSHOT</version>
+        </dependency>
+      </dependencies>
+      <build>
+        <resources>
+          <resource>
+            <directory>src/main/resources</directory>
+          </resource>
+          <resource>
+            <directory>src/internal/resources</directory>
+          </resource>
+        </resources>
+      </build>
+    </profile>
+  </profiles>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.5.3</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals>
+              <goal>shade</goal>
+            </goals>
+            <configuration>
+              <createDependencyReducedPom>false</createDependencyReducedPom>
+              <shadedArtifactAttached>true</shadedArtifactAttached>
+              <shadedClassifierName>all</shadedClassifierName>
+              <filters>
+                <filter>
+                  <artifact>*:*</artifact>
+                  <excludes>
+                    <exclude>META-INF/*.SF</exclude>
+                    <exclude>META-INF/*.DSA</exclude>
+                    <exclude>META-INF/*.RSA</exclude>
+                  </excludes>
+                </filter>
+              </filters>
+              <transformers>
+                <transformer
+                  implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"
+                />
+                <transformer
+                  implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer"
+                >
+                  <mainClass>org.flexlb.mock.engine.EngineMain</mainClass>
+                </transformer>
+              </transformers>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

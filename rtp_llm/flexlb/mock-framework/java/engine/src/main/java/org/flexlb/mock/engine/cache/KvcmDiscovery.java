@@ -13,15 +13,26 @@ import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.kvcm.grpc.*;
 
-/** Engine cache reporting endpoint. Reporting owns lookup; close can cancel outstanding discovery. */
+/**
+ * Engine cache reporting endpoint. Reporting owns lookup; close can cancel outstanding discovery.
+ */
 public final class KvcmDiscovery implements AutoCloseable {
     private final URI direct;
     private final String bootstrap, instance;
     private final ServiceDiscovery discovery;
+
     private URI leader;
     private ManagedChannel activeChannel;
     private FutureTask<List<WorkerHost>> activeLookup;
+
     private boolean closed;
+
+    KvcmDiscovery(URI direct, String bootstrap, String instance, ServiceDiscovery discovery) {
+        this.direct = direct;
+        this.bootstrap = bootstrap;
+        this.instance = instance;
+        this.discovery = discovery;
+    }
 
     public static KvcmDiscovery direct(URI endpoint) {
         return new KvcmDiscovery(KvcmReporter.Configuration.validateEndpoint(endpoint), "", "", null);
@@ -42,16 +53,6 @@ public final class KvcmDiscovery implements AutoCloseable {
         }
         return new KvcmDiscovery(null, bootstrap, instance, discovery);
     }
-
-    KvcmDiscovery(URI direct, String bootstrap, String instance, ServiceDiscovery discovery) {
-        this.direct = direct;
-        this.bootstrap = bootstrap;
-        this.instance = instance;
-        this.discovery = discovery;
-    }
-
-    /** Last usable endpoint without performing I/O, also used for best-effort shutdown reporting. */
-    public synchronized URI current() { return closed ? null : direct != null ? direct : leader; }
 
     public URI get() {
         synchronized (this) {
@@ -79,9 +80,22 @@ public final class KvcmDiscovery implements AutoCloseable {
         throw failure;
     }
 
+    /** Last usable endpoint without performing I/O, also used for best-effort shutdown reporting. */
+    public synchronized URI current() { return closed ? null : direct != null ? direct : leader; }
+
     /** An old failed request must not invalidate a newer endpoint. Explicit direct endpoints stay fixed. */
     public synchronized void invalidate(URI failed) {
         if (direct == null && Objects.equals(leader, failed)) leader = null;
+    }
+
+    @Override public void close() {
+        synchronized (this) {
+            if (closed) return;
+            closed = true;
+            if (activeChannel != null) activeChannel.shutdownNow();
+            if (activeLookup != null) activeLookup.cancel(true);
+        }
+        if (discovery != null) discovery.shutdown();
     }
 
     private List<WorkerHost> hosts() {
@@ -99,6 +113,10 @@ public final class KvcmDiscovery implements AutoCloseable {
             lookup.cancel(true);
             synchronized (this) { if (activeLookup == lookup) activeLookup = null; }
         }
+    }
+
+    private void requireOpen() {
+        if (closed) throw new IllegalStateException("KVCM discovery closed");
     }
 
     private URI resolve(String address) {
@@ -119,24 +137,10 @@ public final class KvcmDiscovery implements AutoCloseable {
         }
     }
 
-    private void requireOpen() {
-        if (closed) throw new IllegalStateException("KVCM discovery closed");
-    }
-
     private static String authority(String host, int port) {
         if (host == null || host.isBlank() || port < 1 || port > 65535)
             throw new IllegalStateException("Invalid KVCM endpoint");
         try { return new URI(null, null, host, port, null, null, null).getRawAuthority(); }
         catch (java.net.URISyntaxException error) { throw new IllegalStateException("Invalid KVCM host", error); }
-    }
-
-    @Override public void close() {
-        synchronized (this) {
-            if (closed) return;
-            closed = true;
-            if (activeChannel != null) activeChannel.shutdownNow();
-            if (activeLookup != null) activeLookup.cancel(true);
-        }
-        if (discovery != null) discovery.shutdown();
     }
 }

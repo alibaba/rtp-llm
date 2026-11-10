@@ -27,138 +27,138 @@ environment:
       seq_size_per_block: 128
       prefill_cp_size: 4
       image_token_id: 129264
-      cache_key_hash_seed: '4923373599811257905'
+      cache_key_hash_seed: "4923373599811257905"
 phases:
-- id: startup
-  describe: 确认唯一主 Master 并等待发现。
-  timeout: 150s
-  steps:
-  - id: check_master_leader
-    describe: 双 Master 中恰有一个主节点。
-    interface: master/get
-    args:
-      is_leader: true
-    expect:
-      count: 1
-    wait_after: 10s
-- id: playback
-  describe: 同一轮先低速预热，再原速播放剩余请求。
-  timeout: 525s
-  steps:
-  - id: start_client
-    describe: 四个 Client 先以 0.25 倍速预热 120 秒，再以 1.0 倍速播放剩余流量。
-    interface: client/start
-    args:
-      requests_file: data/traffic/deepseek-v4.1.mckidx
-      reuse_cache: true
-      replay_speed: 1.0
-      warmup:
-        duration: 120s
-        rate_scale: 0.25
-      total_concurrency: 32000
-      queue_capacity: 48000
-      request_timeout: 120s
-      drain_timeout: 150s
-    within: 430s
-    wait_after: 395s
-- id: performance
-  describe: 检查稳态性能、完整回放和排空后的成功率。
-  timeout: 540s
-  steps:
-  - id: check_client_qps
-    describe: 总已发 QPS。
-    interface: client/qps
-    args:
-      range: [-35s, -5s]
-    expect:
-      gte: 960
-      lte: 1150
-    within: 30s
-  - id: check_prefill_tps
-    describe: 集群原生 Prefill TPS。
-    interface: engine/prefill/tps
-    args:
-      range: [-35s, -5s]
-    expect:
-      gte: 2200000
-    within: 30s
-  - id: check_prefill_tps_with_cache
-    describe: 集群原生含缓存 Prefill TPS。
-    interface: engine/prefill/tps_with_cache
-    args:
-      range: [-35s, -5s]
-    expect:
-      gte: 34000000
-    within: 30s
-  - id: check_output_tps
-    describe: 集群 Decode 输出 TPS。
-    interface: engine/decode/tps
-    args:
-      range: [-35s, -5s]
-    expect:
-      gte: 220000
-    within: 30s
-  - id: check_ttft_mean
-    describe: 客户端首 token 延迟均值。
-    interface: client/ttft
-    args:
-      range: [-35s, -5s]
-      statistic: mean
-    expect:
-      lte: 600ms
-    within: 30s
-  - id: check_ttft_p95
-    describe: 客户端首 token 延迟 P95。
-    interface: client/ttft
-    args:
-      range: [-35s, -5s]
-      statistic: p95
-    expect:
-      lte: 1500ms
-    within: 30s
-  - id: check_tpot_mean
-    describe: 成功多 token 请求 TPOT 均值。
-    interface: client/tpot
-    args:
-      range: [-35s, -5s]
-      statistic: mean
-    expect:
-      lte: 8ms
-    within: 30s
-  - id: check_tpot_p95
-    describe: 成功多 token 请求 TPOT P95。
-    interface: client/tpot
-    args:
-      range: [-35s, -5s]
-      statistic: p95
-    expect:
-      lte: 13ms
-    within: 30s
-  - id: check_cache_hit_rate
-    describe: Prefill token 加权实际命中率。
-    interface: engine/cache/hit_rate
-    args:
-      range: [-35s, -5s]
-    expect:
-      gte: 0.9
-    within: 30s
-  - id: check_success_rate
-    describe: 测量窗口内的客户端终态成功率。
-    interface: client/success_rate
-    args:
-      range: [-35s, -5s]
-    expect:
-      gte: 0.999
-    within: 30s
-  - id: stop_client
-    describe: 待整份数据回放完毕后停止 Client，并收齐已发请求的终态。
-    interface: client/stop
-    within: 180s
-  - id: check_total_success_rate
-    describe: 检查整轮回放是否完整，以及排空后的全程成功率。
-    interface: client/success_rate
-    args:
-      playback_result: {ref: steps.stop_client}
-    expect:
-      gte: 0.999
-    within: 30s
+  - id: startup
+    describe: 确认唯一主 Master 并等待发现。
+    timeout: 150s
+    steps:
+      - id: check_master_leader
+        describe: 双 Master 中恰有一个主节点。
+        interface: master/get
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: playback
+    describe: 同一轮先低速预热，再原速播放剩余请求。
+    timeout: 525s
+    steps:
+      - id: start_client
+        describe: 四个 Client 先以 0.25 倍速预热 120 秒，再以 1.0 倍速播放剩余流量。
+        interface: client/start
+        args:
+          requests_file: data/traffic/deepseek-v4.1.mckidx
+          reuse_cache: true
+          replay_speed: 1.0
+          warmup:
+            duration: 120s
+            rate_scale: 0.25
+          total_concurrency: 32000
+          queue_capacity: 48000
+          request_timeout: 120s
+          drain_timeout: 150s
+        within: 430s
+        wait_after: 395s
+  - id: performance
+    describe: 检查稳态性能、完整回放和排空后的成功率。
+    timeout: 540s
+    steps:
+      - id: check_client_qps
+        describe: 总已发 QPS。
+        interface: client/qps
+        args:
+          range: [-35s, -5s]
+        expect:
+          gte: 960
+          lte: 1150
+        within: 30s
+      - id: check_prefill_tps
+        describe: 集群原生 Prefill TPS。
+        interface: engine/prefill/tps
+        args:
+          range: [-35s, -5s]
+        expect:
+          gte: 2200000
+        within: 30s
+      - id: check_prefill_tps_with_cache
+        describe: 集群原生含缓存 Prefill TPS。
+        interface: engine/prefill/tps_with_cache
+        args:
+          range: [-35s, -5s]
+        expect:
+          gte: 34000000
+        within: 30s
+      - id: check_output_tps
+        describe: 集群 Decode 输出 TPS。
+        interface: engine/decode/tps
+        args:
+          range: [-35s, -5s]
+        expect:
+          gte: 220000
+        within: 30s
+      - id: check_ttft_mean
+        describe: 客户端首 token 延迟均值。
+        interface: client/ttft
+        args:
+          range: [-35s, -5s]
+          statistic: mean
+        expect:
+          lte: 600ms
+        within: 30s
+      - id: check_ttft_p95
+        describe: 客户端首 token 延迟 P95。
+        interface: client/ttft
+        args:
+          range: [-35s, -5s]
+          statistic: p95
+        expect:
+          lte: 1500ms
+        within: 30s
+      - id: check_tpot_mean
+        describe: 成功多 token 请求 TPOT 均值。
+        interface: client/tpot
+        args:
+          range: [-35s, -5s]
+          statistic: mean
+        expect:
+          lte: 8ms
+        within: 30s
+      - id: check_tpot_p95
+        describe: 成功多 token 请求 TPOT P95。
+        interface: client/tpot
+        args:
+          range: [-35s, -5s]
+          statistic: p95
+        expect:
+          lte: 13ms
+        within: 30s
+      - id: check_cache_hit_rate
+        describe: Prefill token 加权实际命中率。
+        interface: engine/cache/hit_rate
+        args:
+          range: [-35s, -5s]
+        expect:
+          gte: 0.9
+        within: 30s
+      - id: check_success_rate
+        describe: 测量窗口内的客户端终态成功率。
+        interface: client/success_rate
+        args:
+          range: [-35s, -5s]
+        expect:
+          gte: 0.999
+        within: 30s
+      - id: stop_client
+        describe: 待整份数据回放完毕后停止 Client，并收齐已发请求的终态。
+        interface: client/stop
+        within: 180s
+      - id: check_total_success_rate
+        describe: 检查整轮回放是否完整，以及排空后的全程成功率。
+        interface: client/success_rate
+        args:
+          playback_result: { ref: steps.stop_client }
+        expect:
+          gte: 0.999
+        within: 30s

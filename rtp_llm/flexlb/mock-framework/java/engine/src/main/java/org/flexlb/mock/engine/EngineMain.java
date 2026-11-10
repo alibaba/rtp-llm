@@ -18,7 +18,9 @@ import org.flexlb.mock.engine.vit.VitConfig;
 import org.flexlb.mock.engine.vit.VitNode;
 import org.flexlb.mock.protocol.ConfigInput;
 
-/** Foreground single-engine service. The platform owns discovery and process replacement. */
+/**
+ * Foreground single-engine service. The platform owns discovery and process replacement.
+ */
 public final class EngineMain {
     public static void main(String[] args) throws Exception {
         if (args.length != 0) throw new IllegalArgumentException("Use instance configuration variables");
@@ -64,6 +66,7 @@ public final class EngineMain {
             }
         }
     }
+
     private static void publish(Path target, Object value) throws Exception {
         Path temporary = Files.createTempFile(target.toAbsolutePath().getParent(), ".publish-", ".json");
         try {
@@ -72,11 +75,6 @@ public final class EngineMain {
         } finally {
             Files.deleteIfExists(temporary);
         }
-    }
-
-    private record Started(Runnable stop, Runnable health, Supplier<Map<String, Object>> endpoints,
-                           JsonNode effective) implements AutoCloseable {
-        @Override public void close() { stop.run(); }
     }
 
     private static Started startEnvironment(Map<String, String> env, int rpcPort, int controlPort) throws Exception {
@@ -111,6 +109,17 @@ public final class EngineMain {
         return new Started(node::close, node::checkHealthy, node::endpoints, config.effective());
     }
 
+    /**
+     * Owns the Engine listeners and startup artifacts until the process stops.
+     */
+    private record Started(Runnable stop, Runnable health, Supplier<Map<String, Object>> endpoints,
+                           JsonNode effective) implements AutoCloseable {
+        @Override public void close() { stop.run(); }
+    }
+
+    /**
+     * Parses the host and port used by an Engine listener.
+     */
     public record Address(String bind, String advertise) {
         public static Address local() {
             String bind=System.getenv().getOrDefault("MOCK_BIND_HOST","127.0.0.1");
@@ -125,8 +134,11 @@ public final class EngineMain {
                 throw new IllegalArgumentException("Invalid Engine bind/advertise host");
             return new Address(bind,advertise);
         }
+
         public InetSocketAddress listener(int port) { return new InetSocketAddress(bind,port); }
-        public String rpc(int port) { return (advertise.contains(":")?"["+advertise+"]":advertise)+":"+port; }
+
         public String http(int port) { return "http://"+rpc(port); }
+
+        public String rpc(int port) { return (advertise.contains(":")?"["+advertise+"]":advertise)+":"+port; }
     }
 }

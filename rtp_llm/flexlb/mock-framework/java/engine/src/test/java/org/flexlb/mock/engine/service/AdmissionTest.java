@@ -22,37 +22,10 @@ import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Compiles and runs without any dependency on an Engine backend. */
+/**
+ * Compiles and runs without any dependency on an Engine backend.
+ */
 class AdmissionTest {
-    /** Independent test policy: reject at admission so neither adapter can silently construct RTP's policy. */
-    private static final class RejectingScheduler implements EngineScheduler {
-        final Object lock;
-        boolean submitted, closed;
-        RejectingScheduler(Object lock) { this.lock = lock; }
-        private void locked() { assertTrue(Thread.holdsLock(lock)); }
-        @Override public Request enqueue(Input input, Listener listener) {
-            locked(); submitted = true;
-            throw new RequestFailure(RequestFailure.Reason.OVERLOADED, "injected scheduler admission");
-        }
-        @Override public long nextDeadline() { locked(); return Long.MAX_VALUE; }
-        @Override public List<Task> tasks() { locked(); return List.of(); }
-        @Override public void transferCompleted(Request request, TransferResult result) { fail("No admitted transfer"); }
-        @Override public void prepareKvAndCheckTimeouts() { locked(); }
-        @Override public Work schedule() { locked(); return null; }
-        @Override public List<Request> requests() { locked(); return List.of(); }
-        @Override public QueueSnapshot queues() { locked(); return new QueueSnapshot(0, 0, 0, 0); }
-        @Override public List<Runnable> takeNotifications() { locked(); return List.of(); }
-        @Override public void close() { locked(); closed = true; }
-        public List<InputResult> enqueue(List<InputItem> batch) { throw new UnsupportedOperationException(); }
-        @Override public void control(Request request, Control event) { fail("No admitted request"); }
-        @Override public void abort(Request request, RequestFailure failure) { fail("No admitted request"); }
-        @Override public RequestState.Use beginTransfer(Request request) { throw new AssertionError("No admitted request"); }
-        @Override public void processOutputs(Work work, SimulatedCompute.Outcome outcome) { fail("No admitted work"); }
-        @Override public void failForward(Work work, RuntimeException error) { fail("No admitted work"); }
-        @Override public boolean isForwardCancelled(Work work) { throw new AssertionError("No admitted work"); }
-    }
-
-
     @Test void bothRolesUseTheSuppliedSchedulerWithoutABackend() throws Exception {
         var compute = ComputeModel.fromJson(new ObjectMapper().readTree("{\"forward\":{\"expression\":\"1\"}}"));
         for (var role : List.of(Role.prefill, Role.decode)) {
@@ -100,5 +73,55 @@ class AdmissionTest {
                 }
             }
         }
+    }
+
+    /**
+     * Independent test policy: reject at admission so neither adapter can silently construct RTP's policy.
+     */
+    private static final class RejectingScheduler implements EngineScheduler {
+        final Object lock;
+
+        boolean submitted, closed;
+
+        RejectingScheduler(Object lock) { this.lock = lock; }
+
+        @Override public Request enqueue(Input input, Listener listener) {
+            locked(); submitted = true;
+            throw new RequestFailure(RequestFailure.Reason.OVERLOADED, "injected scheduler admission");
+        }
+
+        @Override public long nextDeadline() { locked(); return Long.MAX_VALUE; }
+
+        @Override public List<Task> tasks() { locked(); return List.of(); }
+
+        @Override public void transferCompleted(Request request, TransferResult result) { fail("No admitted transfer"); }
+
+        @Override public void prepareKvAndCheckTimeouts() { locked(); }
+
+        @Override public Work schedule() { locked(); return null; }
+
+        @Override public List<Request> requests() { locked(); return List.of(); }
+
+        @Override public QueueSnapshot queues() { locked(); return new QueueSnapshot(0, 0, 0, 0); }
+
+        @Override public List<Runnable> takeNotifications() { locked(); return List.of(); }
+
+        @Override public void close() { locked(); closed = true; }
+
+        public List<InputResult> enqueue(List<InputItem> batch) { throw new UnsupportedOperationException(); }
+
+        @Override public void control(Request request, Control event) { fail("No admitted request"); }
+
+        @Override public void abort(Request request, RequestFailure failure) { fail("No admitted request"); }
+
+        @Override public RequestState.Use beginTransfer(Request request) { throw new AssertionError("No admitted request"); }
+
+        @Override public void processOutputs(Work work, SimulatedCompute.Outcome outcome) { fail("No admitted work"); }
+
+        @Override public void failForward(Work work, RuntimeException error) { fail("No admitted work"); }
+
+        @Override public boolean isForwardCancelled(Work work) { throw new AssertionError("No admitted work"); }
+
+        private void locked() { assertTrue(Thread.holdsLock(lock)); }
     }
 }

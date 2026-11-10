@@ -19,62 +19,11 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Exercises direct and discovered KVCM endpoints, including leader changes and cancellation.
+ */
 class KvcmDiscoveryTest {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static void await(BooleanSupplier condition) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
-        while (!condition.getAsBoolean()) {
-            assertTrue(System.nanoTime() < deadline, "Condition timed out"); Thread.sleep(10);
-        }
-    }
-    static class Vip implements ServiceDiscovery {
-        final AtomicReference<List<WorkerHost>> hosts = new AtomicReference<>(List.of());
-        boolean closed;
-        public List<WorkerHost> getHosts(String domain) { assertEquals("kvcm-domain", domain); return hosts.get(); }
-        public void listen(String domain, ServiceHostListener listener) { fail("No watcher is needed"); }
-        public void shutdown() { closed = true; }
-    }
-    static final class Meta implements AutoCloseable {
-        final Server rpc;
-        final HttpServer http;
-        final AtomicInteger lookups = new AtomicInteger(), registrations = new AtomicInteger(), snapshots = new AtomicInteger();
-        final AtomicReference<JsonNode> snapshot = new AtomicReference<>();
-        volatile boolean valid = true, failHttp, notLeader;
-        volatile String instance;
-        Meta() throws Exception {
-            http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-            http.createContext("/api/", exchange -> {
-                try (exchange) {
-                    var body = JSON.readTree(exchange.getRequestBody());
-                    boolean registration = exchange.getRequestURI().getPath().equals("/api/registerInstance");
-                    int status = failHttp && !notLeader ? 503 : 200;
-                    int code = failHttp ? 9 : registration || registrations.get() > 0 ? 1 : 10;
-                    if (status == 200 && code == 1) {
-                        if (registration) registrations.incrementAndGet();
-                        for (var event : body.path("events")) if (event.has("block_snapshot")) {
-                            snapshot.set(event.path("block_snapshot")); snapshots.incrementAndGet();
-                        }
-                    }
-                    byte[] response = ("{\"header\":{\"status\":{\"code\":" + code + "}}}").getBytes();
-                    exchange.sendResponseHeaders(status, response.length); exchange.getResponseBody().write(response);
-                }
-            }); http.start();
-            rpc = ServerBuilder.forPort(0).addService(new MetaServiceGrpc.MetaServiceImplBase() {
-                @Override public void getClusterInfo(GetClusterInfoRequest request, StreamObserver<GetClusterInfoResponse> out) {
-                    instance = request.getInstanceId(); lookups.incrementAndGet();
-                    out.onNext(GetClusterInfoResponse.newBuilder()
-                        .setHeader(CommonResponseHeader.newBuilder().setStatus(Status.newBuilder().setCode(ErrorCode.OK)))
-                        .setLeaderNodeId("leader")
-                        .setLeaderEndpoint(MetaNodeEndpoint.newBuilder().setNodeId(valid ? "leader" : "old-leader")
-                            .setHost("127.0.0.1").setMetaHttpPort(http.getAddress().getPort())).build());
-                    out.onCompleted();
-                }
-            }).build().start();
-        }
-        WorkerHost host() { return WorkerHost.of("127.0.0.1", rpc.getPort(), ""); }
-        URI endpoint() { return URI.create("http://127.0.0.1:" + http.getAddress().getPort()); }
-        @Override public void close() throws Exception { http.stop(0); rpc.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
-    }
 
     @Test void unreachableAndInvalidCandidatesDoNotHideAnAvailableLeader() throws Exception {
         try (var invalid = new Meta(); var healthy = new Meta()) {
@@ -176,5 +125,74 @@ class KvcmDiscoveryTest {
             assertTimeoutPreemptively(java.time.Duration.ofSeconds(1), resolver::close);
             assertThrows(ExecutionException.class, () -> pending.get(2, TimeUnit.SECONDS));
         } finally { resolver.close(); rpc.shutdownNow().awaitTermination(2, TimeUnit.SECONDS); }
+    }
+
+    private static void await(BooleanSupplier condition) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+        while (!condition.getAsBoolean()) {
+            assertTrue(System.nanoTime() < deadline, "Condition timed out"); Thread.sleep(10);
+        }
+    }
+
+    /**
+     * Supplies bootstrap hosts and exposes discovery shutdown to the tests.
+     */
+    static class Vip implements ServiceDiscovery {
+        final AtomicReference<List<WorkerHost>> hosts = new AtomicReference<>(List.of());
+        boolean closed;
+        public List<WorkerHost> getHosts(String domain) { assertEquals("kvcm-domain", domain); return hosts.get(); }
+        public void listen(String domain, ServiceHostListener listener) { fail("No watcher is needed"); }
+        public void shutdown() { closed = true; }
+    }
+
+    /**
+     * Serves test Meta gRPC and HTTP endpoints to exercise leader discovery and reports.
+     */
+    static final class Meta implements AutoCloseable {
+        final Server rpc;
+        final HttpServer http;
+        final AtomicInteger lookups = new AtomicInteger(), registrations = new AtomicInteger(), snapshots = new AtomicInteger();
+        final AtomicReference<JsonNode> snapshot = new AtomicReference<>();
+
+        volatile boolean valid = true, failHttp, notLeader;
+
+        volatile String instance;
+
+        Meta() throws Exception {
+            http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            http.createContext("/api/", exchange -> {
+                try (exchange) {
+                    var body = JSON.readTree(exchange.getRequestBody());
+                    boolean registration = exchange.getRequestURI().getPath().equals("/api/registerInstance");
+                    int status = failHttp && !notLeader ? 503 : 200;
+                    int code = failHttp ? 9 : registration || registrations.get() > 0 ? 1 : 10;
+                    if (status == 200 && code == 1) {
+                        if (registration) registrations.incrementAndGet();
+                        for (var event : body.path("events")) if (event.has("block_snapshot")) {
+                            snapshot.set(event.path("block_snapshot")); snapshots.incrementAndGet();
+                        }
+                    }
+                    byte[] response = ("{\"header\":{\"status\":{\"code\":" + code + "}}}").getBytes();
+                    exchange.sendResponseHeaders(status, response.length); exchange.getResponseBody().write(response);
+                }
+            }); http.start();
+            rpc = ServerBuilder.forPort(0).addService(new MetaServiceGrpc.MetaServiceImplBase() {
+                @Override public void getClusterInfo(GetClusterInfoRequest request, StreamObserver<GetClusterInfoResponse> out) {
+                    instance = request.getInstanceId(); lookups.incrementAndGet();
+                    out.onNext(GetClusterInfoResponse.newBuilder()
+                        .setHeader(CommonResponseHeader.newBuilder().setStatus(Status.newBuilder().setCode(ErrorCode.OK)))
+                        .setLeaderNodeId("leader")
+                        .setLeaderEndpoint(MetaNodeEndpoint.newBuilder().setNodeId(valid ? "leader" : "old-leader")
+                            .setHost("127.0.0.1").setMetaHttpPort(http.getAddress().getPort())).build());
+                    out.onCompleted();
+                }
+            }).build().start();
+        }
+
+        @Override public void close() throws Exception { http.stop(0); rpc.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
+
+        WorkerHost host() { return WorkerHost.of("127.0.0.1", rpc.getPort(), ""); }
+
+        URI endpoint() { return URI.create("http://127.0.0.1:" + http.getAddress().getPort()); }
     }
 }

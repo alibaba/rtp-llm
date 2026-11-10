@@ -18,22 +18,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Verifies that the Engine loop uses its supplied scheduler.
+ */
 class SchedulerInjectionTest {
     @TempDir Path directory;
-
-    private RtpConfig config(String role) throws Exception {
-        var path = directory.resolve(role + ".json");
-        var json = new ObjectMapper();
-        var document = json.valueToTree(LLMMockEngineTest.configuration(role));
-        ((com.fasterxml.jackson.databind.node.ObjectNode) document.path("component").path("config"))
-            .put("max_batch_tokens_size", 1);
-        json.writeValue(path.toFile(), document);
-        return RtpConfig.load(path);
-    }
-    private static GenerateInputPB input(int output) {
-        return GenerateInputPB.newBuilder().setRequestId(1).addAllTokenIds(List.of(1, 2, 3))
-            .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(output)).build();
-    }
 
     @Test void defaultRtpPolicyRunsALegalSingletonAboveTheBatchTokenBudget() throws Exception {
         try (var node = LLMMockEngine.start(config("prefill"))) {
@@ -62,5 +51,20 @@ class SchedulerInjectionTest {
             assertNotNull(resource.get());
             assertThrows(IllegalStateException.class, () -> resource.get().acquire(1, List.of()));
         }
+    }
+
+    private RtpConfig config(String role) throws Exception {
+        var path = directory.resolve(role + ".json");
+        var json = new ObjectMapper();
+        var document = json.valueToTree(LLMMockEngineTest.configuration(role));
+        ((com.fasterxml.jackson.databind.node.ObjectNode) document.path("component").path("config"))
+            .put("max_batch_tokens_size", 1);
+        json.writeValue(path.toFile(), document);
+        return RtpConfig.load(path);
+    }
+
+    private static GenerateInputPB input(int output) {
+        return GenerateInputPB.newBuilder().setRequestId(1).addAllTokenIds(List.of(1, 2, 3))
+            .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(output)).build();
     }
 }

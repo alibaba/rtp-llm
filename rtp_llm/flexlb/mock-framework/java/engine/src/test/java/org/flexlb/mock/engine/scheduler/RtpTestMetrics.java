@@ -3,7 +3,9 @@ package org.flexlb.mock.engine.scheduler;
 import org.flexlb.mock.engine.cache.KvCacheManager;
 import org.flexlb.mock.engine.config.RtpConfig;
 
-/** Captures the concrete RTP metrics for tests that assemble an admission component directly. */
+/**
+ * Captures the concrete RTP metrics for tests that assemble an admission component directly.
+ */
 public final class RtpTestMetrics implements EngineScheduler.Factory {
     private final EngineScheduler.Factory factory;
     private Object lock;

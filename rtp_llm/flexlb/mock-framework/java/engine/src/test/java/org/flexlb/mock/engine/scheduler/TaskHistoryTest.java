@@ -5,10 +5,10 @@ import java.util.logging.*;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Verifies finished-task retention and versioned reads.
+ */
 class TaskHistoryTest {
-    private static EngineScheduler.Task task(long id) {
-        return new EngineScheduler.Task(id, 0, 1, 0, 0, EngineScheduler.ReportedPhase.RECEIVED, 0, 0, 0, -1, null);
-    }
     @Test void laggingReadersKeepCurrentStateAndReceiveExplicitGapEvidence() {
         var history = new TaskHistory();
         for (int i = 1; i <= TaskHistory.LIMIT + 1; i++)
@@ -44,5 +44,9 @@ class TaskHistoryTest {
         history.add(task(1));
         var snapshot = history.snapshot(99, List.of(), 0, 0);
         assertEquals(99, snapshot.finishedVersion()); assertTrue(snapshot.finished().isEmpty());
+    }
+
+    private static EngineScheduler.Task task(long id) {
+        return new EngineScheduler.Task(id, 0, 1, 0, 0, EngineScheduler.ReportedPhase.RECEIVED, 0, 0, 0, -1, null);
     }
 }

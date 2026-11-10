@@ -15,28 +15,11 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Checks how Engine configuration selects and resolves a Meta endpoint.
+ */
 class KvcmDiscoveryConfigurationTest {
     private static final ObjectMapper JSON = new ObjectMapper();
-
-    static final class Meta implements AutoCloseable {
-        final Server rpc;
-        volatile boolean valid = true;
-        volatile String instance;
-        Meta(int httpPort) throws Exception {
-            rpc = ServerBuilder.forPort(0).addService(new MetaServiceGrpc.MetaServiceImplBase() {
-                @Override public void getClusterInfo(GetClusterInfoRequest request, StreamObserver<GetClusterInfoResponse> out) {
-                    instance = request.getInstanceId();
-                    out.onNext(GetClusterInfoResponse.newBuilder()
-                        .setHeader(CommonResponseHeader.newBuilder().setStatus(Status.newBuilder().setCode(ErrorCode.OK)))
-                        .setLeaderNodeId("leader")
-                        .setLeaderEndpoint(MetaNodeEndpoint.newBuilder().setNodeId(valid ? "leader" : "old-leader")
-                            .setHost("127.0.0.1").setMetaHttpPort(httpPort)).build());
-                    out.onCompleted();
-                }
-            }).build().start();
-        }
-        @Override public void close() throws Exception { rpc.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
-    }
 
     @Test void environmentUsesTheActualRealRecoBindings() {
         var settings = RtpConfig.environment(Map.of("RECO_ENABLE_VIPSERVER", "true", "RECO_VIPSERVER_DOMAIN", "kvcm-domain",
@@ -64,5 +47,28 @@ class KvcmDiscoveryConfigurationTest {
                 if (direct) assertNull(rpc.instance); else assertEquals("shared_128", rpc.instance);
             }
         }
+    }
+
+    /**
+     * Exposes a test gRPC bootstrap and reports its Meta HTTP endpoint.
+     */
+    static final class Meta implements AutoCloseable {
+        final Server rpc;
+        volatile boolean valid = true;
+        volatile String instance;
+        Meta(int httpPort) throws Exception {
+            rpc = ServerBuilder.forPort(0).addService(new MetaServiceGrpc.MetaServiceImplBase() {
+                @Override public void getClusterInfo(GetClusterInfoRequest request, StreamObserver<GetClusterInfoResponse> out) {
+                    instance = request.getInstanceId();
+                    out.onNext(GetClusterInfoResponse.newBuilder()
+                        .setHeader(CommonResponseHeader.newBuilder().setStatus(Status.newBuilder().setCode(ErrorCode.OK)))
+                        .setLeaderNodeId("leader")
+                        .setLeaderEndpoint(MetaNodeEndpoint.newBuilder().setNodeId(valid ? "leader" : "old-leader")
+                            .setHost("127.0.0.1").setMetaHttpPort(httpPort)).build());
+                    out.onCompleted();
+                }
+            }).build().start();
+        }
+        @Override public void close() throws Exception { rpc.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
     }
 }

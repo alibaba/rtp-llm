@@ -50,9 +50,9 @@ Runner 按 Phase 推进。Step 解析前置结果或全局发现引用，校验�
 
 Python 把 `client/start` 交给 Java client0。`ReplayControlServer` 固定参与者、分配并发槽和索引范围，在所有 Client 准备后下发同一开始时刻。client0 也发送自己的请求。每个 JVM 独立读取和计算发送时刻，再由 `BackendRpcClient` 调用真实 Master 和原生 Engine RPC。
 
-| 回放方式 | 全局序号为 `k` 的请求计划发送时刻 |
-| --- | --- |
-| 固定 QPS | 从共同起点偏移 `k / 总 QPS`。 |
+| 回放方式       | 全局序号为 `k` 的请求计划发送时刻                |
+| -------------- | ------------------------------------------------ |
+| 固定 QPS       | 从共同起点偏移 `k / 总 QPS`。                    |
 | 按采集时间回放 | 从共同起点偏移 `源到达时间偏移 / replay_speed`。 |
 
 第 `i` 个 Client 负责 `i, i+N, i+2N, …`，其中 `N` 为 Client 数。各 Client 共享同一份数据文件。可选的 `warmup` 在开始阶段降低速率，之后恢复正式速率，每条请求发送一次。性能门禁使用预热后的时间范围。
@@ -69,14 +69,28 @@ Python 把 `client/start` 交给 Java client0。`ReplayControlServer` 固定参�
 {
   "format": "MCKINDEX",
   "prefix_chains": [
-    {"first": 1, "parent": 0, "length": 3},
-    {"first": 4, "parent": 2, "length": 1}
+    { "first": 1, "parent": 0, "length": 3 },
+    { "first": 4, "parent": 2, "length": 1 }
   ],
   "media": [],
   "output_caps": [3],
   "requests": [
-    {"arrival_ms": 0, "leaf": 3, "observed_output_tokens": -1, "priority": 50, "output_cap_id": 1, "images": []},
-    {"arrival_ms": 0, "leaf": 4, "observed_output_tokens": -1, "priority": 50, "output_cap_id": 1, "images": []}
+    {
+      "arrival_ms": 0,
+      "leaf": 3,
+      "observed_output_tokens": -1,
+      "priority": 50,
+      "output_cap_id": 1,
+      "images": []
+    },
+    {
+      "arrival_ms": 0,
+      "leaf": 4,
+      "observed_output_tokens": -1,
+      "priority": 50,
+      "output_cap_id": 1,
+      "images": []
+    }
   ]
 }
 ```
@@ -91,13 +105,13 @@ Python 把 `client/start` 交给 Java client0。`ReplayControlServer` 固定参�
 
 `LLMMockEngine` 装配每个 P/D 实例的 RPC、`EngineLoop`、`EngineScheduler` 和 `KvCacheManager`。协议层拥有会话、校验报文、准备输入并处理取消。图片展开和 prompt cache key 计算在调度锁外完成，入队前再校验请求身份与 deadline。准备中的 P 请求可按 PENDING 查询，成功入队后由 Scheduler 提供执行状态。
 
-| 组件 | 拥有的状态与行为 |
-| --- | --- |
-| `RtpRpcService`、`PrefillRpcServer`、`DecodeRpcServer` | 原生报文、会话、P/D 阶段校验、异步响应。 |
-| `EngineLoop` | 等待唤醒和最近 deadline，维护在途 Forward，协调计算与回调。 |
-| `EngineScheduler` | 准入、队列、组批、生成进度、KV 申请和请求终态。 |
-| `SimulatedCompute` | 根据本轮 `ForwardBatch` 计算模拟耗时和结果，由 Scheduler 提交。 |
-| `KvCacheManager` | 前缀匹配、LRU、容量、资源引用和有效块元数据。 |
+| 组件                                                   | 拥有的状态与行为                                                |
+| ------------------------------------------------------ | --------------------------------------------------------------- |
+| `RtpRpcService`、`PrefillRpcServer`、`DecodeRpcServer` | 原生报文、会话、P/D 阶段校验、异步响应。                        |
+| `EngineLoop`                                           | 等待唤醒和最近 deadline，维护在途 Forward，协调计算与回调。     |
+| `EngineScheduler`                                      | 准入、队列、组批、生成进度、KV 申请和请求终态。                 |
+| `SimulatedCompute`                                     | 根据本轮 `ForwardBatch` 计算模拟耗时和结果，由 Scheduler 提交。 |
+| `KvCacheManager`                                       | 前缀匹配、LRU、容量、资源引用和有效块元数据。                   |
 
 ```mermaid
 flowchart LR
@@ -163,13 +177,13 @@ args:
 
 ## 从源码进入
 
-| 要改的行为 | 源码入口 |
-| --- | --- |
-| YAML、类型校验与引用 | `python/mock_framework/config/`、`python/mock_framework/execution/step/` |
+| 要改的行为                | 源码入口                                                                                  |
+| ------------------------- | ----------------------------------------------------------------------------------------- |
+| YAML、类型校验与引用      | `python/mock_framework/config/`、`python/mock_framework/execution/step/`                  |
 | Case 编排、发现、进程管理 | `python/mock_framework/execution/runner.py`、`environment.py`、`processes.py` 与 `roles/` |
-| 流量读取、节奏和原生请求 | `java/client/` 中的 `IndexedTrafficReader`、`ReplayControlServer` 和 `BackendRpcClient` |
-| RTP/ViT、计算与缓存 | `java/engine/` 的 `service`、`execution`、`scheduler`、`cache` 和 `vit` |
-| 协议、指标导出及实例入口 | `java/protocol/`、`java/metrics/`、`java/master/` 和 `java/zookeeper/` |
+| 流量读取、节奏和原生请求  | `java/client/` 中的 `IndexedTrafficReader`、`ReplayControlServer` 和 `BackendRpcClient`   |
+| RTP/ViT、计算与缓存       | `java/engine/` 的 `service`、`execution`、`scheduler`、`cache` 和 `vit`                   |
+| 协议、指标导出及实例入口  | `java/protocol/`、`java/metrics/`、`java/master/` 和 `java/zookeeper/`                    |
 
 新增调度策略从 `LLMMockEngine.start(..., EngineScheduler.Factory)` 装配，调度器拥有队列和状态转换，EngineLoop 提供执行机制。当前接入的是 RTP，工厂边界可以独立验证调度器，协议和 KV 仍按实际后端适配。
 

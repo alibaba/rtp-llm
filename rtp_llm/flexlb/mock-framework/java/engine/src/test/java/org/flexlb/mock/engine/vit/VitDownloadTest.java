@@ -18,40 +18,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Exercises image download and the lifetime of ViT inflight work.
+ */
 class VitDownloadTest {
     @TempDir Path directory;
-    private VitConfig config(int concurrency,int waiting) throws Exception { return config(concurrency, waiting, 1); }
-    private VitConfig config(int concurrency,int waiting,int maxFileSizeKb) throws Exception {
-        var json=new ObjectMapper();
-        var settings = new java.util.HashMap<String, Object>(Map.of(
-            "patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024, "hidden_size", 4,
-            "vit_concurrency", concurrency, "vit_max_queue_size", waiting, "gpu_max_batch_size", 4, "gpu_batch_wait_ms", 0));
-        settings.put("mm_image_max_file_size_kb", maxFileSizeKb);
-        settings.put("download_headers", "{\"X-Media-Test\":\"present\"}");
-        settings.put("mock.compute.forward.expression", "5");
-        return VitConfig.load(json.valueToTree(Map.of("id", "v", "component_role", "vit",
-            "component", Map.of("config", settings))));
-    }
-    private static byte[] png() throws Exception {
-        var bytes=new ByteArrayOutputStream(); ImageIO.write(new BufferedImage(56,28,BufferedImage.TYPE_INT_RGB),"png",bytes); return bytes.toByteArray();
-    }
-    private static MultimodalInputsPB input(HttpServer server,String path) {
-        // Deliberately wrong hints: download mode must inspect the actual image.
-        return VitTest.input("http://127.0.0.1:"+server.getAddress().getPort()+path).toBuilder().setRequestId(1)
-            .setMultimodalInputs(0,VitTest.input("http://127.0.0.1:"+server.getAddress().getPort()+path).getMultimodalInputs(0).toBuilder()
-                .setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(1).setHeight(1))).build();
-    }
-    private static void await(BooleanSupplier condition) throws Exception {
-        long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
-        while(!condition.getAsBoolean()) { assertTrue(System.nanoTime()<end,"Timed out waiting for V state"); Thread.sleep(5); }
-    }
-
-    private static String metrics(VitNode node) throws Exception {
-        try(var client=java.net.http.HttpClient.newHttpClient()) {
-            return client.send(java.net.http.HttpRequest.newBuilder(URI.create((String)node.endpoints().get("metrics"))).GET().build(),
-                java.net.http.HttpResponse.BodyHandlers.ofString()).body();
-        }
-    }
 
     @Test void blockedDownloadDoesNotBlockForwardAndNativeAdmissionCountsUniqueMedia() throws Exception {
         var firstEntered=new CountDownLatch(1);var secondEntered=new CountDownLatch(1);
@@ -177,6 +148,7 @@ class VitDownloadTest {
             } finally { stalled.countDown();server.stop(0); }
         }
     }
+
     @Test void downloadedContentIdentityFollowsBytesAcrossUrlsAndRedirects() throws Exception {
         var image = new BufferedImage(56, 28, BufferedImage.TYPE_INT_RGB);
         var png = new ByteArrayOutputStream(); ImageIO.write(image, "png", png);
@@ -249,6 +221,43 @@ class VitDownloadTest {
                 assertEquals(3, attempts.get());
             } finally { channel.shutdownNow().awaitTermination(2, TimeUnit.SECONDS); }
         } finally { server.stop(0); }
+    }
+
+    private VitConfig config(int concurrency,int waiting) throws Exception { return config(concurrency, waiting, 1); }
+
+    private VitConfig config(int concurrency,int waiting,int maxFileSizeKb) throws Exception {
+        var json=new ObjectMapper();
+        var settings = new java.util.HashMap<String, Object>(Map.of(
+            "patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024, "hidden_size", 4,
+            "vit_concurrency", concurrency, "vit_max_queue_size", waiting, "gpu_max_batch_size", 4, "gpu_batch_wait_ms", 0));
+        settings.put("mm_image_max_file_size_kb", maxFileSizeKb);
+        settings.put("download_headers", "{\"X-Media-Test\":\"present\"}");
+        settings.put("mock.compute.forward.expression", "5");
+        return VitConfig.load(json.valueToTree(Map.of("id", "v", "component_role", "vit",
+            "component", Map.of("config", settings))));
+    }
+
+    private static byte[] png() throws Exception {
+        var bytes=new ByteArrayOutputStream(); ImageIO.write(new BufferedImage(56,28,BufferedImage.TYPE_INT_RGB),"png",bytes); return bytes.toByteArray();
+    }
+
+    private static MultimodalInputsPB input(HttpServer server,String path) {
+        // Deliberately wrong hints: download mode must inspect the actual image.
+        return VitTest.input("http://127.0.0.1:"+server.getAddress().getPort()+path).toBuilder().setRequestId(1)
+            .setMultimodalInputs(0,VitTest.input("http://127.0.0.1:"+server.getAddress().getPort()+path).getMultimodalInputs(0).toBuilder()
+                .setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(1).setHeight(1))).build();
+    }
+
+    private static void await(BooleanSupplier condition) throws Exception {
+        long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
+        while(!condition.getAsBoolean()) { assertTrue(System.nanoTime()<end,"Timed out waiting for V state"); Thread.sleep(5); }
+    }
+
+    private static String metrics(VitNode node) throws Exception {
+        try(var client=java.net.http.HttpClient.newHttpClient()) {
+            return client.send(java.net.http.HttpRequest.newBuilder(URI.create((String)node.endpoints().get("metrics"))).GET().build(),
+                java.net.http.HttpResponse.BodyHandlers.ofString()).body();
+        }
     }
 
 }

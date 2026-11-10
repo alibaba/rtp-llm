@@ -14,11 +14,10 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 
 import org.junit.jupiter.api.Test;
 
+/**
+ * Exercises Engine startup and the HTTP control endpoints.
+ */
 class EngineServiceTest {
-    static Map<String,Object> configuration(String role) {
-        return Map.of("id",role+"-0","component_role",role,"component",Map.of("engine","rtp","config",Map.of("seq_size_per_block",16,
-            "max_seq_len",4096,"test_block_num",9,"reserve_block_ratio",0,"mock.compute",Map.of("forward",Map.of("expression","1 + batchSize")))),"environment",Map.of());
-    }
     @Test void urlOnlyFrontendRequestDownloadsRealImageAndCompletesPrefillDecode() throws Exception {
         var json = new ObjectMapper();
         var png = new java.io.ByteArrayOutputStream();
@@ -62,6 +61,11 @@ class EngineServiceTest {
                 assertEquals(1, downloads.get());
             } finally { channel.shutdownNow().awaitTermination(2, TimeUnit.SECONDS); }
         } finally { images.stop(0); }
+    }
+
+    static Map<String,Object> configuration(String role) {
+        return Map.of("id",role+"-0","component_role",role,"component",Map.of("engine","rtp","config",Map.of("seq_size_per_block",16,
+            "max_seq_len",4096,"test_block_num",9,"reserve_block_ratio",0,"mock.compute",Map.of("forward",Map.of("expression","1 + batchSize")))),"environment",Map.of());
     }
 
 }

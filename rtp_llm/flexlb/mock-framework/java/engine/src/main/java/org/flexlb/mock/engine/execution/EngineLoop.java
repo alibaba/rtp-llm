@@ -12,7 +12,9 @@ import org.flexlb.mock.engine.scheduler.RequestState;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 
-/** Enqueue, schedule, Forward and output processing; waits for events outside the scheduling lock. */
+/**
+ * Enqueue, schedule, Forward and output processing; waits for events outside the scheduling lock.
+ */
 public final class EngineLoop implements AutoCloseable {
     private final Object lock;
     private final java.util.concurrent.locks.ReentrantLock signal = new java.util.concurrent.locks.ReentrantLock();
@@ -25,17 +27,14 @@ public final class EngineLoop implements AutoCloseable {
     private final String identity;
     private final SimulatedCompute compute = new SimulatedCompute();
     private final ExecutorService notifications = Executors.newVirtualThreadPerTaskExecutor();
+
     private ForwardExecution inFlightForward;
+
     private volatile boolean closed;
     private boolean dirty;
     private int notifying;
-    private volatile RuntimeException failure;
 
-    private static final class ForwardExecution {
-        final EngineScheduler.Work work;
-        SimulatedCompute.Execution execution;
-        ForwardExecution(EngineScheduler.Work work) { this.work = work; }
-    }
+    private volatile RuntimeException failure;
 
     public EngineLoop(Object lock, EngineScheduler.Factory schedulers, TaskHistory finished, KvCacheManager cache, ComputeModel model, Role role, String identity) {
         this(lock, schedulers.create(lock, cache, finished), finished, cache, model, role, identity);
@@ -57,24 +56,30 @@ public final class EngineLoop implements AutoCloseable {
     public EngineScheduler.Request enqueue(EngineScheduler.Input input, EngineScheduler.Listener listener) {
         return withSchedulerLock(() -> { ensureOpen(); return scheduler.enqueue(input, listener); });
     }
+
     public List<EngineScheduler.InputResult> enqueue(List<EngineScheduler.InputItem> batch) {
         return withSchedulerLock(() -> { ensureOpen(); return scheduler.enqueue(List.copyOf(batch)); });
     }
+
     /** Apply protocol-owned generation updates; the Scheduler owns their state transitions. */
     public void updateRequest(EngineScheduler.Request request, EngineScheduler.Control event) {
         withSchedulerLock(() -> { scheduler.control(request, event); return null; });
     }
+
     public void onKvTransferCompleted(EngineScheduler.Request request, EngineScheduler.TransferResult result) {
         withSchedulerLock(() -> { scheduler.transferCompleted(request, result); return null; });
     }
+
     public void abortRequest(EngineScheduler.Request request, RequestFailure failure) {
         Objects.requireNonNull(failure, "Abort requires a failure");
         withSchedulerLock(() -> { scheduler.abort(request, failure); return null; });
     }
+
     public RequestState.Use beginKvTransfer(EngineScheduler.Request request) {
         var use = withSchedulerLock(() -> { ensureOpen(); return scheduler.beginTransfer(request); });
         return () -> withSchedulerLock(() -> { use.close(); return null; });
     }
+
     public EngineScheduler.Status status(long latestFinishedVersion) {
         synchronized (lock) {
             checkFailure();
@@ -83,7 +88,16 @@ public final class EngineLoop implements AutoCloseable {
             return finished.snapshot(latestFinishedVersion, tasks, counts.waiting(), counts.running());
         }
     }
+
     public void checkHealthy() { ensureOpen(); }
+
+    /** A signal is retained even if it arrives before the worker starts waiting. */
+    public void wakeUp() {
+        signal.lock();
+        try { dirty = true; changed.signal(); } finally { signal.unlock(); }
+    }
+
+    @Override public void close() { synchronized (lock) { stopLoop(); dispatchCallbacks(); } }
 
     private <T> T withSchedulerLock(Supplier<T> operation) {
         try { synchronized (lock) { return operation.get(); } }
@@ -93,10 +107,39 @@ public final class EngineLoop implements AutoCloseable {
         }
     }
 
-    /** A signal is retained even if it arrives before the worker starts waiting. */
-    public void wakeUp() {
-        signal.lock();
-        try { dirty = true; changed.signal(); } finally { signal.unlock(); }
+    private void dispatchCallbacks() {
+        for (var notification : scheduler.takeNotifications()) {
+            notifying++;
+            notifications.execute(() -> {
+                try { notification.run(); }
+                catch (RuntimeException error) { synchronized (lock) { failEngine(error); } }
+                finally {
+                    synchronized (lock) { notifying--; if (closed) dispatchCallbacks(); }
+                    wakeUp();
+                }
+            });
+        }
+        if (closed && notifying == 0 && scheduler.requests().isEmpty()) notifications.shutdown();
+    }
+
+    private void failEngine(RuntimeException error) {
+        if (failure == null) failure = error;
+        stopLoop();
+    }
+
+    private void stopLoop() {
+        if (closed) return;
+        closed = true;
+        cache.onChange(() -> {});
+        scheduler.close();
+        if (inFlightForward != null) {
+            var current = inFlightForward;
+            inFlightForward = null;
+            if (current.execution != null) current.execution.cancel();
+            scheduler.failForward(current.work, new RequestFailure(RequestFailure.Reason.CLOSED, "Engine closed during Forward"));
+        }
+        compute.close();
+        wakeUp();
     }
 
     private void loop() {
@@ -173,44 +216,19 @@ public final class EngineLoop implements AutoCloseable {
         wakeUp();
     }
 
-    private void dispatchCallbacks() {
-        for (var notification : scheduler.takeNotifications()) {
-            notifying++;
-            notifications.execute(() -> {
-                try { notification.run(); }
-                catch (RuntimeException error) { synchronized (lock) { failEngine(error); } }
-                finally {
-                    synchronized (lock) { notifying--; if (closed) dispatchCallbacks(); }
-                    wakeUp();
-                }
-            });
-        }
-        if (closed && notifying == 0 && scheduler.requests().isEmpty()) notifications.shutdown();
-    }
-
     private void ensureOpen() {
         checkFailure();
         if (closed) throw new RequestFailure(RequestFailure.Reason.CLOSED, "Engine is closed");
     }
-    private void checkFailure() { if (failure != null) throw failure; }
-    private void failEngine(RuntimeException error) {
-        if (failure == null) failure = error;
-        stopLoop();
-    }
-    private void stopLoop() {
-        if (closed) return;
-        closed = true;
-        cache.onChange(() -> {});
-        scheduler.close();
-        if (inFlightForward != null) {
-            var current = inFlightForward;
-            inFlightForward = null;
-            if (current.execution != null) current.execution.cancel();
-            scheduler.failForward(current.work, new RequestFailure(RequestFailure.Reason.CLOSED, "Engine closed during Forward"));
-        }
-        compute.close();
-        wakeUp();
-    }
 
-    @Override public void close() { synchronized (lock) { stopLoop(); dispatchCallbacks(); } }
+    private void checkFailure() { if (failure != null) throw failure; }
+
+    /**
+     * Associates one forward plan with its in-flight simulated computation.
+     */
+    private static final class ForwardExecution {
+        final EngineScheduler.Work work;
+        SimulatedCompute.Execution execution;
+        ForwardExecution(EngineScheduler.Work work) { this.work = work; }
+    }
 }

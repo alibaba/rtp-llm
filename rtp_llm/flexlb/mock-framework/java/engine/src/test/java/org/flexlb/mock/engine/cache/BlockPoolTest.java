@@ -5,6 +5,9 @@ import org.junit.jupiter.api.Test;
 import static org.flexlb.mock.engine.cache.BlockPool.Kind.*;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Verifies block allocation, reference counting, and reuse.
+ */
 class BlockPoolTest {
     @Test void onlyCacheReferencesAreReclaimableAndEachOwnerClosesIndependently() {
         var pool = new BlockPool(4);
@@ -23,6 +26,7 @@ class BlockPoolTest {
         assertEquals(new BlockPool.Snapshot(4, 4, 4, 0), pool.snapshot());
         assertThrows(IllegalArgumentException.class, () -> pool.retain(reader, REQUEST));
     }
+
     @Test void referencesCannotCrossPools() {
         var firstPool = new BlockPool(2); var secondPool = new BlockPool(3);
         var source = firstPool.allocate(2, CACHE);
@@ -35,6 +39,7 @@ class BlockPoolTest {
         assertEquals(1, secondPool.snapshot().free());
         target.forEach(BlockPool.Reference::close);
     }
+
     @Test void oversizedAllocationDoesNotPartiallyConsumeCapacityAndReleaseAdvancesGeneration() {
         var pool = new BlockPool(2);
         assertNull(pool.allocate(Integer.MAX_VALUE, REQUEST));
@@ -45,7 +50,7 @@ class BlockPoolTest {
         owned.forEach(BlockPool.Reference::close);
         assertEquals(2, pool.snapshot().free());
     }
-    private record Owner(BlockPool.Reference reference, int block, BlockPool.Kind kind) {}
+
     @Test void accountingMatchesAnIndependentOwnershipModelDuringRandomRetainAndRelease() {
         var pool = new BlockPool(32);
         var owners = new ArrayList<Owner>(); var random = new Random(28);
@@ -74,4 +79,6 @@ class BlockPoolTest {
         owners.forEach(o -> o.reference.close());
         assertEquals(32, pool.snapshot().free());
     }
+
+    private record Owner(BlockPool.Reference reference, int block, BlockPool.Kind kind) {}
 }

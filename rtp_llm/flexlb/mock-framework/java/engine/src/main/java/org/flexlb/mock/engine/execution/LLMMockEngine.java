@@ -16,7 +16,9 @@ import org.flexlb.mock.engine.service.RtpRpcService;
 import org.flexlb.mock.metrics.MetricTags;
 import org.flexlb.mock.protocol.ControlServer;
 
-/** One LLM Mock P/D Engine with independent listeners and resources. Does not contain the case runner or a cluster controller. */
+/**
+ * One LLM Mock P/D Engine with independent listeners and resources. Does not contain the case runner or a cluster controller.
+ */
 public final class LLMMockEngine implements AutoCloseable {
     private final RtpConfig config;
     private final KvCacheManager cacheManager;
@@ -24,11 +26,11 @@ public final class LLMMockEngine implements AutoCloseable {
     private final EngineLoop engine;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final org.flexlb.mock.engine.EngineMain.Address address = org.flexlb.mock.engine.EngineMain.Address.local();
+
     private Server rpc;
     private ControlServer api;
     private org.flexlb.mock.metrics.MetricsOutput metrics;
     private java.util.function.Supplier<List<MetricFamilySamples>> metricSource;
-
 
     private LLMMockEngine(RtpConfig config, EngineScheduler.Factory schedulers) {
         this.config = Objects.requireNonNull(config);
@@ -82,21 +84,14 @@ public final class LLMMockEngine implements AutoCloseable {
         }
     }
 
-    private List<MetricFamilySamples> collectMetrics() {
-        if (metricSource == null) return service.collectMetrics();
-        service.checkHealthy();
-        var samples = new java.util.ArrayList<>(metricSource.get());
-        samples.addAll(service.collectMetrics());
-        return samples;
-    }
-
-    public String rpcAddress() { return address.rpc(rpc.getPort()); }
     public void checkHealthy() {
         if (closed.get()) throw new IllegalStateException("Engine closed");
         if (rpc == null || rpc.isShutdown()) throw new IllegalStateException("Engine RPC stopped");
         service.checkHealthy();
     }
+
     public KvCacheManager cacheManager() { return cacheManager; }
+
     public Map<String, Object> endpoints() {
         boolean prefill = config.role() == org.flexlb.mock.protocol.Role.prefill;
         var result = new LinkedHashMap<String, Object>();
@@ -117,6 +112,8 @@ public final class LLMMockEngine implements AutoCloseable {
         result.put("remote_generation", prefill ? Map.of() : Map.of("stages", List.of("ALLOCATE", "LOAD", "GENERATE", "PREFILL_COMPLETE"), "multimodal", true, "load", true));
         return Map.copyOf(result);
     }
+
+    public String rpcAddress() { return address.rpc(rpc.getPort()); }
 
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
@@ -146,6 +143,14 @@ public final class LLMMockEngine implements AutoCloseable {
             }
         }
         if (failure != null) throw failure;
+    }
+
+    private List<MetricFamilySamples> collectMetrics() {
+        if (metricSource == null) return service.collectMetrics();
+        service.checkHealthy();
+        var samples = new java.util.ArrayList<>(metricSource.get());
+        samples.addAll(service.collectMetrics());
+        return samples;
     }
 
 }

@@ -18,28 +18,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Checks Prefill request admission and cancellation before scheduling.
+ */
 class PrefillAdmissionTest {
     @TempDir Path directory;
-    static GenerateInputPB input(long id, int timeout, boolean reuse) {
-        return GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(List.of(1, 2, 3, 4, 5))
-            .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(1).setTimeoutMs(timeout).setReuseCache(reuse)).build();
-    }
-    RtpConfig config(String expression) throws Exception { return config(expression, false); }
-    private RtpConfig config(String expression, boolean groups) throws Exception {
-        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration("prefill"));
-        ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2).put("reuse_cache", true);
-        if (groups) ((ObjectNode) root.path("component").path("config")).put("mock.scheduler.mode", "group");
-        ((ObjectNode) root.path("component").path("config").path("mock.compute").path("forward")).put("expression", expression);
-        var path = directory.resolve("config.json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
-    }
-
-    private static PrefillRpcServer server(RtpConfig config, KvCacheManager cache, EngineScheduler.Factory factory) {
-        var lock = new Object();
-        var history = new org.flexlb.mock.engine.scheduler.TaskHistory();
-        var engine = new org.flexlb.mock.engine.execution.EngineLoop(lock, factory, history, cache,
-            config.compute(), config.role(), config.id());
-        return new PrefillRpcServer(RtpRpcService.Config.from(config), lock, history, engine, () -> {}, () -> () -> {});
-    }
 
     @Test void singleAndBatchSubmissionRejectUnpreparedMediaWithoutAdmission() throws Exception {
         var config = config("1", true);
@@ -56,6 +39,13 @@ class PrefillAdmissionTest {
             assertTrue(engine.snapshot(0).tasks().isEmpty());
             assertTrue(engine.snapshot(0).finished().isEmpty());
         }
+    }
+
+    RtpConfig config(String expression) throws Exception { return config(expression, false); }
+
+    static GenerateInputPB input(long id, int timeout, boolean reuse) {
+        return GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(List.of(1, 2, 3, 4, 5))
+            .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(1).setTimeoutMs(timeout).setReuseCache(reuse)).build();
     }
 
     @Test void forwardsThenCommitsCompleteBlocksAndReportsCacheReuse() throws Exception {
@@ -210,6 +200,7 @@ class PrefillAdmissionTest {
             engine.close(); assertEquals(8, cache.snapshot(-1, false).availableBlocks());
         }
     }
+
     @Test void pendingCancellationAndSubmissionHaveOneOwnerAndCannotAffectReusedIdentity() throws Exception {
         var config = config("0");
         try (var cache = new KvCacheManager(config.blockSize(), 8, 0);
@@ -282,6 +273,22 @@ class PrefillAdmissionTest {
             assertEquals(1, admission.snapshot(0).finished().size());
             assertEquals(8, cache.snapshot(0, false).availableBlocks());
         }
+    }
+
+    private RtpConfig config(String expression, boolean groups) throws Exception {
+        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration("prefill"));
+        ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2).put("reuse_cache", true);
+        if (groups) ((ObjectNode) root.path("component").path("config")).put("mock.scheduler.mode", "group");
+        ((ObjectNode) root.path("component").path("config").path("mock.compute").path("forward")).put("expression", expression);
+        var path = directory.resolve("config.json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
+    }
+
+    private static PrefillRpcServer server(RtpConfig config, KvCacheManager cache, EngineScheduler.Factory factory) {
+        var lock = new Object();
+        var history = new org.flexlb.mock.engine.scheduler.TaskHistory();
+        var engine = new org.flexlb.mock.engine.execution.EngineLoop(lock, factory, history, cache,
+            config.compute(), config.role(), config.id());
+        return new PrefillRpcServer(RtpRpcService.Config.from(config), lock, history, engine, () -> {}, () -> () -> {});
     }
 
 }

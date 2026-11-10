@@ -7,11 +7,10 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Checks timer completion and cancellation for a simulated forward.
+ */
 class SimulatedComputeTest {
-    private static NoiseModel.Sample sample(long nanos) {
-        return new NoiseModel.Sample(Duration.ofNanos(nanos), 0, Duration.ofNanos(nanos));
-    }
-
     @Test void waitsForPlannedTimeAndReportsActualElapsed() throws Exception {
         try (var compute = new SimulatedCompute()) {
             var execution = compute.submit(sample(5_000_000));
@@ -85,6 +84,7 @@ class SimulatedComputeTest {
             assertNotNull(execution.completion().toCompletableFuture().get(2, TimeUnit.SECONDS));
         }
     }
+
     @Test void elapsedStopsBeforeNotificationQueueDelay() throws Exception {
         var entered = new CountDownLatch(1); var release = new CountDownLatch(1);
         var notifications = Executors.newSingleThreadExecutor();
@@ -102,6 +102,10 @@ class SimulatedComputeTest {
             var outcome = execution.completion().toCompletableFuture().get(1, TimeUnit.SECONDS);
             assertTrue(outcome.elapsedNanos() <= upperBound);
         } finally { release.countDown(); notifications.shutdownNow(); }
+    }
+
+    private static NoiseModel.Sample sample(long nanos) {
+        return new NoiseModel.Sample(Duration.ofNanos(nanos), 0, Duration.ofNanos(nanos));
     }
 
 }

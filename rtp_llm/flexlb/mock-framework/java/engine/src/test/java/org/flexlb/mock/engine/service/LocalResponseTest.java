@@ -6,6 +6,9 @@ import java.nio.ByteOrder;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Verifies native replies for local generation.
+ */
 class LocalResponseTest {
     @Test void rpcChunksContainOnlyNewTokensForBothFrontendResponseModes() {
         for (boolean incremental : new boolean[] {false, true}) {

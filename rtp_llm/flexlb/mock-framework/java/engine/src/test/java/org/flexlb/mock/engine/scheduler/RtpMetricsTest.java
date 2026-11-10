@@ -9,19 +9,13 @@ import org.flexlb.mock.engine.scheduler.RtpMetrics.StepStats;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Verifies RTP metric names, samples, and aggregation.
+ */
 class RtpMetricsTest {
     private static final RtpMetrics.State IDLE = new RtpMetrics.State(0, 0, 0, 0, 100, 100, 100, 0, 1);
-
     private static final RtpMetrics.RequestStats REQUEST =
         new RtpMetrics.RequestStats(20_000, 4_000, 2_000, 0, -1, 10, 3, 2, 4);
-
-    static double sample(String text, String name, String label) {
-        return text.lines().filter(line -> line.startsWith(name + "{") && line.contains(label))
-            .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1))).findFirst().orElseThrow();
-    }
-    static double mean(String text, String name, String label) {
-        return sample(text, name + "_sum", label) / sample(text, name + "_count", label);
-    }
 
     @Test void exposesZeroCountersAndCurrentStateWithoutResetOnScrape() {
         var state = new AtomicReference<>(IDLE);
@@ -36,6 +30,11 @@ class RtpMetricsTest {
         assertEquals(70, sample(metrics.scrape(), "rtp_llm_kv_tokens", "state=\"available\""));
         state.set(IDLE);
         assertEquals(100, sample(metrics.scrape(), "rtp_llm_kv_tokens", "state=\"available\""));
+    }
+
+    static double sample(String text, String name, String label) {
+        return text.lines().filter(line -> line.startsWith(name + "{") && line.contains(label))
+            .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1))).findFirst().orElseThrow();
     }
 
     @Test void keepsTokenWeightsDurationAndOutcomesSeparate() {
@@ -61,6 +60,10 @@ class RtpMetricsTest {
         assertFalse(text.contains("engine="));
         for (String outcome : new String[]{"success", "timeout"})
             assertEquals(1, sample(text, "rtp_llm_framework_requests_total", "outcome=\"" + outcome + "\""));
+    }
+
+    static double mean(String text, String name, String label) {
+        return sample(text, name + "_sum", label) / sample(text, name + "_count", label);
     }
 
     @Test void reportsActualReuseAtCompletionWhenEnabled() {

@@ -6,13 +6,13 @@
 
 以下命令均在本目录 `rtp_llm/flexlb/mock-framework/` 执行。若使用外层内部仓库，先进入 `github-opensource/` 中的对应目录。
 
-| 依赖 | 要求 |
-| --- | --- |
-| Java | Java 21，设置 `JAVA_HOME`。构建使用仓库自带 Maven Wrapper。 |
-| Python / uv | Python 3.11 或更高版本，安装 uv；Python 依赖由 `uv.lock` 锁定。 |
-| Prometheus | 已安装的可执行文件，`PROMETHEUS_BIN` 指向程序本身，Runner 不负责下载。 |
-| Grafana | 仅查看指标曲线时需要；`GRAFANA_HOME` 包含 `bin/grafana`、`conf` 和 `public`。 |
-| 执行资源 | 端口、回环地址、磁盘、CPU 和内存满足所选 Case。双 Master 需要能绑定两个不同的回环 IP。 |
+| 依赖        | 要求                                                                                   |
+| ----------- | -------------------------------------------------------------------------------------- |
+| Java        | Java 21，设置 `JAVA_HOME`。构建使用仓库自带 Maven Wrapper。                            |
+| Python / uv | Python 3.11 或更高版本，安装 uv；Python 依赖由 `uv.lock` 锁定。                        |
+| Prometheus  | 已安装的可执行文件，`PROMETHEUS_BIN` 指向程序本身，Runner 不负责下载。                 |
+| Grafana     | 仅查看指标曲线时需要；`GRAFANA_HOME` 包含 `bin/grafana`、`conf` 和 `public`。          |
+| 执行资源    | 端口、回环地址、磁盘、CPU 和内存满足所选 Case。双 Master 需要能绑定两个不同的回环 IP。 |
 
 在实际执行机器上确认工具可运行，按锁定版本准备依赖，检查构建和测试所需配置、资源及 Case 输入完整可读。下载失败先解决依赖源或网络问题；不通过改版本或跳过检查绕过。共享机器上使用独立目录，不抢占其他服务。
 
@@ -60,14 +60,14 @@ P/D/V、Master 和 Client 各实例直接启动独立 JVM。ZooKeeper 由单独�
 
 ## 检查结果与失败请求
 
-| 产物 | 查看内容 |
-| --- | --- |
-| `result.json` | 最终状态、起止时间及清理错误。状态为 PASS / FAIL / ERROR / CANCELLED。 |
-| `gates.jsonl` 和事件记录 | 步骤事件、门禁预期与实际值、单位、查询时刻和窗口。 |
-| 配置与源码记录 | 原始 Case、编译配置、启动配方、源码版本和工作区差异。 |
-| `components/` | 组件生效配置、端点、日志和 Client 播放结果/请求证据。 |
-| `prometheus/` | 采集配置、日志、完整性记录及 TSDB/WAL；缺指标不能补零。 |
-| `view.json` | 本次保存的大盘快照，供之后回看。 |
+| 产物                     | 查看内容                                                               |
+| ------------------------ | ---------------------------------------------------------------------- |
+| `result.json`            | 最终状态、起止时间及清理错误。状态为 PASS / FAIL / ERROR / CANCELLED。 |
+| `gates.jsonl` 和事件记录 | 步骤事件、门禁预期与实际值、单位、查询时刻和窗口。                     |
+| 配置与源码记录           | 原始 Case、编译配置、启动配方、源码版本和工作区差异。                  |
+| `components/`            | 组件生效配置、端点、日志和 Client 播放结果/请求证据。                  |
+| `prometheus/`            | 采集配置、日志、完整性记录及 TSDB/WAL；缺指标不能补零。                |
+| `view.json`              | 本次保存的大盘快照，供之后回看。                                       |
 
 检查 Client 的 issued、finished、success/error/timeout/cancelled，以及 queued、inflight、unsent。Case 主动提前停止播放时，未发送的输入不算失败；已发送请求是否收齐终态、请求证据是否完整，要分别确认。清理错误和采集错误也应单独报告，不能解释成请求失败或忽略后宣称 PASS。
 

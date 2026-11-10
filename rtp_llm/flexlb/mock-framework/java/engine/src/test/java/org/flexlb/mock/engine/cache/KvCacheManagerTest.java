@@ -5,6 +5,9 @@ import java.util.*;
 import java.util.concurrent.*;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Verifies KV reservations, shared prefixes, and eviction.
+ */
 class KvCacheManagerTest {
     @Test void keySnapshotsAreDetachedAndEachReaderUsesItsOwnVersion() {
         try (var cache = new KvCacheManager(1, 4, 0)) {

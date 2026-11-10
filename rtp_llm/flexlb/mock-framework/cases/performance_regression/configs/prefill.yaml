@@ -8,7 +8,7 @@ mock.compute.forward.expression: 110.08423325235695 + 0.0032314434042004558 * su
 test_block_num: 43128
 reserve_block_ratio: 2
 image_token_id: 129264
-cache_key_hash_seed: '4923373599811257905'
+cache_key_hash_seed: "4923373599811257905"
 enable_memory_cache: false
 kv_cache_event_publisher_type: none
 cp_force_single_prefill: false

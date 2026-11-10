@@ -20,36 +20,36 @@ Mock 专用参数使用小写点号名称，例如 `mock.compute.forward.express
 
 ### 已实现的 real 参数
 
-| 参数 | 默认值/约束 | 行为 |
-| --- | --- | --- |
-| seq_size_per_block / max_seq_len / test_block_num | 64 / 8192 / 必填；前两者为 0 时用默认值，test_block_num ≥ 2 | 基础哈希/物理块 token 数、单请求序列上限、每 rank 的 Device 物理块数（含 null block）。P 的逻辑分配粒度为基础块大小乘 prefill_cp_size。 |
-| concurrency_limit | 32，正整数 | P/D 每轮请求数上限；real 的 ConcurrencyConfig 输入经 engine_config.py 写入内部 max_generate_batch_size。 |
-| reserve_block_ratio | 5，0–100 | 首次分配预留百分比。 |
-| reuse_cache / enable_device_cache | false / true | 前缀复用和 Device 索引。 |
-| prefill_cp_size | 1（0 视为默认） | Mock P 每组包含的基础缓存块数。大于 1 时只取每组末尾的键，逻辑块大小为基础块大小乘该值，未命中 token 的准入预算按 2 × CP size 对齐。D 的本地 FULL KV 始终按基础块管理。 |
-| cp_force_single_prefill | true | 仅在 P 的 CP size 大于 1 时生效。设为 false 可在同轮接纳多个 Prefill。 |
-| max_batch_tokens_size | 0，启动时解析为 max_context_batch_size × max_seq_len | P 的 batch token/矩形准入；合法 singleton 可超过预算。D 不使用该预算选批，仍通过 WorkerStatus 报告。 |
-| max_context_batch_size | 1，正整数 | 只在 max_batch_tokens_size 缺省或为 0 时参与预算推导，不直接限制 batch 请求数。 |
-| max_batch_tokens_without_cache / max_inited_kv_cache_streams | 0 / 0 | 仅 P 生效；0 不启用对应限制。 |
-| disable_decode_first_malloc_device_reuse | false | real 内部 CacheConfig 属性，文件输入，仅支持文件配置。 |
-| gpu_max_batch_size / gpu_batch_wait_ms | 1 / 10 ms | 仅 V；batch=1 为逐请求执行且等待为 0；>1 同时限制 Forward 工作块数与媒体数，较大图片组分轮执行。 |
-| vit_concurrency / vit_max_queue_size | 64 / 64 | 异步工作线程上限 / 额外等待额度；总准入和 GPU 就绪队列容量为两者之和。 |
-| mm_cache_gpu_max_bytes / mm_cache_cpu_max_bytes | 各 2 GiB | V embedding 缓存逻辑预算，单位 byte。 |
-| mm_hash_key_cache_max_bytes | 256 MiB | V hash 缓存逻辑预算，单位 byte。 |
+| 参数                                                         | 默认值/约束                                                 | 行为                                                                                                                                                                    |
+| ------------------------------------------------------------ | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| seq_size_per_block / max_seq_len / test_block_num            | 64 / 8192 / 必填；前两者为 0 时用默认值，test_block_num ≥ 2 | 基础哈希/物理块 token 数、单请求序列上限、每 rank 的 Device 物理块数（含 null block）。P 的逻辑分配粒度为基础块大小乘 prefill_cp_size。                                 |
+| concurrency_limit                                            | 32，正整数                                                  | P/D 每轮请求数上限；real 的 ConcurrencyConfig 输入经 engine_config.py 写入内部 max_generate_batch_size。                                                                |
+| reserve_block_ratio                                          | 5，0–100                                                    | 首次分配预留百分比。                                                                                                                                                    |
+| reuse_cache / enable_device_cache                            | false / true                                                | 前缀复用和 Device 索引。                                                                                                                                                |
+| prefill_cp_size                                              | 1（0 视为默认）                                             | Mock P 每组包含的基础缓存块数。大于 1 时只取每组末尾的键，逻辑块大小为基础块大小乘该值，未命中 token 的准入预算按 2 × CP size 对齐。D 的本地 FULL KV 始终按基础块管理。 |
+| cp_force_single_prefill                                      | true                                                        | 仅在 P 的 CP size 大于 1 时生效。设为 false 可在同轮接纳多个 Prefill。                                                                                                  |
+| max_batch_tokens_size                                        | 0，启动时解析为 max_context_batch_size × max_seq_len        | P 的 batch token/矩形准入；合法 singleton 可超过预算。D 不使用该预算选批，仍通过 WorkerStatus 报告。                                                                    |
+| max_context_batch_size                                       | 1，正整数                                                   | 只在 max_batch_tokens_size 缺省或为 0 时参与预算推导，不直接限制 batch 请求数。                                                                                         |
+| max_batch_tokens_without_cache / max_inited_kv_cache_streams | 0 / 0                                                       | 仅 P 生效；0 不启用对应限制。                                                                                                                                           |
+| disable_decode_first_malloc_device_reuse                     | false                                                       | real 内部 CacheConfig 属性，文件输入，仅支持文件配置。                                                                                                                  |
+| gpu_max_batch_size / gpu_batch_wait_ms                       | 1 / 10 ms                                                   | 仅 V；batch=1 为逐请求执行且等待为 0；>1 同时限制 Forward 工作块数与媒体数，较大图片组分轮执行。                                                                        |
+| vit_concurrency / vit_max_queue_size                         | 64 / 64                                                     | 异步工作线程上限 / 额外等待额度；总准入和 GPU 就绪队列容量为两者之和。                                                                                                  |
+| mm_cache_gpu_max_bytes / mm_cache_cpu_max_bytes              | 各 2 GiB                                                    | V embedding 缓存逻辑预算，单位 byte。                                                                                                                                   |
+| mm_hash_key_cache_max_bytes                                  | 256 MiB                                                     | V hash 缓存逻辑预算，单位 byte。                                                                                                                                        |
 
 real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine_config.py`、`rtp_llm/config/py_config_modules.py` 和 `rtp_llm/cpp/config/ConfigModules.h` 为依据。Mock 不用真实 GPU 分配这些预算，也不按实例伪造物理资源消耗。
 
 ### Mock 参数
 
-| 参数 | 含义 |
-| --- | --- |
-| mock.cache.total.blocks | 统一池总块数，不含 null block；默认 test_block_num - 1，不得小于 device 可用总块数。ENV：MOCK_CACHE_TOTAL_BLOCKS。 |
-| mock.scheduler.mode | P 调度方式，默认 `fifo` 按单请求入队、自主组 Forward batch，拒绝 `EnqueueBatch`/`EnqueueGroup`；`group` 显式启用组语义。ENV 为 `MOCK_SCHEDULER_MODE`；D 始终使用普通调度。 |
-| mock.vit.skip.download | 默认 false；true 时只跳过实际图片读取，使用输入宽高，其余异步调度不变。 |
-| mock.compute.forward.expression | 必填，Forward 公式，结果单位 ms。 |
-| mock.compute.forward.noise.stddev.ms / stddev.ratio / max.deviation.ms / seed | 有界噪声，详见 Compute；数值后缀均相对 mock.compute.forward.noise。 |
-| mock.compute.decode.tokens.per.step | D 平均每轮进度，与真实投机机制不同。 |
-| mock.compute.eos.probability / seed | P/D 的概率停止模型。 |
+| 参数                                                                          | 含义                                                                                                                                                                       |
+| ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| mock.cache.total.blocks                                                       | 统一池总块数，不含 null block；默认 test_block_num - 1，不得小于 device 可用总块数。ENV：MOCK_CACHE_TOTAL_BLOCKS。                                                         |
+| mock.scheduler.mode                                                           | P 调度方式，默认 `fifo` 按单请求入队、自主组 Forward batch，拒绝 `EnqueueBatch`/`EnqueueGroup`；`group` 显式启用组语义。ENV 为 `MOCK_SCHEDULER_MODE`；D 始终使用普通调度。 |
+| mock.vit.skip.download                                                        | 默认 false；true 时只跳过实际图片读取，使用输入宽高，其余异步调度不变。                                                                                                    |
+| mock.compute.forward.expression                                               | 必填，Forward 公式，结果单位 ms。                                                                                                                                          |
+| mock.compute.forward.noise.stddev.ms / stddev.ratio / max.deviation.ms / seed | 有界噪声，详见 Compute；数值后缀均相对 mock.compute.forward.noise。                                                                                                        |
+| mock.compute.decode.tokens.per.step                                           | D 平均每轮进度，与真实投机机制不同。                                                                                                                                       |
+| mock.compute.eos.probability / seed                                           | P/D 的概率停止模型。                                                                                                                                                       |
 
 ### ENV 输入
 
@@ -83,7 +83,7 @@ vit:
     hidden_size: 4096
     min_pixels: 295936
     max_image_tokens: 1024
-    mock.vit.skip.download: true  # 本地假 URL 回放；Whale 使用默认 false
+    mock.vit.skip.download: true # 本地假 URL 回放；Whale 使用默认 false
     gpu_max_batch_size: 8
     gpu_batch_wait_ms: 10
     vit_concurrency: 64

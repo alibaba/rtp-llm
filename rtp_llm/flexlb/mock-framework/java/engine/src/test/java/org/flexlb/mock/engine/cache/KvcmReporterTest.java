@@ -12,14 +12,12 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Verifies KVCM registration, snapshots, and incremental reporting.
+ */
 class KvcmReporterTest {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static void await(BooleanSupplier condition) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
-        while (!condition.getAsBoolean()) {
-            assertTrue(System.nanoTime() < deadline, "KVCM state timed out"); Thread.sleep(10);
-        }
-    }
+
     @ParameterizedTest @ValueSource(booleans = {false, true})
     void slowFailedSnapshotDoesNotBlockDeltasOrReplayAcrossRegistration(boolean registrationLost) throws Exception {
         var entered = new CountDownLatch(1); var release = new CountDownLatch(1);
@@ -86,40 +84,6 @@ class KvcmReporterTest {
                 assertEquals(registrationLost ? 2 : 1, registrations.get(), "Stale snapshot feedback must not invalidate a new registration");
             } finally { release.countDown(); server.stop(0); }
         }
-    }
-    private static final class Meta implements AutoCloseable {
-        final HttpServer server;
-        final ExecutorService threads = Executors.newVirtualThreadPerTaskExecutor();
-        final List<JsonNode> requests = new CopyOnWriteArrayList<>();
-        volatile java.util.function.BiConsumer<JsonNode, com.fasterxml.jackson.databind.node.ObjectNode> reply = (request, response) -> {};
-        Meta() throws Exception {
-            server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-            server.setExecutor(threads);
-            server.createContext("/api/", exchange -> {
-                try (exchange) {
-                    var request = JSON.readTree(exchange.getRequestBody()); requests.add(request);
-                    var response = JSON.createObjectNode(); response.putObject("header").putObject("status").put("code", "OK");
-                    reply.accept(request, response);
-                    byte[] bytes = JSON.writeValueAsBytes(response);
-                    exchange.sendResponseHeaders(200, bytes.length); exchange.getResponseBody().write(bytes);
-                }
-            });
-            server.start();
-        }
-        int count(String type) { return (int) requests.stream().filter(request -> type.equals(type(request))).count(); }
-        int registrations() { return (int) requests.stream().filter(request -> request.has("model_deployment")).count(); }
-        static String type(JsonNode request) { return request.path("events").path(0).path("event_type").asText(); }
-        KvcmReporter reporter(KvCacheManager cache, boolean events, java.util.function.LongSupplier clock) {
-            return new KvcmReporter(new KvcmReporter.Configuration(
-                URI.create("http://127.0.0.1:" + server.getAddress().getPort()), events, 600000),
-                new KvcmReporter.Identity("instance", "group", "127.0.0.1:9000", "model", "FP16", false, 1, 1, "full"), cache, clock);
-        }
-        @Override public void close() { server.stop(0); threads.close(); }
-    }
-    private static void heartbeat(Meta meta) throws Exception {
-        int before = meta.count("EVENT_HEARTBEAT");
-        // Two starts guarantee the preceding response has been processed by the serial heartbeat worker.
-        await(() -> meta.count("EVENT_HEARTBEAT") >= before + 2);
     }
 
     @ParameterizedTest @ValueSource(booleans = {false, true})
@@ -217,6 +181,59 @@ class KvcmReporterTest {
                     await(() -> meta.registrations() == 2);
                 } finally { releaseHeartbeat.countDown(); }
             }
+        }
+    }
+
+    private static void heartbeat(Meta meta) throws Exception {
+        int before = meta.count("EVENT_HEARTBEAT");
+        // Two starts guarantee the preceding response has been processed by the serial heartbeat worker.
+        await(() -> meta.count("EVENT_HEARTBEAT") >= before + 2);
+    }
+
+    private static void await(BooleanSupplier condition) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+        while (!condition.getAsBoolean()) {
+            assertTrue(System.nanoTime() < deadline, "KVCM state timed out"); Thread.sleep(10);
+        }
+    }
+
+    /**
+     * Emulates KVCM Meta HTTP responses for the reporting client.
+     */
+    private static final class Meta implements AutoCloseable {
+        final HttpServer server;
+        final ExecutorService threads = Executors.newVirtualThreadPerTaskExecutor();
+        final List<JsonNode> requests = new CopyOnWriteArrayList<>();
+
+        volatile java.util.function.BiConsumer<JsonNode, com.fasterxml.jackson.databind.node.ObjectNode> reply = (request, response) -> {};
+
+        Meta() throws Exception {
+            server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            server.setExecutor(threads);
+            server.createContext("/api/", exchange -> {
+                try (exchange) {
+                    var request = JSON.readTree(exchange.getRequestBody()); requests.add(request);
+                    var response = JSON.createObjectNode(); response.putObject("header").putObject("status").put("code", "OK");
+                    reply.accept(request, response);
+                    byte[] bytes = JSON.writeValueAsBytes(response);
+                    exchange.sendResponseHeaders(200, bytes.length); exchange.getResponseBody().write(bytes);
+                }
+            });
+            server.start();
+        }
+
+        @Override public void close() { server.stop(0); threads.close(); }
+
+        int count(String type) { return (int) requests.stream().filter(request -> type.equals(type(request))).count(); }
+
+        static String type(JsonNode request) { return request.path("events").path(0).path("event_type").asText(); }
+
+        int registrations() { return (int) requests.stream().filter(request -> request.has("model_deployment")).count(); }
+
+        KvcmReporter reporter(KvCacheManager cache, boolean events, java.util.function.LongSupplier clock) {
+            return new KvcmReporter(new KvcmReporter.Configuration(
+                URI.create("http://127.0.0.1:" + server.getAddress().getPort()), events, 600000),
+                new KvcmReporter.Identity("instance", "group", "127.0.0.1:9000", "model", "FP16", false, 1, 1, "full"), cache, clock);
         }
     }
 

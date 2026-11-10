@@ -22,95 +22,11 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Verifies scheduler admission, batch selection, and request completion.
+ */
 class RtpSchedulerTest {
     @TempDir Path directory;
-    private RtpConfig config(String role, String expression, int batchSize) throws Exception {
-        return config(role, expression, batchSize, 0);
-    }
-    private RtpConfig config(String role, String expression, int batchSize, int tokenBudget) throws Exception {
-        return config(role, expression, batchSize, tokenBudget, false);
-    }
-    private RtpConfig config(String role, String expression, int batchSize, int tokenBudget, boolean reuse) throws Exception {
-        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration(role));
-        var config = (ObjectNode) root.path("component").path("config");
-        config.put("seq_size_per_block", 2).put("concurrency_limit", batchSize).put("max_batch_tokens_size", tokenBudget).put("reuse_cache", reuse);
-        ((ObjectNode) config.path("mock.compute").path("forward")).put("expression", expression);
-        var path = directory.resolve(role + ".json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
-    }
-    private static EngineScheduler.Input input(long id, boolean retained) {
-        return new EngineScheduler.Input(Long.toString(id), id, 0, 5, 3, 0, System.nanoTime(), Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(5, 0), List.of()), false, retained, 0, false);
-    }
-    private static class Listener implements EngineScheduler.Listener {
-        final CompletableFuture<EngineScheduler.Request> allocated = new CompletableFuture<>();
-        final CompletableFuture<EngineScheduler.Progress> output = new CompletableFuture<>();
-        final CompletableFuture<RequestFailure> terminal = new CompletableFuture<>();
-        public void allocated(EngineScheduler.Request request) { allocated.complete(request); }
-        public void progressed(EngineScheduler.Request request) {
-            var output = request.progress(); this.output.complete(output); }
-        public void terminal(EngineScheduler.Request request, RequestFailure failure) { terminal.complete(failure); }
-    }
-    private static void drain(EngineScheduler scheduler) {
-        for (var notices = scheduler.takeNotifications(); !notices.isEmpty(); notices = scheduler.takeNotifications())
-            notices.forEach(Runnable::run);
-    }
-    private static void complete(EngineScheduler scheduler, EngineScheduler.Work work, RtpConfig config) {
-        var sample = config.compute().plan(config.role(), config.id(), work.batch());
-        scheduler.processOutputs(work, new SimulatedCompute.Outcome(SimulatedCompute.State.COMPLETED, sample, 10_000_000));
-    }
-    private static void loaded(EngineScheduler scheduler, EngineScheduler.Request request) {
-        try (var use = scheduler.beginTransfer(request)) {
-            scheduler.transferCompleted(request, new RtpTransferResult(false, null));
-        }
-    }
-    private static void generate(EngineScheduler scheduler, EngineScheduler.Request request) {
-        loaded(scheduler, request);
-        scheduler.control(request, new RtpControl.Generate(42));
-    }
-
-    private RtpConfig metricConfig(double tokensPerStep, double eos, int maxSequence) throws Exception {
-        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration("decode"));
-        var values = (ObjectNode) root.path("component").path("config");
-        values.put("seq_size_per_block", 2).put("concurrency_limit", 2).put("max_seq_len", maxSequence);
-        ((ObjectNode) values.path("mock.compute")).putObject("decode").put("tokens.per.step", tokensPerStep);
-        ((ObjectNode) values.path("mock.compute")).putObject("eos").put("probability", eos);
-        var path = directory.resolve("metric.json"); json.writeValue(path.toFile(), root);
-        return RtpConfig.load(path);
-    }
-    private static EngineScheduler.Input metricInput(long id, int maxNewTokens) {
-        return metricInput(id, maxNewTokens, 0);
-    }
-    private static EngineScheduler.Input metricInput(long id, int maxNewTokens, int priority) {
-        var base = input(id, false);
-        return new EngineScheduler.Input(base.identity(), id, 0, 5, maxNewTokens, priority, base.started(), base.deadline(),
-            base.cacheSequence(), false, false, 0, false);
-    }
-    private static String completeAndCheckTpot(RtpFifoScheduler scheduler, EngineScheduler.Work work, RtpConfig config,
-                                               String beforeMetrics, long beforeSchedule, long afterSchedule, int accepted, int streams) throws Exception {
-        // Leave a measurable execution interval so using truncated output or the wrong
-        // stream population cannot accidentally satisfy the clock-bound assertions.
-        Thread.sleep(20);
-        long beforeComplete = System.nanoTime();
-        complete(scheduler, work, config);
-        long afterComplete = System.nanoTime();
-        var text = scheduler.metrics().scrape();
-        double tpot = eventMeanDelta(beforeMetrics, text, "rtp_llm_sp_estimate_tpot_us");
-        assertTrue(tpot >= (beforeComplete - afterSchedule) / 1000.0 * streams / accepted, text);
-        assertTrue(tpot <= (afterComplete - beforeSchedule) / 1000.0 * streams / accepted, text);
-        assertFalse(text.contains("mock_decode_estimate_tpot_us"));
-        assertFalse(text.contains("mock_forward_batch_prepare_us"));
-        double gather = eventMeanDelta(beforeMetrics, text, "rtp_llm_gather_model_input_us");
-        assertTrue(gather >= 0 && gather <= (afterSchedule - beforeSchedule) / 1000.0, text);
-        drain(scheduler);
-        return text;
-    }
-
-    private static double eventMeanDelta(String before, String after, String name) {
-        double oldCount = before.contains(name + "_count{") ? RtpMetricsTest.sample(before, name + "_count", "") : 0;
-        double oldSum = before.contains(name + "_sum{") ? RtpMetricsTest.sample(before, name + "_sum", "") : 0;
-        double count = RtpMetricsTest.sample(after, name + "_count", "") - oldCount;
-        assertEquals(1, count, name);
-        return (RtpMetricsTest.sample(after, name + "_sum", "") - oldSum) / count;
-    }
 
     @ParameterizedTest
     @CsvSource({"0,3,128,2", "1,5,128,1", "0,5,7,1"})
@@ -348,11 +264,6 @@ class RtpSchedulerTest {
             complete(scheduler, singleton, config); drain(scheduler);
             assertTrue(scheduler.requests().isEmpty());
         }
-    }
-
-    private static void generate(EngineLoop engine, EngineScheduler.Request request) throws Exception {
-        try (var use = engine.beginKvTransfer(request)) { engine.onKvTransferCompleted(request, new RtpTransferResult(false, null)); }
-        engine.updateRequest(request, new RtpControl.Generate(42));
     }
 
     @Test void staggeredDecodeCohortsParticipateTogetherInEverySubsequentForward() throws Exception {
@@ -622,23 +533,6 @@ class RtpSchedulerTest {
         }
     }
 
-    private static EngineScheduler.Input sized(long id, int tokens) {
-        return new EngineScheduler.Input(Long.toString(id), id, 81, tokens, 3, 0, System.nanoTime(),
-            Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(tokens, 0), List.of()), false, false, 0, false);
-    }
-    private static List<EngineScheduler.InputItem> batch(EngineScheduler.Input... inputs) {
-        return Arrays.stream(inputs).map(input -> new EngineScheduler.InputItem(input, new Listener())).toList();
-    }
-    private static List<Long> ids(EngineScheduler.Work work) {
-        return work.batch().requests().stream().map(item -> Long.valueOf(item.id())).toList();
-    }
-    private RtpConfig admissionLimits(RtpConfig config, int inited, int uncached) throws Exception {
-        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration("prefill"));
-        ((ObjectNode) root.path("component")).set("config", config.business());
-        ((ObjectNode) root.path("component").path("config"))
-            .put("max_inited_kv_cache_streams", inited).put("max_batch_tokens_without_cache", uncached);
-        var path = directory.resolve("limits.json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
-    }
     @Test void ordinarySchedulerIgnoresGroupMetadataAndRejectsExplicitGroupsWithoutAdmission() throws Exception {
         var config = config("prefill", "1", 4, 100);
         try (var cache = new KvCacheManager(2, 20, 0);
@@ -669,6 +563,7 @@ class RtpSchedulerTest {
             assertTrue(scheduler.requests().isEmpty()); assertEquals(20, cache.snapshot(0, false).freeBlocks());
         }
     }
+
     @Test void groupCapacityScanKeepsResidualMembersAndCanAdmitLaterSmallerMembers() throws Exception {
         var config = config("prefill", "1", 4, 100);
         try (var cache = new KvCacheManager(2, 4, 0);
@@ -682,6 +577,7 @@ class RtpSchedulerTest {
             assertEquals(4, cache.snapshot(0, false).freeBlocks());
         }
     }
+
     @Test void ordinaryAndGroupWorkAlternateAtEmptyForwardBoundariesWithoutMixing() throws Exception {
         var config = config("prefill", "1", 4, 100);
         try (var cache = new KvCacheManager(2, 20, 0);
@@ -697,6 +593,7 @@ class RtpSchedulerTest {
             complete(scheduler, tail, config); drain(scheduler);
         }
     }
+
     @Test void oversizedGroupFallsBackToOrdinaryAdmissionAndCanMergeWithSingles() throws Exception {
         var config = config("prefill", "1", 2, 100);
         try (var cache = new KvCacheManager(2, 20, 0);
@@ -709,6 +606,7 @@ class RtpSchedulerTest {
             complete(scheduler, tail, config); drain(scheduler);
         }
     }
+
     @Test void initializedKvLimitProtectsRetainedSourcesAndCountsAsAnOversizedGroupLimit() throws Exception {
         var config = admissionLimits(config("prefill", "1", 4, 100), 1, 0);
         try (var cache = new KvCacheManager(2, 20, 0);
@@ -724,6 +622,7 @@ class RtpSchedulerTest {
             complete(scheduler, tail, config); drain(scheduler);
         }
     }
+
     @Test void prefillRectangleLimitsGroupsAndUncachedQuotaAppliesToOrdinaryAdmission() throws Exception {
         var config = admissionLimits(config("prefill", "1", 4, 100), 0, 1);
         try (var cache = new KvCacheManager(2, 100, 0);
@@ -742,6 +641,7 @@ class RtpSchedulerTest {
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
         }
     }
+
     @Test void rejectedAndCancelledGroupMembersDoNotCancelOtherMembers() throws Exception {
         var config = config("prefill", "1", 4, 100);
         try (var cache = new KvCacheManager(2, 20, 0);
@@ -804,15 +704,6 @@ class RtpSchedulerTest {
             scheduler.enqueue(sized(1, 5), new Listener()); scheduler.enqueue(sized(2, 5), new Listener());
             assertEquals(List.of(1L, 2L), ids(scheduler.schedule()));
         }
-    }
-
-    private RtpConfig boundaryConfig(String role, int sequence, int width) throws Exception {
-        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration(role));
-        var values = (ObjectNode) root.path("component").path("config");
-        values.put("seq_size_per_block", 2).put("max_seq_len", sequence).put("concurrency_limit", 2)
-            .put("max_inited_kv_cache_streams", 1);
-        ((ObjectNode) values.path("mock.compute")).putObject("decode").put("tokens.per.step", width);
-        return RtpConfig.load(root);
     }
 
     @Test void decodeClampsRequestedLengthToContext() throws Exception {
@@ -917,6 +808,143 @@ class RtpSchedulerTest {
             engine.close();
             assertThrows(RequestFailure.class, engine::checkHealthy);
         }
+    }
+
+    private RtpConfig config(String role, String expression, int batchSize) throws Exception {
+        return config(role, expression, batchSize, 0);
+    }
+
+    private RtpConfig config(String role, String expression, int batchSize, int tokenBudget) throws Exception {
+        return config(role, expression, batchSize, tokenBudget, false);
+    }
+
+    private RtpConfig config(String role, String expression, int batchSize, int tokenBudget, boolean reuse) throws Exception {
+        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration(role));
+        var config = (ObjectNode) root.path("component").path("config");
+        config.put("seq_size_per_block", 2).put("concurrency_limit", batchSize).put("max_batch_tokens_size", tokenBudget).put("reuse_cache", reuse);
+        ((ObjectNode) config.path("mock.compute").path("forward")).put("expression", expression);
+        var path = directory.resolve(role + ".json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
+    }
+
+    private static void generate(EngineScheduler scheduler, EngineScheduler.Request request) {
+        loaded(scheduler, request);
+        scheduler.control(request, new RtpControl.Generate(42));
+    }
+
+    private static void loaded(EngineScheduler scheduler, EngineScheduler.Request request) {
+        try (var use = scheduler.beginTransfer(request)) {
+            scheduler.transferCompleted(request, new RtpTransferResult(false, null));
+        }
+    }
+
+    private RtpConfig metricConfig(double tokensPerStep, double eos, int maxSequence) throws Exception {
+        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration("decode"));
+        var values = (ObjectNode) root.path("component").path("config");
+        values.put("seq_size_per_block", 2).put("concurrency_limit", 2).put("max_seq_len", maxSequence);
+        ((ObjectNode) values.path("mock.compute")).putObject("decode").put("tokens.per.step", tokensPerStep);
+        ((ObjectNode) values.path("mock.compute")).putObject("eos").put("probability", eos);
+        var path = directory.resolve("metric.json"); json.writeValue(path.toFile(), root);
+        return RtpConfig.load(path);
+    }
+
+    private static EngineScheduler.Input metricInput(long id, int maxNewTokens) {
+        return metricInput(id, maxNewTokens, 0);
+    }
+
+    private static EngineScheduler.Input metricInput(long id, int maxNewTokens, int priority) {
+        var base = input(id, false);
+        return new EngineScheduler.Input(base.identity(), id, 0, 5, maxNewTokens, priority, base.started(), base.deadline(),
+            base.cacheSequence(), false, false, 0, false);
+    }
+
+    private static EngineScheduler.Input input(long id, boolean retained) {
+        return new EngineScheduler.Input(Long.toString(id), id, 0, 5, 3, 0, System.nanoTime(), Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(5, 0), List.of()), false, retained, 0, false);
+    }
+
+    private static String completeAndCheckTpot(RtpFifoScheduler scheduler, EngineScheduler.Work work, RtpConfig config,
+                                               String beforeMetrics, long beforeSchedule, long afterSchedule, int accepted, int streams) throws Exception {
+        // Leave a measurable execution interval so using truncated output or the wrong
+        // stream population cannot accidentally satisfy the clock-bound assertions.
+        Thread.sleep(20);
+        long beforeComplete = System.nanoTime();
+        complete(scheduler, work, config);
+        long afterComplete = System.nanoTime();
+        var text = scheduler.metrics().scrape();
+        double tpot = eventMeanDelta(beforeMetrics, text, "rtp_llm_sp_estimate_tpot_us");
+        assertTrue(tpot >= (beforeComplete - afterSchedule) / 1000.0 * streams / accepted, text);
+        assertTrue(tpot <= (afterComplete - beforeSchedule) / 1000.0 * streams / accepted, text);
+        assertFalse(text.contains("mock_decode_estimate_tpot_us"));
+        assertFalse(text.contains("mock_forward_batch_prepare_us"));
+        double gather = eventMeanDelta(beforeMetrics, text, "rtp_llm_gather_model_input_us");
+        assertTrue(gather >= 0 && gather <= (afterSchedule - beforeSchedule) / 1000.0, text);
+        drain(scheduler);
+        return text;
+    }
+
+    private static void complete(EngineScheduler scheduler, EngineScheduler.Work work, RtpConfig config) {
+        var sample = config.compute().plan(config.role(), config.id(), work.batch());
+        scheduler.processOutputs(work, new SimulatedCompute.Outcome(SimulatedCompute.State.COMPLETED, sample, 10_000_000));
+    }
+
+    private static double eventMeanDelta(String before, String after, String name) {
+        double oldCount = before.contains(name + "_count{") ? RtpMetricsTest.sample(before, name + "_count", "") : 0;
+        double oldSum = before.contains(name + "_sum{") ? RtpMetricsTest.sample(before, name + "_sum", "") : 0;
+        double count = RtpMetricsTest.sample(after, name + "_count", "") - oldCount;
+        assertEquals(1, count, name);
+        return (RtpMetricsTest.sample(after, name + "_sum", "") - oldSum) / count;
+    }
+
+    private static void drain(EngineScheduler scheduler) {
+        for (var notices = scheduler.takeNotifications(); !notices.isEmpty(); notices = scheduler.takeNotifications())
+            notices.forEach(Runnable::run);
+    }
+
+    private static void generate(EngineLoop engine, EngineScheduler.Request request) throws Exception {
+        try (var use = engine.beginKvTransfer(request)) { engine.onKvTransferCompleted(request, new RtpTransferResult(false, null)); }
+        engine.updateRequest(request, new RtpControl.Generate(42));
+    }
+
+    private static EngineScheduler.Input sized(long id, int tokens) {
+        return new EngineScheduler.Input(Long.toString(id), id, 81, tokens, 3, 0, System.nanoTime(),
+            Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(tokens, 0), List.of()), false, false, 0, false);
+    }
+
+    private static List<EngineScheduler.InputItem> batch(EngineScheduler.Input... inputs) {
+        return Arrays.stream(inputs).map(input -> new EngineScheduler.InputItem(input, new Listener())).toList();
+    }
+
+    private static List<Long> ids(EngineScheduler.Work work) {
+        return work.batch().requests().stream().map(item -> Long.valueOf(item.id())).toList();
+    }
+
+    private RtpConfig admissionLimits(RtpConfig config, int inited, int uncached) throws Exception {
+        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration("prefill"));
+        ((ObjectNode) root.path("component")).set("config", config.business());
+        ((ObjectNode) root.path("component").path("config"))
+            .put("max_inited_kv_cache_streams", inited).put("max_batch_tokens_without_cache", uncached);
+        var path = directory.resolve("limits.json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
+    }
+
+    private RtpConfig boundaryConfig(String role, int sequence, int width) throws Exception {
+        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration(role));
+        var values = (ObjectNode) root.path("component").path("config");
+        values.put("seq_size_per_block", 2).put("max_seq_len", sequence).put("concurrency_limit", 2)
+            .put("max_inited_kv_cache_streams", 1);
+        ((ObjectNode) values.path("mock.compute")).putObject("decode").put("tokens.per.step", width);
+        return RtpConfig.load(root);
+    }
+
+    /**
+     * Records scheduler callbacks so tests can inspect emitted request events.
+     */
+    private static class Listener implements EngineScheduler.Listener {
+        final CompletableFuture<EngineScheduler.Request> allocated = new CompletableFuture<>();
+        final CompletableFuture<EngineScheduler.Progress> output = new CompletableFuture<>();
+        final CompletableFuture<RequestFailure> terminal = new CompletableFuture<>();
+        public void allocated(EngineScheduler.Request request) { allocated.complete(request); }
+        public void progressed(EngineScheduler.Request request) {
+            var output = request.progress(); this.output.complete(output); }
+        public void terminal(EngineScheduler.Request request, RequestFailure failure) { terminal.complete(failure); }
     }
 
 }

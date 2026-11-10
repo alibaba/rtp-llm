@@ -22,25 +22,10 @@ import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.execution.EngineLoop;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 
-/** Native RPC adapter; P and D owners manage request state and KV independently. */
+/**
+ * Native RPC adapter; P and D owners manage request state and KV independently.
+ */
 public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase implements AutoCloseable {
-    public record Config(String id, Role role, int blockSize, int maxSeqLen,
-                         int maxBatchTokens, ComputeModel compute, int imageToken, long cacheKeySeed, int cacheKeyStride) {
-        public Config {
-            if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
-                    || blockSize < 1 || cacheKeyStride < 1 || maxSeqLen < 1 || maxBatchTokens < 0)
-                throw new IllegalArgumentException("Invalid RTP endpoint configuration");
-            Objects.requireNonNull(compute);
-        }
-
-        public int cacheBlockSize() { return Math.multiplyExact(blockSize,cacheKeyStride); }
-
-        public static Config from(RtpConfig config) {
-            return new Config(config.id(), config.role(), config.blockSize(), config.maxSeqLen(),
-                config.maxBatchTokens(), config.compute(), config.imageToken(), config.cacheKeySeed(), config.cpSize());
-        }
-    }
-
     private final CollectorRegistry rpcRegistry = new CollectorRegistry();
     private final EventMetrics rpcMetrics;
     private final Map<String, String> metricTags;
@@ -49,9 +34,12 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     private final TaskHistory finished;
     private final PrefillRpcServer prefill;
     private final DecodeRpcServer decode;
+
     private final boolean groups;
+
     private final AtomicLong onflightRequests = new AtomicLong();
     private final AtomicLong statusVersion = new AtomicLong();
+
     private volatile boolean closed;
 
     public RtpRpcService(Config config, KvCacheManager cache, Object executionLock, TaskHistory finished,
@@ -68,6 +56,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             ? new PrefillRpcServer(config, executionLock, finished, engine, this::recordCancellation, this::trackRequest) : null;
         decode = prefill == null ? new DecodeRpcServer(config, executionLock, engine, this::recordCancellation, this::trackRequest) : null;
     }
+
     public void close() {
         closed = true;
         RuntimeException failure = null;
@@ -81,10 +70,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         }
         if (failure != null) throw failure;
     }
-    public void checkHealthy() {
-        if (closed) throw new IllegalStateException("Engine closed");
-        if (prefill == null) decode.checkHealthy(); else prefill.checkHealthy();
-    }
+
     @Override public void executeFunction(FunctionRequestPB input, StreamObserver<FunctionResponsePB> response) {
         if (input.hasRemoteRequest()) {
             var operation = input.getRemoteRequest().getOp();
@@ -138,6 +124,11 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         reply(response, () -> { checkHealthy(); return CheckHealthResponsePB.newBuilder().setHealth("OK").build(); });
     }
 
+    public void checkHealthy() {
+        if (closed) throw new IllegalStateException("Engine closed");
+        if (prefill == null) decode.checkHealthy(); else prefill.checkHealthy();
+    }
+
     @Override public void getWorkerStatus(StatusVersionPB request, StreamObserver<WorkerStatusPB> response) {
         statusReply("worker_status", response, () -> {
             var snapshot = cache.snapshot(request.getLatestCacheVersion(), false);
@@ -170,6 +161,10 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         });
     }
 
+    public List<MetricFamilySamples> collectMetrics() {
+        return MetricTags.collect(rpcRegistry, metricTags);
+    }
+
     // Real samples at GenerateContext destruction, before its AtomicGuard decrements.
     private Runnable trackRequest() {
         onflightRequests.incrementAndGet();
@@ -184,11 +179,6 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         rpcMetrics.increment("rtp_llm_rpc_cancel_qps");
     }
 
-    public List<MetricFamilySamples> collectMetrics() {
-        return MetricTags.collect(rpcRegistry, metricTags);
-    }
-
-    private record StatusResult<T>(T value, long collected) {}
     private <T> void statusReply(String kind, StreamObserver<T> observer, Supplier<StatusResult<T>> read) {
         long started = System.nanoTime();
         T value = null;
@@ -209,6 +199,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     }
 
     private long tokens(int blocks) { return (long) blocks * config.cacheBlockSize(); }
+
     private <T> void reply(StreamObserver<T> observer, Supplier<T> read) {
         if (closed) { observer.onError(Status.UNAVAILABLE.withDescription("RTP node is closed").asRuntimeException()); return; }
         T value;
@@ -217,4 +208,26 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         catch (RuntimeException error) { observer.onError(Status.INTERNAL.withCause(error).withDescription(error.getMessage()).asRuntimeException()); return; }
         observer.onNext(value); observer.onCompleted();
     }
+
+    /**
+     * Validates the identity, limits, and cache-key layout of an RTP endpoint.
+     */
+    public record Config(String id, Role role, int blockSize, int maxSeqLen,
+                         int maxBatchTokens, ComputeModel compute, int imageToken, long cacheKeySeed, int cacheKeyStride) {
+        public Config {
+            if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
+                    || blockSize < 1 || cacheKeyStride < 1 || maxSeqLen < 1 || maxBatchTokens < 0)
+                throw new IllegalArgumentException("Invalid RTP endpoint configuration");
+            Objects.requireNonNull(compute);
+        }
+
+        public int cacheBlockSize() { return Math.multiplyExact(blockSize,cacheKeyStride); }
+
+        public static Config from(RtpConfig config) {
+            return new Config(config.id(), config.role(), config.blockSize(), config.maxSeqLen(),
+                config.maxBatchTokens(), config.compute(), config.imageToken(), config.cacheKeySeed(), config.cpSize());
+        }
+    }
+
+    private record StatusResult<T>(T value, long collected) {}
 }

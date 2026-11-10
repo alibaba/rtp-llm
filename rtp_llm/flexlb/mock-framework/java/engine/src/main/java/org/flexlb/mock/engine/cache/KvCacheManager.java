@@ -4,61 +4,26 @@ import java.util.*;
 import org.flexlb.mock.engine.config.RtpConfig;
 import static org.flexlb.mock.engine.cache.BlockPool.Kind.*;
 
-/** Full-KV allocation, reuse and LRU; owns device accounting and KVCM metadata reporting. */
+/**
+ * Full-KV allocation, reuse and LRU; owns device accounting and KVCM metadata reporting.
+ */
 public final class KvCacheManager implements AutoCloseable {
-    public enum Failure { PERMANENT, RETRYABLE }
-    /** A Mock restore source reports the number of consecutive suffix blocks read successfully.
-     * The future must be returned without blocking and never owns local block references. */
-    public sealed interface Preparation permits Ready, Failed {}
-    public record Ready(Lease lease, long matchNanos) implements Preparation {}
-    public final class Failed implements Preparation {
-        private final Failure failure;
-        private final long generation, requiredTokens;
-        private final List<Long> keys;
-
-        private Failed(Failure failure, long requiredTokens, List<Long> keys) {
-            this.failure = failure;
-            this.requiredTokens = requiredTokens;
-            this.keys = List.copyOf(keys);
-            generation = allocationGeneration();
-        }
-
-        public Failure failure() { return failure; }
-
-        /** Retry only when capacity or the reusable index has changed. */
-        public Preparation retry() {
-            synchronized (KvCacheManager.this) {
-                if (failure == Failure.PERMANENT || generation == allocationGeneration()) return this;
-                return prepare(requiredTokens, keys);
-            }
-        }
-    }
-
     private static final long[] EMPTY_KEYS = new long[0];
 
-    public record Admission(Lease lease, Failure failure, long matchNanos) {}
-    /** Keys are a detached copy, safe to encode after releasing the cache monitor. */
-    public record Snapshot(int totalBlocks, int availableBlocks, int freeBlocks, int heldBlocks,
-                           int referencedBlocks, long version, long[] keys) {}
     private final BlockPool pool;
     private final BlockTree tree = new BlockTree();
+
     private final int blockSize, deviceBlocks, reserve;
     private final boolean deviceCache;
+
     private final Set<Lease> active = Collections.newSetFromMap(new IdentityHashMap<>());
+
     private boolean closed;
+
     private volatile KvcmReporter reporter;
     private java.util.function.Consumer<CacheMetadata.Change> metadataObserver;
     private java.util.function.LongConsumer evictionLifetime = nanos -> {};
     private Runnable changed = () -> {};
-
-    /** The observer must only signal; it must never acquire an Engine scheduling lock. */
-    public synchronized void onChange(Runnable observer) { changed = Objects.requireNonNull(observer); }
-
-    public synchronized void onEvictionLifetime(java.util.function.LongConsumer observer) {
-        evictionLifetime = Objects.requireNonNull(observer);
-    }
-
-    public synchronized int itemCount() { return tree.size(); }
 
     public KvCacheManager(int blockSize, int blocks, int reserve) {
         this(blockSize, blocks, reserve, true);
@@ -78,6 +43,15 @@ public final class KvCacheManager implements AutoCloseable {
         this.reserve = reserve;
         this.deviceCache = deviceCache;
     }
+
+    /** The observer must only signal; it must never acquire an Engine scheduling lock. */
+    public synchronized void onChange(Runnable observer) { changed = Objects.requireNonNull(observer); }
+
+    public synchronized void onEvictionLifetime(java.util.function.LongConsumer observer) {
+        evictionLifetime = Objects.requireNonNull(observer);
+    }
+
+    public synchronized int itemCount() { return tree.size(); }
 
     /** KVCM configuration, registration and reporting share the cache manager's lifetime. */
     public void startKvcmReporter(RtpConfig config, String workerAddress) {
@@ -120,9 +94,6 @@ public final class KvCacheManager implements AutoCloseable {
         return current == null ? Map.of() : current.status();
     }
 
-    /** Maximum size of one request, independent of current leases and evictable cache entries. */
-    public synchronized long maxRequestTokens() { return (long) (deviceBlocks - reserve) * blockSize; }
-
     public synchronized Preparation prepare(long requiredTokens, List<Long> keys) {
         var admission = acquire(requiredTokens, keys);
         if (admission.failure() != null) return new Failed(admission.failure(), requiredTokens, keys);
@@ -156,8 +127,12 @@ public final class KvCacheManager implements AutoCloseable {
         return new Admission(lease, null, matchNanos);
     }
 
+    /** Maximum size of one request, independent of current leases and evictable cache entries. */
+    public synchronized long maxRequestTokens() { return (long) (deviceBlocks - reserve) * blockSize; }
+
     /** Snapshot and subscription share the cache monitor. Observers must only enqueue, never block. */
     public synchronized CacheMetadata.SnapshotKeys metadataKeys() { return tree.metadataKeys(); }
+
     public synchronized AutoCloseable observeMetadata(java.util.function.Consumer<CacheMetadata.Change> observer) {
         if (closed) throw new IllegalStateException("Cache is closed");
         if (metadataObserver != null) throw new IllegalStateException("Cache metadata already has a reporter");
@@ -167,9 +142,7 @@ public final class KvCacheManager implements AutoCloseable {
             if (metadataObserver == observer) { metadataObserver = null; tree.observe(change -> {}); }
         } };
     }
-    private Admission rejected(Failure failure) { return new Admission(null, failure, 0); }
-    /** Both freed capacity and newly reusable prefixes can make a rejected request admissible. */
-    private long allocationGeneration() { return pool.generation() + tree.version(); }
+
     public synchronized Snapshot snapshot(long latestVersion, boolean needKeys) {
         var state = pool.snapshot();
         int indexed = pool.cachedActiveBlocks();
@@ -178,6 +151,94 @@ public final class KvCacheManager implements AutoCloseable {
         return new Snapshot(deviceBlocks, deviceAvailable(), free, state.active() - indexed, indexed,
             needKeys ? tree.version() : latestVersion, needKeys && latestVersion != tree.version() ? tree.keys() : EMPTY_KEYS);
     }
+
+    @Override public void close() {
+        KvcmReporter owned;
+        synchronized (this) {
+            if (closed) return;
+            closed = true;
+            owned = reporter;
+            reporter = null;
+        }
+        // Reporter.close detaches the cache observer and waits for network workers.
+        // Never hold the cache monitor across that wait or HOST_DOWN delivery.
+        try { if (owned != null) owned.close(); }
+        finally {
+            synchronized (this) {
+                for (var lease : List.copyOf(active)) lease.close();
+                tree.clear();
+            }
+        }
+    }
+
+    private Admission rejected(Failure failure) { return new Admission(null, failure, 0); }
+
+    /** Both freed capacity and newly reusable prefixes can make a rejected request admissible. */
+    private long allocationGeneration() { return pool.generation() + tree.version(); }
+
+    private int deviceAvailable() { return deviceBlocks - pool.snapshot().active(); }
+
+    private boolean makePoolFree(int count) {
+        int missing = count - pool.snapshot().free();
+        if (missing > 0)
+            for (var evicted : tree.evict(missing))
+                evictionLifetime.accept(System.nanoTime() - evicted.insertedNanos);
+        return pool.snapshot().free() >= count;
+    }
+
+    private long blocksFor(long tokens) {
+        if (tokens < 0) throw new IllegalArgumentException("Negative Token capacity");
+        return tokens / blockSize + (tokens % blockSize == 0 ? 0 : 1);
+    }
+
+    private static void validate(List<Long> keys) {
+        if (keys == null || keys.stream().anyMatch(Objects::isNull) || new HashSet<>(keys).size() != keys.size())
+            throw new IllegalArgumentException("Cache keys must be distinct, non-null prefix identities");
+    }
+
+    public enum Failure { PERMANENT, RETRYABLE }
+
+    /**
+     * A Mock restore source reports the number of consecutive suffix blocks read successfully.
+     * The future must be returned without blocking and never owns local block references.
+     */
+    public sealed interface Preparation permits Ready, Failed {}
+
+    public record Ready(Lease lease, long matchNanos) implements Preparation {}
+
+    /**
+     * Carries the cache allocation failure and capacity information for a retry.
+     */
+    public final class Failed implements Preparation {
+        private final Failure failure;
+        private final long generation, requiredTokens;
+        private final List<Long> keys;
+
+        private Failed(Failure failure, long requiredTokens, List<Long> keys) {
+            this.failure = failure;
+            this.requiredTokens = requiredTokens;
+            this.keys = List.copyOf(keys);
+            generation = allocationGeneration();
+        }
+
+        public Failure failure() { return failure; }
+
+        /** Retry only when capacity or the reusable index has changed. */
+        public Preparation retry() {
+            synchronized (KvCacheManager.this) {
+                if (failure == Failure.PERMANENT || generation == allocationGeneration()) return this;
+                return prepare(requiredTokens, keys);
+            }
+        }
+    }
+
+    public record Admission(Lease lease, Failure failure, long matchNanos) {}
+
+    /**
+     * Keys are a detached copy, safe to encode after releasing the cache monitor.
+     */
+    public record Snapshot(int totalBlocks, int availableBlocks, int freeBlocks, int heldBlocks,
+                           int referencedBlocks, long version, long[] keys) {}
 
     public final class Lease implements AutoCloseable {
         private final List<Slot> slots;
@@ -239,43 +300,13 @@ public final class KvCacheManager implements AutoCloseable {
         }
         private void requireOpen() { if (terminal) throw new IllegalStateException("Lease is closed"); }
     }
-    @Override public void close() {
-        KvcmReporter owned;
-        synchronized (this) {
-            if (closed) return;
-            closed = true;
-            owned = reporter;
-            reporter = null;
-        }
-        // Reporter.close detaches the cache observer and waits for network workers.
-        // Never hold the cache monitor across that wait or HOST_DOWN delivery.
-        try { if (owned != null) owned.close(); }
-        finally {
-            synchronized (this) {
-                for (var lease : List.copyOf(active)) lease.close();
-                tree.clear();
-            }
-        }
-    }
-    private int deviceAvailable() { return deviceBlocks - pool.snapshot().active(); }
-    private boolean makePoolFree(int count) {
-        int missing = count - pool.snapshot().free();
-        if (missing > 0)
-            for (var evicted : tree.evict(missing))
-                evictionLifetime.accept(System.nanoTime() - evicted.insertedNanos);
-        return pool.snapshot().free() >= count;
-    }
-    private long blocksFor(long tokens) {
-        if (tokens < 0) throw new IllegalArgumentException("Negative Token capacity");
-        return tokens / blockSize + (tokens % blockSize == 0 ? 0 : 1);
-    }
+
+    /**
+     * Tracks the cache resources reserved for one batch member.
+     */
     private static final class Slot {
         final BlockPool.Reference reference;
         Long key;
         Slot(BlockPool.Reference reference, BlockTree.Node node) { this.reference = reference; key = node == null ? null : node.key; }
-    }
-    private static void validate(List<Long> keys) {
-        if (keys == null || keys.stream().anyMatch(Objects::isNull) || new HashSet<>(keys).size() != keys.size())
-            throw new IllegalArgumentException("Cache keys must be distinct, non-null prefix identities");
     }
 }

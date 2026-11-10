@@ -18,46 +18,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Verifies Mock Engine reporting and remote operation replies against the native protocol.
+ */
 class KvcmProtocolTest {
     private static final ObjectMapper JSON = new ObjectMapper();
+
     @TempDir Path directory;
-    private RtpConfig config(String role, String endpoint) throws Exception {
-        var root = JSON.<ObjectNode>valueToTree(LLMMockEngineTest.configuration(role));
-        var values = (ObjectNode)root.path("component").path("config");
-        values.put("kv_cache_event_manager_endpoint",endpoint).put("reuse_cache",true)
-            .put("kv_cache_event_host_ip_port","127.0.0.1:18080").put("kv_cache_event_instance_id","test-instance").put("kv_cache_event_instance_group","test-group");
-        values.put("kv_cache_event_publisher_type","kvcm");
-        var path = directory.resolve(role + ".json"); JSON.writeValue(path.toFile(),root); return RtpConfig.load(path);
-    }
-    private static void await(BooleanSupplier condition) throws Exception {
-        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
-        while (!condition.getAsBoolean()) { assertTrue(System.nanoTime() < until,"Condition timed out"); Thread.sleep(10); }
-    }
-    static final class Meta implements AutoCloseable {
-        final List<JsonNode> requests = new CopyOnWriteArrayList<>();
-        final AtomicInteger registrations = new AtomicInteger();
-        final AtomicBoolean expire = new AtomicBoolean();
-        final AtomicBoolean expireItem = new AtomicBoolean();
-        final HttpServer server;
-        Meta() throws Exception {
-            server = HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
-            server.createContext("/api/", exchange -> {
-                try(exchange) {
-                    var body = JSON.readTree(exchange.getRequestBody()); requests.add(body);
-                    boolean registration = exchange.getRequestURI().getPath().equals("/api/registerInstance");
-                    if (registration) registrations.incrementAndGet();
-                    var response = JSON.createObjectNode();
-                    response.putObject("header").putObject("status").put("code",!registration && expire.compareAndSet(true,false) ? 8 : 1);
-                    if (!registration && expireItem.compareAndSet(true,false)) response.putArray("item_results").addObject().put("code",8);
-                    response.put("extra_info","{\"rtp_remote_cache_enabled\":true}");
-                    var bytes = JSON.writeValueAsBytes(response); exchange.sendResponseHeaders(200,bytes.length); exchange.getResponseBody().write(bytes);
-                }
-            }); server.start();
-        }
-        String endpoint() { return "http://127.0.0.1:" + server.getAddress().getPort(); }
-        boolean has(String type) { return requests.stream().anyMatch(r -> r.path("events").findValuesAsText("event_type").contains(type)); }
-        @Override public void close() { server.stop(0); }
-    }
+
     @Test void nativeRegistrationSnapshotsMutationsRecoveryAndHostDownReflectRealCache() throws Exception {
         try(var meta = new Meta()) {
             try(var node = LLMMockEngine.start(config("prefill",meta.endpoint()))) {
@@ -77,6 +45,7 @@ class KvcmProtocolTest {
             assertTrue(meta.has("EVENT_HOST_DOWN"));
         }
     }
+
     @Test void unimplementedPayloadIoAndRankShutdownNeverFabricateSuccess() throws Exception {
         var path = directory.resolve("native.json"); JSON.writeValue(path.toFile(),LLMMockEngineTest.configuration("prefill"));
         try(var node = LLMMockEngine.start(RtpConfig.load(path))) {
@@ -94,6 +63,7 @@ class KvcmProtocolTest {
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
     }
+
     @Test void cacheManagerOwnsReporterWithoutAnEngineAndClosesItBeforeReleasingCache() throws Exception {
         try (var meta = new Meta()) {
             var config = config("prefill", meta.endpoint());
@@ -110,6 +80,53 @@ class KvcmProtocolTest {
                 assertThrows(IllegalStateException.class, () -> cache.startKvcmReporter(config, "127.0.0.1:12345"));
             } finally { cache.close(); }
         }
+    }
+
+    private RtpConfig config(String role, String endpoint) throws Exception {
+        var root = JSON.<ObjectNode>valueToTree(LLMMockEngineTest.configuration(role));
+        var values = (ObjectNode)root.path("component").path("config");
+        values.put("kv_cache_event_manager_endpoint",endpoint).put("reuse_cache",true)
+            .put("kv_cache_event_host_ip_port","127.0.0.1:18080").put("kv_cache_event_instance_id","test-instance").put("kv_cache_event_instance_group","test-group");
+        values.put("kv_cache_event_publisher_type","kvcm");
+        var path = directory.resolve(role + ".json"); JSON.writeValue(path.toFile(),root); return RtpConfig.load(path);
+    }
+
+    private static void await(BooleanSupplier condition) throws Exception {
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+        while (!condition.getAsBoolean()) { assertTrue(System.nanoTime() < until,"Condition timed out"); Thread.sleep(10); }
+    }
+
+    /**
+     * Emulates KVCM Meta HTTP responses for the reporting client.
+     */
+    static final class Meta implements AutoCloseable {
+        final List<JsonNode> requests = new CopyOnWriteArrayList<>();
+        final AtomicInteger registrations = new AtomicInteger();
+        final AtomicBoolean expire = new AtomicBoolean();
+        final AtomicBoolean expireItem = new AtomicBoolean();
+        final HttpServer server;
+
+        Meta() throws Exception {
+            server = HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
+            server.createContext("/api/", exchange -> {
+                try(exchange) {
+                    var body = JSON.readTree(exchange.getRequestBody()); requests.add(body);
+                    boolean registration = exchange.getRequestURI().getPath().equals("/api/registerInstance");
+                    if (registration) registrations.incrementAndGet();
+                    var response = JSON.createObjectNode();
+                    response.putObject("header").putObject("status").put("code",!registration && expire.compareAndSet(true,false) ? 8 : 1);
+                    if (!registration && expireItem.compareAndSet(true,false)) response.putArray("item_results").addObject().put("code",8);
+                    response.put("extra_info","{\"rtp_remote_cache_enabled\":true}");
+                    var bytes = JSON.writeValueAsBytes(response); exchange.sendResponseHeaders(200,bytes.length); exchange.getResponseBody().write(bytes);
+                }
+            }); server.start();
+        }
+
+        @Override public void close() { server.stop(0); }
+
+        String endpoint() { return "http://127.0.0.1:" + server.getAddress().getPort(); }
+
+        boolean has(String type) { return requests.stream().anyMatch(r -> r.path("events").findValuesAsText("event_type").contains(type)); }
     }
 
 }

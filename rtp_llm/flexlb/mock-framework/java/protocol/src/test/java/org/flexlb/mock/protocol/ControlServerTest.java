@@ -6,13 +6,18 @@ import java.net.http.*;
 import java.util.*;
 import org.junit.jupiter.api.*;
 
+/**
+ * Verifies control request validation and error responses.
+ */
 class ControlServerTest {
-    private ControlServer server;
     private static final HttpClient CLIENT = HttpClient.newHttpClient();
+
+    private ControlServer server;
 
     @BeforeEach void start() throws Exception {
         server = TransportProbe.server();
     }
+
     @AfterEach void close() { server.close(); }
 
     @Test void optionalMetricsEndpointIsExactAndReportsCollectionFailure() throws Exception {
@@ -32,12 +37,6 @@ class ControlServerTest {
             assertEquals(500, CLIENT.send(request, HttpResponse.BodyHandlers.ofString()).statusCode());
         }
         assertEquals(404, CLIENT.send(HttpRequest.newBuilder(URI.create(server.url() + "/metrics")).GET().build(), HttpResponse.BodyHandlers.ofString()).statusCode());
-    }
-
-    private HttpResponse<String> call(String route, Object args, long timeout) throws Exception {
-        var body = JsonWire.JSON.writeValueAsString(Map.of("interface", route, "args", args, "timeout_ms", timeout));
-        return CLIENT.send(HttpRequest.newBuilder(URI.create(server.url() + "/invoke"))
-            .POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
     }
 
     @Test void typedRecords() throws Exception {
@@ -105,6 +104,12 @@ class ControlServerTest {
             assertEquals(200, CLIENT.send(HttpRequest.newBuilder(URI.create(bound.url() + "/health")).GET().build(),
                 HttpResponse.BodyHandlers.ofString()).statusCode());
         }
+    }
+
+    private HttpResponse<String> call(String route, Object args, long timeout) throws Exception {
+        var body = JsonWire.JSON.writeValueAsString(Map.of("interface", route, "args", args, "timeout_ms", timeout));
+        return CLIENT.send(HttpRequest.newBuilder(URI.create(server.url() + "/invoke"))
+            .POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
     }
 
 }

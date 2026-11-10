@@ -11,6 +11,6 @@ reserve_block_ratio: 5
 mock.compute.eos.probability: 0.00089
 mock.compute.eos.seed: 20261105
 image_token_id: 129264
-cache_key_hash_seed: '4923373599811257905'
+cache_key_hash_seed: "4923373599811257905"
 enable_memory_cache: false
 kv_cache_event_publisher_type: none

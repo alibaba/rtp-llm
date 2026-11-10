@@ -13,8 +13,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Exercises the Engine loop with the RTP scheduler.
+ */
 public class LLMMockEngineTest {
     private static final ObjectMapper JSON = new ObjectMapper();
+
     @TempDir Path directory;
 
     public static Map<String, Object> configuration(String role) {
@@ -22,10 +26,6 @@ public class LLMMockEngineTest {
             "component", Map.of("engine", "rtp", "config", Map.of("seq_size_per_block", 16,
                 "max_seq_len", 4096, "test_block_num", 9, "reserve_block_ratio", 0, "mock.compute", Map.of("forward", Map.of("expression", "1 + batchSize")))),
             "environment", Map.of());
-    }
-    private RtpConfig config(String role) throws Exception {
-        Path file = directory.resolve("config.json"); JSON.writeValue(file.toFile(), configuration(role));
-        return RtpConfig.load(file);
     }
 
     @Test void servesProductionNativeProtocolAndLiveCacheCapacity() throws Exception {
@@ -108,5 +108,10 @@ public class LLMMockEngineTest {
 
     @Test void exportsClasspathForNativeCrossProcessProbe() throws Exception {
         Files.writeString(Path.of("target/rtp-classpath.txt"), System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")));
+    }
+
+    private RtpConfig config(String role) throws Exception {
+        Path file = directory.resolve("config.json"); JSON.writeValue(file.toFile(), configuration(role));
+        return RtpConfig.load(file);
     }
 }
