@@ -121,18 +121,33 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         self._W2_s = stacked_routed["w2_s"]
         self._W3_w = stacked_routed["w3_w"]
         self._W3_s = stacked_routed["w3_s"]
-        self._W1_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W1_s, cfg.moe_inter_dim, cfg.dim, self._W1_s.shape[0]
+        from rtp_llm.models_py.modules.dsv41.qlinear import (
+            native_fp4_gemm_supported,
         )
-        self._W2_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W2_s, cfg.dim, cfg.moe_inter_dim, self._W2_s.shape[0]
+
+        self._native_fp4_gemm = native_fp4_gemm_supported(
+            self._W1_s.device if self._W1_s.is_cuda else None
         )
-        self._W3_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W3_s, cfg.moe_inter_dim, cfg.dim, self._W3_s.shape[0]
-        )
-        self._W1_s_gemm_t = self._W1_s_gemm.transpose(-1, -2)
-        self._W2_s_gemm_t = self._W2_s_gemm.transpose(-1, -2)
-        self._W3_s_gemm_t = self._W3_s_gemm.transpose(-1, -2)
+        if self._native_fp4_gemm:
+            self._W1_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W1_s, cfg.moe_inter_dim, cfg.dim, self._W1_s.shape[0]
+            )
+            self._W2_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W2_s, cfg.dim, cfg.moe_inter_dim, self._W2_s.shape[0]
+            )
+            self._W3_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W3_s, cfg.moe_inter_dim, cfg.dim, self._W3_s.shape[0]
+            )
+            self._W1_s_gemm_t = self._W1_s_gemm.transpose(-1, -2)
+            self._W2_s_gemm_t = self._W2_s_gemm.transpose(-1, -2)
+            self._W3_s_gemm_t = self._W3_s_gemm.transpose(-1, -2)
+        else:
+            # Pre-SM100: DeepGEMM's SF layout transform is unavailable
+            # (ptxas rejects the SM100 PTX) and its FP4 GEMMs cannot run.
+            # Experts bind scale_gemm=None and QuantizedLinear forwards
+            # through its exact bf16 dequant path instead.
+            self._W1_s_gemm = self._W2_s_gemm = self._W3_s_gemm = None
+            self._W1_s_gemm_t = self._W2_s_gemm_t = self._W3_s_gemm_t = None
 
         def _expert_at(global_idx: int) -> Optional[Expert]:
             if not cfg.local_expert_start <= global_idx < cfg.local_expert_end:
@@ -141,13 +156,25 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             ew = {
                 "w1_w": stacked_routed["w1_w"][local_idx],
                 "w1_s": stacked_routed["w1_s"][local_idx],
-                "w1_s_gemm": self._W1_s_gemm[local_idx],
+                "w1_s_gemm": (
+                    self._W1_s_gemm[local_idx]
+                    if self._W1_s_gemm is not None
+                    else None
+                ),
                 "w2_w": stacked_routed["w2_w"][local_idx],
                 "w2_s": stacked_routed["w2_s"][local_idx],
-                "w2_s_gemm": self._W2_s_gemm[local_idx],
+                "w2_s_gemm": (
+                    self._W2_s_gemm[local_idx]
+                    if self._W2_s_gemm is not None
+                    else None
+                ),
                 "w3_w": stacked_routed["w3_w"][local_idx],
                 "w3_s": stacked_routed["w3_s"][local_idx],
-                "w3_s_gemm": self._W3_s_gemm[local_idx],
+                "w3_s_gemm": (
+                    self._W3_s_gemm[local_idx]
+                    if self._W3_s_gemm is not None
+                    else None
+                ),
             }
             return Expert(
                 cfg.dim,
@@ -225,6 +252,7 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             if (
                 _bs1_fast_enabled()
                 and self.cfg.ep_size == 1
+                and self._W1_s_gemm_t is not None
                 and (topk_max_n > 0)
                 and (T <= topk_max_n)
             ):
