@@ -9,6 +9,7 @@ from navi_sched.adapters.vllm.NaviSchedEndpointRouter import NaviSchedEndpointRo
 from navi_sched.adapters.vllm.VLLMBlockHash import (
     block_hash_to_uint64,
     calculate_vllm_block_hashes,
+    wrap_vllm_request_block_hasher,
 )
 
 
@@ -30,6 +31,61 @@ class VLLMBlockHashTest(unittest.TestCase):
                 )
         with self.assertRaises(ValueError):
             native.hash_vllm_plain_text_blocks(array("i", [1]), 1)
+
+    def test_cpp_kv_hash_matches_native_and_continues_existing_blocks(self):
+        from navi_sched.util import naviSchedModule
+        from vllm.utils.hashing import sha256_cbor
+        from vllm.v1.core import kv_cache_utils
+
+        cpp_hash = naviSchedModule().hash_vllm_plain_text_kv_blocks
+        block_size = 16
+        native_hasher = kv_cache_utils.get_request_block_hasher(block_size, sha256_cbor)
+        parent = sha256_cbor("a seed supplied by vLLM")
+        native = mock.Mock(wraps=native_hasher)
+        with mock.patch.object(kv_cache_utils, "NONE_HASH", parent, create=True):
+            wrapped = wrap_vllm_request_block_hasher(native, block_size, parent, cpp_hash)
+            token_ids = [-65537, -24, 23, 24, 65535, 65536, 1 << 32] * 7
+            request = SimpleNamespace(
+                all_token_ids=token_ids,
+                num_tokens=len(token_ids),
+                block_hashes=[],
+                mm_features=[],
+                lora_request=None,
+                cache_salt=None,
+                prompt_embeds=None,
+            )
+            expected = native_hasher(request)
+            self.assertEqual(expected, wrapped(request))
+            request.num_tokens = block_size + 1
+            request.block_hashes = wrapped(request)
+            self.assertEqual(expected[:1], request.block_hashes)
+            self.assertEqual([], wrapped(request))
+            request.num_tokens = len(token_ids)
+            self.assertEqual(expected[1:], wrapped(request))
+            self.assertEqual(expected[1:], native_hasher(request))
+            native.assert_not_called()
+
+        with self.assertRaises(ValueError):
+            cpp_hash(array("q", token_ids), block_size, b"short")
+
+    def test_cpp_kv_hash_preserves_native_special_request_handling(self):
+        native = mock.Mock(return_value=[b"native"])
+        cpp_hash = mock.Mock()
+        wrapped = wrap_vllm_request_block_hasher(native, 16, b"x" * 32, cpp_hash)
+        metadata = {
+            "mm_features": [object()],
+            "lora_request": object(),
+            "cache_salt": "salt",
+            "prompt_embeds": object(),
+        }
+        for field, value in metadata.items():
+            request = SimpleNamespace(
+                mm_features=[], lora_request=None, cache_salt=None, prompt_embeds=None
+            )
+            setattr(request, field, value)
+            self.assertEqual([b"native"], wrapped(request))
+            native.assert_called_with(request)
+        cpp_hash.assert_not_called()
 
     def test_cpp_route_hash_only_handles_plain_native_pp_requests(self):
         env = {

@@ -1,4 +1,5 @@
 import hashlib
+from array import array
 from collections.abc import Iterable, Sequence
 from types import SimpleNamespace
 
@@ -60,6 +61,34 @@ def block_hash_to_uint64(block_hash: bytes | int) -> int:
     if isinstance(block_hash, int):
         return block_hash & _UINT64_MASK
     return int.from_bytes(block_hash, byteorder="big") & _UINT64_MASK
+
+
+
+def wrap_vllm_request_block_hasher(native_hasher, block_size, initial_parent, hash_plain_blocks):
+    """Use the native hash chain format for plain token requests."""
+
+    def hash_request(request):
+        if (
+            request.mm_features
+            or request.lora_request is not None
+            or request.cache_salt is not None
+            or request.prompt_embeds is not None
+        ):
+            return native_hasher(request)
+
+        existing_hashes = request.block_hashes
+        start = len(existing_hashes) * block_size
+        end = request.num_tokens // block_size * block_size
+        if start >= end:
+            return []
+        parent = existing_hashes[-1] if existing_hashes else initial_parent
+        try:
+            tokens = array("q", request.all_token_ids[start:end])
+        except (OverflowError, TypeError):
+            return native_hasher(request)
+        return hash_plain_blocks(tokens, block_size, parent)
+
+    return hash_request
 
 
 def stable_request_id(request_id: str) -> int:

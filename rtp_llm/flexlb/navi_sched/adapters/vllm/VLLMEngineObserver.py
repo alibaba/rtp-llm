@@ -23,7 +23,11 @@ from navi_sched import NaviSchedAgent
 
 from . import ExecutionTimingProbe as _execution_timing_probe
 from .VLLMAdapterUtils import NAVI_SCHED_MEDIA_ERROR_PREFIX, make_kmon_tags
-from .VLLMBlockHash import block_hash_to_uint64, stable_request_id
+from .VLLMBlockHash import (
+    block_hash_to_uint64,
+    stable_request_id,
+    wrap_vllm_request_block_hasher,
+)
 from .VLLMCachePolicy import (
     VLLMCachePolicy,
     VLLMCacheState,
@@ -1862,6 +1866,7 @@ class VLLMEngineObserver:
             )
         self._bind_backend_pipeline_stages(engine_core)
         self._engine_core = engine_core
+        self._enable_pp_kv_block_hashing(engine_core)
         _execution_timing_probe.bind_engine_loop_audit(self, engine_core)
         if self._native_ingress:
             from .VLLMExecutionGeometry import capture_execution_policy
@@ -1885,6 +1890,37 @@ class VLLMEngineObserver:
             daemon=True,
         )
         self._forward_thread.start()
+
+    def _enable_pp_kv_block_hashing(self, engine_core) -> None:
+        if not (
+            self._native_ingress
+            and _read_bool_env("VLLM_NAVI_SCHED_PP_KV_HASH_CPP", False)
+            and engine_core.vllm_config.parallel_config.pipeline_parallel_size > 1
+        ):
+            return
+
+        from vllm.v1.core.kv_cache_utils import NONE_HASH
+
+        config = engine_core.vllm_config.cache_config
+        block_size = getattr(engine_core.scheduler, "hash_block_size", 0)
+        native_hasher = engine_core.request_block_hasher
+        hash_plain_blocks = getattr(
+            naviSchedModule(), "hash_vllm_plain_text_kv_blocks", None
+        )
+        if not (
+            config.prefix_caching_hash_algo == "sha256_cbor"
+            and block_size > 0
+            and native_hasher is not None
+            and hash_plain_blocks is not None
+            and isinstance(NONE_HASH, bytes)
+            and len(NONE_HASH) == 32
+        ):
+            logger.warning("NaviSched PP C++ KV hashing is unavailable for this EngineCore")
+            return
+        engine_core.request_block_hasher = wrap_vllm_request_block_hasher(
+            native_hasher, block_size, NONE_HASH, hash_plain_blocks
+        )
+        logger.info("NaviSched PP C++ KV hashing enabled: block_size=%d", block_size)
 
     def _bind_backend_pipeline_stages(self, engine_core) -> None:
         stepper = getattr(getattr(engine_core, "step_fn", None), "__self__", None)

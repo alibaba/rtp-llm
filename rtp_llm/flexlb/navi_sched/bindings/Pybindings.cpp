@@ -68,7 +68,10 @@ void appendCborValue(std::vector<uint8_t>& bytes, uint8_t majorType, uint64_t va
     }
 }
 
-std::vector<uint64_t> hashVllmPlainTextBlocks(const py::buffer &tokenBuffer, size_t blockSize)
+using VllmBlockDigest = std::array<uint8_t, SHA256_DIGEST_LENGTH>;
+
+std::vector<VllmBlockDigest> hashVllmPlainTextBlockDigests(
+    const py::buffer &tokenBuffer, size_t blockSize, VllmBlockDigest parent)
 {
     const auto tokens = tokenBuffer.request();
     if (blockSize == 0 || tokens.ndim != 1 || tokens.format != "q"
@@ -77,14 +80,10 @@ std::vector<uint64_t> hashVllmPlainTextBlocks(const py::buffer &tokenBuffer, siz
     }
     const auto *tokenBytes = static_cast<const uint8_t *>(tokens.ptr);
     const size_t fullBlocks = tokens.size / blockSize;
-    std::vector<uint64_t> result(fullBlocks);
+    std::vector<VllmBlockDigest> result(fullBlocks);
 
     // The caller owns its token buffer until this synchronous call returns.
     py::gil_scoped_release release;
-    // vLLM seeds sha256_cbor with the encoded Python hash seed "0".
-    constexpr std::array<uint8_t, 2> seed{0x61, '0'};
-    std::array<uint8_t, SHA256_DIGEST_LENGTH> parent{};
-    SHA256(seed.data(), seed.size(), parent.data());
     std::vector<uint8_t> encoded;
     for (size_t block = 0; block < fullBlocks; ++block) {
         encoded.clear();
@@ -105,13 +104,45 @@ std::vector<uint64_t> hashVllmPlainTextBlocks(const py::buffer &tokenBuffer, siz
         }
         encoded.push_back(0xf6);  // No extra cache keys on the plain-text path.
         SHA256(encoded.data(), encoded.size(), parent.data());
-        for (size_t i = parent.size() - sizeof(uint64_t); i < parent.size(); ++i) {
-            result[block] = (result[block] << 8) | parent[i];
-        }
+        result[block] = parent;
     }
     return result;
 }
 
+std::vector<uint64_t> hashVllmPlainTextBlocks(const py::buffer &tokenBuffer, size_t blockSize)
+{
+    // The route hash uses vLLM's sha256_cbor seed for PYTHONHASHSEED=0.
+    constexpr std::array<uint8_t, 2> seed{0x61, '0'};
+    VllmBlockDigest parent{};
+    SHA256(seed.data(), seed.size(), parent.data());
+    const auto digests = hashVllmPlainTextBlockDigests(tokenBuffer, blockSize, parent);
+    std::vector<uint64_t> result;
+    result.reserve(digests.size());
+    for (const auto &digest : digests) {
+        uint64_t wireHash = 0;
+        for (size_t i = digest.size() - sizeof(wireHash); i < digest.size(); ++i) {
+            wireHash = (wireHash << 8) | digest[i];
+        }
+        result.push_back(wireHash);
+    }
+    return result;
+}
+
+py::list hashVllmPlainTextKvBlocks(
+    const py::buffer &tokenBuffer, size_t blockSize, const py::bytes &parentHash)
+{
+    const std::string parentBytes = parentHash;
+    VllmBlockDigest parent{};
+    if (parentBytes.size() != parent.size()) {
+        throw std::invalid_argument("expected a 32-byte parent hash");
+    }
+    std::memcpy(parent.data(), parentBytes.data(), parent.size());
+    py::list result;
+    for (const auto &digest : hashVllmPlainTextBlockDigests(tokenBuffer, blockSize, parent)) {
+        result.append(py::bytes(reinterpret_cast<const char *>(digest.data()), digest.size()));
+    }
+    return result;
+}
 
 void shutdownAlogAtExit()
 {
@@ -1763,6 +1794,8 @@ void bindNaviSchedModule(py::module_ &module, const char *description)
 {
     module.def("hash_vllm_plain_text_blocks", &hashVllmPlainTextBlocks,
                py::arg("token_buffer"), py::arg("block_size"));
+    module.def("hash_vllm_plain_text_kv_blocks", &hashVllmPlainTextKvBlocks,
+               py::arg("token_buffer"), py::arg("block_size"), py::arg("parent_hash"));
     module.doc() = description;
     auto naviModule = module.def_submodule("navi", "Navi runtime configuration");
     registerNaviRuntimeConfigPybind(naviModule);
