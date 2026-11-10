@@ -21,7 +21,19 @@ grpc::Status LocalRpcServer::RlControl(grpc::ServerContext*      context,
     // while waiting for the engine loop or for another control RPC.
     std::lock_guard<std::mutex> lock(rl_control_mutex_);
     const auto& parallel = maga_init_params_.parallelism_config;
-    const bool world_control = parallel.ep_size > 1 || parallel.dp_size > 1;
+    const char* q36_ep4_env = std::getenv("RTP_LLM_RL_Q36_EP4");
+    const bool q36_ep4 = q36_ep4_env && std::strcmp(q36_ep4_env, "1") == 0;
+    if (q36_ep4 && (parallel.world_size != 4 || parallel.local_world_size != 4
+                    || parallel.tp_size != 4 || parallel.dp_size != 1 || parallel.ep_size != 4
+                    || parallel.pp_size != 1 || parallel.ffn_sp_size != 4
+                    || parallel.get_ffn_tp_size() != 1 || parallel.world_rank < 0 || parallel.world_rank >= 4
+                    || parallel.tp_rank != parallel.world_rank || parallel.dp_rank != 0
+                    || parallel.ep_rank != parallel.world_rank)) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "RL Q36 EP4 rank or topology mismatch"};
+    }
+    // Q36 EP4 has one TP group covering the complete EP world. Protocol 2
+    // addresses all four ranks and must never be used for a partial world.
+    const bool world_control = (parallel.ep_size > 1 || parallel.dp_size > 1) && !q36_ep4;
     // Validate the target incarnation's complete rank layout before changing
     // any state. A TP-group endpoint accidentally routed to this world must
     // never acknowledge a partial pause or a partial weight transaction.

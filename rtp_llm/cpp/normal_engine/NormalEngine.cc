@@ -127,6 +127,9 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                              && parallelism_config.world_size == parallelism_config.tp_size;
         const char* world72 = std::getenv("RTP_LLM_RL_WORLD72");
         rl_world72_        = world72 && std::strcmp(world72, "1") == 0;
+        const char* q36_ep4_env = std::getenv("RTP_LLM_RL_Q36_EP4");
+        const bool q36_ep4 = q36_ep4_env && std::strcmp(q36_ep4_env, "1") == 0;
+        RTP_LLM_CHECK_WITH_INFO(!(q36_ep4 && rl_world72_), "Q36 EP4 and world72 profiles are exclusive");
         if (rl_world72_) {
             const char* layout = std::getenv("RTP_FIXED_PHYSICAL_EP_LAYOUT");
             RTP_LLM_CHECK_WITH_INFO(
@@ -150,6 +153,28 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                     && !params.hw_kernel_config.enable_cuda_graph && !runtime_config.warm_up
                     && params.device_resource_config.enable_layer_micro_batch == 0,
                 "RL world control requires the eager BF16 NCCL reference router, without CP, warmup or layer microbatch");
+        } else if (q36_ep4) {
+            // One attention-TP group is the entire EP world. Its existing TP
+            // pause barrier therefore covers all four expert-owning ranks.
+            RTP_LLM_CHECK_WITH_INFO(
+                (model_config_.model_type == "qwen35_moe_text" || model_config_.model_type == "qwen36_moe_text")
+                    && model_config_.num_layers == 40 && model_config_.hidden_size == 2048
+                    && model_config_.expert_num == 256 && model_config_.moe_k == 8
+                    && eplb_config.phy_exp_num(model_config_.expert_num) == 256 && !eplb_config.enable_eplb()
+                    && parallelism_config.world_size == 4 && parallelism_config.local_world_size == 4
+                    && parallelism_config.tp_size == 4 && parallelism_config.dp_size == 1
+                    && parallelism_config.ep_size == 4 && parallelism_config.pp_size == 1
+                    && parallelism_config.ffn_sp_size == 4 && parallelism_config.get_ffn_tp_size() == 1
+                    && parallelism_config.world_rank >= 0 && parallelism_config.world_rank < 4
+                    && parallelism_config.tp_rank == parallelism_config.world_rank
+                    && parallelism_config.dp_rank == 0 && parallelism_config.ep_rank == parallelism_config.world_rank,
+                "Q36 EP4 requires the exact 40-layer/256-expert TP4/EP4 topology");
+            RTP_LLM_CHECK_WITH_INFO(
+                params.moe_config.moe_strategy == "nccl_bf16_reference" && !params.moe_config.fake_balance_expert
+                    && !params.moe_config.hack_moe_expert && !parallelism_config.prefill_cp_config.is_enabled()
+                    && !params.hw_kernel_config.enable_cuda_graph && !runtime_config.warm_up
+                    && params.device_resource_config.enable_layer_micro_batch == 0,
+                "Q36 EP4 requires the eager BF16 NCCL reference router");
         } else {
             RTP_LLM_CHECK_WITH_INFO(pure_tp, "RL mode requires pure TP or the explicit RL world72 profile");
         }

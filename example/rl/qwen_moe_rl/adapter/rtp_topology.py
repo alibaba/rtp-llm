@@ -2,6 +2,7 @@
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import os
 
 
 @dataclass(frozen=True)
@@ -54,8 +55,11 @@ class ReplicaTopology:
         return groups
 
     def node_environment(self,index,incarnation):
-        if self.ep_size!=1:
-            raise NotImplementedError('Native RL requires EP=1')
+        if self.ep_size != 1:
+            if not (os.environ.get('RTP_LLM_RL_Q36_EP4') == '1'
+                    and self.ep_size == 4 and self.tp_size == 4
+                    and self.replica_rank == 0 and len(self.node_groups) == 1):
+                raise NotImplementedError('EP>1 requires the explicit single-node Q36 EP4 profile')
         node=self.node_groups[int(index)]
         gang=';'.join(f'name:rl_part{i},ip:{group["host"]},port:{self.start_port}'
                       for i,group in enumerate(self.node_groups))

@@ -2,6 +2,7 @@
 
 import asyncio
 import math
+import os
 
 import grpc
 
@@ -161,6 +162,12 @@ class ReplicaRpcClient:
                 if self._topology is None:
                     if reply.protocol_version != 2 or reply.tp_rank != rank or reply.tp_size != len(replies):
                         raise ReplicaControlError("RL protocol or TP rank mapping mismatch")
+                    if os.environ.get('RTP_LLM_RL_Q36_EP4') == '1' and (
+                        len(replies) != 4 or reply.world_rank != rank or reply.world_size != 4
+                        or reply.dp_rank != 0 or reply.dp_size != 1
+                        or reply.ep_rank != rank or reply.ep_size != 4
+                    ):
+                        raise ReplicaControlError("Q36 EP4 protocol-2 world/expert rank mismatch")
                 elif (
                     reply.protocol_version != 3 or reply.world_rank != rank
                     or reply.world_size != self._topology["world_size"]
