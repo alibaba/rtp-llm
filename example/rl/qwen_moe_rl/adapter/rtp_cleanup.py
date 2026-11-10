@@ -186,6 +186,21 @@ def _cleanup_multinode(identity, root):
                 rpc_receipt=dict(process_tree_terminated=True,nodes=results))
 
 
+def _qualified_owner_count():
+    """Preserve legacy four-node cleanup unless the exact Q36 profile is selected."""
+    flag = os.environ.get('Q36_DISAGG_CLEANUP_SINGLE_NODE_TP4', '0')
+    if flag not in ('0', '1'):
+        raise ValueError('Q36 single-node cleanup selector must be 0 or 1')
+    if flag == '0':
+        return 4
+    required = {'Q36_ONPOLICY_NO_CONCURRENT_ROLLOUT': '1', 'Q36_DISAGG_TRAIN_GPUS': '4',
+                'Q36_DISAGG_ROLLOUT_GPUS': '4', 'RTP_TP_SIZE': '4', 'RTP_EP_SIZE': '1',
+                'RLLM_RTP_GPUS_PER_NODE': '4', 'RLLM_RTP_EXPECTED_REPLICAS': '1'}
+    if any(os.environ.get(key) != value for key, value in required.items()):
+        raise ValueError('single-node cleanup requires the exact explicit 4+4 TP4/EP1 profile')
+    return 1
+
+
 def _discover_required_clusters(root, expected_replicas):
     """Copy missing owned controller identities from live Ray to the driver.
 
@@ -195,6 +210,7 @@ def _discover_required_clusters(root, expected_replicas):
     """
     if not 1 <= expected_replicas <= 32:
         raise ValueError('Invalid explicit native replica count')
+    expected_owners = _qualified_owner_count()
     import ray
     if not ray.is_initialized():
         raise RuntimeError('Live Ray is required to discover distributed cleanup identities')
@@ -215,7 +231,8 @@ def _discover_required_clusters(root, expected_replicas):
             if (identity['replica_rank'] != replica or Path(identity['root']).resolve() != Path(deployment).resolve()
                     or Path(identity['audit_dir']).resolve() != root
                     or identity['ray_actor'] != dict(name=name, namespace=namespace)
-                    or identity['node_owner_count'] != 4 or len(identity['node_owners']) != 4):
+                    or identity['node_owner_count'] != expected_owners
+                    or len(identity['node_owners']) != expected_owners):
                 raise ValueError('Discovered native controller belongs to another deployment, run, or topology')
             _write(path, identity)
         except Exception as error:
@@ -234,6 +251,7 @@ def cleanup_owned_rtp_processes(audit_dir):
     if os.environ.get("RTP_LLM_RL_WORLD72") == "1":
         from qwen38_owned_cleanup import cleanup_owned_world72
         return cleanup_owned_world72(audit_dir)
+    expected_owners = _qualified_owner_count()
     root = Path(audit_dir).resolve()
     configured = os.environ.get('RLLM_RTP_ACCEPTANCE_DIR')
     if configured is None or root != Path(configured).resolve():
@@ -254,6 +272,9 @@ def cleanup_owned_rtp_processes(audit_dir):
         item={'identity_file':str(path)}
         try:
             identity=json.loads(path.read_text())
+            if expected_owners == 1 and (int(identity['replica_rank']) != 0 or
+                    identity['node_owner_count'] != 1 or len(identity['node_owners']) != 1):
+                raise ValueError('Recorded Q36 TP4 identity must cover exactly one native owner')
             if path.name!=f"rtp_cluster_{int(identity['replica_rank'])}.json":
                 raise ValueError('Cluster identity filename mismatch')
             expected_deployment=os.environ.get('RLLM_RTP_DEPLOY_ROOT') or os.environ.get('RTP_DEPLOY_ROOT')
