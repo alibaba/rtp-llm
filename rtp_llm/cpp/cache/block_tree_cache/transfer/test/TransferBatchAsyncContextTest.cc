@@ -142,6 +142,40 @@ TEST(TransferBatchAsyncContextTest, ClassifiedResultReachesCallbacksBeforeAndAft
     EXPECT_EQ(context.result().copy_error, CacheCopyError::IO_FAILED);
 }
 
+TEST(TransferBatchAsyncContextTest, BufferSafeFailureReachesCallbacksBeforeAndAfterCompletion) {
+    TransferBatchAsyncContext context(2);
+    EXPECT_FALSE(context.done());
+    EXPECT_FALSE(context.result().buffer_safe);
+
+    size_t     calls    = 0;
+    const auto callback = [&](TransferResult result) {
+        EXPECT_TRUE(result.buffer_safe);
+        EXPECT_FALSE(result.ok());
+        EXPECT_EQ(result.status.code(), ErrorCode::EXECUTION_EXCEPTION);
+        EXPECT_EQ(result.status.ToString(), "completed disk read failed");
+        EXPECT_EQ(result.copy_error, CacheCopyError::IO_FAILED);
+        EXPECT_EQ(result.block_errors, std::vector<CacheCopyError>(2, CacheCopyError::IO_FAILED));
+        ++calls;
+    };
+    context.onDone(callback);
+    EXPECT_EQ(calls, 0u);
+    TransferResult failure(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "completed disk read failed"),
+                           CacheCopyError::IO_FAILED);
+    failure.buffer_safe = true;
+    context.complete(std::move(failure));
+    context.waitDone();
+    EXPECT_EQ(calls, 1u);
+    context.onDone(callback);
+    context.complete(TransferStatus::OK);
+
+    EXPECT_EQ(calls, 2u);
+    EXPECT_TRUE(context.done());
+    EXPECT_TRUE(context.result().buffer_safe);
+    EXPECT_FALSE(context.success());
+    EXPECT_EQ(context.errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_EQ(context.errorInfo().ToString(), "completed disk read failed");
+}
+
 TEST(TransferBatchAsyncContextTest, ThrowingConsumersDoNotInterruptOtherRegisteredCallbacks) {
     TransferBatchAsyncContext context(2);
     size_t                    calls = 0;

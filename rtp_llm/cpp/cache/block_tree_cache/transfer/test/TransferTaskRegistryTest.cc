@@ -1,0 +1,189 @@
+#include <gtest/gtest.h>
+
+#include <future>
+#include <limits>
+#include <string>
+#include <vector>
+
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
+
+namespace rtp_llm {
+namespace {
+
+using Registry = TransferTaskRegistry;
+using State    = Registry::State;
+
+TEST(TransferTaskRegistryTest, RejectsEmptyAndDuplicateExecutionIds) {
+    Registry registry(2);
+    EXPECT_FALSE(registry.begin(""));
+    EXPECT_TRUE(registry.begin("first"));
+    EXPECT_FALSE(registry.begin("first"));
+    EXPECT_TRUE(registry.begin("second"));
+    EXPECT_EQ(registry.query(registry.epoch(), {"first", "second", ""}),
+              (std::vector<State>{State::RUNNING, State::RUNNING, State::UNKNOWN}));
+}
+
+TEST(TransferTaskRegistryTest, ExplicitSafetyProofCompletesEvenAfterUnsafeFailure) {
+    Registry registry;
+    ASSERT_TRUE(registry.begin("failed-execution"));
+    ASSERT_TRUE(registry.finish("failed-execution", false));
+    EXPECT_EQ(registry.query(registry.epoch(), {"failed-execution"}), (std::vector<State>{State::RUNNING}));
+    // Business failure remains a failure; a later successful drain only proves
+    // that the failed execution no longer accesses its buffers.
+    EXPECT_TRUE(registry.finish("failed-execution", true));
+    EXPECT_EQ(registry.query(registry.epoch(), {"failed-execution"}), (std::vector<State>{State::BUFFER_SAFE}));
+    EXPECT_FALSE(registry.begin("failed-execution"));
+}
+
+TEST(TransferTaskRegistryTest, SafeCompletionIsMonotonicAndIdempotent) {
+    Registry registry;
+    ASSERT_TRUE(registry.begin("execution"));
+    ASSERT_TRUE(registry.finish("execution", true));
+    EXPECT_TRUE(registry.finish("execution", true));
+    EXPECT_TRUE(registry.finish("execution", false));
+    EXPECT_EQ(registry.query(registry.epoch(), {"execution"}), (std::vector<State>{State::BUFFER_SAFE}));
+}
+
+TEST(TransferTaskRegistryTest, MissingEvidenceDoesNotCreateOrCompleteAnExecution) {
+    Registry registry;
+    EXPECT_FALSE(registry.finish("missing", true));
+    EXPECT_FALSE(registry.finish("missing", false));
+    EXPECT_FALSE(registry.finish("", true));
+    ASSERT_TRUE(registry.begin("unknown-completion"));
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_TRUE(registry.finish("unknown-completion", false));
+        EXPECT_EQ(registry.query(registry.epoch(), {"missing", "unknown-completion", ""}),
+                  (std::vector<State>{State::UNKNOWN, State::RUNNING, State::UNKNOWN}));
+    }
+    EXPECT_TRUE(registry.begin("missing"));
+}
+
+TEST(TransferTaskRegistryTest, QueryRequiresCurrentWorkerEpochAndPreservesOrder) {
+    Registry registry;
+    Registry restarted;
+    ASSERT_FALSE(registry.epoch().empty());
+    ASSERT_NE(registry.epoch(), restarted.epoch());
+    ASSERT_TRUE(registry.begin("safe"));
+    ASSERT_TRUE(registry.finish("safe", true));
+    ASSERT_TRUE(registry.begin("running"));
+    ASSERT_TRUE(restarted.begin("safe"));
+    ASSERT_TRUE(restarted.finish("safe", true));
+
+    const std::vector<std::string> ids{"running", "missing", "safe", "safe", ""};
+    EXPECT_EQ(registry.query(registry.epoch(), ids),
+              (std::vector<State>{
+                  State::RUNNING, State::UNKNOWN, State::BUFFER_SAFE, State::BUFFER_SAFE, State::UNKNOWN}));
+    for (const auto& wrong_epoch : {std::string{}, restarted.epoch(), registry.epoch() + "-invalid"}) {
+        EXPECT_EQ(registry.query(wrong_epoch, ids), std::vector<State>(ids.size(), State::UNKNOWN));
+    }
+    EXPECT_EQ(restarted.query(registry.epoch(), {"safe"}), (std::vector<State>{State::UNKNOWN}));
+    EXPECT_TRUE(registry.query(registry.epoch(), std::vector<std::string>{}).empty());
+}
+
+TEST(TransferTaskRegistryTest, CapacityRetainsBothPendingAndCompletedEvidence) {
+    Registry disabled(0);
+    EXPECT_FALSE(disabled.begin("execution"));
+    EXPECT_EQ(disabled.query(disabled.epoch(), {"execution"}), (std::vector<State>{State::UNKNOWN}));
+
+    Registry registry(2);
+    ASSERT_TRUE(registry.begin("safe"));
+    ASSERT_TRUE(registry.begin("running"));
+    EXPECT_FALSE(registry.begin("rejected"));
+    ASSERT_TRUE(registry.finish("safe", true));
+    EXPECT_FALSE(registry.begin("rejected"));
+    EXPECT_FALSE(registry.begin("safe"));
+    EXPECT_EQ(registry.query(registry.epoch(), {"safe", "running", "rejected"}),
+              (std::vector<State>{State::BUFFER_SAFE, State::RUNNING, State::UNKNOWN}));
+}
+
+TEST(TransferTaskRegistryTest, ConcurrentDuplicateSubmissionHasExactlyOneOwner) {
+    Registry                      registry;
+    std::promise<void>             start;
+    const auto                    ready = start.get_future().share();
+    std::vector<std::future<bool>> attempts;
+    for (int i = 0; i < 16; ++i) {
+        attempts.push_back(std::async(std::launch::async, [&] {
+            ready.wait();
+            return registry.begin("shared-execution");
+        }));
+    }
+    start.set_value();
+    size_t accepted = 0;
+    for (auto& attempt : attempts) {
+        accepted += attempt.get();
+    }
+    EXPECT_EQ(accepted, 1u);
+    EXPECT_EQ(registry.query(registry.epoch(), {"shared-execution"}), (std::vector<State>{State::RUNNING}));
+}
+
+TEST(TransferTaskRegistryTest, ConcurrentIndependentSubmissionsRespectCapacity) {
+    constexpr size_t              capacity = 4;
+    Registry                      registry(capacity);
+    std::promise<void>             start;
+    const auto                    ready = start.get_future().share();
+    std::vector<std::future<bool>> attempts;
+    std::vector<std::string>       ids;
+    for (int i = 0; i < 16; ++i) {
+        ids.push_back("execution-" + std::to_string(i));
+        attempts.push_back(std::async(std::launch::async, [&, id = ids.back()] {
+            ready.wait();
+            return registry.begin(id);
+        }));
+    }
+    start.set_value();
+    const auto states = [&] {
+        for (size_t i = 0; i < attempts.size(); ++i) {
+            const bool accepted = attempts[i].get();
+            EXPECT_EQ(registry.query(registry.epoch(), {ids[i]}),
+                      (std::vector<State>{accepted ? State::RUNNING : State::UNKNOWN}));
+        }
+        return registry.query(registry.epoch(), ids);
+    }();
+    size_t running = 0;
+    for (const auto state : states) {
+        running += state == State::RUNNING;
+    }
+    EXPECT_EQ(running, capacity);
+}
+
+TEST(TransferTaskRegistryTest, NumericTracesReuseExistingIdentityAndRejectZero) {
+    Registry       registry;
+    const uint64_t trace_id = 42;
+    const uint64_t largest  = std::numeric_limits<uint64_t>::max();
+    ASSERT_TRUE(registry.begin(trace_id));
+    EXPECT_FALSE(registry.begin(trace_id));
+    EXPECT_FALSE(registry.begin(std::to_string(trace_id)));
+    ASSERT_TRUE(registry.begin(largest));
+    ASSERT_TRUE(registry.finish(trace_id, false));
+    EXPECT_EQ(registry.query(registry.epoch(), std::vector<uint64_t>{trace_id}),
+              (std::vector<State>{State::RUNNING}));
+    ASSERT_TRUE(registry.finish(trace_id, true));
+    EXPECT_FALSE(registry.finish(uint64_t{43}, true));
+
+    // The numeric overload must never use the string record "0" as evidence.
+    ASSERT_TRUE(registry.begin("0"));
+    ASSERT_TRUE(registry.finish("0", true));
+    EXPECT_FALSE(registry.begin(uint64_t{0}));
+    EXPECT_FALSE(registry.finish(uint64_t{0}, true));
+    EXPECT_EQ(registry.query(registry.epoch(), std::vector<uint64_t>{0, trace_id, 43, largest, trace_id}),
+              (std::vector<State>{
+                  State::UNKNOWN, State::BUFFER_SAFE, State::UNKNOWN, State::RUNNING, State::BUFFER_SAFE}));
+    EXPECT_EQ(registry.query("wrong-epoch", std::vector<uint64_t>{trace_id, largest}),
+              (std::vector<State>{State::UNKNOWN, State::UNKNOWN}));
+    EXPECT_TRUE(registry.query(registry.epoch(), std::vector<uint64_t>{}).empty());
+}
+
+TEST(TransferTaskRegistryTest, NumericAndKvcmIdentitiesUseIndependentRegistries) {
+    Registry transfer;
+    Registry kvcm;
+    ASSERT_TRUE(transfer.begin(uint64_t{42}));
+    ASSERT_TRUE(kvcm.begin("42"));
+    ASSERT_TRUE(transfer.finish(uint64_t{42}, true));
+    EXPECT_EQ(transfer.query(transfer.epoch(), std::vector<uint64_t>{42}),
+              (std::vector<State>{State::BUFFER_SAFE}));
+    EXPECT_EQ(kvcm.query(kvcm.epoch(), std::vector<std::string>{"42"}),
+              (std::vector<State>{State::RUNNING}));
+}
+
+}  // namespace
+}  // namespace rtp_llm

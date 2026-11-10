@@ -21,6 +21,15 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "transfer_task_registry",
+    hdrs = [
+        "transfer/TransferTaskRegistry.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 # Leaf pool target: DeviceBlockPool owns its backing and inherits the common
 # IBlockPool lifecycle. Keeping this target below allocator/group targets avoids
 # a cycle with the full block_tree_cache library.

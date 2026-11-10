@@ -57,7 +57,7 @@ TransferWorkLoop::Queue TransferWorkLoop::Queue::take() {
 TransferWorkLoop::Entry::Entry(TransferTask task, BeforeCompleteCallback before_complete):
     task(std::move(task)),
     context(std::make_shared<TransferBatchAsyncContext>(this->task.descriptors().size())),
-    result(this->task.descriptors().size()),
+    result(TransferResult::emptyAggregate(this->task.descriptors().size())),
     before_complete(std::move(before_complete)) {}
 
 bool TransferWorkLoop::isCrc(Step step) {
@@ -446,6 +446,9 @@ void TransferWorkLoop::pollOnce() {
 
 void TransferWorkLoop::recordDiskResult(Entry& entry, BlockIOStatus status) noexcept {
     assert(entry.result.ok());
+    // BlockIOStatus has no explicit completion proof yet. Do not inherit the
+    // empty aggregate's identity as evidence for an executed disk operation.
+    entry.result.buffer_safe = false;
     const auto transfer_status = blockIOStatusToTransferStatus(status);
     const auto copy_error      = cacheCopyErrorFor(transfer_status);
     const bool intermediate    = transfer_status == TransferStatus::OK && entry.step == Step::DISK_READ
@@ -469,6 +472,7 @@ void TransferWorkLoop::recordResult(Entry& entry, TransferResult result) noexcep
     if (!intermediate)
         for (size_t i = 0; i < entry.task.descriptors().size(); ++i)
             entry.result.block_errors[i] = result.blockError(i);
+    entry.result.buffer_safe = entry.result.buffer_safe && result.buffer_safe;
     entry.result.status     = std::move(result.status);
     entry.result.copy_error = result.copy_error;
 }

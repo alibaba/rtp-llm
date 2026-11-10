@@ -92,7 +92,7 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
                 metrics_reporter_->reportQueueWaitMetric(
                     false, "transfer", nullptr, source, target, currentTimeUs() - queue_begin);
             }
-            TransferResult result(descriptors.size());
+            TransferResult result = TransferResult::emptyAggregate(descriptors.size());
             size_t         active_begin = 0;
             size_t         active_end   = 0;
             const auto     record_batch = [&](TransferResult batch) {

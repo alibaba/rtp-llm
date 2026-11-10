@@ -120,7 +120,8 @@ private:
 
     bool evaluate(ErrorInfo forced_error = ErrorInfo::OkStatus()) {
         TransferResult result =
-            forced_error.ok() ? TransferResult{} : TransferResult(std::move(forced_error), CacheCopyError::RPC_FAILED);
+            forced_error.ok() ? TransferResult::emptyAggregate() :
+                                TransferResult(std::move(forced_error), CacheCopyError::RPC_FAILED);
         if (result.ok()) {
             if (!broadcast_result_->done()) {
                 return false;
@@ -183,8 +184,8 @@ private:
                 rank_result.status =
                     ErrorInfo(rank_result.status.code(),
                               "rank=" + std::to_string(rank) + " {" + rank_result.status.ToString() + "}");
-                result.merge(std::move(rank_result));
             }
+            result.merge(std::move(rank_result));
         }
         // Copy before claiming completion: allocation failure must leave the
         // context retryable. Once claimed, publication cannot allocate.

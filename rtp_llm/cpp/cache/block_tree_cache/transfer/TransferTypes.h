@@ -124,6 +124,14 @@ struct TransferResult {
                                                                 CacheCopyError::COPY_FAILED) {}
     TransferResult(ErrorInfo error, CacheCopyError copy_error): status(std::move(error)), copy_error(copy_error) {}
 
+    // Identity for combining independent operations, not proof for an executed
+    // operation. Every contributing result must explicitly prove buffer safety.
+    static TransferResult emptyAggregate(size_t block_count = 0) {
+        TransferResult result(block_count);
+        result.buffer_safe = true;
+        return result;
+    }
+
     bool ok() const {
         return status.ok();
     }
@@ -131,6 +139,9 @@ struct TransferResult {
     // Append every failure message; keep unknown completion ahead of known failures
     // without losing higher-priority copy diagnostics such as confirmed CRC errors.
     void merge(TransferResult other) {
+        // A successful business result can still lack completion proof. Merge
+        // safety before either early return, independently of error precedence.
+        buffer_safe = buffer_safe && other.buffer_safe;
         if (other.ok()) {
             return;
         }
@@ -161,6 +172,10 @@ struct TransferResult {
     ErrorInfo                   status{ErrorInfo::OkStatus()};
     CacheCopyError              copy_error{CacheCopyError::NONE};
     std::vector<CacheCopyError> block_errors;
+    // True only when this operation can no longer access any of its buffers.
+    // False means unproven, not necessarily in-flight. Business success, error
+    // codes and NOT_EXECUTED diagnostics never implicitly grant this proof.
+    bool buffer_safe{false};
 };
 
 struct HostBufferView {
@@ -391,8 +406,9 @@ public:
         return task;
     }
 
-    // A separately submitted RPC batch needs its own identity. Nested worker
-    // batches retain that identity and use their local descriptor ranges.
+    // Construction gives each independently submitted RPC batch a new trace ID
+    // as its execution identity. Nested worker batches inherit that trace ID
+    // through subtask(), while the workflow links independent RPC batches.
     TransferTask rpcSubtask(std::vector<TransferDescriptor> descriptors) const {
         auto task = TransferTask(std::move(descriptors), deadline_, request_id_);
         task.setWorkflow(workflow_id_, trace_id_);

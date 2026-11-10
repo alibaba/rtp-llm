@@ -14,7 +14,7 @@ public:
     using DoneCallback = std::function<void(TransferResult)>;
 
     explicit TransferStageState(DoneCallback callback, size_t block_count = 0):
-        callback_(std::move(callback)), result_(block_count) {}
+        callback_(std::move(callback)), result_(TransferResult::emptyAggregate(block_count)) {}
 
     void addBatch() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -44,7 +44,7 @@ public:
         }
     }
 
-    void finishSubmitting(TransferResult submission_error = {}) {
+    void finishSubmitting(TransferResult submission_error = TransferResult::emptyAggregate()) {
         DoneCallback   callback;
         TransferResult result;
         {

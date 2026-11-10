@@ -625,8 +625,14 @@ TEST_F(MultiRankBlockTransferEngineTest, DispatcherAssignsDistinctWireIdsToConcu
                            [&](TransferResult result) { second_complete.set_value(std::move(result)); });
     ASSERT_EQ(done.wait_for(std::chrono::seconds(5)), std::future_status::ready);
     ASSERT_EQ(second_done.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    EXPECT_TRUE(done.get().ok());
-    EXPECT_TRUE(second_done.get().ok());
+    const auto first_result = done.get();
+    const auto second_result = second_done.get();
+    EXPECT_TRUE(first_result.ok());
+    EXPECT_TRUE(second_result.ok());
+    // The current wire response does not carry explicit buffer safety proof.
+    // Even successful RPCs from every rank must not grant it implicitly.
+    EXPECT_FALSE(first_result.buffer_safe);
+    EXPECT_FALSE(second_result.buffer_safe);
     dispatcher.waitForTransfers();
     std::lock_guard<std::mutex> lock(state->mutex);
     ASSERT_EQ(state->requests.size(), 4u);

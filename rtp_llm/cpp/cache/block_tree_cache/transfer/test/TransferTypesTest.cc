@@ -18,6 +18,68 @@ TEST(TransferTaskTest, SubtasksPreserveQueryIdAndDeadline) {
     EXPECT_EQ(grandchild.requestId(), 73);
 }
 
+TEST(TransferTaskTest, RpcBatchesHaveDistinctExecutionTracesWithinWorkflow) {
+    TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10), 73);
+    auto first  = task.rpcSubtask({TransferDescriptor::hostToDevice(1, 3, {4})});
+    auto second = task.rpcSubtask({TransferDescriptor::hostToDevice(2, 5, {6})});
+
+    EXPECT_NE(first.traceId(), 0u);
+    EXPECT_NE(second.traceId(), 0u);
+    EXPECT_NE(first.traceId(), task.traceId());
+    EXPECT_NE(second.traceId(), task.traceId());
+    EXPECT_NE(first.traceId(), second.traceId());
+    EXPECT_EQ(first.deadline(), task.deadline());
+    EXPECT_EQ(second.deadline(), task.deadline());
+    EXPECT_EQ(first.requestId(), task.requestId());
+    EXPECT_EQ(second.requestId(), task.requestId());
+    EXPECT_EQ(first.workflowId(), task.workflowId());
+    EXPECT_EQ(second.workflowId(), task.workflowId());
+    EXPECT_EQ(first.parentTraceId(), task.traceId());
+    EXPECT_EQ(second.parentTraceId(), task.traceId());
+
+    auto nested_rpc = first.rpcSubtask(first.descriptors());
+    EXPECT_NE(nested_rpc.traceId(), first.traceId());
+    EXPECT_EQ(nested_rpc.workflowId(), task.workflowId());
+    EXPECT_EQ(nested_rpc.parentTraceId(), first.traceId());
+}
+
+TEST(TransferTaskTest, WorkerSubtasksPreserveReceivedExecutionTrace) {
+    TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10), 73);
+    const auto rpc = task.rpcSubtask(task.descriptors());
+    TransferTask worker(rpc.descriptors(), std::chrono::seconds(10), rpc.requestId());
+    worker.setTraceId(rpc.traceId());
+    worker.setWorkflow(rpc.workflowId(), rpc.parentTraceId());
+
+    auto child  = worker.subtask({TransferDescriptor::hostToDevice(1, 3, {4})});
+    auto nested = child.subtask({TransferDescriptor::hostToDevice(2, 5, {6})});
+
+    EXPECT_EQ(worker.traceId(), rpc.traceId());
+    EXPECT_EQ(child.traceId(), rpc.traceId());
+    EXPECT_EQ(nested.traceId(), rpc.traceId());
+    EXPECT_EQ(nested.workflowId(), task.workflowId());
+    EXPECT_EQ(nested.parentTraceId(), task.traceId());
+    EXPECT_EQ(nested.deadline(), worker.deadline());
+    EXPECT_EQ(nested.requestId(), worker.requestId());
+}
+
+TEST(TransferTaskTest, CopyAndMovePreserveExecutionTrace) {
+    TransferTask parent({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10), 73);
+    const auto task = parent.rpcSubtask(parent.descriptors());
+    auto copied = task;
+    auto moved  = std::move(copied);
+    EXPECT_EQ(moved.traceId(), task.traceId());
+    EXPECT_EQ(moved.workflowId(), task.workflowId());
+    EXPECT_EQ(moved.parentTraceId(), task.parentTraceId());
+
+    TransferTask assigned({}, std::chrono::seconds(1));
+    assigned = task;
+    EXPECT_EQ(assigned.traceId(), task.traceId());
+    assigned = std::move(moved);
+    EXPECT_EQ(assigned.traceId(), task.traceId());
+    EXPECT_EQ(assigned.workflowId(), task.workflowId());
+    EXPECT_EQ(assigned.parentTraceId(), task.parentTraceId());
+}
+
 TEST(TransferResultTest, MergePreservesMessagesAndHighestPriorityCode) {
     for (bool crc_first : {false, true}) {
         TransferResult crc(TransferStatus::CRC_MISMATCH);
@@ -31,6 +93,65 @@ TEST(TransferResultTest, MergePreservesMessagesAndHighestPriorityCode) {
         EXPECT_EQ(result.status.ToString(),
                   crc_first ? "cache integrity verification failed; invalid block transfer request" :
                               "invalid block transfer request; cache integrity verification failed");
+    }
+}
+
+TEST(TransferResultTest, BusinessStatusAndBlockDiagnosticsNeverImplyBufferSafety) {
+    EXPECT_FALSE(TransferResult{}.buffer_safe);
+    EXPECT_FALSE(TransferResult(3).buffer_safe);
+    EXPECT_FALSE(TransferResult(TransferStatus::OK).buffer_safe);
+    EXPECT_FALSE(TransferResult(ErrorInfo::OkStatus()).buffer_safe);
+    EXPECT_FALSE(TransferResult(TransferStatus::CRC_MISMATCH).buffer_safe);
+    EXPECT_FALSE(TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "not submitted"),
+                                CacheCopyError::NOT_EXECUTED)
+                     .buffer_safe);
+    const auto aggregate = TransferResult::emptyAggregate(3);
+    EXPECT_TRUE(aggregate.buffer_safe);
+    EXPECT_TRUE(aggregate.ok());
+    EXPECT_EQ(aggregate.block_errors, std::vector<CacheCopyError>(3, CacheCopyError::NOT_EXECUTED));
+}
+
+TEST(TransferResultTest, EveryContributorMustProveSafetyRegardlessOfBusinessOutcome) {
+    for (const bool first_safe : {false, true}) {
+        for (const bool second_safe : {false, true}) {
+            for (const bool first_ok : {false, true}) {
+                for (const bool second_ok : {false, true}) {
+                    SCOPED_TRACE(::testing::Message() << first_safe << second_safe << first_ok << second_ok);
+                    TransferResult first(first_ok ? TransferStatus::OK : TransferStatus::CRC_MISMATCH);
+                    TransferResult second(second_ok ? TransferStatus::OK : TransferStatus::DISK_IO_ERROR);
+                    first.buffer_safe = first_safe;
+                    second.buffer_safe = second_safe;
+                    auto result = TransferResult::emptyAggregate();
+                    result.merge(first);
+                    result.merge(second);
+                    EXPECT_EQ(result.buffer_safe, first_safe && second_safe);
+                    EXPECT_EQ(result.ok(), first_ok && second_ok);
+                    EXPECT_EQ(result.copy_error,
+                              !first_ok ? CacheCopyError::CRC_MISMATCH :
+                              !second_ok ? CacheCopyError::IO_FAILED : CacheCopyError::NONE);
+                    // Further proven-safe successes cannot erase missing proof.
+                    TransferResult safe_success(TransferStatus::OK);
+                    safe_success.buffer_safe = true;
+                    result.merge(safe_success);
+                    EXPECT_EQ(result.buffer_safe, first_safe && second_safe);
+                }
+            }
+        }
+    }
+}
+
+TEST(TransferResultTest, UnknownCompletionKeepsBusinessPriorityAndBlocksAggregateSafety) {
+    for (const bool unknown_first : {false, true}) {
+        TransferResult crc(TransferStatus::CRC_MISMATCH);
+        crc.buffer_safe = true;
+        TransferResult unknown(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "RPC timed out"),
+                               CacheCopyError::RPC_FAILED);
+        auto result = TransferResult::emptyAggregate();
+        result.merge(unknown_first ? unknown : crc);
+        result.merge(unknown_first ? crc : unknown);
+        EXPECT_FALSE(result.buffer_safe);
+        EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+        EXPECT_EQ(result.copy_error, CacheCopyError::CRC_MISMATCH);
     }
 }
 

@@ -146,6 +146,17 @@ cc_test(
 )
 
 cc_test(
+    name = "transfer_task_registry_test",
+    srcs = ["TransferTaskRegistryTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache:transfer_task_registry",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "transfer_batch_async_context_test",
     exec_properties = {"gpu": "L20_CU13"},
     srcs = ["TransferBatchAsyncContextTest.cc"],

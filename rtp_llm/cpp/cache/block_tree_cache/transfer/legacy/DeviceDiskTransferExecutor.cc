@@ -282,7 +282,7 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
                                     (*batch_leases)[index].blockBuffer(sub_group_sets[index]->payloadBytes()));
                             }
 
-                            TransferResult result;
+                            TransferResult result = TransferResult::emptyAggregate();
                             for (const bool disk_stage : {load, !load}) {
                                 const char* stage =
                                     disk_stage ? (load ? "disk_read" : "disk_write") : (load ? "h2d" : "d2h");
@@ -295,9 +295,11 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
                                                          "worker_batch",
                                                          transfer_id,
                                                          identity);
+                                const bool previous_stages_safe = result.buffer_safe;
                                 result = disk_stage ?
                                              host_disk_executor_.executeBatch(hosts, sub_descriptors, sub_group_sets) :
                                              device_host_executor_.executeBatch(hosts, sub_descriptors, sub_group_sets);
+                                result.buffer_safe = previous_stages_safe && result.buffer_safe;
                                 timer.finish(result.ok());
                                 if (!result.ok()) {
                                     batch_timer.finish(false);

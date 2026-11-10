@@ -30,6 +30,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferWorkLoop.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/AsyncProfileTrace.h"
@@ -38,6 +39,73 @@ namespace rtp_llm {
 namespace {
 using namespace block_transfer_engine_test;
 using namespace std::chrono_literals;
+
+TEST(TransferWorkLoopSafetyTest, EveryStageMustPreserveBufferSafetyProof) {
+    TransferWorkLoop owner({}, nullptr, nullptr, TransferDirection::OFFLOAD, 1, 1, {});
+    for (const bool first_safe : {false, true}) {
+        for (const bool second_safe : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "first_safe=" << first_safe << " second_safe=" << second_safe);
+            TransferWorkLoop::Entry entry(makeTransferTask({TransferDescriptor::deviceToDisk(0, {1}, 2)}), {});
+            ASSERT_TRUE(entry.result.buffer_safe);
+            entry.step = TransferWorkLoop::Step::CRC_STORE;
+            TransferResult first(TransferStatus::OK);
+            first.buffer_safe = first_safe;
+            owner.recordResult(entry, std::move(first));
+            EXPECT_TRUE(entry.result.ok());
+            EXPECT_EQ(entry.result.buffer_safe, first_safe);
+            EXPECT_EQ(entry.result.block_errors, std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED});
+
+            entry.step = TransferWorkLoop::Step::DISK_WRITE;
+            TransferResult second(TransferStatus::OK);
+            second.buffer_safe = second_safe;
+            owner.recordResult(entry, std::move(second));
+            EXPECT_TRUE(entry.result.ok());
+            EXPECT_EQ(entry.result.buffer_safe, first_safe && second_safe);
+            EXPECT_EQ(entry.result.block_errors, std::vector<CacheCopyError>{CacheCopyError::NONE});
+        }
+    }
+}
+
+TEST(TransferWorkLoopSafetyTest, ProvenSafeFailurePreservesProofAndBusinessError) {
+    TransferWorkLoop owner({}, nullptr, nullptr, TransferDirection::OFFLOAD, 1, 1, {});
+    TransferWorkLoop::Entry entry(makeTransferTask({TransferDescriptor::deviceToDisk(0, {1}, 2)}), {});
+    entry.step = TransferWorkLoop::Step::CRC_STORE;
+    TransferResult first(TransferStatus::OK);
+    first.buffer_safe = true;
+    owner.recordResult(entry, std::move(first));
+
+    entry.step = TransferWorkLoop::Step::DISK_WRITE;
+    TransferResult failure(TransferStatus::DISK_IO_ERROR);
+    failure.buffer_safe = true;
+    owner.recordResult(entry, std::move(failure));
+    EXPECT_TRUE(entry.result.buffer_safe);
+    EXPECT_FALSE(entry.result.ok());
+    EXPECT_EQ(entry.result.status.code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_EQ(entry.result.copy_error, CacheCopyError::IO_FAILED);
+    EXPECT_EQ(entry.result.block_errors, std::vector<CacheCopyError>{CacheCopyError::IO_FAILED});
+}
+
+TEST(TransferWorkLoopSafetyTest, DiskStatusDoesNotSupplyBufferSafetyProof) {
+    TransferWorkLoop owner({}, nullptr, nullptr, TransferDirection::OFFLOAD, 1, 1, {});
+    for (const auto status : {BlockIOStatus::OK, BlockIOStatus::PARTIAL_FAILURE}) {
+        SCOPED_TRACE(static_cast<int>(status));
+        TransferWorkLoop::Entry entry(makeTransferTask({TransferDescriptor::deviceToDisk(0, {1}, 2)}), {});
+        ASSERT_TRUE(entry.result.buffer_safe);
+        entry.step = TransferWorkLoop::Step::CRC_STORE;
+        TransferResult first(TransferStatus::OK);
+        first.buffer_safe = true;
+        owner.recordResult(entry, std::move(first));
+        ASSERT_TRUE(entry.result.buffer_safe);
+
+        entry.step = TransferWorkLoop::Step::DISK_WRITE;
+        owner.recordDiskResult(entry, status);
+        EXPECT_FALSE(entry.result.buffer_safe);
+        EXPECT_EQ(entry.result.ok(), status == BlockIOStatus::OK);
+        const auto error = status == BlockIOStatus::OK ? CacheCopyError::NONE : CacheCopyError::IO_FAILED;
+        EXPECT_EQ(entry.result.copy_error, error);
+        EXPECT_EQ(entry.result.block_errors, std::vector<CacheCopyError>{error});
+    }
+}
 
 size_t seriesCount(kmonitor::MutableMetric* metric) {
     return metric->metric_data_->Size();
