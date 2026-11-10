@@ -372,6 +372,43 @@ def _prepare_wo_a_stacked(
     return (w_stk, s_stk)
 
 
+def _dequant_wo_a_to_bf16(
+    weight_fp8: torch.Tensor,
+    scale_raw: torch.Tensor,
+    G: int,
+    R: int,
+    K: int,
+) -> torch.Tensor:
+    """Exact ROCm fallback for the grouped wo_a weight.
+
+    The checkpoint stores e4m3 weights plus one E8M0 scale per 128x128 block.
+    DeepGEMM's packed layout is only consumed by its CUDA einsum; on ROCm we
+    expand the same scales and materialize the BF16 weight once.  This keeps
+    the original quantization exactly (no new quantization, no approximation)
+    and is used only by the ROCm einsum fallback.
+    """
+    w = weight_fp8.view(G, R, K).float()
+    if scale_raw.dtype == torch.int32:
+        raw = scale_raw.contiguous().view(torch.uint8).to(torch.float32)
+        if bool((raw == 255).any()):
+            raise ValueError("wo_a scale contains E8M0 NaN byte 255")
+        scale = torch.exp2(raw - 127.0)
+    else:
+        scale = scale_raw.float()
+        if bool(torch.isnan(scale).any()):
+            raise ValueError("wo_a scale contains NaN")
+    block_k = K // scale.shape[-1]
+    if scale.shape[-2] * block_k != R:
+        raise ValueError(
+            f"wo_a scale shape {tuple(scale.shape)} does not cover R={R}, K={K}"
+        )
+    scale = scale.view(G, scale.shape[-2], scale.shape[-1])
+    scale = scale.repeat_interleave(block_k, dim=1).repeat_interleave(block_k, dim=2)
+    if scale.shape != w.shape:
+        raise ValueError(f"wo_a scale expanded to {tuple(scale.shape)}, expected {tuple(w.shape)}")
+    return (w * scale).to(torch.bfloat16)
+
+
 def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
     """Backwards-compat bridge over ``_v4_fp8_linear`` for callers that
     still pass a flat dict + keys.  Mutates ``weights[scale_key]`` to the
@@ -848,11 +885,22 @@ class AttentionFP8(nn.Module):
         self.wo_a_w = wo_a_w
         self.wo_a_s = wo_a_s
         K_local = n_heads_local * head_dim // n_groups_local
-        _stk_w, _stk_s = _prepare_wo_a_stacked(
-            wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
-        )
-        self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
-        self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
+        if torch.version.hip is not None:
+            self.register_buffer(
+                "_wo_a_bf16",
+                _dequant_wo_a_to_bf16(
+                    wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
+                ),
+                persistent=False,
+            )
+            self._wo_a_stk_w = None
+            self._wo_a_stk_s = None
+        else:
+            _stk_w, _stk_s = _prepare_wo_a_stacked(
+                wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
+            )
+            self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
+            self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
         self.wo_b = _fp8_w_s(
             W.v4_attn_wo_b_w,
             W.v4_attn_wo_b_s,
@@ -1808,6 +1856,18 @@ class AttentionFP8(nn.Module):
         M, G, _K = o_fp8.shape
         R = self.o_lora_rank
         out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o_fp8.device)
+        wo_a_bf16 = getattr(self, "_wo_a_bf16", None)
+        if wo_a_bf16 is not None:
+            raw = o_scale.contiguous().view(torch.uint8).to(torch.float32)
+            if bool((raw == 255).any()):
+                raise ValueError("wo_a activation scale contains E8M0 NaN byte 255")
+            act_scale = torch.exp2(raw - 127.0)
+            act_scale = act_scale.repeat_interleave(_K // act_scale.shape[-1], dim=-1)
+            act = o_fp8.float() * act_scale
+            out.copy_(
+                torch.einsum("mgk,grk->mgr", act, wo_a_bf16).to(out.dtype)
+            )
+            return out.view(B, S, G, R)
         if deep_gemm is None:
             raise NotImplementedError(
                 "deep_gemm.fp8_einsum is not available on this ROCm image"
