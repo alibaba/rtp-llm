@@ -467,11 +467,11 @@ def _release_shared_table(data_path, lease_file):
 
 
 class _CudaArrayView:
-    def __init__(self, owner, tensor, pointer):
+    def __init__(self, owner, tensor, pointer, shape=None, strides=None):
         self.owner = owner
         self.__cuda_array_interface__ = {
-            "shape": tuple(tensor.shape),
-            "strides": tuple(tensor.stride()),
+            "shape": tuple(tensor.shape) if shape is None else tuple(shape),
+            "strides": tuple(tensor.stride()) if strides is None else tuple(strides),
             "typestr": "|u1",
             "data": (pointer, False),
             "version": 3,
@@ -595,6 +595,49 @@ class _PinnedSharedTable:
             return torch.as_tensor(
                 _CudaArrayView(self, tensor, pointer), device=self.device
             )
+
+
+class _PinnedHostProjection:
+    """Small Engram projection weight pinned in host RAM with a UVA view.
+
+    Every Engram checkpoint key must stay in host memory on every hardware
+    family. ``pin_memory`` copies the checkpoint bytes into the torch host
+    allocator (anonymous pinned pages, never an mmap view of the checkpoint)
+    and kernels read them through the zero-copy mapping; no device allocation
+    backs the view, so transient staging during computation never becomes a
+    persistent GPU copy. The owner must be retained for as long as any view
+    is used: releasing the pinned block invalidates the mapping.
+    """
+
+    def __init__(self, tensor, device):
+        self.device = torch.device(device)
+        with torch.cuda.device(self.device):
+            host = tensor.detach().contiguous().pin_memory()
+            if not host.is_pinned():
+                raise RuntimeError(
+                    "CUDA did not recognize the pinned Engram projection weight"
+                )
+            from cuda.bindings import runtime
+
+            result, pointer = runtime.cudaHostGetDevicePointer(host.data_ptr(), 0)
+            if int(result) != 0:
+                raise RuntimeError(
+                    f"Engram cudaHostGetDevicePointer failed: {result}"
+                )
+            # Describe the mapping as flat bytes so any element dtype survives
+            # the round trip; the element view below restores shape and dtype.
+            flat = torch.as_tensor(
+                _CudaArrayView(
+                    self,
+                    host,
+                    pointer,
+                    shape=(host.numel() * host.element_size(),),
+                    strides=(1,),
+                ),
+                device=self.device,
+            )
+        self.host = host
+        self.view = flat.view(host.dtype).view(host.shape)
 
 
 # Device-scale generations use this cold-path release fence. Retain a failed
@@ -1970,12 +2013,16 @@ class Engram(nn.Module):
         q_weight: torch.Tensor,
         k_weight: torch.Tensor,
         eps: float,
+        host_pinned=None,
     ):
         super().__init__()
         self.layout = layout
         self.layer_hash_index = layer_hash_index
         self.embed_tokens = embedding
         self.wkv = wkv
+        # Retain the pinned-host owners of any UVA projection views; their
+        # registration finalizers must not run while buffers reference them.
+        self._host_pinned = () if host_pinned is None else tuple(host_pinned)
         self.register_buffer("q_weight", q_weight, persistent=False)
         self.register_buffer("k_weight", k_weight, persistent=False)
         self.eps = eps
@@ -2171,25 +2218,40 @@ class Engram(nn.Module):
                     scale_group=scale_group,
                     scale_identity=identity,
                 )
+            host_pinned = []
             if target.type == "cuda":
                 with torch.cuda.device(target):
                     from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
-                    projection = V41MXFP8Linear(
-                        load("wkv.weight").to(target), load("wkv.scale").to(target)
-                    )
+                    # Policy: every Engram checkpoint key stays in host RAM on
+                    # every hardware family. The projection weights are pinned
+                    # and exposed through zero-copy UVA views; wkv exceeds the
+                    # V41MXFP8Linear bf16 cache bound, so its exact
+                    # dequantization remains a per-call transient and no
+                    # Engram-derived bytes persistently occupy device memory.
+                    wkv_weight = _PinnedHostProjection(load("wkv.weight"), target)
+                    wkv_scale = _PinnedHostProjection(load("wkv.scale"), target)
+                    host_pinned.extend((wkv_weight, wkv_scale))
+                    projection = V41MXFP8Linear(wkv_weight.view, wkv_scale.view)
+                q_pinned = _PinnedHostProjection(load("q_weight"), target)
+                k_pinned = _PinnedHostProjection(load("k_weight"), target)
+                host_pinned.extend((q_pinned, k_pinned))
+                q_weight, k_weight = q_pinned.view, k_pinned.view
             else:
                 projection = _ReferenceWKV(
                     dequantize_block_weight(load("wkv.weight"), load("wkv.scale"))
                 )
+                q_weight = load("q_weight").to(target)
+                k_weight = load("k_weight").to(target)
             return cls(
                 layout,
                 layer_hash_index,
                 embedding,
                 projection,
-                load("q_weight").to(target),
-                load("k_weight").to(target),
+                q_weight,
+                k_weight,
                 float(_config_value(config, "rms_norm_eps")),
+                host_pinned=host_pinned,
             )
         except BaseException:
             if external_storage is not None and embedding is not None:
