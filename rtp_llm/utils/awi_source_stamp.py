@@ -11,7 +11,7 @@ declared source pair.
 
 BUILD_SOURCE = {
     "internal": "1652dde216335fb3b14076964eb44ba3fc9c83c0",
-    "public": "382c239d8e7749e3f3a51d4eaeb28ad453e8fbc3",
+    "public": "5ccbc5184a8645f7bac3dc2800a4c77e759c7604",
     "branch": "feature/adapt-dsv41-1017-mi308x-cc",
     "baseline": {
         "internal": "03036dcdf1b70ab8145169d013e2475e4a71a35a",
