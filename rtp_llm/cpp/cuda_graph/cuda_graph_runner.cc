@@ -12,6 +12,7 @@
 #include <c10/core/InferenceMode.h>
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/awi/AwiTelemetry.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
@@ -2414,6 +2415,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                          key,
                          graph_pool_delta / 1024 / 1024,
                          post_capture_reserved / 1024 / 1024);
+        // Observation is emitted only after a real capture succeeded.  The
+        // backend string follows the compiled runtime, not a requested flag.
+        AwiTelemetry::instance().recordCapture(key);
     }
 }
 

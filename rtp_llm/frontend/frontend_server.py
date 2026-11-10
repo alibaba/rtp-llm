@@ -28,6 +28,7 @@ from rtp_llm.server.misc import format_exception
 from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
+from rtp_llm.telemetry import awi as awi_telemetry
 from rtp_llm.telemetry import attributes as trace_attrs
 from rtp_llm.telemetry import record_response_attributes, start_server_span
 from rtp_llm.utils.complete_response_async_generator import (
@@ -420,6 +421,123 @@ class FrontendServer(object):
                 else:
                     trace_state.finish(error=e)
         return rep
+
+    async def awi_generate(self, req: Union[str, Dict[str, Any]], raw_request: RawRequest):
+        """Raw-token generation for the frozen AWI benchmark workload."""
+        body: Dict[str, Any] = {}
+        try:
+            body = json.loads(req) if isinstance(req, str) else dict(req)
+            input_ids = [int(v) for v in body.get("input_ids", [])]
+            max_tokens = int(body.get("max_tokens", 0))
+            if not input_ids or max_tokens <= 0:
+                return ORJSONResponse(
+                    status_code=400,
+                    content={"error": "input_ids and positive max_tokens are required"},
+                )
+            extra = body.get("extra_configs") or {}
+            min_new_tokens = int(extra.get("min_new_tokens", 0))
+            ignore_eos = bool(extra.get("ignore_eos", True))
+            awi_request_id = str(
+                raw_request.headers.get("X-AWI-Request-ID")
+                or body.get("request_id")
+                or ""
+            )
+            if not awi_request_id:
+                return ORJSONResponse(
+                    status_code=400, content={"error": "X-AWI-Request-ID is required"}
+                )
+            sequence = self._global_controller.increment() % 4096
+            request_id = generate_request_id(
+                self.py_env_configs.server_config.ip,
+                self.py_env_configs.server_config.server_port,
+                self.server_id,
+                sequence,
+            )
+            awi_telemetry.record_mapping(
+                awi_request_id, request_id, len(input_ids), max_tokens, extra
+            )
+            result = await self._frontend_worker.awi_generate(
+                request_id=request_id,
+                input_ids=input_ids,
+                max_tokens=max_tokens,
+                min_new_tokens=min_new_tokens,
+                ignore_eos=ignore_eos,
+            )
+            completion_tokens = int(result.get("output_tokens", 0))
+            return ORJSONResponse(
+                content={
+                    "id": awi_request_id,
+                    "object": "chat.completion",
+                    "model": "deepseek-v4.1-flash-1017",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": result.get("text", ""),
+                            },
+                            "finish_reason": (
+                                "length" if completion_tokens >= max_tokens else "stop"
+                            ),
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": len(input_ids),
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": len(input_ids) + completion_tokens,
+                    },
+                    "output_ids": result.get("output_ids", []),
+                    "request_id": request_id,
+                }
+            )
+        except Exception as e:
+            return self._handle_exception(body or req, e)
+        finally:
+            try:
+                self._global_controller.decrement()
+            except Exception:
+                pass
+
+    async def awi_barrier(self, req: Union[str, Dict[str, Any]]):
+        try:
+            body = json.loads(req) if isinstance(req, str) else dict(req)
+            operation_id = str(body.get("operation_id", ""))
+            request_ids = [str(v) for v in body.get("request_ids", [])]
+            context_tokens = int(body.get("context_tokens", 0))
+            if not operation_id or not request_ids:
+                return ORJSONResponse(
+                    status_code=400,
+                    content={"error": "operation_id and request_ids are required"},
+                )
+            numeric = awi_telemetry.write_barrier(
+                operation_id, request_ids, context_tokens, len(request_ids)
+            )
+            if len(numeric) != len(request_ids):
+                return ORJSONResponse(
+                    status_code=409,
+                    content={
+                        "error": "barrier request ids are not all admitted",
+                        "operation_id": operation_id,
+                        "found": len(numeric),
+                        "requested": len(request_ids),
+                    },
+                )
+            state = await awi_telemetry.wait_for_resident(
+                operation_id, numeric, timeout_s=1800.0
+            )
+            if state.get("status") == "resident":
+                return ORJSONResponse(content=state)
+            if state.get("status") == "capacity":
+                return ORJSONResponse(status_code=503, content=state)
+            return ORJSONResponse(status_code=503, content=state)
+        except Exception as e:
+            return self._handle_exception(req, e)
+
+    async def awi_observations(self, operation_id: str):
+        try:
+            return ORJSONResponse(content=awi_telemetry.observations(operation_id))
+        except Exception as e:
+            return self._handle_exception({"operation_id": operation_id}, e)
 
     async def chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request

@@ -2,8 +2,10 @@
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/awi/AwiTelemetry.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <cstdlib>
+#include <chrono>
 #include <algorithm>
 #include <limits>
 #include <memory>
@@ -304,12 +306,55 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                                       stream_groups.modelExecuteTokenSize(),
                                       stream_groups.maxSeqLen());
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        const auto awi_start_system = std::chrono::system_clock::now();
+        const auto awi_start_steady = std::chrono::steady_clock::now();
         if (model_inputs_logger_) {
             const auto role = is_propose_ ? ModelInputsModelRole::DRAFT : ModelInputsModelRole::NORMAL;
             model_inputs_logger_->log(model_input, role, model_->model_id_);
         }
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (AwiTelemetry::instance().enabled()) {
+            // The evaluator requires a synchronized scheduler step, including
+            // the host/communication tail.  Sync only when telemetry is on so
+            // the production path keeps its existing overlap.
+            cuda_graph::graphDeviceSynchronize();
+            const auto awi_end_steady = std::chrono::steady_clock::now();
+            const auto awi_end_ns     = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                            std::chrono::system_clock::now().time_since_epoch())
+                                            .count();
+            const auto awi_start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          awi_start_system.time_since_epoch())
+                                          .count();
+            const double awi_elapsed_ms =
+                std::chrono::duration<double, std::milli>(awi_end_steady - awi_start_steady).count();
+            auto& telemetry = AwiTelemetry::instance();
+            for (const auto& stream : stream_groups.contextStreams()) {
+                telemetry.recordPrefill(
+                    stream->streamId(), static_cast<int64_t>(stream->inputLength()), awi_start_ns, awi_end_ns);
+                telemetry.recordReuse(stream->streamId(), static_cast<int64_t>(stream->reuseLength()));
+            }
+            const auto& decode_streams = stream_groups.decodeStreams();
+            for (const auto& stream : decode_streams) {
+                telemetry.recordDecode(
+                    stream->streamId(), AwiTelemetry::threadGraphReplay(), awi_elapsed_ms);
+            }
+            if (!decode_streams.empty()) {
+                std::vector<AwiResidentSequence> resident;
+                int64_t                          context_tokens = 0;
+                resident.reserve(decode_streams.size());
+                for (const auto& stream : decode_streams) {
+                    AwiResidentSequence seq;
+                    seq.request_id     = stream->streamId();
+                    seq.input_tokens   = static_cast<int64_t>(stream->inputLength());
+                    seq.kv_tokens      = static_cast<int64_t>(stream->seqLength());
+                    seq.reserved_tokens = static_cast<int64_t>(stream->maxSeqLen());
+                    context_tokens     = std::max(context_tokens, seq.reserved_tokens);
+                    resident.push_back(seq);
+                }
+                telemetry.recordResident(resident, context_tokens);
+            }
+        }
     }
 
     if (auto capture_error = model_->takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {

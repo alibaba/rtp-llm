@@ -917,6 +917,20 @@ class FrontendApp(object):
 
             return await track_business_request(call)
 
+        @app.post("/awi/generate")
+        async def awi_generate(
+            req: Union[str, Dict[Any, Any]], raw_request: RawRequest
+        ):
+            return await self.frontend_server.awi_generate(req, raw_request)
+
+        @app.post("/awi/barrier")
+        async def awi_barrier(req: Union[str, Dict[Any, Any]]):
+            return await self.frontend_server.awi_barrier(req)
+
+        @app.get("/awi/observations")
+        async def awi_observations(operation_id: str = ""):
+            return await self.frontend_server.awi_observations(operation_id)
+
         @app.post("/update_scheduler_info")
         async def update_scheduler_info(
             req: Union[str, Dict[Any, Any]], request: Request

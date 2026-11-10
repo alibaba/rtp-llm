@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
+#include "rtp_llm/cpp/awi/AwiTelemetry.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -227,6 +228,11 @@ absl::Status StreamCacheResource::initKVBlock() {
             case MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED:
                 return absl::UnavailableError("kv cache is temporarily unavailable");
             case MallocStatus::PERMANENT_RESOURCE_EXHAUSTED:
+                // The allocator itself reports that the requested sequence can
+                // never fit.  This is the capacity-failure event the barrier
+                // admission probe consumes; it is not synthesized by an HTTP
+                // handler.
+                AwiTelemetry::instance().recordCapacityFailure("kv_capacity_exceeded");
                 return absl::ResourceExhaustedError("request exceeds usable kv cache capacity");
             case MallocStatus::INTERNAL_ERROR:
                 return absl::InternalError("malloc failed");

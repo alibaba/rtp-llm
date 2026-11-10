@@ -1,8 +1,10 @@
 """Shared DSV4 utility functions used across BF16 and FP8 paths."""
 
+import os
 import weakref
 
 import torch
+import torch.nn.functional as F
 from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
@@ -21,13 +23,64 @@ class V41Embedding(Embedding):
         return hidden.reshape(*input.shape, hidden.shape[-1])
 
 
+def _deepgemm_runtime_supported() -> bool:
+    """DeepGEMM V4 kernels need Hopper/Blackwell; Ada (SM89) must fall back."""
+    if os.environ.get("RTP_LLM_FORCE_FP8_REFERENCE", "0") == "1":
+        return False
+    if not torch.cuda.is_available():
+        return False
+    try:
+        import deep_gemm  # noqa: F401
+    except Exception:
+        return False
+    return torch.cuda.get_device_capability()[0] >= 9
+
+
+def _dequantize_v41_weight(weight: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """Dequantize native 32x32 checkpoint blocks to BF16.
+
+    This is the runtime decoder for the original checkpoint representation; it
+    does not requantize or substitute weights.
+    """
+    if weight.ndim != 2:
+        raise ValueError("V4.1 FP8 weight must be a matrix")
+    out_dim, in_dim = weight.shape
+    block = 32
+    rows = torch.arange(out_dim, device=scales.device) // block
+    cols = torch.arange(in_dim, device=scales.device) // block
+    scale = scales.float().index_select(0, rows).index_select(1, cols)
+    return (weight.float() * scale).to(torch.bfloat16)
+
+
+def _dequantize_v41_activation(x_q: torch.Tensor, x_s: torch.Tensor) -> torch.Tensor:
+    """Undo the group-32 UE8M0 activation quantization for the reference GEMM."""
+    if x_s is None:
+        return x_q.to(torch.bfloat16)
+    m = x_q.shape[0]
+    k = x_q.shape[1]
+    if x_s.dtype == torch.int32:
+        packed = x_s.contiguous().view(torch.uint8).reshape(m, -1)
+        if packed.shape[1] < k // 32:
+            raise ValueError(f"activation scale shape {tuple(x_s.shape)} cannot cover {k}")
+        exponent = packed[:, : k // 32].to(torch.float32)
+        scale = torch.exp2(exponent - 127.0)
+    else:
+        scale = x_s.to(torch.float32).reshape(m, k // 32)
+        if scale.max() < 1.0:
+            scale = torch.exp2(scale - 127.0)
+    values = x_q.float().reshape(m, k // 32, 32) * scale[..., None]
+    return values.reshape(m, k).to(torch.bfloat16)
+
+
 class V41MXFP8Linear(torch.nn.Module):
     """Native 32x32 checkpoint blocks, expanded to per-row MXFP8 scales."""
 
     def __init__(self, weight: torch.Tensor, scales: torch.Tensor):
         super().__init__()
         self.weight = weight
+        self.raw_scales = scales
         self.N, self.K = weight.shape
+        self._use_deepgemm = _deepgemm_runtime_supported()
         self.weight_scales = self.pack_scales(scales)
 
     def pack_scales(self, scales: torch.Tensor) -> torch.Tensor:
@@ -78,6 +131,18 @@ class V41MXFP8Linear(torch.nn.Module):
             if out is not None
             else torch.empty(shape, device=x_q.device, dtype=torch.bfloat16)
         )
+        if m and not self._use_deepgemm:
+            # Ada has no DeepGEMM V4 kernel.  Decode the original FP8 weights
+            # and activation scales at runtime, compute in BF16, and release
+            # the temporary weight when this call returns.
+            x_2d = x_q.reshape(m, self.K)
+            x_bf16 = _dequantize_v41_activation(x_2d, x_s)
+            weight = _dequantize_v41_weight(self.weight, self.raw_scales)
+            result = F.linear(x_bf16, weight)
+            if out is not None:
+                out.copy_(result.view_as(out))
+                return out
+            return result.view(shape)
         if m:
             import deep_gemm
 
@@ -103,6 +168,14 @@ class V41MXFP8Linear(torch.nn.Module):
     def forward(self, x: torch.Tensor, out=None):
         if x.numel() == 0:
             return out if out is not None else x.new_empty((*x.shape[:-1], self.N))
+        if not self._use_deepgemm:
+            flat = x.reshape(-1, self.K).to(torch.bfloat16)
+            weight = _dequantize_v41_weight(self.weight, self.raw_scales)
+            result = F.linear(flat, weight).view(*x.shape[:-1], self.N)
+            if out is not None:
+                out.copy_(result.view_as(out))
+                return out
+            return result
         return self.forward_quantized(*self._quantize_input(x), out=out)
 
 

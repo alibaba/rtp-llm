@@ -20,6 +20,7 @@ FP8 linears already migrated in S2 to ``CudaFp8DeepGEMMLinear`` and don't
 go through this class for attention/indexer/shared-expert linears.
 """
 
+import os
 from typing import Optional
 
 import torch
@@ -216,7 +217,29 @@ class QuantizedLinear(nn.Module):
         if self.storage == "bf16":
             return F.linear(x, self.weight)
         if self.storage == "fp4":
+            if not _deepgemm_fp4_supported():
+                # Ada / non-SM100: decode the original packed FP4 weight and
+                # compute with the same arithmetic contract.  No requantized
+                # checkpoint is written.
+                w = self.dequant_weight(out_dtype=torch.bfloat16)
+                return F.linear(x.to(torch.bfloat16), w).to(x.dtype)
             return self._fp4_forward_deepgemm(x)
         # FP8: dequant to x's dtype on the fly.
         w = self.dequant_weight(out_dtype=x.dtype)
         return F.linear(x, w)
+
+
+def _deepgemm_fp4_supported() -> bool:
+    if os.environ.get("RTP_LLM_FORCE_FP4_REFERENCE", "0") == "1":
+        return False
+    if not torch.cuda.is_available():
+        return False
+    try:
+        import deep_gemm
+
+        return (
+            torch.cuda.get_device_capability()[0] == 10
+            and hasattr(deep_gemm, "fp8_fp4_gemm_nt")
+        )
+    except Exception:
+        return False

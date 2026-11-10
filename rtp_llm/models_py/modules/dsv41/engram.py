@@ -2164,24 +2164,17 @@ class Engram(nn.Module):
                     scale_group=scale_group,
                     scale_identity=identity,
                 )
-            if target.type == "cuda":
-                with torch.cuda.device(target):
-                    from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
-
-                    projection = V41MXFP8Linear(
-                        load("wkv.weight").to(target), load("wkv.scale").to(target)
-                    )
-            else:
-                projection = _ReferenceWKV(
-                    dequantize_block_weight(load("wkv.weight"), load("wkv.scale"))
-                )
+            # All Engram checkpoint tensors stay in host RAM.  The projection
+            # decodes its original FP8 blocks per forward and the gate weights
+            # are staged as tiny bounded copies when the gate runs.
+            projection = HostResidentWKV(load("wkv.weight"), load("wkv.scale"))
             return cls(
                 layout,
                 layer_hash_index,
                 embedding,
                 projection,
-                load("q_weight").to(target),
-                load("k_weight").to(target),
+                load("q_weight"),
+                load("k_weight"),
                 float(_config_value(config, "rms_norm_eps")),
             )
         except BaseException:
@@ -2335,9 +2328,23 @@ class Engram(nn.Module):
         else:
             kv = self.wkv(rows)
         del rows
-        return gated_engram_residual(
-            hidden, kv, self.q_weight, self.k_weight, self.eps, token_mask, out=out
-        )
+        # Master gate weights are host resident.  Stage only the two 40 KiB
+        # BF16 tensors for the duration of this kernel; this is bounded
+        # per-call staging, not a persistent full-model copy.
+        q_weight = self.q_weight
+        k_weight = self.k_weight
+        staged = False
+        if hidden.is_cuda and not q_weight.is_cuda:
+            q_weight = q_weight.to(hidden.device, non_blocking=False)
+            k_weight = k_weight.to(hidden.device, non_blocking=False)
+            staged = True
+        try:
+            return gated_engram_residual(
+                hidden, kv, q_weight, k_weight, self.eps, token_mask, out=out
+            )
+        finally:
+            if staged:
+                del q_weight, k_weight
 
 
 class _ReferenceWKV(nn.Module):
@@ -2349,3 +2356,31 @@ class _ReferenceWKV(nn.Module):
 
     def forward(self, rows):
         return F.linear(mxfp8_activation_reference(rows), self.weight)
+
+
+class HostResidentWKV(nn.Module):
+    """WKV projection whose checkpoint bytes stay in host RAM.
+
+    The evaluator requires every Engram checkpoint tensor, including the WKV
+    projection, to be host resident with no persistent GPU mirror.  The
+    original FP8 weight is decoded to BF16 for the duration of one forward
+    call, uploaded as a bounded temporary, consumed, and released.  Nothing
+    is cached on the device between calls.
+    """
+
+    def __init__(self, weight: torch.Tensor, scales: torch.Tensor):
+        super().__init__()
+        self.register_buffer("weight", weight.cpu(), persistent=False)
+        self.register_buffer("scales", scales.cpu(), persistent=False)
+
+    def _decode(self) -> torch.Tensor:
+        return dequantize_block_weight(self.weight, self.scales)
+
+    def forward(self, rows: torch.Tensor) -> torch.Tensor:
+        if not rows.is_cuda:
+            return F.linear(mxfp8_activation_reference(rows), self._decode())
+        weight = self._decode().to(rows.device, non_blocking=False)
+        try:
+            return F.linear(rows.to(torch.bfloat16), weight)
+        finally:
+            del weight

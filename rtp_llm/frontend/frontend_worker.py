@@ -147,6 +147,52 @@ class FrontendWorker:
         tokens = [self.pipeline.decode(id) for id in token_ids]
         return token_ids, tokens
 
+    async def awi_generate(
+        self,
+        request_id: int,
+        input_ids: List[int],
+        max_tokens: int,
+        min_new_tokens: int = 0,
+        ignore_eos: bool = True,
+    ) -> Dict[str, Any]:
+        """Run a raw-token request through the same Pipeline as normal traffic.
+
+        The evaluator needs exact token accounting, so this path bypasses the
+        prompt/template layer but keeps the engine's scheduler, KV cache and
+        graph paths unchanged.
+        """
+        generate_config = GenerateConfig()
+        generate_config.max_new_tokens = int(max_tokens)
+        generate_config.min_new_tokens = int(min_new_tokens)
+        generate_config.ignore_eos = bool(ignore_eos)
+        generate_config.is_streaming = False
+        generate_config.incremental = False
+        generate_config.return_output_ids = True
+        generate_config.aux_info = True
+
+        output_ids: List[int] = []
+        text = ""
+        async for generate_response in self.pipeline.generate_stream(
+            request_id=request_id,
+            token_ids=list(int(v) for v in input_ids),
+            mm_inputs=[],
+            generate_config=generate_config,
+        ):
+            if not generate_response.generate_outputs:
+                continue
+            output = generate_response.generate_outputs[0]
+            if output.output_ids is not None:
+                output_ids = [int(v) for v in output.output_ids.reshape(-1).tolist()]
+            if generate_response.generate_texts:
+                text = generate_response.generate_texts[0] or text
+        if not text and output_ids:
+            text = self.pipeline.decode(output_ids)
+        return {
+            "output_ids": output_ids,
+            "output_tokens": len(output_ids),
+            "text": text,
+        }
+
     async def batch_infer(
         self, prompts: List[str], request_id: int, generate_config: dict
     ) -> BatchPipelineResponse:

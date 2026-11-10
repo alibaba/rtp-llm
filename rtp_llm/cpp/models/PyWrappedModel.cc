@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/cuda_graph/prepared_attention_inputs_guard.h"
+#include "rtp_llm/cpp/awi/AwiTelemetry.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -1292,6 +1293,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         const bool can_run_graph = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
                                    && graph_runner->canRun(py_model_inputs, graph_state);
+        AwiTelemetry::setThreadGraphReplay(can_run_graph);
         if (!capture_hidden_states && !inputs.warmup && !dspark_graph_budgets_.empty()
             && py_model_inputs.attention_inputs.is_target_verify) {
             RTP_LLM_CHECK_WITH_INFO(
