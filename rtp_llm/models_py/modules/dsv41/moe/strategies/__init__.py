@@ -35,10 +35,12 @@ from .grouped_fp4 import (  # noqa: F401  ep_size==1 + kernel
 )
 from .deepep import DeepEPStrategy  # noqa: F401  targeted tests/experiments
 from .local_loop import LocalLoopStrategy  # noqa: F401  universal fallback
+from .rocm_ep import RocmEPStrategy  # noqa: F401  ROCm EP fallback
 
 __all__ = [
     "MoeCfg",
     "RoutedExpertsStrategy",
     "select_strategy",
     "_has_fp8_fp4_grouped_kernel",
+    "RocmEPStrategy",
 ]
