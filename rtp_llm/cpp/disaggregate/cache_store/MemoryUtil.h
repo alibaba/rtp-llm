@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <shared_mutex>
 
@@ -15,6 +16,11 @@ public:
     virtual bool isMemoryMr(void* ptr, uint64_t size, bool gpu, bool adopted)                   = 0;
     virtual bool findMemoryMr(void* mem_info, void* buf, uint64_t size, bool gpu, bool adopted) = 0;
     virtual bool isRdmaMode()                                                                   = 0;
+
+    // Minimum size of an individual registration, in bytes.
+    virtual uint64_t minRegistrationSize() const {
+        return 0;
+    }
 };
 
 }  // namespace rtp_llm
