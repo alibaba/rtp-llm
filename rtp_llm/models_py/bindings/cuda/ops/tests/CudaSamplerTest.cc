@@ -392,6 +392,70 @@ TEST_F(CudaSamplerTest, testVllmGumbelBridge) {
     }
 }
 
+TEST_F(CudaSamplerTest, testDeferredPreparationPreservesHistoryAndPenalties) {
+    initializeSamplerPython();
+    constexpr int64_t batch = 4;
+    constexpr int64_t vocab = 10;
+    auto              original =
+        cudaTensor({0.1f, 0.8f, 0.9f, -0.2f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f}, {1, vocab}).repeat({batch, 1});
+    auto history =
+        pinnedIntTensor({2, 2, 2, 1, 1, 0, 2, 2, 2, 1, 1, 0, 2, 2, 2, 1, 1, 0, 2, 2, 2, 1, 1, 0}).reshape({batch, 6});
+    for (int mode = 0; mode < 6; ++mode) {
+        SCOPED_TRACE("penalty mode=" + std::to_string(mode));
+        GreedyParams params;
+        params.logits           = original.clone();
+        params.input_lengths    = cudaIntTensor({5, 5, 5, 5}, {batch});
+        params.sequence_lengths = cudaIntTensor({5, 5, 5, 5}, {batch});
+        params.token_ids        = history.clone();
+        params.step             = 5;
+        params.top_k            = pinnedIntTensor({0, 0, 0, 0});
+        params.top_p            = pinnedFloatTensor({1, 1, 1, 1});
+        params.temperature      = pinnedFloatTensor({0.8f, 1, 1.2f, 1});
+        params.output_all_probs = torch::empty_like(original);
+        if (mode > 0) {
+            params.repetition_penalty = pinnedFloatTensor({1, 1, 1, 1});
+            params.presence_penalty   = pinnedFloatTensor({0, 0, 0, 0});
+            params.frequency_penalty  = pinnedFloatTensor({0, 0, 0, 0});
+        }
+        if (mode == 2) {
+            params.repetition_penalty->fill_(1.7f);
+        } else if (mode == 3) {
+            params.presence_penalty->fill_(0.6f);
+        } else if (mode == 4) {
+            params.frequency_penalty->fill_(0.2f);
+        } else if (mode == 5) {
+            params.no_repeat_ngram_size = pinnedIntTensor({1, 0, 1, 0});
+        }
+        params.do_sample = pinnedIntTensor({1, 0, 1, 1}).to(torch::kBool);
+        execSampleGreedy(params);
+        auto reference = params.output_all_probs->clone();
+        params.logits.copy_(original);
+        params.token_ids.copy_(history);
+        params.output_all_probs->fill_(-7);
+        params.defer_token_sampling = true;
+        EXPECT_TRUE(execSampleGreedy(params).deferred_token_sampling);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        EXPECT_TRUE(torch::allclose(torch::softmax(params.logits, -1), reference, 1e-5, 1e-6));
+        EXPECT_TRUE(torch::equal(params.token_ids, history));
+        EXPECT_TRUE(torch::all(params.output_all_probs.value() == -7).item<bool>());
+    }
+
+    GreedyParams unfiltered;
+    unfiltered.logits               = original.clone();
+    unfiltered.input_lengths        = cudaIntTensor({5, 5, 5, 5}, {batch});
+    unfiltered.sequence_lengths     = cudaIntTensor({5, 5, 5, 5}, {batch});
+    unfiltered.token_ids            = history.clone();
+    unfiltered.step                 = 5;
+    unfiltered.top_k                = pinnedIntTensor({-1, 1, vocab, 0});
+    unfiltered.top_p                = pinnedFloatTensor({0, std::numeric_limits<float>::quiet_NaN(), 1, -1e-8f});
+    unfiltered.temperature          = pinnedFloatTensor({1, 1, 1, 1});
+    unfiltered.defer_token_sampling = true;
+    EXPECT_TRUE(execSampleGreedy(unfiltered).deferred_token_sampling);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    EXPECT_TRUE(torch::equal(unfiltered.logits, original));
+    EXPECT_TRUE(torch::equal(unfiltered.token_ids, history));
+}
+
 TEST_F(CudaSamplerTest, testDeferredRejectionBridge) {
     initializeSamplerPython();
     auto options = torch::TensorOptions().device(torch::kCUDA);
@@ -418,8 +482,309 @@ TEST_F(CudaSamplerTest, testDeferredRejectionBridge) {
     params.draft_point_mass            = true;
     execRejectionSampling(params);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-    EXPECT_EQ(toHostInt(output), (std::vector<int32_t>{2, -1, -1, -1, 0, 2, -1, -1, 0, 0, 2, -1, 0, 0, 0, 3}));
+    EXPECT_EQ(toHostInt(output), (std::vector<int32_t>{2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 3}));
     EXPECT_EQ(toHostInt(lengths), (std::vector<int32_t>{1, 2, 3, 4}));
+    pybind11::exec(R"PY(
+from unittest.mock import patch
+from rtp_llm.models_py.sampling import adapter, rejection_graph
+
+assert callable(rejection_graph._native_replay)
+torch.cuda.synchronize()
+rejection_graph._entries.clear()
+native_replay = rejection_graph._native_replay
+native_calls = []
+def counted_native_replay(*args):
+    native_calls.append(1)
+    return native_replay(*args)
+
+producer = torch.cuda.Stream()
+consumer = torch.cuda.current_stream()
+saved_outputs = []
+with patch.object(rejection_graph, "_native_replay", counted_native_replay), patch.dict(
+    os.environ, {"RTP_LLM_GUMBEL_REJECTION_GRAPH": "1"}
+):
+    for iteration in range(6):
+        with torch.cuda.stream(producer):
+            logits = torch.randn(16, 6, 513, device="cuda")
+            ids = torch.randint(513, (16, 5), device="cuda", dtype=torch.int32)
+            seeds = torch.arange(16, device="cuda", dtype=torch.int64) + iteration * 13
+            positions = seeds + iteration * 17
+            sample = seeds % 2 == 0
+            caps = (seeds % 6).int()
+            expected, expected_lengths = adapter._rejection_sample_logits_eager(
+                logits, None, ids, seeds, positions, sample, None, caps, clean_output=True
+            )
+        consumer.wait_stream(producer)
+        output = torch.full((16, 6), -777, device="cuda", dtype=torch.int32)
+        lengths = torch.full((16,), -777, device="cuda", dtype=torch.int32)
+        assert rejection_graph.try_replay(
+            adapter._rejection_sample_logits_eager,
+            logits, ids, seeds, positions, sample, None, caps, output, lengths,
+        )
+        saved_outputs.append((output, lengths, expected, expected_lengths))
+        del logits, ids, seeds, positions, sample, caps
+
+torch.cuda.synchronize()
+assert len(native_calls) == 6
+for output, lengths, expected, expected_lengths in saved_outputs:
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+    torch.testing.assert_close(lengths, expected_lengths, rtol=0, atol=0)
+rejection_graph._entries.clear()
+)PY");
+}
+
+TEST_F(CudaSamplerTest, testDeferredNativePlanBypassesPythonAndExpires) {
+    initializeSamplerPython();
+    auto native_env_patch = pybind11::module_::import("unittest.mock")
+                                .attr("patch")
+                                .attr("dict")(pybind11::module_::import("os").attr("environ"),
+                                              pybind11::dict(pybind11::arg("RTP_LLM_GUMBEL_REJECTION_NATIVE") = "0"));
+    native_env_patch.attr("__enter__")();
+    struct RestoreGraphEnv {
+        std::optional<std::string> value;
+        ~RestoreGraphEnv() {
+            if (value) {
+                setenv("RTP_LLM_GUMBEL_REJECTION_GRAPH", value->c_str(), 1);
+            } else {
+                unsetenv("RTP_LLM_GUMBEL_REJECTION_GRAPH");
+            }
+        }
+    } restore;
+    if (const char* value = std::getenv("RTP_LLM_GUMBEL_REJECTION_GRAPH")) {
+        restore.value = value;
+    }
+    setenv("RTP_LLM_GUMBEL_REJECTION_GRAPH", "1", 1);
+    auto                    options = torch::TensorOptions().device(torch::kCUDA);
+    RejectionSamplingParams params;
+    params.target_logits_d = torch::full({16, 6, 513}, -std::numeric_limits<float>::infinity(), options);
+    params.target_logits_d.select(2, 0).fill_(0);
+    params.draft_token_ids_d           = torch::zeros({16, 5}, options.dtype(torch::kInt32));
+    params.output_token_ids_d          = torch::empty({16, 6}, options.dtype(torch::kInt32));
+    params.output_accepted_token_num_d = torch::empty({16}, options.dtype(torch::kInt32));
+    params.do_sample_d                 = torch::ones({16}, options.dtype(torch::kBool));
+    params.deferred_token_sampling     = true;
+    params.draft_point_mass            = true;
+    execRejectionSampling(params);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    auto graph = pybind11::module_::import("rtp_llm.models_py.sampling.rejection_graph");
+    auto reject_dispatch =
+        pybind11::cpp_function([](pybind11::args) { throw std::runtime_error("unexpected Python Graph dispatch"); });
+    auto patcher =
+        pybind11::module_::import("unittest.mock").attr("patch").attr("object")(graph, "try_replay", reject_dispatch);
+    patcher.attr("__enter__")();
+    auto previous_output = params.output_token_ids_d;
+    params.target_logits_d.fill_(-std::numeric_limits<float>::infinity());
+    params.target_logits_d.select(2, 3).fill_(0);
+    params.draft_token_ids_d.fill_(3);
+    params.output_token_ids_d          = torch::full_like(previous_output, -777);
+    params.output_accepted_token_num_d = torch::full_like(params.output_accepted_token_num_d, -777);
+    EXPECT_NO_THROW(execRejectionSampling(params));
+    EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    EXPECT_TRUE(torch::all(params.output_token_ids_d == 3).item<bool>());
+    EXPECT_TRUE(torch::all(previous_output == 0).item<bool>());
+    EXPECT_TRUE(torch::all(params.output_accepted_token_num_d == 6).item<bool>());
+
+    // A competing eviction guard must force a nonblocking fallback. Hold it
+    // on another thread: relocking std::mutex on its owner thread is undefined.
+    pybind11::exec(R"PY(
+import threading
+from rtp_llm.models_py.sampling import rejection_graph
+native_guard_ready = threading.Event()
+native_guard_release = threading.Event()
+native_guard_acquired = []
+def hold_native_guard():
+    acquired = rejection_graph._try_native_guard()
+    native_guard_acquired.append(acquired)
+    native_guard_ready.set()
+    if acquired:
+        try:
+            native_guard_release.wait(10)
+        finally:
+            rejection_graph._release_native_guard()
+native_guard_thread = threading.Thread(target=hold_native_guard)
+native_guard_thread.start()
+assert native_guard_ready.wait(10) and native_guard_acquired == [True]
+)PY");
+    EXPECT_THROW(execRejectionSampling(params), pybind11::error_already_set);
+    pybind11::exec(R"PY(
+native_guard_release.set()
+native_guard_thread.join(timeout=10)
+assert not native_guard_thread.is_alive()
+)PY");
+    EXPECT_NO_THROW(execRejectionSampling(params));
+    EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    // Disabling Graph must bypass the native plan as well as the Python cache.
+    setenv("RTP_LLM_GUMBEL_REJECTION_GRAPH", "0", 1);
+    EXPECT_THROW(execRejectionSampling(params), pybind11::error_already_set);
+    setenv("RTP_LLM_GUMBEL_REJECTION_GRAPH", "1", 1);
+    // An expired Python owner invalidates the native weak registry entry.
+    EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    graph.attr("_entries").attr("clear")();
+    EXPECT_THROW(execRejectionSampling(params), pybind11::error_already_set);
+    patcher.attr("__exit__")(pybind11::none(), pybind11::none(), pybind11::none());
+
+    execRejectionSampling(params);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    EXPECT_TRUE(torch::all(params.output_accepted_token_num_d == 6).item<bool>());
+    native_env_patch.attr("__exit__")(pybind11::none(), pybind11::none(), pybind11::none());
+}
+
+TEST_F(CudaSamplerTest, testDeferredPackedRngMatchesEagerAcrossCacheMisses) {
+    initializeSamplerPython();
+    auto native_env_patch = pybind11::module_::import("unittest.mock")
+                                .attr("patch")
+                                .attr("dict")(pybind11::module_::import("os").attr("environ"),
+                                              pybind11::dict(pybind11::arg("RTP_LLM_GUMBEL_REJECTION_NATIVE") = "0"));
+    native_env_patch.attr("__enter__")();
+    const char*             old_env  = std::getenv("RTP_LLM_GUMBEL_REJECTION_GRAPH");
+    const auto              previous = old_env ? std::make_optional(std::string(old_env)) : std::nullopt;
+    auto                    options  = torch::TensorOptions().device(torch::kCUDA);
+    RejectionSamplingParams params;
+    params.deferred_token_sampling = true;
+    params.draft_point_mass        = true;
+    std::vector<at::Generator> eager_generators;
+    for (int i = 0; i < 16; ++i) {
+        auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+        generator.set_current_seed(8147 + i);
+        params.generator.push_back(generator);
+        auto reference = torch::make_generator<at::CUDAGeneratorImpl>();
+        reference.set_current_seed(8147 + i);
+        eager_generators.push_back(reference);
+    }
+    auto graph = pybind11::module_::import("rtp_llm.models_py.sampling.rejection_graph");
+    // Repeated states exercise cold capture, native hits, cap-key changes, and
+    // eviction. Compare both tokens and generator progression to eager.
+    for (int iteration = 0; iteration < 10; ++iteration) {
+        const int batch        = iteration == 8 ? 8 : 16;
+        params.target_logits_d = torch::randn({batch, 6, 513}, options);
+        params.target_logits_d.select(2, 0).add_(6);
+        params.draft_token_ids_d = torch::zeros({batch, 5}, options.dtype(torch::kInt32));
+        params.do_sample_d       = (torch::arange(batch, options.dtype(torch::kInt32)) % 3 != 0);
+        params.acceptance_cap =
+            iteration >= 4 && iteration <= 6 ? torch::arange(batch, options.dtype(torch::kInt32)) % 6 : torch::Tensor();
+        params.output_token_ids_d          = torch::full({batch, 6}, -777, options.dtype(torch::kInt32));
+        params.output_accepted_token_num_d = torch::empty({batch}, options.dtype(torch::kInt32));
+        if (iteration == 7) {
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            graph.attr("_entries").attr("clear")();
+        }
+        setenv("RTP_LLM_GUMBEL_REJECTION_GRAPH", "1", 1);
+        execRejectionSampling(params);
+        auto expected                        = params;
+        expected.generator                   = eager_generators;
+        expected.output_token_ids_d          = torch::full_like(params.output_token_ids_d, -999);
+        expected.output_accepted_token_num_d = torch::empty_like(params.output_accepted_token_num_d);
+        setenv("RTP_LLM_GUMBEL_REJECTION_GRAPH", "0", 1);
+        execRejectionSampling(expected);
+        EXPECT_TRUE(torch::equal(params.output_token_ids_d, expected.output_token_ids_d));
+        EXPECT_TRUE(torch::equal(params.output_accepted_token_num_d, expected.output_accepted_token_num_d));
+        for (int i = 0; i < 16; ++i) {
+            EXPECT_TRUE(torch::equal(params.generator[i].get_state(), eager_generators[i].get_state()));
+        }
+    }
+    if (previous) {
+        setenv("RTP_LLM_GUMBEL_REJECTION_GRAPH", previous->c_str(), 1);
+    } else {
+        unsetenv("RTP_LLM_GUMBEL_REJECTION_GRAPH");
+    }
+    native_env_patch.attr("__exit__")(pybind11::none(), pybind11::none(), pybind11::none());
+}
+
+TEST_F(CudaSamplerTest, testNativeEagerBucketsWithoutGraphs) {
+    initializeSamplerPython();
+    struct PatchScope {
+        pybind11::object patch;
+        explicit PatchScope(pybind11::object value): patch(std::move(value)) {
+            patch.attr("__enter__")();
+        }
+        ~PatchScope() {
+            patch.attr("__exit__")(pybind11::none(), pybind11::none(), pybind11::none());
+        }
+    };
+    auto       mock         = pybind11::module_::import("unittest.mock");
+    auto       environment  = pybind11::module_::import("os").attr("environ");
+    auto       patch_dict   = mock.attr("patch").attr("dict");
+    auto       patch_object = mock.attr("patch").attr("object");
+    PatchScope env(patch_dict(environment,
+                              pybind11::dict(pybind11::arg("RTP_LLM_GUMBEL_REJECTION_GRAPH")  = "0",
+                                             pybind11::arg("RTP_LLM_GUMBEL_REJECTION_NATIVE") = "1")));
+    auto       forbidden = pybind11::cpp_function([](pybind11::args, pybind11::kwargs) {
+        throw std::runtime_error("unexpected cold builder or CUDA Graph construction");
+    });
+    PatchScope no_graph(patch_object(pybind11::module_::import("torch").attr("cuda"), "CUDAGraph", forbidden));
+    auto       native = pybind11::module_::import("rtp_llm.models_py.sampling.rejection_native");
+    auto eager = pybind11::module_::import("rtp_llm.models_py.sampling.adapter").attr("_rejection_sample_logits_eager");
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    native.attr("_plans").attr("clear")();
+    auto                       options = torch::TensorOptions().device(torch::kCUDA);
+    std::vector<at::Generator> generators;
+    for (int64_t i = 0; i < 64; ++i) {
+        auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+        generator.set_current_seed(12345 + i);
+        generators.push_back(generator);
+    }
+    std::unique_ptr<PatchScope>               no_builder;
+    std::vector<std::array<torch::Tensor, 4>> outputs;
+    RejectionSamplingParams                   last;
+    int                                       iteration = 0;
+    for (int64_t batch : {64, 62, 63, 64, 62, 63}) {
+        RejectionSamplingParams params;
+        params.target_logits_d = torch::zeros({batch, 6, 129280}, options);
+        params.target_logits_d.select(2, iteration % 3).fill_(std::log(129279.0f * 0.7f / 0.3f));
+        params.draft_token_ids_d           = torch::full({batch, 5}, iteration % 3, options.dtype(torch::kInt32));
+        params.output_token_ids_d          = torch::full({batch, 6}, -777, options.dtype(torch::kInt32));
+        params.output_accepted_token_num_d = torch::full({batch}, -777, options.dtype(torch::kInt32));
+        auto indices                       = torch::arange(batch, options.dtype(torch::kInt64));
+        params.do_sample_d                 = (indices + iteration).remainder(2) == 0;
+        params.acceptance_cap              = (indices + iteration).remainder(6).to(torch::kInt32);
+        params.deferred_token_sampling     = true;
+        params.draft_point_mass            = true;
+        params.generator.assign(generators.begin(), generators.begin() + batch);
+        for (auto& generator : params.generator)
+            generator.set_offset(iteration * 32);
+        auto seeds     = indices + 12345;
+        auto positions = torch::full({batch}, iteration * 32, options.dtype(torch::kInt64));
+        std::pair<torch::Tensor, torch::Tensor> expected;
+        {
+            PatchScope oracle(
+                patch_dict(environment, pybind11::dict(pybind11::arg("RTP_LLM_GUMBEL_REJECTION_NATIVE") = "0")));
+            expected = eager(params.target_logits_d,
+                             pybind11::none(),
+                             params.draft_token_ids_d,
+                             seeds,
+                             positions,
+                             params.do_sample_d,
+                             pybind11::none(),
+                             params.acceptance_cap,
+                             pybind11::arg("clean_output") = true)
+                           .cast<std::pair<torch::Tensor, torch::Tensor>>();
+        }
+        execRejectionSampling(params);
+        if (iteration == 0) {
+            ASSERT_EQ(pybind11::len(native.attr("_plans")), 1);
+            no_builder = std::make_unique<PatchScope>(patch_object(native, "build_plan", forbidden));
+        }
+        for (const auto& generator : params.generator) {
+            EXPECT_EQ(generator.get_offset(), static_cast<uint64_t>((iteration + 1) * 32));
+        }
+        outputs.push_back(
+            {params.output_token_ids_d, params.output_accepted_token_num_d, expected.first, expected.second});
+        last = params;
+        ++iteration;
+    }
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    EXPECT_EQ(pybind11::len(native.attr("_plans")), 1);
+    for (const auto& output : outputs) {
+        EXPECT_TRUE(torch::equal(output[0], output[2]));
+        EXPECT_TRUE(torch::equal(output[1], output[3]));
+    }
+    // Cumulative probability consumers are outside the native point-mass ABI.
+    // They must retain the original eager route, even with a matching bucket.
+    last.cum_log_probs = torch::zeros({63 * 6}, options);
+    EXPECT_NO_THROW(execRejectionSampling(last));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    EXPECT_TRUE(torch::isfinite(last.cum_log_probs).all().item<bool>());
 }
 
 TEST_F(CudaSamplerTest, DISABLED_benchmarkRejectionMemory) {

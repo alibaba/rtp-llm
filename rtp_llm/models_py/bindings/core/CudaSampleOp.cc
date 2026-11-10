@@ -4,6 +4,7 @@
 
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/sampling_penalty_kernels.h"
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
@@ -22,6 +23,10 @@
 #include <memory>
 #include <map>
 #include <mutex>
+#include <tuple>
+#include <array>
+#include <dlfcn.h>
+#include <iterator>
 #endif
 
 using namespace std;
@@ -106,9 +111,427 @@ pybind11::object& pyGumbelSampleFn() {
     return fn;
 }
 
+// This private entry point only replays our deterministic Triton graph. Its
+// random values come from explicit seed inputs, not captured Torch RNG state.
+at::cuda::CUDAStream uploadDeferredInputs(const torch::Tensor&              addresses,
+                                          const std::vector<torch::Tensor>& inputs,
+                                          const torch::Tensor&              tokens,
+                                          const torch::Tensor&              lengths) {
+    TORCH_CHECK(inputs.size() == 5 || inputs.size() == 6, "invalid deferred Graph input count");
+    TORCH_CHECK(addresses.is_cuda() && addresses.scalar_type() == torch::kInt64 && addresses.numel() == 8
+                    && addresses.is_contiguous(),
+                "invalid deferred Graph address table");
+    const auto device = addresses.get_device();
+    TORCH_CHECK(at::cuda::current_device() == device, "deferred Graph device mismatch");
+    const auto    stream     = at::cuda::getCurrentCUDAStream(device);
+    const bool    packed_rng = !inputs[2].is_cuda();
+    const int64_t batch      = inputs[0].size(0);
+    if (packed_rng) {
+        TORCH_CHECK(inputs[2].scalar_type() == torch::kInt64 && inputs[2].is_pinned() && inputs[2].is_contiguous()
+                        && inputs[2].numel() == batch && inputs[2].storage_offset() == 8 && !inputs[3].is_cuda()
+                        && inputs[3].scalar_type() == torch::kInt64 && inputs[3].is_contiguous()
+                        && inputs[3].numel() == batch
+                        && inputs[3].data_ptr<int64_t>() == inputs[2].data_ptr<int64_t>() + batch,
+                    "invalid deferred Graph packed RNG state");
+    }
+    auto host        = packed_rng ? inputs[2].as_strided({8 + 2 * batch}, {1}, 0) :
+                                    torch::empty({8}, torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
+    auto destination = packed_rng ? addresses.as_strided({8 + 2 * batch}, {1}) : addresses;
+    auto pointers    = host.data_ptr<int64_t>();
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        if (packed_rng && (i == 2 || i == 3)) {
+            pointers[i] = reinterpret_cast<int64_t>(addresses.data_ptr<int64_t>() + 8 + (i - 2) * batch);
+        } else {
+            TORCH_CHECK(inputs[i].is_cuda() && inputs[i].get_device() == device,
+                        "deferred Graph input device mismatch");
+            pointers[i] = reinterpret_cast<int64_t>(inputs[i].data_ptr());
+        }
+    }
+    if (inputs.size() == 5) {
+        pointers[5] = 0;
+    }
+    TORCH_CHECK(tokens.is_cuda() && lengths.is_cuda() && tokens.get_device() == device
+                    && lengths.get_device() == device,
+                "deferred Graph output device mismatch");
+    pointers[6] = reinterpret_cast<int64_t>(tokens.data_ptr());
+    pointers[7] = reinterpret_cast<int64_t>(lengths.data_ptr());
+    // Torch's pinned allocator retains host until this asynchronous copy ends.
+    destination.copy_(host, /*non_blocking=*/true);
+    for (const auto& input : inputs) {
+        if (input.is_cuda()) {
+            c10::cuda::CUDACachingAllocator::recordStream(input.storage().data_ptr(), stream);
+        }
+    }
+    c10::cuda::CUDACachingAllocator::recordStream(tokens.storage().data_ptr(), stream);
+    c10::cuda::CUDACachingAllocator::recordStream(lengths.storage().data_ptr(), stream);
+    return stream;
+}
+
+void replayDeferredGraph(uint64_t                          graph_exec,
+                         uint64_t                          ready_event,
+                         const torch::Tensor&              addresses,
+                         const std::vector<torch::Tensor>& inputs,
+                         const torch::Tensor&              tokens,
+                         const torch::Tensor&              lengths) {
+    TORCH_CHECK(graph_exec != 0 && ready_event != 0, "invalid deferred Graph handles");
+    const auto stream = uploadDeferredInputs(addresses, inputs, tokens, lengths);
+    auto       status = cudaGraphLaunch(reinterpret_cast<cudaGraphExec_t>(graph_exec), stream.stream());
+    TORCH_CHECK(status == cudaSuccess, "deferred Graph launch failed: ", cudaGetErrorString(status));
+    status = cudaEventRecord(reinterpret_cast<cudaEvent_t>(ready_event), stream.stream());
+    TORCH_CHECK(status == cudaSuccess, "deferred Graph event record failed: ", cudaGetErrorString(status));
+}
+
+using DeferredPlanKey = std::tuple<int, uint64_t, bool, int64_t, int64_t, int64_t, bool>;
+
+struct DeferredGraphPlan {
+    pybind11::weakref owner;
+    uint64_t          graph_exec;
+    uint64_t          ready_event;
+    torch::Tensor     addresses;
+};
+
+std::mutex& deferredGraphMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+// All accesses hold the GIL and native guard. The guard also covers Python's
+// ready-query/eviction sequence, whose CUDA query may temporarily release GIL.
+// Only Entry's capsule owns a plan; the registry cannot retain Graph buffers.
+std::map<DeferredPlanKey, std::weak_ptr<DeferredGraphPlan>>& deferredGraphPlans() {
+    static std::map<DeferredPlanKey, std::weak_ptr<DeferredGraphPlan>> plans;
+    return plans;
+}
+
+pybind11::capsule registerDeferredGraphPlan(const pybind11::object& owner,
+                                            uint64_t                graph_exec,
+                                            uint64_t                ready_event,
+                                            const torch::Tensor&    addresses,
+                                            const DeferredPlanKey&  key) {
+    TORCH_CHECK(graph_exec && ready_event && addresses.is_cuda(), "invalid deferred Graph registration");
+    TORCH_CHECK(std::get<0>(key) == addresses.get_device(), "deferred Graph registration device mismatch");
+    auto& plans = deferredGraphPlans();
+    for (auto it = plans.begin(); it != plans.end();) {
+        it = it->second.expired() ? plans.erase(it) : std::next(it);
+    }
+    constexpr size_t max_plan_keys = 64;
+    if (plans.size() >= max_plan_keys && plans.find(key) == plans.end()) {
+        plans.erase(plans.begin());
+    }
+    auto plan = std::make_shared<DeferredGraphPlan>(
+        DeferredGraphPlan{pybind11::weakref(owner), graph_exec, ready_event, addresses});
+    plans[key] = plan;
+    return pybind11::capsule(new std::shared_ptr<DeferredGraphPlan>(std::move(plan)),
+                             [](void* pointer) { delete static_cast<std::shared_ptr<DeferredGraphPlan>*>(pointer); });
+}
+
+std::optional<DeferredPlanKey> deferredSamplingLayout(const RejectionSamplingParams& params, bool capacity_bucket) {
+    const auto& logits = params.target_logits_d;
+    if (!logits.is_cuda() || logits.dim() != 3 || logits.scalar_type() != torch::kFloat32 || !logits.is_contiguous()) {
+        return std::nullopt;
+    }
+    const auto batch = logits.size(0);
+    const auto rows  = logits.size(1);
+    const auto vocab = logits.size(2);
+    if (batch < 8 || batch > 128 || rows < 2 || rows > 9) {
+        return std::nullopt;
+    }
+    bool forced = false;
+    if (!params.force_accept.empty()) {
+        if (params.force_accept.size() != static_cast<size_t>(batch)) {
+            return std::nullopt;
+        }
+        forced = params.force_accept.front();
+        if (std::any_of(params.force_accept.begin(), params.force_accept.end(), [forced](bool value) {
+                return value != forced;
+            })) {
+            return std::nullopt;
+        }
+    }
+    const auto device  = logits.get_device();
+    auto       matches = [device](const torch::Tensor& tensor, at::ScalarType dtype, c10::IntArrayRef shape) {
+        return tensor.defined() && tensor.is_cuda() && tensor.get_device() == device && tensor.scalar_type() == dtype
+               && tensor.sizes() == shape && tensor.is_contiguous();
+    };
+    const bool has_cap = params.acceptance_cap.defined();
+    if (!matches(params.draft_token_ids_d, torch::kInt32, {batch, rows - 1})
+        || !matches(params.do_sample_d, torch::kBool, {batch})
+        || !matches(params.output_token_ids_d, torch::kInt32, {batch, rows})
+        || !matches(params.output_accepted_token_num_d, torch::kInt32, {batch})
+        || (has_cap && !matches(params.acceptance_cap, torch::kInt32, {batch}))
+        || at::cuda::current_device() != device) {
+        return std::nullopt;
+    }
+    const auto              stream = at::cuda::getCurrentCUDAStream(device);
+    cudaStreamCaptureStatus capture_status;
+    const auto              status = cudaStreamIsCapturing(stream.stream(), &capture_status);
+    TORCH_CHECK(status == cudaSuccess, "deferred Graph capture query failed: ", cudaGetErrorString(status));
+    if (capture_status != cudaStreamCaptureStatusNone) {
+        return std::nullopt;
+    }
+    int64_t bucket = batch;
+    if (capacity_bucket) {
+        bucket = 8;
+        while (bucket < batch) {
+            bucket *= 2;
+        }
+    }
+    return DeferredPlanKey{device, reinterpret_cast<uint64_t>(stream.stream()), forced, bucket, rows, vocab, has_cap};
+}
+
+bool tryReplayDeferredGraph(const RejectionSamplingParams& params,
+                            const torch::Tensor&           seeds,
+                            const torch::Tensor&           positions) {
+    const char* enabled = std::getenv("RTP_LLM_GUMBEL_REJECTION_GRAPH");
+    if ((enabled && std::strcmp(enabled, "1") != 0) || !params.draft_point_mass || params.cum_log_probs.defined()) {
+        return false;
+    }
+    const auto layout = deferredSamplingLayout(params, false);
+    if (!layout) {
+        return false;
+    }
+    const auto&                  key = *layout;
+    std::unique_lock<std::mutex> guard(deferredGraphMutex(), std::try_to_lock);
+    if (!guard.owns_lock()) {
+        return false;
+    }
+    auto& plans = deferredGraphPlans();
+    auto  found = plans.find(key);
+    if (found == plans.end()) {
+        return false;
+    }
+    auto plan = found->second.lock();
+    if (!plan) {
+        plans.erase(found);
+        return false;
+    }
+    auto owner = plan->owner();
+    if (owner.is_none()) {
+        plans.erase(found);
+        return false;
+    }
+    std::vector<torch::Tensor> inputs{
+        params.target_logits_d, params.draft_token_ids_d, seeds, positions, params.do_sample_d};
+    if (params.acceptance_cap.defined()) {
+        inputs.push_back(params.acceptance_cap);
+    }
+    replayDeferredGraph(plan->graph_exec,
+                        plan->ready_event,
+                        plan->addresses,
+                        inputs,
+                        params.output_token_ids_d,
+                        params.output_accepted_token_num_d);
+    return true;
+}
+
+union DeferredLaunchValue {
+    uint64_t pointer;
+    int32_t  i32;
+    uint32_t u32;
+    int64_t  i64;
+    uint64_t u64;
+    float    f32;
+    double   f64;
+};
+
+struct DeferredKernel {
+    uint64_t                         function;
+    unsigned                         shared;
+    unsigned                         warps;
+    unsigned                         grid_factor;
+    unsigned                         grid_divisor;
+    unsigned                         grid_y;
+    std::vector<int>                 types;
+    std::vector<DeferredLaunchValue> values;
+    std::vector<int64_t>             factors;
+
+    explicit DeferredKernel(const pybind11::tuple& descriptor) {
+        TORCH_CHECK(descriptor.size() == 9, "invalid native sampler launch descriptor");
+        function     = descriptor[0].cast<uint64_t>();
+        shared       = descriptor[1].cast<unsigned>();
+        warps        = descriptor[2].cast<unsigned>();
+        grid_factor  = descriptor[3].cast<unsigned>();
+        grid_divisor = descriptor[4].cast<unsigned>();
+        grid_y       = descriptor[5].cast<unsigned>();
+        types        = descriptor[6].cast<std::vector<int>>();
+        auto args    = descriptor[7].cast<pybind11::list>();
+        factors      = descriptor[8].cast<std::vector<int64_t>>();
+        TORCH_CHECK(function && warps && grid_factor && grid_divisor && grid_y && types.size() <= 64
+                        && args.size() == types.size() && factors.size() == types.size(),
+                    "invalid native sampler launch ABI");
+        values.resize(types.size());
+        for (size_t i = 0; i < types.size(); ++i) {
+            switch (types[i]) {
+                case 0:
+                    values[i].pointer = args[i].cast<uint64_t>();
+                    break;
+                case 1:
+                    values[i].i32 = args[i].cast<int32_t>();
+                    break;
+                case 2:
+                    values[i].u32 = args[i].cast<uint32_t>();
+                    break;
+                case 3:
+                    values[i].i64 = args[i].cast<int64_t>();
+                    break;
+                case 4:
+                    values[i].u64 = args[i].cast<uint64_t>();
+                    break;
+                case 5:
+                    values[i].f32 = args[i].cast<float>();
+                    break;
+                case 6:
+                    values[i].f64 = args[i].cast<double>();
+                    break;
+                default:
+                    TORCH_CHECK(false, "unsupported native sampler argument type");
+            }
+            TORCH_CHECK(factors[i] == 0 || (factors[i] > 0 && types[i] >= 1 && types[i] <= 4),
+                        "invalid native sampler batch argument");
+        }
+    }
+
+    void launch(int64_t batch, cudaStream_t stream) {
+        using Launch =
+            int (*)(void*, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, void*, void**, void**);
+        static Launch launch_kernel = [] {
+            void* library = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
+            TORCH_CHECK(library, "Cannot load CUDA driver: ", dlerror());
+            auto function = reinterpret_cast<Launch>(dlsym(library, "cuLaunchKernel"));
+            TORCH_CHECK(function, "Cannot resolve cuLaunchKernel");
+            return function;
+        }();
+        std::array<void*, 66> arguments;
+        for (size_t i = 0; i < values.size(); ++i) {
+            if (factors[i]) {
+                const auto value = batch * factors[i];
+                if (types[i] == 1)
+                    values[i].i32 = static_cast<int32_t>(value);
+                else if (types[i] == 2)
+                    values[i].u32 = static_cast<uint32_t>(value);
+                else if (types[i] == 3)
+                    values[i].i64 = value;
+                else
+                    values[i].u64 = static_cast<uint64_t>(value);
+            }
+            arguments[i] = &values[i];
+        }
+        // Triton 3.6 appends two scratch pointers; the Python gate requires
+        // zero scratch sizes and excludes cluster/cooperative/PDL launches.
+        void* scratch                = nullptr;
+        arguments[values.size()]     = &scratch;
+        arguments[values.size() + 1] = &scratch;
+        const unsigned grid_x        = (batch * grid_factor + grid_divisor - 1) / grid_divisor;
+        const int      status        = launch_kernel(reinterpret_cast<void*>(function),
+                                         grid_x,
+                                         grid_y,
+                                         1,
+                                         warps * 32,
+                                         1,
+                                         1,
+                                         shared,
+                                         reinterpret_cast<void*>(stream),
+                                         arguments.data(),
+                                         nullptr);
+        TORCH_CHECK(status == 0, "native sampler cuLaunchKernel failed: ", status);
+    }
+};
+
+struct DeferredKernelPlan {
+    pybind11::weakref           owner;
+    uint64_t                    ready_event;
+    torch::Tensor               addresses;
+    std::vector<DeferredKernel> kernels;
+};
+
+std::map<DeferredPlanKey, std::weak_ptr<DeferredKernelPlan>>& deferredKernelPlans() {
+    static std::map<DeferredPlanKey, std::weak_ptr<DeferredKernelPlan>> plans;
+    return plans;
+}
+
+pybind11::capsule registerDeferredKernelPlan(const pybind11::object& owner,
+                                             uint64_t                ready_event,
+                                             const torch::Tensor&    addresses,
+                                             const DeferredPlanKey&  key,
+                                             const pybind11::list&   descriptors) {
+    TORCH_CHECK(ready_event && descriptors.size() == 5 && addresses.is_cuda()
+                    && addresses.get_device() == std::get<0>(key),
+                "invalid native sampler registration");
+    auto plan =
+        std::make_shared<DeferredKernelPlan>(DeferredKernelPlan{pybind11::weakref(owner), ready_event, addresses, {}});
+    for (const auto& descriptor : descriptors) {
+        plan->kernels.emplace_back(pybind11::cast<pybind11::tuple>(descriptor));
+    }
+    auto& plans = deferredKernelPlans();
+    for (auto it = plans.begin(); it != plans.end();) {
+        it = it->second.expired() ? plans.erase(it) : std::next(it);
+    }
+    if (plans.size() >= 64 && plans.find(key) == plans.end())
+        plans.erase(plans.begin());
+    plans[key] = plan;
+    return pybind11::capsule(new std::shared_ptr<DeferredKernelPlan>(std::move(plan)),
+                             [](void* pointer) { delete static_cast<std::shared_ptr<DeferredKernelPlan>*>(pointer); });
+}
+
+pybind11::object& pyDeferredRejectionFn();
+
+bool trySubmitDeferredKernels(const RejectionSamplingParams& params,
+                              const torch::Tensor&           seeds,
+                              const torch::Tensor&           positions) {
+    const char* enabled = std::getenv("RTP_LLM_GUMBEL_REJECTION_NATIVE");
+    if ((enabled && std::strcmp(enabled, "1") != 0) || !params.draft_point_mass || params.cum_log_probs.defined()) {
+        return false;
+    }
+    const auto layout = deferredSamplingLayout(params, true);
+    if (!layout)
+        return false;
+    const auto&                  key = *layout;
+    std::unique_lock<std::mutex> guard(deferredGraphMutex(), std::try_to_lock);
+    if (!guard.owns_lock())
+        return false;
+    auto&            plans = deferredKernelPlans();
+    auto             found = plans.find(key);
+    auto             plan  = found == plans.end() ? nullptr : found->second.lock();
+    pybind11::object owner = plan ? plan->owner() : pybind11::none();
+    if (!plan || owner.is_none()) {
+        // Compilation never launches or reserves RNG. Release the guard while
+        // the Python builder acquires it for workspace eviction/registration.
+        guard.unlock();
+        pyDeferredRejectionFn();
+        auto builder = pybind11::module_::import("rtp_llm.models_py.sampling.rejection_native").attr("build_plan");
+        if (!builder(key).cast<bool>() || !guard.try_lock())
+            return false;
+        found = plans.find(key);
+        plan  = found == plans.end() ? nullptr : found->second.lock();
+        owner = plan ? plan->owner() : pybind11::none();
+        if (!plan || owner.is_none())
+            return false;
+    }
+    std::vector<torch::Tensor> inputs{
+        params.target_logits_d, params.draft_token_ids_d, seeds, positions, params.do_sample_d};
+    if (params.acceptance_cap.defined())
+        inputs.push_back(params.acceptance_cap);
+    const auto stream =
+        uploadDeferredInputs(plan->addresses, inputs, params.output_token_ids_d, params.output_accepted_token_num_d);
+    for (auto& kernel : plan->kernels)
+        kernel.launch(params.target_logits_d.size(0), stream.stream());
+    const auto status = cudaEventRecord(reinterpret_cast<cudaEvent_t>(plan->ready_event), stream.stream());
+    TORCH_CHECK(status == cudaSuccess, "native sampler completion event failed: ", cudaGetErrorString(status));
+    return true;
+}
+
 pybind11::object& pyDeferredRejectionFn() {
-    static pybind11::object fn =
-        pybind11::module_::import("rtp_llm.models_py.sampling.adapter").attr("rejection_sample_logits");
+    static pybind11::object fn = []() -> pybind11::object {
+        auto graph_module                   = pybind11::module_::import("rtp_llm.models_py.sampling.rejection_graph");
+        graph_module.attr("_native_replay") = pybind11::cpp_function(&replayDeferredGraph);
+        graph_module.attr("_register_native_plan") = pybind11::cpp_function(&registerDeferredGraphPlan);
+        graph_module.attr("_try_native_guard") =
+            pybind11::cpp_function([]() { return deferredGraphMutex().try_lock(); });
+        graph_module.attr("_release_native_guard") = pybind11::cpp_function([]() { deferredGraphMutex().unlock(); });
+        pybind11::module_::import("rtp_llm.models_py.sampling.rejection_native").attr("_register_plan") =
+            pybind11::cpp_function(&registerDeferredKernelPlan);
+        return pybind11::module_::import("rtp_llm.models_py.sampling.adapter").attr("rejection_sample_logits");
+    }();
     return fn;
 }
 
@@ -126,15 +549,15 @@ void pyTopPRenormProbs(const torch::Tensor& probs, torch::Tensor& renorm_probs, 
     renorm_probs.copy_(result, /*non_blocking=*/true);
 }
 
-std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std::vector<at::Generator>& generators,
-                                                                      int64_t                           batch_size,
-                                                                      int                               increment,
-                                                                      TensorHolder*                     buffer_holder) {
+torch::Tensor reserveSamplingSeedOffsets(const std::vector<at::Generator>& generators,
+                                         int64_t                           batch_size,
+                                         int                               increment,
+                                         int64_t                           prefix = 0) {
     auto options  = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
-    auto seed_h   = torch::empty({batch_size}, options);
-    auto offset_h = torch::empty({batch_size}, options);
-    auto seed_ptr = seed_h.data_ptr<int64_t>();
-    auto off_ptr  = offset_h.data_ptr<int64_t>();
+    auto state_h =
+        torch::empty({prefix + 2 * batch_size}, options).narrow(0, prefix, 2 * batch_size).view({2, batch_size});
+    auto seed_ptr = state_h.data_ptr<int64_t>();
+    auto off_ptr  = seed_ptr + batch_size;
 
     for (int64_t i = 0; i < batch_size; ++i) {
         auto generator = (i < static_cast<int64_t>(generators.size()) && generators[i].defined()) ?
@@ -145,13 +568,40 @@ std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std:
         off_ptr[i]          = static_cast<int64_t>(offset);
     }
 
-    auto seed_d   = seed_h.to(torch::kCUDA, /*non_blocking=*/true).contiguous();
-    auto offset_d = offset_h.to(torch::kCUDA, /*non_blocking=*/true).contiguous();
+    return state_h;
+}
+
+std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std::vector<at::Generator>& generators,
+                                                                      int64_t                           batch_size,
+                                                                      int                               increment,
+                                                                      TensorHolder*                     buffer_holder) {
+    auto state_h = reserveSamplingSeedOffsets(generators, batch_size, increment);
+    auto state_d = state_h.to(torch::kCUDA, /*non_blocking=*/true);
     if (buffer_holder != nullptr) {
-        buffer_holder->hold_host(seed_h);
-        buffer_holder->hold_host(offset_h);
+        buffer_holder->hold_host(state_h);
     }
-    return {seed_d, offset_d};
+    return {state_d.select(0, 0), state_d.select(0, 1)};
+}
+
+bool requiresTokenHistory(const GreedyParams& params) {
+    const auto batch_size = params.logits.size(0);
+    if (params.repetition_penalty.has_value()) {
+        RTP_LLM_CHECK(params.presence_penalty.has_value() && params.frequency_penalty.has_value());
+        const auto* repetition = params.repetition_penalty->data_ptr<float>();
+        const auto* presence   = params.presence_penalty->data_ptr<float>();
+        const auto* frequency  = params.frequency_penalty->data_ptr<float>();
+        if (std::any_of(repetition, repetition + batch_size, [](float value) { return value != 1.0f; })
+            || std::any_of(presence, presence + batch_size, [](float value) { return value != 0.0f; })
+            || std::any_of(frequency, frequency + batch_size, [](float value) { return value != 0.0f; })) {
+            return true;
+        }
+    }
+    const auto decoder_batch_size = params.sequence_lengths.size(0);
+    if (decoder_batch_size && params.no_repeat_ngram_size.has_value()) {
+        const auto* ngram = params.no_repeat_ngram_size->data_ptr<int32_t>();
+        return std::any_of(ngram, ngram + decoder_batch_size, [](int32_t value) { return value != 0; });
+    }
+    return false;
 }
 
 void processLogits(const GreedyParams&  params,
@@ -269,6 +719,23 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
     // Copy result back to logits to preserve the in-place behavior of the original kernel,
     // since callers may reuse the logits tensor across iterations.
     if (params.defer_token_sampling && Py_IsInitialized()) {
+        const auto* requested_k = params.top_k.data_ptr<int32_t>();
+        const auto* requested_p = params.top_p.data_ptr<float>();
+        const auto  vocab       = params.logits.size(1);
+        bool        unfiltered  = true;
+        for (int64_t row = 0; row < batch_size; ++row) {
+            // Greedy rows ignore TopP, including non-finite values, just as
+            // the normalization below does before applying any filters.
+            if (requested_k[row] != 1
+                && !((requested_k[row] <= 0 || requested_k[row] >= vocab)
+                     && (std::abs(requested_p[row]) < 1e-7f || std::abs(requested_p[row] - 1.0f) < 1e-7f))) {
+                unfiltered = false;
+                break;
+            }
+        }
+        if (unfiltered) {
+            return GreedyOutput{torch::Tensor(), true};
+        }
         auto top_k = params.top_k.clone();
         auto top_p = params.top_p.clone();
         auto k     = top_k.data_ptr<int32_t>();
@@ -280,7 +747,6 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
             }
         }
         std::transform(p, p + batch_size, p, [](float value) { return std::abs(value) < 1e-7f ? 1.0f : value; });
-        const auto vocab = params.logits.size(1);
         const bool no_k =
             std::all_of(k, k + batch_size, [vocab](int32_t value) { return value <= 0 || value >= vocab; });
         const bool no_p = std::all_of(p, p + batch_size, [](float value) { return std::abs(value - 1.0f) < 1e-7f; });
@@ -508,11 +974,6 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
 }
 
 GreedyOutput sampleGreedy(const GreedyParams& params) {
-    // [batch_size, step + 1] — clone to GPU
-    auto device_tokens = params.token_ids.to(torch::kCUDA, true);
-    // [step + 1, batch_size]
-    auto transposed_tokens = device_tokens.transpose(0, 1).contiguous();
-
     const auto batch_size        = params.logits.size(0);
     bool       has_not_do_sample = params.do_sample.has_value()
                              && std::any_of(params.do_sample.value().data_ptr<bool>(),
@@ -522,6 +983,13 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                           || std::any_of(params.do_sample.value().data_ptr<bool>(),
                                          params.do_sample.value().data_ptr<bool>() + batch_size,
                                          [&](auto t) { return t; });
+    const bool    deferred = params.defer_token_sampling && Py_IsInitialized();
+    torch::Tensor device_tokens;
+    torch::Tensor transposed_tokens;
+    if (!deferred || (need_do_sample && requiresTokenHistory(params))) {
+        device_tokens     = params.token_ids.to(torch::kCUDA, true);
+        transposed_tokens = device_tokens.transpose(0, 1).contiguous();
+    }
     if (need_do_sample) {
         torch::Tensor selected_logits;
         torch::Tensor mask_tensor;
@@ -536,7 +1004,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         }
     }
 
-    if (params.defer_token_sampling && Py_IsInitialized()) {
+    if (deferred) {
         return flashinferSampleGreedy(params, transposed_tokens);
     }
 
@@ -692,9 +1160,22 @@ void rejectionSampling(const RejectionSamplingParams& params) {
         TORCH_CHECK(Py_IsInitialized(), "deferred verification requires the Python Gumbel runtime");
         const int64_t batch_size = params.target_logits_d.size(0);
         const int64_t rows       = params.target_logits_d.size(1);
-        auto [seeds, positions]  = makeSamplingSeedOffsetTensors(
-            params.generator, batch_size, std::max<int64_t>(32, ((rows + 3) / 4) * 4), params.buffer_holder);
+        // Reserve RNG once. A cache hit uploads its state with the address table;
+        // a miss uploads the same state for the ordinary Python dispatch.
+        auto state_h =
+            reserveSamplingSeedOffsets(params.generator, batch_size, std::max<int64_t>(32, ((rows + 3) / 4) * 4), 8);
         pybind11::gil_scoped_acquire gil;
+        if (trySubmitDeferredKernels(params, state_h.select(0, 0), state_h.select(0, 1))
+            || tryReplayDeferredGraph(params, state_h.select(0, 0), state_h.select(0, 1))) {
+            check_cuda_error();
+            return;
+        }
+        auto state_d = state_h.to(torch::kCUDA, /*non_blocking=*/true);
+        if (params.buffer_holder != nullptr) {
+            params.buffer_holder->hold_host(state_h);
+        }
+        auto             seeds     = state_d.select(0, 0);
+        auto             positions = state_d.select(0, 1);
         pybind11::object draft = params.draft_point_mass ? pybind11::none() : pybind11::cast(params.draft_probs_d);
         pybind11::object cap =
             params.acceptance_cap.defined() ? pybind11::cast(params.acceptance_cap) : pybind11::none();
@@ -710,7 +1191,8 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                                 cap,
                                 cumulative,
                                 params.output_token_ids_d,
-                                params.output_accepted_token_num_d);
+                                params.output_accepted_token_num_d,
+                                true);
         check_cuda_error();
         return;
     }

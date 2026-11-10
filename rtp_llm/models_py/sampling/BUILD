@@ -15,6 +15,8 @@ py_library(
         "draft_logits.py",
         "runtime.py",
         "rejection_metadata.py",
+        "rejection_graph.py",
+        "rejection_native.py",
         "vllm_gumbel.py",
         "vllm_rejection.py",
         "vllm_watermark.py",
@@ -68,6 +70,14 @@ py_test(
     srcs = ["test_rejection.py"],
     deps = [":sampling"],
     tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_rejection_output_perf",
+    srcs = ["test_rejection_output_perf.py"],
+    deps = [":sampling"],
+    tags = ["SM103_CU13", "manual"],
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )
 

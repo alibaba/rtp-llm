@@ -126,3 +126,13 @@ alias(
     actual = "//rtp_llm/cpp/cuda_graph/tests:cuda_graph_copy_kernel_test",
     visibility = ["//visibility:public"],
 )
+
+cc_test(
+    name = "fair_sampling_bench_test",
+    srcs = ["FairSamplingBenchTest.cc"],
+    data = ["//rtp_llm/models_py/sampling:sampling"],
+    copts = copts() + ["-DFAIR_GUMBEL_BRANCH"],
+    deps = test_deps + ["//rtp_llm/models_py/bindings/core:exec_ops_test_lib"] + cuda13_torch_link_deps,
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)

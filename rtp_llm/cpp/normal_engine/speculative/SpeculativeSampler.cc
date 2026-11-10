@@ -351,7 +351,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     // use async sample here, we assume accept all tokens
     // so we need to reset -1 to 0 in output_token_ids_d
-    bool cleaned = greedy_finalized;
+    bool cleaned = greedy_finalized || target_sampler_output.deferred_token_sampling;
 #if USING_CUDA
     if (!cleaned) {
         cleaned = mtpFusionEnabled()

@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
-
 import triton
 import triton.language as tl
-from triton.language.extra.cuda import libdevice as tldevice
+from rtp_llm.models_py.sampling.draft_logits import DraftLogitsCache, draft_logits_row
 from rtp_llm.models_py.sampling.vllm_fly import compute_fly_entropy
 from rtp_llm.models_py.sampling.vllm_gumbel import (
     gumbel_block_argmax,
@@ -12,10 +11,7 @@ from rtp_llm.models_py.sampling.vllm_gumbel import (
     tl_rand32,
 )
 from rtp_llm.models_py.sampling.vllm_watermark import philox_gumbel_block_argmax
-from rtp_llm.models_py.sampling.draft_logits import (
-    DraftLogitsCache,
-    draft_logits_row,
-)
+from triton.language.extra.cuda import libdevice as tldevice
 
 
 @triton.jit
@@ -258,7 +254,13 @@ def _compute_local_logits_stats_kernel(
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     DRAFT_VALUES_ARE_PROBS: tl.constexpr,
+    graph_input_addresses_ptr=None,
 ):
+    if graph_input_addresses_ptr is not None:
+        target_logits_ptr = (
+            tl.load(graph_input_addresses_ptr).to(tl.uint64).to(target_logits_ptr.dtype)
+        )
+
     logit_idx = tl.program_id(0).to(tl.int64)
 
     if _is_bonus_logit(expanded_local_pos_ptr, logit_idx, num_logits):
@@ -603,7 +605,21 @@ def _rejection_kernel(
     USE_BLOCK_VERIFICATION: tl.constexpr,
     FLY_WINDOW_SIZE: tl.constexpr,
     DRAFT_VALUES_ARE_PROBS: tl.constexpr,
+    graph_input_addresses_ptr=None,
 ):
+    if graph_input_addresses_ptr is not None:
+        target_logits_ptr = (
+            tl.load(graph_input_addresses_ptr).to(tl.uint64).to(target_logits_ptr.dtype)
+        )
+        sampled_ptr = (
+            tl.load(graph_input_addresses_ptr + 6).to(tl.uint64).to(sampled_ptr.dtype)
+        )
+        rejected_steps_ptr = (
+            tl.load(graph_input_addresses_ptr + 7)
+            .to(tl.uint64)
+            .to(rejected_steps_ptr.dtype)
+        )
+
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
     start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
@@ -900,7 +916,18 @@ def _resample_kernel(
     DEDUPLICATE_CONTEXTS: tl.constexpr,
     SKIP_MASKED_BLOCKS: tl.constexpr,
     DRAFT_VALUES_ARE_PROBS: tl.constexpr,
+    graph_input_addresses_ptr=None,
 ):
+    if graph_input_addresses_ptr is not None:
+        target_logits_ptr = (
+            tl.load(graph_input_addresses_ptr).to(tl.uint64).to(target_logits_ptr.dtype)
+        )
+        rejected_step_ptr = (
+            tl.load(graph_input_addresses_ptr + 7)
+            .to(tl.uint64)
+            .to(rejected_step_ptr.dtype)
+        )
+
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
     start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
@@ -1108,7 +1135,19 @@ def _insert_resampled_kernel(
     # [max_num_reqs]
     temp_ptr,
     PADDED_RESAMPLE_NUM_BLOCKS: tl.constexpr,
+    CLEAN_OUTPUT_ROWS: tl.constexpr = 0,
+    graph_input_addresses_ptr=None,
 ):
+    if graph_input_addresses_ptr is not None:
+        sampled_ptr = (
+            tl.load(graph_input_addresses_ptr + 6).to(tl.uint64).to(sampled_ptr.dtype)
+        )
+        num_sampled_ptr = (
+            tl.load(graph_input_addresses_ptr + 7)
+            .to(tl.uint64)
+            .to(num_sampled_ptr.dtype)
+        )
+
     req_idx = tl.program_id(0)
     num_sampled = tl.load(num_sampled_ptr + req_idx)
     start_idx = tl.load(cu_num_logits_ptr + req_idx)
@@ -1118,6 +1157,14 @@ def _insert_resampled_kernel(
 
     # Increment the number of sampled tokens.
     tl.store(num_sampled_ptr + req_idx, num_sampled + 1)
+
+    if CLEAN_OUTPUT_ROWS > 0:
+        columns = tl.arange(0, triton.next_power_of_2(CLEAN_OUTPUT_ROWS))
+        tl.store(
+            sampled_ptr + req_idx * sampled_stride + columns,
+            0,
+            (columns > num_sampled) & (columns < CLEAN_OUTPUT_ROWS),
+        )
 
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     is_bonus = resample_token_idx == end_idx - 1
@@ -1187,8 +1234,24 @@ def rejection_sample(
     fly_entropy_threshold: float = 0.3,
     fly_entropy_top_k: int = 3,
     skip_masked_vocab_blocks: bool = False,
+    output_ids: torch.Tensor | None = None,
+    output_lengths: torch.Tensor | None = None,
+    graph_input_addresses: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
+    if graph_input_addresses is not None:
+        # Only the point-mass Graph path redirects logits; all other consumers
+        # continue to read the Tensor passed by the caller directly.
+        assert draft_logits_cache is None and not use_block_verification
+        assert contexts is None and fly_window_size == 0
+        assert target_logits.is_cuda and target_logits.dtype == torch.float32
+        assert target_logits.is_contiguous()
+        assert graph_input_addresses.device == target_logits.device
+        assert graph_input_addresses.dtype in (torch.int64, torch.uint64)
+        assert graph_input_addresses.shape == (8,)
+        assert graph_input_addresses.is_contiguous()
+        assert output_ids is not None and output_lengths is not None
+        assert output_ids.is_contiguous() and output_lengths.is_contiguous()
     draft_logits = None
     draft_logits_row_mapping = None
     draft_values_are_probs = False
@@ -1310,6 +1373,7 @@ def rejection_sample(
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
         DRAFT_VALUES_ARE_PROBS=draft_values_are_probs,
+        graph_input_addresses_ptr=graph_input_addresses,
     )
 
     # Precompute the running joint ratio and residual mass for block
@@ -1395,10 +1459,22 @@ def rejection_sample(
 
     # Sample up until the first rejected/bonus token, and store
     # the step.
-    sampled = draft_sampled.new_empty(
-        num_reqs, num_speculative_steps + 1, dtype=torch.int64
-    )
-    num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
+    direct_output = output_ids is not None
+    if direct_output:
+        assert output_lengths is not None
+        assert output_ids.shape == (num_reqs, num_speculative_steps + 1)
+        assert output_ids.dtype == torch.int32 and output_ids.stride(1) == 1
+        assert output_lengths.shape == (num_reqs,)
+        assert output_lengths.dtype == torch.int32 and output_lengths.stride(0) == 1
+        assert output_ids.device == output_lengths.device == target_logits.device
+        sampled = output_ids
+        num_sampled = output_lengths
+    else:
+        assert output_lengths is None
+        sampled = draft_sampled.new_empty(
+            num_reqs, num_speculative_steps + 1, dtype=torch.int64
+        )
+        num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
     target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
     draft_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
     _rejection_kernel[(num_reqs,)](
@@ -1443,6 +1519,7 @@ def rejection_sample(
         USE_BLOCK_VERIFICATION=use_block_verification,
         FLY_WINDOW_SIZE=fly_window_size,
         num_warps=1,
+        graph_input_addresses_ptr=graph_input_addresses,
     )
 
     # Resample the rejected/bonus tokens.
@@ -1494,6 +1571,7 @@ def rejection_sample(
         WATERMARK=watermark,
         DEDUPLICATE_CONTEXTS=watermarking_skip_mask is not None,
         SKIP_MASKED_BLOCKS=skip_masked_vocab_blocks,
+        graph_input_addresses_ptr=graph_input_addresses,
     )
 
     # Insert the resampled tokens into the output sampled.
@@ -1510,5 +1588,7 @@ def rejection_sample(
         expanded_idx_mapping,
         temperature,
         PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
+        CLEAN_OUTPUT_ROWS=num_speculative_steps + 1 if direct_output else 0,
+        graph_input_addresses_ptr=graph_input_addresses,
     )
     return sampled, num_sampled

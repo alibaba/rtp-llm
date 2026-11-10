@@ -40,8 +40,22 @@ def _prepare_rejection_metadata(
     sample_stride,
     cap_stride,
     BLOCK: tl.constexpr,
+    graph_input_addresses=None,
+    seed_output=None,
 ):
+    if graph_input_addresses is not None:
+        draft_ids = tl.load(graph_input_addresses + 1).to(tl.uint64).to(draft_ids.dtype)
+        positions = tl.load(graph_input_addresses + 3).to(tl.uint64).to(positions.dtype)
+        do_sample = tl.load(graph_input_addresses + 4).to(tl.uint64).to(do_sample.dtype)
+        if cap is not None:
+            cap = tl.load(graph_input_addresses + 5).to(tl.uint64).to(cap.dtype)
     index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    if graph_input_addresses is not None:
+        seed_source = (
+            tl.load(graph_input_addresses + 2).to(tl.uint64).to(seed_output.dtype)
+        )
+        seeds = tl.load(seed_source + index, mask=index < count, other=0)
+        tl.store(seed_output + index, seeds, mask=index < count)
     request = index // rows
     column = index % rows
     active = index < count * rows
@@ -84,8 +98,20 @@ class RejectionMetadata:
         positions: torch.Tensor,
         do_sample: torch.Tensor,
         acceptance_cap: torch.Tensor | None,
+        graph_input_addresses: torch.Tensor | None = None,
+        seed_output: torch.Tensor | None = None,
     ) -> "RejectionMetadata":
         count, steps = draft_ids.shape
+        if graph_input_addresses is not None:
+            assert graph_input_addresses.shape == (8,)
+            assert graph_input_addresses.dtype in (torch.int64, torch.uint64)
+            assert graph_input_addresses.device == draft_ids.device
+            assert graph_input_addresses.is_contiguous()
+            assert seed_output is not None and seed_output.shape == (count,)
+            assert seed_output.dtype == torch.int64
+            assert (
+                seed_output.device == draft_ids.device and seed_output.is_contiguous()
+            )
         rows = steps + 1
         total = count * rows
         integers = torch.empty(2 * total, device=draft_ids.device, dtype=torch.int64)
@@ -126,6 +152,8 @@ class RejectionMetadata:
             do_sample.stride(0),
             acceptance_cap.stride(0) if acceptance_cap is not None else 0,
             BLOCK=256,
+            graph_input_addresses=graph_input_addresses,
+            seed_output=seed_output,
         )
         return metadata
 

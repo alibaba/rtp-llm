@@ -34,6 +34,60 @@ def rejection_sample_logits(
     cum_log_probs: torch.Tensor | None = None,
     output_ids: torch.Tensor | None = None,
     output_lengths: torch.Tensor | None = None,
+    clean_output: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if (
+        clean_output
+        and draft_probs is None
+        and cum_log_probs is None
+        and output_ids is not None
+        and output_lengths is not None
+    ):
+        from rtp_llm.models_py.sampling.rejection_graph import try_replay
+
+        if try_replay(
+            _rejection_sample_logits_eager,
+            target_logits,
+            draft_ids,
+            seeds,
+            positions,
+            do_sample,
+            force_accept,
+            acceptance_cap,
+            output_ids,
+            output_lengths,
+        ):
+            return output_ids, output_lengths
+    return _rejection_sample_logits_eager(
+        target_logits,
+        draft_probs,
+        draft_ids,
+        seeds,
+        positions,
+        do_sample,
+        force_accept,
+        acceptance_cap,
+        cum_log_probs,
+        output_ids,
+        output_lengths,
+        clean_output,
+    )
+
+
+def _rejection_sample_logits_eager(
+    target_logits: torch.Tensor,
+    draft_probs: torch.Tensor | None,
+    draft_ids: torch.Tensor,
+    seeds: torch.Tensor,
+    positions: torch.Tensor,
+    do_sample: torch.Tensor,
+    force_accept: list[bool] | None = None,
+    acceptance_cap: torch.Tensor | None = None,
+    cum_log_probs: torch.Tensor | None = None,
+    output_ids: torch.Tensor | None = None,
+    output_lengths: torch.Tensor | None = None,
+    clean_output: bool = False,
+    graph_input_addresses: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from rtp_llm.models_py.sampling.draft_logits import DraftLogitsCache
     from rtp_llm.models_py.sampling.rejection_metadata import (
@@ -59,6 +113,9 @@ def rejection_sample_logits(
     if draft_probs is not None and not fuse_draft_probs_log:
         draft_logits = draft_probs.log()
     max_requests = max(1, (1 << 30) // (rows * vocab * 4))
+    if graph_input_addresses is not None:
+        assert draft_probs is None and cum_log_probs is None and clean_output
+        assert batch <= max_requests and all(value == forced[0] for value in forced)
     cumulative_chunks: list[torch.Tensor] = []
     initial_cumulative = (
         cum_log_probs.reshape(batch, rows)[:, 0].to(target_logits.device)
@@ -78,6 +135,8 @@ def rejection_sample_logits(
             positions[start:end],
             do_sample[start:end],
             acceptance_cap[start:end] if acceptance_cap is not None else None,
+            graph_input_addresses=graph_input_addresses,
+            seed_output=seeds[start:end] if graph_input_addresses is not None else None,
         )
         cache = (
             DraftLogitsCache(
@@ -100,6 +159,9 @@ def rejection_sample_logits(
             steps,
             metadata.rates if forced[start] else None,
             skip_masked_vocab_blocks=True,
+            output_ids=output_ids[start:end] if clean_output else None,
+            output_lengths=output_lengths[start:end] if clean_output else None,
+            graph_input_addresses=graph_input_addresses,
         )
         if initial_cumulative is not None:
             valid = metadata.local_positions.reshape(count, rows) < lengths.unsqueeze(1)
@@ -112,9 +174,10 @@ def rejection_sample_logits(
             cumulative_chunks.append(
                 initial_cumulative[start:end].unsqueeze(1) + log_probs.cumsum(dim=1)
             )
-        finalize_rejection_output(
-            output, lengths, output_ids[start:end], output_lengths[start:end]
-        )
+        if not clean_output:
+            finalize_rejection_output(
+                output, lengths, output_ids[start:end], output_lengths[start:end]
+            )
         start = end
     if cum_log_probs is not None:
         cum_log_probs.copy_(

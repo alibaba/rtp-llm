@@ -108,12 +108,226 @@ class RejectionSourceTest(unittest.TestCase):
                         "_rejection_kernel",
                         "_resample_kernel",
                         "rejection_sample",
+                        "_insert_resampled_kernel",
                     }
                     if local == "vllm_rejection.py"
                     else set()
                 )
                 for name in actual.keys() - adapted:
                     self.assertEqual(actual[name], expected[name], name)
+
+
+class DirectOutputTest(unittest.TestCase):
+    def test_cached_graph_refreshes_inputs_and_owns_outputs(self) -> None:
+        from rtp_llm.models_py.sampling import rejection_graph
+
+        torch.manual_seed(456)
+        batch, steps, vocab = 16, 5, 8193
+        for forced in (False, True):
+            old_outputs = []
+            for iteration in range(4):
+                logits = torch.randn(batch, steps + 1, vocab, device="cuda")
+                ids = torch.randint(
+                    vocab, (batch, steps), device="cuda", dtype=torch.int32
+                )
+                seeds = (
+                    torch.arange(batch, device="cuda", dtype=torch.int64) + iteration
+                )
+                positions = seeds + iteration * 17
+                sample = seeds % 2 == 0
+                caps = (seeds % (steps + 1)).int()
+                args = (
+                    logits,
+                    None,
+                    ids,
+                    seeds,
+                    positions,
+                    sample,
+                    [forced] * batch,
+                    caps,
+                )
+                expected, expected_lengths = adapter._rejection_sample_logits_eager(
+                    *args, clean_output=True
+                )
+                output = torch.full(
+                    (batch, steps + 1), -777, device="cuda", dtype=torch.int32
+                )
+                lengths = torch.full((batch,), -777, device="cuda", dtype=torch.int32)
+                with patch.dict(os.environ, {"RTP_LLM_GUMBEL_REJECTION_GRAPH": "1"}):
+                    self.assertTrue(
+                        rejection_graph.try_replay(
+                            adapter._rejection_sample_logits_eager,
+                            logits,
+                            ids,
+                            seeds,
+                            positions,
+                            sample,
+                            [forced] * batch,
+                            caps,
+                            output,
+                            lengths,
+                        )
+                    )
+                torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                torch.testing.assert_close(lengths, expected_lengths, rtol=0, atol=0)
+                old_outputs.append((output, output.clone(), lengths, lengths.clone()))
+            for output, snapshot, lengths, saved_lengths in old_outputs:
+                torch.testing.assert_close(output, snapshot, rtol=0, atol=0)
+                torch.testing.assert_close(lengths, saved_lengths, rtol=0, atol=0)
+
+    def test_indirect_graph_queued_inputs_from_another_stream(self) -> None:
+        from rtp_llm.models_py.sampling import rejection_graph
+
+        torch.cuda.synchronize()
+        producer = torch.cuda.Stream()
+        consumer = torch.cuda.current_stream()
+        saved = []
+        first_logits = None
+        first_snapshot = None
+        for iteration in range(8):
+            with torch.cuda.stream(producer):
+                logits = torch.randn(16, 6, 8193, device="cuda")
+                ids = torch.randint(8193, (16, 5), device="cuda", dtype=torch.int32)
+                seeds = torch.arange(16, device="cuda", dtype=torch.int64) + iteration
+                positions = seeds + iteration * 19
+                sample = seeds % 2 == 0
+                expected, counts = adapter._rejection_sample_logits_eager(
+                    logits, None, ids, seeds, positions, sample, clean_output=True
+                )
+                if iteration == 0:
+                    first_logits = logits
+                    first_snapshot = logits.clone()
+            consumer.wait_stream(producer)
+            tokens = torch.empty((16, 6), device="cuda", dtype=torch.int32)
+            lengths = torch.empty(16, device="cuda", dtype=torch.int32)
+            with patch.dict(os.environ, {"RTP_LLM_GUMBEL_REJECTION_GRAPH": "1"}):
+                self.assertTrue(
+                    rejection_graph.try_replay(
+                        adapter._rejection_sample_logits_eager,
+                        logits,
+                        ids,
+                        seeds,
+                        positions,
+                        sample,
+                        None,
+                        None,
+                        tokens,
+                        lengths,
+                    )
+                )
+            saved.append((tokens, lengths, expected, counts))
+            # The Graph must protect each producer allocation until its read
+            # completes, even when the caller immediately releases the tensor.
+            del logits
+        torch.cuda.synchronize()
+        torch.testing.assert_close(first_logits, first_snapshot, rtol=0, atol=0)
+        for tokens, lengths, expected, counts in saved:
+            torch.testing.assert_close(tokens, expected, rtol=0, atol=0)
+            torch.testing.assert_close(lengths, counts, rtol=0, atol=0)
+
+    def test_graph_stream_isolation_and_external_capture_fallback(self) -> None:
+        from rtp_llm.models_py.sampling import rejection_graph
+
+        streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+        saved = []
+        for stream in streams:
+            with torch.cuda.stream(stream):
+                logits = torch.randn(16, 6, 513, device="cuda")
+                ids = torch.randint(513, (16, 5), device="cuda", dtype=torch.int32)
+                seeds = torch.arange(16, device="cuda", dtype=torch.int64)
+                sample = seeds % 2 == 0
+                tokens = torch.empty((16, 6), device="cuda", dtype=torch.int32)
+                lengths = torch.empty(16, device="cuda", dtype=torch.int32)
+                args = (logits, ids, seeds, seeds, sample, None, None, tokens, lengths)
+                compute = adapter._rejection_sample_logits_eager
+                expected, counts = compute(
+                    logits, None, ids, seeds, seeds, sample, clean_output=True
+                )
+                # Finish old entries so eviction cannot intentionally fall back.
+                torch.cuda.synchronize()
+                with patch.dict(os.environ, {"RTP_LLM_GUMBEL_REJECTION_GRAPH": "1"}):
+                    self.assertTrue(rejection_graph.try_replay(compute, *args))
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, stream=stream):
+                        self.assertFalse(rejection_graph.try_replay(compute, *args))
+                        adapter.rejection_sample_logits(
+                            logits,
+                            None,
+                            ids,
+                            seeds,
+                            seeds,
+                            sample,
+                            output_ids=tokens,
+                            output_lengths=lengths,
+                            clean_output=True,
+                        )
+                    graph.replay()
+                with patch.dict(os.environ, {"RTP_LLM_GUMBEL_REJECTION_GRAPH": "0"}):
+                    self.assertFalse(rejection_graph.try_replay(compute, *args))
+                saved.append((tokens, lengths, expected, counts))
+        torch.cuda.synchronize()
+        for tokens, lengths, expected, counts in saved:
+            torch.testing.assert_close(tokens, expected, rtol=0, atol=0)
+            torch.testing.assert_close(lengths, counts, rtol=0, atol=0)
+
+    def test_matches_legacy_output_and_preserves_buffers(self) -> None:
+        torch.manual_seed(123)
+        for steps in (0, 3, 5):
+            for dense in (False, True):
+                with self.subTest(steps=steps, dense=dense):
+                    batch, vocab = 8, 131
+                    logits = torch.randn(batch, steps + 1, vocab, device="cuda")
+                    probs = (
+                        torch.softmax(
+                            torch.randn(batch, steps, vocab, device="cuda"), -1
+                        )
+                        if dense
+                        else None
+                    )
+                    ids = torch.randint(
+                        vocab, (batch, steps), device="cuda", dtype=torch.int32
+                    )
+                    seeds = torch.arange(batch, device="cuda", dtype=torch.int64)
+                    positions = seeds + 17
+                    sample = seeds % 2 == 0
+                    caps = (seeds % (steps + 1)).int()
+                    forced = [False, True, True, False, False, True, False, True]
+                    args = (logits, probs, ids, seeds, positions, sample, forced, caps)
+                    expected, lengths = adapter.rejection_sample_logits(*args)
+                    storage = torch.full(
+                        (batch, steps + 3), -777, device="cuda", dtype=torch.int32
+                    )
+                    output = storage[:, 1:-1]
+                    counts = torch.full_like(lengths, -777)
+                    actual, actual_lengths = adapter.rejection_sample_logits(
+                        *args,
+                        output_ids=output,
+                        output_lengths=counts,
+                        clean_output=True,
+                    )
+                    self.assertEqual(actual.data_ptr(), output.data_ptr())
+                    self.assertEqual(actual_lengths.data_ptr(), counts.data_ptr())
+                    torch.testing.assert_close(
+                        actual, expected.clamp_min(0), rtol=0, atol=0
+                    )
+                    torch.testing.assert_close(actual_lengths, lengths, rtol=0, atol=0)
+                    self.assertTrue((storage[:, (0, -1)] == -777).all().item())
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        adapter.rejection_sample_logits(
+                            *args,
+                            output_ids=output,
+                            output_lengths=counts,
+                            clean_output=True,
+                        )
+                    for _ in range(2):
+                        output.fill_(-777)
+                        counts.fill_(-777)
+                        graph.replay()
+                        torch.testing.assert_close(
+                            output, expected.clamp_min(0), rtol=0, atol=0
+                        )
+                        torch.testing.assert_close(counts, lengths, rtol=0, atol=0)
 
 
 class DeferredRejectionTest(unittest.TestCase):
@@ -768,7 +982,7 @@ class DraftLogProfileTest(unittest.TestCase):
                 graphs.append(graph)
         samples: list[list[float]] = [[], []]
         for round_index in range(self.rounds):
-            for enabled in ([0, 1] if round_index % 2 == 0 else [1, 0]):
+            for enabled in [0, 1] if round_index % 2 == 0 else [1, 0]:
                 start = torch.cuda.Event(enable_timing=True)
                 end = torch.cuda.Event(enable_timing=True)
                 start.record()
