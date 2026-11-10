@@ -108,7 +108,8 @@ class Glm53FlashMtpModel(GptModelBase):
                 inputs.multimodal_inputs.mm_features_locs,
                 full_inputs.cu_seqlens_device,
                 full_inputs.cu_seqlens,
-                already_shifted=self.parallelism_config.prefill_cp_config.is_enabled(),
+                # The draft input builder already shifts feature locations with token IDs.
+                already_shifted=True,
             )
             embeds = self.multimodal_embedding_injector(
                 self.embed_tokens(token_ids), features, locs

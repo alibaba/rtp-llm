@@ -155,9 +155,18 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     pool_collector.write_bytes                   = pool_metrics.write_bytes;
     pool_collector.read_bandwidth_bytes_per_sec  = pool_metrics.read_bandwidth_bytes_per_sec;
     pool_collector.write_bandwidth_bytes_per_sec = pool_metrics.write_bandwidth_bytes_per_sec;
+    if (pool_metrics.shared_arena_memory) {
+        const auto& arena                           = *pool_metrics.shared_arena_memory;
+        pool_collector.shared_arena_total_bytes     = arena.total_bytes;
+        pool_collector.shared_arena_free_bytes      = arena.free_bytes;
+        pool_collector.shared_arena_available_bytes = arena.available_bytes;
+    }
 
     kmonitor::MetricsTags pool_tags("pool_name", pool_metrics.pool_name);
     pool_tags.AddTag("tier", tierName(pool_metrics.tier));
+    if (pool_metrics.shared_namespace) {
+        pool_tags.AddTag("cache_backing", "shared_namespace");
+    }
     metrics_reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&pool_tags, &pool_collector);
 }
 
@@ -254,19 +263,17 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
         }
     }
 
-    const auto& cp_cfg = parallelism_config_.prefill_cp_config;
     // Decode retains every received FULL page on each TP rank. Its sharding
     // flag describes the upstream prefill layout for transport/state sizing,
     // not local allocation: applying the CP mapper here would underallocate by the CP factor.
-    if (cp_cfg.kv_cache_sharded && (cp_cfg.is_enabled() || cp_cfg.is_prefill_enabled())
-        && parallelism_config_.role_type != RoleType::DECODE && parallelism_config_.tp_size > 1) {
-        cp_slot_mapper_ = std::make_shared<CPSlotMapper>(static_cast<int>(parallelism_config_.tp_rank),
-                                                         static_cast<int>(parallelism_config_.tp_size),
-                                                         static_cast<int>(config_.seq_size_per_block));
+    const int cp_size = static_cast<int>(parallelism_config_.kvCacheCpSize());
+    if (cp_size > 1) {
+        cp_slot_mapper_ = std::make_shared<CPSlotMapper>(
+            static_cast<int>(parallelism_config_.tp_rank), cp_size, static_cast<int>(config_.seq_size_per_block));
         RTP_LLM_LOG_INFO("CP sharded KV cache enabled: cp_rank=%d, cp_size=%d, block_size=%zu, "
                          "virtual_block_size=%d",
                          (int)parallelism_config_.tp_rank,
-                         (int)parallelism_config_.tp_size,
+                         cp_size,
                          config_.seq_size_per_block,
                          cp_slot_mapper_->virtualBlockSize());
     }

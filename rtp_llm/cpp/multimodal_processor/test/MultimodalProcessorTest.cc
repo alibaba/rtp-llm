@@ -97,6 +97,7 @@ TEST_F(MultimodalProcessorTest, InterleavedVideoExpandsTimestampsWithoutDeepstac
     EXPECT_TRUE(!input->mm_extra_input || input->mm_extra_input->empty());
     EXPECT_TRUE(torch::equal(input->text_tokens_mask.value(),
                              torch::tensor({1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 1}, torch::kInt32)));
+    EXPECT_EQ(input->multimodalLengths(), (std::map<int, int>{{2, 3}}));
 
     processor.starts_media = false;
     input->input_ids       = torch::tensor({0, 20, 99, 21, 6}, torch::kInt32);
