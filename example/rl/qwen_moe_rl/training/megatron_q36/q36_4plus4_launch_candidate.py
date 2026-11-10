@@ -19,7 +19,8 @@ SOURCES = {
   'onpolicy_standalone_candidate.py': '8c36ff1bb662fa5ba5177c1f4e17646664c81fe93790087f00d3c10178f468a8',
   'q36_4plus4_claim_loader.py': '0075f76555d41822bfd23d3879165aa754b0b0f19484f99ec3f5166dfbe0c5ac',
   'q36_4plus4_claim_guard.py': '8bbfcd82128c1c2ac4018ec1f9fd101547389523077acbbd4c3435c5321f9e0e',
-  'q36_standalone_bootstrap_selector.py': 'd1392c78d102b007fa615b2b0d3c699bbc6b1b98c22e757d0c0c6ffd3bb8cf1a',
+  'q36_standalone_bootstrap_selector.py': 'f921d6b4fc82246fc702d2afcec278ae2d4c763924539200ac3ecf409dd34c6e',
+  'standalone_bootstrap_rpc_v6.py': 'e8caff16e23780db8ec592fa050d6ead8fce6de0395dbd4ff2ac3ec2d25ff02c',
   'standalone_bootstrap_v4.py': 'd3c993deb80505b578b97fd5222ff396dec4f0b5362dc6937aa503ff211e66a8'},
  'Q36_ADAPTER_DIR': {
   'standalone_rtp_adapter_v3.py': '746017e37515ecacbbd17e822d8665a619a21fd04b27ca327b246890cbca6c35',
@@ -31,6 +32,7 @@ SOURCES = {
 MODEL_SHA = {'config.json': '93a4693fa9d8392fbfccd4b3c9873f4bfdcb14fdede978b123d07d19675efe99',
              'model.safetensors.index.json': '41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83'}
 REQUIRED_FLAGS = {'Q36_STRICT_4PLUS4_CLAIM':'1', 'Q36_ONPOLICY_NO_CONCURRENT_ROLLOUT':'1',
+ 'Q36_USE_RPC_OVERLAY':'1',
  'Q36_DISAGG_CLEANUP_SINGLE_NODE_TP4':'1', 'Q36_DISAGG_TRAIN_GPUS':'4',
  'Q36_DISAGG_ROLLOUT_GPUS':'4', 'RTP_EP_SIZE':'1', 'RTP_RL_SHARED_BACKING':'0',
  'RTP_TP_SIZE':'4', 'RLLM_RTP_GPUS_PER_NODE':'4', 'RLLM_RTP_EXPECTED_REPLICAS':'1',
@@ -78,6 +80,12 @@ def preflight(env):
         ready.get('training_node_ip') != '10.44.49.51' or ready.get('rollout_readback') != expected_peer):
         raise RuntimeError('claim replication receipt differs from this run')
     verify_sources(env)
+    from q36_standalone_bootstrap_selector import select_bootstrap
+    rpc_bootstrap = select_bootstrap()
+    if rpc_bootstrap.__name__ != 'standalone_bootstrap_rpc_v6':
+        raise RuntimeError('4+4 requires the RPC-aware standalone worker hook')
+    rpc_bootstrap._install_proto()
+    rpc_bootstrap._load_v5()._verify_v5()
     resident = env.get('Q36_DISAGG_RESIDENT_KV', '0')
     if resident not in ('0', '1'):
         raise RuntimeError('Q36_DISAGG_RESIDENT_KV must be 0 or 1')

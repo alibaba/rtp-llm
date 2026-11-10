@@ -27,8 +27,12 @@ class SelectorTest(unittest.TestCase):
                 self.assertEqual(self.selector.select_bootstrap(),'standalone_bootstrap_v4')
                 with patch.dict(os.environ,{'Q36_DISAGG_RESIDENT_KV':'1'}):
                     self.assertEqual(self.selector.select_bootstrap(),'standalone_bootstrap_v5')
+                    with patch.dict(os.environ,{'Q36_USE_RPC_OVERLAY':'1'}):
+                        self.assertEqual(self.selector.select_bootstrap(),'standalone_bootstrap_rpc_v6')
             with patch.dict(os.environ,{'Q36_DISAGG_RESIDENT_KV':'1'}):
                 with self.assertRaisesRegex(ValueError,'no-concurrent'):self.selector.select_bootstrap()
+            with patch.dict(os.environ,{'Q36_USE_RPC_OVERLAY':'1'}):
+                with self.assertRaisesRegex(ValueError,'resident KV'):self.selector.select_bootstrap()
 
     def test_adapter_source_lock_rejects_tampered_file(self):
         self.bootstrap._verify_v5()

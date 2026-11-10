@@ -8,6 +8,7 @@ import sys
 
 V4_SHA256 = 'd3c993deb80505b578b97fd5222ff396dec4f0b5362dc6937aa503ff211e66a8'
 V5_SHA256 = '1e25f1b0f9f546173fd623413dfcf63545af1d53bf155c419e3fbfd69c5d448c'
+RPC_SHA256 = 'e8caff16e23780db8ec592fa050d6ead8fce6de0395dbd4ff2ac3ec2d25ff02c'
 
 
 def select_bootstrap():
@@ -17,13 +18,18 @@ def select_bootstrap():
     resident = os.environ.get('Q36_DISAGG_RESIDENT_KV', '0')
     if resident not in ('0', '1') or (resident == '1' and flag != '1'):
         raise ValueError('resident KV requires explicit no-concurrent on-policy selection')
-    name = 'standalone_bootstrap_v5' if resident == '1' else ('standalone_bootstrap_v4' if flag == '1' else 'standalone_bootstrap_v3')
+    rpc = os.environ.get('Q36_USE_RPC_OVERLAY', '0')
+    if rpc not in ('0', '1') or (rpc == '1' and resident != '1'):
+        raise ValueError('RPC overlay requires the explicit resident KV profile')
+    name = ('standalone_bootstrap_rpc_v6' if rpc == '1' else
+            'standalone_bootstrap_v5' if resident == '1' else
+            'standalone_bootstrap_v4' if flag == '1' else 'standalone_bootstrap_v3')
     if flag == '1':
         root = Path(os.environ['Q36_CODE_DIR']).resolve(strict=True)
         source = root / (name + '.py')
         spec = importlib.machinery.PathFinder.find_spec(name, sys.path)
         loaded = sys.modules.get(name)
-        expected = V5_SHA256 if resident == '1' else V4_SHA256
+        expected = RPC_SHA256 if rpc == '1' else V5_SHA256 if resident == '1' else V4_SHA256
         if (source.is_symlink() or not source.is_file() or hashlib.sha256(source.read_bytes()).hexdigest() != expected or
             spec is None or not spec.origin or Path(spec.origin).resolve() != source or
             loaded is not None and Path(getattr(loaded, '__file__', '')).resolve() != source):
