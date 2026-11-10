@@ -182,11 +182,19 @@ def _build_block(
     commit_only: bool = False,
     shared_attention: Optional[Dict] = None,
 ) -> Block:
-    return Block(
+    block = Block(
         **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only),
         v41_config=args.v41_config,
         shared_attention=shared_attention,
     )
+    import os
+    if os.environ.get("DSV41_DEBUG_MEM") == "1":
+        print(
+            f"[mem] built layer {layer_id}: allocated="
+            f"{torch.cuda.memory_allocated() / 2**30:.2f} GiB",
+            flush=True,
+        )
+    return block
 
 
 class V4Transformer(nn.Module):

@@ -116,6 +116,15 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             "w3_s": layer_weights.pop(W.v4_routed_w3_s),
         }
         self._W1_w = stacked_routed["w1_w"]
+        import os
+        if os.environ.get("DSV41_DEBUG_MEM") == "1":
+            nbytes = sum(t.numel() * t.element_size() for t in stacked_routed.values())
+            print(
+                f"[mem] layer {cfg.layer_id} stacked experts {tuple(self._W1_w.shape)} "
+                f"bytes={nbytes / 2**30:.2f} GiB "
+                f"allocated={torch.cuda.memory_allocated() / 2**30:.2f} GiB",
+                flush=True,
+            )
         self._W1_s = stacked_routed["w1_s"]
         self._W2_w = stacked_routed["w2_w"]
         self._W2_s = stacked_routed["w2_s"]
