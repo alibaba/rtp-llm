@@ -40,6 +40,23 @@ import torch.nn.functional as F
 from torch import nn
 
 logger = logging.getLogger(__name__)
+
+
+def _host_runtime():
+    """Return a CUDA/HIP runtime binding for host-pinned Engram tables.
+
+    Grace-Hopper images ship the ``cuda.bindings`` package.  ROCm images do
+    not, but torch's cudart shim exposes the same cudaHostRegister /
+    cudaHostGetDevicePointer / cudaHostUnregister entry points backed by HIP,
+    which is exactly the host-mapped memory Engram needs.  No CUDA runtime is
+    otherwise required for the ROCm path.
+    """
+    try:
+        from cuda.bindings import runtime as _runtime
+
+        return _runtime
+    except ImportError:
+        return torch.cuda.cudart()
 DEAD_ID = -1
 
 
@@ -551,7 +568,7 @@ class _PinnedSharedTable:
         self.weight = self.storage[:weight_bytes].view(weight.dtype).view(weight.shape)
         self.scales = self.storage[weight_bytes:].view(torch.uint8).view(scales.shape)
         self.device = torch.device(device)
-        from cuda.bindings import runtime
+        runtime = _host_runtime()
 
         with torch.cuda.device(self.device):
             (result,) = runtime.cudaHostRegister(
@@ -608,7 +625,7 @@ class _DeviceScaleLease:
     def __init__(self, uva, pinned, *, storage=None):
         self.uva, self.pinned, self.storage = uva, pinned, storage
         if pinned is None:
-            from cuda.bindings import runtime
+            runtime = _host_runtime()
         else:
             runtime = pinned.runtime
         device = pinned.device.index if pinned is not None else storage.device
