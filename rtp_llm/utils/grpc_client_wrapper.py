@@ -15,15 +15,23 @@ from rtp_llm.utils.time_util import Timer
 
 
 def _awi_event_to_dict(e) -> Dict[str, Any]:
-    """Typed AwiEventPB -> dict. Sentinel -1/empty fields are omitted so each
-    event carries only the contract fields its type actually records."""
-    d: Dict[str, Any] = {"type": e.type, "rank": int(e.rank)}
+    """Typed AwiEventPB -> contract event dict.
+
+    Field semantics follow the frozen evaluator's summarize():
+    - events are keyed "kind";
+    - "request_id" is the adapter's X-AWI string id when present (the engine
+      id only annotates rank step aggregates, which carry request_id -1);
+    - "graph_replay" is a JSON boolean (checked with `is True`);
+    - "resident" events carry a "sequences" array (one scheduler snapshot);
+    - sentinel -1/empty fields are omitted.
+    """
+    d: Dict[str, Any] = {"kind": e.type, "rank": int(e.rank)}
     if e.operation_id:
         d["operation_id"] = e.operation_id
-    if e.request_id >= 0:
-        d["request_id"] = int(e.request_id)
     if e.awi_request_id:
-        d["awi_request_id"] = e.awi_request_id
+        d["request_id"] = e.awi_request_id
+    elif e.request_id >= 0:
+        d["request_id"] = int(e.request_id)
     for field in (
         "input_tokens",
         "start_ns",
@@ -39,7 +47,7 @@ def _awi_event_to_dict(e) -> Dict[str, Any]:
         if value >= 0:
             d[field] = value
     if int(e.graph_replay) != -1:
-        d["graph_replay"] = int(e.graph_replay)
+        d["graph_replay"] = bool(int(e.graph_replay))
     if e.elapsed_ms > 0:
         d["elapsed_ms"] = float(e.elapsed_ms)
     if e.backend:
@@ -47,7 +55,11 @@ def _awi_event_to_dict(e) -> Dict[str, Any]:
     if e.failure_kind:
         d["failure_kind"] = e.failure_kind
     if e.detail_json:
-        d["detail"] = json.loads(e.detail_json)
+        detail = json.loads(e.detail_json)
+        if e.type == "resident" and isinstance(detail, dict):
+            d["sequences"] = detail.get("sequences", [])
+        else:
+            d["detail"] = detail
     return d
 
 
