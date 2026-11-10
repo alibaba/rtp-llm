@@ -240,6 +240,29 @@ class V4Transformer(nn.Module):
                 f"reserved={torch.cuda.memory_reserved() / 2**30:.2f} GiB",
                 flush=True,
             )
+            _seen = []
+            for _o in _gc.get_objects():
+                try:
+                    if isinstance(_o, torch.Tensor) and _o.is_cuda:
+                        _seen.append(
+                            (
+                                _o.numel() * _o.element_size(),
+                                str(_o.dtype),
+                                tuple(_o.shape),
+                                id(_o),
+                            )
+                        )
+                except Exception:
+                    pass
+            _seen.sort(reverse=True)
+            print(
+                "[mem] top cuda tensors "
+                + " ".join(
+                    f"{b / 2**30:.2f}GiB/{dt}/{shape}/id={oid}"
+                    for b, dt, shape, oid in _seen[:10]
+                ),
+                flush=True,
+            )
         if torch.version.hip is not None:
             # The generic loader materializes every Engram table on the GPU
             # before the model is built.  Engram is the one component that must
