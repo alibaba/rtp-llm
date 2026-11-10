@@ -1031,12 +1031,13 @@ TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoReportsPrefillReuseForLongContex
     EXPECT_EQ(aux_info.input_len(), 347211);
 }
 
-TEST_F(PrefillRpcServerTest, pollRemoteOutputForwardsTokensWithoutAuxInfo) {
+TEST_F(PrefillRpcServerTest, pollRemoteOutputPublishesWithoutGenerateDoneEvent) {
     class TerminalStream final: public NormalGenerateStream {
     public:
         using NormalGenerateStream::NormalGenerateStream;
         void markTerminal() {
-            reportEvent(StreamEvents::GenerateDone);
+            // This deployment can finish a prefill response without ever
+            // publishing GenerateDone to the RPC output path.
             generate_status_->status.store(StreamState::FINISHED, std::memory_order_release);
         }
     };
@@ -1047,8 +1048,8 @@ TEST_F(PrefillRpcServerTest, pollRemoteOutputForwardsTokensWithoutAuxInfo) {
             for (int token : {11, 12}) {
                 GenerateOutputsPB response;
                 auto*             flat = response.mutable_flatten_output();
-                // This deployment forwards the final chunk without the finished
-                // flag; publication must key on the terminal prefill event.
+                // This deployment forwards the final chunk without either the
+                // finished flag or a GenerateDone event.
                 flat->add_finished(false);
                 auto* ids = flat->mutable_output_ids();
                 ids->set_data_type(TensorPB::INT32);

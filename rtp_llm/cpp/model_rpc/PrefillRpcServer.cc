@@ -621,8 +621,8 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
 bool PrefillRpcServer::publishPrefillCache(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     auto stream = prefill_context.getStream();
-    if (!stream || stream->hasError() || !stream->hasEvent(StreamEvents::GenerateDone)) {
-        RTP_LLM_LOG_WARNING(
+    if (!stream || stream->hasError()) {
+        RTP_LLM_LOG_ERROR(
             "request [%ld] prefill cache publication skipped: stream=%d has_error=%d generate_done=%d",
             prefill_context.request_id,
             static_cast<int>(stream != nullptr),
@@ -635,9 +635,12 @@ bool PrefillRpcServer::publishPrefillCache(PrefillGenerateContext& prefill_conte
     // cancelling a successful stream; a timeout leaves the existing deferred
     // release path intact rather than failing the request.
     if (!stream->isFinished() && !stream->waitForFinished(kPrefillCachePublicationWaitMs)) {
-        RTP_LLM_LOG_WARNING("request [%ld] prefill cache publication deferred: lifecycle not terminal within %ld ms",
-                            prefill_context.request_id,
-                            kPrefillCachePublicationWaitMs);
+        RTP_LLM_LOG_ERROR(
+            "request [%ld] prefill cache publication deferred: lifecycle not terminal within %ld ms, "
+            "generate_done=%d",
+            prefill_context.request_id,
+            kPrefillCachePublicationWaitMs,
+            static_cast<int>(stream->hasEvent(StreamEvents::GenerateDone)));
         return false;
     }
     if (!stream->waitPendingAsyncBookkeeping(kPrefillCachePublicationWaitMs)) {
@@ -744,14 +747,14 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             RTP_LLM_LOG_ERROR("request [%ld] generate output size is 0", request_id);
             break;
         }
-        // Publish as soon as the prefill stream is terminal, before forwarding
-        // any decode output that could acknowledge the request. The previous
-        // version keyed only on the response's finished flag; this deployment
-        // forwards the final decode chunk without that flag, so the terminal
-        // stream event is the reliable signal. The call is idempotent and is
-        // retried on later chunks if the stream is not terminal yet.
-        if (!prefill_context.cache_published && prefill_context.getStream()
-            && prefill_context.getStream()->hasEvent(StreamEvents::GenerateDone)) {
+        // Publish before forwarding any decode output that could acknowledge
+        // the request. This deployment does not expose the response finished
+        // flag and may not publish GenerateDone until after the output worker
+        // runs, so neither is a safe precondition. The bounded wait inside
+        // publishPrefillCache decides whether the stream is terminal; if it is
+        // not, the call is retried at the end of finishStream and the existing
+        // deferred release remains the fallback.
+        if (!prefill_context.cache_published) {
             prefill_context.cache_published = publishPrefillCache(prefill_context);
         }
         for (size_t i = 0; i < response.flatten_output().aux_info_size(); i++) {

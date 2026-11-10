@@ -265,7 +265,7 @@ TEST_F(PrefillContextLifecycleTest, PublishPrefillCacheDrainsTerminalBookkeeping
     EXPECT_FALSE(stream_->isDeferredReleasePending());
 }
 
-TEST_F(PrefillContextLifecycleTest, PublishPrefillCacheDoesNotWaitForRunningStream) {
+TEST_F(PrefillContextLifecycleTest, PublishPrefillCacheWaitsBoundedForRunningStream) {
     auto context = makePrefillContext();
     const auto begin = std::chrono::steady_clock::now();
     CachePublicationTestServer server;
@@ -273,7 +273,10 @@ TEST_F(PrefillContextLifecycleTest, PublishPrefillCacheDoesNotWaitForRunningStre
     const auto elapsed_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
 
-    EXPECT_LT(elapsed_ms, 50);
+    // v45 intentionally waits the bounded publication interval for a
+    // successful but still-RUNNING stream; it must not hang or fail it.
+    EXPECT_GE(elapsed_ms, 90);
+    EXPECT_LT(elapsed_ms, 250);
     EXPECT_FALSE(stream_->hasError());
     EXPECT_EQ(stream_->getStatus(), StreamState::RUNNING);
     EXPECT_FALSE(stream_->streamCacheResource().isResourceReleased());
