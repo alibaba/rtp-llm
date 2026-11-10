@@ -251,14 +251,6 @@ message MultimodalOutputPB {
     repeated MMRdmaSlotPB output_rdma_slots = 5;
     // Compact CPU row hashes stay inline for either transport.
     TensorPB multimodal_feature_hash = 7;
-    // Optional complete marker replacements, in input-media order. Empty keeps
-    // the legacy embedding-only expansion. Spans index the returned features.
-    repeated MultimodalTokenPlanPB token_plans = 8;
-}
-
-message MultimodalTokenPlanPB {
-    repeated int32 token_ids = 1;
-    repeated MultimodalTokenSpanPB spans = 2;
 }
 
 message ReleaseLeasePB {

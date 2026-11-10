@@ -693,9 +693,29 @@ class PLEExecution:
         return ple_input_ids(inputs, self.eos_token_id)
 
 
+def semantic_token_ids(inputs: PyModelInputs) -> torch.Tensor:
+    """Restore per-token vocabulary IDs from the existing multimodal sidecar."""
+    mm = inputs.multimodal_inputs
+    extra = mm.mm_extra_input
+    locations = mm.mm_features_locs.reshape(-1)
+    features = mm.multimodal_features
+    if len(extra) != locations.numel() or len(features) != len(extra):
+        raise ValueError("semantic IDs must match multimodal media tensors")
+    result = inputs.input_ids.clone()
+    for loc, ids, feature in zip(locations.unbind(), extra, features):
+        if ids.dtype != torch.int32 or ids.ndim != 1 or ids.numel() != feature.shape[0]:
+            raise ValueError("semantic IDs require one int32 value per media token")
+        indices = torch.arange(feature.shape[0], device=result.device) + loc
+        result.index_copy_(
+            0,
+            indices.long(),
+            ids.to(device=result.device, dtype=result.dtype, non_blocking=True),
+        )
+    return result
+
+
 def ple_input_ids(inputs: PyModelInputs, eos_token_id) -> torch.Tensor:
     """Use vocabulary IDs for PLE, independently of visual cache hashes."""
-    from rtp_llm.multimodal.token_plan import semantic_token_ids
 
     mm = getattr(inputs, "multimodal_inputs", None)
     if mm is not None and getattr(mm, "mm_extra_input", None):

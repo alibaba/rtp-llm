@@ -3,7 +3,6 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <algorithm>
 #include <cstring>
-#include <map>
 #include <string>
 #include <vector>
 #include <torch/python.h>
@@ -12,10 +11,6 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
-
-#if USING_CUDA
-#include <c10/cuda/CUDAStream.h>
-#endif
 
 namespace py = pybind11;
 
@@ -48,50 +43,6 @@ ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* 
     (void)tensor_name;
 #endif
     return ErrorInfo::OkStatus();
-}
-
-// Token-plan media may split one GPU output into many frames. Queue their
-// host copies together and finish once per device before TP serialization.
-ErrorInfo pinTokenPlanFeatures(std::vector<torch::Tensor>& tensors) {
-#if USING_CUDA
-    std::map<c10::DeviceIndex, c10::cuda::CUDAStream> streams;
-    try {
-        std::vector<torch::Tensor> pinned;
-        pinned.reserve(tensors.size());
-        // Keep the original GPU tensors alive until every queued copy finishes,
-        // including when a later allocation/copy throws on another frame.
-        for (const auto& tensor : tensors) {
-            if (!tensor.defined() || tensor.is_pinned()) {
-                pinned.push_back(tensor);
-            } else if (tensor.is_cuda()) {
-                streams.emplace(tensor.get_device(), c10::cuda::getCurrentCUDAStream(tensor.get_device()));
-                auto options =
-                    torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true);
-                pinned.push_back(tensor.to(options, /*non_blocking=*/true));
-            } else {
-                pinned.push_back(tensor.pin_memory());
-            }
-        }
-        for (const auto& [device, stream] : streams) {
-            stream.synchronize();
-        }
-        tensors = std::move(pinned);
-    } catch (const std::exception& error) {
-        // The input vector still owns every GPU source. Drain already queued
-        // copies before returning an error and releasing those owners.
-        for (const auto& [device, stream] : streams) {
-            try {
-                stream.synchronize();
-            } catch (const std::exception&) {
-            }
-        }
-        return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
-                         std::string("failed to move token-plan embeddings to pinned CPU: ") + error.what());
-    }
-    return ErrorInfo::OkStatus();
-#else
-    return pinMultimodalTensors(tensors, "embedding");
-#endif
 }
 
 }  // namespace
@@ -201,75 +152,6 @@ MultimodalProcessor::getMultimodalTags(const torch::Tensor& token_ids) {
     } catch (const std::exception& error) {
         return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, error.what());
     }
-}
-
-ErrorResult<ExpandedOutput>
-MultimodalProcessor::expandTokenPlans(const std::vector<torch::Tensor>&                features,
-                                      const torch::Tensor&                             token_ids,
-                                      const std::vector<MultimodalTokenPlan>&          plans,
-                                      const std::optional<std::vector<torch::Tensor>>& feature_hashes) {
-    CHECK_AND_RETURN_REF(markers, getMultimodalTags(token_ids));
-    if (!include_sep_tokens_ || markers.size() != plans.size()
-        || (feature_hashes && feature_hashes->size() != features.size())) {
-        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "token plans require complete, matching media markers");
-    }
-    int64_t size          = token_ids.numel();
-    size_t  feature_index = 0;
-    for (size_t i = 0; i < plans.size(); ++i) {
-        const auto& plan = plans[i];
-        size += static_cast<int64_t>(plan.token_ids.size()) - (markers[i].second - markers[i].first);
-        int64_t previous_end = 0;
-        for (const auto& [offset, length] : plan.spans) {
-            if (offset < previous_end || length <= 0 || int64_t(offset) + length > plan.token_ids.size()
-                || feature_index >= features.size() || features[feature_index].dim() != 2
-                || features[feature_index].size(0) != length) {
-                return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "token plan spans do not match embedding segments");
-            }
-            previous_end = int64_t(offset) + length;
-            ++feature_index;
-        }
-        if (plan.spans.empty()
-            || std::any_of(plan.token_ids.begin(), plan.token_ids.end(), [](int32_t id) { return id < 0; })) {
-            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
-                             "token plan requires vocabulary IDs and embedding spans");
-        }
-    }
-    if (feature_index != features.size() || size <= 0 || size >= max_seq_len_) {
-        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid token plan feature count or expanded length");
-    }
-    auto    ids    = torch::empty({size}, torch::kInt32);
-    auto    mask   = torch::ones({size}, torch::kInt32);
-    auto    locs   = torch::empty({static_cast<int64_t>(features.size())}, torch::kInt32);
-    int64_t source = 0, destination = 0;
-    feature_index = 0;
-    for (size_t i = 0; i < plans.size(); ++i) {
-        const auto&   plan        = plans[i];
-        const int64_t text_length = markers[i].first - source;
-        std::copy_n(token_ids.data_ptr<int32_t>() + source, text_length, ids.data_ptr<int32_t>() + destination);
-        destination += text_length;
-        std::copy(plan.token_ids.begin(), plan.token_ids.end(), ids.data_ptr<int32_t>() + destination);
-        for (const auto& [offset, length] : plan.spans) {
-            auto* target = ids.data_ptr<int32_t>() + destination + offset;
-            if (feature_hashes) {
-                const auto& hashes = feature_hashes->at(feature_index);
-                if (!hashes.device().is_cpu() || hashes.scalar_type() != torch::kInt32 || hashes.dim() != 1
-                    || hashes.numel() != length) {
-                    return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid token plan feature hashes");
-                }
-                auto contiguous = hashes.contiguous();
-                std::copy_n(contiguous.data_ptr<int32_t>(), length, target);
-            } else {
-                RETURN_IF_STATUS_ERROR(getFeatureHash(target, features[feature_index]));
-            }
-            std::fill_n(mask.data_ptr<int32_t>() + destination + offset, length, 0);
-            locs.data_ptr<int32_t>()[feature_index++] = destination + offset;
-        }
-        destination += plan.token_ids.size();
-        source = markers[i].second;
-    }
-    std::copy_n(
-        token_ids.data_ptr<int32_t>() + source, token_ids.numel() - source, ids.data_ptr<int32_t>() + destination);
-    return ExpandedOutput(std::move(ids), {}, std::move(mask), std::move(locs));
 }
 
 ErrorInfo MultimodalProcessor::checkExpandLength(const ExpandedOutput& expand_output) {
@@ -473,36 +355,22 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     CHECK_AND_RETURN_REF(
         mm_embedding_res,
         MultimodalEmbedding(input->multimodal_inputs.value(), ip_port, input->request_id, server_context));
-    if (!mm_embedding_res.token_plans.empty()
-        && mm_embedding_res.token_plans.size() != input->multimodal_inputs->size()) {
-        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "token plan count must match media inputs");
-    }
     auto                       mm_features = std::move(mm_embedding_res.mm_features);
     std::vector<torch::Tensor> mm_extra_input;
     if (mm_embedding_res.mm_extra_input.has_value()) {
         mm_extra_input = std::move(mm_embedding_res.mm_extra_input.value());
     }
-    CHECK_AND_RETURN_REF(
-        expanded_ids,
-        !mm_embedding_res.token_plans.empty() ?
-            expandTokenPlans(
-                mm_features, input->input_ids, mm_embedding_res.token_plans, mm_embedding_res.mm_feature_hashes) :
-        input->multimodal_token_layout.has_value() ?
-            useExpandedTokenLayout(*input, mm_features, mm_embedding_res.mm_feature_hashes) :
-            expandTokenIds(mm_features,
-                           input->input_ids,
-                           input->multimodal_inputs.value(),
-                           {},
-                           mm_embedding_res.mm_feature_hashes));
+    CHECK_AND_RETURN_REF(expanded_ids,
+                         input->multimodal_token_layout.has_value() ?
+                             useExpandedTokenLayout(*input, mm_features, mm_embedding_res.mm_feature_hashes) :
+                             expandTokenIds(mm_features,
+                                            input->input_ids,
+                                            input->multimodal_inputs.value(),
+                                            {},
+                                            mm_embedding_res.mm_feature_hashes));
     RETURN_IF_STATUS_ERROR(checkExpandLength(expanded_ids));
-    RETURN_IF_STATUS_ERROR(mm_embedding_res.token_plans.empty() ? pinMultimodalTensors(mm_features, "embedding") :
-                                                                   pinTokenPlanFeatures(mm_features));
+    RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_features, "embedding"));
     RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_extra_input, "extra input"));
-    for (size_t i = 0; i < mm_embedding_res.token_plans.size(); ++i) {
-        for (const auto& span : mm_embedding_res.token_plans[i].spans) {
-            input->multimodal_feature_lengths[input->multimodal_inputs->at(i).mm_type] += span.second;
-        }
-    }
     input->multimodal_features = std::move(mm_features);
     input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
     input->mm_extra_input      = std::move(mm_extra_input);

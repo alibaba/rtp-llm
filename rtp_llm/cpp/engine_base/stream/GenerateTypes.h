@@ -2,7 +2,6 @@
 #include "rtp_llm/cpp/multimodal_processor/V41Input.h"
 #include <cstdint>
 #include <memory>
-#include <map>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -45,9 +44,6 @@ public:
     }
 
     std::map<int, int> multimodalLengths() const {
-        if (!multimodal_feature_lengths.empty()) {
-            return multimodal_feature_lengths;
-        }
         std::map<int, int> lengths;
         if (v41_inputs && multimodal_features) {
             for (const auto& feature : *multimodal_features) {
@@ -101,8 +97,6 @@ public:
     bool                            fake_query            = false;
     // For multi-modality models
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;
-    // A media item may produce several embedding spans (e.g. video frames).
-    std::map<int, int>                          multimodal_feature_lengths;
     std::shared_ptr<const V41RequestInputs>     v41_inputs;
     std::optional<std::vector<torch::Tensor>>   multimodal_features;
     std::optional<torch::Tensor>                text_tokens_mask;  // text part for 1 and multimodal part for 0

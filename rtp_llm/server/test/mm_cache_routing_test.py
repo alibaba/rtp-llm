@@ -35,7 +35,6 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.multimodal.multimodal_util import trans_config
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, PDSepConfig, VitSeparation
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
-from rtp_llm.server.cache_key_routing import get_block_cache_keys
 from rtp_llm.server.master_client import (
     VIT_ROUTE_STALE_CODE,
     FlexlbResponse,
@@ -328,46 +327,6 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [(s.offset, s.length) for s in wire.multimodal_token_layout.spans], [(1, 2)]
         )
-
-    async def test_token_plan_model_keeps_raw_media_markers_for_backend(self):
-        for model_type in ("qwen4_exp", "qwen4_exp_mtp"):
-            with self.subTest(model_type=model_type):
-                pd_config = PDSepConfig()
-                pd_config.role_type = RoleType.FRONTEND
-                visitor = BackendRPCServerVisitor(
-                    max_seq_len=100,
-                    seq_size_per_block=2,
-                    pd_sep_config=pd_config,
-                    addresses=[],
-                    vit_separation=VitSeparation.VIT_SEPARATION_REMOTE,
-                    mm_model_config=SimpleNamespace(
-                        mm_sep_tokens=[[10, 11]], include_sep_tokens=True
-                    ),
-                    model_config=SimpleNamespace(model_type=model_type),
-                )
-                visitor.master_client = SimpleNamespace(
-                    get_backend_role_addrs=AsyncMock(
-                        return_value=FlexlbResponse.ok([self.prefill, self.vit])
-                    ),
-                    get_vit_cache_metadata=AsyncMock(
-                        side_effect=AssertionError("hash-only preflight")
-                    ),
-                )
-                self.request.token_ids = torch.tensor(
-                    [1, 2, 10, 20, 11, 3], dtype=torch.int32
-                )
-                await visitor.get_master_route_addrs(self.request)
-                visitor.master_client.get_vit_cache_metadata.assert_not_awaited()
-                calls = visitor.master_client.get_backend_role_addrs.call_args_list
-                self.assertEqual(len(calls), 1)
-                self.assertNotIn("seq_len", calls[0].kwargs)
-                self.assertIsNone(self.request.mm_token_expansion)
-                wire = trans_input(self.request)
-                self.assertEqual(list(wire.token_ids), [1, 2, 10, 20, 11, 3])
-                self.assertFalse(wire.HasField("multimodal_token_layout"))
-                self.assertEqual(
-                    calls[0].kwargs["block_cache_keys"], get_block_cache_keys([1, 2], 2)
-                )
 
     async def test_missing_or_invalid_required_hashes_stop_before_prefill_routing(self):
         for data in ({"entries": [{}]},):

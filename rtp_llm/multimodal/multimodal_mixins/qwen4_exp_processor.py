@@ -6,7 +6,6 @@ import torch
 from PIL import Image, ImageOps
 
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
-from rtp_llm.multimodal.token_plan import MMTokenPlan
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
@@ -14,47 +13,63 @@ from rtp_llm.utils.base_model_datatypes import MMUrlType
 class Qwen4VisualInput:
     pixels: torch.Tensor
     grid: torch.Tensor
-    token_plan: MMTokenPlan
-    positions: list
-    semantic_ids: list
+    timestamps: list | None = None
 
 
-def visual_token_plan(grid, processor, is_video=False, timestamps=None):
-    """Construct frame-local coordinates and the official timestamped prompt."""
-    t, h, w = (int(x) for x in grid[0].tolist())
+def assemble_visual_embedding(data, features, positions, processor, text_embedding):
+    """Return one complete embedding/position/semantic-ID tensor per media item."""
+    t, h, w = (int(x) for x in data.grid[0].tolist())
     merge = processor.image_processor.merge_size
     h, w = h // merge, w // merge
     if min(t, h, w) <= 0:
         raise ValueError("Qwen4 visual grid must have positive merged dimensions")
+    is_video = data.timestamps is not None
     if not is_video and t != 1:
         raise ValueError("an image must produce one temporal grid cell")
-    if is_video and (timestamps is None or len(timestamps) != t):
+    if is_video and len(data.timestamps) != t:
         raise ValueError("video timestamps must match temporal patches")
+    if features.shape[0] != t * h * w:
+        raise ValueError("visual features must match the merged grid")
     token_id = processor.video_token_id if is_video else processor.image_token_id
     start, end = processor.vision_start_token_id, processor.vision_end_token_id
-    tokens, spans, positions, semantic_ids = [], [], [], []
-    spatial = torch.stack(
-        (
-            torch.zeros(h * w, dtype=torch.int32),
-            torch.arange(h, dtype=torch.int32).repeat_interleave(w),
-            torch.arange(w, dtype=torch.int32).repeat(h),
-        ),
-        dim=-1,
-    )
+    tokens, visual_mask, coordinates = [], [], []
+    spatial = positions[: h * w].to(device="cpu", dtype=torch.int32)
+    offset = 0
     for frame in range(t):
+        text = []
         if is_video:
-            tokens.extend(
+            text.extend(
                 processor.tokenizer.encode(
-                    f"<{timestamps[frame]:.1f} seconds>", add_special_tokens=False
+                    f"<{data.timestamps[frame]:.1f} seconds>", add_special_tokens=False
                 )
             )
-        tokens.append(start)
-        spans.append((len(tokens), h * w))
+        text.append(start)
+        tokens.extend(text)
+        visual_mask.extend([False] * len(text))
+        coordinates.append(
+            torch.arange(offset, offset + len(text), dtype=torch.int32)
+            .unsqueeze(1)
+            .expand(-1, 3)
+        )
+        offset += len(text)
         tokens.extend([token_id] * (h * w))
+        visual_mask.extend([True] * (h * w))
+        coordinates.append(spatial + offset)
+        offset += max(h, w)
         tokens.append(end)
-        positions.append(spatial.clone())
-        semantic_ids.append(torch.tensor(token_id, dtype=torch.int32))
-    return MMTokenPlan(tokens, spans), positions, semantic_ids
+        visual_mask.append(False)
+        coordinates.append(torch.full((1, 3), offset, dtype=torch.int32))
+        offset += 1
+    token_ids = torch.tensor(tokens, dtype=torch.int32)
+    visual_mask = torch.tensor(visual_mask, dtype=torch.bool)
+    # Only fetch the small set of text rows from the CPU checkpoint mapping.
+    # No second vocabulary table is retained on the ViT GPU.
+    text = text_embedding[token_ids[~visual_mask].long()]
+    output = features.new_empty((len(tokens), features.shape[1]))
+    device_mask = visual_mask.to(features.device)
+    output[device_mask] = features
+    output[~device_mask] = text.to(device=features.device, dtype=features.dtype)
+    return output, torch.cat(coordinates), token_ids
 
 
 def preprocess_qwen4(mm_inputs, vit_config, processor):
@@ -136,5 +151,4 @@ def preprocess_qwen4(mm_inputs, vit_config, processor):
                 images=[image], size=size, return_tensors="pt"
             )
         pixels, grid = result["pixel_values"], result["image_grid_thw"]
-    plan, positions, semantic = visual_token_plan(grid, processor, video, timestamps)
-    return Qwen4VisualInput(pixels, grid, plan, positions, semantic)
+    return Qwen4VisualInput(pixels, grid, timestamps)

@@ -8,17 +8,11 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputClass.h"
 
 namespace rtp_llm {
-struct MultimodalTokenPlan {
-    std::vector<int32_t>                     token_ids;
-    std::vector<std::pair<int32_t, int32_t>> spans;
-};
-
 struct MultimodalOutput {
     std::vector<torch::Tensor>                mm_features       = {};
     std::optional<std::vector<torch::Tensor>> mm_position_ids   = std::nullopt;
     std::optional<std::vector<torch::Tensor>> mm_extra_input    = std::nullopt;
     std::optional<std::vector<torch::Tensor>> mm_feature_hashes = std::nullopt;
-    std::vector<MultimodalTokenPlan>          token_plans;
 };
 
 class MultimodalFeature {

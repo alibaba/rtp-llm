@@ -126,77 +126,36 @@ def _validate_embedding_result(result: Any) -> None:
             )
 
 
-def _token_plan_feature_hashes(embeddings: List[torch.Tensor]) -> List[torch.Tensor]:
-    """Hash one model-produced frame batch at a single CPU completion boundary."""
-    first = embeddings[0]
-    lengths = [value.shape[0] for value in embeddings]
-    storage = first.untyped_storage()
-    cursor = first.data_ptr()
-    shared = True
-    for value in embeddings:
-        if (
-            value.device != first.device
-            or value.dtype != first.dtype
-            or value.shape[1] != first.shape[1]
-            or not value.is_contiguous()
-            or value.untyped_storage().data_ptr() != storage.data_ptr()
-            or value.data_ptr() != cursor
-        ):
-            shared = False
-            break
-        cursor += value.numel() * value.element_size()
-    rows = sum(lengths)
-    if (
-        shared
-        and (first.storage_offset() + rows * first.shape[1]) * first.element_size()
-        <= storage.nbytes()
-    ):
-        # The vision tower splits a contiguous output. Preserve that storage
-        # instead of allocating and copying another potentially large video.
-        packed = first.as_strided((rows, first.shape[1]), (first.shape[1], 1))
-    else:
-        packed = torch.cat(embeddings, dim=0)
-    return list(get_multimodal_feature_hash(packed).split(lengths))
-
-
 @cuda_graph_gate.operation()
 def _feature_hashes_from_result(result: Any) -> List[torch.Tensor]:
     """Build one sidecar hash tensor for every validated embedding tensor."""
     _validate_embedding_result(result)
     embeddings = maybe_tensor_to_list(result[0], ndim_threshold=2)
-    plan = result[3] if len(result) > 3 else None
-    salt = None
-    if plan is not None:
-        import hashlib
-        import json
-
-        plan.validate(embeddings)
-        # Prepare CPU identity while the vision producer can still be running.
-        identity = hashlib.sha256(
-            json.dumps((plan.token_ids, plan.spans), separators=(",", ":")).encode()
-        )
-        for positions in maybe_tensor_to_list(result[1], ndim_threshold=2):
-            if positions.device.type != "cpu":
-                raise ValueError("token-plan coordinates must be produced on CPU")
-            identity.update(positions.detach().contiguous().numpy().tobytes())
-        salt = int.from_bytes(identity.digest()[:4], "little", signed=True)
-    batch_hash = (
-        plan is not None
-        and len(embeddings) > 1
+    hashes = [get_multimodal_feature_hash(embedding) for embedding in embeddings]
+    extra = maybe_tensor_to_list(result[2], ndim_threshold=1) if len(result) > 2 else []
+    if (
+        extra
+        and len(extra) == len(embeddings)
         and all(
-            value.is_cuda
-            and value.device == embeddings[0].device
-            and value.dtype == embeddings[0].dtype
-            and value.shape[1:] == embeddings[0].shape[1:]
-            for value in embeddings
+            isinstance(ids, torch.Tensor)
+            and ids.dtype == torch.int32
+            and ids.ndim == 1
+            and ids.numel() == embedding.shape[0]
+            for ids, embedding in zip(extra, embeddings)
         )
-    )
-    hashes = (
-        _token_plan_feature_hashes(embeddings)
-        if batch_hash
-        else [get_multimodal_feature_hash(embedding) for embedding in embeddings]
-    )
-    if salt is not None:
+    ):
+        import hashlib
+
+        # Equal media embeddings with different vocabulary IDs or positions
+        # must not share language-model KV state (e.g. PLE and MRoPE).
+        identity = hashlib.sha256()
+        for tensor in [*extra, *maybe_tensor_to_list(result[1], ndim_threshold=2)]:
+            if tensor.device.type != "cpu":
+                raise ValueError(
+                    "semantic IDs and media coordinates must be produced on CPU"
+                )
+            identity.update(tensor.contiguous().numpy().tobytes())
+        salt = int.from_bytes(identity.digest()[:4], "little", signed=True)
         hashes = [(value.to(torch.int64) ^ salt).to(torch.int32) for value in hashes]
     return hashes
 
@@ -593,14 +552,12 @@ class MMEmbeddingRes:
         position_ids: Optional[List[torch.Tensor]] = None,
         extra_input: Optional[List[torch.Tensor]] = None,
         feature_hashes: Optional[List[torch.Tensor]] = None,
-        token_plans=None,
     ):
         self.embeddings = embeddings
         self.position_ids = position_ids if position_ids is not None else []
         # Model-specific extra input, one opaque flat 1-D tensor per image (e.g. deepstack).
         self.extra_input = extra_input if extra_input is not None else []
         self.feature_hashes = feature_hashes
-        self.token_plans = token_plans or []
 
     def __str__(self) -> str:
         return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, extra_input_shape={[d.shape for d in self.extra_input] if self.extra_input is not None else []})"
@@ -1615,19 +1572,7 @@ class MMProcessEngine:
                         if defer_feature_hashes
                         else [h for wi in work_items for h in wi.feature_hashes or []]
                     )
-                    plans = [
-                        wi.embedding_result[3]
-                        for wi in work_items
-                        if len(wi.embedding_result) > 3
-                        and wi.embedding_result[3] is not None
-                    ]
-                    if plans and len(plans) != len(work_items):
-                        raise ValueError(
-                            "all media items must use the same token expansion contract"
-                        )
-                    result = MMEmbeddingRes(
-                        emb_res, pos_res, extra_input_res, hashes, plans
-                    )
+                    result = MMEmbeddingRes(emb_res, pos_res, extra_input_res, hashes)
 
                 if not self.vit_config.disable_access_log:
                     self._access_logger.log_success_access(
@@ -1810,8 +1755,7 @@ class MMProcessEngine:
         extra_res = (
             maybe_tensor_to_list(result[2], ndim_threshold=1) if len(result) > 2 else []
         )
-        plans = [result[3]] if len(result) > 3 and result[3] is not None else []
-        return MMEmbeddingRes(emb_res, pos_res, extra_res, feature_hashes, plans)
+        return MMEmbeddingRes(emb_res, pos_res, extra_res, feature_hashes)
 
     def async_submit(
         self,

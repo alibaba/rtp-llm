@@ -84,11 +84,6 @@ private:
                    torch::Tensor                                    token_type_ids = {},
                    const std::optional<std::vector<torch::Tensor>>& feature_hashes = std::nullopt);
 
-    ErrorResult<ExpandedOutput> expandTokenPlans(const std::vector<torch::Tensor>&                features,
-                                                 const torch::Tensor&                             token_ids,
-                                                 const std::vector<MultimodalTokenPlan>&          plans,
-                                                 const std::optional<std::vector<torch::Tensor>>& feature_hashes);
-
     ErrorResult<std::vector<std::pair<int32_t, int32_t>>> getMultimodalTags(const torch::Tensor& token_ids);
 
     ErrorInfo checkExpandLength(const ExpandedOutput& expand_output);

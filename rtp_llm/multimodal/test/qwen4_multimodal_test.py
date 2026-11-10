@@ -8,12 +8,17 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import INDEXER_ROPE_POS_TAG
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_execution import (
+    semantic_token_ids,
+)
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_position_state import (
     QSAPositionState,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
-from rtp_llm.multimodal.multimodal_mixins.qwen4_exp_processor import visual_token_plan
-from rtp_llm.multimodal.token_plan import MMTokenPlan, semantic_token_ids
+from rtp_llm.multimodal.multimodal_mixins.qwen4_exp_processor import (
+    Qwen4VisualInput,
+    assemble_visual_embedding,
+)
 
 
 def position_state(prefixes, lengths, positions, pool, table, *, graph=False):
@@ -47,6 +52,212 @@ def position_state(prefixes, lengths, positions, pool, table, *, graph=False):
 
 
 class Qwen4MultimodalTest(unittest.TestCase):
+    def check_mixed_vision_batch(self, device):
+        from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe import (
+            qwen3_5_moe_vit as vit,
+        )
+        from rtp_llm.multimodal.multimodal_mixins.qwen4_exp_mixin import (
+            Qwen4ExpImageEmbedding,
+        )
+        from rtp_llm.utils.base_model_datatypes import MMUrlType
+
+        config = vit.Qwen3_5MoeVisionConfig(
+            depth=1,
+            hidden_size=32,
+            intermediate_size=64,
+            num_heads=2,
+            patch_size=2,
+            temporal_patch_size=1,
+            spatial_merge_size=2,
+            out_hidden_size=32,
+            num_position_embeddings=16,
+        )
+        config._attn_implementation = "sdpa"
+        torch.manual_seed(17)
+        adapter = Qwen4ExpImageEmbedding.__new__(Qwen4ExpImageEmbedding)
+        with patch.object(vit, "default_attn_impl", "sdpa"):
+            adapter.visual = vit.Qwen3_5MoeVisionModel(config).eval().to(device)
+        adapter.mm_processor = self.processor()
+        adapter.text_embedding = torch.randn(256, 32)
+        image = Qwen4VisualInput(torch.randn(16, 12), torch.tensor([[1, 4, 4]]))
+        video = Qwen4VisualInput(
+            torch.randn(16, 12), torch.tensor([[2, 2, 4]]), [0.1, 0.5]
+        )
+        expected = [adapter.embedding(data) for data in (image, video)]
+        with patch.object(
+            adapter.visual, "forward", wraps=adapter.visual.forward
+        ) as forward:
+            actual = adapter.batched_embedding(
+                [image, video], [MMUrlType.IMAGE, MMUrlType.VIDEO]
+            )
+        self.assertEqual(forward.call_count, 1)
+        for result, reference in zip(actual, expected):
+            for left, right in zip(result, reference):
+                torch.testing.assert_close(left, right, atol=1e-5, rtol=1e-5)
+
+    def test_mixed_image_video_reuses_one_shared_vision_forward_cpu(self):
+        self.check_mixed_vision_batch("cpu")
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_mixed_image_video_reuses_one_shared_vision_forward_cuda(self):
+        self.check_mixed_vision_batch("cuda")
+
+    def assemble(self, grid, timestamps=None, device="cpu"):
+        from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_mixin import (
+            Qwen3_5MoeImageEmbedding,
+        )
+
+        grid = torch.tensor([grid])
+        tower = SimpleNamespace(visual=SimpleNamespace(spatial_merge_size=2))
+        positions = Qwen3_5MoeImageEmbedding.get_position_ids(tower, grid)[0]
+        rows = int(grid.prod()) // 4
+        features = torch.arange(rows * 4, device=device, dtype=torch.float32).reshape(
+            rows, 4
+        )
+        text = torch.arange(256 * 4, dtype=torch.float32).reshape(256, 4) / 1024
+        result = assemble_visual_embedding(
+            Qwen4VisualInput(torch.empty(0), grid, timestamps),
+            features,
+            positions,
+            self.processor(),
+            text,
+        )
+        return result, features, text
+
+    def test_image_reuses_shared_spatial_coordinates_and_complete_tensor(self):
+        (embedding, positions, ids), features, text = self.assemble([1, 4, 6])
+        self.assertEqual(ids.tolist(), [10, *([20] * 6), 11])
+        torch.testing.assert_close(
+            embedding, torch.cat([text[10:11], features, text[11:12]]), atol=0, rtol=0
+        )
+        self.assertEqual(
+            positions.tolist(),
+            [
+                [0, 0, 0],
+                *[[1, h + 1, w + 1] for h in range(2) for w in range(3)],
+                [4, 4, 4],
+            ],
+        )
+
+    def test_video_keeps_timestamp_embeddings_frame_order_and_mrope(self):
+        devices = ["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"]
+        for device in devices:
+            with self.subTest(device=device):
+                (embedding, positions, ids), features, text = self.assemble(
+                    [2, 4, 4], [0.25, 1.75], device
+                )
+                tokens, expected, expected_positions = [], [], []
+                offset = 0
+                for frame, stamp in enumerate((0.25, 1.75)):
+                    prefix = [ord(c) for c in f"<{stamp:.1f} seconds>"] + [10]
+                    tokens.extend([*prefix, 21, 21, 21, 21, 11])
+                    expected.extend(
+                        [
+                            text[prefix].to(device),
+                            features[frame * 4 : (frame + 1) * 4],
+                            text[11:12].to(device),
+                        ]
+                    )
+                    expected_positions.extend(
+                        [[value] * 3 for value in range(offset, offset + len(prefix))]
+                    )
+                    offset += len(prefix)
+                    expected_positions.extend(
+                        [
+                            [offset, offset + h, offset + w]
+                            for h, w in ((0, 0), (0, 1), (1, 0), (1, 1))
+                        ]
+                    )
+                    offset += 2
+                    expected_positions.append([offset] * 3)
+                    offset += 1
+                self.assertEqual(ids.tolist(), tokens)
+                self.assertEqual(positions.tolist(), expected_positions)
+                torch.testing.assert_close(
+                    embedding, torch.cat(expected), atol=0, rtol=0
+                )
+                self.assertEqual(positions.device.type, "cpu")
+                self.assertEqual(ids.dtype, torch.int32)
+
+    def test_video_rejects_inconsistent_frame_metadata(self):
+        with self.assertRaisesRegex(ValueError, "timestamps"):
+            self.assemble([2, 4, 4], [0.0])
+
+    def test_rpc_keeps_existing_tensor_fields_without_an_extra_protocol(self):
+        from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
+        from rtp_llm.server.vit_rpc_server import merge_embedding_results, trans_output
+
+        result, _, _ = self.assemble([2, 4, 4], [0.0, 1.0])
+        embedding, positions, ids = result
+        output = trans_output(
+            merge_embedding_results(
+                [MMEmbeddingRes([embedding], [positions], [ids])] * 2
+            )
+        )
+        self.assertNotIn(8, output.DESCRIPTOR.fields_by_number)
+        self.assertEqual(list(output.split_size), [embedding.shape[0]] * 2)
+        self.assertEqual(list(output.multimodal_extra_input[0].shape), [ids.numel()])
+        self.assertEqual(
+            output.multimodal_extra_input[0].int32_data, ids.numpy().tobytes()
+        )
+        self.assertEqual(
+            output.multimodal_pos_id.int32_data,
+            torch.cat([positions] * 2).numpy().tobytes(),
+        )
+
+    def test_cache_hash_includes_semantic_ids_and_positions_without_readback(self):
+        from rtp_llm.multimodal.mm_process_engine import _feature_hashes_from_result
+
+        result = (
+            [torch.ones(2, 4)],
+            [torch.zeros(2, 3, dtype=torch.int32)],
+            [torch.tensor([10, 20], dtype=torch.int32)],
+        )
+        with patch.object(
+            torch.Tensor, "cpu", side_effect=AssertionError("coordinate readback")
+        ):
+            reference = _feature_hashes_from_result(result)[0]
+            torch.testing.assert_close(
+                reference, _feature_hashes_from_result(result)[0]
+            )
+            for other in (
+                (result[0], [result[1][0] + 1], result[2]),
+                (result[0], result[1], [result[2][0] + 1]),
+            ):
+                self.assertFalse(
+                    torch.equal(reference, _feature_hashes_from_result(other)[0])
+                )
+
+    def test_shared_embedding_cache_round_trip_keeps_complete_tensor_result(self):
+        from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCache
+        from rtp_llm.multimodal.mm_remote_embedding_cache import MMRemoteEmbeddingCache
+        from rtp_llm.multimodal.test.mm_cache_test_store import Store
+
+        store = Store()
+        remote = MMRemoteEmbeddingCache(
+            store,
+            max_object_bytes=65536,
+            max_inflight_bytes=1048576,
+            read_timeout_ms=500,
+        )
+        self.addCleanup(remote.close)
+        cache = MMEmbeddingCache(0, 64, on_cpu_evict=remote.submit_eviction)
+        self.addCleanup(cache.clear)
+        result = (
+            [torch.ones(2, 4)],
+            [torch.zeros(2, 3, dtype=torch.int32)],
+            [torch.tensor([10, 20], dtype=torch.int32)],
+        )
+        for key in ("image_a", "image_b"):
+            _, entry = cache.try_acquire(key)
+            cache.complete(key, entry, result)
+        self.assertTrue(store.saved.wait(2))
+        loaded = remote.load("image_a")
+        self.assertIsNotNone(loaded)
+        self.assertEqual(len(loaded), 3)
+        for actual, expected in zip(loaded, result):
+            torch.testing.assert_close(actual[0], expected[0], atol=0, rtol=0)
+
     def processor(self):
         return SimpleNamespace(
             image_processor=SimpleNamespace(merge_size=2),
@@ -59,171 +270,6 @@ class Qwen4MultimodalTest(unittest.TestCase):
             ),
         )
 
-    def test_image_plan_and_spatial_order(self):
-        plan, positions, ids = visual_token_plan(
-            torch.tensor([[1, 4, 6]]), self.processor()
-        )
-        self.assertEqual(plan.token_ids, [10, *([20] * 6), 11])
-        self.assertEqual(plan.spans, [(1, 6)])
-        self.assertEqual(
-            positions[0].tolist(), [[0, h, w] for h in range(2) for w in range(3)]
-        )
-        self.assertEqual(ids[0].ndim, 0)
-        self.assertEqual(ids[0].tolist(), 20)
-        plan.validate([torch.zeros(6, 4)])
-
-    def test_video_plan_keeps_each_timestamp_and_frame_boundary(self):
-        processor = self.processor()
-        plan, positions, ids = visual_token_plan(
-            torch.tensor([[2, 4, 4]]), processor, True, [0.25, 1.75]
-        )
-        expected = []
-        for stamp in (0.25, 1.75):
-            expected.extend([ord(c) for c in f"<{stamp:.1f} seconds>"])
-            expected.extend([10, 21, 21, 21, 21, 11])
-        self.assertEqual(plan.token_ids, expected)
-        self.assertEqual(len(plan.spans), 2)
-        self.assertTrue(torch.equal(positions[0], positions[1]))
-        self.assertTrue(
-            all(
-                torch.equal(value, torch.tensor(21, dtype=torch.int32)) for value in ids
-            )
-        )
-        with self.assertRaises(ValueError):
-            visual_token_plan(torch.tensor([[2, 4, 4]]), processor, True, [0.0])
-
-    def check_vision_host_metadata(self, device):
-        from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe import (
-            qwen3_5_moe_vit as vit,
-        )
-
-        config = vit.Qwen3_5MoeVisionConfig(
-            depth=2,
-            hidden_size=32,
-            intermediate_size=64,
-            num_heads=2,
-            in_channels=3,
-            patch_size=2,
-            temporal_patch_size=1,
-            spatial_merge_size=2,
-            out_hidden_size=32,
-            num_position_embeddings=16,
-        )
-        config._attn_implementation = "sdpa"
-        torch.manual_seed(7)
-        model = vit.Qwen3_5MoeVisionModel(config).eval().to(device)
-        grids = torch.tensor([[1, 4, 4], [2, 2, 4]], dtype=torch.int64)
-        lengths = (16, 8, 8)
-        pixels = torch.randn(32, 12, device=device)
-        cu = torch.tensor([0, 16, 24, 32], dtype=torch.int32, device=device)
-        original_item = torch.Tensor.item
-        original_tolist = torch.Tensor.tolist
-
-        def host_only_item(tensor, *args, **kwargs):
-            if tensor.is_cuda:
-                raise AssertionError("vision metadata must not read a CUDA scalar")
-            return original_item(tensor, *args, **kwargs)
-
-        def host_only_tolist(tensor, *args, **kwargs):
-            if tensor.is_cuda:
-                raise AssertionError("vision metadata must not read a CUDA tensor")
-            return original_tolist(tensor, *args, **kwargs)
-
-        with torch.inference_mode(), patch.object(vit, "default_attn_impl", "sdpa"):
-            expected = model(pixels, grid_thw=grids.to(device))
-            with patch.object(torch.Tensor, "item", host_only_item), patch.object(
-                torch.Tensor, "tolist", host_only_tolist
-            ):
-                actual = model(
-                    pixels,
-                    grid_thw=grids,
-                    cu_seqlens=cu,
-                    sequence_lengths=lengths,
-                    async_metadata=True,
-                )
-        torch.testing.assert_close(actual.last_hidden_state, expected.last_hidden_state)
-        torch.testing.assert_close(actual.pooler_output, expected.pooler_output)
-
-    def test_shared_vision_host_metadata_matches_legacy_cpu(self):
-        self.check_vision_host_metadata("cpu")
-
-    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
-    def test_shared_vision_host_metadata_matches_legacy_cuda(self):
-        self.check_vision_host_metadata("cuda")
-
-    def hash_frames(self, layout, device, dtype):
-        values = torch.arange(40, dtype=dtype, device=device).reshape(10, 4)
-        if layout == "noncontiguous":
-            return [values[:6:2], values[::2]]
-        if layout == "width_one":
-            values = torch.arange(12, dtype=dtype, device=device)
-            return [
-                values.as_strided((3, 1), (1, 17), storage_offset=4),
-                values.as_strided((5, 1), (1, 17), storage_offset=7),
-            ]
-        frames = list(values[:8].split([3, 5]))
-        if layout in ("offset", "independent"):
-            frames = list(values[2:].split([3, 5]))
-        if layout == "independent":
-            frames = [value.clone() for value in frames]
-        return frames
-
-    def test_batched_feature_hashes_preserve_frame_rows(self):
-        from rtp_llm.multimodal import mm_process_engine as engine
-        from rtp_llm.ops import get_multimodal_feature_hash
-
-        for layout in ("shared", "offset", "independent", "noncontiguous", "width_one"):
-            with self.subTest(layout=layout):
-                frames = self.hash_frames(layout, "cpu", torch.float32)
-                expected = [get_multimodal_feature_hash(value) for value in frames]
-                with patch.object(
-                    engine,
-                    "get_multimodal_feature_hash",
-                    wraps=get_multimodal_feature_hash,
-                ) as hashing:
-                    actual = engine._token_plan_feature_hashes(frames)
-                self.assertEqual(hashing.call_count, 1)
-                for left, right in zip(actual, expected):
-                    torch.testing.assert_close(left, right)
-
-    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
-    def test_video_hashing_has_one_completion_and_preserves_cpu_identity(self):
-        from rtp_llm.multimodal import mm_process_engine as engine
-        from rtp_llm.ops import get_multimodal_feature_hash
-
-        for layout in ("shared", "offset", "independent", "noncontiguous", "width_one"):
-            with self.subTest(layout=layout):
-                gpu = self.hash_frames(layout, "cuda", torch.float32)
-                cpu = [value.cpu() for value in gpu]
-                positions = [
-                    torch.zeros(3, 3, dtype=torch.int32),
-                    torch.ones(5, 3, dtype=torch.int32),
-                ]
-                semantic = [
-                    torch.full((3,), 20, dtype=torch.int32),
-                    torch.full((5,), 21, dtype=torch.int32),
-                ]
-                plan = MMTokenPlan([20] * 3 + [21] * 5, [(0, 3), (3, 5)])
-                expected = engine._feature_hashes_from_result(
-                    (cpu, positions, semantic, plan)
-                )
-                with patch.object(
-                    engine,
-                    "get_multimodal_feature_hash",
-                    wraps=get_multimodal_feature_hash,
-                ) as hashing:
-                    actual = engine._feature_hashes_from_result(
-                        (gpu, positions, semantic, plan)
-                    )
-                self.assertEqual(hashing.call_count, 1)
-                for left, right in zip(actual, expected):
-                    torch.testing.assert_close(left, right)
-
-    def test_invalid_plan_is_rejected(self):
-        for spans in [[(-1, 2)], [(0, 3)], [(0, 2), (1, 1)]]:
-            with self.assertRaises(ValueError):
-                MMTokenPlan([20, 20], spans).validate([torch.zeros(2, 4)])
-
     def test_semantic_ids_are_independent_from_cache_hashes(self):
         original = torch.tensor([7, -10, 800000, 8, -20, 9], dtype=torch.int32)
         inputs = SimpleNamespace(
@@ -231,8 +277,8 @@ class Qwen4MultimodalTest(unittest.TestCase):
             multimodal_inputs=SimpleNamespace(
                 mm_features_locs=torch.tensor([1, 4]),
                 mm_extra_input=[
-                    torch.tensor(20, dtype=torch.int32),
-                    torch.tensor(21, dtype=torch.int32),
+                    torch.tensor([20, 20], dtype=torch.int32),
+                    torch.tensor([21], dtype=torch.int32),
                 ],
                 multimodal_features=[torch.zeros(2, 4), torch.zeros(1, 4)],
             ),
@@ -247,7 +293,7 @@ class Qwen4MultimodalTest(unittest.TestCase):
             for flat in (False, True):
                 with self.subTest(device=device, tp_flattened=flat):
                     features = torch.zeros(6, 4, device=device)[2:4]
-                    marker = torch.tensor(21, dtype=torch.int32, device=device)
+                    marker = torch.tensor([21, 21], dtype=torch.int32, device=device)
                     if flat:
                         marker = marker.reshape(-1)
                     inputs = SimpleNamespace(
@@ -535,69 +581,11 @@ class Qwen4MultimodalTest(unittest.TestCase):
             ),
             multimodal_inputs=SimpleNamespace(
                 mm_features_locs=torch.tensor([1]),
-                mm_extra_input=[torch.tensor(20, dtype=torch.int32)],
+                mm_extra_input=[torch.tensor([20, 20], dtype=torch.int32)],
                 multimodal_features=[torch.zeros(2, 4)],
             ),
         )
         self.assertEqual(ple_input_ids(inputs, 9).tolist(), [7, 20, 20, 8])
-
-    def test_rpc_preserves_plan_positions_and_integer_sidecars(self):
-        from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
-        from rtp_llm.server.vit_rpc_server import merge_embedding_results, trans_output
-
-        plan = MMTokenPlan([10, 20, 20, 11], [(1, 2)])
-        result = MMEmbeddingRes(
-            [torch.ones(2, 4)],
-            [torch.zeros(2, 3, dtype=torch.int32)],
-            [torch.tensor(20, dtype=torch.int32)],
-            [torch.tensor([100, 101], dtype=torch.int32)],
-            [plan],
-        )
-        merged = merge_embedding_results([result, result])
-        output = trans_output(merged)
-        self.assertEqual(len(output.token_plans), 2)
-        self.assertEqual(list(output.multimodal_extra_input[0].shape), [])
-        self.assertEqual(
-            output.multimodal_extra_input[0].int32_data,
-            torch.tensor(20, dtype=torch.int32).numpy().tobytes(),
-        )
-        self.assertEqual(list(output.token_plans[0].token_ids), plan.token_ids)
-        self.assertEqual(
-            [(s.offset, s.length) for s in output.token_plans[1].spans], plan.spans
-        )
-
-    def test_token_plan_hashing_does_not_transfer_coordinates(self):
-        from rtp_llm.multimodal.mm_process_engine import _feature_hashes_from_result
-
-        result = (
-            [torch.ones(2, 4)],
-            [torch.zeros(2, 3, dtype=torch.int32)],
-            [torch.tensor(20, dtype=torch.int32)],
-            MMTokenPlan([10, 20, 20, 11], [(1, 2)]),
-        )
-        with patch.object(
-            torch.Tensor, "cpu", side_effect=AssertionError("coordinate readback")
-        ):
-            self.assertEqual(len(_feature_hashes_from_result(result)), 1)
-
-    def test_cache_hash_includes_layout_and_positions(self):
-        from rtp_llm.multimodal.mm_process_engine import _feature_hashes_from_result
-
-        embedding = [torch.ones(2, 4)]
-        coordinates = [torch.zeros(2, 3, dtype=torch.int32)]
-        semantic = [torch.tensor(20, dtype=torch.int32)]
-        first = (
-            *[embedding, coordinates, semantic],
-            MMTokenPlan([10, 20, 20, 11], [(1, 2)]),
-        )
-        changed_text = (*first[:3], MMTokenPlan([12, 10, 20, 20, 11], [(2, 2)]))
-        changed_position = (embedding, [coordinates[0] + 1], semantic, first[3])
-        reference = _feature_hashes_from_result(first)[0]
-        self.assertTrue(torch.equal(reference, _feature_hashes_from_result(first)[0]))
-        for other in (changed_text, changed_position):
-            self.assertFalse(
-                torch.equal(reference, _feature_hashes_from_result(other)[0])
-            )
 
     def test_draft_graph_normalizes_target_visual_position_offset(self):
         from unittest.mock import Mock
@@ -638,37 +626,6 @@ class Qwen4MultimodalTest(unittest.TestCase):
                 [[137] * 3, [138] * 3, [139] * 3, [0] * 3],
             )
         impl.prepare_cuda_graph.assert_called_once_with(groups["full"])
-
-    def test_shared_embedding_cache_round_trip_keeps_token_plan(self):
-        from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCache
-        from rtp_llm.multimodal.mm_remote_embedding_cache import MMRemoteEmbeddingCache
-        from rtp_llm.multimodal.test.mm_cache_test_store import Store
-
-        store = Store()
-        remote = MMRemoteEmbeddingCache(
-            store,
-            max_object_bytes=65536,
-            max_inflight_bytes=1048576,
-            read_timeout_ms=500,
-        )
-        self.addCleanup(remote.close)
-        cache = MMEmbeddingCache(0, 64, on_cpu_evict=remote.submit_eviction)
-        self.addCleanup(cache.clear)
-        plan = MMTokenPlan([10, 20, 20, 11], [(1, 2)])
-        result = (
-            [torch.ones(2, 4)],
-            [torch.zeros(2, 3, dtype=torch.int32)],
-            [torch.tensor(20, dtype=torch.int32)],
-            plan,
-        )
-        for key in ("image_a", "image_b"):
-            _, entry = cache.try_acquire(key)
-            cache.complete(key, entry, result)
-        self.assertTrue(store.saved.wait(2))
-        loaded = remote.load("image_a")
-        self.assertIsNotNone(loaded)
-        self.assertEqual(loaded[3], plan)
-        self.assertTrue(torch.equal(loaded[2][0], result[2][0]))
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_coordinate_graph_replay_uses_dynamic_input(self):
