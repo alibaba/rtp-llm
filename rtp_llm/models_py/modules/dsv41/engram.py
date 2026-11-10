@@ -2331,7 +2331,18 @@ class Engram(nn.Module):
             )
             del lookup_rows
         if isinstance(rows, tuple):
-            kv = self.wkv.forward_quantized(*rows)
+            from rtp_llm.models_py.modules.dsv41.sm80_support import (
+                mxfp8_packed_input_to_bf16,
+                use_reference_gemm_paths,
+            )
+
+            if use_reference_gemm_paths():
+                # The CPU-lookup tuple is pre-quantized for the SM100
+                # group-32 MXFP8 GEMM; reference GPUs dequantize it exactly
+                # (e4m3 + ue8m0 embed losslessly) and use the BF16 forward.
+                kv = self.wkv(mxfp8_packed_input_to_bf16(*rows))
+            else:
+                kv = self.wkv.forward_quantized(*rows)
         else:
             kv = self.wkv(rows)
         del rows

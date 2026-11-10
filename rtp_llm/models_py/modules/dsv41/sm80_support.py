@@ -95,3 +95,31 @@ def fp8_block32_to_bf16(weight_e4m3: torch.Tensor, scales_e8m0: torch.Tensor) ->
     cols = torch.arange(k, device=scales_e8m0.device) // 32
     scale_f = scales_e8m0.to(torch.float32)[rows][:, cols]
     return (weight_e4m3.to(torch.float32) * scale_f).to(torch.bfloat16)
+
+
+def mxfp8_packed_input_to_bf16(x_q: torch.Tensor, x_s: torch.Tensor) -> torch.Tensor:
+    """Dequantize the MXFP8 activation pair produced by unpack_packed_rows.
+
+    ``x_q``: ``[T, W]`` e4m3fn values. ``x_s``: ``[T, ceil(W/32/4)]`` int32
+    words (MN-major as_strided view); byte j of word c is the UE8M0 exponent
+    of group 4*c+j (little endian), one exponent per 32-value group.
+
+    Exact: e4m3 significands embed in BF16 and UE8M0 scales are powers of
+    two, so this loses nothing relative to the SM100 fp8-activation GEMM
+    inputs; only the GEMM itself changes (BF16 cuBLAS, fp32 accumulate).
+    """
+    t, w = x_q.shape
+    groups = w // 32
+    words = x_s.to(torch.int64)
+    scale_bytes = torch.stack(
+        [
+            words & 0xFF,
+            (words >> 8) & 0xFF,
+            (words >> 16) & 0xFF,
+            (words >> 24) & 0xFF,
+        ],
+        dim=-1,
+    ).reshape(t, -1)[:, :groups]
+    scales = torch.exp2((scale_bytes - 127).to(torch.float32))
+    vals = x_q.float().reshape(t, groups, 32) * scales.unsqueeze(-1)
+    return vals.reshape(t, w).to(torch.bfloat16)
