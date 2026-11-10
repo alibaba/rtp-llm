@@ -1,12 +1,6 @@
 # Mock 框架使用说明
 
-用已有 Case 启动真实 FlexLB Master、Mock RTP Prefill/Decode、可选 ViT 和 Client，执行流量与故障步骤，保存门禁、请求证据和 Prometheus 数据，再用 View 查看结果。Master 使用生产调度和 ZK 选举；Mock Engine 使用生产协议，在 CPU 上模拟计算与缓存行为。
-
-当前支持 RTP、Engine 扩缩容、Master 停启与恢复、多 Client 播放及主备发现。vLLM 尚未接通。小流量 Case 用于功能验证，不能作为真实 GPU 性能或规模容量结论。
-
-本分支 `codex/mock-framework-dsv41` 基于公共 Mock 提交 `84b174c6d9`，真实 Java Master 和 Engine RPC 契约固定为 `feature/dsv41-dev-main-202161013@ba26ddf1dd86c02bcee3cc6eee966ca59e4ae7a6`。不随远端分支自动更新，也不包含真实 GPU 引擎实现。公共修改先进入 `codex/mock-framework-on-main`，再按独立提交同步；本分支的协议迁移不反向覆盖 main 的契约。
-
-多模态回放使用原始 token 和图片占位位置 `Image.offset`，不再接受预展开的 `Image.length`。Client 使用显式配置的 image_token_id，将占位位置编码为该标记，V 给出长度/hash 元数据，P 准备计算输入并通过原生 PD 请求传递缓存身份。V4.1 几何、ViT 负载及 KVCM 接入范围见[组件参考](docs/component-reference.md)。
+用 Case 启动真实 FlexLB Master 和 Mock RTP Engine，回放流量、验证故障恢复，再用 View 查看门禁结果和指标。
 
 ## 准备环境
 

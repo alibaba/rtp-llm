@@ -120,7 +120,9 @@ Mock 启动不读取或挂载模型目录。ViT 配置显式提供上例中的�
 
 本地假 URL 设置 `mock.vit.skip.download=true`，从回放宽高获取尺寸；仍走同一执行器、准入、队列和完成流程，不模拟下载耗时，也不伪造下载指标。真实 URL 回放可省略宽高。几何继续使用 V4.1 `plan_image_grid`/`num_image_tokens`，参数来自 ViT 的显式配置；视频、音频和 tensor 输入未实现。
 
-回放数据保存匿名文本符号、图片 ID 和尺寸，以及每张图片的插入位置。Client 与 P/D 使用相同的 image_token_id，回放会话读取请求时用该值还原图片占位。直接构造请求的测试工具在不设置图片标记时仍使用 -200 约定；对接真实 Frontend 时使用其实际标记。标记出现次数必须与媒体数一致。P 的内部 Prepared 保存规范化语义 token 和 cache-only spans，缓存 hash 不再替换语义 token。Native GenerateInput 不携带布局；仅 P→D 的 GenerateRequest.multimodal_cache_spans 携带缓存身份。P/D 按原生逐块滚动算法将语义 token 与重叠 span 身份共同混入 key；同一媒体身份必须在两端得到相同 key。参与匹配的组件应显式对齐 cache-key seed。
+回放数据保存匿名文本符号、图片 ID、尺寸和插入位置。Client 读取数据后，用配置的 `image_token_id` 在每个插入位置放一个占位 token。请求里的图片 token 数由 ViT 元数据决定。占位数必须与图片数一致，Client 与 P/D 使用相同的标记。直接构造请求的测试工具默认使用 `-200`，对接真实 Frontend 时使用它的标记。
+
+P 准备展开后的语义 token 和缓存身份，通过原生 P→D 请求的 `GenerateRequest.multimodal_cache_spans` 传递缓存身份。P/D 用相同的 cache-key seed，按块将语义 token 和重叠 span 的身份混入滚动 hash。
 
 V 以 miss 的图片组成 ForwardBatch，复用公式和 SimulatedCompute。计算完成后登记缓存、通知等待者；Compute 不直接改变缓存。命中和在途合并不重复计入 forward。提供 real 名称的 py_rtp_vit_embedding_forward_rt、batch_size、cache 指标及 mock_vit_theoretical_forward_rt；元数据模拟不能代替真实模型计时校准。
 
@@ -245,6 +247,8 @@ java -jar java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar
 ```
 
 ## DSV4.1 Engine / KVCM 契约
+
+Java Master 与 Engine RPC 的源码对照基线为 `ba26ddf1dd86c02bcee3cc6eee966ca59e4ae7a6`（`feature/dsv41-dev-main-202161013`）。
 
 ViT 的 GetWorkerStatus 总是显式提供 `mm_inflight_inputs`（包括真实零值），计数来自去重后的媒体所有权；缓存命中不增加，重复等待者不重复增加，排队/执行/缓存结果发布完成前不提前减少。RPC 等待者数不是该指标。状态查询不经过阻塞的结果等待执行器。真实图片由 Java 下载，ImageIO 读取 PNG/JPEG/GIF/BMP 尺寸，WebP 读取格式头；仅提取尺寸，不做完整像素解码校验。文件字节的 SHA-256 摘要与模型几何参数共同生成模拟特征身份，不执行神经网络或物化 embedding 张量，不依赖 Python、Pillow 或解码子进程。未知格式明确拒绝，不回退到请求中的尺寸提示；需要的新格式按实际输入补齐。
 
