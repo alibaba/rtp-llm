@@ -43,7 +43,12 @@ FP4_BLOCK = 32
 _FP4_CHUNKED_GEMM_MAX_ROWS = int(
     os.environ.get("DSV41_FP4_CHUNKED_GEMM_MAX_ROWS", "256")
 )
-_FP4_DEQUANT_GEMM_CHUNK_ROWS = 128
+# Chunk rows trade transient bytes against graph node count: 128 keeps
+# transients minimal for eager runs but explodes CUDA graph nodes (~600 per
+# expert); 2048 keeps both bounded (~36 nodes/expert, ~70MB transients).
+_FP4_DEQUANT_GEMM_CHUNK_ROWS = int(
+    os.environ.get("DSV41_FP4_DEQUANT_CHUNK_ROWS", "128")
+)
 
 
 def native_fp4_gemm_supported(device: Optional[torch.device] = None) -> bool:

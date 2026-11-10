@@ -27,7 +27,11 @@ _V41_MXFP8_BF16_CACHE_MAX_NUMEL = int(
 _V41_MXFP8_CHUNKED_GEMM_MAX_ROWS = int(
     os.environ.get("DSV41_MXFP8_CHUNKED_GEMM_MAX_ROWS", "256")
 )
-_V41_MXFP8_DEQUANT_GEMM_CHUNK_ROWS = 128
+# Chunk rows trade transient bytes against CUDA graph node count; see the
+# matching knob in qlinear.py. 2048 bounds both for decode-graph capture.
+_V41_MXFP8_DEQUANT_GEMM_CHUNK_ROWS = int(
+    os.environ.get("DSV41_MXFP8_DEQUANT_CHUNK_ROWS", "128")
+)
 
 
 class V41Embedding(Embedding):
