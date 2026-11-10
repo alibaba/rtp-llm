@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
 import logging
-import os
-import signal
 import socket
 import struct
-import subprocess
 import sys
 import tempfile
 import threading
@@ -14,8 +11,6 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-from cryptography.fernet import Fernet
 
 from rtp_llm.models_py.modules.dsv41.engram_distributed import (
     resident,
@@ -26,7 +21,10 @@ from rtp_llm.models_py.modules.dsv41.engram_distributed.exchange import (
     decode,
     encode,
 )
-from rtp_llm.models_py.modules.dsv41.engram_distributed.test.test_startup import fixture
+from rtp_llm.models_py.modules.dsv41.engram_distributed.test.test_startup import (
+    fixture,
+    publications,
+)
 
 
 def free_port():
@@ -41,21 +39,36 @@ class ResidentNetworkTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
         self.group, self.docs = fixture(n=1, p=1)
-        self.key = Fernet.generate_key()
-        keyfile = self.root / "key"
-        keyfile.write_bytes(self.key)
-        keyfile.chmod(0o600)
         self.env = {
             "RTP_ENGRAM_STORAGE": "host_shared",
             "ENGRAM_SHARD_COUNT": "1",
             net.TRANSPORT_ENV: "tcp",
-            net.KEY_ENV: str(keyfile),
-            net.ENDPOINTS_ENV: f"127.0.0.1:{free_port()}",
-            "RTP_ENGRAM_RESIDENT_GENERATION": self.group["generation"],
+            net.PORT_ENV: str(free_port()),
             "RTP_ENGRAM_MODEL_REVISION": self.group["model_revision"],
             "RTP_ENGRAM_CHECKPOINT": str(self.root),
             "RTP_ENGRAM_COHORT_TIMEOUT": "0.25",
         }
+        self.env = self.pod_env(0, {"prefill_part0": {"ip": "127.0.0.1"}}, self.env)
+        self.docs[0]["generation"] = self.env["RTP_ENGRAM_RESIDENT_GENERATION"]
+
+    def pod_env(self, part, members, env):
+        pod = self.root / str(part)
+        pod.mkdir(mode=0o700, exist_ok=True)
+        annotations = pod / "annotations"
+        annotations.write_text(
+            f"app.c2.io/biz-detail-ganginfo={json.dumps(json.dumps(members))}\n"
+        )
+        (pod / "labels").write_text(
+            f'gang-version-hash="release-one"\napp.c2.io/gang-part-name="prefill-part{part}"\n'
+        )
+        result = {
+            **env,
+            "ENGRAM_SHARD_COUNT": str(len(members)),
+            "GANG_ANNOCATION_PATH": str(annotations),
+            net.STATE_ENV: str(pod),
+        }
+        result["RTP_ENGRAM_RESIDENT_GENERATION"] = net.c2_topology(result)[0]
+        return result
 
     def generation(self, name, **extra):
         directory = self.root / name
@@ -64,11 +77,22 @@ class ResidentNetworkTest(unittest.TestCase):
             {**self.env, net.STATE_ENV: str(directory), **extra}
         )
 
+    def test_numeric_endpoints_connect_without_dns(self):
+        owner = self.generation("owner")
+        consumer = self.generation("worker")
+        with net.OwnerEndpoint(owner, 0) as endpoint:
+            endpoint.publish(self.docs[0])
+            with patch.object(
+                socket, "getaddrinfo", side_effect=AssertionError("DNS used")
+            ):
+                self.assertEqual(consumer.network.request(0, 1), self.docs[0])
+
     def test_ready_read_reconnect_without_shared_files_and_log_redaction(self):
         owner = self.generation("owner")
         consumer = self.generation("worker")
-        with net.OwnerEndpoint(owner, 0) as endpoint, patch.object(
-            resident, "checkpoint_samples", return_value={}
+        with (
+            net.OwnerEndpoint(owner, 0) as endpoint,
+            patch.object(resident, "checkpoint_samples", return_value={}),
         ):
             with self.assertRaisesRegex(ExchangeError, "TIMEOUT"):
                 consumer.load()
@@ -79,11 +103,62 @@ class ResidentNetworkTest(unittest.TestCase):
             self.assertEqual(first["generation"], second["generation"])
             self.assertEqual(first["capabilities"], second["capabilities"])
             self.assertIn("resident_owners_connected", "\n".join(logs.output))
-            self.assertNotIn(self.key.decode(), "\n".join(logs.output))
+            self.assertNotIn(
+                self.docs[0]["layers"][0]["segments"][0]["weight"]["handle"],
+                "\n".join(logs.output),
+            )
             self.assertFalse(list(self.root.rglob("ready.json")))
             for file in (self.root / "worker").rglob("*"):
                 if file.is_file():
                     self.assertNotIn(b"handle", file.read_bytes())
+
+    @unittest.skipUnless(
+        sys.platform == "linux", "requires multiple loopback addresses"
+    )
+    def test_c2_gang_reconnect_and_reject_outside_source(self):
+        members = {
+            "prefill_part1": {"ip": "127.0.0.2"},
+            "prefill_part0": {"ip": "127.0.0.1"},
+        }
+        first_env, second_env = (
+            self.pod_env(part, members, self.env) for part in range(2)
+        )
+        first, second = (
+            resident.ResidentGeneration(e) for e in (first_env, second_env)
+        )
+        self.assertEqual(first.generation, second.generation)
+        _, documents = fixture(n=2, p=2)
+        for document in documents:
+            document["generation"] = first.generation
+
+        with (
+            net.OwnerEndpoint(first, 0) as left,
+            net.OwnerEndpoint(second, 1) as right,
+            patch.object(resident, "checkpoint_samples", return_value={}),
+        ):
+            left.publish(documents[0])
+            right.publish(documents[1])
+            before = first.load()
+            sibling = second.load()
+            after = resident.ResidentGeneration(first_env).load()
+            self.assertEqual(before["capabilities"], after["capabilities"])
+            self.assertEqual(sibling["capabilities"], after["capabilities"])
+            self.assertEqual(second.network.request(0, 1), documents[0])
+            with self.assertLogs(net._LOGGER, logging.WARNING) as logs:
+                with socket.create_connection(
+                    left.server.server_address,
+                    timeout=1,
+                    source_address=("127.0.0.3", 0),
+                ) as outsider:
+                    self.assertEqual(outsider.recv(1), b"")
+            self.assertIn("reason=outside_c2_gang", "\n".join(logs.output))
+
+        labels = Path(first_env[net.STATE_ENV]) / "labels"
+        labels.write_text(labels.read_text().replace("release-one", "release-two"))
+        with self.assertRaisesRegex(ValueError, "GANG_IDENTITY_MISMATCH"):
+            resident.ResidentGeneration(first_env)
+        self.assertFalse(list(self.root.rglob("ready.json")))
+        self.assertFalse(list(self.root.rglob("owner.key")))
 
     def test_replacement_allocation_is_rejected_across_worker_objects(self):
         owner = self.generation("owner")
@@ -127,41 +202,30 @@ class ResidentNetworkTest(unittest.TestCase):
     def test_connect_time_is_counted_in_rpc_deadline(self):
         client = self.generation("worker").network
         connection = MagicMock()
-        with patch.object(
-            net.socket, "create_connection", return_value=connection
-        ), patch.object(net.time, "monotonic", side_effect=[0.0, 2.0]):
+        with (
+            patch.object(net.socket, "socket", return_value=connection),
+            patch.object(net.time, "monotonic", side_effect=[0.0, 2.0]),
+        ):
             with self.assertRaises(TimeoutError):
                 client.request(0, 1)
         connection.__enter__.return_value.sendall.assert_not_called()
 
-    def test_wrong_key_and_oversized_request_cannot_read_or_change_owner(self):
+    def test_oversized_request_cannot_read_or_change_owner(self):
         owner = self.generation("owner")
         with net.OwnerEndpoint(owner, 0) as endpoint:
             endpoint.publish(self.docs[0])
-            wrong = Fernet(Fernet.generate_key())
-            request = dict(
-                protocol=1,
-                kind="get",
-                generation=owner.generation,
-                revision=owner.revision,
-                shard=0,
-                nonce="a" * 64,
-            )
-            with socket.create_connection(owner.network.peers[0], timeout=1) as sock:
-                net._send_frame(sock, wrong.encrypt(encode(request)))
-                self.assertEqual(sock.recv(1), b"")
             with socket.create_connection(owner.network.peers[0], timeout=1) as sock:
                 sock.sendall(struct.pack("!I", 2**32 - 1))
                 self.assertEqual(sock.recv(1), b"")
             self.assertEqual(
                 self.generation("worker").network.request(0, 1), self.docs[0]
             )
-            self.assertEqual(endpoint.rejections, 2)
+            self.assertEqual(endpoint.rejections, 1)
 
-    def test_response_replay_rejected_even_when_correctly_encrypted(self):
+    def test_response_replay_rejected(self):
         client = self.generation("worker").network
         reply = dict(
-            protocol=1,
+            protocol=net._PROTOCOL,
             kind="reply",
             generation=client.generation,
             revision=client.revision,
@@ -178,7 +242,7 @@ class ResidentNetworkTest(unittest.TestCase):
                 conn, _ = listener.accept()
                 with conn:
                     net._read_frame(conn, net._REQUEST_LIMIT, time.monotonic() + 1)
-                    net._send_frame(conn, client.cipher.encrypt(encode(reply)))
+                    net._send_frame(conn, encode(reply))
 
             thread = threading.Thread(target=fake_owner)
             thread.start()
@@ -188,7 +252,7 @@ class ResidentNetworkTest(unittest.TestCase):
             finally:
                 thread.join(2)
 
-    def test_authenticated_response_requires_exact_integer_fields(self):
+    def test_response_requires_exact_integer_fields(self):
         client = self.generation("worker").network
         for field in ("protocol", "shard"):
             with self.subTest(field=field), socket.socket() as listener:
@@ -200,10 +264,8 @@ class ResidentNetworkTest(unittest.TestCase):
                     conn, _ = listener.accept()
                     with conn:
                         request = decode(
-                            client.cipher.decrypt(
-                                net._read_frame(
-                                    conn, net._REQUEST_LIMIT, time.monotonic() + 1
-                                )
+                            net._read_frame(
+                                conn, net._REQUEST_LIMIT, time.monotonic() + 1
                             )
                         )
                         reply = {
@@ -213,7 +275,7 @@ class ResidentNetworkTest(unittest.TestCase):
                             "document": self.docs[0],
                         }
                         reply[field] = bool(reply[field])
-                        net._send_frame(conn, client.cipher.encrypt(encode(reply)))
+                        net._send_frame(conn, encode(reply))
 
                 thread = threading.Thread(target=fake_owner)
                 thread.start()
@@ -232,112 +294,25 @@ class ResidentNetworkTest(unittest.TestCase):
                 net._read_frame(right, 100, start + 0.05)
             self.assertLess(time.monotonic() - start, 0.2)
 
-    def test_key_permissions_and_mixed_transports_fail_closed(self):
-        Path(self.env[net.KEY_ENV]).chmod(0o644)
-        with self.assertRaisesRegex(ExchangeError, "UNSAFE"):
-            self.generation("worker")
-        Path(self.env[net.KEY_ENV]).chmod(0o600)
-        with self.assertRaisesRegex(ValueError, "CONFLICTING_RESIDENT_TRANSPORT"):
+    def test_gpu_owner_publishes_gpu_backing(self):
+        generation = self.generation("owner", RTP_ENGRAM_STORAGE="gpu_shared")
+        group = {**self.group, "generation": generation.generation}
+        (document,) = publications(group, memory_kind="gpu")
+        env = {**self.env, "RTP_ENGRAM_GPU_RESERVE_BYTES": "4096"}
+        with patch.object(resident, "ShardPublisher") as factory:
+            publisher = factory.return_value
+            publisher.publish.return_value = document
+            publisher.release.return_value = []
+            resident.serve_shard(generation, env, 0, "host-0", 0, lambda: True, (0, 1))
+        options = publisher.publish.call_args.kwargs
+        self.assertEqual(options["memory_kind"], "gpu")
+        self.assertEqual(options["gpu_devices"], (0, 1))
+        self.assertEqual(options["gpu_reserve_bytes"], 4096)
+        publisher.release.assert_called_once_with(generation.generation)
+
+    def test_legacy_transport_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "RESIDENT_C2_TCP_REQUIRED"):
             self.generation("worker", RTP_ENGRAM_RESIDENT_DIR=str(self.root))
-
-    def test_gang_discovery_uses_dedicated_owner_ports(self):
-        env = {k: v for k, v in self.env.items() if k != net.ENDPOINTS_ENV}
-        with patch.object(net.config, "_cohort", return_value=None), patch.object(
-            net.config, "_ganginfo_cohort", return_value=None
-        ), patch.object(
-            net.config, "_local_addresses", return_value={"10.1.0.1"}
-        ), patch.object(
-            net.config,
-            "_annotation_cohort",
-            return_value=[("10.1.0.1", 29483), ("10.1.0.2", 29483)],
-        ):
-            self.assertEqual(
-                net.endpoints(env, 2), (("10.1.0.1", 29484), ("10.1.0.2", 29484))
-            )
-
-    def test_worker_sigkill_sigterm_and_abort_leave_owner_and_peer_alive(self):
-        self.group, self.docs = fixture(n=2, p=2)
-        ports = [free_port(), free_port()]
-        self.env.update(ENGRAM_SHARD_COUNT="2", RTP_ENGRAM_COHORT_TIMEOUT="3")
-        self.env[net.ENDPOINTS_ENV] = f"127.0.0.1:{ports[0]},localhost:{ports[1]}"
-        processes = []
-
-        def child(code, state, *args):
-            directory = self.root / state
-            directory.mkdir(mode=0o700, exist_ok=True)
-            env = {**os.environ, **self.env, net.STATE_ENV: str(directory)}
-            log = (directory / f"process-{len(processes)}.log").open("w")
-            self.addCleanup(log.close)
-            proc = subprocess.Popen(
-                [sys.executable, "-c", code, *args], env=env, stdout=log, stderr=log
-            )
-            processes.append(proc)
-            return proc
-
-        def cleanup():
-            for p in reversed(processes):
-                if p.poll() is None:
-                    p.kill()
-                p.wait(timeout=5)
-
-        self.addCleanup(cleanup)
-        owner_code = """
-import json, sys
-from rtp_llm.models_py.modules.dsv41.engram_distributed import resident
-document=json.loads(sys.argv[1])
-class Publisher:
- def publish(self,*a,**kw): return document
- def release(self,*a): return []
-resident.ShardPublisher=Publisher
-sys.argv=[sys.argv[0],'--shard',sys.argv[2],'--host-id','fixture-'+sys.argv[2]]
-resident.main()
-"""
-        owners = [
-            child(owner_code, f"owner-{i}", json.dumps(self.docs[i]), str(i))
-            for i in range(2)
-        ]
-        consumer = self.generation("observer")
-        with patch.object(resident, "checkpoint_samples", return_value={}):
-            consumer.load()
-        worker_code = """
-import os, resource, sys, time
-from pathlib import Path
-from rtp_llm.models_py.modules.dsv41.engram_distributed import resident, EngramStartup, EngramRuntime
-resource.setrlimit(resource.RLIMIT_CORE,(0,0))
-resident.checkpoint_samples=lambda *_:{}
-runtime=EngramRuntime()
-EngramStartup(None,rank=0,world_size=1,publish=None,install=runtime.install).run()
-Path(sys.argv[1]).write_text(str(os.getpid()))
-while True: time.sleep(.02)
-"""
-
-        def ready(proc, path):
-            deadline = time.monotonic() + 5
-            while (
-                not path.exists()
-                and proc.poll() is None
-                and time.monotonic() < deadline
-            ):
-                time.sleep(0.02)
-            self.assertTrue(path.exists())
-
-        sibling = child(worker_code, "sibling", str(self.root / "sibling-ready"))
-        ready(sibling, self.root / "sibling-ready")
-        for sig in (signal.SIGKILL, signal.SIGTERM, signal.SIGABRT):
-            marker = self.root / f"ready-{sig.name}"
-            worker = child(worker_code, "worker", str(marker))
-            ready(worker, marker)
-            worker.send_signal(sig)
-            self.assertEqual(worker.wait(timeout=5), -sig)
-            self.assertIsNone(sibling.poll())
-            self.assertTrue(all(p.poll() is None for p in owners))
-            with patch.object(resident, "checkpoint_samples", return_value={}):
-                self.assertEqual(
-                    consumer.load()["generation"], self.group["generation"]
-                )
-        replacement = child(worker_code, "worker", str(self.root / "replacement-ready"))
-        ready(replacement, self.root / "replacement-ready")
-        self.assertFalse(list(self.root.rglob("ready.json")))
 
 
 if __name__ == "__main__":

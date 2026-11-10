@@ -175,6 +175,13 @@ class _AllocatorDumpRequestGuard:
 
 
 class GracefulShutdownServer(Server):
+    startup_ready_flag = None
+
+    async def startup(self, sockets=None):
+        await super().startup(sockets=sockets)
+        if self.started and self.startup_ready_flag is not None:
+            self.startup_ready_flag.value = True
+
     def set_server(
         self,
         frontend_server: FrontendServer,
@@ -377,6 +384,8 @@ class GracefulShutdownServer(Server):
 
     @override
     async def shutdown(self, sockets: Optional[List[socket.socket]] = None) -> None:
+        if self.startup_ready_flag is not None:
+            self.startup_ready_flag.value = False
         self.shutdown_manager.start_draining("uvicorn shutdown")
         try:
             await super().shutdown(sockets)
@@ -408,6 +417,8 @@ class GracefulShutdownServer(Server):
 
 
 class FrontendApp(object):
+    startup_ready_flag = None
+
     def __init__(
         self,
         py_env_configs: PyEnvConfigs,
@@ -517,6 +528,7 @@ class FrontendApp(object):
         )
         try:
             server = GracefulShutdownServer(config)
+            server.startup_ready_flag = self.startup_ready_flag
             server.set_server(
                 self.frontend_server,
                 self.shutdown_manager,
@@ -657,7 +669,9 @@ class FrontendApp(object):
 
         @app.post("/frontend_health")
         @app.get("/frontend_health")
-        async def frontend_health():
+        async def frontend_health(request: Request):
+            if self.startup_ready_flag is not None:
+                check_startup_warmup_ready(request)
             if self.shutdown_manager.is_unavailable():
                 return draining_response()
             return "ok"
@@ -698,6 +712,8 @@ class FrontendApp(object):
         @app.get("/")
         async def health(request: Request):
             check_not_draining(request)
+            if self.startup_ready_flag is not None:
+                check_startup_warmup_ready(request)
             if self.shutdown_manager.is_unavailable():
                 return draining_response()
             if self.separated_frontend:

@@ -37,6 +37,7 @@ def start_frontend_server(
     server_id: int,
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
+    ready_flag=None,
 ):
     _install_hot_hook_runtime(f"frontend_rank_{rank_id}_server_{server_id}")
     # Set rank_id and server_id on the passed config so port properties match this rank
@@ -69,6 +70,7 @@ def start_frontend_server(
         set_global_controller(global_controller)
         separated_frontend = py_env_configs.role_config.role_type == RoleType.FRONTEND
         app = FrontendApp(py_env_configs, separated_frontend)
+        app.startup_ready_flag = ready_flag
         app.start()
     except BaseException as e:
         logging.error(
