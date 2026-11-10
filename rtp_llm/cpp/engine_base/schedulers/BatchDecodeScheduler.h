@@ -69,6 +69,7 @@ public:
                 stream->moveToNext();
                 return absl::CancelledError("scheduler stopped");
             }
+            stream->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds());
             waiting_streams_.emplace_back(stream);
             if (waiting_streams_.size() % 16 == 0) {
                 RTP_LLM_LOG_DEBUG("BatchDecodeScheduler::enqueue: waiting_streams_.size() = %d",
@@ -113,6 +114,13 @@ public:
                     stream->moveToNext();
                 }
                 return {std::vector<bool>(streams.size(), false), streams};
+            }
+            if (!stream_enqueued.empty()) {
+                // Publish one timestamp and recorded identity before making the group visible.
+                const auto enqueue_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+                for (auto& stream : stream_enqueued) {
+                    stream->recordSchedulerEnqueueTime(enqueue_time_us);
+                }
             }
             waiting_streams_.insert(waiting_streams_.end(), stream_enqueued.begin(), stream_enqueued.end());
         }

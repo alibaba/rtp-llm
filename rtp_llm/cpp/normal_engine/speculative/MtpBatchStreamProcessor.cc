@@ -1093,7 +1093,7 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&      s
     updateProposeTokens(stream_groups, propose_output, spec_update_infos);
 
     // update streams
-    stream_groups.updateStreams(spec_update_infos);
+    stream_groups.updateStreams(spec_update_infos, prefill_output.recorded_batch);
 
     RTP_LLM_LOG_DEBUG("dispatch prefill done");
     return absl::OkStatus();
@@ -1123,7 +1123,10 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
     // to avoid cuda sync, we need to set propose token in extra loop
     updateProposeTokens(stream_groups, draft_prefill_output, spec_update_infos);
 
-    stream_groups.updateStreams(spec_update_infos);
+    // sp_verify rows: specUpdate backfills kv_len/accept_len under the stream
+    // lock (guarded by speculative_propose_step > 0), then the RecordedBatch
+    // destructor submits.
+    stream_groups.updateStreams(spec_update_infos, draft_prefill_output.recorded_batch);
 
     RTP_LLM_LOG_DEBUG("dispatch decode done");
     return absl::OkStatus();

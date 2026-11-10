@@ -940,6 +940,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_detail_log", &ProfilingDebugLoggingConfig::enable_detail_log)
         .def_readwrite("check_nan", &ProfilingDebugLoggingConfig::check_nan)
         .def_readwrite("enable_model_inputs_log", &ProfilingDebugLoggingConfig::enable_model_inputs_log)
+        .def_readwrite("enable_batch_record", &ProfilingDebugLoggingConfig::enable_batch_record)
+        .def_readwrite("record_queue_size", &ProfilingDebugLoggingConfig::record_queue_size)
+        .def_readwrite("record_decode_sample_rate", &ProfilingDebugLoggingConfig::record_decode_sample_rate)
         .def("to_string", &ProfilingDebugLoggingConfig::to_string)
         .def(py::pickle(
             [](const ProfilingDebugLoggingConfig& self) {
@@ -958,10 +961,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.debug_start_fake_process,
                                       self.enable_detail_log,
                                       self.check_nan,
-                                      self.enable_model_inputs_log);
+                                      self.enable_model_inputs_log,
+                                      self.enable_batch_record,
+                                      self.record_queue_size,
+                                      self.record_decode_sample_rate);
             },
             [](py::tuple t) {
-                if (t.size() != 12 && t.size() != 13 && t.size() != 15 && t.size() != 16)
+                if (t.size() != 12 && t.size() != 13 && t.size() != 15 && t.size() != 16 && t.size() != 19)
                     throw std::runtime_error("Invalid state!");
 
                 ProfilingDebugLoggingConfig c;
@@ -993,8 +999,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.debug_start_fake_process = t[12].cast<bool>();
                         c.enable_detail_log        = t[13].cast<bool>();
                         c.check_nan                = t[14].cast<bool>();
-                        if (t.size() == 16) {
+                        if (t.size() >= 16) {
                             c.enable_model_inputs_log = t[15].cast<bool>();
+                        }
+                        if (t.size() >= 19) {
+                            c.enable_batch_record       = t[16].cast<bool>();
+                            c.record_queue_size         = t[17].cast<int64_t>();
+                            c.record_decode_sample_rate = t[18].cast<double>();
                         }
                     }
                 } catch (const std::exception& e) {

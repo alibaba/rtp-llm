@@ -11,6 +11,7 @@
 namespace rtp_llm {
 
 class LogitsProcessorStates;
+class RecordedBatch;
 typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;
 
 struct SamplerInitParams {
@@ -141,6 +142,7 @@ public:
     // Decode publication reuses the output-copy wait even with CPU outputs.
     // This is a local writer dependency, not all-rank Prefill readiness proof.
     bool wait_for_kv_writer{false};
+    std::shared_ptr<RecordedBatch> recorded_batch;
 };
 
 }  // namespace rtp_llm

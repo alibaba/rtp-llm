@@ -29,6 +29,9 @@
 
 namespace rtp_llm {
 
+class RecordedRequest;
+struct RecordedTokenTiming;
+
 // GenerateStream-owned buffers stay on host by default; KV cache is the device-side exception.
 
 struct StreamUpdateInfo {
@@ -186,6 +189,10 @@ public:
         return is_fake_stream_;
     }
 
+    std::shared_ptr<RecordedRequest> recordedRequest() const {
+        return recorded_request_;
+    }
+
     // A positive wait_timeout_ms bounds only the consumer condition-variable
     // wait. Zero waits without a caller interval; a request deadline, when
     // configured, remains authoritative.
@@ -198,10 +205,13 @@ public:
     virtual GenerationPrefillCudaGraphStatus generationPrefillCudaGraphStatus() const {
         return GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
     }
-    void update(const StreamUpdateInfo& update_info);
+    void update(const StreamUpdateInfo& update_info, RecordedTokenTiming* timings = nullptr, size_t timing_count = 0);
+    void specUpdate(const StreamSpecUpdateInfo& update_info,
+                    RecordedTokenTiming*        timings      = nullptr,
+                    size_t                      timing_count = 0);
+
     std::shared_ptr<const DecodeEndpoint> latestDecodePublicationEndpoint() const;
     void setDecodePublicationPages(std::vector<std::shared_ptr<const DecodeEndpoint>> pages);
-    void specUpdate(const StreamSpecUpdateInfo& update_info);
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
     virtual size_t scoreLen() const {
@@ -1124,8 +1134,9 @@ protected:
     // just for bool test
     bool perf_test_ = false;
     friend class StreamCacheResource;
-    void endCacheExposedWaitWithoutLock(int64_t time_us);
-    bool is_fake_stream_ = false;
+    void                             endCacheExposedWaitWithoutLock(int64_t time_us);
+    bool                             is_fake_stream_ = false;
+    std::shared_ptr<RecordedRequest> recorded_request_;
 
     // prefill TP size queried from prefill server (used for asymmetric TP)
     int prefill_tp_size_ = -1;

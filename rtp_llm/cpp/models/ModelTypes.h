@@ -135,6 +135,7 @@ enum GptModelInputIndex : size_t {
     mmFeaturesSpans,
     engramTokenWindowRows,
     engramTokenWindowWidth,
+    recordExecutionId,
     gptModelInputLength,
 };
 

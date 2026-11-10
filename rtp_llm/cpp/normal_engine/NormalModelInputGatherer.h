@@ -48,7 +48,8 @@ public:
     absl::StatusOr<GptModelInputs> gather(const StreamGroups& stream_groups,
                                           TensorHolder&       host_holder,
                                           bool                defer_page_tables    = false,
-                                          bool                defer_token_metadata = false) const;
+                                          bool                defer_token_metadata = false,
+                                          bool                record_lengths       = false) const;
 
     // Build only the CUDA kv_cache_kernel_block_id tensor in group_tags row order.
     // Read-only over streams: no step(), no sibling kv_cache_block_id, no

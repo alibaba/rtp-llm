@@ -221,9 +221,9 @@ TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
             NormalBatchStreamProcessor(model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, config, false),
             mapping_(std::move(mapping)) {}
 
-        absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& groups,
-                                                        TensorHolder&       holder) const override {
-            auto result = NormalBatchStreamProcessor::gatherModelInput(groups, holder);
+        absl::StatusOr<GptModelInputs>
+        gatherModelInput(const StreamGroups& groups, TensorHolder& holder, bool record_lengths) const override {
+            auto result = NormalBatchStreamProcessor::gatherModelInput(groups, holder, record_lengths);
             if (!result.ok()) {
                 return result.status();
             }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -358,14 +359,26 @@ public:
         return debug_string.str();
     }
 
-    void updateStreams(const std::vector<StreamSpecUpdateInfo>& spec_update_infos) const {
-        int stream_idx = 0;
+    void updateStreams(const std::vector<StreamSpecUpdateInfo>& spec_update_infos,
+                       const std::shared_ptr<RecordedBatch>&    recorded_batch = nullptr) const {
+        int    stream_idx = 0;
+        size_t timing_idx = 0;
+        auto   slice      = [&](const GenerateStreamPtr& stream) {
+            RecordedTokenTiming* timings = nullptr;
+            if (recorded_batch) {
+                timings = recorded_batch->sliceTimings(timing_idx, stream->currentBatchSize());
+            }
+            timing_idx += stream->currentBatchSize();
+            return timings;
+        };
         for (auto& stream : decode_streams_) {
-            stream->specUpdate(spec_update_infos[stream_idx]);
+            auto* timings = slice(stream);
+            stream->specUpdate(spec_update_infos[stream_idx], timings, timings ? stream->currentBatchSize() : 0);
             stream_idx++;
         }
         for (auto& stream : context_streams_) {
-            stream->specUpdate(spec_update_infos[stream_idx]);
+            auto* timings = slice(stream);
+            stream->specUpdate(spec_update_infos[stream_idx], timings, timings ? stream->currentBatchSize() : 0);
             stream_idx++;
         }
     }

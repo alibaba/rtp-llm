@@ -63,6 +63,9 @@ struct CustomConfig {
     bool                                    warm_up_with_loss              = false;
     int                                     output_dispatcher_worker_count = 0;
     int                                     tokens_per_block               = 2;
+    bool                                    enable_batch_record            = false;
+    double                                  record_decode_sample_rate      = 1.0;
+    bool                                    enable_ffn_disaggregate        = false;
 };
 
 inline void setDefaultMhaKVCacheSpecDescs(rtp_llm::ModelConfig& model_config) {
@@ -158,11 +161,13 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::ConcurrencyConfig           concurrency_config;
     rtp_llm::FMHAConfig                  fmha_config;
     rtp_llm::ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    rtp_llm::HWKernelConfig              hw_kernel_config;
-    rtp_llm::DeviceResourceConfig        device_resource_config;
-    rtp_llm::MoeConfig                   moe_config;
-    rtp_llm::ModelSpecificConfig         model_specific_config;
-    rtp_llm::SpeculativeExecutionConfig  sp_config;
+    profiling_debug_logging_config.enable_batch_record       = config.enable_batch_record;
+    profiling_debug_logging_config.record_decode_sample_rate = config.record_decode_sample_rate;
+    rtp_llm::HWKernelConfig             hw_kernel_config;
+    rtp_llm::DeviceResourceConfig       device_resource_config;
+    rtp_llm::MoeConfig                  moe_config;
+    rtp_llm::ModelSpecificConfig        model_specific_config;
+    rtp_llm::SpeculativeExecutionConfig sp_config;
     sp_config.type                   = config.speculative_enabled ? SP_TYPE_VANILLA : SP_TYPE_NONE;
     runtime_config.warm_up_with_loss = config.warm_up_with_loss;
     rtp_llm::CacheStoreConfig      cache_store_config;
@@ -171,8 +176,9 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::GrpcConfig            grpc_config;
     rtp_llm::FfnDisAggregateConfig ffn_disaggregate_config;
     rtp_llm::VitConfig             vit_config;
-    runtime_config.output_dispatcher_worker_count = config.output_dispatcher_worker_count;
-    pd_sep_config.role_type                       = config.role_type;
+    runtime_config.output_dispatcher_worker_count   = config.output_dispatcher_worker_count;
+    pd_sep_config.role_type                         = config.role_type;
+    ffn_disaggregate_config.enable_ffn_disaggregate = config.enable_ffn_disaggregate;
 
     rtp_llm::EngineInitParams rtp_llm_params(0,
                                              model_config,

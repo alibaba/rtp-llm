@@ -140,6 +140,17 @@ protected:
 
     absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
 
+    // Phase-2 speculative recording: build the sp_verify record rows (one per
+    // request slot, decode streams first then context streams to match
+    // updateStreams timing slices). q_len is the dense verify width, or the
+    // actual packed DSpARK width frozen after proposal planning;
+    // kv_len/accept_len are backfilled at dispatch via RecordedTokenTiming.
+    // Must run after waitPreviousBookkeepingBeforeStreamPreparation (stream
+    // state stable). Throws on stream-state anomalies; caller contains it.
+    std::shared_ptr<RecordedBatch> buildSpVerifyRecord(int64_t record_id, const StreamGroups& groups) const;
+    static void
+    recordSpVerifyQueryLengths(RecordedBatch& record, const torch::Tensor& query_lengths, size_t decode_rows);
+
     // decodeStep helpers — extracted to keep decodeStep readable. Each helper
     // owns a single phase (prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
@@ -199,7 +210,8 @@ protected:
                                       std::shared_ptr<torch::Event>                rejection_event,
                                       std::shared_ptr<torch::Event>                draft_event,
                                       const torch::Tensor&                         engram_anchor,
-                                      torch::Tensor&                               engram_output);
+                                      torch::Tensor&                               engram_output,
+                                      std::shared_ptr<RecordedBatch>               recorded_batch = nullptr);
 
     void draftModelDecode(GptModelInputs&             model_input,
                           const StreamGroups&         stream_groups,

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
+#include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -894,6 +895,10 @@ void GenerateStream::recordWaitLatency() {
 void GenerateStream::recordSchedulerEnqueueTime(int64_t time_us) {
     if (scheduler_enqueue_time_us_ == 0) {
         scheduler_enqueue_time_us_ = time_us;
+        auto& recorder             = ExecutionRecorder::instance();
+        if (!isFakeStream() && recorder.enabled()) {
+            recorded_request_ = std::make_shared<RecordedRequest>(recorder);
+        }
     }
 }
 
@@ -1535,7 +1540,9 @@ void GenerateStream::setDecodePublicationPages(std::vector<std::shared_ptr<const
     pending.insert(pending.end(), std::make_move_iterator(pages.begin()), std::make_move_iterator(pages.end()));
 }
 
-void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
+void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
+                                RecordedTokenTiming*        timings,
+                                size_t                      timing_count) {
     // Worker-thread MTP bookkeeping updates tokens/output and finish checks
     // before the next async dispatch. The speculative propose_step+1 window
     // already covers stop/EOS/max-token boundaries.
@@ -1585,6 +1592,18 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 
     int nxt_cached_len   = seqLength() - 1;
     int accept_token_num = nxt_cached_len - cur_cached_len;
+
+    // Speculative verify rows: backfill the pre-verify cached length and the
+    // accepted token count while holding the stream lock. Guarded by
+    // speculative_propose_step so prefill updates (always zero) never
+    // overwrite the gather-sourced kv_len of prefill rows. Early returns
+    // above leave both null: omitted means unknown, not zero.
+    if (timings && timing_count && update_info.speculative_propose_step > 0) {
+        for (size_t i = 0; i < timing_count; ++i) {
+            timings[i].kv_len     = cur_cached_len;
+            timings[i].accept_len = accept_token_num;
+        }
+    }
 
     // The stream token history is authoritative. Advance every processor exactly
     // once before mutating speculative buffers, cache layout or published output.
@@ -1720,9 +1739,16 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
             stream_cache_resource_->publishCompletedDecode(final_computed);
     }
 
+    // Freeze TTFT after output update while holding the stream lock; mirrors
+    // update(). Later speculative steps re-freeze the same first-token value.
+    if (timings && timing_count && seqLength() > inputLength()) {
+        for (size_t i = 0; i < timing_count; ++i) {
+            timings[i].ttft_us = complete_token_ids_->firstTokenLatencyUs();
+        }
+    }
 }
 
-void GenerateStream::update(const StreamUpdateInfo& update_info) {
+void GenerateStream::update(const StreamUpdateInfo& update_info, RecordedTokenTiming* timings, size_t timing_count) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
@@ -1809,6 +1835,13 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     // needFinish(), called by updateOutput(), can trim this packet at EOS/stop
     // words. Advance the cached phase only from tokens that were committed.
     updateLogprobsContentStarted(old_seq_length);
+
+    // Freeze TTFT after output trimming while holding the stream lock.
+    if (timings && seqLength() > inputLength()) {
+        for (size_t i = 0; i < timing_count; ++i) {
+            timings[i].ttft_us = complete_token_ids_->firstTokenLatencyUs();
+        }
+    }
 
     // checkFinished() 已将本轮 updateOutput 中上报的 GenerateDone/Error 事件应用到状态上，
     // 即使 moveToNext() 还未被调度器轮询，这里也能拿到与事件一致的"已完成"判断。

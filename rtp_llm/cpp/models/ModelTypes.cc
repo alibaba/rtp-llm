@@ -300,8 +300,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // skips the init and falls back to NCCL automatically inside execBroadcastCpu.
 
     // first sync stage: shape hints
-    auto shape_hints_t   = makeModelInputShapeHintsTensor(inputs);
-    auto shape_hints_ptr = shape_hints_t.data_ptr<int64_t>();
+    auto shape_hints_t                                     = makeModelInputShapeHintsTensor(inputs);
+    auto shape_hints_ptr                                   = shape_hints_t.data_ptr<int64_t>();
+    shape_hints_ptr[GptModelInputIndex::recordExecutionId] = inputs.record_execution_id;
 
     // CPU broadcast: routed through CpuTpBroadcaster (UDS) when intra-node;
     // execBroadcastCpu's fallback path keeps the NCCL+cudaSyncAndCheck
@@ -342,6 +343,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         static_cast<size_t>(checkedHint(GptModelInputIndex::seqSizePerBlock, "seqSizePerBlock"));
     inputs.kernel_seq_size_per_block =
         static_cast<size_t>(checkedHint(GptModelInputIndex::kernelSeqSizePerBlock, "kernelSeqSizePerBlock"));
+    inputs.record_execution_id = shape_hints_ptr[GptModelInputIndex::recordExecutionId];
     if (inputs.skip_run) {
         inputs.kv_cache_group_tags.clear();
         inputs.kv_cache_block_id        = torch::Tensor();
