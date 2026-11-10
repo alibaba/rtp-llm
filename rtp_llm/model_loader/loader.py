@@ -727,6 +727,12 @@ class ModelLoader:
                     and _storage_bytes > _view_bytes * 2
                 ):
                     tensor = tensor.clone()
+                    if _os.environ.get("DSV41_DEBUG_MEM") == "1":
+                        print(
+                            f"[mem] compacted {name} view={_view_bytes / 2**20:.1f} MiB "
+                            f"storage={_storage_bytes / 2**20:.1f} MiB",
+                            flush=True,
+                        )
             except Exception:
                 pass
             if layer_id is not None:

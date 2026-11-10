@@ -258,11 +258,13 @@ class V4Transformer(nn.Module):
                 _blocks.sort(reverse=True)
                 _agg = {}
                 for _size, _frames in _blocks:
-                    _agg[_frames] = _agg.get(_frames, 0) + _size
-                _top = sorted(_agg.items(), key=lambda kv: kv[1], reverse=True)[:6]
-                for _frames, _size in _top:
+                    _prev = _agg.get(_frames, (0, 0))
+                    _agg[_frames] = (_prev[0] + _size, _prev[1] + 1)
+                _top = sorted(_agg.items(), key=lambda kv: kv[1][0], reverse=True)[:6]
+                for _frames, (_size, _count) in _top:
                     print(
-                        f"[mem] active {_size / 2**30:.2f} GiB stack={_frames}",
+                        f"[mem] active {_size / 2**30:.2f} GiB blocks={_count} "
+                        f"avg={_size / _count / 2**20:.1f} MiB stack={_frames}",
                         flush=True,
                     )
             except Exception as _exc:
