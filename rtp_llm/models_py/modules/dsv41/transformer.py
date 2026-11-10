@@ -229,6 +229,17 @@ class V4Transformer(nn.Module):
         from rtp_llm.utils.model_weight import W
 
         gw = mw.global_weights
+        import gc as _gc
+        _gc.collect()
+        torch.cuda.empty_cache()
+        import os as _os0
+        if _os0.environ.get("DSV41_DEBUG_MEM") == "1":
+            print(
+                f"[mem] before blocks allocated="
+                f"{torch.cuda.memory_allocated() / 2**30:.2f} GiB "
+                f"reserved={torch.cuda.memory_reserved() / 2**30:.2f} GiB",
+                flush=True,
+            )
         if torch.version.hip is not None:
             # The generic loader materializes every Engram table on the GPU
             # before the model is built.  Engram is the one component that must
