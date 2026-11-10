@@ -785,12 +785,9 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
                          torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device())) :
             torch::Tensor();
 #if USING_CUDA
-    // One-kernel softmax + top-p + sampling for the compact pure-top-p draft shape,
-    // which is what DSpARK production runs. Capability dispatch only: every other
-    // shape (explicit top-k, joint top-k/top-p, non-compact) keeps the three
-    // reference kernels.
-    const bool fuse_draft_sampling = torch_ext::deepselect_fp32_candidate_width_supported(compact_width) && filter_draft
-                                     && top_p.defined() && !top_k.defined() && joint_max_top_k == 0;
+    // Compact draft sampling without explicit top-k; top-p may be 1.
+    const bool fuse_draft_sampling =
+        torch_ext::deepselect_fp32_candidate_width_supported(compact_width) && top_p.defined() && !top_k.defined();
 #else
     const bool fuse_draft_sampling = false;
 #endif

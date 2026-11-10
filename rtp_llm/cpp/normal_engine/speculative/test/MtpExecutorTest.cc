@@ -4354,17 +4354,20 @@ TEST_F(MtpExecutorTest, testDSparkDraftPureExplicitTopKUsesFullAndMixedUsesCap) 
     for (const auto* cap : {"0", "512", "1024", "4096"}) {
         autil::EnvGuard force_topk("RTP_LLM_DSPARK_FORCE_TOPK", cap);
         const int       width   = std::stoi(cap);
-        auto            sampled = run(components, vocab, 16, 0, 0, true, .95f);
-        EXPECT_EQ(sampled.all_probs.size(2), width ? width : vocab);
-        EXPECT_EQ(sampled.all_probs_indices.defined(), width != 0);
+        for (float top_p : {0.0f, 0.95f, 1.0f}) {
+            auto sampled = run(components, vocab, 16, 0, 0, true, top_p);
+            EXPECT_EQ(sampled.all_probs.size(2), width ? width : vocab);
+            EXPECT_EQ(sampled.all_probs_indices.defined(), width != 0);
+            EXPECT_TRUE(sampled.all_probs.sum(-1).allclose(torch::ones({16, 1}, floats), 1e-4, 1e-4));
+        }
     }
     auto small_pure = run(components, vocab, 16, 1024, 1024);
     EXPECT_EQ(small_pure.all_probs.size(2), vocab);
     EXPECT_FALSE(small_pure.all_probs_indices.defined());
 
     auto pure_no_k_p1 = run(components, vocab, 2, 0, 0);
-    EXPECT_EQ(pure_no_k_p1.all_probs.size(2), vocab);
-    EXPECT_FALSE(pure_no_k_p1.all_probs_indices.defined());
+    EXPECT_EQ(pure_no_k_p1.all_probs.size(2), 4096);
+    EXPECT_TRUE(pure_no_k_p1.all_probs_indices.defined());
 
     auto pure_no_k_p95 = run(components, vocab, 2, 0, 0, true, 0.95f);
     EXPECT_EQ(pure_no_k_p95.all_probs.size(2), 4096);

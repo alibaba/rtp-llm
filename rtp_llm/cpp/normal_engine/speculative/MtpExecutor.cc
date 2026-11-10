@@ -2741,7 +2741,7 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
     const bool mixed_sampling = speculative::dsparkHasMixedSamplingParams(stream_groups.allStreams());
     // Mixed requests use the fixed candidate cap, including explicit top-k
     // above that cap. Pure explicit top-k keeps the full-vocabulary path.
-    const bool compact_pure_path  = !has_top_k && has_top_p;
+    const bool compact_pure_path  = !has_top_k;
     const bool compact_mixed_path = mixed_sampling;
     if (force_topk >= static_cast<int>(draft_vocab_size_) || d2t_map_.defined()
         || (!compact_mixed_path && !compact_pure_path)) {
@@ -2761,7 +2761,7 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
 #endif
     auto temperature = temperature_cpu.to(base_logits.device(), /*non_blocking=*/true);
     auto top_k       = has_top_k ? top_k_cpu.to(base_logits.device(), /*non_blocking=*/true) : torch::Tensor();
-    auto top_p       = has_top_p ? top_p_cpu.to(base_logits.device(), /*non_blocking=*/true) : torch::Tensor();
+    auto top_p       = top_p_cpu.to(base_logits.device(), /*non_blocking=*/true);
     return speculative_sampler_->sampleDSparkDraft(
         base_logits,
         anchors,
