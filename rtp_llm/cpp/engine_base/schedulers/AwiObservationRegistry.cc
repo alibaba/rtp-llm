@@ -188,10 +188,8 @@ void AwiObservationRegistry::setRank(int64_t world_rank) {
 std::string AwiObservationRegistry::queryJson(const std::string& operation_id) const {
     std::lock_guard<std::mutex> lock(mu_);
     std::unordered_set<std::string> op_requests;
-    int64_t                         op_ctx = 0;
-    auto                            op_it  = ops_.find(operation_id);
+    auto                            op_it = ops_.find(operation_id);
     if (op_it != ops_.end()) {
-        op_ctx = op_it->second.context_tokens;
         for (const auto& r : op_it->second.request_ids) {
             op_requests.insert(r);
         }
