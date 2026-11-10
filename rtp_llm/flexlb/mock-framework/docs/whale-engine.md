@@ -60,16 +60,16 @@ P/D/V 的资源候选绑定同一个 CI 镜像，按实际节点架构选择资�
 
 ## CP 与 block size
 
-| 位置 | 配置 | 生效规则 |
+使用支持显式 Prefill CP 的 Frontend。Frontend 和 Mock Prefill 的 `SEQ_SIZE_PER_BLOCK` 都填 **CP 前的基础块大小**，`PREFILL_CP_SIZE` 填相同值，Frontend 额外设 `PREFILL_CP_KV_CACHE_SHARDED=1`。两端按基础块滚动哈希，每组取最后一个 key，Master 的路由跨度为基础块大小 × CP。Mock P/D 的 `CACHE_KEY_HASH_SEED` 与 Frontend 生效值对齐。
+
+| 示例 | Frontend 和 Mock Prefill 的基础块 / CP | Master 路由跨度 |
 | --- | --- | --- |
-| Mock Prefill | `PREFILL_CP_SIZE` | 默认 1。设为 4 时，缓存键每 4 个取最后一个，未命中 token 的调度预算按 8 对齐。 |
-| Mock Prefill | `CP_FORCE_SINGLE_PREFILL` | 仅 CP 大于 1 时生效，默认 true。允许同一轮接纳多个 Prefill 时显式设为 `0`。 |
-| Mock P/D | `SEQ_SIZE_PER_BLOCK` | 基础哈希块的 token 数，缺省为 64。按真实 Frontend 的基础块大小显式设置。 |
-| 真实 Frontend | `SEQ_SIZE_PER_BLOCK`、`PREFILL_CP_SIZE`、`PREFILL_CP_KV_CACHE_SHARDED` | 与 Mock P 使用相同基础块和 CP size。CP4 时显式启用分片 `PREFILL_CP_KV_CACHE_SHARDED=1`，发给 Master 的键为 K4、K8… |
+| DeepSeek V4.1 CP4 | `128 / 4` | 512 token，取 K4、K8… |
+| GLM-5.3 CP8 | `64 / 8` | 512 token，取 K8、K16… |
 
-例如基础块为 128、Prefill CP4，P/D 的 `SEQ_SIZE_PER_BLOCK` 都填 `128`。Mock P 的分配和路由逻辑块为 `128 × 4 = 512` token，D 固定 CP1，每块 128 token。P/D 的 `CACHE_KEY_HASH_SEED` 与真实 Frontend 生效的模型哈希 seed 对齐。
+Mock 的基础块默认 64，Prefill CP 默认 1。CP 大于 1 时，`CP_FORCE_SINGLE_PREFILL` 默认开启，设为 `0` 可同轮接纳多个 Prefill。Mock Decode 固定 CP1，基础块按目标 Decode 填写。
 
-**TP 自动计算。** Mock 在 WorkerStatus 中让 P 的 TP 等于 `PREFILL_CP_SIZE`，D 的 TP 为 1，DP 固定为 1。Whale 资源候选的 TP/DP 仍按单 JVM 的实际规格选。Mock P/D 不读取 `TP_SIZE`、`DP_SIZE`、`CP_ROTATE_METHOD`、`PREFILL_CP_KV_CACHE_SHARDED`，这些键无需写入 Mock zone ENV。
+Mock 的 WorkerStatus 上报 Prefill TP 为 CP size、Decode TP 为 1、DP 为 1。Whale 资源规格按单 JVM 实际需求配置。
 
 ## KV 容量
 
@@ -80,7 +80,12 @@ P/D 按每实例的**逻辑 block**配置。先用该角色的每块 token 数�
 | `TEST_BLOCK_NUM` | 必填，至少 2。Device block 数，含一个 null block。可用 Device 容量为 `TEST_BLOCK_NUM - 1`。 |
 | `MOCK_CACHE_TOTAL_BLOCKS` | 统一缓存能保留的 block 数，不含 null block。默认等于可用 Device 容量，至少为该值。 |
 | `RESERVE_BLOCK_RATIO` | 首次分配预留的 Device 百分比，默认 5。按可用 Device block 数向下取整。 |
-| `REUSE_CACHE` | 前缀复用开关，默认 false。需要模拟缓存命中时对目标角色显式开启。 |
+| `REUSE_CACHE` | 默认 `false`。启用前缀复用时，角色和请求都要允许复用，且 Device 前缀索引已开启。 |
+| `ENABLE_DEVICE_CACHE` | 默认 `true`。控制本地前缀查找和发布。设为 `false` 时，请求执行仍会分配 KV block。 |
+| `ENABLE_REMOTE_CACHE` | 默认 `false`。Mock 启动时校验此值，设为 `true` 会拒绝启动。 |
+| `ENABLE_MEMORY_CACHE` | 默认 `false`。Mock 启动时校验此值，设为 `true` 会拒绝启动。 |
+
+这三个 `ENABLE_*` 参数使用默认值时可省略。模拟本地前缀复用时，显式设置 `REUSE_CACHE=true`。需要扩大统一缓存容量时，调整 `MOCK_CACHE_TOTAL_BLOCKS`。
 
 例如 P 为 CP4、基础块为 128，配置 `TEST_BLOCK_NUM=1025`、`MOCK_CACHE_TOTAL_BLOCKS=4096`。Device 可用 1024 块，即 524,288 token，统一缓存最多保留 4096 块，即 2,097,152 token。缓存命中也要取得 Device 驻留额度才可进入计算。
 
