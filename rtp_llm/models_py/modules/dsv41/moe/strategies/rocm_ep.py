@@ -78,7 +78,11 @@ class RocmEPStrategy(RoutedExpertsStrategy):
     def _gather(self, tensor: torch.Tensor) -> torch.Tensor:
         # Route through the capture-aware ROCm collective wrapper.  Raw
         # dist.all_gather_into_tensor crashes RCCL graph capture on MI300.
-        return _capture_all_gather(tensor.contiguous(), Group.TP)
+        # The HIP-graph shim expects a flat contiguous buffer.
+        n = tensor.shape[0]
+        flat = tensor.contiguous().view(-1)
+        out = _capture_all_gather(flat, Group.TP)
+        return out.view(self._ep_world * n, *tensor.shape[1:])
 
     def _forward_chunk(
         self,
@@ -101,9 +105,9 @@ class RocmEPStrategy(RoutedExpertsStrategy):
         # RCCL has no capture-safe reduce-scatter wrapper here.  All-reduce the
         # partial expert outputs and slice this rank's token block instead; the
         # result is identical and the collective is graph-capturable.
-        y_sum = _capture_all_reduce(
-            y_all.contiguous(), Group.TP, inplace=False
-        )
+        flat = y_all.contiguous().view(-1)
+        y_flat = _capture_all_reduce(flat, Group.TP, inplace=False)
+        y_sum = y_flat.view_as(y_all)
         return y_sum[self._ep_rank * n : (self._ep_rank + 1) * n]
 
     def forward(
