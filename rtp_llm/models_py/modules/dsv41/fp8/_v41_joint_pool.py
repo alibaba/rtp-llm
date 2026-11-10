@@ -15,6 +15,7 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.modules.dsv41.attn_type import INDEXER_KV
+from rtp_llm.models_py.modules.dsv41.cp_cache import round_robin_coordinates_jit
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_fp4_triton as codec
 from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
@@ -58,12 +59,11 @@ def _slot(
     RANK: tl.constexpr,
     CP_SIZE: tl.constexpr,
 ):
-    owner_block = pos // OWNER
-    column = owner_block // CP_SIZE * (OWNER // TPB) + pos % OWNER // TPB
-    valid = valid & (owner_block % CP_SIZE == RANK) & (column < COLS)
+    owner, column, offset = round_robin_coordinates_jit(pos, OWNER, TPB, CP_SIZE)
+    valid = valid & (owner == RANK) & (column < COLS)
     valid = valid & ((pos + 1) % RATIO == 0)
     block = tl.load(table + req * STRIDE + column, valid, other=0).to(tl.int64)
-    return tl.where(valid & (block > 0), block * EB + pos % TPB // RATIO, -1)
+    return tl.where(valid & (block > 0), block * EB + offset // RATIO, -1)
 
 
 @triton.jit(do_not_specialize=["ROWS", "FIRST", "STOP", "ES", "MC", "MS", "IC", "IS"])

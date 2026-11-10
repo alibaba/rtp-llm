@@ -21,6 +21,11 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41.cp import cp_gather_rank_major
+from rtp_llm.models_py.modules.dsv41.cp_cache import (
+    local_slice_offset_jit,
+    rank_major_slice_offset_jit,
+)
 from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import quantize_swa_row
 
 if TYPE_CHECKING:
@@ -103,20 +108,21 @@ def _quantize_and_insert_swa_kernel(
     payload = quantized.to(tl.uint8, bitcast=True)
     payload_byte = position * 528 + columns
     if CP_BYTES:
-        begin = rank.to(tl.int64) * local_bytes
+        local = local_slice_offset_jit(payload_byte, rank.to(tl.int64), local_bytes)
         tl.store(
-            base + payload_byte - begin,
+            base + local,
             payload,
-            (payload_byte >= begin) & (payload_byte < begin + local_bytes),
+            (local >= 0) & (local < local_bytes),
         )
     else:
         tl.store(base + payload_byte, payload)
     scale_byte = position * 528 + 512 + tl.arange(0, 16)
     if CP_BYTES:
+        local = local_slice_offset_jit(scale_byte, rank.to(tl.int64), local_bytes)
         tl.store(
-            base + scale_byte - begin,
+            base + local,
             encoded,
-            (scale_byte >= begin) & (scale_byte < begin + local_bytes),
+            (local >= 0) & (local < local_bytes),
         )
     else:
         tl.store(base + scale_byte, encoded)
@@ -139,12 +145,12 @@ def _load_swa_row(
     payload_byte = position * 528 + columns
     scale_byte = position * 528 + 512 + tl.arange(0, 16)
     if RANK_MAJOR:
-        payload_address = (
-            (payload_byte // local_bytes) * compact_blocks + block
-        ) * local_bytes + payload_byte % local_bytes
-        scale_address = (
-            (scale_byte // local_bytes) * compact_blocks + block
-        ) * local_bytes + scale_byte % local_bytes
+        payload_address = rank_major_slice_offset_jit(
+            block, payload_byte, compact_blocks, local_bytes
+        )
+        scale_address = rank_major_slice_offset_jit(
+            block, scale_byte, compact_blocks, local_bytes
+        )
     else:
         payload_address = block * block_stride.to(tl.int64) + payload_byte
         scale_address = block * block_stride.to(tl.int64) + scale_byte
@@ -565,11 +571,9 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         if cp_size == 1:
             full_raw = local
         else:
-            from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
-
             gathered = _try_all_gather_cp4_bytes(local) if rank_major else None
             if gathered is None:
-                gathered = all_gather(local, group=Group.TP)
+                gathered = cp_gather_rank_major(local, cp_size)
             if rank_major and gathered.is_contiguous():
                 _gather_swa_rank_major(
                     out,

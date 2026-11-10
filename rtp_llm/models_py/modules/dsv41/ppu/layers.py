@@ -66,6 +66,19 @@ def full_graph_rmsnorm_enabled(state):
     )
 
 
+def _full_cp8_prefill_context(state):
+    cp = state.context if getattr(state, "prefill", False) else None
+    if (
+        cp is not None
+        and not state.idle
+        and cp.cp_size == 8
+        and cp.kv_cache_sharded
+        and cp.gather_restore_positions is None
+    ):
+        return cp
+    return None
+
+
 def try_graph_rms_norm(hidden_states, weight, eps) -> torch.Tensor | None:
     """Normalize BF16 Graph activations with one FP32 reduction and BF16 store."""
     if (
@@ -147,10 +160,31 @@ class PPUSharedRMSNorm(BaseNorm):
             from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import verify_rmsnorm_bf16
 
             return verify_rmsnorm_bf16(hidden_states, self.weight, self.variance_epsilon)
+        cp8_prefill = _full_cp8_prefill_context(state) is not None
+        if (
+            cp8_prefill
+            and os.environ.get("RTP_V41_PPU_CP8_FLASHINFER_RMSNORM", "1") == "1"
+            and hidden_states.is_cuda
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.ndim >= 2
+            and hidden_states.shape[-1] in (512, 1280, 5120)
+            and hidden_states.is_contiguous()
+            and not torch.is_grad_enabled()
+            and importlib.util.find_spec("flashinfer") is not None
+        ):
+            from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import rms_norm
+
+            return rms_norm(hidden_states, self.weight, self.variance_epsilon)
         x = hidden_states.float()
         inv = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.variance_epsilon)
         if (
-            verify_epilogue
+            (
+                verify_epilogue
+                or (
+                    cp8_prefill
+                    and os.environ.get("RTP_V41_PPU_CP8_RMSNORM_EPILOGUE", "0") == "1"
+                )
+            )
             and hidden_states.is_cuda
             and hidden_states.dtype == torch.bfloat16
             and x.ndim >= 2

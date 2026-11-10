@@ -187,6 +187,10 @@ def _slot_layouts_supported(layouts, ratio, batch, device):
 
 
 if triton is not None:
+    from rtp_llm.models_py.modules.dsv41.cp_cache import (
+        ring_coordinates_jit,
+        round_robin_coordinates_jit,
+    )
 
     @triton.jit
     def _raw_slot(
@@ -210,18 +214,16 @@ if triton is not None:
         valid &= pos >= 0
         pos = tl.maximum(pos, 0)
         if STATE:
-            raw_column = pos // TPB
+            raw_column, offset = ring_coordinates_jit(pos, TPB, EB * CP)
             column = raw_column % cols
-            offset = pos % (EB * CP)
             valid &= offset // EB == RANK
             offset %= EB
             if HAS_END:
                 valid &= pos + EB * CP >= tl.minimum((raw_column + 1) * TPB, end)
         else:
-            owner = pos // OWNER
-            column = owner // CP * (OWNER // TPB) + pos % OWNER // TPB
-            offset = pos % TPB // RATIO
-            valid &= (owner % CP == RANK) & (column < cols)
+            owner, column, offset = round_robin_coordinates_jit(pos, OWNER, TPB, CP)
+            offset //= RATIO
+            valid &= (owner == RANK) & (column < cols)
             valid &= (pos + 1) % RATIO == 0
         block = tl.load(table + req * stride + column, valid, other=0).to(tl.int64)
         return tl.where(valid & (block > 0), block * EB + offset, -1)

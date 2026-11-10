@@ -5,6 +5,13 @@ import triton.language as tl
 from triton import cdiv, jit
 
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv41.cp import cp_gather_rank_major
+from rtp_llm.models_py.modules.dsv41.cp_cache import (
+    page_interval,
+    rank_major_slice_offset_jit,
+    ring_coordinates_jit,
+    swa_prefix_start,
+)
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache import _WIDTH
 
 
@@ -27,13 +34,12 @@ def _restore_tails(
     out_row = tl.load(plan + request * 4 + 3)
     byte = tl.program_id(1) * TILE + tl.arange(0, TILE)
     position = start + byte // WIDTH
-    block = first_block + position // SPAN - start // SPAN
-    logical_byte = position % ENTRIES * WIDTH + byte % WIDTH
-    owner, column = logical_byte // SLICE, logical_byte % SLICE
+    column, row = ring_coordinates_jit(position, SPAN, ENTRIES)
+    block = first_block + column - start // SPAN
+    logical_byte = row * WIDTH + byte % WIDTH
+    address = rank_major_slice_offset_jit(block, logical_byte, packet_blocks, SLICE)
     valid = byte < count * WIDTH
-    value = tl.load(
-        gathered + (owner * packet_blocks + block) * SLICE + column, valid, other=0
-    )
+    value = tl.load(gathered + address, valid, other=0)
     tl.store(out + out_row * WIDTH + byte, value, valid)
 
 
@@ -119,40 +125,60 @@ def _read_staged(
     tl.store(output + row.to(tl.int64) * WIDTH + column, value, column < WIDTH)
 
 
-def gather_tails(pool, placement, prefixes, window):
-    """Take one rank-major snapshot of the old SWA pages for the batch."""
-    from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
-
-    width = _WIDTH["swa_kv"]
-    counts = tuple(min(int(prefix), window - 1) for prefix in prefixes)
-    packed = pool.tensor.new_empty((sum(counts), width))
+def _tail_layout(prefixes, window, span):
+    starts = tuple(swa_prefix_start(int(prefix), window) for prefix in prefixes)
+    counts = tuple(int(prefix) - start for prefix, start in zip(prefixes, starts))
     requests = []
     pages = []
     out_row = 0
-    for rid, (prefix, count) in enumerate(zip(prefixes, counts)):
+    for rid, (start, count) in enumerate(zip(starts, counts)):
         if not count:
             continue
-        start = int(prefix) - count
+        first, stop = page_interval(start, start + count, span)
         requests.append((start, count, len(pages), out_row))
-        pages.extend(
-            (rid, column)
-            for column in range(start // pool.span, (prefix - 1) // pool.span + 1)
-        )
+        pages.extend((rid, column) for column in range(first, stop))
         out_row += count
+    return counts, pages, requests
+
+
+def gather_tails(pool, placement, prefixes, window, *, plans=None, host_table=None, receive=None):
+    """Take one rank-major snapshot of the old SWA pages for the batch."""
+    width = _WIDTH["swa_kv"]
+    table = placement.table
+    key = ("swa_tail", tuple(prefixes), window, pool.span, table.device)
+    entry = plans.get(key) if plans is not None else None
+    if entry is None:
+        counts, pages, requests = _tail_layout(prefixes, window, pool.span)
+        if plans is not None and pages:
+            from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_metadata import _upload
+
+            host_coords = torch.tensor(pages, dtype=torch.int64, device="cpu")
+            coords = _upload(pages, table.device, torch.int64)
+            plan = _upload(requests, table.device, torch.int64)
+            plans[key] = counts, pages, requests, host_coords, coords, plan
+    else:
+        counts, pages, requests, host_coords, coords, plan = entry
+
+    packed = pool.tensor.new_empty((sum(counts), width))
     if not pages:
         return packed.split(counts)
 
-    table = placement.table
     if len(prefixes) > table.shape[0] or max(col for _, col in pages) >= table.shape[1]:
         raise ValueError("native CP SWA tail outside physical table")
-    coords = torch.tensor(pages, dtype=torch.int64, device=table.device)
+    if plans is None:
+        coords = torch.tensor(pages, dtype=torch.int64, device=table.device)
     blocks = table[coords[:, 0], coords[:, 1]]
-    if bool(((blocks < 0) | (blocks >= pool.tensor.shape[0])).any()):
+    checked = (
+        host_table[host_coords[:, 0], host_coords[:, 1]]
+        if plans is not None and host_table is not None else blocks
+    )
+    if bool(((checked < 0) | (checked >= pool.tensor.shape[0])).any()):
         raise ValueError("native CP ring read refers to an unallocated physical block")
     local = pool.tensor.index_select(0, blocks)
     with record_function_range("dsv41.ppu.prefill.swa_tail.batch"):
-        gathered = all_gather(local, Group.TP)
-    plan = torch.tensor(requests, dtype=torch.int64, device=table.device)
+        gathered = receive.gather(local) if receive is not None else cp_gather_rank_major(local, placement.size)
+    if plans is None:
+        plan = torch.tensor(requests, dtype=torch.int64, device=table.device)
     _restore_tails[(len(requests), cdiv(max(counts) * width, 512))](
         gathered,
         plan,

@@ -179,12 +179,15 @@ class PPUOps(V41BackendOps):
         context: Optional[V41StepContext] = None,
         ratio: Optional[int] = None,
         dense_fp4: bool = False,
+        positions: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         if dense_fp4:
-            if context is None or ratio is None:
+            if positions is None and context is not None:
+                positions = context.positions
+            if positions is None or ratio is None:
                 raise ValueError("dense FP4 Prefill requires request positions and a compression ratio")
-            return dense_fp4_index_score(q, k, head_weights, context, ratio)
+            return dense_fp4_index_score(q, k, head_weights, positions, ratio)
         return _index_score(
             q,
             k,

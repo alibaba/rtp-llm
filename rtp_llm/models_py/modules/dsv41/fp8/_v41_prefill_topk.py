@@ -77,6 +77,75 @@ def _prefill_topk_finite_kernel(
     tl.store(output + row * K + slot, tl.where(keep, index, -1))
 
 
+@triton.jit
+def _write_torch_topk_results_kernel(
+    scores,
+    chosen,
+    out,
+    SCORE_STRIDE: tl.constexpr,
+    CHOSEN_STRIDE: tl.constexpr,
+    OUT_STRIDE: tl.constexpr,
+    K: tl.constexpr,
+    TILE: tl.constexpr,
+    ALLOW_POS_INF: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    slot = tl.arange(0, TILE)
+    active = slot < K
+    value = tl.load(scores + row * SCORE_STRIDE + slot, active, other=-float("inf"))
+    index = tl.load(chosen + row * CHOSEN_STRIDE + slot, active, other=-1)
+    value = value.to(tl.float32)
+    if ALLOW_POS_INF:
+        keep = value > -float("inf")
+    else:
+        keep = tl.abs(value) < float("inf")
+    result = tl.where(keep, index.to(tl.int32), -1)
+    tl.store(out + row * OUT_STRIDE + slot, result, active)
+
+
+def write_torch_topk_results(
+    scores: torch.Tensor,
+    chosen: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    allow_pos_inf: bool = False,
+) -> bool:
+    """Write Torch TopK results in slot order, leaving any output tail untouched.
+
+    Token scores require finite values. Candidate block scores also retain
+    positive infinity, which pins the newest visible block.
+    """
+    if not (
+        scores.is_cuda
+        and scores.dtype in (torch.float16, torch.bfloat16, torch.float32)
+        and chosen.dtype == torch.int64
+        and out.dtype == torch.int32
+        and scores.ndim == 2
+        and scores.shape[0] > 0
+        and 0 < scores.shape[1] <= 4096
+        and chosen.shape == out.shape == scores.shape
+        and chosen.device == out.device == scores.device
+        and all(
+            tensor.stride(1) == 1 and tensor.stride(0) >= scores.shape[1]
+            for tensor in (scores, chosen, out)
+        )
+    ):
+        return False
+    width = scores.shape[1]
+    _write_torch_topk_results_kernel[(scores.shape[0],)](
+        scores,
+        chosen,
+        out,
+        scores.stride(0),
+        chosen.stride(0),
+        out.stride(0),
+        width,
+        triton.next_power_of_2(width),
+        allow_pos_inf,
+    )
+    return True
+
+
 def _select_tokens(
     logits: torch.Tensor,
     visible: torch.Tensor,

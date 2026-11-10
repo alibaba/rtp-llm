@@ -27,6 +27,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy
 _LOGGER = logging.getLogger(__name__)
 CP8_ROW_PREP_ENV = "RTP_V41_PPU_CP8_PREFILL_ROW_PREP"
 CP8_WORKSPACE_DEQUANT_ENV = "RTP_V41_PPU_CP8_FUSED_WORKSPACE_DEQUANT"
+CP8_GATHER_RECEIVE_ENV = "RTP_V41_PPU_CP8_REUSE_GATHER_RECEIVE"
 
 
 class _StagedSwaSegments(NamedTuple):
@@ -64,6 +65,9 @@ class SharedNativeCache(NativeCacheBridge):
         self._fresh_swa = {}
         self._swa_fresh_lengths = None
         self._source_reads = {}
+        self.shared_prefix_stripes = None
+        self.prefill_plans = None
+        self.gather_receive = None
         self.placements = {}
         self.pool_gathers = []
         self.cp = dict(config.get("_ppu_cp_cache", {}))
@@ -107,7 +111,10 @@ class SharedNativeCache(NativeCacheBridge):
                     self.cp, (owner, tag), self.pools[owner, tag], native, meta, geometry,
                 )
         self._slots = None
-        if not defer_producer_slots:
+        if not defer_producer_slots and not (
+            self.cp8_row_prep_enabled()
+            and os.environ.get("RTP_V41_PPU_CP8_LAZY_PRODUCER_SLOTS", "0") == "1"
+        ):
             self._slots = self._build_producer_slots()
 
     def _build_producer_slots(self):
@@ -284,10 +291,35 @@ class SharedNativeCache(NativeCacheBridge):
     def read_source(self, source, request, *, global_entries):
         saved = self._source_reads.get((source, int(request)))
         if saved is not None:
-            return saved[0][:global_entries], saved[1][:global_entries]
+            global_rows, indexer = saved
+            if isinstance(indexer, tuple):
+                # The BF16 scorer still consumes the original byte layout.
+                payload, scales = indexer
+                indexer = torch.cat(
+                    (payload[:global_entries].view(torch.uint8),
+                     scales[:global_entries].view(torch.uint8).reshape(-1, 4)),
+                    dim=1,
+                )
+            return global_rows[:global_entries], indexer[:global_entries]
         positions = torch.arange(global_entries, device=self.device) * self.geometry.ratio(source)
         tag = "global_kv_2" if self.geometry.ratio(source) == 2 else "global_kv_1"
         return self._copy_rows((source, tag), request, positions), self._copy_rows((source, "indexer_kv"), request, positions)
+
+    def read_global(self, source, request, *, global_entries):
+        saved = self._source_reads.get((source, int(request)))
+        if saved is not None:
+            return saved[0][:global_entries]
+        return self.read_source(source, request, global_entries=global_entries)[0]
+
+    def read_indexer_fp4(self, source, request, *, global_entries):
+        from rtp_llm.models_py.modules.dsv41.ppu._quant import _bytes_to_sf
+
+        saved = self._source_reads.get((source, int(request)))
+        if saved is not None and isinstance(saved[1], tuple):
+            payload, scales = saved[1]
+            return payload[:global_entries], scales[:global_entries]
+        packed = self.read_source(source, request, global_entries=global_entries)[1]
+        return packed[:, :64].contiguous().view(torch.int8), _bytes_to_sf(packed[:, 64:])
 
     def prepare_source(self, source):
         """Uniform collectives before any rank-local selector/consumer branch."""
@@ -316,6 +348,7 @@ class SharedNativeCache(NativeCacheBridge):
         counts = tuple(length // ratio for length in self.lengths)
         tag = "global_kv_2" if ratio == 2 else "global_kv_1"
         packed = []
+        split_indexer = os.environ.get("RTP_V41_PPU_CP8_SPLIT_INDEXER_READBACK", "0") == "1"
         for kind in (tag, "indexer_kv"):
             key = source, kind
             packed.append(
@@ -325,6 +358,10 @@ class SharedNativeCache(NativeCacheBridge):
                     counts,
                     width=_WIDTH[kind],
                     planar=kind == "indexer_kv",
+                    split_indexer=split_indexer and kind == "indexer_kv",
+                    plans=getattr(self, "prefill_plans", None),
+                    receive=getattr(self, "gather_receive", None),
+                    shared_prefix_stripes=(self.shared_prefix_stripes or {}).get(key, 0),
                 )
             )
         rows = tuple(zip(*packed))
@@ -339,7 +376,14 @@ class SharedNativeCache(NativeCacheBridge):
         for rid, (count, actual) in enumerate(zip(counts, rows)):
             expected = self.read_source(source, rid, global_entries=count)
             for kind, new, old in zip(("global", "indexer"), actual, expected):
-                if not torch.equal(new, old):
+                if isinstance(new, tuple):
+                    payload, scales = new
+                    match = torch.equal(payload.view(torch.uint8), old[:, :64]) and torch.equal(
+                        scales.view(torch.uint8).reshape(-1, 4), old[:, 64:],
+                    )
+                else:
+                    match = torch.equal(new, old)
+                if not match:
                     mismatches.append((rid, kind))
         failed = torch.tensor(
             [int(bool(mismatches))], dtype=torch.int32, device=self.device
@@ -364,26 +408,55 @@ class SharedNativeCache(NativeCacheBridge):
             and self.cp["size"] == 8
         )
 
-    def bind_swa_fresh_lengths(self, lengths):
+    def bind_swa_fresh_lengths(self, lengths, *, keep_plans=False):
         """Describe the full CP gather's request-major rows, or clear on compaction."""
         self._swa_fresh_lengths = lengths
+        if lengths is None:
+            if not keep_plans:
+                self.prefill_plans = None
+            self.gather_receive = None
+        elif (
+            getattr(self, "prefill_plans", None) is None
+            and torch.device(self.device).type == "cuda"
+            and os.environ.get("RTP_V41_PPU_CP8_ASYNC_PREFILL_METADATA", "1") == "1"
+        ):
+            self.prefill_plans = {}
+        if (
+            lengths is not None
+            and getattr(self, "gather_receive", None) is None
+            and torch.device(self.device).type == "cuda"
+            and os.environ.get(CP8_GATHER_RECEIVE_ENV, "1") == "1"
+            and self.cp.get("size") == 8
+        ):
+            from rtp_llm.models_py.modules.dsv41.cp import CPGatherReceive
+
+            self.gather_receive = CPGatherReceive(self.cp["size"], self.cp["rank"])
 
     def stage_swa(
-        self, layer, positions, requests, packed, prefixes, *, retain_rows=True, retain_prefix_tail=True
+        self, layer, positions, requests, packed, prefixes, *,
+        retain_rows=True, retain_prefix_tail=True, bounded_starts=None,
     ):
-        """Preserve the SWA rows visible to this forward before ring writes."""
+        """Preserve the SWA rows visible to this forward before ring writes.
+
+        Bounded starts describe contiguous suffixes in restored request order.
+        """
         if not self.lengths:
             return
-        batch_swa = (
+        batched = (
             self._batched_swa_enabled()
             and retain_rows
-            and retain_prefix_tail
             and packed.is_cuda
+        )
+        batch_swa = batched and retain_prefix_tail
+        bounded_range = (
+            batched and not retain_prefix_tail and bounded_starts is not None
+            and len(bounded_starts) == len(self.lengths)
+            and os.environ.get("RTP_V41_PPU_CP8_BOUNDED_SWA_RANGE", "1") == "1"
         )
         pool = self.pools[layer, "swa_kv"]
         fresh_lengths = None
         host_table = None
-        if batch_swa:
+        if batch_swa or bounded_range:
             from rtp_llm.models_py.modules.dsv41.ppu.prefill_swa import (
                 gather_tails,
                 write_prefill_range,
@@ -391,13 +464,21 @@ class SharedNativeCache(NativeCacheBridge):
             )
 
             placement = self.placements[layer, "swa_kv"]
-            lengths = getattr(self, "_swa_fresh_lengths", None)
+            fresh_starts = bounded_starts if bounded_range else prefixes
+            lengths = (
+                tuple(end - start for start, end in zip(fresh_starts, self.lengths))
+                if bounded_range else getattr(self, "_swa_fresh_lengths", None)
+            )
+            plans = getattr(self, "prefill_plans", None)
             if (
                 lengths is not None
                 and os.environ.get("RTP_V41_PPU_CP8_FUSED_SWA_WRITE", "1") == "1"
-                and len(lengths) == len(prefixes) == len(self.lengths)
+                and len(lengths) == len(fresh_starts) == len(self.lengths)
                 and sum(lengths) == positions.numel() == requests.numel() == packed.shape[0]
-                and all(start + size == end for start, size, end in zip(prefixes, lengths, self.lengths))
+                and all(
+                    0 <= start <= end and start + size == end
+                    for start, size, end in zip(fresh_starts, lengths, self.lengths)
+                )
             ):
                 fresh_lengths = lengths
                 # Native eager metadata keeps the original host page table
@@ -411,7 +492,24 @@ class SharedNativeCache(NativeCacheBridge):
                     and packed.is_contiguous()
                 ):
                     host_table = table
-            old_tails = gather_tails(pool, placement, prefixes, self.geometry.window)
+            if bounded_range and host_table is None:
+                fresh_lengths = None
+        if batch_swa:
+            host_table_for_read = None
+            if plans is not None:
+                # Both tables belong to this forward's native request metadata.
+                table = getattr(self.inputs[pool.framework_tag], "kv_cache_block_id", None)
+                if (
+                    table is not None and table.device.type == "cpu"
+                    and table.shape == placement.table.shape
+                    and table.dtype in (torch.int32, torch.int64)
+                ):
+                    host_table_for_read = table
+            old_tails = gather_tails(
+                pool, placement, prefixes, self.geometry.window,
+                plans=plans, host_table=host_table_for_read,
+                receive=getattr(self, "gather_receive", None),
+            )
             logical_rows = sum(tail.shape[0] for tail in old_tails)
             if logical_rows:
                 self.pool_gathers.append(
@@ -425,6 +523,9 @@ class SharedNativeCache(NativeCacheBridge):
                         "cp_size": placement.size,
                     }
                 )
+        elif fresh_lengths is not None:
+            # Bounded replay sees the contiguous retained suffix only.
+            old_tails = (packed[:0],) * len(fresh_lengths)
         direct_swa = (
             fresh_lengths is not None
             and packed.is_contiguous()
@@ -445,7 +546,9 @@ class SharedNativeCache(NativeCacheBridge):
             if retain_rows:
                 prefix = int(prefixes[rid])
                 if direct_swa:
-                    self._fresh_swa[key] = _StagedSwaSegments(prefix, old_tails[rid], fresh)
+                    self._fresh_swa[key] = _StagedSwaSegments(
+                        int(fresh_starts[rid]), old_tails[rid], fresh,
+                    )
                 elif retain_prefix_tail and prefix:
                     old_pos = torch.arange(max(0, prefix - self.geometry.window + 1), prefix, device=self.device)
                     if batch_swa:
@@ -463,7 +566,7 @@ class SharedNativeCache(NativeCacheBridge):
             written = None
             if host_table is not None:
                 written = write_prefill_range(
-                    pool, placement, host_table, rid, int(prefixes[rid]),
+                    pool, placement, host_table, rid, int(fresh_starts[rid]),
                     self.lengths[rid], self.geometry.window, fresh,
                 )
             if written is None:

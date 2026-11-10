@@ -408,7 +408,7 @@ def fp4_roundtrip(x):
     return values.view(shape)
 
 
-def select_candidate_blocks(logits, visible, block_size, topk_blocks):
+def select_candidate_blocks(logits, visible, block_size, topk_blocks, *, out=None):
     """V4.1 candidate max-pooling, including the newest visible block."""
     nblocks = (logits.shape[1] + block_size - 1) // block_size
     padded = F.pad(
@@ -420,7 +420,16 @@ def select_candidate_blocks(logits, visible, block_size, topk_blocks):
         1, newest[:, None], torch.where(visible > 0, torch.inf, -torch.inf)[:, None]
     )
     values, ids = scores.topk(min(topk_blocks, nblocks), dim=-1)
-    return torch.where(values > -torch.inf, ids, -1).int()
+    if out is None:
+        return torch.where(values > -torch.inf, ids, -1).int()
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_topk import (
+        write_torch_topk_results,
+    )
+
+    output = out[:, :ids.shape[1]]
+    if not write_torch_topk_results(values, ids, output, allow_pos_inf=True):
+        output.copy_(torch.where(values > -torch.inf, ids, -1).int())
+    return output
 
 
 def mask_candidate_logits(logits, candidates, block_size):

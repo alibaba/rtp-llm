@@ -714,6 +714,7 @@ def cp_all_gather_full(
     cp_ctx: CPContext,
     *,
     profile_name: Optional[str] = None,
+    receive: Optional["CPGatherReceive"] = None,
 ) -> torch.Tensor:
     """Synchronously gather CP-local ``[T_local, H]`` to full ``[T_full, H]``.
 
@@ -723,8 +724,12 @@ def cp_all_gather_full(
     """
     profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.sync"
     local_2d = _cp_gather_2d(local_2d, cp_ctx)
+    # Prefix restore returns a live view of the gather result. Keep that
+    # buffer call-owned so a later gather cannot overwrite the view.
+    if receive is not None and cp_ctx.unpad_restore_is_prefix:
+        receive = None
     with record_function_range(f"{profile_name}.launch"):
-        gathered = all_gather(local_2d, group=Group.TP)
+        gathered = receive.gather(local_2d) if receive is not None else all_gather(local_2d, group=Group.TP)
     # gathered: [cp_size * chunk_length, H]
     with record_function_range(f"{profile_name}.restore"):
         return _cp_restore_gathered_full_2d(gathered, cp_ctx)
@@ -1234,6 +1239,62 @@ def cp_interleave_gathered_pool_blocks(
     return out[:total_logical_blocks]
 
 
+def cp_gather_rank_major(local, cp_size, *, out=None, cp_rank=None, async_op=True):
+    """Gather an equal-size packet per CP rank in process-group order."""
+    if out is None:
+        return collective_torch.all_gather(local, group=Group.TP)
+    if cp_size == 1:
+        return local
+    group = collective_torch._get_group(Group.TP)
+    if (
+        torch.distributed.get_world_size(group) != cp_size
+        or torch.distributed.get_rank(group) != cp_rank
+    ):
+        raise RuntimeError("Cache readback CP size/rank differs from its process group")
+    work = torch.distributed.all_gather_into_tensor(
+        out, local, group=group, async_op=async_op
+    )
+    # The collective stream must join before a caller reuses its scratch.
+    if async_op:
+        work.wait()
+    return out
+
+
+class CPGatherReceive:
+    """Forward-owned scratch for gathers immediately consumed on their stream."""
+
+    _MAX_BYTES = 128 * 1024**2
+
+    def __init__(self, cp_size, cp_rank):
+        self.cp_size = cp_size
+        self.cp_rank = cp_rank
+        self._buffers = {}
+
+    def gather(self, local):
+        nbytes = self.cp_size * local.numel() * local.element_size()
+        if nbytes > self._MAX_BYTES:
+            return cp_gather_rank_major(local, self.cp_size)
+        symmetric = collective_torch._get_symm_mem().get_symm_mem_communicator()
+        if symmetric is not None and symmetric.should_torch_symm_mem_allgather(local):
+            return cp_gather_rank_major(local, self.cp_size)
+        # A stream's next collective is ordered after its preceding restore.
+        # Keep separate scratch if another stream consumes its own packets.
+        stream = torch.cuda.current_stream(local.device)
+        shape = (self.cp_size * local.shape[0], *local.shape[1:])
+        buffer = self._buffers.get(stream)
+        if buffer is None or buffer.numel() < nbytes:
+            self._buffers.pop(stream, None)
+            del buffer
+            buffer = torch.empty(nbytes, dtype=torch.uint8, device=local.device)
+            self._buffers[stream] = buffer
+        output = buffer[:nbytes].view(local.dtype).view(shape)
+        # Match the original all_gather_into_tensor submission on PCCL.
+        # An explicit Work.wait adds device wait events on this backend.
+        return cp_gather_rank_major(
+            local, self.cp_size, out=output, cp_rank=self.cp_rank, async_op=False,
+        )
+
+
 def cp_gather_request_pool_blocks(
     local_pool: torch.Tensor,
     local_block_table_for_req: torch.Tensor,
@@ -1273,7 +1334,7 @@ def cp_gather_request_pool_blocks(
     # NCCL all_gather. Each rank contributes [L, *block_shape] -> output is
     # [cp_size * L, *block_shape] rank-major.
     with record_function_range("dsv4.cp.all_gather.pool_blocks.launch"):
-        gathered = all_gather(local_owned, group=Group.TP)
+        gathered = cp_gather_rank_major(local_owned, cp_size)
 
     return cp_interleave_gathered_pool_blocks(gathered, cp_size, total_logical_blocks)
 

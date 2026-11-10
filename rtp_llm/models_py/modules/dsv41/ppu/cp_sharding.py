@@ -10,6 +10,12 @@ from types import SimpleNamespace
 import torch
 
 from rtp_llm.models_py.modules.dsv41.cp import cp_gather_request_pool_blocks
+from rtp_llm.models_py.modules.dsv41.cp_cache import (
+    local_slice_offset,
+    ring_coordinates,
+    round_robin_owner,
+    round_robin_page,
+)
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache import (
     NativeCacheBridge, _FULL, _Pool, _WIDTH,
 )
@@ -85,7 +91,7 @@ class PoolPlacement:
 
     def owner(self, key, positions):
         if key[1] in _FULL:
-            return (positions // self.physical_span) % self.size
+            return round_robin_owner(positions, self.physical_span, self.size)
         return ((positions % self.full_entries) * _WIDTH[key[1]]) // self.slice_elements
 
     def owned(self, key, positions):
@@ -96,7 +102,7 @@ class PoolPlacement:
 
     def write_ring(self, key, pool, request, positions, rows):
         """Copy only the rank's byte/element intersection, even across a row."""
-        columns = positions // pool.span
+        columns, offsets = ring_coordinates(positions, pool.span, self.full_entries)
         if positions.numel() and (int(positions.min()) < 0 or int(columns.max()) >= pool.table.shape[1]):
             raise ValueError("native CP ring position outside its physical table")
         blocks = pool.table[int(request), columns].long()
@@ -104,21 +110,24 @@ class PoolPlacement:
             raise ValueError("native CP ring refers to an unallocated physical block")
         width = _WIDTH[key[1]]
         for start in range(0, positions.numel(), 4096):
-            pos = positions[start:start + 4096]
-            offsets = (pos % self.full_entries)[:, None] * width + torch.arange(width, device=pos.device)
-            offsets -= self.rank * self.slice_elements
-            live = (offsets >= 0) & (offsets < self.slice_elements)
-            b = blocks[start:start + 4096, None].expand_as(offsets)
-            pool.tensor[b[live], offsets[live]] = rows[start:start + 4096].to(pool.tensor.device)[live]
+            row_offsets = offsets[start:start + 4096, None]
+            logical = row_offsets * width + torch.arange(width, device=positions.device)
+            local = local_slice_offset(logical, self.rank, self.slice_elements)
+            live = (local >= 0) & (local < self.slice_elements)
+            b = blocks[start:start + 4096, None].expand_as(local)
+            pool.tensor[b[live], local[live]] = rows[start:start + 4096].to(pool.tensor.device)[live]
 
     def coordinates(self, key, pool, request, positions):
         if key[1] in _FULL:
-            physical = positions // self.physical_span
-            columns = (physical // self.size) * self.pages + (positions % self.physical_span) // pool.span
-            offsets = (positions % pool.span) // self.ratio
+            columns, page_offsets = round_robin_page(
+                positions, self.physical_span, pool.span, self.size
+            )
+            offsets = page_offsets // self.ratio
         else:
-            columns = positions // pool.span
-            offsets = (positions % self.full_entries) - self.rank * (self.slice_elements // _WIDTH[key[1]])
+            columns, ring_offsets = ring_coordinates(positions, pool.span, self.full_entries)
+            offsets = local_slice_offset(
+                ring_offsets, self.rank, self.slice_elements // _WIDTH[key[1]]
+            )
         if positions.numel() and (int(positions.min()) < 0 or int(columns.max()) >= pool.table.shape[1]):
             raise ValueError("native CP position outside local tag table")
         blocks = pool.table[int(request), columns].long()

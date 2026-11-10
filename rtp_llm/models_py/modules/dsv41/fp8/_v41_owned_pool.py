@@ -21,6 +21,8 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv41.cp import cp_gather_rank_major
+from rtp_llm.models_py.modules.dsv41.cp_cache import round_robin_coordinates_jit
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_fp4_triton as codec
 
 _BYTES = 356
@@ -287,13 +289,12 @@ def _owned_pool_metadata(
         pos = (logical + SEGMENT_BASE + 1) * RATIO - 1
         req = (FIRST + request).to(tl.int64)
         # Ownership is logical and independent of main/index physical pages.
-        owner_block = pos // OWNER
-        mcol = owner_block // CP_SIZE * (OWNER // MTPB) + pos % OWNER // MTPB
-        icol = owner_block // CP_SIZE * (OWNER // ITPB) + pos % OWNER // ITPB
+        _, mcol, moffset = round_robin_coordinates_jit(pos, OWNER, MTPB, CP_SIZE)
+        _, icol, ioffset = round_robin_coordinates_jit(pos, OWNER, ITPB, CP_SIZE)
         mb = tl.load(mt + req * MS + mcol, valid & (mcol < MC), other=0).to(tl.int64)
         ib = tl.load(it + req * IS + icol, valid & (icol < IC), other=0).to(tl.int64)
-        mi = tl.where(valid & (mb > 0), mb * MEB + pos % MTPB // RATIO, -1)
-        ii = tl.where(valid & (ib > 0), ib * IEB + pos % ITPB // RATIO, -1)
+        mi = tl.where(valid & (mb > 0), mb * MEB + moffset // RATIO, -1)
+        ii = tl.where(valid & (ib > 0), ib * IEB + ioffset // RATIO, -1)
         tl.store(slots + row, mi, row < ROWS)
         tl.store(slots + ROWS + row, ii, row < ROWS)
 
@@ -306,10 +307,8 @@ def _owned_pool_metadata(
         start = tl.sum(tl.where(ids < inverse_request, padded, 0), 0)
         count = tl.sum(tl.where(ids == inverse_request, counts, 0), 0)
         inverse_local = row - start
-        inverse_owner = inverse_local // from_slot % CP_SIZE
-        inverse_source = (
-            inverse_local // (from_slot * CP_SIZE) * from_slot
-            + inverse_local % from_slot
+        inverse_owner, inverse_source, _ = round_robin_coordinates_jit(
+            inverse_local, from_slot, 1, CP_SIZE
         )
         for rank in tl.static_range(CP_SIZE):
             owned_sizes = _owned(counts, from_slot, CP_SIZE, rank)
@@ -558,23 +557,7 @@ def warmup(layout, device, gather_fn):
 
 
 def _collect(gathered, send, cp_size, cp_rank):
-    if cp_size == 1:
-        return
-    from rtp_llm.models_py.distributed import collective_torch
-    from rtp_llm.models_py.distributed.collective_torch import Group
-
-    group = collective_torch._get_group(Group.TP)
-    if (
-        torch.distributed.get_world_size(group) != cp_size
-        or torch.distributed.get_rank(group) != cp_rank
-    ):
-        raise RuntimeError("Owned pool CP size/rank differs from its process group")
-    work = torch.distributed.all_gather_into_tensor(
-        gathered, send, group=group, async_op=True
-    )
-    # NCCL's internal stream must join the current stream before scratch reuse
-    # or the outer caller's completion event. This is a GPU dependency.
-    work.wait()
+    cp_gather_rank_major(send, cp_size, out=gathered, cp_rank=cp_rank)
 
 
 def _validate_local(main, index, ends, mt, it, batch, layout):

@@ -5,6 +5,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41.cp_cache import page_interval, swa_prefix_start
+
 from ._swa_cp_byte_sliced import CPByteSlicedSlotCompaction
 
 
@@ -134,10 +136,10 @@ def _host_compact_table(
     host_rows = host_table.resolve_neg().numpy()
     prefix = np.asarray(prefixes)
     length = np.asarray(lengths)
-    starts = np.maximum(prefix - 127, 0) if read else prefix
+    starts = swa_prefix_start(prefix, 128, maximum=np.maximum) if read else prefix
     ends = prefix if read else prefix + length
-    first = starts // span
-    stop = np.minimum((ends + span - 1) // span, columns)
+    first, stop = page_interval(starts, ends, span)
+    stop = np.minimum(stop, columns)
     lo, hi = int(first.min()), min(int(stop.max()), host_rows.shape[1])
     block_columns = np.arange(lo, hi)[None, :]
     blocks = host_rows[:, lo:hi]

@@ -10,6 +10,15 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41.cp_cache import (
+    local_slice_offset,
+    page_interval,
+    rank_major_slice_offset,
+    ring_coordinates,
+    round_robin_owner,
+    round_robin_page,
+    swa_prefix_start,
+)
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache import _FULL, _WIDTH
 from rtp_llm.models_py.modules.dsv41.ppu.prefill import (
     _build_reference_workspace,
@@ -58,6 +67,65 @@ class _BoundaryPools:
 
 
 class SharedShardedBoundary(unittest.TestCase):
+    def test_common_cp_addresses_preserve_packed_bytes(self):
+        # Both producers address the same compressed entry. CUDA uses the
+        # closing token and PPU uses the first token of the pair.
+        for cp_size in (1, 2, 4, 8):
+            for ratio in (1, 2):
+                for owner_span, page_span in ((32, 8), (16, 4), (32, 32)):
+                    for position in range(0, cp_size * owner_span + 19, ratio):
+                        closing = position + ratio - 1
+                        owner_block, within_block = divmod(closing, owner_span)
+                        cuda_owner = owner_block % cp_size
+                        cuda_column = (
+                            owner_block // cp_size * (owner_span // page_span)
+                            + within_block // page_span
+                        )
+                        cuda_entry = (closing % page_span) // ratio
+                        owner = round_robin_owner(position, owner_span, cp_size)
+                        column, offset = round_robin_page(
+                            position, owner_span, page_span, cp_size
+                        )
+                        self.assertEqual(
+                            (owner, column, offset // ratio),
+                            (cuda_owner, cuda_column, cuda_entry),
+                        )
+
+        # Deliberately cross a rank boundary inside an SWA row. The packet is
+        # rank-major, while the authoritative fixture is block-major.
+        blocks, cp_size, slice_size, width = 3, 8, 531, 528
+        stride = cp_size * slice_size
+        fixture = [
+            bytes((block * 59 + i % 173) % 256 for i in range(stride))
+            for block in range(blocks)
+        ]
+        packet = b"".join(
+            row[rank * slice_size : (rank + 1) * slice_size]
+            for rank in range(cp_size)
+            for row in fixture
+        )
+        table = (2, -1, 1, 0)
+        self.assertEqual(
+            tuple(swa_prefix_start(prefix, 8) for prefix in (0, 3, 193)),
+            (0, 0, 186),
+        )
+        self.assertEqual(page_interval(186, 193, 64), (2, 4))
+        for position in (57, 63, 132, 188, 192):
+            column, offset = ring_coordinates(position, 64, 8)
+            self.assertEqual((column, offset), (position // 64, position % 8))
+            block = table[column]
+            start = offset * width
+            actual = bytearray()
+            for byte in range(start, start + width):
+                rank = byte // slice_size
+                local = local_slice_offset(byte, rank, slice_size)
+                address = rank_major_slice_offset(block, byte, blocks, slice_size)
+                self.assertEqual(
+                    address, (rank * blocks + block) * slice_size + local
+                )
+                actual.append(packet[address])
+            self.assertEqual(actual, fixture[block][start : start + width])
+
     @torch.inference_mode()
     def test_batched_workspace_preserves_keys_and_refreshes_only_swa(self):
         for device in ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",):

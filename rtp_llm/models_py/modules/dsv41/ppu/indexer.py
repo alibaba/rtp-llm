@@ -116,7 +116,7 @@ def _visible_counts(
     return visible
 
 
-def dense_fp4_index_score(q, k, head_weights, context, ratio):
+def dense_fp4_index_score(q, k, head_weights, positions, ratio):
     """Score one request-local tile using the CUDA Prefill FP4 ABI."""
     from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_indexer import (
         score_indexer_chunk,
@@ -127,9 +127,9 @@ def dense_fp4_index_score(q, k, head_weights, context, ratio):
     if os.environ.get("RTP_V41_PPU_CP8_DENSE_INDEX_BOUNDS", "0") == "1":
         from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_metadata import try_score_bounds
 
-        bounds = try_score_bounds(context.positions, count, ratio)
+        bounds = try_score_bounds(positions, count, ratio)
     if bounds is None:
-        ends = ((context.positions + 1) // ratio).clamp(0, count).to(torch.int32)
+        ends = ((positions + 1) // ratio).clamp(0, count).to(torch.int32)
         starts = torch.zeros_like(ends)
     else:
         starts, ends = bounds

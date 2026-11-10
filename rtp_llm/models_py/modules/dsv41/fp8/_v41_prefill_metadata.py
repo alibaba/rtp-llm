@@ -11,6 +11,11 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41.cp_cache import (
+    ring_coordinates_jit,
+    round_robin_coordinates_jit,
+)
+
 
 def _integer_vector(value, rows, device):
     return (
@@ -170,9 +175,8 @@ def _prefill_slots_kernel(
     valid = (row < ROWS) & (pos >= 0) & (req >= 0) & (req < REQUESTS)
     pos = tl.maximum(pos, 0)
     if STATE:
-        raw_column = pos // TPB
+        raw_column, offset = ring_coordinates_jit(pos, TPB, EB * CP)
         column = raw_column % COLS
-        offset = pos % (EB * CP)
         valid &= offset // EB == RANK
         offset %= EB
         if HAS_ENDS:
@@ -180,10 +184,9 @@ def _prefill_slots_kernel(
             effective_end = tl.minimum((raw_column + 1) * TPB, seq_end)
             valid &= pos + EB * CP >= effective_end
     else:
-        owner_block = pos // OWNER_TPB
-        column = owner_block // CP * (OWNER_TPB // TPB) + pos % OWNER_TPB // TPB
-        offset = pos % TPB // RATIO
-        valid &= (owner_block % CP == RANK) & (column < COLS)
+        owner, column, offset = round_robin_coordinates_jit(pos, OWNER_TPB, TPB, CP)
+        offset //= RATIO
+        valid &= (owner == RANK) & (column < COLS)
         valid &= (pos + 1) % RATIO == 0
     block = tl.load(table + req * TABLE_STRIDE + column, valid, other=0).to(tl.int64)
     slot = tl.where(valid & (block > 0), block * EB + offset, -1)

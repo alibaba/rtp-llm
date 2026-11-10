@@ -508,6 +508,7 @@ def _remap_sparse_prefill_topk_kernel(
     count = tl.load(sparse_end + row)
     length = tl.load(visible + row)
     valid = (slot < TOPK) & (column >= 0) & (column < count) & (column < SPARSE_COLUMNS)
+    column = column.to(tl.int32)
     block = tl.load(indices + row * INDEX_STRIDE + column // BLOCK, valid, other=0)
     position = block * BLOCK + column % BLOCK
     if BATCHED:
@@ -534,13 +535,14 @@ def remap(
 
     -1, out-of-prefix, and causal-tail positions remain -1. Passing logits
     also preserves RTP's filtering of selected NaN and +/-inf scores. The
-    caller can supply a chunk slice of its int32 final output buffer.
+    caller can pass raw Torch TopK int64 columns and a chunk slice of its
+    int32 final output buffer.
     """
     if not (
         isinstance(plan, SparsePrefillPlan)
         and columns.is_cuda
         and columns.device == plan.sparse_indices.device
-        and columns.dtype == torch.int32
+        and columns.dtype in (torch.int32, torch.int64)
         and columns.ndim == 2
         and columns.shape[0] == plan.rows
         and 0 < columns.shape[1] <= 4096

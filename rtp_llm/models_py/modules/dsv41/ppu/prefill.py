@@ -138,7 +138,11 @@ def _build_reference_workspace(
         if ratio and source is not None:
             tag = "global_kv_2" if ratio == 2 else "global_kv_1"
             count = cache.request_length(rid) // ratio
-            packed = cache.read_source(source, rid, global_entries=count)[0]
+            packed = (
+                cache.read_global(source, rid, global_entries=count)
+                if isinstance(cache, SharedNativeCache)
+                else cache.read_source(source, rid, global_entries=count)[0]
+            )
             decoded = torch.empty(
                 (packed.shape[0], geometry.head_dim),
                 dtype=torch.bfloat16,
@@ -249,7 +253,17 @@ class _CPPrefillWorkspace:
             offset = swa_offset + swa_count
 
         self.kv = torch.empty((offset, geometry.head_dim), dtype=torch.bfloat16, device=positions.device)
-        meta = torch.tensor(layout, dtype=torch.int64, device=positions.device).reshape(-1, 4)
+        plans = getattr(cache, "prefill_plans", None)
+        if plans is None:
+            meta = torch.tensor(layout, dtype=torch.int64, device=positions.device).reshape(-1, 4)
+        else:
+            from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_metadata import _upload
+
+            key = ("workspace_layout", tuple(layout), positions.device)
+            meta = plans.get(key)
+            if meta is None:
+                meta = _upload(layout, positions.device, torch.int64).reshape(-1, 4)
+                plans[key] = meta
         self.row_meta = meta.index_select(0, context.request_ids.long())
         self.selection = None
         self.index_plan = None
@@ -258,7 +272,11 @@ class _CPPrefillWorkspace:
             tag = "global_kv_2" if ratio == 2 else "global_kv_1"
             descriptor = cache.descriptors(source)[tag]
             for rid, begin, count in self.global_ranges:
-                packed = cache.read_source(source, rid, global_entries=count)[0]
+                packed = (
+                    cache.read_global(source, rid, global_entries=count)
+                    if isinstance(cache, SharedNativeCache)
+                    else cache.read_source(source, rid, global_entries=count)[0]
+                )
                 out = self.kv[begin:begin + count]
                 if not (self.fused_dequant and _quant.try_dequantize_prefill_rows(packed, out, global_pool=True)):
                     ops.decode_kv(packed, pool_tag=tag, descriptor=descriptor, out=out)
