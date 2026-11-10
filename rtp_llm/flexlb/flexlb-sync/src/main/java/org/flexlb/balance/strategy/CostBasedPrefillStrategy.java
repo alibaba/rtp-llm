@@ -79,7 +79,7 @@ public class CostBasedPrefillStrategy {
         // Rank known work and cache hits without excluding admission-blocked candidates.
         int selectedIndex = selectBestCandidate(
                 survivors, survivors.minimumProjectedTtftMs,
-                roleType, group, seqLen, config);
+                roleType, group, seqLen, balanceContext.getRequest(), config);
 
         if (selectedIndex < 0) {
             Logger.debug(
@@ -181,6 +181,7 @@ public class CostBasedPrefillStrategy {
                             RoleType roleType,
                             String group,
                             long seqLen,
+                            org.flexlb.dao.loadbalance.Request request,
                             FlexlbConfig config) {
         if (survivors.size() == 0) {
             return -1;
@@ -233,7 +234,18 @@ public class CostBasedPrefillStrategy {
         }
 
         int selectedIndex;
-        if (!preferredCandidates.isEmpty()) {
+        boolean sessionAffinityEnabled = config.getRouter()
+                .getRoles().getPrefill().isSessionAffinityEnabled();
+        int sessionIndex = sessionAffinityEnabled
+                ? selectSessionAffinity(survivors, request) : -1;
+        if (sessionIndex >= 0) {
+            // A session's stable leading block must stay on one Prefill. Cache
+            // status snapshots lag the insert that makes the newest prefix
+            // reusable, so relying on reported hits alone lets the route
+            // oscillate and lose the just-written prefix.
+            selectedIndex = sessionIndex;
+            affinityReason = "SESSION_PREFIX";
+        } else if (!preferredCandidates.isEmpty()) {
             selectedIndex = selectCacheLeader(survivors, preferredCandidates, roleType, group);
         } else {
             selectedIndex = selectBaselineCandidate(
@@ -589,6 +601,49 @@ public class CostBasedPrefillStrategy {
                 selectedPin.close();
             }
         }
+    }
+
+    /**
+     * Rendezvous-hash the leading cache block onto a live Prefill. The leading
+     * block is the session's immutable prefix: later steps append to it, so the
+     * hash is stable for the whole conversation while distinct sessions spread
+     * across workers. Capacity-available candidates win first; if every
+     * candidate is admission-blocked, hash over all of them so the request
+     * still queues on a deterministic owner.
+     */
+    private static int selectSessionAffinity(PrefillCandidateSet survivors,
+                                             org.flexlb.dao.loadbalance.Request request) {
+        if (request == null || request.getBlockCacheKeys() == null
+                || request.getBlockCacheKeys().size() < 2) {
+            return -1;
+        }
+        long sessionKey = request.getBlockCacheKeys().get(0);
+        int index = selectRendezvous(survivors, sessionKey, true);
+        return index >= 0 ? index : selectRendezvous(survivors, sessionKey, false);
+    }
+
+    private static int selectRendezvous(PrefillCandidateSet survivors, long sessionKey,
+                                        boolean availableOnly) {
+        int best = -1;
+        long bestScore = Long.MIN_VALUE;
+        for (int i = 0; i < survivors.size(); i++) {
+            if (availableOnly && survivors.admissionBlock(i) != null) {
+                continue;
+            }
+            long score = mix64(sessionKey
+                    ^ (0x9E3779B97F4A7C15L * survivors.endpointAddress(i).hashCode()));
+            if (score > bestScore) {
+                bestScore = score;
+                best = i;
+            }
+        }
+        return best;
+    }
+
+    private static long mix64(long value) {
+        value = (value ^ (value >>> 30)) * 0xBF58476D1CE4E5B9L;
+        value = (value ^ (value >>> 27)) * 0x94D049BB133111EBL;
+        return value ^ (value >>> 31);
     }
 
     private void reportCacheAffinityDecision(

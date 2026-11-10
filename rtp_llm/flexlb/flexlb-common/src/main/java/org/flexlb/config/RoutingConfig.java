@@ -39,6 +39,8 @@ public final class RoutingConfig {
         private ExecutionTimeEstimatorConfig executionTimeEstimator =
                 new ExecutionTimeEstimatorConfig();
         private CacheAffinityConfig cacheAffinity;
+        /** Pin a conversation to one Prefill by its stable leading cache block. */
+        private boolean sessionAffinityEnabled;
     }
 
     @Getter

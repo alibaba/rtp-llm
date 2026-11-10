@@ -388,7 +388,7 @@ class CostBasedPrefillSelectionMetricTest {
                 new long[] {500L, 500L, 0L});
 
         int selectedIndex = strategy.selectBestCandidate(
-                candidates, 100L, RoleType.PREFILL, null, 1_000L, config);
+                candidates, 100L, RoleType.PREFILL, null, 1_000L, null, config);
 
         assertEquals(0, selectedIndex,
                 "equal cache hit must preserve the minimum-TTFT baseline");
@@ -406,11 +406,49 @@ class CostBasedPrefillSelectionMetricTest {
                 new long[] {500L, 600L, 0L});
 
         int selectedIndex = strategy.selectBestCandidate(
-                candidates, 100L, RoleType.PREFILL, null, 1_000L, config);
+                candidates, 100L, RoleType.PREFILL, null, 1_000L, null, config);
 
         assertEquals(1, selectedIndex);
         verify(reporter).reportCacheAffinityDecision(
                 RoleType.PREFILL, "10.1.0.2", "CACHE_LEADER");
+    }
+
+    @Test
+    void sameLeadingBlockPinsTheSessionToTheSamePrefill() {
+        configureFocusedAffinity();
+        config.getRouter().getRoles().getPrefill().setSessionAffinityEnabled(true);
+        PrefillCandidateSet candidates = candidates(
+                new long[] {100L, 105L, 1_000L},
+                new long[] {500L, 600L, 0L});
+        Request request = new Request();
+        request.setBlockCacheKeys(List.of(42L, 43L, 44L));
+
+        int first = strategy.selectBestCandidate(
+                candidates, 100L, RoleType.PREFILL, null, 1_000L, request, config);
+        int second = strategy.selectBestCandidate(
+                candidates, 100L, RoleType.PREFILL, null, 1_000L, request, config);
+
+        assertEquals(first, second);
+        verify(reporter, times(2)).reportCacheAffinityDecision(
+                RoleType.PREFILL, "10.1.0." + (first + 1), "SESSION_PREFIX");
+    }
+
+    @Test
+    void distinctLeadingBlocksSpreadSessionsAcrossPrefills() {
+        configureFocusedAffinity();
+        config.getRouter().getRoles().getPrefill().setSessionAffinityEnabled(true);
+        PrefillCandidateSet candidates = candidates(
+                new long[] {100L, 105L, 1_000L},
+                new long[] {500L, 600L, 0L});
+        Set<Integer> selected = new HashSet<>();
+        for (long key = 1L; key <= 64L; key++) {
+            Request request = new Request();
+            request.setBlockCacheKeys(List.of(key, key + 1L));
+            selected.add(strategy.selectBestCandidate(
+                    candidates, 100L, RoleType.PREFILL, null, 1_000L, request, config));
+        }
+        assertTrue(selected.size() > 1,
+                "distinct session prefixes must spread over more than one Prefill");
     }
 
     @ParameterizedTest
@@ -428,7 +466,7 @@ class CostBasedPrefillSelectionMetricTest {
         Set<Integer> selected = new HashSet<>();
         for (int attempt = 0; attempt < 6; attempt++) {
             selected.add(strategy.selectBestCandidate(
-                    candidates, 100L, RoleType.PREFILL, null, 1_000L, config));
+                    candidates, 100L, RoleType.PREFILL, null, 1_000L, null, config));
         }
 
         assertEquals(affinityEnabled ? Set.of(1) : Set.of(0, 1), selected);
@@ -444,7 +482,7 @@ class CostBasedPrefillSelectionMetricTest {
         Set<Integer> selected = new HashSet<>();
         for (int attempt = 0; attempt < 6; attempt++) {
             selected.add(strategy.selectBestCandidate(
-                    candidates, 100L, RoleType.PREFILL, null, 1_000L, config));
+                    candidates, 100L, RoleType.PREFILL, null, 1_000L, null, config));
         }
 
         assertEquals(Set.of(0, 2), selected);
