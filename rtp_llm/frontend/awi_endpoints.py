@@ -132,6 +132,7 @@ def register_awi_routes(app: Any, frontend_app: Any) -> None:
                 input_ids,
                 request_id,
                 generate_config=generate_config,
+                generate_env_config=getattr(worker, "generate_env_config", None),
                 headers=headers,
             )
             async for response in stream:
