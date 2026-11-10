@@ -50,9 +50,11 @@ except Exception:  # pragma: no cover - non-cuda env
 
 
 def _fast_path_available() -> bool:
+    if not torch.cuda.is_available() or deep_gemm is None:
+        return False
+    major, _ = torch.cuda.get_device_capability()
     return (
-        torch.cuda.is_available()
-        and deep_gemm is not None
+        major >= 10
         and hasattr(deep_gemm, "fp8_paged_mqa_logits")
         and hasattr(deep_gemm, "get_paged_mqa_logits_metadata")
     )
