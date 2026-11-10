@@ -161,6 +161,8 @@ class DelayedHCUnit(HCUnitBase):
         return y, post, comb
 
     def _post_impl(self, x, residual, post, comb):
+        if x.numel() == 0 or residual.numel() == 0:
+            return residual
         if (
             residual.is_cuda
             and residual.dtype == torch.bfloat16
