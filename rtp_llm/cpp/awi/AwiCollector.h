@@ -66,6 +66,9 @@ struct AwiOperation {
     std::unordered_set<int64_t>     request_ids;  // resolved internal ids
     int64_t                         context_tokens{0};
     bool                            released{false};
+    // One-shot guard so exactly one resident snapshot is emitted per armed
+    // operation (rank 0 only; the engine step loop test-and-sets this).
+    bool resident_emitted{false};
 };
 
 // Per-backend-process collector. Frontend aggregates all ranks through the
@@ -89,6 +92,9 @@ public:
     void        bindInternalId(const std::string& awi_request_id, int64_t internal_id);
     void        markReleased();
     void        clearOperation();
+    // Test-and-set: returns true exactly once per armed operation, for the
+    // single resident snapshot the contract requires.
+    bool        markResidentEmitted();
 
     // Startup facts injected once by the Python layer (build identity, weight
     // placement derived from real allocations, measured network fetch count).

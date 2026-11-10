@@ -854,9 +854,17 @@ grpc::Status LocalRpcServer::UpdateSchedulerInfo(grpc::ServerContext*           
 grpc::Status
 LocalRpcServer::AwiBarrier(grpc::ServerContext* context, const AwiBarrierRequestPB* request, EmptyPB* response) {
     // Arm (or, with an empty operation_id, disarm) the operation-scoped
-    // admission/residency probe state. Scheduler-side residency gating and
-    // prior-benchmark cache eviction consume this state in the engine step
-    // loop; observations are served per rank by AwiObservations below.
+    // admission/residency probe state. The engine step loop consumes it:
+    // armed streams reserve their full input+output span at admission
+    // (NormalEngine::maybeTrackAwiArmedStream), hold at the prefill/decode
+    // boundary until the whole cohort is simultaneously resident, and emit
+    // one resident snapshot plus genuine capacity failures
+    // (NormalEngine::applyAwiBarrier). Prior-benchmark prefix entries are
+    // emptied by the allocator itself: freed benchmark blocks return to the
+    // reuse pool as reclaimable capacity (counted by availableBlocksNum and
+    // evicted by malloc on demand), while distinct benchmark prefixes cannot
+    // produce reuse hits; ordinary memory KV reuse stays enabled throughout.
+    // Observations are served per rank by AwiObservations below.
     AwiOperation operation;
     operation.operation_id = request->operation_id();
     operation.awi_request_ids.insert(request->request_ids().begin(), request->request_ids().end());

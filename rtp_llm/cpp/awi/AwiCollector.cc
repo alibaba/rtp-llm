@@ -82,6 +82,15 @@ void AwiCollector::markReleased() {
     }
 }
 
+bool AwiCollector::markResidentEmitted() {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!has_armed_ || armed_.resident_emitted) {
+        return false;
+    }
+    armed_.resident_emitted = true;
+    return true;
+}
+
 void AwiCollector::clearOperation() {
     std::lock_guard<std::mutex> lock(mu_);
     has_armed_ = false;

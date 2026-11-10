@@ -4,7 +4,11 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 #include "absl/status/status.h"
+#include "rtp_llm/cpp/awi/AwiCollector.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
@@ -56,6 +60,16 @@ private:
                                    int64_t                             step_begin_time_us,
                                    int64_t                             decode_epoch_before,
                                    int64_t                             prefill_epoch_before);
+
+    // AWI barrier (POST /awi/arm via AwiCollector): armed benchmark streams
+    // reserve their full input+output span at admission, hold at the prefill/
+    // decode boundary until every cohort member is simultaneously resident,
+    // and surface genuine capacity failures instead of queueing forever.
+    void maybeTrackAwiArmedStream(const GenerateStreamPtr& stream);
+    void applyAwiBarrier(std::list<GenerateStreamPtr>& streams);
+    void emitAwiResidentSnapshot(const AwiOperation& operation);
+    void checkAwiBarrierCapacity(const AwiOperation& operation);
+    void recordAwiDeviceOom(const std::exception& exception);
 
     void                            initScheduler();
     std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
@@ -112,6 +126,15 @@ private:
     // Engine-loop counter; advances even when profiling is disabled and never resets between captures.
     int64_t                                       execute_step_ = 0;
     int                                           reserve_step_ = 0;
+
+    // Armed AWI benchmark cohort: internal request id -> live stream. Guarded
+    // by awi_armed_mu_; cleared when the armed operation id changes or the
+    // probe disarms. Rank 0 populates it (enqueue runs on the serving rank);
+    // the step-loop hold decision derives from stream state that is identical
+    // on every rank, keeping TP collectives aligned.
+    std::mutex                                     awi_armed_mu_;
+    std::string                                    awi_armed_op_id_;
+    std::unordered_map<int64_t, GenerateStreamPtr> awi_armed_streams_;
 };
 
 }  // namespace rtp_llm

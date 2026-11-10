@@ -826,6 +826,7 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
     stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
+    maybeTrackAwiArmedStream(stream);
     if (!validateStreamForScheduling(stream)) {
         return;
     }
@@ -849,6 +850,7 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
     for (auto& inp : inputs) {
         auto stream = createStream(inp);
         stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
+        maybeTrackAwiArmedStream(stream);
         streams.push_back(stream);
     }
 
@@ -898,6 +900,12 @@ absl::Status NormalEngine::step() try {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         }
+        // AWI barrier: hold armed benchmark streams at the prefill/decode
+        // boundary until the whole cohort is simultaneously resident with
+        // full input+output reservations. No-op unless an operation is armed;
+        // rank 0 owns the scheduled list, so the filtered batch is what every
+        // rank executes through the step collectives.
+        applyAwiBarrier(streams);
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);
@@ -962,6 +970,7 @@ absl::Status NormalEngine::step() try {
 } catch (const std::exception& exception) {
     if (isTorchCudaOom(exception)) {
         dumpFatalTorchCudaOomDiagnostics(parallelism_config.local_rank, exception);
+        recordAwiDeviceOom(exception);
     }
     throw;
 }
@@ -1044,6 +1053,263 @@ void NormalEngine::recordAwiStepObservations(const std::list<GenerateStreamPtr>&
     step_event.graph_replay = decode_replayed ? 1 : (had_decode_stream ? 0 : (prefill_replayed ? -1 : 0));
     step_event.elapsed_ms   = elapsed_ms;
     awi.recordEvent(std::move(step_event));
+}
+
+namespace {
+std::string awiEscapeJson(const std::string& value) {
+    std::string out;
+    out.reserve(value.size() + 8);
+    for (const char character : value) {
+        switch (character) {
+            case '"':
+                out += "\\\"";
+                continue;
+            case '\\':
+                out += "\\\\";
+                continue;
+            case '\n':
+                out += "\\n";
+                continue;
+            case '\r':
+                out += "\\r";
+                continue;
+            case '\t':
+                out += "\\t";
+                continue;
+            default:
+                break;
+        }
+        if (static_cast<unsigned char>(character) < 0x20) {
+            continue;  // drop remaining control characters
+        }
+        out.push_back(character);
+    }
+    return out;
+}
+}  // namespace
+
+void NormalEngine::maybeTrackAwiArmedStream(const GenerateStreamPtr& stream) {
+    if (stream == nullptr) {
+        return;
+    }
+    auto& awi = AwiCollector::instance();
+    if (!awi.hasArmedOperation()) {
+        return;
+    }
+    const auto generate_input = stream->generateInput();
+    if (generate_input == nullptr || generate_input->request_info.request_id.empty()) {
+        return;
+    }
+    const AwiOperation operation = awi.armedOperation();
+    if (operation.awi_request_ids.count(generate_input->request_info.request_id) == 0) {
+        return;
+    }
+    // Barrier contract: admit benchmark members only with their FULL
+    // input+output KV span reserved, so residency is an allocation fact.
+    const auto generate_config = stream->generateConfig();
+    if (generate_config != nullptr && generate_config->max_new_tokens > 0) {
+        stream->setReserveStep(static_cast<size_t>(generate_config->max_new_tokens));
+    }
+    awi.bindInternalId(generate_input->request_info.request_id, generate_input->request_id);
+    std::lock_guard<std::mutex> lock(awi_armed_mu_);
+    if (awi_armed_op_id_ != operation.operation_id) {
+        awi_armed_op_id_ = operation.operation_id;
+        awi_armed_streams_.clear();
+    }
+    awi_armed_streams_[generate_input->request_id] = stream;
+}
+
+void NormalEngine::applyAwiBarrier(std::list<GenerateStreamPtr>& streams) {
+    auto& awi = AwiCollector::instance();
+    if (!awi.hasArmedOperation()) {
+        std::lock_guard<std::mutex> lock(awi_armed_mu_);
+        if (!awi_armed_streams_.empty() || !awi_armed_op_id_.empty()) {
+            awi_armed_streams_.clear();
+            awi_armed_op_id_.clear();
+        }
+        return;
+    }
+    const AwiOperation operation = awi.armedOperation();
+    int64_t            reserved_tokens_capacity = 0;
+    size_t             bound = 0;
+    bool               cohort_complete = true;
+    {
+        std::lock_guard<std::mutex> lock(awi_armed_mu_);
+        if (awi_armed_op_id_ != operation.operation_id) {
+            awi_armed_op_id_ = operation.operation_id;
+            awi_armed_streams_.clear();
+        }
+        for (auto it = awi_armed_streams_.begin(); it != awi_armed_streams_.end();) {
+            if (it->second == nullptr || !it->second->isActive()) {
+                it = awi_armed_streams_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        bound = awi_armed_streams_.size();
+        const auto& cache = resource_context_.cache_manager;
+        reserved_tokens_capacity =
+            cache != nullptr ? static_cast<int64_t>(cache->cacheConfig().seq_size_per_block) : 0;
+        for (const auto& entry : awi_armed_streams_) {
+            const auto& stream = entry.second;
+            const auto  config = stream->generateConfig();
+            const int64_t needed =
+                stream->inputLength() + (config != nullptr ? config->max_new_tokens : 0);
+            const int64_t reserved =
+                static_cast<int64_t>(stream->curBlocksNum()) * reserved_tokens_capacity;
+            if (stream->getTimeInfo().first_token_time_us <= 0 || reserved < needed) {
+                cohort_complete = false;
+                break;
+            }
+        }
+    }
+    if (bound < operation.awi_request_ids.size()) {
+        cohort_complete = false;
+    }
+
+    if (cohort_complete) {
+        // One scheduler snapshot for the whole resident cohort, then release:
+        // later steps run the armed streams normally (decode timing excludes
+        // the barrier wait because held steps never execute or emit events).
+        if (awi.markResidentEmitted()) {
+            emitAwiResidentSnapshot(operation);
+        }
+        return;
+    }
+
+    // Hold armed streams whose prefill already finished out of this step's
+    // batch; prefill itself is never delayed (input KV must materialize).
+    for (auto it = streams.begin(); it != streams.end();) {
+        const auto& stream = *it;
+        bool        hold   = false;
+        if (stream != nullptr && stream->getTimeInfo().first_token_time_us > 0) {
+            const auto generate_input = stream->generateInput();
+            if (generate_input != nullptr) {
+                std::lock_guard<std::mutex> lock(awi_armed_mu_);
+                hold = awi_armed_streams_.count(generate_input->request_id) > 0;
+            }
+        }
+        if (hold) {
+            it = streams.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    checkAwiBarrierCapacity(operation);
+}
+
+void NormalEngine::emitAwiResidentSnapshot(const AwiOperation& operation) {
+    auto& awi = AwiCollector::instance();
+    if (awi.rank() != 0) {
+        return;  // the contract wants a SINGLE scheduler snapshot
+    }
+    const auto& cache = resource_context_.cache_manager;
+    const int64_t tokens_per_block =
+        cache != nullptr ? static_cast<int64_t>(cache->cacheConfig().seq_size_per_block) : 0;
+    std::string sequences = "[";
+    bool        first     = true;
+    int64_t     count     = 0;
+    {
+        std::lock_guard<std::mutex> lock(awi_armed_mu_);
+        for (const auto& entry : awi_armed_streams_) {
+            const auto& stream = entry.second;
+            const auto  generate_input = stream->generateInput();
+            if (generate_input == nullptr) {
+                continue;
+            }
+            if (!first) {
+                sequences += ",";
+            }
+            first = false;
+            ++count;
+            sequences += "{\"request_id\":\"" + awiEscapeJson(generate_input->request_info.request_id)
+                         + "\",\"input_tokens\":" + std::to_string(stream->inputLength())
+                         + ",\"kv_tokens\":" + std::to_string(stream->seqLength())
+                         + ",\"reserved_tokens\":"
+                         + std::to_string(static_cast<int64_t>(stream->curBlocksNum()) * tokens_per_block)
+                         + "}";
+        }
+    }
+    sequences += "]";
+    AwiEvent event;
+    event.type           = "resident";
+    event.operation_id   = operation.operation_id;
+    event.concurrency    = count;
+    event.context_tokens = operation.context_tokens;
+    event.detail_json    = "{\"sequences\":" + sequences + "}";
+    awi.recordEvent(std::move(event));
+}
+
+void NormalEngine::checkAwiBarrierCapacity(const AwiOperation& operation) {
+    const auto& cache = resource_context_.cache_manager;
+    if (cache == nullptr) {
+        return;
+    }
+    const int64_t tokens_per_block = static_cast<int64_t>(cache->cacheConfig().seq_size_per_block);
+    if (tokens_per_block <= 0) {
+        return;
+    }
+    const int64_t available_blocks = static_cast<int64_t>(cache->availableBlocksNum());
+    int64_t       remaining_need   = 0;
+    std::vector<GenerateStreamPtr> pending;
+    {
+        std::lock_guard<std::mutex> lock(awi_armed_mu_);
+        for (const auto& entry : awi_armed_streams_) {
+            const auto&  stream = entry.second;
+            const auto   config = stream->generateConfig();
+            const int64_t needed_blocks =
+                (stream->inputLength() + (config != nullptr ? config->max_new_tokens : 0)
+                 + tokens_per_block - 1)
+                / tokens_per_block;
+            const int64_t held = static_cast<int64_t>(stream->curBlocksNum());
+            if (stream->getTimeInfo().first_token_time_us > 0) {
+                continue;  // already materialized and fully reserved
+            }
+            remaining_need += std::max<int64_t>(0, needed_blocks - held);
+            pending.push_back(stream);
+        }
+    }
+    if (remaining_need <= available_blocks || pending.empty()) {
+        return;
+    }
+    // Admission can never satisfy the cohort: report the genuine shortage and
+    // fail the pending members instead of queueing forever.
+    auto& awi = AwiCollector::instance();
+    for (const auto& stream : pending) {
+        const auto generate_input = stream->generateInput();
+        AwiEvent   event;
+        event.type           = "capacity_failure";
+        event.operation_id   = operation.operation_id;
+        event.concurrency    = static_cast<int64_t>(operation.awi_request_ids.size());
+        event.context_tokens = operation.context_tokens;
+        event.failure_kind   = "kv_capacity_exceeded";
+        if (generate_input != nullptr) {
+            event.request_id     = generate_input->request_id;
+            event.awi_request_id = generate_input->request_info.request_id;
+        }
+        event.detail_json = "{\"remaining_need_blocks\":" + std::to_string(remaining_need)
+                            + ",\"available_blocks\":" + std::to_string(available_blocks) + "}";
+        awi.recordEvent(std::move(event));
+        stream->reportError(ErrorCode::MALLOC_FAILED,
+                            "AWI barrier: KV capacity cannot hold the full-context reservation "
+                            "for every cohort member simultaneously");
+    }
+}
+
+void NormalEngine::recordAwiDeviceOom(const std::exception& exception) {
+    auto& awi = AwiCollector::instance();
+    if (!awi.hasArmedOperation()) {
+        return;
+    }
+    const AwiOperation operation = awi.armedOperation();
+    AwiEvent           event;
+    event.type           = "capacity_failure";
+    event.operation_id   = operation.operation_id;
+    event.concurrency    = static_cast<int64_t>(operation.awi_request_ids.size());
+    event.context_tokens = operation.context_tokens;
+    event.failure_kind   = "device_oom";
+    event.detail_json    = "{\"error\":\"" + awiEscapeJson(exception.what()) + "\"}";
+    awi.recordEvent(std::move(event));
 }
 
 bool NormalEngine::isMTPEagle() {
