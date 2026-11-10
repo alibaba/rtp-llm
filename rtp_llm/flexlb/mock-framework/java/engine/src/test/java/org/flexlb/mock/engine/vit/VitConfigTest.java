@@ -6,24 +6,10 @@ import java.util.*;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Verifies how ViT settings are read and validated.
+ */
 class VitConfigTest {
-    private ObjectNode root() {
-        var json = new ObjectMapper();
-        var root = json.createObjectNode().put("id", "vit-0").put("component_role", "vit");
-        root.putObject("component").putObject("config").put("patch_size", 14).put("downsample_ratio", 3)
-            .put("min_pixels", 295936).put("max_image_tokens", 1024).put("hidden_size", 4096)
-            .put("mock.compute.forward.expression", "batchSize + 1");
-        return root;
-    }
-
-    private Map<String, String> env(int patch, int hidden, Map<String, String> overrides) {
-        var values = new HashMap<>(Map.of("PATCH_SIZE", Integer.toString(patch), "HIDDEN_SIZE", Integer.toString(hidden),
-            "DOWNSAMPLE_RATIO", "3", "MIN_PIXELS", "295936", "MAX_IMAGE_TOKENS", "1024",
-            "MOCK_COMPUTE_FORWARD_EXPRESSION", "batchSize + 1"));
-        values.putAll(overrides);
-        return values;
-    }
-
     @Test void nativeDefaultsAndEnvironmentNamesMatchRealVit() throws Exception {
         var root = root();
         var defaults = VitConfig.load(root);
@@ -61,6 +47,7 @@ class VitConfigTest {
         assertThrows(Exception.class, () -> VitConfig.fromEnvironment("vit-0", env(14, 4096, Map.of("VIT_GPU_MAX_BATCH_SIZE", "1.5"))));
         assertThrows(IllegalArgumentException.class, () -> VitConfig.fromEnvironment("vit-0", env(14, 4096, Map.of("MOCK_VIT_PATCH_SIZE", "8"))));
     }
+
     @Test void normalizesAsyncAdmissionAndDoesNotInventATimeoutCeiling() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         config.put("vit_concurrency", 0).put("vit_max_queue_size", -3).put("mm_timeout_ms", 7200000);
@@ -88,6 +75,23 @@ class VitConfigTest {
         for (int i = 0; i < 257; i++) inputs.addMultimodalInputs(image);
         assertDoesNotThrow(() -> VitGeometry.validate(inputs.build(), true));
         assertTrue(VitGeometry.rows(40000, 40000, 14, 3, 0, 1024) <= 1024);
+    }
+
+    private ObjectNode root() {
+        var json = new ObjectMapper();
+        var root = json.createObjectNode().put("id", "vit-0").put("component_role", "vit");
+        root.putObject("component").putObject("config").put("patch_size", 14).put("downsample_ratio", 3)
+            .put("min_pixels", 295936).put("max_image_tokens", 1024).put("hidden_size", 4096)
+            .put("mock.compute.forward.expression", "batchSize + 1");
+        return root;
+    }
+
+    private Map<String, String> env(int patch, int hidden, Map<String, String> overrides) {
+        var values = new HashMap<>(Map.of("PATCH_SIZE", Integer.toString(patch), "HIDDEN_SIZE", Integer.toString(hidden),
+            "DOWNSAMPLE_RATIO", "3", "MIN_PIXELS", "295936", "MAX_IMAGE_TOKENS", "1024",
+            "MOCK_COMPUTE_FORWARD_EXPRESSION", "batchSize + 1"));
+        values.putAll(overrides);
+        return values;
     }
 
 }

@@ -7,20 +7,15 @@ import java.util.*;
 import org.flexlb.mock.engine.forward.ComputeModel;
 import org.flexlb.mock.protocol.ConfigInput;
 
+/**
+ * Reads and validates the ViT model and Engine settings.
+ */
 public record VitConfig(String id, int patch, int merge, int hidden, int minPixels, int maxTokens, int batchSize,
                            int waitMs, int concurrency, int queueSize, boolean skipDownload, int timeoutMs, int maxFileSizeKb, Map<String,String> downloadHeaders, long deviceBytes, long hostBytes, long hashBytes,
                            ComputeModel compute, ObjectNode effective) {
-    public static VitConfig load(Path path) throws Exception {
-        return load(ConfigInput.read(path));
-    }
     private static final Set<String> NATIVE = Set.of("patch_size", "downsample_ratio", "hidden_size", "min_pixels", "max_image_tokens", "mm_timeout_ms", "mm_image_max_file_size_kb", "download_headers", "gpu_max_batch_size", "gpu_batch_wait_ms", "vit_concurrency", "vit_max_queue_size",
         "mm_cache_gpu_max_bytes", "mm_cache_cpu_max_bytes", "mm_hash_key_cache_max_bytes");
-    private static Set<String> mockNames() {
-        var names = new HashSet<>(ComputeModel.settingNames());
-        names.removeIf(name -> !name.startsWith("mock.compute.forward."));
-        names.add("mock.vit.skip.download");
-        return Set.copyOf(names);
-    }
+
     public static VitConfig fromEnvironment(String id, Map<String, String> env) throws Exception {
         var values = new HashMap<>(env);
         // Real ViT ENV names differ from its configuration attributes.
@@ -32,6 +27,11 @@ public record VitConfig(String id, int patch, int merge, int hidden, int minPixe
         root.putObject("component").set("config", ConfigInput.environment(values, NATIVE, mockNames()));
         return load(root);
     }
+
+    public static VitConfig load(Path path) throws Exception {
+        return load(ConfigInput.read(path));
+    }
+
     public static VitConfig load(JsonNode root) throws Exception {
         if (!root.path("component_role").asText().equals("vit") || !root.path("id").isTextual())
             throw new IllegalArgumentException("V instance requires role vit and an id");
@@ -63,6 +63,14 @@ public record VitConfig(String id, int patch, int merge, int hidden, int minPixe
         });
         return result;
     }
+
+    private static Set<String> mockNames() {
+        var names = new HashSet<>(ComputeModel.settingNames());
+        names.removeIf(name -> !name.startsWith("mock.compute.forward."));
+        names.add("mock.vit.skip.download");
+        return Set.copyOf(names);
+    }
+
     private static boolean bool(JsonNode config,String key,boolean fallback) {
         var value=config.get(key); if(value==null) return fallback;
         if(value.isBoolean()) return value.booleanValue();
@@ -70,6 +78,7 @@ public record VitConfig(String id, int patch, int merge, int hidden, int minPixe
             return value.asText().equals("true") || value.asText().equals("1");
         throw new IllegalArgumentException("Invalid V " + key);
     }
+
     private static Map<String,String> headers(JsonNode config) throws Exception {
         var value=config.get("download_headers");
         if(value==null || value.isTextual() && value.asText().isEmpty()) return Map.of();
@@ -83,6 +92,7 @@ public record VitConfig(String id, int patch, int merge, int hidden, int minPixe
         });
         return Map.copyOf(headers);
     }
+
     private static int signedInteger(JsonNode config, String key, int fallback) {
         var value = config.get(key);
         if (value == null) return fallback;
@@ -92,9 +102,11 @@ public record VitConfig(String id, int patch, int merge, int hidden, int minPixe
         }
         throw new IllegalArgumentException("Invalid V " + key);
     }
+
     private static int integer(JsonNode node,String key,Integer fallback,int low,int high) {
         long value = number(node,key,fallback == null ? null : fallback.longValue()); if (value < low || value > high) throw new IllegalArgumentException("Invalid V " + key); return (int)value;
     }
+
     private static long number(JsonNode node,String key,Long fallback) {
         var value = node.get(key); if (value == null) { if (fallback == null) throw new IllegalArgumentException("Missing model setting: " + key); return fallback; }
         if (value.isIntegralNumber() || value.isTextual() && value.textValue().matches("[+]?\\d+")) {

@@ -4,6 +4,9 @@ import java.util.*;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Checks how snapshots and changes represent keys published by the cache.
+ */
 class CacheMetadataTest {
     @Test void publishesOnlyValidBlocksAndReportsReclamation() throws Exception {
         try (var cache = new KvCacheManager(1, 4, 0)) {

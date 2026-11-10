@@ -7,6 +7,9 @@ import org.flexlb.mock.engine.service.DecodeRpcServer.SimulatedKvLoad;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Checks the timing and completion of simulated KV loads.
+ */
 class SimulatedKvLoadTest {
     @Test void completionAndCancellationReleaseEachUseExactlyOnce() throws Exception {
         var released = new AtomicInteger();

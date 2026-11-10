@@ -8,7 +8,9 @@ import java.util.concurrent.CountDownLatch;
 import org.apache.zookeeper.server.NIOServerCnxnFactory;
 import org.apache.zookeeper.server.ZooKeeperServer;
 
-/** A real, runner-owned standalone ZooKeeper; independent of every Master lifecycle. */
+/**
+ * A real, runner-owned standalone ZooKeeper; independent of every Master lifecycle.
+ */
 public final class ZookeeperNode {
     public static void main(String[] args) {
         try { run(); }

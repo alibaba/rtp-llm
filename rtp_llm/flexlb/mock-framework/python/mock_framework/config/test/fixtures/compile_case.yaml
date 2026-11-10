@@ -18,22 +18,22 @@ phases:
       - id: leader
         describe: Observe leadership
         interface: master/get
-        args: {is_leader: true}
-        expect: {count: 1}
+        args: { is_leader: true }
+        expect: { count: 1 }
       - id: again
         describe: Query the selected Master
         interface: master/get
         args:
           is_leader: true
-          targets: {ref: steps.leader}
+          targets: { ref: steps.leader }
       - id: tps
         describe: Observe actual compute throughput
         interface: engine/prefill/tps
-        args: {range: [-30s, 0s]}
-        expect: {gte: 0}
+        args: { range: [-30s, 0s] }
+        expect: { gte: 0 }
       - id: cached
         describe: Compare throughput including cache
         interface: engine/prefill/tps_with_cache
         expect:
-          gte: {ref: steps.tps}
+          gte: { ref: steps.tps }
 view: views/default/dashboard.json

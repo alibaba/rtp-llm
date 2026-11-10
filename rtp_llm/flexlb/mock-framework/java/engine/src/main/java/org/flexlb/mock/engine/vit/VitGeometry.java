@@ -8,12 +8,10 @@ import java.security.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.protocol.MediaInput;
 
-/** V-owned image geometry, logical output size and simulated feature hashes. */
+/**
+ * V-owned image geometry, logical output size and simulated feature hashes.
+ */
 final class VitGeometry {
-    record Image(String key, int width, int height, int rows, String featureIdentity) {
-        Image(String key, int width, int height, int rows) { this(key, width, height, rows, key); }
-        public long bytes(int hidden, int dtypeBytes) { return Math.multiplyExact(Math.multiplyExact((long) rows, hidden), dtypeBytes); }
-    }
     static ByteString hashes(String key, int rows) {
         byte[] digest;
         try { digest = MessageDigest.getInstance("SHA-256").digest(key.getBytes(StandardCharsets.UTF_8)); }
@@ -54,6 +52,7 @@ final class VitGeometry {
         }
         return Math.toIntExact((long) llmH * (llmW + 1) + 2);
     }
+
     static void validate(MultimodalInputsPB input, boolean skipDownload) {
         if(input.getTimeoutMs()<0) throw MediaInput.invalid("Invalid media timeout");
         if(input.getMultimodalInputsCount()<1) throw MediaInput.invalid("Expected nonempty image inputs");
@@ -64,8 +63,17 @@ final class VitGeometry {
             if(skipDownload) dimensions(media.getMmPreprocessConfig().getWidth(),media.getMmPreprocessConfig().getHeight());
         }
     }
+
     static void dimensions(int width,int height) {
         if(width<1 || height<1)
             throw MediaInput.invalid("Image width/height must be positive; skip-download inputs require explicit dimensions");
+    }
+
+    /**
+     * Carries source and resized image dimensions and the resulting token count.
+     */
+    record Image(String key, int width, int height, int rows, String featureIdentity) {
+        Image(String key, int width, int height, int rows) { this(key, width, height, rows, key); }
+        public long bytes(int hidden, int dtypeBytes) { return Math.multiplyExact(Math.multiplyExact((long) rows, hidden), dtypeBytes); }
     }
 }

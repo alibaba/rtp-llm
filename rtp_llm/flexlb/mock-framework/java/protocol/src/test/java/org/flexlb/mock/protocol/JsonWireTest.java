@@ -6,6 +6,9 @@ import java.nio.file.Path;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Checks JSON encoding of values sent over the Mock control API.
+ */
 class JsonWireTest {
     @Test void numericConstraintsMatchTheSharedPythonFixtures() throws Exception {
         var rows = JsonWire.JSON.readTree(Path.of("../../python/mock_framework/execution/test/fixtures/wire_numbers.json").toFile());

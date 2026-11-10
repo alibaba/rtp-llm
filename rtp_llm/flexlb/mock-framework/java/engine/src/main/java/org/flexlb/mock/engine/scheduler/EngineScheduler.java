@@ -61,6 +61,9 @@ public interface EngineScheduler extends AutoCloseable {
         EngineScheduler create(Object lock, KvCacheManager cache, TaskHistory finished);
     }
 
+    /**
+     * Describes a request at scheduler admission, including limits and cache identities.
+     */
     record Input(String identity, long requestId, long groupId, int tokens, int maxNewTokens, int priority,
                  long started, long deadline, CacheSequence cacheSequence, boolean reuse, boolean retained, int minNewTokens, boolean ignoreEos,
                  boolean streaming) {
@@ -91,17 +94,28 @@ public interface EngineScheduler extends AutoCloseable {
 
     record Progress(int generated, int iterations, boolean finished) {}
 
+    /**
+     * Receives request progress and completion events from the scheduler.
+     */
     interface Listener {
         default void allocated(Request request) {}
         void progressed(Request request);
         void terminal(Request request, RequestFailure failure);
     }
 
+    /**
+     * Describes an event applied to an already admitted request.
+     */
     interface Control {}
 
+    /**
+     * Describes the outcome of transferring KV for a request.
+     */
     interface TransferResult { RequestFailure failure(); }
 
-    /** Request counts by scheduling stage. Loading and transfer-ready requests are not compute waiters. */
+    /**
+     * Request counts by scheduling stage. Loading and transfer-ready requests are not compute waiters.
+     */
     record QueueSnapshot(int waiting, int running, int loading, int ready) {
         public QueueSnapshot {
             if (waiting < 0 || running < 0 || loading < 0 || ready < 0)
@@ -132,11 +146,16 @@ public interface EngineScheduler extends AutoCloseable {
                 ReportedPhase phase, int iterations, long waitingMillis, long executionMillis,
                 long endTimeMillis, RequestFailure failure) {}
 
+    /**
+     * Captures active and finished request state for Master polling.
+     */
     record Status(List<Task> tasks, List<Task> finished, long finishedVersion, int waiting, int running) {
         public Status { tasks = List.copyOf(tasks); finished = List.copyOf(finished); }
     }
 
-    /** Owner is an opaque execution object, never a request ID or a mutable queue. */
+    /**
+     * Owner is an opaque execution object, never a request ID or a mutable queue.
+     */
     record Work(Object owner, ForwardBatch batch) {
         public Work { Objects.requireNonNull(owner); Objects.requireNonNull(batch); }
     }

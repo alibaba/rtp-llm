@@ -15,6 +15,9 @@ public record ForwardBatch(String id, List<Request> requests) {
         if (value == null || value.isBlank()) throw new IllegalArgumentException("Identity must be nonempty");
     }
 
+    /**
+     * Describes the token counts, cache hits, and media shapes of one forward input.
+     */
     public record Request(String id, long inputTokens, long hitCacheTokens, long outputTokens,
                           long generatedTokens, long stepTokens, int priority, List<Image> images) {
         public Request {

@@ -12,6 +12,9 @@ import org.flexlb.mock.engine.scheduler.LLMMockEngineTest;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Checks the metrics emitted by RTP request handling.
+ */
 class RtpRpcMetricsTest {
     @Test void statusTimingsAreRecordedBeforeCallingTheTransportObserver() throws Exception {
         var config = RtpConfig.load(new ObjectMapper().valueToTree(LLMMockEngineTest.configuration("prefill")));

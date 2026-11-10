@@ -6,7 +6,9 @@ import io.prometheus.client.exporter.common.TextFormat;
 import java.io.*;
 import java.util.*;
 
-/** Physical Whale metadata; Prometheus owns job/instance, never the Engine. */
+/**
+ * Physical Whale metadata; Prometheus owns job/instance, never the Engine.
+ */
 public final class MetricTags {
     private MetricTags() { }
 
@@ -33,6 +35,17 @@ public final class MetricTags {
         return Map.copyOf(tags);
     }
 
+    public static String scrape(CollectorRegistry registry, Map<String, String> tags) {
+        return scrape(collect(registry, tags));
+    }
+
+    public static String scrape(List<MetricFamilySamples> snapshot) {
+        var text = new StringWriter();
+        try { TextFormat.write004(text, Collections.enumeration(snapshot)); }
+        catch (IOException impossible) { throw new UncheckedIOException(impossible); }
+        return text.toString();
+    }
+
     public static List<MetricFamilySamples> collect(CollectorRegistry registry, Map<String, String> tags) {
         var ordered = new TreeMap<>(tags);
         var families = new ArrayList<MetricFamilySamples>();
@@ -54,16 +67,5 @@ public final class MetricTags {
             families.add(new MetricFamilySamples(family.name, family.unit, family.type, family.help, samples));
         }
         return List.copyOf(families);
-    }
-
-    public static String scrape(CollectorRegistry registry, Map<String, String> tags) {
-        return scrape(collect(registry, tags));
-    }
-
-    public static String scrape(List<MetricFamilySamples> snapshot) {
-        var text = new StringWriter();
-        try { TextFormat.write004(text, Collections.enumeration(snapshot)); }
-        catch (IOException impossible) { throw new UncheckedIOException(impossible); }
-        return text.toString();
     }
 }

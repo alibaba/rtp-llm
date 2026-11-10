@@ -11,7 +11,9 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 
-/** Native-protocol test fixture only: connects real Master queries to Engine event reports. */
+/**
+ * Native-protocol test fixture only: connects real Master queries to Engine event reports.
+ */
 public final class KvcmMetaProbe {
     public static void main(String[] args) throws Exception {
         var json = new ObjectMapper();

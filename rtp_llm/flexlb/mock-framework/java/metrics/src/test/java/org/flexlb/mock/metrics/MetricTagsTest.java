@@ -5,6 +5,9 @@ import io.prometheus.client.*;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Checks the labels attached to Mock metric series.
+ */
 class MetricTagsTest {
     @Test void followsRealWhaleEnvironmentWithoutInventingAddresses() {
         var tags = MetricTags.fromEnvironment(Map.of("HIPPO_APP", "app", "HIPPO_ROLE", "role",

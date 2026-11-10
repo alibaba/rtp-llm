@@ -2,8 +2,8 @@
 # Build the Java runtime once and package it for Case jobs on other workers.
 set -euo pipefail
 if [[ $# != 1 ]]; then
-  echo "Usage: $0 <runtime archive>" >&2
-  exit 2
+    echo "Usage: $0 <runtime archive>" >&2
+    exit 2
 fi
 : "${JAVA_HOME:?Set JAVA_HOME to a Java 21 installation}"
 export PATH="$JAVA_HOME/bin:$PATH"

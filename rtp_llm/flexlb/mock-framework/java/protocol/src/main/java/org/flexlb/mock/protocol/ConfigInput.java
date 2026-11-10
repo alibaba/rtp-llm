@@ -7,11 +7,15 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.*;
 
-/** Input conversion only. Component parsers own all defaults, units and validation. */
+/**
+ * Input conversion only. Component parsers own all defaults, units and validation.
+ */
 public final class ConfigInput {
     private static final ObjectMapper JSON = new ObjectMapper()
         .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
         .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+
+    private ConfigInput() {}
 
     public static JsonNode read(Path path) throws IOException { return JSON.readTree(path.toFile()); }
 
@@ -35,24 +39,6 @@ public final class ConfigInput {
             }
         });
         return result;
-    }
-
-    private static void flatten(ObjectNode result, String key, JsonNode value, Set<String> names) {
-        if (!key.matches("mock(?:\\.[a-z][a-z0-9]*)*"))
-            throw new IllegalArgumentException("Invalid Mock setting: " + key);
-        if (value.isObject()) {
-            if (value.isEmpty()) throw new IllegalArgumentException("Empty Mock setting: " + key);
-            value.fields().forEachRemaining(entry -> flatten(result, key + "." + entry.getKey(), entry.getValue(), names));
-        } else {
-            if (!names.contains(key)) throw new IllegalArgumentException("Unknown Mock setting: " + key);
-            put(result, key, value);
-        }
-    }
-
-    private static void put(ObjectNode result, String key, JsonNode value) {
-        if (result.has(key)) throw new IllegalArgumentException("Duplicate setting: " + key);
-        if (value.isNull()) throw new IllegalArgumentException("Null setting: " + key);
-        result.set(key, value.deepCopy());
     }
 
     /** Only declared business settings are read; arbitrary process ENV never enters artifacts. */
@@ -87,5 +73,21 @@ public final class ConfigInput {
         throw new IllegalArgumentException("Invalid integer setting: " + key);
     }
 
-    private ConfigInput() {}
+    private static void flatten(ObjectNode result, String key, JsonNode value, Set<String> names) {
+        if (!key.matches("mock(?:\\.[a-z][a-z0-9]*)*"))
+            throw new IllegalArgumentException("Invalid Mock setting: " + key);
+        if (value.isObject()) {
+            if (value.isEmpty()) throw new IllegalArgumentException("Empty Mock setting: " + key);
+            value.fields().forEachRemaining(entry -> flatten(result, key + "." + entry.getKey(), entry.getValue(), names));
+        } else {
+            if (!names.contains(key)) throw new IllegalArgumentException("Unknown Mock setting: " + key);
+            put(result, key, value);
+        }
+    }
+
+    private static void put(ObjectNode result, String key, JsonNode value) {
+        if (result.has(key)) throw new IllegalArgumentException("Duplicate setting: " + key);
+        if (value.isNull()) throw new IllegalArgumentException("Null setting: " + key);
+        result.set(key, value.deepCopy());
+    }
 }

@@ -240,6 +240,9 @@ public final class KvCacheManager implements AutoCloseable {
     public record Snapshot(int totalBlocks, int availableBlocks, int freeBlocks, int heldBlocks,
                            int referencedBlocks, long version, long[] keys) {}
 
+    /**
+     * Owns the KV resources of an admitted batch until each member finishes or is canceled.
+     */
     public final class Lease implements AutoCloseable {
         private final List<Slot> slots;
         private int reused;

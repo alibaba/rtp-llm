@@ -84,6 +84,9 @@ public final class BlockPool {
 
     public record Snapshot(int total, int free, int available, int active) {}
 
+    /**
+     * Counts the references that keep one simulated KV block allocated.
+     */
     private static final class Block {
         final int[] refs = new int[Kind.values().length];
         long totalRefs, activeRefs;

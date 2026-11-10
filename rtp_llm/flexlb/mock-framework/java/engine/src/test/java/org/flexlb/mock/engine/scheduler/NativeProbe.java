@@ -10,7 +10,9 @@ import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 
-/** Test-only external native client. No Engine substitution. */
+/**
+ * Test-only external native client. No Engine substitution.
+ */
 public final class NativeProbe {
     public static void main(String[] args) throws Exception {
         var channel = ManagedChannelBuilder.forTarget(args[0]).usePlaintext().build();

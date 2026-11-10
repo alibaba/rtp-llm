@@ -6,7 +6,9 @@ import java.util.*;
 import java.util.concurrent.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 
-/** Single-DP native envelope; admission is acknowledged independently of Fetch. */
+/**
+ * Single-DP native envelope; admission is acknowledged independently of Fetch.
+ */
 final class PrefillEnqueueHandler {
     static void enqueue(PrefillRpcServer generation, EnqueueBatchRequestPB request, StreamObserver<EnqueueBatchResponsePB> observer) {
         var seen = new HashSet<Long>();

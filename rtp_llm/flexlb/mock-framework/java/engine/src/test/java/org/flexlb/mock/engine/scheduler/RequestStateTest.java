@@ -6,6 +6,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Checks resource release after request completion and active uses.
+ */
 class RequestStateTest {
     @Test void cancellingOneBatchMemberRetainsItsResourceUntilForwardReleasesIt() {
         var closed = new int[2]; var published = new int[2]; var ended = new ArrayList<RequestFailure>();

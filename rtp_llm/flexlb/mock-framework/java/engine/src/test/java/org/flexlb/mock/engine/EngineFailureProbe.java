@@ -5,7 +5,9 @@ import java.util.concurrent.TimeUnit;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
 
-/** Sends real RPC work to exercise the service process failure path. */
+/**
+ * Sends real RPC work to exercise the service process failure path.
+ */
 public final class EngineFailureProbe {
     public static void main(String[] args) throws Exception {
         var channel = ManagedChannelBuilder.forTarget(args[0]).usePlaintext().build();

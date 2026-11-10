@@ -4,6 +4,9 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.util.*;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Checks cache-key generation for text and media inputs.
+ */
 class CacheSequenceTest {
     @Test void appendedKeysEqualHashingTheEntireComputedSequenceAcrossPartialBlocksAndMedia() {
         var random = new Random(20261106);

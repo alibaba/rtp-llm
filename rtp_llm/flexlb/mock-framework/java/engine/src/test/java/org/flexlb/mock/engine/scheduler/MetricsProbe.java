@@ -9,7 +9,9 @@ import java.util.stream.IntStream;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 
-/** Test-only native traffic for Prometheus ingestion; this is not the production Client. */
+/**
+ * Test-only native traffic for Prometheus ingestion; this is not the production Client.
+ */
 public final class MetricsProbe {
     public static void main(String[] args) throws Exception {
         int length = Integer.parseInt(args[1]), count = Integer.parseInt(args[2]);
