@@ -19,6 +19,8 @@ decode impl.
 
 from __future__ import annotations
 
+import os
+
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -324,6 +326,8 @@ def forward_layers(
     """
     B = attn_metadata.batch_size
     q_len = attn_metadata.q_len_per_req
+    if os.environ.get("DSV41_TRACE_CAPTURE"):
+        print(f"[cap] forward_layers B={B} q={q_len} capture={torch.cuda.is_current_stream_capturing()}", flush=True)
     input_ids = input_ids.reshape(-1)
 
     _rt_on = _rt.ENABLED
@@ -333,7 +337,11 @@ def forward_layers(
             _rt_on = False
 
     if prepare_hidden_fn is None:
+        if os.environ.get("DSV41_TRACE_CAPTURE"):
+            print("[cap] embed start", flush=True)
         h = v4.embed(input_ids).view(B, q_len, -1)  # [B, q_len, dim]
+        if os.environ.get("DSV41_TRACE_CAPTURE"):
+            print("[cap] embed done", flush=True)
         if _rt_on:
             _rt.record("decode_embed_out", h)
         h = h.unsqueeze(2).repeat(1, 1, v4.hc_mult, 1)  # [B, q_len, hc, dim]
