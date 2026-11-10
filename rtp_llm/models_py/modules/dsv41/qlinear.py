@@ -25,7 +25,7 @@ FP8 linears already migrated in S2 to ``CudaFp8DeepGEMMLinear`` and don't
 go through this class for attention/indexer/shared-expert linears.
 """
 
-from typing import Optional
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -76,6 +76,28 @@ _FP4_LUT = torch.tensor(
 )
 
 
+_FP4_LUT_CACHE: Dict[torch.device, torch.Tensor] = {}
+
+
+def _fp4_lut(device: torch.device) -> torch.Tensor:
+    """Device-resident FP4 code->value table, materialized once per device.
+
+    A per-call ``_FP4_LUT.to(device)`` is a pageable host->device copy, which
+    CUDA graph capture rejects ("Cannot copy between CPU and CUDA tensors
+    during capture"). The eager warmup that precedes every capture populates
+    this cache, so capture and replay only index a constant device tensor.
+    """
+    lut = _FP4_LUT_CACHE.get(device)
+    if lut is None:
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "FP4 dequant LUT must be materialized before graph capture"
+            )
+        lut = _FP4_LUT.to(device)
+        _FP4_LUT_CACHE[device] = lut
+    return lut
+
+
 def _fp4_unpack_to_fp32(
     weight_int8: torch.Tensor, scale_ue8m0: torch.Tensor
 ) -> torch.Tensor:
@@ -90,7 +112,7 @@ def _fp4_unpack_to_fp32(
     )
     interleaved[:, 0::2] = low.long()
     interleaved[:, 1::2] = high.long()
-    lut = _FP4_LUT.to(weight_int8.device)
+    lut = _fp4_lut(weight_int8.device)
     w_f = lut[interleaved]
     scale_f = scale_ue8m0.to(torch.float32).repeat_interleave(FP4_BLOCK, 1)[:, :in_dim]
     return w_f * scale_f
