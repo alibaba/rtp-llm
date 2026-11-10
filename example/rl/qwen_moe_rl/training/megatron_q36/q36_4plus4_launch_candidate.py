@@ -19,7 +19,7 @@ SOURCES = {
   'onpolicy_standalone_candidate.py': '8c36ff1bb662fa5ba5177c1f4e17646664c81fe93790087f00d3c10178f468a8',
   'q36_4plus4_claim_loader.py': '0075f76555d41822bfd23d3879165aa754b0b0f19484f99ec3f5166dfbe0c5ac',
   'q36_4plus4_claim_guard.py': '8bbfcd82128c1c2ac4018ec1f9fd101547389523077acbbd4c3435c5321f9e0e',
-  'q36_standalone_bootstrap_selector.py': '76917010ec8cf2782b4f0323b19811d109f48d27daabf5645be758fe2e117d9f',
+  'q36_standalone_bootstrap_selector.py': '5191455766b2f51e372a5e5c6a7b7aa4418532af315cb7d3877c77cf76e41ce9',
   'standalone_bootstrap_v4.py': 'd3c993deb80505b578b97fd5222ff396dec4f0b5362dc6937aa503ff211e66a8'},
  'Q36_ADAPTER_DIR': {
   'standalone_rtp_adapter_v3.py': 'b849f17ab606e0554db3802eb43979dd10cedd64361cc8082f716c173cf64f5c',
@@ -78,6 +78,15 @@ def preflight(env):
         ready.get('training_node_ip') != '10.44.49.51' or ready.get('rollout_readback') != expected_peer):
         raise RuntimeError('claim replication receipt differs from this run')
     verify_sources(env)
+    resident = env.get('Q36_DISAGG_RESIDENT_KV', '0')
+    if resident not in ('0', '1'):
+        raise RuntimeError('Q36_DISAGG_RESIDENT_KV must be 0 or 1')
+    if resident == '1':
+        if env.get('RLLM_RTP_KEEP_KV_CACHE') != '1' or env.get('RTP_LLM_RL_MODE') != '1':
+            raise RuntimeError('resident KV requires explicit native keep and RL mode')
+        verify_sources(env, {
+          'Q36_CODE_DIR': {'standalone_bootstrap_v5.py':'a6db33ff9c3eb5e9fe03a8b99fccf526b42d2fd330e0570e61ff7487793c3ae7'},
+          'Q36_ADAPTER_DIR': {'standalone_rtp_adapter_v5.py':'f67a5a6bb80a8354344a37295840b12efa815c58aaf165e97b0fb5909a951a24'}})
     import rtp_cleanup
     if rtp_cleanup._qualified_owner_count() != 1:
         raise RuntimeError('cleanup must select exactly one qualified native owner')
