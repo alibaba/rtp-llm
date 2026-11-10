@@ -46,6 +46,8 @@ except Exception:  # pragma: no cover — keep the module importable without Tri
     triton = None
     tl = None
 
+if triton is not None:
+    from rtp_llm.models_py.modules.dsv41.sm80_fp8_compat import fp32_to_e4m3_bits
 
 if triton is not None:
 
@@ -147,7 +149,7 @@ if triton is not None:
         q = tl.minimum(
             tl.maximum(scaled, -448.0, propagate_nan=tl.PropagateNan.NONE), 448.0
         ).reshape((BLOCK_N,))
-        tl.store(q_ptr + pid_m * N + n_off, q.to(tl.float8e4nv), mask=mask)
+        tl.store(q_ptr + pid_m * N + n_off, fp32_to_e4m3_bits(q), mask=mask)
         group = pid_n * GROUPS + tl.arange(0, GROUPS)
         biased = tl.where(group < N // 32, biased, 0).to(tl.uint8).to(tl.uint32)
         packed = tl.sum(biased.reshape((PACKS, 4)) << (tl.arange(0, 4)[None, :] * 8), 1)
@@ -221,7 +223,9 @@ def silu_mul_fp8_g32_quant(
     apply_clamp = clamp_limit is not None and clamp_limit > 0.0
     _silu_mul_fp8_g32_quant_kernel[(m, triton.cdiv(n, 1024))](
         gate_up,
-        quant,
+        # uint8 view: keeps the kernel signature free of float8e4nv pointer
+        # types, which do not lower on sm80. Stored bytes are identical.
+        quant.view(torch.uint8),
         scales,
         scales.stride(1),
         legacy,

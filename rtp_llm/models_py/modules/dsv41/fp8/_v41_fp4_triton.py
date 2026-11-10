@@ -44,6 +44,11 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41.sm80_fp8_compat import (
+    e4m3_bits_to_fp32,
+    fp32_to_e4m3_bits,
+)
+
 FP4_GLOBAL_HEAD_DIM = 512
 FP4_GLOBAL_GROUP = 16
 FP4_GLOBAL_ENTRY_BYTES = 288  # 256B e2m1 payload + 32B E4M3 scales
@@ -136,8 +141,8 @@ def _fp4_global_insert_kernel(
     maximum = tl.max(tl.abs(x), axis=1)
     # Training's compressed KV: keep even an all-zero group's scale nonzero.
     maximum = tl.maximum(maximum, 6.0 * (2.0**-9))
-    scale_fp8 = tl.div_rn(maximum, 6.0).to(tl.float8e4nv, fp_downcast_rounding="rtne")
-    scale = scale_fp8.to(tl.float32)
+    scale_bits = fp32_to_e4m3_bits(tl.div_rn(maximum, 6.0))
+    scale = e4m3_bits_to_fp32(scale_bits)
     normalized = tl.minimum(tl.maximum(tl.div_rn(x, scale[:, None]), -6.0), 6.0)
     payload = _pack_e2m1_payload(normalized, DIM)
 
@@ -145,7 +150,7 @@ def _fp4_global_insert_kernel(
     tl.store(base + offset * ROW_BYTES + tl.arange(0, DIM // 2), payload)
     tl.store(
         base + offset * ROW_BYTES + DIM // 2 + tl.arange(0, DIM // GROUP),
-        scale_fp8.to(tl.uint8, bitcast=True),
+        scale_bits,
     )
 
 
@@ -182,7 +187,7 @@ def _fp4_global_dequant_kernel(
     packed = tl.load(base + offset * ROW_BYTES + channels // 2)
     code = (packed.to(tl.int32) >> ((channels % 2) * 4)) & 15
     scale = tl.load(base + offset * ROW_BYTES + DIM // 2 + channels // GROUP)
-    scale_value = scale.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+    scale_value = e4m3_bits_to_fp32(scale)
     values = _e2m1_to_float(code) * scale_value
     tl.store(out_row, values.to(OUT_DTYPE))
 
@@ -205,9 +210,7 @@ def _fp4_global_dequant_words(base, valid, R: tl.constexpr):
     scale_bytes = (
         (scales[:, :, None] >> (tl.arange(0, 4)[None, None, :] * 8)) & 255
     ).to(tl.uint8)
-    scale_values = (
-        scale_bytes.reshape(R, 32).to(tl.float8e4nv, bitcast=True).to(tl.float32)
-    )
+    scale_values = e4m3_bits_to_fp32(scale_bytes.reshape(R, 32))
     return (_e2m1_to_float(codes) * scale_values[:, :, None]).reshape(R, 512)
 
 

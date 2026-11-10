@@ -109,6 +109,25 @@ class SparseAttnV4DecodeFp8Op:
         by ``attn_sink``). Empty rows report ``+inf`` and must be guarded
         by the consumer.
         """
+        from rtp_llm.models_py.modules.dsv41.sm80_support import (
+            use_reference_gemm_paths,
+        )
+
+        if use_reference_gemm_paths():
+            # FlashMLA's sparse FP8 kernels are SM100-only (and the module-level
+            # _FLASH_MLA_AVAILABLE gate keys on CUDA version, not capability, so
+            # it cannot be trusted pre-Blackwell).
+            return self._forward_reference_pools(
+                q,
+                kv_cache,
+                attn_sink,
+                topk_idxs,
+                topk_length,
+                extra_k_cache,
+                extra_topk_idxs,
+                extra_topk_length,
+                return_lse,
+            )
         return self._forward_flash_mla(
             q,
             kv_cache,
@@ -123,6 +142,91 @@ class SparseAttnV4DecodeFp8Op:
             extra_topk_length,
             return_lse,
         )
+
+    def _forward_reference_pools(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_sink: torch.Tensor,
+        topk_idxs: torch.Tensor,
+        topk_length: Optional[torch.Tensor],
+        extra_k_cache: Optional[torch.Tensor],
+        extra_topk_idxs: Optional[torch.Tensor],
+        extra_topk_length: Optional[torch.Tensor],
+        return_lse: bool,
+    ) -> torch.Tensor:
+        """Pre-SM100 vectorized reference for the sparse FP8 decode attention.
+
+        Reproduces the FlashMLA sparse contract exactly:
+          * topk indices are GLOBAL pool slot ids; ``-1`` marks masked entries
+            (and may occur inside the topk_length bound, so both the length
+            bound and the ``>= 0`` test are applied);
+          * dual-pool calls run ONE joint softmax over the concatenated
+            candidate set (SWA rows first, then global FP4 rows) — mirroring
+            the kernel's in-kernel merge;
+          * ``attn_sink`` is an extra per-head logit in the softmax denominator
+            with a zero value vector (same math as ``utils._sparse_attn``);
+          * dequantization goes through the pools' own codecs
+            (528B group-32 MXFP8 SWA / 288B e2m1+e4m3 global), so stored KV
+            bytes are interpreted bit-identically to the kernel path.
+
+        Fixed-shape and host-sync free: safe under CUDA graph capture once the
+        codec kernels are warm (the runner's eager warmup forwards compile
+        them before capture).
+        """
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
+            dequantize_k_cache_slots_fp4,
+        )
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_triton import (
+            dequantize_swa_k_cache,
+        )
+
+        if return_lse:
+            raise NotImplementedError(
+                "return_lse is not supported on the pre-SM100 reference decode "
+                "path (no decode caller requests it)"
+            )
+        B, S, H, D = q.shape
+        idx = topk_idxs.squeeze(2) if topk_idxs.dim() == 4 else topk_idxs
+        keys = dequantize_swa_k_cache(
+            kv_cache, idx.reshape(-1), out_dtype=torch.float32
+        ).view(B, S, idx.shape[-1], D)
+        valid = idx >= 0
+        if topk_length is not None:
+            cols = torch.arange(idx.shape[-1], device=idx.device).view(1, 1, -1)
+            valid = valid & (cols < topk_length.view(B, 1, 1).to(torch.int64))
+        if extra_k_cache is not None and extra_topk_idxs is not None:
+            eidx = (
+                extra_topk_idxs.squeeze(2)
+                if extra_topk_idxs.dim() == 4
+                else extra_topk_idxs
+            )
+            ekeys = dequantize_k_cache_slots_fp4(
+                extra_k_cache, eidx.reshape(-1), out_dtype=torch.float32
+            ).view(B, S, eidx.shape[-1], D)
+            evalid = eidx >= 0
+            if extra_topk_length is not None:
+                ecols = torch.arange(eidx.shape[-1], device=eidx.device).view(1, 1, -1)
+                evalid = evalid & (
+                    ecols < extra_topk_length.view(B, 1, 1).to(torch.int64)
+                )
+            keys = torch.cat([keys, ekeys], dim=2)
+            valid = torch.cat([valid, evalid], dim=-1)
+
+        logits = (
+            torch.einsum("bshd,bskd->bshk", q.float(), keys) * self.softmax_scale
+        )
+        logits = logits.masked_fill(~valid.unsqueeze(2), float("-inf"))
+        scores_max = logits.amax(dim=-1, keepdim=True).clamp_min(-1e30)
+        exp_logits = torch.exp(logits - scores_max)
+        sum_exp = exp_logits.sum(dim=-1, keepdim=True)
+        if attn_sink is not None:
+            sum_exp = sum_exp + torch.exp(
+                attn_sink.float().view(1, 1, H, 1) - scores_max
+            )
+        acc = torch.einsum("bshk,bskd->bshd", exp_logits, keys)
+        out = acc / sum_exp
+        return out.to(q.dtype)
 
     def _forward_flash_mla(
         self,

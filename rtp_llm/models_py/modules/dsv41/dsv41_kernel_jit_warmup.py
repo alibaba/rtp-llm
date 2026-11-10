@@ -273,7 +273,12 @@ def _shared_expert_signatures(model):
             routed_dtype, routed_stride = routed.dtype, tuple(routed.stride())
         elif strategy.name == "mega":
             routed_dtype, routed_stride = torch.bfloat16, (dim, 1)
-        elif strategy.name in ("local_loop", "grouped_fp4", "deepep"):
+        elif strategy.name in (
+            "local_loop",
+            "grouped_fp4",
+            "deepep",
+            "sm80_ep_local_loop",
+        ):
             routed_dtype, routed_stride = torch.float32, (dim, 1)
         else:
             raise ValueError(f"unknown V41 routed output contract: {strategy.name}")

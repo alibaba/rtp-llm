@@ -21,6 +21,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41.sm80_fp8_compat import e4m3_bits_to_fp32
+
 from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import quantize_swa_row
 
 if TYPE_CHECKING:
@@ -154,7 +156,7 @@ def _load_swa_row(
         slot64 >= 0,
         other=127,
     )
-    groups = payload.to(tl.float8e4nv, bitcast=True).to(tl.float32).reshape((16, 32))
+    groups = e4m3_bits_to_fp32(payload).reshape((16, 32))
     return (groups * tl.exp2(encoded.to(tl.float32) - 127.0)[:, None]).reshape((512,))
 
 

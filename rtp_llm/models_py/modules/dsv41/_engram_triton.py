@@ -5,6 +5,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41.sm80_fp8_compat import e4m3_bits_to_fp32
+
 
 @triton.jit
 def _hash_windows_kernel(
@@ -144,7 +146,7 @@ def _lookup_host_kernel(
             valid[:, None],
             other=0,
         )
-        value = raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+        value = e4m3_bits_to_fp32(raw)
         exponent = tl.load(
             scales
             + index[:, None] * (DIM // QUANT_BLOCK)

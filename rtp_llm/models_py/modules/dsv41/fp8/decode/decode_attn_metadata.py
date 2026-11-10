@@ -379,6 +379,15 @@ def get_or_build_sched_meta(
     inside the graph so it re-runs (with fresh ``topk_length`` values) on every
     replay. See ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
     """
+    from rtp_llm.models_py.modules.dsv41.sm80_support import (
+        has_sm100_native_kernels,
+    )
+
+    if not has_sm100_native_kernels():
+        # The FlashMLA tile planner (get_mla_metadata) is SM100-only. The
+        # pre-SM100 reference decode op consumes no scheduler metadata.
+        return None
+
     from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
 
     capturing = False

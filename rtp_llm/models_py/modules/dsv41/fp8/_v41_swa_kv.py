@@ -12,6 +12,11 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41.sm80_fp8_compat import (
+    e4m3_bits_to_fp32,
+    fp32_to_e4m3_bits,
+)
+
 
 @triton.jit
 def norm_rope_bf16(values, weight, cos, sin, EPS: tl.constexpr):
@@ -46,8 +51,11 @@ def quantize_swa_row(values):
     encoded = (bits >> 23) + ((bits & 0x7FFFFF) != 0).to(tl.uint32)
     scale = (encoded << 23).to(tl.float32, bitcast=True)
     scaled = tl.clamp(groups / scale[:, None], -448.0, 448.0)
-    payload = scaled.to(tl.float8e4nv)
-    decoded = (payload.to(tl.float32) * scale[:, None]).to(tl.bfloat16)
+    # sm80_fp8_compat: hardware cvt on sm89+, bit-op emulation with identical
+    # PTX (cvt.rn.satfinite) semantics on sm80. Returns packed e4m3 bytes;
+    # consumers bitcast to uint8 which is a no-op on this dtype.
+    payload = fp32_to_e4m3_bits(scaled)
+    decoded = (e4m3_bits_to_fp32(payload) * scale[:, None]).to(tl.bfloat16)
     return payload.reshape((512,)), encoded.to(tl.uint8), decoded.reshape((512,))
 
 

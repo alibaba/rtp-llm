@@ -181,8 +181,15 @@ class W13SharedExpert(nn.Module):
         result goes directly to group32 FP8, matching native MegaMoE shared
         experts without an extra intermediate BF16 rounding.
         """
+        from rtp_llm.models_py.modules.dsv41.sm80_support import (
+            use_reference_gemm_paths,
+        )
+
         return (
             _MXFP8_FUSED_SILU_OK
+            # The fused path ends in w2.forward_quantized (SM100 DeepGEMM);
+            # reference GPUs take the plain BF16-dequant forward instead.
+            and not use_reference_gemm_paths()
             and x.is_cuda
             and (x.dtype == torch.bfloat16)
             and (x.dim() == 2)

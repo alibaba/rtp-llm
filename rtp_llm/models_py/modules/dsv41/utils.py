@@ -91,6 +91,12 @@ class V41MXFP8Linear(torch.nn.Module):
         remain closed for this linear. The caller owns the BF16 norm tensor.
         Input layout and disjoint BF16 output storage are caller preconditions.
         """
+        if self._reference_gemm:
+            raise RuntimeError(
+                "V41MXFP8Linear.forward_quantized requires the SM100 DeepGEMM "
+                "group-32 recipe; pre-SM100 callers must not enter the fused "
+                "MXFP8 path (_can_run_mxfp8_fused_silu gates it off there)"
+            )
         m = x_q.numel() // self.K
         shape = (*x_q.shape[:-1], self.N)
         output = (
