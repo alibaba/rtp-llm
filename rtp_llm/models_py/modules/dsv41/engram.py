@@ -1074,10 +1074,12 @@ class HostEngramEmbedding:
                             uva[1].record_stream(
                                 torch.cuda.current_stream(indices.device)
                             )
-        # The UVA gather needs _PinnedSharedTable (cuda.bindings), which ROCm
-        # never builds; fall through to the host gather below, which keeps the
-        # tables in host RAM and stages only the selected rows to the device.
-        if indices.is_cuda and torch.version.hip is None:
+        # UVA device-side gather. CUDA builds _uva through _PinnedSharedTable
+        # (cuda.bindings + tmpfs shared copy); ROCm builds it through
+        # HipRegisteredTable (hipHostRegister in place on the safetensors
+        # mmap, no copy). Without either, fall through to the host gather,
+        # which keeps the tables in host RAM and stages selected rows.
+        if indices.is_cuda and self._uva is not None:
             from rtp_llm.models_py.modules.dsv41 import _engram_triton
 
             lookup = (
@@ -2152,8 +2154,6 @@ class Engram(nn.Module):
                     )
                 pinned = None
                 identity = None
-                # HIP reports device type "cuda"; its UVA pinning path needs
-                # cuda.bindings, so keep ROCm on the host-resident table.
                 if target.type == "cuda" and torch.version.hip is None:
                     parts = [str(root.resolve()), prefix]
                     for suffix in ("embed.weight", "embed.scale"):
@@ -2172,6 +2172,34 @@ class Engram(nn.Module):
                 else:
                     _prefault_host_tensor(table, prefix + "embed.weight")
                     _prefault_host_tensor(scales, prefix + "embed.scale")
+                    if (
+                        target.type == "cuda"
+                        and torch.version.hip is not None
+                        and os.getenv("DSV41_ENGRAM_HIP_UVA", "1") == "1"
+                    ):
+                        # ROCm UVA: hipHostRegister the safetensors mmap IN
+                        # PLACE (page cache shared across ranks; no tmpfs or
+                        # anonymous copy). The decode gather then runs as a
+                        # device-side Triton kernel reading host pages over
+                        # UVA (graph-capturable) instead of a D2H host gather
+                        # that would break HIP graph capture. Falls back to
+                        # the host gather if registration is unavailable.
+                        try:
+                            from rtp_llm.models_py.modules.dsv41._engram_hip_uva import (
+                                HipRegisteredTable,
+                            )
+
+                            pinned = HipRegisteredTable(
+                                table, scales, prefix, target
+                            )
+                        except Exception as register_error:  # noqa: BLE001
+                            logger.warning(
+                                "Engram HIP UVA registration failed (%s); "
+                                "using host gather (decode graphs disabled "
+                                "for this table)",
+                                register_error,
+                            )
+                            pinned = None
                 embedding = HostEngramEmbedding(
                     table,
                     scales,
@@ -2187,9 +2215,16 @@ class Engram(nn.Module):
                         load("wkv.weight").to(target), load("wkv.scale").to(target)
                     )
             else:
-                projection = _ReferenceWKV(
-                    dequantize_block_weight(load("wkv.weight"), load("wkv.scale"))
+                wkv_weight = dequantize_block_weight(
+                    load("wkv.weight"), load("wkv.scale")
                 )
+                if torch.version.hip is not None and target.type == "cuda":
+                    # Pin the derived host matrix so its per-call staging is
+                    # a non-blocking H2D copy - a HIP-graph-capturable memcpy
+                    # node instead of a pageable synchronous copy.
+                    with torch.cuda.device(target):
+                        wkv_weight = wkv_weight.pin_memory()
+                projection = _ReferenceWKV(wkv_weight)
             # Engram offload policy: every engram checkpoint key stays
             # host-resident. CUDA stages the tiny gate matrices onto the
             # device persistently; ROCm keeps them in host RAM and stages
@@ -2197,15 +2232,26 @@ class Engram(nn.Module):
             qk_target = target if torch.version.hip is None else torch.device("cpu")
             q_weight = load("q_weight").to(qk_target)
             k_weight = load("k_weight").to(qk_target)
+            if qk_target.type == "cpu" and target.type == "cuda":
+                with torch.cuda.device(target):
+                    q_weight = q_weight.pin_memory()
+                    k_weight = k_weight.pin_memory()
             # Under external storage the embed table/scales arrive via
             # from_storage (not the load() hook), so register them here from
             # the resident host tensors to cover both paths. All Engram keys
-            # are host-resident; this records their true placement.
+            # are host-resident; this records their true placement. The q/k
+            # and derived-WKV re-registrations record the pinned resident
+            # form (still device=cpu; pinned host RAM is allowed storage).
             try:
                 from rtp_llm.model_loader.awi_recorder import register_host_tensor
 
                 register_host_tensor(prefix + "embed.weight", embedding.weight)
                 register_host_tensor(prefix + "embed.scale", embedding.scales)
+                register_host_tensor(prefix + "q_weight", q_weight)
+                register_host_tensor(prefix + "k_weight", k_weight)
+                if isinstance(projection, _ReferenceWKV):
+                    register_host_tensor(prefix + "wkv.weight", projection.weight)
+                    register_host_tensor(prefix + "wkv.scale", projection.weight)
             except Exception:  # noqa: BLE001
                 pass
             return cls(
@@ -2373,8 +2419,11 @@ class Engram(nn.Module):
         if q_weight.device != hidden.device:
             # Host-resident gate matrices (Engram offload policy): stage the
             # ~40 KB copies for this call only; no persistent device mirror.
-            q_weight = q_weight.to(hidden.device)
-            k_weight = k_weight.to(hidden.device)
+            # Pinned sources copy non-blocking, which is what makes the
+            # staging HIP-graph capturable (a memcpy node, not a sync).
+            non_blocking = q_weight.is_pinned()
+            q_weight = q_weight.to(hidden.device, non_blocking=non_blocking)
+            k_weight = k_weight.to(hidden.device, non_blocking=non_blocking)
         return gated_engram_residual(
             hidden, kv, q_weight, k_weight, self.eps, token_mask, out=out
         )
@@ -2397,7 +2446,10 @@ class _ReferenceWKV(nn.Module):
         x = mxfp8_activation_reference(rows)
         weight = self.weight
         if x.device != weight.device:
-            staged = weight.to(x.device)
+            # Pinned host sources stage non-blocking, which HIP graph
+            # capture records as a memcpy node instead of failing on a
+            # pageable synchronous copy.
+            staged = weight.to(x.device, non_blocking=weight.is_pinned())
             try:
                 return F.linear(x, staged)
             finally:
