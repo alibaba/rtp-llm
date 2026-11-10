@@ -139,6 +139,21 @@ py_test(
 )
 
 py_test(
+    name = "test_chunk_h_sm90",
+    srcs = ["test_chunk_h_sm90.py"],
+    deps = ["//rtp_llm/models_py/triton_kernels:fla"] + [
+        ":einops",
+        ":numpy",
+        ":packaging",
+        ":torch",
+        ":triton",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_scatter_qkv_l2norm_sm90",
     srcs = ["test_scatter_qkv_l2norm_sm90.py"],
     deps = [
