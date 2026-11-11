@@ -138,7 +138,9 @@ def try_ple_gate(
         and _sm_supported(hidden.device)
         and hidden.ndim == 3
         and (
-            hidden.shape[0] == 1 or all(x.is_contiguous() for x in (key, value, hidden))
+            hidden.shape[0] == 1
+            or hidden.shape[1] == 1
+            or all(x.is_contiguous() for x in (key, value, hidden))
         )
         and hidden.dtype == torch.bfloat16
         and key.dtype == value.dtype == (torch.float32 if projected else torch.bfloat16)
@@ -165,6 +167,8 @@ def try_ple_gate(
     gated = torch.empty(hidden.shape, device=hidden.device, dtype=hidden.dtype)
     normed = torch.empty_like(gated)
     if hidden.shape[1]:
+        # S=1 projection views may have the packed K/V row stride.
+        row_dim = 0 if hidden.shape[1] == 1 else 1
         _ple_gate[(hidden.shape[0] * hidden.shape[1], 4)](
             key,
             value,
@@ -178,9 +182,9 @@ def try_ple_gate(
             WIDTH=10240,
             H=2560,
             EPS=eps,
-            KEY_STRIDE=key.stride(1),
-            VALUE_STRIDE=value.stride(1),
-            HIDDEN_STRIDE=hidden.stride(1),
+            KEY_STRIDE=key.stride(row_dim),
+            VALUE_STRIDE=value.stride(row_dim),
+            HIDDEN_STRIDE=hidden.stride(row_dim),
             BLOCK=4096,
             num_warps=4,
             PROJECTED_FP32=projected,

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Single-token PLE gate, depthwise convolution and history roll on SM90."""
+"""SM90 BF16 single-token PLE gate, convolution and history roll."""
 
 import math
 
@@ -7,7 +7,27 @@ import torch
 import triton
 import triton.language as tl
 
-from .ple_gate_triton import _gate_branch
+from .ple_gate_triton import _gate_branch, try_ple_gate
+
+
+@triton.jit
+def _decode_output(gated, acc, residual_ptr, valid, ADD_RESIDUAL: tl.constexpr):
+    conv = acc.to(tl.bfloat16).to(tl.float32)
+    activated = (conv * tl.sigmoid(conv)).to(tl.bfloat16)
+    # Materialize the rounded PLE result before adding the outer residual.
+    # This also prevents contracting either producer multiply into the add.
+    out = tl.inline_asm_elementwise(
+        "add.rn.bf16 $0, $1, $2;",
+        constraints="=h,h,h",
+        args=[gated, activated],
+        dtype=tl.bfloat16,
+        is_pure=True,
+        pack=1,
+    )
+    if ADD_RESIDUAL:
+        residual = tl.load(residual_ptr, valid, other=0).to(tl.float32)
+        out = (out.to(tl.float32) + residual).to(tl.bfloat16)
+    return out
 
 
 @triton.jit
@@ -30,6 +50,7 @@ def _ple_decode_gate_conv(
     HIDDEN_STRIDE: tl.constexpr,
     HISTORY_BATCH_STRIDE: tl.constexpr,
     HISTORY_ROW_STRIDE: tl.constexpr,
+    ADD_RESIDUAL: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     batch = tl.program_id(0).to(tl.int64)
@@ -41,8 +62,7 @@ def _ple_decode_gate_conv(
         H, EPS, KEY_STRIDE, VALUE_STRIDE, HIDDEN_STRIDE,
     )
 
-    # Kernel size 4 and dilation 3 select history rows 0, 3 and 6
-    # followed by the BF16-normalized current row.
+    # Kernel size 4 and dilation 3 select history rows 0, 3 and 6.
     previous = History + batch * HISTORY_BATCH_STRIDE + hc_col
     next_row = NextHistory + batch * 9 * WIDTH + hc_col
     weight = Weight + hc_col * 4
@@ -56,26 +76,58 @@ def _ple_decode_gate_conv(
             tl.store(next_row + (position - 1) * WIDTH, history, valid)
     tap = tl.load(weight + 3, valid, other=0).to(tl.float32)
     acc = tl.fma(normed.to(tl.float32), tap, acc)
-    conv = acc.to(tl.bfloat16).to(tl.float32)
-    activated = (conv * tl.sigmoid(conv)).to(tl.bfloat16)
-    # PTX takes both operands as BF16 so neither producer multiply can be
-    # contracted with this add across its original rounding boundary.
-    output = tl.inline_asm_elementwise(
-        "add.rn.bf16 $0, $1, $2;",
-        constraints="=h,h,h",
-        args=[gated, activated],
-        dtype=tl.bfloat16,
-        is_pure=True,
-        pack=1,
+    out = _decode_output(
+        gated, acc, Hidden + batch * HIDDEN_STRIDE + hc_col, valid, ADD_RESIDUAL
     )
-    tl.store(Output + batch * WIDTH + hc_col, output, valid)
+    tl.store(Output + batch * WIDTH + hc_col, out, valid)
     tl.store(next_row + 8 * WIDTH, normed, valid)
 
 
-def try_ple_decode_fusion(
-    key, value, hidden, norm_key, norm_query, norm_conv, history, weight, eps, dilation
+@triton.jit
+def _ple_decode_conv_roll(
+    Gated,
+    Normed,
+    Hidden,
+    History,
+    Weight,
+    Output,
+    WIDTH: tl.constexpr,
+    BLOCK: tl.constexpr,
+    ADD_RESIDUAL: tl.constexpr,
 ):
-    """Return the PLE output and rolled history for a supported decode step."""
+    row = tl.program_id(0).to(tl.int64)
+    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    valid = col < WIDTH
+    history = History + row * 9 * WIDTH + col
+    weight = Weight + col * 4
+    offset = row * WIDTH + col
+    acc = tl.full((BLOCK,), 0, tl.float32)
+    for tap in tl.static_range(3):
+        value = tl.load(history + 3 * tap * WIDTH, valid, other=0).to(tl.float32)
+        filt = tl.load(weight + tap, valid, other=0).to(tl.float32)
+        acc = tl.fma(value, filt, acc)
+    normed = tl.load(Normed + offset, valid, other=0)
+    filt = tl.load(weight + 3, valid, other=0).to(tl.float32)
+    acc = tl.fma(normed.to(tl.float32), filt, acc)
+    gated = tl.load(Gated + offset, valid, other=0)
+    out = _decode_output(gated, acc, Hidden + offset, valid, ADD_RESIDUAL)
+    tl.store(Output + offset, out, valid)
+
+    # The CTA owns all nine history rows for its channel tile. Read the
+    # convolution taps first, then roll old rows in ascending order.
+    for pos in tl.static_range(8):
+        prev = tl.load(history + (pos + 1) * WIDTH, valid, other=0)
+        tl.store(history + pos * WIDTH, prev, valid)
+    tl.store(history + 8 * WIDTH, normed, valid)
+
+
+def try_ple_decode_fusion(
+    key, value, hidden, norm_key, norm_query, norm_conv, history, weight, eps, dilation,
+    *,
+    add_residual=False,
+    reuse_history=False,
+):
+    """Return the output and rolled history, optionally reusing a private input."""
     width, hidden_size, state_len = 10240, 2560, 9
     if not (
         hidden.is_cuda
@@ -90,7 +142,7 @@ def try_ple_decode_fusion(
     ):
         return None
     batch = hidden.shape[0]
-    if batch > 1 and not all(x.is_contiguous() for x in (key, value, hidden)):
+    if batch > 1 and not hidden.is_contiguous():
         return None
     tensors = (
         (hidden, (batch, 1, width)),
@@ -111,7 +163,21 @@ def try_ple_decode_fusion(
         for x, shape in tensors
     ):
         return None
+
     output = torch.empty_like(hidden, memory_format=torch.contiguous_format)
+    # At larger batches the gate's full-width reduction and the memory-bound
+    # roll favor different tiles. Use the existing gate with a 512-channel
+    # convolution CTA, as in vLLM's decode layout.
+    if reuse_history and batch >= 16 and history.is_contiguous():
+        gates = try_ple_gate(key, value, hidden, norm_key, norm_query, norm_conv, eps)
+        if gates is not None:
+            block = 512
+            _ple_decode_conv_roll[(batch, triton.cdiv(width, block))](
+                *gates, hidden, history, weight, output,
+                WIDTH=width, BLOCK=block, ADD_RESIDUAL=add_residual, num_warps=8,
+            )
+            return output, history
+
     next_history = history.new_empty((batch, state_len, width))
     _ple_decode_gate_conv[(batch, width // hidden_size)](
         key,
@@ -132,6 +198,7 @@ def try_ple_decode_fusion(
         HIDDEN_STRIDE=hidden.stride(0),
         HISTORY_BATCH_STRIDE=history.stride(0),
         HISTORY_ROW_STRIDE=history.stride(1),
+        ADD_RESIDUAL=add_residual,
         BLOCK=triton.next_power_of_2(hidden_size),
         num_warps=4,
     )

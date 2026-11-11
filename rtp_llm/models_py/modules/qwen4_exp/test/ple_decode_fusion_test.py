@@ -1,11 +1,15 @@
 """Exact SM90 decode tail, eager validity and Graph replay contracts."""
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.ple import ple_conv_triton
+from rtp_llm.models_py.modules.qwen4_exp.ple import (
+    ple_conv_triton,
+    ple_decode_fusion_triton,
+)
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpPLELayer
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple_decode_plan_triton import (
     try_plan_decode_cache,
@@ -23,12 +27,20 @@ class TailFixture:
         self.conv_weight = torch.randn(10240, 1, 4, **kw) * 0.1
         self.conv_dilation = 3
         self.hc_hidden_size = 10240
+        self.norm_key = self.norm_query = self.norm_conv = None
+        self.norm_eps = 1e-6
 
-    def _gated_values(self, *_args, **_kwargs):
+    def _project_key_value(self, *_args, **_kwargs):
+        return None, None
+
+    def _gate_projected_values(self, *_args, **_kwargs):
         return self.gated, self.normed
 
     def call(self):
-        return Qwen4ExpPLELayer.decode_step(self, self.gated, None, self.initial)
+        with patch.object(
+            ple_decode_fusion_triton, "try_ple_decode_fusion", return_value=None
+        ):
+            return Qwen4ExpPLELayer.decode_step(self, self.gated, None, self.initial)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -107,6 +119,93 @@ class PLEDecodeFusionTest(unittest.TestCase):
             )
             actual = fixture.call()
         self.assert_exact(actual, expected)
+
+    def test_packed_projection_residual_and_graph_weight_views(self):
+        kw = {"device": "cuda", "dtype": torch.bfloat16}
+        layer = Qwen4ExpPLELayer(
+            SimpleNamespace(ngram_size=3),
+            torch.randn(10240, 2560, **kw) * 0.02,
+            torch.randn(2560, 2560, **kw) * 0.02,
+            torch.randn(10240, 1, 4, **kw) * 0.1,
+            *(torch.randn(10240, **kw) * 0.1 for _ in range(3)),
+            hc_mult=4, hidden_size=2560, conv_kernel_size=4, norm_eps=1e-6,
+        )
+        self.assertTrue(layer.pack_decode_projections())
+        self.assertEqual(
+            layer.key_proj.untyped_storage().data_ptr(),
+            layer.value_proj.untyped_storage().data_ptr(),
+        )
+
+        def reference(hidden, history, embeddings):
+            with patch.object(layer, "_decode_kv_weight", None), patch.object(
+                ple_decode_fusion_triton, "try_ple_decode_fusion", return_value=None
+            ):
+                output, state = layer.decode_step(
+                    hidden, None, history, embeddings=embeddings
+                )
+            return hidden + output, state
+
+        def actual(hidden, history, embeddings, *, reuse=False):
+            return layer.decode_step(
+                hidden, None, history, embeddings=embeddings, add_residual=True,
+                reuse_conv_buffer=reuse,
+            )
+
+        fused = ple_decode_fusion_triton.try_ple_decode_fusion
+
+        def require_fusion(*args, **kwargs):
+            result = fused(*args, **kwargs)
+            self.assertIsNotNone(result)
+            return result
+
+        for batch in (1, 3, 16, 32, 64, 65, 128):
+            with self.subTest(batch=batch):
+                hidden = torch.randn(batch, 1, 10240, **kw)
+                history = torch.randn(batch, 9, 10272, **kw)[..., :10240]
+                embeddings = torch.randn(batch, 1, 2560, **kw)
+                before = history.clone()
+                expected = reference(hidden, history, embeddings)
+                with patch.object(
+                    ple_decode_fusion_triton, "try_ple_decode_fusion",
+                    side_effect=require_fusion,
+                ) as launch:
+                    result = actual(hidden, history, embeddings)
+                self.assertEqual(launch.call_count, 1)
+                self.assert_exact(result, expected)
+                if batch >= 16:
+                    scratch = history.contiguous()
+                    result = actual(hidden, scratch, embeddings, reuse=True)
+                    self.assertIs(result[1], scratch)
+                    self.assert_exact(result, expected)
+                self.assert_exact((history,), (before,))
+
+        pool = torch.randn(2 * batch + 1, 9, 10240, **kw)
+        read_ids = torch.arange(batch, device=pool.device) // 2
+        write_ids = torch.arange(batch, device=pool.device) + batch
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            scratch = pool.index_select(0, read_ids)
+            output, rolled = actual(hidden, scratch, embeddings, reuse=True)
+            self.assertIs(rolled, scratch)
+            pool.index_copy_(0, write_ids, rolled)
+        for replay in range(2):
+            # The model loader publishes these views for in-place weight updates.
+            layer.key_proj[:256].normal_(std=0.02)
+            layer.value_proj[:256].normal_(std=0.02)
+            hidden.normal_()
+            embeddings.normal_()
+            pool.normal_()
+            # Exercise refreshed page IDs, shared read pages and distinct writes.
+            read_ids.add_(replay)
+            write_ids.sub_(replay)
+            expected_output, expected_rolled = reference(
+                hidden, pool.index_select(0, read_ids), embeddings
+            )
+            expected_pool = pool.clone()
+            expected_pool.index_copy_(0, write_ids, expected_rolled)
+            graph.replay()
+            self.assert_exact((output, pool), (expected_output, expected_pool))
 
     def test_cache_plan_cross_page_independent_tables(self):
         lengths = torch.tensor([63, 64, 65, 128], device="cuda", dtype=torch.int32)

@@ -583,6 +583,7 @@ class Qwen4ExpPLELayer(nn.Module):
         self.short_conv_state_len = (conv_kernel_size - 1) * self.conv_dilation
         self.key_proj = key_proj
         self.value_proj = value_proj
+        self._decode_kv_weight = None
         from rtp_llm.models_py.modules.base.common.fp8_linear import make_projection
 
         scales = projection_scales if projection_scales is not None else (None, None)
@@ -597,6 +598,37 @@ class Qwen4ExpPLELayer(nn.Module):
         self.norm_key = norm_key
         self.norm_query = norm_query
         self.norm_conv = norm_conv
+
+    def pack_decode_projections(self) -> bool:
+        """Pack qualified weights during assembly, before installing their views."""
+        if self._decode_kv_weight is not None:
+            return True
+        key, value = self.key_proj, self.value_proj
+        if not (
+            self.key_projection is None
+            and self.value_projection is None
+            and key.shape == (10240, 2560)
+            and value.shape == (2560, 2560)
+            and key.is_cuda
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(key.device) == (9, 0)
+            and all(
+                w.device == key.device
+                and w.dtype == torch.bfloat16
+                and w.is_contiguous()
+                and not w.requires_grad
+                and not getattr(w, "_rtp_requires_restart_for_update", False)
+                for w in (key, value)
+            )
+        ):
+            return False
+        # As in vLLM's PLE layer, a single GEMM produces both projections.
+        # Install the slices as the model's K/V weights so in-place updates
+        # and the prefill path see the same storage as the packed decode GEMM.
+        packed = torch.cat((key, value), dim=0)
+        self.key_proj, self.value_proj = packed.split((10240, 2560), dim=0)
+        self._decode_kv_weight = packed
+        return True
 
     def _norm(self, x: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
         return grouped_rms_norm(x, gamma, self.hidden_size, self.norm_eps)
@@ -658,10 +690,27 @@ class Qwen4ExpPLELayer(nn.Module):
         )
         return hidden_states.transpose(1, 2)
 
-    def _project_key_value(self, hyper_states, token_history, embeddings):
+    def _project_key_value(
+        self, hyper_states, token_history, embeddings, *, decode=False
+    ):
         seq_len = hyper_states.shape[1]
         if embeddings is None:
             embeddings = self.ple_embedding(token_history, seq_len)
+
+        packed = self._decode_kv_weight
+        if (
+            decode
+            and packed is not None
+            and seq_len == 1
+            and embeddings.shape == (hyper_states.shape[0], 1, packed.shape[1])
+            and embeddings.device == packed.device
+            and embeddings.dtype == packed.dtype
+            and embeddings.is_contiguous()
+            and not embeddings.requires_grad
+        ):
+            return F.linear(embeddings, packed).split(
+                (self.hc_hidden_size, self.hidden_size), dim=-1
+            )
 
         from rtp_llm.models_py.modules.base.common.fp8_linear import project_fp8_pair
 
@@ -998,6 +1047,8 @@ class Qwen4ExpPLELayer(nn.Module):
         conv_buffer: torch.Tensor,
         *,
         embeddings: Optional[torch.Tensor] = None,
+        add_residual: bool = False,
+        reuse_conv_buffer: bool = False,
     ) -> tuple:
         """One decode token: PLE output plus the rolled conv buffer.
 
@@ -1005,10 +1056,13 @@ class Qwen4ExpPLELayer(nn.Module):
         ``[B, context_len + 1]`` (cached context ids followed by the new token);
         ``conv_buffer`` is ``[B, state_len, hc_hidden]`` of prior conv inputs.
         Unlike prefill's ``_short_conv``, the real cached history is used instead
-        of a zero left pad.
+        of a zero left pad. With ``add_residual``, the output includes the
+        outer addition of ``hyper_state`` after the PLE output is rounded.
+        Set ``reuse_conv_buffer`` only for a disposable history buffer. The
+        qualified fused path may write the rolled history into that buffer.
         """
         key, value = self._project_key_value(
-            hyper_state, token_history_step, embeddings
+            hyper_state, token_history_step, embeddings, decode=True
         )
         if hyper_state.is_cuda and torch.version.hip is None:
             from .ple_decode_fusion_triton import try_ple_decode_fusion
@@ -1024,6 +1078,8 @@ class Qwen4ExpPLELayer(nn.Module):
                 self.conv_weight,
                 self.norm_eps,
                 self.conv_dilation,
+                add_residual=add_residual,
+                reuse_history=reuse_conv_buffer,
             )
             if fused is not None:
                 return fused
@@ -1039,6 +1095,7 @@ class Qwen4ExpPLELayer(nn.Module):
                 conv_buffer,
                 self.conv_weight,
                 self.conv_dilation,
+                residual=hyper_state if add_residual else None,
                 roll_state=True,
             )
             if fused is not None:
@@ -1054,7 +1111,7 @@ class Qwen4ExpPLELayer(nn.Module):
         ).transpose(1, 2)
         output = gated_value + conv_out
         new_buffer = torch.cat([conv_buffer, gated_value_normed], dim=1)[:, 1:]
-        return output, new_buffer
+        return (hyper_state + output if add_residual else output), new_buffer
 
     def decode_chunk(
         self,

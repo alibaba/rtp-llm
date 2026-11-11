@@ -772,6 +772,10 @@ class PLEExecution:
                 hyper_states.view(batch, 1, -1),
                 history,
                 conv_buffer,
+                add_residual=True,
+                # Both cache-read paths return a private index_select buffer.
+                # The persistent pool is still updated only below.
+                reuse_conv_buffer=True,
                 embeddings=PLELookupResult(
                     ple.ple_embedding._reduce_rows(local_rows[0])
                     if local_rows is not None and local_rows[0] is not None
@@ -786,7 +790,7 @@ class PLEExecution:
                 ctx_write_blocks,
                 history[:, -context_len:].to(ctx_pool.dtype),
             )
-            return hyper_states + output.squeeze(1)
+            return output.squeeze(1)
 
     def _read_decode_cache(
         self,
