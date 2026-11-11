@@ -157,3 +157,12 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
+
+py_test(
+    name = "route_key_offload_test",
+    srcs = ["route_key_offload_test.py"],
+    deps = [
+        "//rtp_llm:rtp_llm_frontend_lib",
+        "//rtp_llm:testlib",
+    ],
+)

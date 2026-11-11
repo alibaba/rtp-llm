@@ -554,7 +554,14 @@ class Pipeline(object):
     ) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
         request_headers = normalize_request_headers(kwargs.pop("headers", None))
-        token_ids = torch.tensor(token_ids, dtype=torch.int)
+        # Off-loop tensor construction: converting a ~192K-element Python list
+        # is per-request CPU on the uvicorn loop; the tok-encode executor (the
+        # same pool 00032 uses for the tokenize) builds it without blocking
+        # the loop. Values/dtype are identical to the inline construction.
+        loop = asyncio.get_running_loop()
+        token_ids = await loop.run_in_executor(
+            self._encode_executor, torch.tensor, token_ids, torch.int
+        )
 
         input = GenerateInput(
             request_id=request_id,

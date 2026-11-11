@@ -1,4 +1,15 @@
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Sequence, Tuple
+
+# Block-key hashing is a pure per-request CPU cost (Python chunking of the full
+# prompt into ~24K block lists plus the C++ rolling hash).  On the uvicorn event
+# loop it serializes concurrent requests exactly like the pre-00032 tokenize;
+# the C++ hash releases the GIL and the function has no shared mutable state,
+# so the '/' route path runs it in this small dedicated pool.
+_KEY_HASH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="key-hash"
+)
 
 
 def route_cache_keys_for_page_rr(
@@ -83,3 +94,27 @@ def get_block_cache_keys(
             )
         )
     return cpp_get_block_cache_keys(rolling_segments, cache_key_seed)[1::2]
+
+
+async def get_block_cache_keys_async(
+    token_ids,
+    block_size,
+    cache_key_seed=0,
+    multimodal_cache_spans: Optional[Sequence[Tuple[int, Sequence[int]]]] = None,
+):
+    """Off-loop twin of get_block_cache_keys.
+
+    Runs the UNMODIFIED sync function (chunking + C++ rolling hash, multimodal
+    path included) in the module-level key-hash executor, so the uvicorn event
+    loop keeps serving other requests.  The function is pure: for identical
+    inputs the returned keys are bit-identical to the sync call.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _KEY_HASH_EXECUTOR,
+        get_block_cache_keys,
+        token_ids,
+        block_size,
+        cache_key_seed,
+        multimodal_cache_spans,
+    )

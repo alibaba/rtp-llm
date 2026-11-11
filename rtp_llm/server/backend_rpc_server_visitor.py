@@ -19,6 +19,7 @@ from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation
 from rtp_llm.server.cache_key_routing import (
     get_block_cache_keys,
+    get_block_cache_keys_async,
     get_v41_cache_key_seed,
     route_cache_keys_for_page_rr,
 )
@@ -401,7 +402,11 @@ class BackendRPCServerVisitor:
         # Keep hash generation at the physical KV block granularity. Page-RR
         # routing samples canonical keys from this full logical-block key list;
         # it must not recompute request hashes with the virtual block size.
-        full_block_cache_keys = get_block_cache_keys(
+        # Off-loop key hash: the chunking+hash of a ~192K-token prompt is pure
+        # per-request CPU (GIL-releasing C++ hash); running it in the key-hash
+        # executor keeps the uvicorn loop serving other requests. Keys are
+        # bit-identical to the sync call (async wrapper runs the same function).
+        full_block_cache_keys = await get_block_cache_keys_async(
             token_ids,
             self.seq_size_per_block,
             cache_key_seed=self.cache_key_seed,
@@ -496,7 +501,7 @@ class BackendRPCServerVisitor:
                         "Incomplete replacement ViT routing hashes",
                     )
                 block_cache_keys = self._route_cache_keys(
-                    get_block_cache_keys(
+                    await get_block_cache_keys_async(
                         token_ids,
                         self.seq_size_per_block,
                         cache_key_seed=self.cache_key_seed,
