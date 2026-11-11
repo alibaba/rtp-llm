@@ -172,6 +172,24 @@ class DelayedHCUnit(HCUnitBase):
             and torch.version.hip is None
         ):
             return TileLangHCUnit._post_impl(self, x, residual, post, comb)
+        if residual.is_cuda and torch.version.hip is not None:
+            # The degenerate tiny batched GEMM ([T,4,4]^T @ [T,4,dim])
+            # raises hipErrorInvalidConfiguration under HIP graph capture
+            # (load23/24, exact frame under AMD_SERIALIZE_KERNEL=3) while
+            # working eagerly. Unroll the hc_mult=4 combination as
+            # elementwise multiply + reduce: identical math, capture-safe,
+            # and bounded temporary memory (one [T,j,dim] product per lane).
+            residual_f = residual.float()
+            comb_f = comb.float()
+            # out[..., i, d] = sum_j comb[..., j, i] * residual[..., j, d]
+            lanes = [
+                (residual_f * comb_f[..., lane : lane + 1]).sum(-2)
+                for lane in range(comb_f.shape[-1])
+            ]
+            mixed = torch.stack(lanes, dim=-2)
+            return (post.float() * x.float().unsqueeze(-2) + mixed).to(
+                residual.dtype
+            )
         return (
             post.float() * x.float().unsqueeze(-2)
             + torch.matmul(comb.float().transpose(-1, -2), residual.float())
