@@ -92,7 +92,22 @@ def collapse_delayed(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
             x.reshape(1, -1, shape[-2], shape[-1]),
             pre_mix.reshape(1, -1, shape[-2], 1).contiguous(),
         ).reshape(*shape[:-2], shape[-1])
-    return (x.float() * pre_mix.unsqueeze(-1)).sum(dim=-2).to(x.dtype)
+    # Row-local reduction: chunk it like the HC post mix so a whole-stream
+    # prefill does not materialize two fp32 [rows, hc_mult, dim] temporaries
+    # (5 GiB each at 65K tokens; boot-35 OOM).
+    chunk_rows = _hc_post_chunk_rows()
+    n = x.shape[:-2].numel()
+    if chunk_rows <= 0 or n <= chunk_rows:
+        return (x.float() * pre_mix.unsqueeze(-1)).sum(dim=-2).to(x.dtype)
+    xf = x.reshape(n, *x.shape[-2:])
+    pf = pre_mix.reshape(n, *pre_mix.shape[-2:])
+    outs = []
+    for i in range(0, n, chunk_rows):
+        j = min(i + chunk_rows, n)
+        outs.append(
+            (xf[i:j].float() * pf[i:j].unsqueeze(-1)).sum(dim=-2).to(x.dtype)
+        )
+    return torch.cat(outs, dim=0).reshape(*x.shape[:-2], x.shape[-1])
 
 
 def can_fuse_big_pre() -> bool:
