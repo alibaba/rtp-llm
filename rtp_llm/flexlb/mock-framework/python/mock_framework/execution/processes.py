@@ -60,7 +60,7 @@ class ProcessSupervisor:
         return tuple(
             identity
             for identity, _ in self._children.values()
-            if identity is not None and identity.role in roles
+            if identity is not None and (not roles or identity.role in roles)
         )
 
     def fail(self, message):

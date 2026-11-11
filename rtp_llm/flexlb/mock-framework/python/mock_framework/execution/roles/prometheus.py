@@ -124,19 +124,18 @@ class PrometheusRole:
                 pass
             await asyncio.sleep(0.05)
 
-    def discover(self, node, directory):
+    def register_target(self, instance_id, endpoint):
         try:
-            endpoint = json.loads(
-                (directory / "endpoints.json").read_text(encoding="utf-8")
-            )
+            if not isinstance(endpoint, dict):
+                raise ValueError("Missing or invalid endpoints")
             backend = endpoint.get("metrics_backend", "prometheus")
             if backend != "prometheus":
                 raise ExecutionError(
-                    f"{node}: managed Prometheus requires metrics_backend=prometheus, got {backend!r}"
+                    f"{instance_id}: managed Prometheus requires metrics_backend=prometheus, got {backend!r}"
                 )
             address = urllib.parse.urlsplit(endpoint["metrics"])
             if (
-                endpoint.get("id") != node
+                endpoint.get("id") != instance_id
                 or address.scheme not in ("http", "https")
                 or not address.hostname
                 or address.username
@@ -152,15 +151,15 @@ class PrometheusRole:
                 or any(
                     v["labels"]["instance"] == rpc
                     for k, v in self.targets.items()
-                    if k != node
+                    if k != instance_id
                 )
             ):
                 raise ValueError("Missing or duplicate instance address")
-        except (OSError, ValueError, KeyError, TypeError) as error:
+        except (ValueError, KeyError, TypeError) as error:
             raise ExecutionError(
-                f"{node}: managed collection requires endpoints.json with id, unique rpc and metrics URL"
+                f"{instance_id}: managed collection requires endpoints.json with id, unique rpc and metrics URL"
             ) from error
-        self.targets[node] = {
+        self.targets[instance_id] = {
             "targets": [address.netloc],
             "labels": {
                 "instance": rpc,
@@ -223,9 +222,14 @@ class PrometheusRole:
             while True:
                 if self.child.returncode is not None:
                     raise ExecutionError("Prometheus exited before final collection")
-                for node, child in self.supervisor.children:
-                    if node in self.targets and child.returncode is not None:
-                        raise ExecutionError(f"{node} exited before final collection")
+                for process in self.supervisor.owned_processes():
+                    if (
+                        process.instance_id in self.targets
+                        and self.supervisor.child(process.name).returncode is not None
+                    ):
+                        raise ExecutionError(
+                            f"{process.name} exited before final collection"
+                        )
                 targets = await self._scrapes()
                 if selected <= targets.keys() and all(
                     targets[node]["health"] == "up"

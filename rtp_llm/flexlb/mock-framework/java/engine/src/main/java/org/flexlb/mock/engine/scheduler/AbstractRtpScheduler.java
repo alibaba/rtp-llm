@@ -229,7 +229,6 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         if (prefill() || stream.lease == null || stream.loaded || stream.generating)
             throw new RequestFailure(INVALID, "Unexpected Decode KV load completion");
         stream.loaded = true;
-        stream.prefillFinished = transferred.prefillFinished();
         stream.phase = TRANSFERRED;
     }
 
@@ -546,7 +545,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         public record Generate(int tokenId) implements Control {}
     }
 
-    public record RtpTransferResult(boolean prefillFinished, RequestFailure failure) implements TransferResult {}
+    public record RtpTransferResult(RequestFailure failure) implements TransferResult {}
 
     enum Phase { QUEUED, CAPACITY, WAITING_LOAD, TRANSFERRING, TRANSFERRED, RUNNING, FORWARD, READY }
 

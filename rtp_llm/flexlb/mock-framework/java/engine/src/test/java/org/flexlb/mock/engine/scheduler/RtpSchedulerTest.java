@@ -833,7 +833,7 @@ class RtpSchedulerTest {
 
     private static void loaded(EngineScheduler scheduler, EngineScheduler.Request request) {
         try (var use = scheduler.beginTransfer(request)) {
-            scheduler.transferCompleted(request, new RtpTransferResult(false, null));
+            scheduler.transferCompleted(request, new RtpTransferResult(null));
         }
     }
 
@@ -900,7 +900,7 @@ class RtpSchedulerTest {
     }
 
     private static void generate(EngineLoop engine, EngineScheduler.Request request) throws Exception {
-        try (var use = engine.beginKvTransfer(request)) { engine.onKvTransferCompleted(request, new RtpTransferResult(false, null)); }
+        try (var use = engine.beginKvTransfer(request)) { engine.onKvTransferCompleted(request, new RtpTransferResult(null)); }
         engine.updateRequest(request, new RtpControl.Generate(42));
     }
 

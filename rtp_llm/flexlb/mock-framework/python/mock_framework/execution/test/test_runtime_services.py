@@ -245,18 +245,15 @@ def test_collection_removes_retired_target_without_retaining_a_ledger(tmp_path):
     )
     monitor.directory.mkdir()
     for index in range(2):
-        directory = tmp_path / f"prefill-{index}"
-        directory.mkdir()
-        (directory / "endpoints.json").write_text(
-            json.dumps(
-                {
-                    "id": directory.name,
-                    "rpc": f"127.0.0.1:{1000 + index}",
-                    "metrics": f"http://127.0.0.1:{2000 + index}/metrics",
-                }
-            )
+        instance_id = f"prefill-{index}"
+        monitor.register_target(
+            instance_id,
+            {
+                "id": instance_id,
+                "rpc": f"127.0.0.1:{1000 + index}",
+                "metrics": f"http://127.0.0.1:{2000 + index}/metrics",
+            },
         )
-        monitor.discover(directory.name, directory)
     monitor.metadata["final_scrapes"] = {"prefill-0": "old", "prefill-1": "current"}
     monitor.retire("prefill-0")
     metadata = json.loads((monitor.directory / "collection.json").read_text())

@@ -14,4 +14,4 @@ def register_ready_instance(
             **identity.event_fields(),
         )
     if monitoring:
-        monitoring.discover(identity.instance_id, identity.directory(records.directory))
+        monitoring.register_target(identity.instance_id, endpoint)

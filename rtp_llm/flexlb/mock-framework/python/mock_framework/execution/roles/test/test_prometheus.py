@@ -21,20 +21,16 @@ from mock_framework.execution.test.helpers import FRAMEWORK
 ROOT = FRAMEWORK
 
 
-def test_managed_prometheus_rejects_push_backend_before_discovery(tmp_path):
+def test_managed_prometheus_rejects_push_backend_before_registration(tmp_path):
     from mock_framework.execution import ExecutionError
     from mock_framework.execution.roles.prometheus import PrometheusRole
 
-    (tmp_path / "endpoints.json").write_text(
-        json.dumps(
-            {
-                "id": "prefill-0",
-                "rpc": "127.0.0.1:1234",
-                "metrics": "",
-                "metrics_backend": "kmonitor",
-            }
-        )
-    )
+    endpoint = {
+        "id": "prefill-0",
+        "rpc": "127.0.0.1:1234",
+        "metrics": "",
+        "metrics_backend": "kmonitor",
+    }
     collector = PrometheusRole(
         None,
         SimpleNamespace(directory=tmp_path),
@@ -43,8 +39,36 @@ def test_managed_prometheus_rejects_push_backend_before_discovery(tmp_path):
     with pytest.raises(
         ExecutionError, match="metrics_backend=prometheus, got .kmonitor."
     ):
-        collector.discover("prefill-0", tmp_path)
+        collector.register_target("prefill-0", endpoint)
     assert collector.targets == {}
+
+
+def test_final_scrape_detects_exited_restarted_master(tmp_path, monkeypatch):
+    from mock_framework.execution import ExecutionError
+    from mock_framework.execution.processes import ProcessIdentity
+    from mock_framework.execution.roles.prometheus import PrometheusRole
+
+    process = ProcessIdentity("master", 0, generation=1)
+    child = SimpleNamespace(returncode=1)
+    supervisor = SimpleNamespace(
+        owned_processes=lambda: (process,),
+        child=lambda name: {process.name: child}[name],
+    )
+    collector = PrometheusRole(
+        supervisor,
+        SimpleNamespace(directory=tmp_path),
+        {"startup_timeout": "1s", "scrape_interval": "1s"},
+    )
+    collector.baselined = True
+    collector.child = SimpleNamespace(returncode=None)
+    collector.targets[process.instance_id] = {}
+
+    async def unexpected_scrape():
+        pytest.fail("The exited process should be detected before querying Prometheus")
+
+    monkeypatch.setattr(collector, "_scrapes", unexpected_scrape)
+    with pytest.raises(ExecutionError, match="master-0-restart-1 exited"):
+        asyncio.run(collector.final_scrape())
 
 
 @pytest.mark.skipif(

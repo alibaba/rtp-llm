@@ -146,7 +146,7 @@ final class DecodeRpcServer implements AutoCloseable {
                 outcome.state() == SimulatedKvLoad.State.CANCELLED ? RequestFailure.Reason.CANCELLED : RequestFailure.Reason.INTERNAL,
                 "KV transfer " + outcome.state(), outcome.error());
             try {
-                engine.onKvTransferCompleted(call.request, new RtpTransferResult(false, failure));
+                engine.onKvTransferCompleted(call.request, new RtpTransferResult(failure));
                 if (failure != null) return;
                 call.stage = Stage.LOADED;
                 send(call, GenerateOutputsPB.newBuilder().setRequestId(call.input.getRequestId())
