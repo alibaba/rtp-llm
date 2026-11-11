@@ -187,7 +187,13 @@ size_t graphAllocatedBytes() {
 }
 
 void graphEmptyCache() {
-#if USING_CUDA
+    // torch's ROCm build provides the same c10::cuda::CUDACachingAllocator
+    // entry points (HIP-mapped). Without this, every emptyCache-based memory
+    // recovery — including the per-capture-size cache release that 1M-context
+    // capture depends on — was a silent no-op on MI308X (native-n10c OOMed
+    // identically to n10b: 4GiB pool reservation, 2.90GiB free, 18.40GiB
+    // reserved-but-unallocated).
+#if USING_CUDA || USING_ROCM
     c10::cuda::CUDACachingAllocator::emptyCache();
 #endif
 }
