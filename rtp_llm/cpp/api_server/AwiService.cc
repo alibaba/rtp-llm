@@ -100,6 +100,13 @@ int64_t getInt(const JsonMap& map, const std::string& key, int64_t default_value
         return std::stoll(AnyCast<std::string>(it->second));
     } catch (...) {
     }
+    // autil's JsonNumber wrapper is not AnyCast-able to int64/double/std::string.
+    // Parse its canonical textual form so max_tokens, barrier counts and other
+    // numeric AWI fields do not silently fall back to their defaults.
+    try {
+        return std::stoll(autil::legacy::json::ToString(it->second, true));
+    } catch (...) {
+    }
     return default_value;
 }
 
