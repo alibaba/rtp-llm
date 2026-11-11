@@ -30,30 +30,6 @@ class VLLMExecutionWindowGapTest(unittest.TestCase):
             )
         return assembler, windows
 
-    def test_empty_control_steps_do_not_discard_prefill_samples(self):
-        from types import SimpleNamespace
-
-        from navi_sched.adapters.vllm.VLLMEngineObserver import VLLMEngineObserver
-
-        observer = VLLMEngineObserver.__new__(VLLMEngineObserver)
-        observer._native_ingress = True
-        observer._v6d_scheduler = None
-        observer._observed_execution_window_training = True
-        assembler = PrefillExecutionWindowAssembler((4,))
-        observer._prefill_execution_windows = assembler
-        assembler.register(1)
-        observer._prepare_execution_step(
-            SimpleNamespace(num_scheduled_tokens={}),
-            lambda identity: self.fail("empty control step must not read requests"),
-            SimpleNamespace(started_ns=2, prefill_tokens=0, batch_progress=[]),
-        )
-        assembler.register(3)
-        windows = list(assembler.complete(2, None))
-        windows.extend(assembler.complete(1, self.sample(1, 1000000)))
-        windows.extend(assembler.complete(3, self.sample(3, 3000000)))
-        self.assertEqual([1, 3], [s.step_id for w in windows for s in w.steps])
-        self.assertEqual(0, assembler.rejected_windows)
-
     def test_idle_gap_preserves_both_execution_spans(self):
         assembler, windows = self.complete([1000000, 100000000])
         self.assertEqual([1, 1], [w.execution_step_count for w in windows])

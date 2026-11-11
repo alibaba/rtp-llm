@@ -9,16 +9,51 @@ import time
 import unittest
 from pathlib import Path
 
-from navi_sched import NaviSchedAgent
-from navi_sched import _navi_sched_core as core
 from navi_sched.adapters.vllm.VLLMExecutionSample import (
     PrefillExecutionSample,
     PrefillStepRequest,
 )
 from navi_sched.adapters.vllm.VLLMExecutionWindow import PrefillExecutionWindowAssembler
 
+from navi_sched import NaviSchedAgent
+from navi_sched import _navi_sched_core as core
+
 
 class VLLMExecutionWindowIntegrationTest(unittest.TestCase):
+    def test_empty_control_steps_do_not_discard_prefill_samples(self):
+        from types import SimpleNamespace
+
+        from navi_sched.adapters.vllm.VLLMEngineObserver import VLLMEngineObserver
+
+        def sample(identity):
+            start = identity * 1000000
+            return PrefillExecutionSample(
+                identity,
+                (PrefillStepRequest(identity, 0, 8192, 0, identity),),
+                start,
+                start + 4000000,
+                8192,
+            )
+
+        observer = VLLMEngineObserver.__new__(VLLMEngineObserver)
+        observer._native_ingress = True
+        observer._v6d_scheduler = None
+        observer._observed_execution_window_training = True
+        assembler = PrefillExecutionWindowAssembler((4,))
+        observer._prefill_execution_windows = assembler
+        assembler.register(1)
+        observer._prepare_execution_step(
+            SimpleNamespace(num_scheduled_tokens={}),
+            lambda identity: self.fail("empty control step must not read requests"),
+            SimpleNamespace(started_ns=2, prefill_tokens=0, batch_progress=[]),
+        )
+        assembler.register(3)
+        windows = list(assembler.complete(2, None))
+        windows.extend(assembler.complete(1, sample(1)))
+        windows.extend(assembler.complete(3, sample(3)))
+        self.assertEqual([1, 3], [s.step_id for w in windows for s in w.steps])
+        self.assertEqual(0, assembler.rejected_windows)
+
     def test_observed_windows_train_without_request_lifecycle_events(self):
         self.assertEqual(1, core.VLLM_SHARED_EXECUTION_SAMPLES_VERSION)
         original = os.getcwd()
