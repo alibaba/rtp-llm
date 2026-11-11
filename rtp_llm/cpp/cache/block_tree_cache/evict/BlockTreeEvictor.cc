@@ -275,15 +275,17 @@ void BlockTreeEvictor::logZeroDeviceReclaimLocked(size_t group_set_id,
     const auto& heap       = *tier_heaps.device;
     const auto  candidates = heap.size();
     // Frozen state is read from every member pool after the diagnostic rate limit.
-    const bool has_unfrozen_candidate = heap.best([&group_set, group_set_id](TreeNode* node) {
-        const auto& blocks = node->group_set_resources[group_set_id].device_blocks;
-        for (size_t i = 0; i < blocks.size(); ++i) {
-            if (!isNullBlockIdx(blocks[i]) && group_set->devicePools()[i]->isFrozen(blocks[i])) {
-                return false;
-            }
-        }
-        return true;
-    }).has_value();
+    const bool has_unfrozen_candidate =
+        heap.best([&group_set, group_set_id](TreeNode* node) {
+                const auto& blocks = node->group_set_resources[group_set_id].device_blocks;
+                for (size_t i = 0; i < blocks.size(); ++i) {
+                    if (!isNullBlockIdx(blocks[i]) && group_set->devicePools()[i]->isFrozen(blocks[i])) {
+                        return false;
+                    }
+                }
+                return true;
+            })
+            .has_value();
     // A candidate covers at most one block in the requested member pool. The
     // difference is only a lower bound, since candidates may share blocks or hold other references.
     const auto cache_only_outside_heap_min =
@@ -359,9 +361,9 @@ bool BlockTreeEvictor::batchDropLocked(size_t  group_set_id,
         source_pools.push_back(group_set->diskPool().get());
     }
 
-    scheduled_count        = 0;
-    bool   processed       = false;
-    size_t remaining_count = max_victim_count;
+    scheduled_count                      = 0;
+    bool                 processed       = false;
+    size_t               remaining_count = max_victim_count;
     EvictionBatchContext eviction_batch_context;
     while (remaining_count > 0) {
         std::vector<size_t> used_before;
@@ -469,9 +471,9 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
                 /*scheduled_count=*/scheduled_count};
     }
 
-    std::vector<TransferDescriptor>     descriptors;
-    std::vector<EvictionTimingMetrics>  timings;
-    EvictionBatchContext                eviction_batch_context;
+    std::vector<TransferDescriptor>    descriptors;
+    std::vector<EvictionTimingMetrics> timings;
+    EvictionBatchContext               eviction_batch_context;
     for (size_t victim_count = 0; victim_count < max_victim_count; ++victim_count) {
         auto eviction_desc = chooseVictim(group_set_id,
                                           source_tier,
@@ -542,31 +544,6 @@ void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTas
 
 void BlockTreeEvictor::completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task,
                                             ErrorInfo                                   error) noexcept {
-    if (error.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
-        auto observation = CompletionStageContext::forTransfer(*metrics_reporter_, task->transfer_task, "evict", false);
-        CompletionStageScope freeze(observation, "freeze_blocks", "workflow_callback");
-        // Ordinary source/target references are still held here. Freeze every
-        // saved endpoint before rollback can return any of them to a pool.
-        for (const TransferDescriptor& desc : task->descriptors()) {
-            if (desc.target_tier == Tier::NONE) {
-                continue;
-            }
-            const GroupSetPtr& group_set = tree_->groupSets()[desc.group_set_id];
-            const auto         freeze    = [&group_set](Tier tier, const std::vector<BlockIdxType>& blocks) noexcept {
-                if (tier == Tier::DEVICE) {
-                    for (size_t i = 0; i < blocks.size(); ++i) {
-                        group_set->devicePools()[i]->freezeBlock(blocks[i]);
-                    }
-                } else {
-                    IBlockPool* pool = tier == Tier::HOST ? static_cast<IBlockPool*>(group_set->hostPool().get()) :
-                                                                       static_cast<IBlockPool*>(group_set->diskPool().get());
-                    pool->freezeBlock(blocks.front());
-                }
-            };
-            freeze(desc.source_tier, desc.source_blocks);
-            freeze(desc.target_tier, desc.target_blocks);
-        }
-    }
     scheduleEvictionSettlement(std::move(task), error.ok());
 }
 
@@ -689,8 +666,8 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t         
         eviction_batch_context = &local_eviction_batch_context;
     }
     struct SelectionContext {
-        EvictionVictimCounters*  counters;
-        EvictionBatchContext*    eviction_batch_context;
+        EvictionVictimCounters* counters;
+        EvictionBatchContext*   eviction_batch_context;
 
         bool skip(EvictionVictimSkipReason reason) const {
             if (counters != nullptr) {
@@ -1117,7 +1094,7 @@ void BlockTreeEvictor::completeEvict(const std::vector<TransferDescriptor>& desc
             continue;
         }
         resource.evictFromTier(desc.source_tier);
-        resource.transfer_state       = GroupSetTransferState::IDLE;
+        resource.transfer_state = GroupSetTransferState::IDLE;
         resource.setBlocks(desc.target_tier, desc.target_blocks);
         tree_->refreshPublishedState(desc.node);
         RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE) || resource.hasCompleteDeviceValue(),
@@ -1147,7 +1124,7 @@ void BlockTreeEvictor::reserveSource(const std::vector<TransferDescriptor>& evic
     for (const TransferDescriptor& desc : eviction_descs) {
         GroupSetResource& resource = desc.node->group_set_resources[desc.group_set_id];
         suspendCandidate(desc.node, desc.group_set_id, desc.source_tier);
-        resource.transfer_state       = GroupSetTransferState::DEMOTING;
+        resource.transfer_state = GroupSetTransferState::DEMOTING;
         tree_->refreshPublishedState(desc.node);
     }
 }
@@ -1167,7 +1144,7 @@ std::vector<TransferDescriptor> BlockTreeEvictor::restoreSource(const std::vecto
             RTP_LLM_LOG_WARNING("state mismatch, group_set=%zu node_key=%ld", desc.group_set_id, desc.node->cache_key);
             continue;
         }
-        resource.transfer_state       = GroupSetTransferState::IDLE;
+        resource.transfer_state = GroupSetTransferState::IDLE;
         tree_->refreshPublishedState(desc.node);
         RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE) || resource.hasCompleteDeviceValue(),
                                 "eviction rollback produced invalid steady state: group_set_id=%zu node_key=%ld",
@@ -1186,13 +1163,13 @@ void BlockTreeEvictor::discardDetachedTransfer(const std::vector<TransferDescrip
     }
 
     for (const TransferDescriptor& desc : transfer_descs) {
-        GroupSetResource&  resource  = desc.node->group_set_resources[desc.group_set_id];
-        const GroupSetPtr& group_set = tree_->groupSets()[desc.group_set_id];
+        GroupSetResource&       resource  = desc.node->group_set_resources[desc.group_set_id];
+        const GroupSetPtr&      group_set = tree_->groupSets()[desc.group_set_id];
         const MultiNodeResource source_holder{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
         group_set->unreferenceBlocks(source_holder, BlockTreeRefType::CACHE);
         resource.evictFromTier(desc.source_tier);
-        resource.transfer_state       = GroupSetTransferState::IDLE;
-        resource.transfer_detached    = false;
+        resource.transfer_state    = GroupSetTransferState::IDLE;
+        resource.transfer_detached = false;
         tree_->refreshPublishedState(desc.node);
     }
 }
@@ -1321,9 +1298,9 @@ EvictionDropTask BlockTreeEvictor::planDropTask(TransferDescriptor              
     EvictionDropTask task;
     task.primary_timing =
         EvictionTimingMetrics(eviction_desc.node->group_set_resources[eviction_desc.group_set_id].candidate_meta);
-    task.primary_desc = std::move(eviction_desc);
-    const TransferDescriptor&                 primary_desc = task.primary_desc;
-    const Tier                                target_tier  = primary_desc.target_tier;
+    task.primary_desc                      = std::move(eviction_desc);
+    const TransferDescriptor& primary_desc = task.primary_desc;
+    const Tier                target_tier  = primary_desc.target_tier;
     collectFullPrune(primary_desc, task, detached_resources);
     TreeNode* const                           primary_node     = primary_desc.node;
     const size_t                              primary_group_id = primary_desc.group_set_id;
@@ -1337,8 +1314,8 @@ EvictionDropTask BlockTreeEvictor::planDropTask(TransferDescriptor              
             node, group_set_id, /*path_index=*/0, source_tier, target_tier, resource.getBlocks(source_tier));
     };
 
-    const bool primary_is_leaf        = tree_->isLeafAtTier(primary_node, primary_group_id, source_tier);
-    const CacheGroupType primary_type = group_sets[primary_group_id]->groupType();
+    const bool           primary_is_leaf = tree_->isLeafAtTier(primary_node, primary_group_id, source_tier);
+    const CacheGroupType primary_type    = group_sets[primary_group_id]->groupType();
     for (const GroupSetPtr& group_set : group_sets) {
         const size_t group_set_id = group_set->groupSetId();
         if (group_set_id == primary_group_id) {
@@ -1414,8 +1391,8 @@ EvictionDropTask BlockTreeEvictor::createDropTask(TransferDescriptor    eviction
                                                   const char*           trigger_type,
                                                   EvictionBatchContext* eviction_batch_context) {
     std::vector<std::pair<TreeNode*, size_t>> detached_resources;
-    EvictionDropTask task = planDropTask(std::move(eviction_desc), detached_resources, eviction_batch_context);
-    const auto&                             group_sets = tree_->groupSets();
+    EvictionDropTask task       = planDropTask(std::move(eviction_desc), detached_resources, eviction_batch_context);
+    const auto&      group_sets = tree_->groupSets();
 
     task.dependent_prune_timings.resize(task.dependent_prune_descs.size());
     for (size_t i = 0; i < task.dependent_prune_descs.size(); ++i) {
@@ -1501,7 +1478,7 @@ void BlockTreeEvictor::selectUpwardCascades(EvictionDropTask&     task,
     };
 
     std::vector<TreeNode*> ancestors;
-    std::vector<bool> endpoint_matchable;
+    std::vector<bool>      endpoint_matchable;
     if (eviction_batch_context == nullptr
         || eviction_batch_context->endpoint_matchable.count(primary_node->parent) == 0) {
         for (TreeNode* node = primary_node->parent; node != tree_->root(); node = node->parent) {

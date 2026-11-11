@@ -17,11 +17,14 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/store/BlockTreeStorer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
 
 namespace rtp_llm {
 
 class BlockTreeTaskPool;
 class BlockTransferDispatcher;
+class FrozenTask;
+class TransferCompletionCleanup;
 class FullPrefixInvariantScanner;
 struct CacheStats {
     size_t tree_node_count{0};
@@ -169,10 +172,10 @@ public:
     // Skips plans containing device blocks that would remain referenced after dropping.
     int evictForGroup(std::string_view group_tag, size_t num_blocks);
 
-    CacheStats                                getStats() const;
-    std::vector<CachePoolMetrics>             poolMetrics() const;
-    void                                      reportMetrics() const;
-    BlockTreeKeySnapshot                      getKeySnapshot(int64_t latest_version = -1) const;
+    CacheStats                    getStats() const;
+    std::vector<CachePoolMetrics> poolMetrics() const;
+    void                          reportMetrics() const;
+    BlockTreeKeySnapshot          getKeySnapshot(int64_t latest_version = -1) const;
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
     bool            abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
@@ -180,7 +183,12 @@ public:
     BlockIndicesType matchedBlocksForGroup(std::string_view                      group_tag,
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
-    TransferResult executeTransfer(TransferTask task);
+    TransferResult                     executeTransfer(TransferTask task);
+    TransferTaskRegistry::State        localTransferCompletion(uint64_t trace_id) const;
+    TransferTaskRegistry::ForgetResult forgetLocalTransferCompletion(uint64_t trace_id) const;
+    // Configure before accepting coordinator work.
+    void                                     setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup);
+    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
 
     // Accessors
     BlockTree* tree() const {

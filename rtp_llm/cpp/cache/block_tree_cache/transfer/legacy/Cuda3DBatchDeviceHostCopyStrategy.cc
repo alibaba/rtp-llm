@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceHostCopyStrategy.h"
 
 #include <limits>
+#include <cstdio>
+#include <cstdlib>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -105,77 +107,103 @@ StrategyResult Cuda3DBatchDeviceHostCopyStrategy::tryExecute(const std::vector<H
                                                              const std::vector<const GroupSet*>&    group_sets,
                                                              const DeviceHostCopyExecutionContext&  context) {
 #if USING_CUDA && !USE_PPU && CUDART_VERSION >= 13000 && CUDART_VERSION < 14000
-    const bool                       d2h          = descriptors.front().target_tier != Tier::DEVICE;
-    int                              device_index = -1;
-    std::vector<cudaMemcpy3DBatchOp> ops;
-    for (size_t i = 0; i < descriptors.size(); ++i) {
-        const auto& group = *group_sets[i];
-        const auto  found = templates_.find(&group);
-        if (found == templates_.end()) {
-            return StrategyResult::notApplicable();
+    bool buffer_safe = true;
+    try {
+        if (hosts.empty() || hosts.size() != descriptors.size() || hosts.size() != group_sets.size()) {
+            return StrategyResult::failed(TransferStatus::INVALID_ARGS, true);
         }
-        const auto&  templates = found->second;
-        const auto&  pools     = group.devicePools();
-        const size_t payload   = group.payloadBytes();
-        if (!isValidHostBufferView(hosts[i], payload, payload)
-            || reinterpret_cast<uintptr_t>(hosts[i].base) > UINTPTR_MAX - payload) {
-            return StrategyResult::failed(hosts[i].base == nullptr ? TransferStatus::DEVICE_IO_ERROR :
-                                                                     TransferStatus::INVALID_ARGS);
-        }
-        const auto& blocks             = descriptors[i].blocksAt(Tier::DEVICE);
-        const int   group_device_index = pools.front()->deviceIndex();
-        if (device_index >= 0 && device_index != group_device_index) {
-            return StrategyResult::notApplicable();
-        }
-        device_index = group_device_index;
-        for (const auto& t : templates) {
-            const auto block = blocks[t.member_index];
-            if (block < 0
-                || static_cast<size_t>(block) >= pools[t.member_index]->config().memory_layouts.front().block_num) {
-                return StrategyResult::failed(TransferStatus::INVALID_ARGS);
+        const bool                       d2h          = descriptors.front().target_tier != Tier::DEVICE;
+        int                              device_index = -1;
+        std::vector<cudaMemcpy3DBatchOp> ops;
+        for (size_t i = 0; i < descriptors.size(); ++i) {
+            if (group_sets[i] == nullptr) {
+                return StrategyResult::failed(TransferStatus::INVALID_ARGS, true);
             }
-            auto* host   = static_cast<uint8_t*>(hosts[i].base) + t.host_offset;
-            auto* device = static_cast<uint8_t*>(t.device_base) + static_cast<size_t>(block) * t.width_bytes;
-            cudaMemcpy3DBatchOp op{};
-            op.src.type               = cudaMemcpyOperandTypePointer;
-            op.dst.type               = cudaMemcpyOperandTypePointer;
-            op.src.op.ptr.ptr         = d2h ? device : host;
-            op.dst.op.ptr.ptr         = d2h ? host : device;
-            op.src.op.ptr.rowLength   = d2h ? t.device_pitch : t.width_bytes;
-            op.dst.op.ptr.rowLength   = d2h ? t.width_bytes : t.device_pitch;
-            op.src.op.ptr.layerHeight = t.layer_count;
-            op.dst.op.ptr.layerHeight = t.layer_count;
-            op.extent                 = {t.width_bytes, t.layer_count, 1};
-            op.srcAccessOrder         = cudaMemcpySrcAccessOrderStream;
-            ops.push_back(op);
+            const auto& group = *group_sets[i];
+            const auto  found = templates_.find(&group);
+            if (found == templates_.end()) {
+                return StrategyResult::notApplicable(true);
+            }
+            const auto&  templates = found->second;
+            const auto&  pools     = group.devicePools();
+            const size_t payload   = group.payloadBytes();
+            if (!isValidHostBufferView(hosts[i], payload, payload)
+                || reinterpret_cast<uintptr_t>(hosts[i].base) > UINTPTR_MAX - payload) {
+                return StrategyResult::failed(
+                    hosts[i].base == nullptr ? TransferStatus::DEVICE_IO_ERROR : TransferStatus::INVALID_ARGS, true);
+            }
+            const auto& blocks = descriptors[i].blocksAt(Tier::DEVICE);
+            if (pools.empty() || blocks.size() != pools.size()) {
+                return StrategyResult::failed(TransferStatus::INVALID_ARGS, true);
+            }
+            const int group_device_index = pools.front()->deviceIndex();
+            if (device_index >= 0 && device_index != group_device_index) {
+                return StrategyResult::notApplicable(true);
+            }
+            device_index = group_device_index;
+            for (const auto& t : templates) {
+                const auto block = blocks[t.member_index];
+                if (block < 0
+                    || static_cast<size_t>(block) >= pools[t.member_index]->config().memory_layouts.front().block_num) {
+                    return StrategyResult::failed(TransferStatus::INVALID_ARGS, true);
+                }
+                auto* host   = static_cast<uint8_t*>(hosts[i].base) + t.host_offset;
+                auto* device = static_cast<uint8_t*>(t.device_base) + static_cast<size_t>(block) * t.width_bytes;
+                cudaMemcpy3DBatchOp op{};
+                op.src.type               = cudaMemcpyOperandTypePointer;
+                op.dst.type               = cudaMemcpyOperandTypePointer;
+                op.src.op.ptr.ptr         = d2h ? device : host;
+                op.dst.op.ptr.ptr         = d2h ? host : device;
+                op.src.op.ptr.rowLength   = d2h ? t.device_pitch : t.width_bytes;
+                op.dst.op.ptr.rowLength   = d2h ? t.width_bytes : t.device_pitch;
+                op.src.op.ptr.layerHeight = t.layer_count;
+                op.dst.op.ptr.layerHeight = t.layer_count;
+                op.extent                 = {t.width_bytes, t.layer_count, 1};
+                op.srcAccessOrder         = cudaMemcpySrcAccessOrderStream;
+                ops.push_back(op);
+            }
         }
-    }
 
-    if (!context.owner || context.deviceIndex() != device_index || context.stream() == 0
-        || context.direction != (d2h ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D)) {
-        return StrategyResult::failed(TransferStatus::INVALID_ARGS);
+        if (!context.owner || context.deviceIndex() != device_index || context.stream() == 0
+            || context.direction != (d2h ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D)) {
+            return StrategyResult::failed(TransferStatus::INVALID_ARGS, true);
+        }
+        c10::cuda::CUDAGuard         guard(device_index);
+        auto                         stream = reinterpret_cast<cudaStream_t>(context.stream());
+        std::unique_lock<std::mutex> submit_lock(cudaBatchSubmitMutex(device_index));
+        buffer_safe       = false;
+        const auto submit = cudaMemcpy3DBatchAsync(ops.size(), ops.data(), 0, stream);
+        submit_lock.unlock();
+        // Drain even a failed submission: a prefix may already be in flight.
+        const auto completion = cudaStreamSynchronize(stream);
+        if (completion != cudaSuccess) {
+            // No exception may release buffers while a prefix of the batch is still using them.
+            std::fprintf(stderr,
+                         "3D batch completion unconfirmed: device=%d error=%s\n",
+                         device_index,
+                         cudaGetErrorString(completion));
+            std::fflush(stderr);
+            std::abort();
+        }
+        buffer_safe = true;
+        if (submit != cudaSuccess) {
+            RTP_LLM_LOG_WARNING("3D batch submission failed: device=%d ops=%zu error=%s",
+                                device_index,
+                                ops.size(),
+                                cudaGetErrorString(submit));
+            return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR, true);
+        }
+        return StrategyResult::done(true);
+    } catch (...) {
+        if (!buffer_safe) {
+            std::fputs("3D batch completion unconfirmed during exception\n", stderr);
+            std::fflush(stderr);
+            std::abort();
+        }
+        return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR, true);
     }
-    c10::cuda::CUDAGuard         guard(device_index);
-    auto                         stream = reinterpret_cast<cudaStream_t>(context.stream());
-    std::unique_lock<std::mutex> submit_lock(cudaBatchSubmitMutex(device_index));
-    const auto                   submit = cudaMemcpy3DBatchAsync(ops.size(), ops.data(), 0, stream);
-    submit_lock.unlock();
-    // Drain even a failed submission: a prefix may already be in flight.
-    const auto completion = cudaStreamSynchronize(stream);
-    RTP_LLM_CHECK_WITH_INFO(completion == cudaSuccess,
-                            "3D batch completion failed: device=%d error=%s",
-                            device_index,
-                            cudaGetErrorString(completion));
-    if (submit != cudaSuccess) {
-        RTP_LLM_LOG_WARNING("3D batch submission failed: device=%d ops=%zu error=%s",
-                            device_index,
-                            ops.size(),
-                            cudaGetErrorString(submit));
-        return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
-    }
-    return StrategyResult::done();
 #else
-    return StrategyResult::notApplicable();
+    return StrategyResult::notApplicable(true);
 #endif
 }
 

@@ -26,15 +26,22 @@ public:
     using ConfigMap = std::map<std::string, KVCMConfigPtr>;
     // Internal submission tracking; an ordinary SDK error does not prove that
     // payload I/O has stopped accessing caller buffers.
-    enum class TransferCompletion { NOT_SUBMITTED, PAYLOAD_COMPLETE, UNKNOWN };
-    explicit ClientWrapper(std::unique_ptr<ClientFactory> client_factory = std::make_unique<ClientFactory>(),
-                           std::chrono::milliseconds reinit_interval = std::chrono::seconds(10));
+    enum class TransferCompletion {
+        NOT_SUBMITTED,
+        PAYLOAD_COMPLETE,
+        UNKNOWN,
+        NOT_STARTED = NOT_SUBMITTED,
+        BUFFER_SAFE = PAYLOAD_COMPLETE,
+    };
+    static TransferCompletion sdkResultCompletion(kv_cache_manager::ClientErrorCode ec);
+    explicit ClientWrapper(std::unique_ptr<ClientFactory> client_factory  = std::make_unique<ClientFactory>(),
+                           std::chrono::milliseconds      reinit_interval = std::chrono::seconds(10));
     virtual ~ClientWrapper();
     virtual bool
     init(const ConfigMap& config_str_map, const kv_cache_manager::InitParams& init_params, const std::string& tag);
     struct PoolRegistration {
-        kv_cache_manager::RegistSpan span;
-        std::string                  location_spec_name;
+        kv_cache_manager::RegistSpan                               span;
+        std::string                                                location_spec_name;
         std::optional<kv_cache_manager::ClientMemoryRegistrations> memory_registrations;
     };
     virtual bool initForPools(const ConfigMap&                     config_map,
@@ -59,27 +66,33 @@ public:
                      int64_t                         write_timeout_seconds,
                      int32_t                         min_replica_count = 0);
 
-    virtual bool removeCache(const std::string& unique_id, const std::string& trace_id,
-                             const std::vector<int64_t>& keys, const std::vector<int64_t>& tokens,
+    virtual bool removeCache(const std::string&                 unique_id,
+                             const std::string&                 trace_id,
+                             const std::vector<int64_t>&        keys,
+                             const std::vector<int64_t>&        tokens,
                              const kv_cache_manager::BlockMask& block_mask);
     virtual std::pair<bool, kv_cache_manager::BackendLocations>
-    getCacheLocationsByBackend(const std::string& unique_id, const std::string& trace_id,
-                               const std::vector<int64_t>& keys, const std::vector<int64_t>& tokens,
-                               const kv_cache_manager::BlockMask& block_mask,
-                               const std::vector<std::string>& location_spec_names,
-                               kv_cache_manager::StorageType backend_type);
-    virtual std::pair<bool, kv_cache_manager::HostCacheState>
-    getHostCacheState(const std::string& unique_id, const std::string& trace_id,
-                      kv_cache_manager::QueryType query_type, const std::vector<int64_t>& keys,
-                      const std::vector<std::string>& medium, int32_t p2p_host_count);
+                                                              getCacheLocationsByBackend(const std::string&                 unique_id,
+                                                                                         const std::string&                 trace_id,
+                                                                                         const std::vector<int64_t>&        keys,
+                                                                                         const std::vector<int64_t>&        tokens,
+                                                                                         const kv_cache_manager::BlockMask& block_mask,
+                                                                                         const std::vector<std::string>&    location_spec_names,
+                                                                                         kv_cache_manager::StorageType      backend_type);
+    virtual std::pair<bool, kv_cache_manager::HostCacheState> getHostCacheState(const std::string&          unique_id,
+                                                                                const std::string&          trace_id,
+                                                                                kv_cache_manager::QueryType query_type,
+                                                                                const std::vector<int64_t>& keys,
+                                                                                const std::vector<std::string>& medium,
+                                                                                int32_t p2p_host_count);
 
     virtual bool finishWrite(const std::string&                 unique_id,
                              const std::string&                 trace_id,
                              const std::string&                 write_session_id,
                              const kv_cache_manager::BlockMask& block_mask,
                              const kv_cache_manager::Locations& locations);
-    virtual bool abortWrite(const std::string& unique_id, const std::string& trace_id,
-                            const std::string& write_session_id);
+    virtual bool
+    abortWrite(const std::string& unique_id, const std::string& trace_id, const std::string& write_session_id);
 
     // The tag selects a registered transfer client; vector slots stay private.
     // PACE uses the first client, which owns all GPU registrations. Span-bound backends must use their own pool's tag.
@@ -87,21 +100,27 @@ public:
                                     const kv_cache_manager::UriStrVec&                          uris,
                                     kv_cache_manager::BlockBuffers&                             buffers,
                                     const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
+    // Without completion feedback, an overridden legacy status method remains
+    // UNKNOWN after admission. Only native preflight may prove NOT_SUBMITTED;
+    // only an explicit native result may prove PAYLOAD_COMPLETE.
     virtual kv_cache_manager::ClientErrorCode
     loadKvCachesForTagWithStatus(const std::string&                                          tag,
                                  const kv_cache_manager::UriStrVec&                          uris,
                                  kv_cache_manager::BlockBuffers&                             buffers,
                                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
-    virtual kv_cache_manager::ClientErrorCode loadKvCachesForTagWithStatus(
-        const std::string& tag, const kv_cache_manager::UriStrVec& uris,
-        kv_cache_manager::BlockBuffers& buffers,
-        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
-        std::optional<std::chrono::steady_clock::time_point> deadline);
-    virtual kv_cache_manager::ClientErrorCode loadKvCachesForTagWithStatus(
-        const std::string& tag, const kv_cache_manager::UriStrVec& uris,
-        kv_cache_manager::BlockBuffers& buffers,
-        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
-        TransferCompletion* completion, std::optional<std::chrono::steady_clock::time_point> deadline);
+    virtual kv_cache_manager::ClientErrorCode
+    loadKvCachesForTagWithStatus(const std::string&                                          tag,
+                                 const kv_cache_manager::UriStrVec&                          uris,
+                                 kv_cache_manager::BlockBuffers&                             buffers,
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
+                                 std::optional<std::chrono::steady_clock::time_point>        deadline);
+    virtual kv_cache_manager::ClientErrorCode
+    loadKvCachesForTagWithStatus(const std::string&                                          tag,
+                                 const kv_cache_manager::UriStrVec&                          uris,
+                                 kv_cache_manager::BlockBuffers&                             buffers,
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
+                                 TransferCompletion*                                         completion,
+                                 std::optional<std::chrono::steady_clock::time_point>        deadline);
     virtual std::pair<bool, kv_cache_manager::UriStrVec>
     saveKvCachesForTag(const std::string&                                          tag,
                        const kv_cache_manager::UriStrVec&                          uris,
@@ -112,16 +131,19 @@ public:
                                  const kv_cache_manager::UriStrVec&                          uris,
                                  const kv_cache_manager::BlockBuffers&                       buffers,
                                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
-    virtual std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec> saveKvCachesForTagWithStatus(
-        const std::string& tag, const kv_cache_manager::UriStrVec& uris,
-        const kv_cache_manager::BlockBuffers& buffers,
-        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
-        std::optional<std::chrono::steady_clock::time_point> deadline);
-    virtual std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec> saveKvCachesForTagWithStatus(
-        const std::string& tag, const kv_cache_manager::UriStrVec& uris,
-        const kv_cache_manager::BlockBuffers& buffers,
-        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
-        TransferCompletion* completion, std::optional<std::chrono::steady_clock::time_point> deadline);
+    virtual std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
+    saveKvCachesForTagWithStatus(const std::string&                                          tag,
+                                 const kv_cache_manager::UriStrVec&                          uris,
+                                 const kv_cache_manager::BlockBuffers&                       buffers,
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
+                                 std::optional<std::chrono::steady_clock::time_point>        deadline);
+    virtual std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
+    saveKvCachesForTagWithStatus(const std::string&                                          tag,
+                                 const kv_cache_manager::UriStrVec&                          uris,
+                                 const kv_cache_manager::BlockBuffers&                       buffers,
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
+                                 TransferCompletion*                                         completion,
+                                 std::optional<std::chrono::steady_clock::time_point>        deadline);
 
 private:
     bool initImpl(const ConfigMap&                     config_map,
@@ -129,12 +151,11 @@ private:
                   const std::vector<PoolRegistration>& registrations,
                   const std::vector<std::string>&      tags);
     using MetaClientMap = std::map<std::string, std::shared_ptr<kv_cache_manager::MetaClient>>;
-    bool initMetaClient(const std::string& unique_id, KVCMConfigPtr config);
+    bool                                          initMetaClient(const std::string& unique_id, KVCMConfigPtr config);
     std::shared_ptr<kv_cache_manager::MetaClient> getMetaClient(const std::string& unique_id);
-    bool checkError(kv_cache_manager::ClientErrorCode ec,
-                    const std::shared_ptr<kv_cache_manager::MetaClient>& client);
-    void                                          reinitWorkerLoop() noexcept;
-    bool                                          waitForRetry(int sleep_time_ms);
+    bool checkError(kv_cache_manager::ClientErrorCode ec, const std::shared_ptr<kv_cache_manager::MetaClient>& client);
+    void reinitWorkerLoop() noexcept;
+    bool waitForRetry(int sleep_time_ms);
 
     kv_cache_manager::InitParams init_params_;
     // InitParams carries a pointer, so retain the descriptor for every later
@@ -156,19 +177,19 @@ private:
     std::unique_ptr<kvcm::Subscriber>                              subscriber_;
 
     // Protects recovery state and metadata client snapshots; SDK calls run unlocked.
-    std::mutex              reinit_worker_mutex_;
-    std::mutex              shutdown_mutex_;
-    std::condition_variable reinit_worker_cv_;
-    std::thread             reinit_worker_;
+    std::mutex                      reinit_worker_mutex_;
+    std::mutex                      shutdown_mutex_;
+    std::condition_variable         reinit_worker_cv_;
+    std::thread                     reinit_worker_;
     const std::chrono::milliseconds reinit_interval_;
-    std::string            bound_address_;
+    std::string                     bound_address_;
     enum class ReinitAction {
         NONE,
         REGISTER,
         FIND_LEADER
     };
-    ReinitAction            reinit_action_ = ReinitAction::NONE;
-    bool                    stop_requested_   = false;
+    ReinitAction reinit_action_  = ReinitAction::NONE;
+    bool         stop_requested_ = false;
 };
 
 }  // namespace kvcm
