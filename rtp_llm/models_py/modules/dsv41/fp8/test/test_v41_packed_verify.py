@@ -1308,6 +1308,198 @@ class PackedVerifyCUDA(unittest.TestCase):
                 )
 
     @torch.inference_mode()
+    def test_capacity_indexer_compaction_and_topk_follow_live_owner(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_indexer as indexer
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_topk as decode_topk
+        from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_decode_indexer import (
+            make_case,
+        )
+
+        batch, width, capacity, topk = 4, 4, 1024, 512
+        rows = batch * width
+        for ratio, logical in ((1, 128), (2, 64)):
+            for padded in (False, True):
+                with self.subTest(ratio=ratio, pad_invisible=padded):
+                    case, _ = make_case(batch, width, capacity, 128, logical, ratio)
+                    original_table = case["block_table"].clone()
+                    original_q = case["q"].clone()
+                    case["weights"].fill_(1.0)
+                    # Full lookup, as in production; Q is nonzero and each
+                    # replay uses the real request's absolute RoPE position.
+                    frequency_positions = torch.arange(2 * capacity, device="cuda")
+                    angles = (
+                        frequency_positions[:, None]
+                        * torch.linspace(0.0001, 0.01, 32, device="cuda")[None]
+                    )
+                    case["freqs_cis"] = torch.polar(torch.ones_like(angles), angles)
+                    owners = torch.empty(rows, dtype=torch.int32, device="cuda")
+                    positions = torch.empty(rows, dtype=torch.int64, device="cuda")
+                    keys = indexer.DecodeIndexerKeys(
+                        case["pool"], case["block_table"], capacity, logical
+                    )
+
+                    def set_case(lengths, phase):
+                        owner_list = [
+                            request
+                            for request, length in enumerate(lengths)
+                            for _ in range(length)
+                        ]
+                        prefix = [700 * ratio, 900 * ratio, 120 * ratio, 0]
+                        position_list = [
+                            prefix[request] + offset
+                            for request, length in enumerate(lengths)
+                            for offset in range(length)
+                        ]
+                        owners.copy_(torch.tensor(owner_list, device="cuda"))
+                        positions.copy_(torch.tensor(position_list, device="cuda"))
+                        case["context_lens"].copy_(
+                            ((positions + 1) // ratio).reshape(batch, width)
+                        )
+                        case["q"].copy_(original_q * (1 + phase * 0.25))
+                        case["block_table"].copy_(original_table)
+                        # Request1 has >900 visible entries, while request2
+                        # owns only its short prefix's pages. Reading tile2's
+                        # table for rows8/9 must not zero request1's scores.
+                        short_length = (prefix[2] + lengths[2]) // ratio
+                        pages = (short_length + logical - 1) // logical
+                        case["block_table"][2, pages:] = 0
+                        case["block_table"][3].zero_()
+                        if phase:
+                            # Change a reserve-page sentinel at the same
+                            # address without extending the visible prefix.
+                            case["block_table"][2, pages] = original_table[2, pages]
+
+                    def execute():
+                        metadata = indexer.get_decode_metadata(
+                            {},
+                            keys,
+                            positions,
+                            batch_size=batch,
+                            query_len=width,
+                            compress_ratio=ratio,
+                            request_ids=owners,
+                        )
+                        if metadata is None:
+                            raise AssertionError(
+                                "Fused native indexer metadata required"
+                            )
+                        logits = indexer.score_decode_indexer(
+                            **case,
+                            positions=positions,
+                            metadata=metadata,
+                            request_ids=owners,
+                            # Force compaction even on development revisions
+                            # with a BF16 DirectIndexLogits optimization.
+                            preserve_score_dtype=False,
+                            pad_invisible=padded,
+                        )
+                        selected = decode_topk.select_tokens(
+                            logits, metadata.lengths, topk
+                        )
+                        return logits, selected, metadata
+
+                    set_case([4] * batch, 0)
+                    stream = torch.cuda.Stream()
+                    stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(stream):
+                        for _ in range(3):
+                            execute()
+                    torch.cuda.current_stream().wait_stream(stream)
+                    torch.cuda.synchronize()
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        actual, selected, metadata = execute()
+                    # Initialize every captured request's safe-table row,
+                    # including the zero-page request3. It becomes a zero-
+                    # length ghost in subsequent replays, just as in reuse.
+                    graph.replay()
+                    torch.cuda.synchronize()
+                    pointers = (
+                        owners.data_ptr(),
+                        positions.data_ptr(),
+                        actual.data_ptr(),
+                    )
+                    for phase, lengths in enumerate(([5, 5, 6, 0], [6, 6, 4, 0])):
+                        with self.subTest(phase=phase, lengths=lengths):
+                            set_case(lengths, phase)
+                            graph.replay()
+                            torch.cuda.synchronize()
+                            # Independent dense geometry: one real query per
+                            # scorer request with its owner's explicit table.
+                            # This native path cannot infer owner as row//4.
+                            oracle = dict(case)
+                            oracle["q"] = case["q"].reshape(rows, 1, 32, 128)
+                            oracle["weights"] = case["weights"].reshape(rows, 1, 32)
+                            oracle["context_lens"] = case["context_lens"].reshape(
+                                rows, 1
+                            )
+                            oracle["block_table"] = case["block_table"].index_select(
+                                0, owners.long()
+                            )
+                            expected = indexer.score_decode_indexer(
+                                **oracle,
+                                positions=positions,
+                                preserve_score_dtype=False,
+                                pad_invisible=padded,
+                            )
+                            visible_lengths = case["context_lens"].flatten().int()
+                            expected_selected = decode_topk.select_tokens(
+                                expected, visible_lengths, topk
+                            )
+                            self.assertEqual(
+                                pointers,
+                                (
+                                    owners.data_ptr(),
+                                    positions.data_ptr(),
+                                    actual.data_ptr(),
+                                ),
+                            )
+                            torch.testing.assert_close(
+                                metadata.paged.tables,
+                                case["block_table"].clamp_min(0)[owners.long()],
+                                rtol=0,
+                                atol=0,
+                            )
+                            for row in (8, 9):
+                                count = int(visible_lengths[row])
+                                self.assertEqual(int(owners[row]), 1)
+                                self.assertGreater(count, topk)
+                                self.assertGreater(
+                                    expected[row, :count].min().item(), 0
+                                )
+                                zeroed = (
+                                    (actual[row, :count] == 0)
+                                    & (expected[row, :count] > 0)
+                                ).sum()
+                                print(
+                                    f"ratio={ratio} padded={padded} phase={phase} "
+                                    f"row={row} owner=1 tile=2 zeroed_scores={int(zeroed)}"
+                                )
+                            with self.subTest(stage="native_scores_after_compaction"):
+                                visible = (
+                                    torch.arange(capacity, device="cuda")[None]
+                                    < visible_lengths[:, None]
+                                )
+                                torch.testing.assert_close(
+                                    actual[visible], expected[visible], rtol=0, atol=0
+                                )
+                            with self.subTest(stage="native_topk_score_multiset"):
+                                # Score multisets avoid imposing an arbitrary
+                                # tie order on either native TopK algorithm.
+                                actual_scores = actual[8:10].gather(
+                                    1, selected[8:10].long()
+                                )
+                                expected_scores = expected[8:10].gather(
+                                    1, expected_selected[8:10].long()
+                                )
+                                torch.testing.assert_close(
+                                    actual_scores.sort(-1).values,
+                                    expected_scores.sort(-1).values,
+                                    rtol=0,
+                                    atol=0,
+                                )
+
+    @torch.inference_mode()
     def test_indexer_fused_and_uncached_match_per_query_table_oracle(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_indexer as indexer
         from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_decode_indexer import (
