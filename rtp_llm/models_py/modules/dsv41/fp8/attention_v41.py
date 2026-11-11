@@ -2073,15 +2073,15 @@ class AttentionV41FP8(AttentionFP8):
                         # bounded by one block regardless of context length.
                         q_dense = q[chunk]
                         w_dense = weights[chunk]
-                        rows = int(visible.numel())
+                        n_rows = int(visible.numel())
                         k = min(self.index_topk, key_count)
                         key_block = 32768
                         ids = torch.arange(key_count, device=x.device)
                         best_val = torch.full(
-                            (rows, k), -torch.inf, dtype=torch.float32, device=x.device
+                            (n_rows, k), -torch.inf, dtype=torch.float32, device=x.device
                         )
                         best_idx = torch.full(
-                            (rows, k), -1, dtype=torch.int32, device=x.device
+                            (n_rows, k), -1, dtype=torch.int32, device=x.device
                         )
                         for kb in range(0, key_count, key_block):
                             ke = min(kb + key_block, key_count)
