@@ -1,6 +1,8 @@
 """V4 Flash MXFP4 MegaMoE with model-owned symmetric workspace."""
 
+import logging
 import os
+
 import torch
 
 from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_deepep_fp4 import PpuDeepEPFP4Strategy, take_raw_routed_mxfp4_weights
@@ -180,22 +182,37 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
             scheduling["expected_m"] = max(
                 1, token_count * self.cfg.n_activated_experts // self.cfg.n_local_experts + 1
             )
-        if self._streamed:
-            gemm = self._mega.fp4_fp4_mega_moe_streamed
-        else:
-            gemm = self._mega.fp4_fp4_mega_moe
-            scheduling["fuse_reduce"] = False
-            if after_gemm1 is not None:
-                scheduling["after_gemm1"] = after_gemm1
-        gemm(
-            y,
-            (self._w13, self._s13),
-            (self._w2, self._s2),
-            self._sym,
+        self._launch_routed_gemm(y, scheduling, after_gemm1)
+        return hierarchy.combine(y, token_count) if hierarchy is not None else y
+
+    # The packaged streamed kernel accepts one decode tile shape only and the
+    # binding reports a mismatch through a plain RuntimeError message.
+    _STREAMED_TILE_ERROR = "streamed MegaMoE requires"
+
+    def _launch_routed_gemm(self, y, scheduling, after_gemm1):
+        weights = ((self._w13, self._s13), (self._w2, self._s2), self._sym)
+        extra = dict(
             activation_clamp=(
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             preserve_bf16=True,
-            **scheduling,
         )
-        return hierarchy.combine(y, token_count) if hierarchy is not None else y
+        if self._streamed:
+            try:
+                self._mega.fp4_fp4_mega_moe_streamed(y, *weights, **extra, **scheduling)
+                return
+            except RuntimeError as err:
+                if self._STREAMED_TILE_ERROR not in str(err):
+                    raise
+                # A decode tile the streamed kernel does not cover must degrade
+                # to the plain kernel instead of aborting engine startup.
+                logging.warning(
+                    "[ppu-megamoe] streamed kernel rejected the decode tile shape, "
+                    "falling back to fp4_fp4_mega_moe: %s",
+                    err,
+                )
+                self._streamed = False
+        fallback = dict(scheduling, fuse_reduce=False)
+        if after_gemm1 is not None:
+            fallback["after_gemm1"] = after_gemm1
+        self._mega.fp4_fp4_mega_moe(y, *weights, **extra, **fallback)

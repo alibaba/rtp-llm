@@ -205,6 +205,48 @@ class MegaMoEContractTest(unittest.TestCase):
             strategy.forward(x, weights, indices, after_gemm1=lambda: None)
         strategy._mega.mega_moe_pre_dispatch.assert_not_called()
 
+    def test_streamed_tile_rejection_falls_back_to_plain_kernel(self):
+        strategy = object.__new__(PpuMegaMoEFP4Strategy)
+        torch.nn.Module.__init__(strategy)
+        strategy.cfg = self.cfg
+        strategy._sym = object()
+        strategy._w13 = strategy._s13 = strategy._w2 = strategy._s2 = object()
+        strategy._mega = Mock()
+        strategy._mega.fp4_fp4_mega_moe_streamed.side_effect = RuntimeError(
+            "streamed MegaMoE requires Flash EP8 BM64/BN128 and G2 BM32"
+        )
+        strategy._streamed = True
+        x = torch.zeros((8, 4096), dtype=torch.bfloat16)
+        indices = torch.zeros((8, 8), dtype=torch.int64)
+        weights = torch.ones((8, 8))
+        strategy.forward(x, weights, indices)
+        self.assertFalse(strategy._streamed)
+        plain = strategy._mega.fp4_fp4_mega_moe
+        plain.assert_called_once()
+        self.assertFalse(plain.call_args.kwargs["fuse_reduce"])
+        self.assertTrue(plain.call_args.kwargs["preserve_bf16"])
+        strategy.forward(x, weights, indices)
+        self.assertEqual(strategy._mega.fp4_fp4_mega_moe_streamed.call_count, 1)
+        self.assertEqual(plain.call_count, 2)
+
+    def test_streamed_unrelated_runtime_error_still_raises(self):
+        strategy = object.__new__(PpuMegaMoEFP4Strategy)
+        torch.nn.Module.__init__(strategy)
+        strategy.cfg = self.cfg
+        strategy._sym = object()
+        strategy._w13 = strategy._s13 = strategy._w2 = strategy._s2 = object()
+        strategy._mega = Mock()
+        strategy._mega.fp4_fp4_mega_moe_streamed.side_effect = RuntimeError("boom")
+        strategy._streamed = True
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            strategy.forward(
+                torch.zeros((8, 4096), dtype=torch.bfloat16),
+                torch.ones((8, 8)),
+                torch.zeros((8, 8), dtype=torch.int64),
+            )
+        self.assertTrue(strategy._streamed)
+        strategy._mega.fp4_fp4_mega_moe.assert_not_called()
+
     def test_missing_native_phase_api_rejected_before_forward(self):
         strategy = object.__new__(PpuMegaMoEFP4Strategy)
         torch.nn.Module.__init__(strategy)
