@@ -1139,11 +1139,28 @@ def _forward_prefill_chunked(
     def _vec(key: str, values: Any) -> Optional[torch.Tensor]:
         return _chunk_vec_like(orig[key], values)
 
+    # Engram hashes/masks are per-forward layer state sized by the FULL combo
+    # batch (set in DeepSeekV41Model._prepare_engram before this dispatcher);
+    # slice them alongside input_ids/positions and restore afterwards. A
+    # full-batch lookup prefetch fails its identity check on sliced hashes
+    # and falls back to the regular per-chunk lookup path.
+    engram_saved = [
+        (layer, layer.engram_hashes, layer.engram_token_mask)
+        for layer in v4.layers
+        if getattr(layer, "engram_hashes", None) is not None
+    ]
+
     finals: Dict[int, Tuple[int, torch.Tensor, int]] = {}
     last_h: Optional[torch.Tensor] = None
     num_chunks = (total + chunk_rows - 1) // chunk_rows
-    for idx, c0 in enumerate(range(0, total, chunk_rows)):
+    try:
+      for idx, c0 in enumerate(range(0, total, chunk_rows)):
         c1 = min(c0 + chunk_rows, total)
+        for layer, full_hashes, full_mask in engram_saved:
+            layer.engram_hashes = full_hashes[c0:c1]
+            layer.engram_token_mask = (
+                None if full_mask is None else full_mask[c0:c1]
+            )
         parts = []
         for ri in range(n_req):
             s0, s1 = bounds[ri], bounds[ri + 1]
@@ -1203,6 +1220,10 @@ def _forward_prefill_chunked(
         for ri, ov0, ov1 in parts:
             if ov1 == bounds[ri + 1]:
                 finals[ri] = (bounds[ri + 1] - 1, h, ov1 - 1 - c0)
+    finally:
+        for layer, full_hashes, full_mask in engram_saved:
+            layer.engram_hashes = full_hashes
+            layer.engram_token_mask = full_mask
     if last_h is None or len(finals) != n_req:
         raise RuntimeError(
             f"chunked prefill lost final rows: have {sorted(finals)}, need {n_req}"
