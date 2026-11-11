@@ -2066,74 +2066,49 @@ class AttentionV41FP8(AttentionFP8):
                                 **({"bounds": bounds} if bounds is not None else {}),
                             )
                     else:
-                        # The dense fallback materialises [tokens, key_count]
-                        # scores.  At 128K CP-local tokens and an 8K candidate
-                        # window that is >4 GiB, more than the whole runtime
-                        # reserve.  Score fixed-size row blocks and publish
-                        # each block immediately; the mathematical result is
-                        # identical to one full-width top-k.
+                        # The dense fallback cannot materialise [tokens, keys]
+                        # scores at full context: 64 queries x 1M keys x heads
+                        # is already several GiB per layer.  Stream key blocks
+                        # and merge per-block top-k exactly, so peak memory is
+                        # bounded by one block regardless of context length.
                         q_dense = q[chunk]
                         w_dense = weights[chunk]
                         rows = int(visible.numel())
-                        row_block = 512
-                        ids = torch.arange(key_count, device=x.device)
-                        candidates = shared.get("candidates")
                         k = min(self.index_topk, key_count)
-                        for rs in range(0, rows, row_block):
-                            re = min(rs + row_block, rows)
-                            logits = torch.einsum(
-                                "thd,kd->thk", q_dense[rs:re], keys.float()
+                        key_block = 32768
+                        ids = torch.arange(key_count, device=x.device)
+                        best_val = torch.full(
+                            (rows, k), -torch.inf, dtype=torch.float32, device=x.device
+                        )
+                        best_idx = torch.full(
+                            (rows, k), -1, dtype=torch.int32, device=x.device
+                        )
+                        for kb in range(0, key_count, key_block):
+                            ke = min(kb + key_block, key_count)
+                            block_logits = torch.einsum(
+                                "thd,kd->thk", q_dense, keys[kb:ke].float()
                             ).relu_()
-                            logits = (logits * w_dense[rs:re, :, None]).sum(1)
-                            vis = visible[rs:re]
-                            logits.masked_fill_(
-                                ids[None] >= vis[:, None], -torch.inf
+                            block_logits = (
+                                block_logits * w_dense[:, :, None]
+                            ).sum(1)
+                            block_logits.masked_fill_(
+                                ids[kb:ke][None] >= visible[:, None], -torch.inf
                             )
-                            out_rows = output_rows[rs:re]
-                            if candidates is not None:
-                                if publish_candidates or (
-                                    candidate_source >= 0
-                                    and self.layer_id > candidate_source
-                                ):
-                                    _apply_prefill_candidates(
-                                        shared,
-                                        logits,
-                                        vis,
-                                        out_rows,
-                                        candidate_size,
-                                        candidate_blocks,
-                                        publish_candidates,
-                                        mask_tail=logits.dtype == torch.bfloat16,
-                                    )
-                            target = out[out_rows, :k] if contiguous else None
-                            selected = prefill_topk.try_select_tokens(
-                                logits,
-                                vis,
-                                k,
-                                bounds=bounds,
-                                out=target,
-                            )
-                            if selected is None:
-                                if logits.dtype == torch.bfloat16:
-                                    from ._v41_grouped_prefill_score import (
-                                        _mask_tail_kernel,
-                                    )
-
-                                    _mask_tail_kernel[(logits.shape[0],)](
-                                        logits,
-                                        vis,
-                                        logits.shape[1],
-                                        logits.stride(0),
-                                        256,
-                                    )
-                                scores, selected = logits.topk(k, dim=-1)
-                                selected = torch.where(
-                                    scores.isfinite(), selected, -1
-                                ).int()
-                                del scores
-                            if selected is not target:
-                                out[out_rows, :k] = selected
-                            del logits, selected, target
+                            take = min(k, ke - kb)
+                            block_val, block_idx = block_logits.topk(take, dim=-1)
+                            block_idx = block_idx + kb
+                            merged_val = torch.cat((best_val, block_val), dim=1)
+                            merged_idx = torch.cat((best_idx, block_idx), dim=1)
+                            best_val, pos = merged_val.topk(k, dim=-1)
+                            best_idx = torch.gather(merged_idx, 1, pos)
+                            del block_logits, block_val, block_idx, merged_val, merged_idx
+                        selected = torch.where(
+                            best_val.isfinite(), best_idx, torch.full_like(best_idx, -1)
+                        ).int()
+                        target = out[output_rows, :k] if contiguous else None
+                        if selected is not target:
+                            out[output_rows, :k] = selected
+                        del selected, target, best_val, best_idx
         shared["topk"] = {self.layer_id: out}
         return out
 
