@@ -14,6 +14,7 @@
 #include <string>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <unordered_set>
@@ -366,6 +367,20 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
     init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
     init_resources.max_context_batch_size = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
+    {
+        // Effective per-forward prefill token bound: the scheduler budget, or
+        // the engine chunked-prefill cap when that is tighter. Models size
+        // workspaces from this instead of falling back to max_seq_len.
+        int64_t     max_batch_tokens = params.runtime_config.fifo_scheduler_config.max_batch_tokens_size;
+        const char* chunk_env        = std::getenv("RTP_LLM_PREFILL_CHUNK_TOKENS");
+        if (chunk_env != nullptr) {
+            const int64_t chunk_tokens = std::atoll(chunk_env);
+            if (chunk_tokens > 0 && (max_batch_tokens <= 0 || chunk_tokens < max_batch_tokens)) {
+                max_batch_tokens = chunk_tokens;
+            }
+        }
+        init_resources.max_batch_tokens_size = max_batch_tokens;
+    }
 
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run

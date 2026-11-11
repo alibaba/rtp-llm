@@ -236,6 +236,10 @@ struct PyModelInitResources {
     bool                   is_speculative         = false;
     bool                   is_decode_role         = false;
     int64_t                max_context_batch_size = 1;
+    // Scheduler token budget (fifo_scheduler_config.max_batch_tokens_size); 0
+    // when unbounded. Models use it to size per-forward prefill workspaces
+    // instead of falling back to max_seq_len.
+    int64_t max_batch_tokens_size = 0;
 };
 
 struct PyCacheStoreInputs {
