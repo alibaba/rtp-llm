@@ -76,7 +76,7 @@ def _get_or_create_local_y(
     return cached
 
 
-_GROUPED_CAPTURE_GROUP = 8
+_GROUPED_CAPTURE_GROUP = 2
 
 
 def _fp4_byte_lut(device: torch.device) -> torch.Tensor:
