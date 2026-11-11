@@ -175,7 +175,7 @@ def forward_graph_query(model, layer_id, x, positions, prefixes, active):
     if key not in state.shared:
         state.shared[key] = table[positions.reshape(-1).clamp(0, cache.max_seq_len - 1)]
     freqs = state.shared[key]
-    _, q, fresh, _ = attn.project_query_kv(flat, reuse_ptpc=True)
+    _, q, fresh, _ = attn.project_query_kv(flat, reuse_ptpc=True, fuse_qr_norm=True)
     q = q.reshape(-1, g.n_heads, g.head_dim)
     packed = try_rotate_q_and_pack_swa(q, fresh, freqs)
     if packed is None:
@@ -251,7 +251,7 @@ def forward_query(model, layer_id, x, positions, prefixes, active, indices):
         return torch.zeros_like(x)
     flat = x.reshape(-1, g.hidden_size)
     freqs = runtime.freqs_for(layer_id)[positions.reshape(-1)]
-    _, q, fresh, _ = attn.project_query_kv(flat, reuse_ptpc=True)
+    _, q, fresh, _ = attn.project_query_kv(flat, reuse_ptpc=True, fuse_qr_norm=True)
     q = _rope_tail(q.reshape(-1, g.n_heads, g.head_dim), freqs)
     fresh = _rope_tail(fresh, freqs)
     cache = state.cache

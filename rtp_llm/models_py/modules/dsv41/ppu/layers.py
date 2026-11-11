@@ -18,7 +18,10 @@ from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.base.common.norm import BaseNorm
 from rtp_llm.models_py.modules.dsv41.hc.base import HCUnitBase
 from rtp_llm.models_py.modules.dsv41.ppu.engram import engram_gate_inject, wkv_project
-from rtp_llm.models_py.modules.dsv41.ppu.linear import prepare_shared_ptpc_input
+from rtp_llm.models_py.modules.dsv41.ppu.linear import (
+    PPUPTPCLinear,
+    prepare_shared_ptpc_input,
+)
 from rtp_llm.models_py.modules.dsv41.ppu.mhc import PPUStepMix
 from rtp_llm.models_py.modules.dsv41.ppu.moe import (
     combine_routed_and_shared,
@@ -145,6 +148,27 @@ class PPUSharedRMSNorm(BaseNorm):
         super().__init__(weight, eps)
         self.calls = 0
         self._ptpc = quant_mode() == MXFP4_FP8_PTPC
+
+    def forward_with_ptpc_input(self, hidden_states):
+        """Return the unchanged BF16 norm and an optional ephemeral PTPC pair."""
+        if self._ptpc:
+            from rtp_llm.models_py.modules.dsv41.ppu.ptpc_norm import (
+                can_fuse_ptpc_rms_norm,
+            )
+
+            if can_fuse_ptpc_rms_norm(hidden_states, self.weight):
+                from rtp_llm.models_py.modules.dsv41.ppu.ptpc_norm_quant import (
+                    ptpc_rms_norm_quant_candidate,
+                )
+
+                result = ptpc_rms_norm_quant_candidate(
+                    hidden_states, self.weight, self.variance_epsilon
+                )
+                if result is not None:
+                    self.calls += 1
+                    normalized, payload, scale = result
+                    return normalized, (payload, scale)
+        return self(hidden_states), None
 
     def forward(self, hidden_states):
         self.calls += 1
@@ -470,7 +494,9 @@ class PPUAttentionProjections(nn.Module):
     def query_latent(self, normalized_hidden):
         return self.q_norm(self.wq_a(normalized_hidden))
 
-    def project_query_kv(self, x, *, prepare_indexer=False, reuse_ptpc=False):
+    def project_query_kv(
+        self, x, *, prepare_indexer=False, reuse_ptpc=False, fuse_qr_norm=False
+    ):
         """Keep projection order while sharing identical PTPC input rows.
 
         The optional pairs are local to this invocation. Graph capture records
@@ -480,14 +506,27 @@ class PPUAttentionProjections(nn.Module):
             prepare_shared_ptpc_input(x, (self.wq_a, self.wkv))
             if reuse_ptpc else None
         )
-        if x_pair is None:
-            qr = self.query_latent(x)
-        else:
-            qr = self.q_norm(self.wq_a.forward_quantized(*x_pair))
-        qr_pair = (
-            prepare_shared_ptpc_input(qr, (self.wq_b, self.index_wq))
-            if reuse_ptpc and prepare_indexer else None
+        raw_qr = (
+            self.wq_a(x) if x_pair is None else self.wq_a.forward_quantized(*x_pair)
         )
+        qr_consumers = (self.wq_b, self.index_wq) if prepare_indexer else (self.wq_b,)
+        can_prepare_qr = (
+            fuse_qr_norm
+            and reuse_ptpc
+            and raw_qr.shape[-1] == 1280
+            and all(
+                isinstance(op, PPUPTPCLinear)
+                and op.weight.device == raw_qr.device
+                and op.weight.shape[1] == raw_qr.shape[-1]
+                for op in qr_consumers
+            )
+        )
+        if can_prepare_qr:
+            qr, qr_pair = self.q_norm.forward_with_ptpc_input(raw_qr)
+        else:
+            qr, qr_pair = self.q_norm(raw_qr), None
+        if qr_pair is None and reuse_ptpc and prepare_indexer:
+            qr_pair = prepare_shared_ptpc_input(qr, qr_consumers)
         q = self.wq_b(qr) if qr_pair is None else self.wq_b.forward_quantized(*qr_pair)
         raw_kv = self.wkv(x) if x_pair is None else self.wkv.forward_quantized(*x_pair)
         return qr, q, self.kv_norm(raw_kv), qr_pair

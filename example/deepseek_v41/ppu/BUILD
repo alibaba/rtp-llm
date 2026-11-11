@@ -24,6 +24,7 @@ exports_files(["test_functional.sh"])
         ("contracts", 0), ("device", 1), ("alignment", 0), ("audit", 0), ("layout", 0),
         ("fusion-contracts", 0), ("fusion-device", 1), ("fusion-micro", 1),
         ("prepared-contracts", 0), ("prepared-device", 1),
+        ("qnorm-contracts", 0), ("qnorm-device", 1),
     ]
 ]
 

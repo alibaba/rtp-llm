@@ -406,7 +406,7 @@ def forward_graph_attention(attn, x, state):
         freqs = table[positions]
     qr, q, kv, qr_quantized = attn.project_query_kv(
         x, prepare_indexer=bool(attn.compress_ratio and attn.is_index_source),
-        reuse_ptpc=verify,
+        reuse_ptpc=verify, fuse_qr_norm=verify,
     )
     q = q.reshape(-1, g.n_heads, g.head_dim)
     if native_packed:

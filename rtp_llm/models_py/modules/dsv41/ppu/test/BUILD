@@ -12,6 +12,7 @@ filegroup(
         "test_ptpc_woa_direct.py",
         "test_ptpc_prepared.py",
         "test_ptpc_input_reuse.py",
+        "test_ptpc_qnorm_reuse.py",
         "ptpc_microbench.py",
     ],
 )
