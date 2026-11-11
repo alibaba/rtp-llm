@@ -1011,6 +1011,14 @@ py_test(
 )
 
 py_test(
+    name = "navi_sched_vllm_v6d_cache_source_test",
+    srcs = ["test/vllm/VLLMV6DCacheSourceTest.py"],
+    main = "test/vllm/VLLMV6DCacheSourceTest.py",
+    data = ["adapters/vllm/VLLMEngineObserver.py"],
+    python_version = "PY3",
+)
+
+py_test(
     name = "navi_sched_vllm_block_hash_test",
     srcs = ["test/vllm/VLLMBlockHashTest.py"],
     main = "test/vllm/VLLMBlockHashTest.py",
@@ -1427,6 +1435,19 @@ py_test(
 )
 
 py_test(
+    name = "navi_sched_v6d_snapshot_contract_test",
+    srcs = ["test/vllm/VLLMV6DSnapshotContractTest.py"],
+    main = "test/vllm/VLLMV6DSnapshotContractTest.py",
+    data = [
+        "packaging/dashllm_r50/runtime_overlay/kvs_connector/v6d_object_connector.py",
+        "packaging/dashllm_r78/runtime_overlay/kvs_connector/v6d_object_connector.py",
+        "packaging/dashllm_r50/runtime_overlay/v6d/server/daemon.py",
+        "packaging/dashllm_r50/runtime_overlay/v6d/server/peers/tiered_vineyard/peer.py",
+    ],
+    python_version = "PY3",
+)
+
+py_test(
     name = "navi_sched_r50_publication_test",
     srcs = ["test/vllm/VLLMR50PublicationTest.py"],
     main = "test/vllm/VLLMR50PublicationTest.py",
@@ -1782,4 +1803,15 @@ cc_test(
     ],
     data = [":wheel_python_runtime"],
     deps = ["//aios/unittest_framework", ":navi_sched_role_lib"],
+)
+
+py_test(
+    name = "navi_sched_vllm_v6d_wire_integration_test",
+    srcs = ["test/vllm/VLLMV6DWireIntegrationTest.py"],
+    main = "test/vllm/VLLMV6DWireIntegrationTest.py",
+    python_version = "PY3",
+    env = {
+        "LD_LIBRARY_PATH": "/opt/conda310/lib",
+    },
+    deps = [":py_sched_lib"],
 )

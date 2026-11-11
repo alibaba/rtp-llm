@@ -71,12 +71,15 @@ _LATENCY_PARAMETER_LEARNING_RATE_SCALES = (
 )
 
 
+_CACHE_SNAPSHOT_INTERVAL_NS = 100_000_000
+
+
 class _MediaPreprocessingError(ValueError):
     pass
 
 
 def _v6d_peer_cache_enabled(scheduler) -> bool:
-    """Read the connected client's cached capability once, before Agent init."""
+    """Follow native V6D configuration; live read status is reported separately."""
     module = sys.modules.get("kvs_connector.v6d_object_connector")
     connector_type = getattr(module, "V6dObjectConnector", None)
     if connector_type is None:
@@ -85,39 +88,7 @@ def _v6d_peer_cache_enabled(scheduler) -> bool:
     while connectors:
         connector = connectors.pop()
         if isinstance(connector, connector_type):
-            source = connector.scheduler
-            # Multi-node TP needs per-shard capability/domain reporting first.
-            if getattr(source, "_is_cross_node_tp", False):
-                return False
-            context = getattr(source, "_client_context", None)
-            client = getattr(context, "client", None)
-            info = getattr(client, "peer_info", None)
-            if not isinstance(info, dict):
-                return False
-            # The existing SDK finishes lazy transfer initialization in its own
-            # startup thread after the connector publishes the cache spec.
-            polling_thread = getattr(client, "_polling_thread", None)
-            if (
-                info.get("is_lazy_strategy") is True
-                and getattr(client, "tair_kvcm_runtime", None) is None
-                and polling_thread is not None
-            ):
-                polling_thread.join(timeout=30.0)
-                info = getattr(client, "peer_info", None)
-                if not isinstance(info, dict):
-                    return False
-            status = info.get("kvcm_status", {})
-            if not isinstance(status, dict):
-                return False
-            ready = (
-                info.get("peer_type") == "vineyard"
-                and status.get("mode") == "report-event-and-cache-transfer"
-                and status.get("report_event_ready") is True
-                and status.get("cache_transfer_ready") is True
-            )
-            if info.get("is_lazy_strategy") is True:
-                ready = ready and getattr(client, "tair_kvcm_runtime", None) is not None
-            return bool(ready)
+            return True
         connectors.extend(getattr(connector, "_connectors", ()))
     return False
 
@@ -1302,10 +1273,14 @@ class _NaviSchedScheduler:
                         self._forward_enqueue_sequence += 1
                         submit_timing = state.submit_timing
                         if submit_timing is not None:
-                            submit_timing[request_id]["native_add_started_ns"] = time.monotonic_ns()
+                            submit_timing[request_id][
+                                "native_add_started_ns"
+                            ] = time.monotonic_ns()
                         self._scheduler.add_request(forwarded)
                         if submit_timing is not None:
-                            submit_timing[request_id]["native_add_finished_ns"] = time.monotonic_ns()
+                            submit_timing[request_id][
+                                "native_add_finished_ns"
+                            ] = time.monotonic_ns()
                         added_request_ids.append(forwarded.request_id)
             except BaseException:
                 self._rollback_failed_admission(state, added_request_ids)
@@ -1592,6 +1567,8 @@ class VLLMEngineObserver:
         self._v6d_scheduler = None
         self._v6d_publication_restore = []
         self._v6d_unpublished_candidates = {}
+        self._v6d_snapshot_future = None
+        self._next_v6d_snapshot_poll_ns = 0
         self._block_size = self._cache_policy.block_size
         if os.environ.get("PYTHONHASHSEED") != "0":
             raise ValueError("NaviSched requires PYTHONHASHSEED=0")
@@ -1856,7 +1833,9 @@ class VLLMEngineObserver:
         if getattr(self, "_pp_workload_timing_enabled", False) and not hasattr(
             self._bridge, "last_workload_report_duration_ns"
         ):
-            logger.warning("NaviSched PP workload timing requires a matching C++ bridge")
+            logger.warning(
+                "NaviSched PP workload timing requires a matching C++ bridge"
+            )
             self._pp_workload_timing_enabled = False
         if not self._bridge.enable_forwarding():
             self.shutdown()
@@ -1872,7 +1851,11 @@ class VLLMEngineObserver:
         if self._native_ingress:
             logger.info(
                 "NaviSched native engine step loop: %s",
-                getattr(engine_core.step_fn, "__qualname__", type(engine_core.step_fn).__name__),
+                getattr(
+                    engine_core.step_fn,
+                    "__qualname__",
+                    type(engine_core.step_fn).__name__,
+                ),
             )
         self._bind_backend_pipeline_stages(engine_core)
         self._engine_core = engine_core
@@ -1925,7 +1908,9 @@ class VLLMEngineObserver:
             and isinstance(NONE_HASH, bytes)
             and len(NONE_HASH) == 32
         ):
-            logger.warning("NaviSched PP C++ KV hashing is unavailable for this EngineCore")
+            logger.warning(
+                "NaviSched PP C++ KV hashing is unavailable for this EngineCore"
+            )
             return
         engine_core.request_block_hasher = wrap_vllm_request_block_hasher(
             native_hasher, block_size, NONE_HASH, hash_plain_blocks
@@ -2145,7 +2130,9 @@ class VLLMEngineObserver:
                 reporter = reporters[request_id].make_cache_publication_reporter()
                 for job in source._store_jobs.values():
                     shared = {
-                        group: set(hashes).intersection(source.navi_sched_job_hashes(job).get(group, ()))
+                        group: set(hashes).intersection(
+                            source.navi_sched_job_hashes(job).get(group, ())
+                        )
                         for group, hashes in groups.items()
                     }
                     shared = {
@@ -2167,6 +2154,30 @@ class VLLMEngineObserver:
         self._v6d_publication_restore.clear()
         self._v6d_unpublished_candidates.clear()
 
+    def _poll_v6d_cache_source(self) -> None:
+        if self._forward_stop.is_set() or self._v6d_scheduler is None:
+            return
+        future = self._v6d_snapshot_future
+        if future is not None:
+            if not future.done():
+                return
+            self._v6d_snapshot_future = None
+            try:
+                self.on_v6d_cache_snapshots(future.result())
+            except Exception:
+                # Observation failure is not an upstream circuit-state update.
+                logger.exception("failed to read V6D resident cache snapshot")
+        now = time.monotonic_ns()
+        if now >= self._next_v6d_snapshot_poll_ns:
+            self._next_v6d_snapshot_poll_ns = now + _CACHE_SNAPSHOT_INTERVAL_NS
+            try:
+                self._v6d_snapshot_future = (
+                    self._v6d_scheduler.submit_local_cache_snapshots()
+                )
+            except Exception:
+                # Keep the last state explicitly supplied by the upstream cache.
+                logger.exception("failed to submit V6D resident cache snapshot")
+
     def _forward_batches(self) -> None:
         if _read_bool_env("VLLM_NAVI_SCHED_DEFER_RENDER", False):
             asyncio.run(self._forward_render_batches())
@@ -2177,6 +2188,7 @@ class VLLMEngineObserver:
 
         decoder = MsgpackDecoder(forward_request_type(EngineCoreRequest))
         while True:
+            self._poll_v6d_cache_source()
             if not self._drain_cancelled_requests(EngineCoreRequestType):
                 if self._forward_stop.wait(0.1):
                     return
@@ -2921,10 +2933,14 @@ class VLLMEngineObserver:
             for request_id, value in processed:
                 submit_timing = state.submit_timing
                 if submit_timing is not None:
-                    submit_timing[request_id]["queue_put_started_ns"] = time.monotonic_ns()
+                    submit_timing[request_id][
+                        "queue_put_started_ns"
+                    ] = time.monotonic_ns()
                 engine_core.input_queue.put_nowait((request_type.ADD, value))
                 if submit_timing is not None:
-                    submit_timing[request_id]["queue_put_finished_ns"] = time.monotonic_ns()
+                    submit_timing[request_id][
+                        "queue_put_finished_ns"
+                    ] = time.monotonic_ns()
                 submitted_request_ids.append(request_id)
         except Exception:
             submitted = set(submitted_request_ids)
@@ -4025,7 +4041,9 @@ class VLLMEngineObserver:
                 waiting_requests = workload.waiting_request_count
                 if timing is not None:
                     timing.mark("arrival_snapshot")
-                if self._report_workload_locked(workload, reason, admitted_state, timing):
+                if self._report_workload_locked(
+                    workload, reason, admitted_state, timing
+                ):
                     if admitted_state is not None:
                         with admitted_state.lock:
                             admitted_state.admission_reported = True
@@ -4432,13 +4450,19 @@ class VLLMEngineObserver:
                 if has_tokens:
                     execution_step.backend_execution_started = bool(
                         _execution_timing_probe.begin(
-                            execution_step, self._bridge.begin_backend_execution, 0, running_request_count
+                            execution_step,
+                            self._bridge.begin_backend_execution,
+                            0,
+                            running_request_count,
                         )
                     )
             else:
                 execution_step.backend_execution_started = bool(
                     _execution_timing_probe.begin(
-                        execution_step, self._bridge.begin_backend_execution, 0, running_request_count
+                        execution_step,
+                        self._bridge.begin_backend_execution,
+                        0,
+                        running_request_count,
                     )
                 )
             if not execution_step.backend_execution_started and (
@@ -5789,6 +5813,51 @@ class VLLMEngineObserver:
             self._mark_forward_batch_released(state)
         self._cleanup_released_forward_batch(state)
 
+    def on_v6d_cache_snapshots(self, snapshots: list[dict]) -> None:
+        """Feed existing resident-object snapshots into the original KV path."""
+        if not snapshots:
+            raise ValueError("V6D snapshot requires every physical node")
+        if any(
+            type(snapshot["peer_cache_read_available"]) is not bool
+            for snapshot in snapshots
+        ):
+            raise ValueError("invalid V6D peer cache read availability")
+        peer_cache_read_available = all(
+            snapshot["peer_cache_read_available"] for snapshot in snapshots
+        )
+        common = None
+        for snapshot in snapshots:
+            groups = {}
+            for obj in snapshot["objects"]:
+                if obj["tier"] != "vineyard" or obj["sealedResident"] is not True:
+                    continue
+                identity = obj["meta"].get("navi_sched_cache")
+                if identity is None:
+                    continue
+                identity = json.loads(identity)
+                group_id = identity["group_id"]
+                if type(group_id) is not int or not 0 <= group_id < len(
+                    self._cache_policy.group_roles
+                ):
+                    raise ValueError("invalid V6D cache group")
+                hashes = [bytes.fromhex(value) for value in identity["block_hashes"]]
+                if not hashes or any(len(value) != 32 for value in hashes):
+                    raise ValueError("invalid V6D source block hash")
+                groups.setdefault(group_id, set()).update(hashes)
+            if common is None:
+                common = groups
+            else:
+                for group_id in common:
+                    common[group_id].intersection_update(groups.get(group_id, ()))
+        self.on_block_lifecycle_event(
+            "snapshot",
+            None,
+            {group_id: tuple(sorted(hashes)) for group_id, hashes in common.items()},
+            cause="v6d_resident_snapshot",
+            cache_key_type=1,
+        )
+        self._bridge.report_peer_cache_read_available(peer_cache_read_available)
+
     def on_block_lifecycle_event(
         self,
         event_type: str,
@@ -5943,6 +6012,9 @@ class VLLMEngineObserver:
         for thread in (self._forward_thread,):
             if thread is not None and thread is not threading.current_thread():
                 thread.join()
+        if self._v6d_snapshot_future is not None:
+            self._v6d_snapshot_future.cancel()
+            self._v6d_snapshot_future = None
         self._restore_v6d_publication_observers()
         for state in self._matching_forward_batches(None):
             self._fail_forward_responses(
