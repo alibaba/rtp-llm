@@ -357,6 +357,21 @@ class NfsManager:
 _nfs_manager = NfsManager()
 
 
+def _awi_record_network_fetch():
+    """Count a genuine remote fetch into the AWI observation registry.
+
+    This module is the codebase's canonical remote-content entry (JIT cache
+    remote stores, remote model/checkpoint URIs). Best-effort: processes
+    without the engine bindings (e.g. frontend-only) simply skip counting.
+    """
+    try:
+        import libth_transformer
+
+        libth_transformer.awi_record_startup_network_fetch()
+    except Exception:
+        pass
+
+
 def fetch_remote_file_to_local(
     path: str,
     mount_mode: MountRwMode = MountRwMode.RWMODE_RO,
@@ -368,9 +383,11 @@ def fetch_remote_file_to_local(
         return path
     elif parse_result.scheme == "nas":
         logging.info(f"try mount nas path {path}")
+        _awi_record_network_fetch()
         return _nfs_manager.mount_nfs_dir(path)
     else:
         logging.info(f"try fuse path {_redact_uri(path)}")
+        _awi_record_network_fetch()
         return _get_fuser().mount_dir(path, mount_mode, enable_mnt_ref)
 
 
