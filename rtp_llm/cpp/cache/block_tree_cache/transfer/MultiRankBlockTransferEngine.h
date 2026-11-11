@@ -26,11 +26,10 @@ public:
                                  std::shared_ptr<BroadcastManager>              broadcast_manager,
                                  std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr);
 
+    // One copy direction per request; the receiving PerRank engines own batching.
     std::shared_ptr<TransferAsyncContext> execute(TransferTask task, const char* completion_operation = nullptr) const;
 
 private:
-    friend class BlockTransferDispatcher;
-
     std::vector<GroupSetPtr>                       group_sets_;
     std::shared_ptr<BroadcastManager>              broadcast_manager_;
     std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter_;

@@ -26,7 +26,12 @@ class StagedSmDeviceHostCopyStrategy: public DeviceHostCopyStrategy {
 public:
     ~StagedSmDeviceHostCopyStrategy() override;
 
-    StrategyResult tryExecute(const DeviceHostCopyPlan& plan, const DeviceHostCopyOptions& options) override;
+    StrategyResult tryExecute(const DeviceHostCopyPlan& plan, const DeviceHostCopyOptions& options);
+    StrategyResult tryExecute(const DeviceHostCopyPlan&    plan,
+                              const DeviceHostCopyOptions& options,
+                              const DeviceHostCopyExecutionContext&) override {
+        return tryExecute(plan, options);
+    }
 
 private:
     std::mutex                                              scratch_mutex_;

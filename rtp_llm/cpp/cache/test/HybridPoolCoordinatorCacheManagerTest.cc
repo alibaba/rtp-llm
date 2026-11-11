@@ -1267,7 +1267,6 @@ static void expectSameFinalPoolMetrics(const CachePoolMetricsSnapshot& expected,
     EXPECT_EQ(actual.block_cache_ref_blocks, expected.block_cache_ref_blocks) << context;
     EXPECT_EQ(actual.load_ref_blocks, expected.load_ref_blocks) << context;
     EXPECT_EQ(actual.eviction_target_ref_blocks, expected.eviction_target_ref_blocks) << context;
-    EXPECT_EQ(actual.store_ref_blocks, expected.store_ref_blocks) << context;
     EXPECT_EQ(actual.frozen_ref_blocks, expected.frozen_ref_blocks) << context;
     EXPECT_FLOAT_EQ(actual.used_ratio, expected.used_ratio) << context;
 }
@@ -1327,7 +1326,6 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AllPrefixReuseDisabledPoolMetricsF
         EXPECT_EQ(snapshot->request_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->block_cache_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->eviction_target_ref_blocks, 0u) << source.pool_name;
-        EXPECT_EQ(snapshot->store_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->frozen_ref_blocks, 0u) << source.pool_name;
         EXPECT_FLOAT_EQ(snapshot->used_ratio, 0.0f) << source.pool_name;
         init_reserve_blocks += snapshot->reserve_blocks;
@@ -1370,7 +1368,6 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AllPrefixReuseDisabledPoolMetricsF
         EXPECT_EQ(snapshot->active_blocks, expected_request_blocks) << source.pool_name;
         EXPECT_EQ(snapshot->block_cache_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->eviction_target_ref_blocks, 0u) << source.pool_name;
-        EXPECT_EQ(snapshot->store_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->frozen_ref_blocks, 0u) << source.pool_name;
         EXPECT_FLOAT_EQ(
             snapshot->used_ratio,
@@ -1411,7 +1408,6 @@ static KVCachePoolMetricsSnapshot makeMergeAllocatorInput(
     snapshot.block_cache_ref_blocks     = 13 + seed;
     snapshot.load_ref_blocks            = 14 + seed;
     snapshot.eviction_target_ref_blocks = 15 + seed;
-    snapshot.store_ref_blocks           = 16 + seed;
     snapshot.frozen_ref_blocks          = 17 + seed;
     snapshot.used_ratio                 = static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
                                              / static_cast<double>(snapshot.total_blocks));
@@ -1437,7 +1433,6 @@ static BlockTreePoolMetricsSnapshot makeMergeTreeInput(Tier               tier,
     snapshot.block_cache_ref_blocks     = 33 + seed;
     snapshot.load_ref_blocks            = 34 + seed;
     snapshot.eviction_target_ref_blocks = 35 + seed;
-    snapshot.store_ref_blocks           = 36 + seed;
     snapshot.frozen_ref_blocks          = 37 + seed;
     if (tier == Tier::DISK) {
         snapshot.read_bytes                    = (int64_t{1} << 40) + seed;
@@ -1464,7 +1459,6 @@ static void expectMergedRowFromAllocator(const KVCachePoolMetricsSnapshot& sourc
     EXPECT_EQ(actual.block_cache_ref_blocks, source.block_cache_ref_blocks) << context;
     EXPECT_EQ(actual.load_ref_blocks, source.load_ref_blocks) << context;
     EXPECT_EQ(actual.eviction_target_ref_blocks, source.eviction_target_ref_blocks) << context;
-    EXPECT_EQ(actual.store_ref_blocks, source.store_ref_blocks) << context;
     EXPECT_EQ(actual.frozen_ref_blocks, source.frozen_ref_blocks) << context;
     EXPECT_FLOAT_EQ(actual.used_ratio, source.used_ratio) << context;
     EXPECT_EQ(actual.available_blocks, expected_available) << context;
@@ -1491,7 +1485,6 @@ static void expectMergedRowFromTree(const BlockTreePoolMetricsSnapshot& source,
     EXPECT_EQ(actual.block_cache_ref_blocks, source.block_cache_ref_blocks) << context;
     EXPECT_EQ(actual.load_ref_blocks, source.load_ref_blocks) << context;
     EXPECT_EQ(actual.eviction_target_ref_blocks, source.eviction_target_ref_blocks) << context;
-    EXPECT_EQ(actual.store_ref_blocks, source.store_ref_blocks) << context;
     EXPECT_EQ(actual.frozen_ref_blocks, source.frozen_ref_blocks) << context;
     EXPECT_EQ(actual.available_blocks, expected_available) << context;
     EXPECT_EQ(actual.read_bytes, source.read_bytes) << context;
@@ -2016,7 +2009,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, InitMallocRollbackReleasesLowerTie
             host_sources.emplace_back(group_set, source_block);
         }
     }
-    cache->insert(cached_keys, slots, Tier::HOST);
+    ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, cached_keys, slots));
 
     const auto counters_before = snapshotPoolCounters(allocator);
     for (const auto& [group_set, source_block] : host_sources) {

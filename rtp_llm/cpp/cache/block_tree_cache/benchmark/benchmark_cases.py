@@ -270,10 +270,10 @@ PROFILE_CASES = [
         copy_strategy="staged-sm",
         descriptor_batch_size=8,
     ),
-    # --- device-disk pair: Device <-> Disk, mixed d2disk+disk2d ---
+    # --- three-tier cycle: Device -> Host -> Disk -> Device ---
     _transfer_case(
         "transfer_device_disk_full_context_direct",
-        "d2disk,disk2d",
+        "d2h,h2disk,disk2d",
         "full_context",
         8,
         disk_mode="direct",
@@ -283,7 +283,7 @@ PROFILE_CASES = [
     ),
     _transfer_case(
         "transfer_device_disk_full_context_buffered",
-        "d2disk,disk2d",
+        "d2h,h2disk,disk2d",
         "full_context",
         8,
         disk_mode="buffered",
@@ -293,7 +293,7 @@ PROFILE_CASES = [
     ),
     _transfer_case(
         "transfer_device_disk_swa_direct",
-        "d2disk,disk2d",
+        "d2h,h2disk,disk2d",
         "swa",
         8,
         disk_mode="direct",
@@ -302,7 +302,7 @@ PROFILE_CASES = [
     ),
     _transfer_case(
         "transfer_device_disk_swa_buffered",
-        "d2disk,disk2d",
+        "d2h,h2disk,disk2d",
         "swa",
         8,
         disk_mode="buffered",
@@ -310,10 +310,10 @@ PROFILE_CASES = [
         working_set_blocks=4096,
         device_disk_staging_block_count=8,
     ),
-    # --- host-disk pair: Host <-> Disk, mixed h2disk+disk2h ---
+    # --- host-to-disk eviction ---
     _transfer_case(
         "transfer_host_disk_full_context_direct",
-        "h2disk,disk2h",
+        "h2disk",
         "full_context",
         8,
         disk_mode="direct",
@@ -322,7 +322,7 @@ PROFILE_CASES = [
     ),
     _transfer_case(
         "transfer_host_disk_full_context_buffered",
-        "h2disk,disk2h",
+        "h2disk",
         "full_context",
         8,
         disk_mode="buffered",
@@ -331,7 +331,7 @@ PROFILE_CASES = [
     ),
     _transfer_case(
         "transfer_host_disk_swa_direct",
-        "h2disk,disk2h",
+        "h2disk",
         "swa",
         8,
         disk_mode="direct",
@@ -339,7 +339,7 @@ PROFILE_CASES = [
     ),
     _transfer_case(
         "transfer_host_disk_swa_buffered",
-        "h2disk,disk2h",
+        "h2disk",
         "swa",
         8,
         disk_mode="buffered",
@@ -396,7 +396,7 @@ def _e2e_business_cases():
             ("staged_sm", "staged-sm"),
         ),
         "h2disk": (("direct", None),),
-        "disk2h": (("direct", None),),
+        "disk2d": (("direct", None),),
     }
     for direction, strategies in direction_strategies.items():
         for strategy_name, copy_strategy in strategies:

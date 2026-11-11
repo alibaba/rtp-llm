@@ -57,7 +57,7 @@ public:
         PerRankBlockTransferEngine({}, false, {}, 128, max_batch, 4, 10000, nullptr, 0, 4, async),
         contexts_(std::move(contexts)) {}
 
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         const auto& descriptors = task.descriptors();
         ++submit_count_;
         submitted_batches_.push_back(descriptors);
@@ -136,7 +136,7 @@ TEST_P(DispatcherBackendTest, LocalRequestSplitsBeforeEngineAndPreservesDeadline
     auto engine = std::make_shared<ScriptedPerRankEngine>(
         std::deque<std::shared_ptr<TransferAsyncContext>>{first, second, third}, 2, GetParam());
     ASSERT_EQ(engine->asyncEnabled(), GetParam());
-    BlockTransferDispatcher dispatcher(engine, nullptr, 16);  // The engine remains bounded by M=2.
+    BlockTransferDispatcher dispatcher(engine, nullptr);
     TransferTask task({descriptor(0), descriptor(1), descriptor(0), descriptor(0)}, std::chrono::seconds(30));
     const auto   deadline = task.deadline();
     const auto   trace_id = task.traceId();
@@ -248,8 +248,8 @@ TEST(BlockTransferDispatcherTest, AsynchronousRunTransferGroupsAndWaitsForEveryB
         auto second = std::make_shared<TransferBatchAsyncContext>();
         auto third  = std::make_shared<TransferBatchAsyncContext>();
         auto engine = std::make_shared<ScriptedPerRankEngine>(
-            std::deque<std::shared_ptr<TransferAsyncContext>>{first, reject_second_batch ? nullptr : second, third});
-        BlockTransferDispatcher dispatcher(engine, nullptr, 2);
+            std::deque<std::shared_ptr<TransferAsyncContext>>{first, reject_second_batch ? nullptr : second, third}, 2);
+        BlockTransferDispatcher dispatcher(engine, nullptr);
 
         size_t    callback_count = 0;
         ErrorInfo final_error    = ErrorInfo::OkStatus();
@@ -287,8 +287,8 @@ TEST(BlockTransferDispatcherTest, ReorderedBatchesReturnBlockResultsInOriginalTa
     auto second = std::make_shared<TransferBatchAsyncContext>();
     auto third  = std::make_shared<TransferBatchAsyncContext>();
     auto engine = std::make_shared<ScriptedPerRankEngine>(
-        std::deque<std::shared_ptr<TransferAsyncContext>>{first, second, third});
-    BlockTransferDispatcher dispatcher(engine, nullptr, 2);
+        std::deque<std::shared_ptr<TransferAsyncContext>>{first, second, third}, 2);
+    BlockTransferDispatcher dispatcher(engine, nullptr);
     size_t                  callback_count = 0;
     TransferResult          result;
     dispatcher.runTransfer(
@@ -310,6 +310,34 @@ TEST(BlockTransferDispatcherTest, ReorderedBatchesReturnBlockResultsInOriginalTa
         result.block_errors,
         (std::vector<CacheCopyError>{
             CacheCopyError::NOT_EXECUTED, CacheCopyError::NONE, CacheCopyError::CRC_MISMATCH, CacheCopyError::NONE}));
+}
+
+TEST(BlockTransferDispatcherTest, ExecutePerRankDrainWaitsForConsumerCallbackReturn) {
+    auto pending = std::make_shared<TransferBatchAsyncContext>();
+    auto engine  = std::make_shared<ScriptedPerRankEngine>(std::deque<std::shared_ptr<TransferAsyncContext>>{pending});
+    auto dispatcher = std::make_shared<BlockTransferDispatcher>(engine);
+    auto context    = dispatcher->executePerRank(TransferTask({descriptor(0)}, std::chrono::seconds(30)));
+    auto entered    = std::make_shared<TestSignal>();
+    auto release    = std::make_shared<TestSignal>();
+    auto observed   = std::make_shared<TestSignal>();
+    context->onDone([entered, release](TransferResult result) {
+        EXPECT_TRUE(result.ok());
+        entered->signal();
+        release->wait();
+    });
+    dispatcher->drain_observer_for_test_ = [observed] { observed->signal(); };
+    block_tree_cache_detail::ScopeRollback cleanup([release] { release->signal(); });
+    BoundedThread<void>                    complete([pending] { pending->complete(TransferStatus::OK); });
+    ASSERT_EQ(entered->waitFor(), std::future_status::ready);
+    EXPECT_TRUE(context->done());
+    BoundedThread<void> drain([dispatcher] { dispatcher->waitForTransfers(); });
+    ASSERT_EQ(observed->waitFor(), std::future_status::ready);
+    EXPECT_EQ(drain.waitFor(std::chrono::milliseconds(0)), std::future_status::timeout);
+    release->signal();
+    ASSERT_EQ(complete.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    complete.get();
+    ASSERT_EQ(drain.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    drain.get();
 }
 
 TEST(BlockTransferDispatcherTest, DrainAndShutdownWaitForCallbackReturnNotOnlyContextReadiness) {
@@ -475,16 +503,14 @@ TEST(BlockTransferDispatcherTest, AllDirectionsRespectSelectedBackendBatchLimits
     const std::vector<TransferDescriptor> directions{TransferDescriptor::hostToDevice(0, 1, {1}),
                                                      TransferDescriptor::deviceToHost(0, {1}, 1),
                                                      TransferDescriptor::hostToDisk(0, 1, 1),
-                                                     TransferDescriptor::diskToHost(0, 1, 1),
-                                                     TransferDescriptor::diskToDevice(0, 1, {1}),
-                                                     TransferDescriptor::deviceToDisk(0, {1}, 1)};
+                                                     TransferDescriptor::diskToDevice(0, 1, {1})};
     for (const bool async : {false, true}) {
         SCOPED_TRACE(async);
         for (const auto& direction : directions) {
             for (const size_t limit : {2u, 8u, 16u}) {
                 auto engine = std::make_shared<ScriptedPerRankEngine>(
                     std::deque<std::shared_ptr<TransferAsyncContext>>{}, limit, async);
-                BlockTransferDispatcher dispatcher(engine, nullptr, limit);
+                BlockTransferDispatcher dispatcher(engine, nullptr);
                 size_t                  callback_count = 0;
                 dispatcher.runTransfer(
                     TransferTask(std::vector<TransferDescriptor>(100, direction), std::chrono::seconds(30)),
@@ -507,7 +533,7 @@ TEST(BlockTransferDispatcherTest, AllDirectionsRespectSelectedBackendBatchLimits
     }
 }
 
-TEST(BlockTransferDispatcherTest, DefaultBatchLimitIsSharedByDirections) {
+TEST(BlockTransferDispatcherTest, EngineBatchLimitIsSharedByDirections) {
     auto device_host_engine =
         std::make_shared<ScriptedPerRankEngine>(std::deque<std::shared_ptr<TransferAsyncContext>>{}, 64);
     BlockTransferDispatcher         device_host_dispatcher(device_host_engine);
@@ -521,9 +547,8 @@ TEST(BlockTransferDispatcherTest, DefaultBatchLimitIsSharedByDirections) {
                                            EXPECT_TRUE(error.ok());
                                            ++device_host_callback_count;
                                        });
-    ASSERT_EQ(device_host_engine->submittedBatches().size(), 2u);
-    EXPECT_EQ(device_host_engine->submittedBatches()[0].size(), 32u);
-    EXPECT_EQ(device_host_engine->submittedBatches()[1].size(), 1u);
+    ASSERT_EQ(device_host_engine->submittedBatches().size(), 1u);
+    EXPECT_EQ(device_host_engine->submittedBatches()[0].size(), 33u);
     EXPECT_EQ(device_host_callback_count, 1u);
 
     auto host_disk_engine =
@@ -539,9 +564,8 @@ TEST(BlockTransferDispatcherTest, DefaultBatchLimitIsSharedByDirections) {
                                          EXPECT_TRUE(error.ok());
                                          ++host_disk_callback_count;
                                      });
-    ASSERT_EQ(host_disk_engine->submittedBatches().size(), 2u);
-    EXPECT_EQ(host_disk_engine->submittedBatches()[0].size(), 32u);
-    EXPECT_EQ(host_disk_engine->submittedBatches()[1].size(), 1u);
+    ASSERT_EQ(host_disk_engine->submittedBatches().size(), 1u);
+    EXPECT_EQ(host_disk_engine->submittedBatches()[0].size(), 33u);
     EXPECT_EQ(host_disk_callback_count, 1u);
 }
 

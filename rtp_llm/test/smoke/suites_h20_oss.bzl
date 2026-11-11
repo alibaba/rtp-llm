@@ -1,3 +1,4 @@
+load("//rtp_llm/test/smoke:cache_tier_args.bzl", "HOST_REUSE_AFTER_DEMOTION_ARGS")
 load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "REMOTE_CACHE_DEVICE_STORE_ARGS")
 
@@ -343,7 +344,7 @@ def h20_oss_suites():
                 name = "next_long_reuse_memcache",
                 task_info = "data/model/qwen3_next/q_r_next_fp8_tp2_long_input_reuse_memory.json",
                 sleep_time_qr = 10,
-                smoke_args = "--tp_size 2 --act_type BF16 --seq_size_per_block 2048 --reuse_cache_tail_blocks 8 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --memory_cache_size_mb 1024",
+                smoke_args = ("--tp_size 2 --act_type BF16 --seq_size_per_block 2048 --reuse_cache_tail_blocks 8 --reuse_cache 1 --memory_cache_size_mb 1024" + HOST_REUSE_AFTER_DEMOTION_ARGS),
                 gpu_type = ["H20_CU13"],
             ),
             smoke_test(
@@ -467,7 +468,7 @@ def h20_oss_suites():
                 name = "kimi_long_reuse_memcache",
                 task_info = "data/model/kimi_linear/q_r_bf16_tp2_long_input_reuse_cache_memory.json",
                 sleep_time_qr = 10,
-                smoke_args = "--tp_size 2 --act_type BF16 --max_seq_len 16384 --seq_size_per_block 2048 --reuse_cache_tail_blocks 8 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --memory_cache_size_mb 2048 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
+                smoke_args = ("--tp_size 2 --act_type BF16 --max_seq_len 16384 --seq_size_per_block 2048 --reuse_cache_tail_blocks 8 --reuse_cache 1 --memory_cache_size_mb 2048 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192" + HOST_REUSE_AFTER_DEMOTION_ARGS),
                 envs = ["TRITON_AUTOTUNE_CACHE_MODE=cached"],
                 gpu_type = ["H20_CU13"],
             ),
@@ -523,7 +524,7 @@ def h20_oss_suites():
             smoke_test(
                 name = "eagle_mtp_reuse_host",
                 task_info = "data/model/qwen2_14b/q_r_mtp_reuse_host_cache.json",
-                smoke_args = "--reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --enable_disk_cache 0 --enable_remote_cache 0 --memory_cache_size_mb 1024 --max_seq_len 16384 --sp_type eagle --gen_num_per_cycle 4 --act_type FP16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/  --warm_up 0 --reserver_runtime_mem_mb 21954 --tp_size 2",
+                smoke_args = ("--reuse_cache 1 --enable_disk_cache 0 --enable_remote_cache 0 --memory_cache_size_mb 1024 --max_seq_len 16384 --sp_type eagle --gen_num_per_cycle 4 --act_type FP16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/  --warm_up 0 --reserver_runtime_mem_mb 21954 --tp_size 2" + HOST_REUSE_AFTER_DEMOTION_ARGS),
                 sleep_time_qr = 10,
                 gpu_type = ["H20_CU13"],
             ),

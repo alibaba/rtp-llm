@@ -25,13 +25,9 @@ struct DiskWrite {
     uint64_t    offset;
     const void* buffer;
     size_t      bytes;
-    // Optional writable tail, cleared by the async worker before issuing I/O.
-    // Its storage remains leased through the completion callback.
-    void*  padding{nullptr};
-    size_t padding_bytes{0};
 };
 
-// Block-pool-agnostic I/O for one backing file. BlockTreeDiskBlockPool owns
+// Block-pool-agnostic I/O for one backing file. DiskBlockPool owns
 // allocation policy and maps block indices to offsets.
 class DiskBlockIO {
 public:

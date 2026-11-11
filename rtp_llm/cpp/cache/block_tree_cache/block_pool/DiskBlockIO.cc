@@ -66,7 +66,7 @@ BlockTreePosixDiskBlockIO::openAndPreallocate(const std::string& file_path, size
             close();
             return DiskBlockIOStatus::IO_ERROR;
         }
-        rc = 0;
+        return DiskBlockIOStatus::OK;
     }
     if (rc != 0) {
         RTP_LLM_LOG_ERROR("posix_fallocate disk block file failed, file=%s, bytes=%zu, error=%s",

@@ -62,9 +62,9 @@ public:
     FrameworkCopies(const FrameworkCopies&)            = delete;
     FrameworkCopies& operator=(const FrameworkCopies&) = delete;
 
-    void copyBatch(const FrameworkCopyPlan& plan, bool store);
-    void copyStaged(const FrameworkCopyPlan& plan, bool store);
-    void copyMainStaged(const FrameworkCopyPlan& plan, bool store);
+    void copyBatch(const FrameworkCopyPlan& plan, bool evict);
+    void copyStaged(const FrameworkCopyPlan& plan, bool evict);
+    void copyMainStaged(const FrameworkCopyPlan& plan, bool evict);
 
     // Production's thread-local stream is private. The experimental 3D path
     // uses a separate stream from the same nondefault Torch stream pool.

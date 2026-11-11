@@ -41,14 +41,3 @@ cc_test(
     deps = test_deps,
     env = {},
 )
-
-cc_test(
-    name = "store_task_runner_test",
-    exec_properties = {"gpu": "L20_CU13"},
-    testonly = True,
-    srcs = ["StoreTaskRunnerTest.cc"],
-    copts = test_copts,
-    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils"],
-    env = {},
-    tags = ["L20_CU13"],
-)
