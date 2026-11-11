@@ -1976,7 +1976,14 @@ class AttentionV41FP8(AttentionFP8):
                 elif fused_indexer:
                     chunk_rows = prefill_indexer.logits_chunk_rows(key_count)
                 else:
-                    chunk_rows = 64
+                    # Non-fused (SM89) index selection materializes
+                    # [rows, heads, keys] FP32 logits. 64 rows at 65k keys is
+                    # 152 MiB, which was the last allocation to fail during
+                    # exact 1M-token prefill on a 44 GiB L20; 32 rows halves
+                    # that temporary without changing the selected tokens.
+                    chunk_rows = int(
+                        os.environ.get("DSV41_PREFILL_SELECT_ROWS", "64")
+                    )
                 request_bounds = None
                 if contiguous and fused_indexer:
                     cache = shared.setdefault("prefill_score_bounds", {})
