@@ -12,8 +12,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from navi_sched import NaviSchedAgent, NaviSchedMaster
+from navi_sched import NaviSchedAgent, NaviSchedClient, NaviSchedMaster
 from navi_sched import _navi_sched_core as core
+from navi_sched.adapters.vllm.VLLMBlockHash import block_hash_to_uint64
 from navi_sched.adapters.vllm.VLLMCachePolicy import VLLMCachePolicy, VLLMCacheState
 from navi_sched.adapters.vllm.VLLMEngineObserver import VLLMEngineObserver
 
@@ -87,6 +88,7 @@ class VLLMV6DWireIntegrationTest(unittest.TestCase):
             notifications = SnapshotChanges(root)
             agents = []
             master = None
+            client = None
             try:
                 for enabled in (False, True):
                     agent = NaviSchedAgent(
@@ -189,24 +191,86 @@ class VLLMV6DWireIntegrationTest(unittest.TestCase):
 
                 text = notifications.wait(switched_on)
                 self.assertIn("      tail_ready_block_count: 1", text)
+
+                def resident(text, count):
+                    blocks = re.split(r"(?m)(?=^    id: )", text)
+                    block = next(
+                        (
+                            value
+                            for value in blocks
+                            if "    server_address: 127.0.0.1:17001\n" in value
+                        ),
+                        "",
+                    )
+                    cache = re.search(r"v6d_cache:\n((?:      .*\n)+)", block)
+                    return (
+                        cache is not None
+                        and f"      full_ready_block_count: {count}\n" in cache.group(1)
+                        and f"      tail_ready_block_count: {count}\n" in cache.group(1)
+                        and "    peer_cache_read_available: false" in block
+                    )
+
+                # Local V6D remains usable when remote cache transfer is unavailable.
+                snapshots = [
+                    dict(peer_cache_read_available=False, objects=rows)
+                    for _ in range(4)
+                ]
+                observer.on_v6d_cache_snapshots(snapshots)
+                notifications.wait(lambda text: resident(text, 1))
+                client = NaviSchedClient(
+                    "v6d_wire_client",
+                    master_biz_name="v6d_wire_master",
+                    runtime_config={
+                        "thread_num": 2,
+                        "local_nodes": [
+                            dict(
+                                biz_name="v6d_wire_master",
+                                grpc_port=master.grpc_port,
+                                support_heartbeat=True,
+                            )
+                        ],
+                    },
+                    name="wire_client",
+                    enable_kmon=False,
+                    enable_snapshot=False,
+                    wait_no_query=False,
+                ).init()
+                hashes = [
+                    block_hash_to_uint64(bytes.fromhex(value * 32))
+                    for value in ("01", "02")
+                ]
+                decision = client.schedule(
+                    32,
+                    "v6d_wire_prefill",
+                    request_id=1,
+                    block_size=16,
+                    block_hashes=hashes,
+                    timeout_ms=5000,
+                    route_only=True,
+                )
+                self.assertEqual("127.0.0.1:17001", decision.target.address)
+                self.assertEqual(16, decision.predicted_cache_hit_tokens)
                 snapshots[2] = dict(peer_cache_read_available=False, objects=[])
                 observer.on_v6d_cache_snapshots(snapshots)
 
                 def evicted(text):
-                    return (
-                        switched_on(text) is False
-                        and bool(
-                            re.search(
-                                r"v6d_cache:\n(?:      .*\n)*?      full_ready_block_count: 0\n",
-                                text,
-                            )
-                        )
-                        and "    peer_cache_read_available: true" not in text
-                    )
+                    return resident(text, 0)
 
                 text = notifications.wait(evicted)
                 self.assertIn("      tail_ready_block_count: 0", text)
+                decision = client.schedule(
+                    32,
+                    "v6d_wire_prefill",
+                    request_id=2,
+                    block_size=16,
+                    block_hashes=hashes,
+                    timeout_ms=5000,
+                    route_only=True,
+                )
+                self.assertEqual(0, decision.predicted_cache_hit_tokens)
             finally:
+                if client is not None:
+                    client.stop()
                 if master is not None:
                     master.stop()
                 for agent in reversed(agents):
