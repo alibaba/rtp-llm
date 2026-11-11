@@ -189,30 +189,41 @@ inline void setTestGroupPolicies(CacheConfig& config, const std::vector<CacheGro
     config.setTopology(std::move(groups), config.topology().layers());
 }
 
-// Production createConfig renames MTP group tags that collide with the main
-// model. Tests building a draft CacheModuleConfig directly apply the same rule.
-inline CacheModuleConfig renameMtpModuleTags(CacheModuleConfig module_config, const CacheModuleConfig& main_config) {
-    const std::set<std::string>        main_tags(main_config.groupTags().begin(), main_config.groupTags().end());
-    std::map<std::string, std::string> rename_map;
-    auto                               groups = module_config.topology().groups();
-    auto                               layers = module_config.topology().layers();
+// Production declares module-scoped draft cache tags in the Python model
+// description (``ModelConfig.cache_tag_prefix``): every draft tag is published
+// as ``mtp_<tag>``.  Tests building a draft directly apply the same declaration.
+inline constexpr const char* kDraftCacheTagPrefix = "mtp_";
+
+inline void declareModuleScopedTags(ModelConfig& draft_model_config, const std::string& prefix = kDraftCacheTagPrefix) {
+    for (auto& layer_descs : draft_model_config.kv_cache_spec_descs) {
+        for (auto& desc : layer_descs) {
+            if (desc.tag.rfind(prefix, 0) != 0) {
+                desc.tag = prefix + desc.tag;
+            }
+        }
+    }
+}
+
+inline CacheModuleConfig declareModuleScopedTags(CacheModuleConfig  module_config,
+                                                 const std::string& prefix = kDraftCacheTagPrefix) {
+    auto groups = module_config.topology().groups();
+    auto layers = module_config.topology().layers();
     for (auto& group : groups) {
-        if (main_tags.count(group.tag) == 0) {
+        if (group.tag.rfind(prefix, 0) == 0) {
             continue;
         }
-        const std::string old_tag = group.tag;
-        const std::string new_tag = "mtp_" + old_tag;
-        rename_map.emplace(old_tag, new_tag);
-        auto spec  = group.spec->clone();
-        spec->tag  = new_tag;
-        group.spec = std::move(spec);
-        group.tag  = new_tag;
+        const std::string new_tag = prefix + group.tag;
+        if (group.spec != nullptr) {
+            auto spec  = group.spec->clone();
+            spec->tag  = new_tag;
+            group.spec = std::move(spec);
+        }
+        group.tag = new_tag;
     }
     for (auto& layer : layers) {
         for (auto& tag : layer.group_tags) {
-            const auto it = rename_map.find(tag);
-            if (it != rename_map.end()) {
-                tag = it->second;
+            if (tag.rfind(prefix, 0) != 0) {
+                tag = prefix + tag;
             }
         }
     }

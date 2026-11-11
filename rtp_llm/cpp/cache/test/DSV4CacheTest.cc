@@ -270,6 +270,14 @@ static ModelConfig makeFlashMtpModelConfig() {
     return mc;
 }
 
+// Draft modules declare module-scoped cache tags in the Python model
+// description; the tests mirror that declaration explicitly.
+static ModelConfig makeFlashMtpModelConfigWithScopedTags() {
+    auto mc = makeFlashMtpModelConfig();
+    test::declareModuleScopedTags(mc);
+    return mc;
+}
+
 static ModelConfig makeHybridAttentionModelConfig(int size_per_head = 16) {
     ModelConfig mc;
     mc.num_layers                                      = 4;
@@ -2231,7 +2239,7 @@ TEST(CacheConfigTest, DSV4PinnedFixedPoolFallbackFollowsFullPoolBaseline) {
 
 TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     auto score_model_config                                  = makeFlashModelConfig();
-    auto propose_model_config                                = makeFlashMtpModelConfig();
+    auto propose_model_config                                = makeFlashMtpModelConfigWithScopedTags();
     score_model_config.attn_config.tokens_per_block          = 16384;
     score_model_config.attn_config.kernel_tokens_per_block   = 128;
     propose_model_config.attn_config.tokens_per_block        = 16384;
@@ -2291,7 +2299,7 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
 
 TEST(CacheConfigTest, DSV4MtpJointBudgetIncludesScoreAndProposeSwaBacking) {
     auto score_model_config   = makeFlashModelConfig();
-    auto propose_model_config = makeFlashMtpModelConfig();
+    auto propose_model_config = makeFlashMtpModelConfigWithScopedTags();
 
     ParallelismConfig parallelism_config;
     RuntimeConfig     runtime_config;
@@ -3829,6 +3837,7 @@ TEST(CacheConfigCreatorTest, MergedBudgetUsesEachPhysicalSegmentOnce) {
         for (const bool host : {false, true}) {
             auto target = makeCreationModel(2, 2);
             auto draft  = makeCreationModel(2, 4);
+            test::declareModuleScopedTags(draft);
             for (auto* model : {&target, &draft}) {
                 for (auto& layer : model->kv_cache_spec_descs) {
                     layer[0].group_type = group_type;
@@ -3884,8 +3893,9 @@ TEST(CacheConfigCreatorTest, MergedBudgetUsesEachPhysicalSegmentOnce) {
 }
 
 TEST(CacheConfigCreatorTest, MtpModuleCountsPreserveEagleAndDsparkRules) {
-    auto          target = makeCreationModel();
-    auto          draft  = makeCreationModel(2);
+    auto target = makeCreationModel();
+    auto draft  = makeCreationModel(2);
+    test::declareModuleScopedTags(draft);
     KVCacheConfig options;
     options.test_block_num = 5;
     SpeculativeExecutionConfig sp;
@@ -3915,7 +3925,25 @@ TEST(CacheConfigCreatorTest, MtpModuleCountsPreserveEagleAndDsparkRules) {
     EXPECT_EQ(ordinary_draft.mtp_sub_configs.size(), 1u);
 }
 
-TEST(CacheConfigCreatorTest, MtpRenamesCollidingDraftTagsAndKeepsDistinctOnes) {
+TEST(CacheConfigCreatorTest, MtpUsesDeclaredModuleScopedDraftTags) {
+    auto target = makeCreationModel();
+    auto draft  = target;
+    addCreationFixedPool(draft, false);
+    test::declareModuleScopedTags(draft);
+    KVCacheConfig options;
+    options.test_block_num = 5;
+    SpeculativeExecutionConfig sp;
+    sp.type              = SP_TYPE_MTP;
+    sp.gen_num_per_cycle = 1;
+
+    auto created_config = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
+    ASSERT_EQ(created_config.mtp_sub_configs.size(), 1u);
+    // The declaration is honoured verbatim: nothing is renamed on the C++ side.
+    EXPECT_EQ(created_config.mtp_sub_configs[0].groupTags(), (std::vector<std::string>{"mtp_full", "mtp_state"}));
+    EXPECT_EQ(created_config.allGroupTags(), (std::vector<std::string>{"full", "mtp_full", "mtp_state"}));
+}
+
+TEST(CacheConfigCreatorTest, MtpRejectsDraftTagsThatCollideWithAnotherModule) {
     auto target = makeCreationModel();
     auto draft  = target;
     addCreationFixedPool(draft, false);
@@ -3925,27 +3953,16 @@ TEST(CacheConfigCreatorTest, MtpRenamesCollidingDraftTagsAndKeepsDistinctOnes) {
     sp.type              = SP_TYPE_MTP;
     sp.gen_num_per_cycle = 1;
 
-    // "full" collides with the target and becomes "mtp_full"; the distinct
-    // "state" tag passes through unchanged.
-    auto created_config = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
-    ASSERT_EQ(created_config.mtp_sub_configs.size(), 1u);
-    EXPECT_EQ(created_config.mtp_sub_configs[0].groupTags(), (std::vector<std::string>{"mtp_full", "state"}));
-
-    // A draft whose only colliding tag is "full" that carries no target-only group.
-    std::swap(target, draft);
-    auto created2 = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
-    ASSERT_EQ(created2.mtp_sub_configs.size(), 1u);
-    EXPECT_EQ(created2.mtp_sub_configs[0].groupTags(), (std::vector<std::string>{"mtp_full"}));
-
-    // The first prefixed candidate can itself be an existing draft tag.
-    target = makeCreationModel();
-    draft  = target;
-    KVCacheSpecDesc distinct_desc;
-    distinct_desc.tag = "mtp_full";
-    draft.kv_cache_spec_descs[0].push_back(distinct_desc);
-    auto created3 = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
-    EXPECT_EQ(created3.mtp_sub_configs[0].groupTags(), (std::vector<std::string>{"mtp_mtp_full", "mtp_full"}));
-    EXPECT_EQ(created3.allGroupTags(), (std::vector<std::string>{"full", "mtp_mtp_full", "mtp_full"}));
+    // The draft declares the target's tags unchanged: the config must be
+    // rejected with an actionable message instead of being silently renamed.
+    try {
+        CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
+        FAIL() << "expected a module-scoped tag violation";
+    } catch (const std::exception& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("'full'"), std::string::npos) << message;
+        EXPECT_NE(message.find("mtp_<tag>"), std::string::npos) << message;
+    }
 }
 
 TEST(CacheConfigCreatorTest, MtpRejectsMismatchedBaseSpanAndJointCapacity) {
@@ -3953,16 +3970,19 @@ TEST(CacheConfigCreatorTest, MtpRejectsMismatchedBaseSpanAndJointCapacity) {
     KVCacheConfig options;
     options.test_block_num = 5;
     SpeculativeExecutionConfig sp;
-    sp.type                                                      = SP_TYPE_MTP;
-    sp.gen_num_per_cycle                                         = 1;
-    auto draft                                                   = target;
+    sp.type              = SP_TYPE_MTP;
+    sp.gen_num_per_cycle = 1;
+    auto draft           = target;
+    test::declareModuleScopedTags(draft);
     draft.kv_cache_spec_descs[0][0].capacity                     = CacheCapacityPolicyDesc{};
     draft.kv_cache_spec_descs[0][0].capacity->explicit_block_num = 2;
     EXPECT_ANY_THROW(CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true));
-    draft                              = target;
+    draft = target;
+    test::declareModuleScopedTags(draft);
     draft.attn_config.tokens_per_block = 8;
     EXPECT_ANY_THROW(CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true));
-    draft                                     = target;
+    draft = target;
+    test::declareModuleScopedTags(draft);
     draft.attn_config.kernel_tokens_per_block = 2;
     auto different_kernel                     = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
     EXPECT_EQ(different_kernel.mtp_sub_configs[0].group("mtp_full").kernelSeqSizePerBlock(), 2u);

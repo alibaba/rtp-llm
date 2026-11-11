@@ -13,29 +13,20 @@
 namespace rtp_llm {
 namespace {
 
-CacheModuleConfig renameMtpTags(CacheModuleConfig module_config, const CacheModuleConfig& main_config) {
-    const std::set<std::string>        main_tags(main_config.groupTags().begin(), main_config.groupTags().end());
-    std::map<std::string, std::string> rename_map;
-    auto                               groups = module_config.topology().groups();
-    auto                               layers = module_config.topology().layers();
+// The draft module declares its own module-scoped tags; nothing is inferred.
+CacheModuleConfig declareModuleScopedTags(CacheModuleConfig module_config) {
+    auto groups = module_config.topology().groups();
+    auto layers = module_config.topology().layers();
     for (auto& group : groups) {
-        if (main_tags.count(group.tag) == 0) {
-            continue;
-        }
-        const std::string old_tag = group.tag;
-        const std::string new_tag = "mtp_" + old_tag;
-        rename_map.emplace(old_tag, new_tag);
-        auto spec  = group.spec->clone();
-        spec->tag  = new_tag;
-        group.spec = std::move(spec);
-        group.tag  = new_tag;
+        const std::string new_tag = "mtp_" + group.tag;
+        auto              spec    = group.spec->clone();
+        spec->tag                 = new_tag;
+        group.spec                = std::move(spec);
+        group.tag                 = new_tag;
     }
     for (auto& layer : layers) {
         for (auto& tag : layer.group_tags) {
-            const auto it = rename_map.find(tag);
-            if (it != rename_map.end()) {
-                tag = it->second;
-            }
+            tag = "mtp_" + tag;
         }
     }
     module_config.setTopology(std::move(groups), std::move(layers));
@@ -154,7 +145,7 @@ TEST(CacheTopologyTest, PhysicalGroupResolvesSingleMtpModuleLayerRange) {
     CacheConfig draft;
     draft.main_config.layer_num = 2;
     draft.setTopology({makeGroup("full")}, {{0, {"full"}}, {1, {"full"}}});
-    config.mtp_sub_configs.push_back(renameMtpTags(std::move(draft.main_config), config.main_config));
+    config.mtp_sub_configs.push_back(declareModuleScopedTags(std::move(draft.main_config)));
 
     EXPECT_EQ(&config.moduleConfig(0).groupForLayer(0, "full"), &config.moduleConfig(0).group("full"));
     const auto& mtp_group = config.moduleConfig(1).group("mtp_full");
@@ -206,7 +197,7 @@ TEST(CacheTopologyTest, TaggedLayoutKeepsMtpPhysicalGeometry) {
     CacheConfig draft;
     draft.main_config.layer_num = 1;
     draft.setTopology({makeLayoutGroup("full", 5)}, {{0, {"full"}}});
-    const auto child = renameMtpTags(std::move(draft.main_config), config.main_config);
+    const auto child = declareModuleScopedTags(std::move(draft.main_config));
     config.mtp_sub_configs.push_back(child);
     const auto main_stride  = config.moduleConfig(0).group("full").kvBlockStrideBytes();
     const auto draft_stride = config.moduleConfig(1).group("mtp_full").kvBlockStrideBytes();

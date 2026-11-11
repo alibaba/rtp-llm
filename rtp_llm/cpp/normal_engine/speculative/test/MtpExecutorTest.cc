@@ -800,6 +800,8 @@ public:
         };
         configure_cache_model(score_cache_model_config);
         configure_cache_model(propose_cache_model_config);
+        // The draft declares module-scoped tags; the C++ side never renames.
+        test::declareModuleScopedTags(propose_cache_model_config);
 
         auto cache_sp_config              = sp_config;
         cache_sp_config.gen_num_per_cycle = 1;
@@ -1071,7 +1073,7 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
     };
     auto target = make_config(multiple_groups, 3);
     auto draft  = make_config(draft_has_linear, 1, true);
-    target.mtp_sub_configs.push_back(test::renameMtpModuleTags(std::move(draft.main_config), target.main_config));
+    target.mtp_sub_configs.push_back(test::declareModuleScopedTags(std::move(draft.main_config)));
     target.finalizeBlockNums(8, RuntimeConfig{});
     if (multiple_groups && !draft_has_linear) {
         EXPECT_EQ(target.mtp_sub_configs[0].groupNums(), 1);

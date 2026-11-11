@@ -326,11 +326,10 @@ private:
 CacheConfig makeTwoModuleCacheConfig(int main_layers, int mtp_layers) {
     CacheConfig config = ::rtp_llm::test::makeSimpleMhaCacheConfig(
         main_layers, /*block_num=*/16, /*tokens_per_block=*/1, DataType::TYPE_FP16);
-    CacheModuleConfig draft = ::rtp_llm::test::renameMtpModuleTags(
+    CacheModuleConfig draft = ::rtp_llm::test::declareModuleScopedTags(
         ::rtp_llm::test::makeSimpleMhaCacheConfig(
             mtp_layers, /*block_num=*/16, /*tokens_per_block=*/1, DataType::TYPE_FP16)
-            .main_config,
-        config.main_config);
+            .main_config);
     config.mtp_sub_configs.push_back(std::move(draft));
     return config;
 }

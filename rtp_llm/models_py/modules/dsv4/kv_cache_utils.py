@@ -27,6 +27,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 
+from rtp_llm.models.cache_tags import DRAFT_CACHE_TAG_PREFIX
+
 # ---------------------------------------------------------------------------
 # Canonical cache-group tags. These are the *consumer* side of the tags that
 # ``rtp_llm/models/dsv4_kv_cache.py`` (``CSA_KV_TAG`` ... ``SWA_KV_TAG``) hands
@@ -81,23 +83,23 @@ def group_tags(kv_cache: Optional[Any]) -> List[str]:
 
 
 def resolve_dsv4_tag(kv_cache: Optional[Any], tag: str) -> str:
-    """Map a canonical DSV4 tag onto the tag actually published by ``kv_cache``.
+    """Map a canonical DSV4 tag onto the tag the draft module declared.
 
-    MTP modules publish their cache groups under ``mtp_<tag>`` (see
-    ``renameMTPGroupTags`` in ``CacheConfigCreator``) so that the
-    tag -> module mapping stays bijective, while the kernels keep addressing
-    pools by canonical name. Identity whenever the canonical tag is present, so
-    main / eagle / eagle3 behaviour is unchanged.
+    Draft modules declare their own cache tags from the model description
+    (``rtp_llm.models.cache_tags.declare_draft_cache_tags``, called by each
+    draft class), so a draft publishes ``<prefix><tag>``.  The main module
+    publishes the canonical tag unchanged, hence the identity fast path.
+
+    No heuristics: if neither the canonical nor the declared tag is published,
+    the canonical tag is returned and the caller reports the miss.
     """
     tag = str(tag)
     tags = group_tags(kv_cache)
     if not tags or tag in tags:
         return tag
-    prefixed = "mtp_" + tag
-    if prefixed in tags:
-        return prefixed
-    if len(tags) == 1:
-        return tags[0]
+    declared = DRAFT_CACHE_TAG_PREFIX + tag
+    if declared in tags:
+        return declared
     return tag
 
 

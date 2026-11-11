@@ -257,6 +257,7 @@ static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig(SpeculativeType    sp
     score_model_cfg.linear_attention_config.linear_num_key_heads   = 2;
     score_model_cfg.linear_attention_config.linear_num_value_heads = 2;
     propose_model_cfg.kv_cache_spec_descs[0][0].tag                = propose_tag;
+    declareModuleScopedTags(propose_model_cfg);
 
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
@@ -660,7 +661,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, MtpRenamesCollidingFullTagAndKeeps
     auto colliding = makeSingleLayerCacheConfig(
         makeMhaSpec("full", /*tokens_per_block=*/4, DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/1),
         CacheGroupType::FULL);
-    auto renamed = renameMtpModuleTags(std::move(colliding.main_config), main_config.main_config);
+    auto renamed = declareModuleScopedTags(std::move(colliding.main_config));
     EXPECT_EQ(renamed.groupTags(), (std::vector<std::string>{"mtp_full"}));
     EXPECT_EQ(renamed.layerIdsForGroup("mtp_full"), std::vector<int>({0}));
 
@@ -668,9 +669,9 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, MtpRenamesCollidingFullTagAndKeeps
         makeMhaSpec(
             "default", /*tokens_per_block=*/4, DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/1),
         CacheGroupType::FULL);
-    auto kept = renameMtpModuleTags(std::move(distinct.main_config), main_config.main_config);
-    EXPECT_EQ(kept.groupTags(), (std::vector<std::string>{"default"}));
-    EXPECT_EQ(kept.layerIdsForGroup("default"), std::vector<int>({0}));
+    auto kept = declareModuleScopedTags(std::move(distinct.main_config));
+    EXPECT_EQ(kept.groupTags(), (std::vector<std::string>{"mtp_default"}));
+    EXPECT_EQ(kept.layerIdsForGroup("mtp_default"), std::vector<int>({0}));
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, MtpPhysicalSlotsDoNotAliasMainSlots) {
@@ -704,6 +705,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, MtpLayoutProjectionRecountsActiveL
 TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateSpConfigPreservesQwenPackingAlignmentForFullMtpLayers) {
     auto score_model_cfg   = makeTinyModelConfig(/*num_layers=*/8);
     auto propose_model_cfg = makeTinyModelConfig(/*num_layers=*/1);
+    declareModuleScopedTags(propose_model_cfg);
 
     setHybridLayerDescs(score_model_cfg,
                         {HybridAttentionType::LINEAR,

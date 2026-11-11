@@ -87,7 +87,7 @@ CacheConfig makeHeterogeneousMtpConfig() {
                                                 DataType::TYPE_FP16,
                                                 /*local_head_num_kv=*/1,
                                                 /*size_per_head=*/4);
-    target.mtp_sub_configs.push_back(test::renameMtpModuleTags(std::move(draft.main_config), target.main_config));
+    target.mtp_sub_configs.push_back(test::declareModuleScopedTags(std::move(draft.main_config)));
     return target;
 }
 

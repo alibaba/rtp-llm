@@ -49,9 +49,12 @@ void CacheConfig::validateCrossModuleInvariants() const {
                                 module.seq_size_per_block,
                                 seq_size_per_block);
         for (const auto& tag : module.groupTags()) {
-            RTP_LLM_CHECK_WITH_INFO(std::find(seen_tags.begin(), seen_tags.end(), tag) == seen_tags.end(),
-                                    "cache group tag=%s occurs in more than one module",
-                                    tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(
+                std::find(seen_tags.begin(), seen_tags.end(), tag) == seen_tags.end(),
+                "cache tag '%s' (module %zu) collides with the tag of another module; the Python model "
+                "description must declare module-scoped tags (e.g. mtp_<tag>)",
+                tag.c_str(),
+                module_id);
             seen_tags.push_back(tag);
         }
         for (size_t earlier_id = 0; earlier_id < module_id; ++earlier_id) {

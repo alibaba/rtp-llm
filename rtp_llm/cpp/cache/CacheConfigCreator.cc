@@ -49,42 +49,6 @@ void addBudgetBytes(size_t& total, size_t bytes, size_t count = 1) {
     total += bytes * count;
 }
 
-CacheModuleConfig renameMTPGroupTags(CacheModuleConfig module_config, const CacheModuleConfig& main_config) {
-    const std::set<std::string> main_tags(main_config.groupTags().begin(), main_config.groupTags().end());
-    std::set<std::string>       occupied_tags = main_tags;
-    occupied_tags.insert(module_config.groupTags().begin(), module_config.groupTags().end());
-    std::map<std::string, std::string> rename_map;
-    auto                               groups = module_config.topology().groups();
-    auto                               layers = module_config.topology().layers();
-    for (auto& group : groups) {
-        if (main_tags.count(group.tag) == 0) {
-            continue;
-        }
-        RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "MTP group tag=%s has null spec", group.tag.c_str());
-        const std::string old_tag = group.tag;
-        std::string       new_tag = "mtp_" + old_tag;
-        while (occupied_tags.count(new_tag) != 0) {
-            new_tag = "mtp_" + new_tag;
-        }
-        occupied_tags.insert(new_tag);
-        rename_map.emplace(old_tag, new_tag);
-        auto spec  = group.spec->clone();
-        spec->tag  = new_tag;
-        group.spec = std::move(spec);
-        group.tag  = new_tag;
-    }
-    for (auto& layer : layers) {
-        for (auto& tag : layer.group_tags) {
-            const auto it = rename_map.find(tag);
-            if (it != rename_map.end()) {
-                tag = it->second;
-            }
-        }
-    }
-    module_config.setTopology(std::move(groups), std::move(layers));
-    return module_config;
-}
-
 KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     KVCacheBlockBudget budget;
     // Each module owns an independent pool per group tag, so the paged-HBM
@@ -438,9 +402,11 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     if (draft_model_config != nullptr) {
         auto draft_config =
             createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
-        auto draft_module = std::move(draft_config.main_config);
-        draft_module      = renameMTPGroupTags(std::move(draft_module), config.main_config);
-        config.mtp_sub_configs.push_back(std::move(draft_module));
+        // The draft module declares its own module-scoped tags in the Python
+        // model description (``ModelConfig.cache_tag_prefix``); no implicit
+        // renaming happens here.  Cross-module duplicates are rejected by
+        // ``validateCrossModuleInvariants``.
+        config.mtp_sub_configs.push_back(std::move(draft_config.main_config));
     }
     config.validateCrossModuleInvariants();
     return config;

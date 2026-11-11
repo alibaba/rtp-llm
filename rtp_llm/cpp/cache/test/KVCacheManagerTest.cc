@@ -524,9 +524,10 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     target.attn_config.size_per_head    = 2;
     target.attn_config.tokens_per_block = 4;
     KVCacheSpecDesc desc;
-    desc.tag                        = "default";
-    target.kv_cache_spec_descs      = {{desc}};
-    auto draft                      = target;
+    desc.tag                   = "default";
+    target.kv_cache_spec_descs = {{desc}};
+    auto draft                 = target;
+    test::declareModuleScopedTags(draft);
     draft.attn_config.size_per_head = 4;
     KVCacheConfig options;
     options.kv_cache_mem_mb = 1;

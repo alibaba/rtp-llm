@@ -113,6 +113,9 @@ class Qwen3NextMTPMixin:
             [HybridAttentionType.NONE],
             KVCacheSpecType.MHA,
         )
+        from rtp_llm.models.cache_tags import declare_draft_cache_tags
+
+        declare_draft_cache_tags(model_config)
 
     def _create_python_model(self) -> Optional[Any]:
         from rtp_llm.models_py.model_desc.qwen3_next_mtp import Qwen3NextMTPModel

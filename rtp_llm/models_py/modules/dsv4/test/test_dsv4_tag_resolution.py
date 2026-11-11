@@ -1,9 +1,10 @@
-"""``resolve_dsv4_tag`` — canonical DSV4 tag -> published cache-group tag.
+"""``resolve_dsv4_tag`` — canonical DSV4 tag -> declared module-scoped tag.
 
-MTP modules publish their cache groups as ``mtp_<tag>`` (``renameMTPGroupTags``
-in ``CacheConfigCreator``) while the kernels keep addressing pools by canonical
-name, so the resolver must be the identity whenever the canonical tag is
-already present. These are pure-CPU contract tests for that mapping.
+Draft modules declare their cache tags in the Python model description
+(``declare_draft_cache_tags``, ``<prefix>`` = ``mtp_``), so the published tag is
+``<prefix><tag>``.  The resolver is the identity whenever the canonical tag is
+already present and never guesses: an unmatched tag is returned unchanged so
+the caller reports the miss.  These are pure-CPU contract tests.
 """
 
 import unittest
@@ -11,6 +12,7 @@ import unittest
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import _semantic_tag
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     CSA_KV,
+    DRAFT_CACHE_TAG_PREFIX,
     SWA_KV,
     group_tags,
     resolve_dsv4_tag,
@@ -28,19 +30,26 @@ class ResolveDsv4TagTest(unittest.TestCase):
         self.assertEqual(resolve_dsv4_tag(cache, SWA_KV), SWA_KV)
         self.assertEqual(resolve_dsv4_tag(cache, CSA_KV), CSA_KV)
 
-    def test_mtp_prefixed_tag(self):
-        cache = _FakeKVCache(["mtp_" + SWA_KV, "mtp_" + CSA_KV])
-        self.assertEqual(resolve_dsv4_tag(cache, SWA_KV), "mtp_" + SWA_KV)
-        self.assertEqual(resolve_dsv4_tag(cache, CSA_KV), "mtp_" + CSA_KV)
+    def test_declared_prefix_tag(self):
+        cache = _FakeKVCache(
+            [DRAFT_CACHE_TAG_PREFIX + SWA_KV, DRAFT_CACHE_TAG_PREFIX + CSA_KV]
+        )
+        self.assertEqual(
+            resolve_dsv4_tag(cache, SWA_KV), DRAFT_CACHE_TAG_PREFIX + SWA_KV
+        )
+        self.assertEqual(
+            resolve_dsv4_tag(cache, CSA_KV), DRAFT_CACHE_TAG_PREFIX + CSA_KV
+        )
 
     def test_canonical_wins_over_prefixed(self):
         # Both present: the canonical name is authoritative, never the mtp one.
         cache = _FakeKVCache([SWA_KV, "mtp_" + SWA_KV])
         self.assertEqual(resolve_dsv4_tag(cache, SWA_KV), SWA_KV)
 
-    def test_single_group_fallback(self):
+    def test_single_group_is_not_guessed(self):
+        # No heuristics: one unrelated group must not be substituted silently.
         cache = _FakeKVCache(["only_group"])
-        self.assertEqual(resolve_dsv4_tag(cache, SWA_KV), "only_group")
+        self.assertEqual(resolve_dsv4_tag(cache, SWA_KV), SWA_KV)
 
     def test_multi_group_without_match_is_identity(self):
         # No match and ambiguous -> return unchanged so the caller reports the

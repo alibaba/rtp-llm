@@ -75,7 +75,7 @@ CacheConfig makeMtpCacheConfig() {
         /*layer_num=*/2, /*block_num=*/3, /*seq_size_per_block=*/1, TYPE_FP16, /*local_head_num_kv=*/1, 64);
     CacheConfig draft = rtp_llm::test::makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*seq_size_per_block=*/1, TYPE_FP16, 1, 64);
-    main.mtp_sub_configs.push_back(rtp_llm::test::renameMtpModuleTags(std::move(draft.main_config), main.main_config));
+    main.mtp_sub_configs.push_back(rtp_llm::test::declareModuleScopedTags(std::move(draft.main_config)));
     main.finalizeBlockNums(/*baseline_block_num=*/3, rtp_llm::RuntimeConfig{});
     return main;
 }
