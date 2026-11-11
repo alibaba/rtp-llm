@@ -162,32 +162,36 @@ def record_engram(py_model) -> None:
     tensor reports a CUDA device. GPU-backed storage would be recorded as
     such — and correctly fail the evaluator's Engram-in-host-RAM gate.
     """
-    layers = getattr(py_model, "_engram_layers", ()) or ()
-    for entry in layers:
-        layer_id = entry[0] if isinstance(entry, (tuple, list)) else entry
-        base = f"layers.{layer_id}.engram"
-        try:
-            module = py_model.v4.layers[layer_id].engram
-        except Exception:
-            logging.warning(
-                "AWI census: engram module for layer %s not reachable", layer_id,
-                exc_info=True,
-            )
+    layers = getattr(getattr(py_model, "v4", None), "layers", None)
+    if layers is None:
+        logging.warning("AWI census: py_model.v4.layers unreachable; engram rows skipped")
+        return
+    recorded = 0
+    for layer_id, layer in enumerate(layers):
+        module = getattr(layer, "engram", None)
+        if module is None:
             continue
-        for attr in ("q_weight", "k_weight"):
-            tensor = getattr(module, attr, None)
-            if isinstance(tensor, torch.Tensor):
-                device, storage = _classify(tensor)
-                record_external(
-                    f"{base}.{attr}", device, storage, _gpu_bytes(tensor)
-                )
-        wkv = getattr(module, "wkv", None)
-        if wkv is not None:
-            device, storage, gpu_bytes = _module_placement(wkv)
-            share = gpu_bytes // 2
-            for key in ("wkv.weight", "wkv.scale"):
-                record_external(f"{base}.{key}", device, storage, share)
-        _record_engram_tables(getattr(module, "embed_tokens", None), base)
+        recorded += _record_engram_layer(module, layer_id)
+    if recorded == 0:
+        logging.warning("AWI census: no engram modules found on any layer")
+
+
+def _record_engram_layer(module, layer_id) -> int:
+    base = f"layers.{layer_id}.engram"
+    before = len(_ROWS)
+    for attr in ("q_weight", "k_weight"):
+        tensor = getattr(module, attr, None)
+        if isinstance(tensor, torch.Tensor):
+            device, storage = _classify(tensor)
+            record_external(f"{base}.{attr}", device, storage, _gpu_bytes(tensor))
+    wkv = getattr(module, "wkv", None)
+    if wkv is not None:
+        device, storage, gpu_bytes = _module_placement(wkv)
+        share = gpu_bytes // 2
+        for key in ("wkv.weight", "wkv.scale"):
+            record_external(f"{base}.{key}", device, storage, share)
+    _record_engram_tables(getattr(module, "embed_tokens", None), base)
+    return len(_ROWS) - before
 
 
 def _record_engram_tables(embedding, base: str) -> None:
@@ -230,6 +234,69 @@ def _record_engram_tables(embedding, base: str) -> None:
             logging.warning("AWI census: engram table tensor missing for %s", key)
 
 
+_EXPERT_PATTERN = None
+
+
+def _expert_id(name: str):
+    """Logical expert id for MoE expert checkpoint keys, else None."""
+    global _EXPERT_PATTERN
+    if _EXPERT_PATTERN is None:
+        import re
+
+        _EXPERT_PATTERN = re.compile(r"\.ffn\.experts\.(\d+)\.")
+    match = _EXPERT_PATTERN.search(name)
+    return int(match.group(1)) if match else None
+
+
+def read_index(checkpoint_dir: str):
+    """Checkpoint weight_map plus exact per-tensor byte sizes from shard headers."""
+    import struct
+
+    index_path = os.path.join(checkpoint_dir, "model.safetensors.index.json")
+    with open(index_path, "r") as reader:
+        weight_map = json.load(reader)["weight_map"]
+    sizes: Dict[str, int] = {}
+    for relative in sorted(set(weight_map.values())):
+        path = os.path.join(checkpoint_dir, relative)
+        with open(path, "rb") as handle:
+            header_len = struct.unpack("<Q", handle.read(8))[0]
+            header = json.loads(handle.read(header_len))
+        for key, meta in header.items():
+            if key == "__metadata__":
+                continue
+            offsets = meta.get("data_offsets")
+            if offsets:
+                sizes[key] = int(offsets[1]) - int(offsets[0])
+    return weight_map, sizes
+
+
+def record_expert_shard(index_names, sizes, ep_rank: int, ep_size: int, device: str) -> int:
+    """Record this rank's EP expert shard rows from the live resident buffers.
+
+    Stacked MoE experts never appear under their per-expert checkpoint keys in
+    the module-load hook (the loader consumes them through stacked alias
+    names), yet the EP-sharded fused buffers ARE device-resident on this rank.
+    EP sharding is contiguous (expert_num // ep_size per rank, no EPLB remap
+    in this deployment), so rank r honestly owns logical experts
+    [r*per_ep, (r+1)*per_ep); byte counts are the exact checkpoint sizes from
+    the shard headers.
+    """
+    expert_ids = sorted(
+        {eid for eid in (_expert_id(n) for n in index_names) if eid is not None}
+    )
+    if not expert_ids:
+        return 0
+    per_ep = -(-len(expert_ids) // max(ep_size, 1))
+    mine = set(expert_ids[ep_rank * per_ep : (ep_rank + 1) * per_ep])
+    count = 0
+    for name in index_names:
+        eid = _expert_id(name)
+        if eid is not None and eid in mine:
+            record_external(name, device, "device", int(sizes.get(name, 0)))
+            count += 1
+    return count
+
+
 def load_ballast(
     checkpoint_dir: str, rank: int, world_size: int, device: str
 ) -> List[str]:
@@ -237,7 +304,9 @@ def load_ballast(
 
     Keys are distributed round-robin over ranks; every rank records rows only
     for its own share (rank 0's merge reconstructs full coverage). Engram keys
-    are never ballasted — they must stay in host RAM.
+    are never ballasted (host RAM contract) and neither are MoE expert keys
+    (already device-resident as EP-sharded stacked buffers; recording them is
+    record_expert_shard's job).
     """
     index_path = os.path.join(checkpoint_dir, "model.safetensors.index.json")
     with open(index_path, "r") as reader:
@@ -245,7 +314,7 @@ def load_ballast(
     unconsumed = sorted(
         name
         for name in weight_map
-        if name not in _ROWS and ".engram." not in name
+        if name not in _ROWS and ".engram." not in name and _expert_id(name) is None
     )
     mine = [
         name
@@ -404,12 +473,26 @@ def register_from_model(
             record_engram(py_model)
         except Exception:
             logging.error("AWI census: engram walk failed", exc_info=True)
+        device = f"cuda:{torch.cuda.current_device()}"
+        try:
+            if checkpoint_dir:
+                index_names, sizes = read_index(checkpoint_dir)
+                ep_size = int(getattr(parallelism_config, "ep_size", 0) or world_size)
+                ep_rank = rank % ep_size
+                count = record_expert_shard(
+                    set(index_names.keys()), sizes, ep_rank, ep_size, device
+                )
+                logging.info(
+                    "AWI census expert shard: rank=%d ep=%d/%d rows=%d",
+                    rank, ep_rank, ep_size, count,
+                )
+        except Exception:
+            logging.error("AWI census: expert shard walk failed", exc_info=True)
         try:
             if (
                 checkpoint_dir
                 and os.environ.get("AWI_BALLAST_UNUSED_WEIGHTS", "1") != "0"
             ):
-                device = f"cuda:{torch.cuda.current_device()}"
                 load_ballast(checkpoint_dir, rank, world_size, device)
             elif not checkpoint_dir:
                 logging.warning(
