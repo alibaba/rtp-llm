@@ -977,6 +977,7 @@ def forward_layers(
 
 
 _PREFILL_CHUNK_ROWS_CACHE: Optional[int] = None
+_CHUNK_GATE_LOGGED = False
 
 
 def _prefill_chunk_rows() -> int:
@@ -1245,24 +1246,37 @@ def forward_prefill(
         if cu_seqlens is not None and cu_seqlens.numel() >= 2
         else 1
     )
-    if (
-        chunk_rows > 0
-        and total_rows > chunk_rows
-        and batch_rows == 1
-        and getattr(inputs, "expert_token_counts", None) is None
-        and not permits_ced(inputs)
-        and int(getattr(v4, "_cp_size", 1) or 1) == 1
-    ):
-        return _forward_prefill_chunked(
-            v4,
-            kv_cache,
-            attn,
-            input_ids,
-            positions,
-            cu_seqlens,
-            prepare_hidden_fn,
-            chunk_rows,
-        )
+    if chunk_rows > 0 and total_rows > chunk_rows:
+        etc = getattr(inputs, "expert_token_counts", None)
+        etc_bound = isinstance(etc, torch.Tensor) and etc.numel() > 0
+        # permits_ced() is a PRECONDITION (last-token-only steps); CED is
+        # actually engaged only with its env flag (mirrors forward_layers'
+        # ced_requested), and only then must chunking stand aside.
+        ced_active = permits_ced(inputs) and _env_flag("DSV41_CED")
+        cp_size = int(getattr(v4, "_cp_size", 1) or 1)
+        if batch_rows == 1 and not etc_bound and not ced_active and cp_size == 1:
+            return _forward_prefill_chunked(
+                v4,
+                kv_cache,
+                attn,
+                input_ids,
+                positions,
+                cu_seqlens,
+                prepare_hidden_fn,
+                chunk_rows,
+            )
+        global _CHUNK_GATE_LOGGED
+        if not _CHUNK_GATE_LOGGED:
+            _CHUNK_GATE_LOGGED = True
+            logging.info(
+                "[dsv41] chunked prefill SKIPPED for T=%d: batch=%d "
+                "expert_token_counts_bound=%s ced_active=%s cp_size=%d",
+                total_rows,
+                batch_rows,
+                etc_bound,
+                ced_active,
+                cp_size,
+            )
 
     block_tables_by_type = build_block_tables_batched(kv_cache, attn)
 
