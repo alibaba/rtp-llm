@@ -1405,9 +1405,10 @@ def _collect_grouped_fp4_strategy_shapes(
             continue
         weight_stack = getattr(strategy, weight_attr)
         scale_stack_t = getattr(strategy, scale_attr)
-        if weight_stack.dim() != 3 or scale_stack_t is None:
-            # ROCm keeps the raw UE8M0 scales; there is no DeepGEMM packed
-            # scale layout to warm up.
+        if weight_stack is None or weight_stack.dim() != 3 or scale_stack_t is None:
+            # ROCm keeps the raw UE8M0 scales and releases the stacked FP4
+            # tensors after building per-expert caches; there is no DeepGEMM
+            # packed layout to warm up.
             continue
         expert_idx = torch.zeros((1,), dtype=torch.long, device=weight_stack.device)
         weight = weight_stack[0]
@@ -1438,8 +1439,9 @@ def _collect_local_loop_strategy_shapes(
             continue
         weight_stack = getattr(strategy, weight_attr)
         scale_stack_t = getattr(strategy, scale_attr)
-        if weight_stack.dim() != 3 or scale_stack_t is None:
-            # ROCm keeps raw UE8M0 scales, so there is no packed layout.
+        if weight_stack is None or weight_stack.dim() != 3 or scale_stack_t is None:
+            # ROCm keeps raw UE8M0 scales and releases the stacked FP4 tensors
+            # after building per-expert caches, so there is no packed layout.
             continue
         expert_idx = torch.zeros((1,), dtype=torch.long, device=weight_stack.device)
         weight = weight_stack[0]
