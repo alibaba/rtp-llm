@@ -36,6 +36,26 @@ public:
 
     bool isBarrierRequest(const std::string& request_id) const;
 
+    // Barrier lifecycle for the engine-side admission/residency probe
+    // (evaluator-protocol.md: decode of armed requests is delayed until every
+    // sequence's full input+output KV reservation coexists; a genuine
+    // capacity failure is reported instead of queueing forever).
+    struct BarrierSnapshot {
+        std::string              operation_id;
+        std::vector<std::string> request_ids;
+        int64_t                  context_tokens = 0;
+        bool                     satisfied      = false;
+        bool                     failed         = false;
+    };
+    std::vector<BarrierSnapshot> barriers() const;
+    // True while any armed barrier is neither satisfied nor failed.
+    bool hasUnresolvedBarriers() const;
+    // True when the request belongs to an unresolved barrier: its decode
+    // steps are held (prefill still runs) until the barrier resolves.
+    bool isHeldRequest(const std::string& request_id) const;
+    void markBarrierSatisfied(const std::string& operation_id);
+    void markBarrierFailed(const std::string& operation_id);
+
     // Successful CUDA/HIP graph replays, counted process-wide. The engine
     // loop brackets executor_->process() with reads of this counter: a
     // nonzero delta proves the decode step ran a replayed graph instead of
@@ -72,6 +92,8 @@ private:
         std::vector<std::string> request_ids;
         int64_t context_tokens = 0;
         int64_t armed_ns = 0;
+        bool satisfied = false;
+        bool failed = false;
     };
 
     mutable std::mutex     mu_;

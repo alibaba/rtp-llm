@@ -932,6 +932,135 @@ void NormalEngine::markAwiPrefillStarts(const std::list<GenerateStreamPtr>& stre
             // Covers the ENTIRE prefill including chunks: stamped at the
             // first step this stream was scheduled as a context stream.
             state.prefill_start_ns = now_ns;
+            // Reuse-hit observation from the admission-time cache match
+            // (initKVBlock -> publishReuseLengths). Emitted only when blocks
+            // were actually reused, so benchmark waves (distinct prefixes)
+            // correctly show no reuse events.
+            const int reuse_hit = stream->reuseLength();
+            if (reuse_hit > 0) {
+                std::string event = "{\"kind\":\"reuse\",\"request_id\":";
+                awiAppendJsonString(event, rid);
+                event += ",\"hit_tokens\":";
+                event += std::to_string(reuse_hit);
+                event += ",\"host_ns\":";
+                event += std::to_string(now_ns);
+                event += "}";
+                AwiRankStore::instance().appendEvent(std::move(event), rid, std::string());
+            }
+        }
+    }
+}
+
+void NormalEngine::awiApplyBarriers(std::list<GenerateStreamPtr>& streams) {
+    auto& store = AwiRankStore::instance();
+    if (!store.hasUnresolvedBarriers()) {
+        return;
+    }
+    for (const auto& barrier : store.barriers()) {
+        if (barrier.satisfied || barrier.failed || barrier.request_ids.empty()) {
+            continue;
+        }
+        std::vector<GenerateStreamPtr> armed;
+        armed.reserve(barrier.request_ids.size());
+        for (const auto& stream : streams) {
+            if (!stream) {
+                continue;
+            }
+            const std::string& rid = stream->generateInput()->request_info.request_id;
+            for (const auto& want : barrier.request_ids) {
+                if (want == rid) {
+                    armed.push_back(stream);
+                    break;
+                }
+            }
+        }
+        if (armed.size() < barrier.request_ids.size()) {
+            continue;  // not every armed sequence is scheduled yet
+        }
+        bool all_prefilled = true;
+        for (const auto& stream : armed) {
+            if (stream->isContextStream()) {
+                all_prefilled = false;
+                break;
+            }
+        }
+        if (!all_prefilled) {
+            continue;
+        }
+        // Reserve the ENTIRE context (input + output) for every armed sequence
+        // at once, so the resident snapshot below proves genuine coexisting
+        // full-context reservations instead of serialized sequences. A malloc
+        // failure here is the real capacity verdict for this concurrency.
+        bool reserved = true;
+        for (const auto& stream : armed) {
+            const int target_tokens =
+                barrier.context_tokens > 0
+                    ? static_cast<int>(barrier.context_tokens)
+                    : stream->inputLength() + static_cast<int>(stream->generateConfig()->max_new_tokens);
+            if (!stream->streamCacheResource().incrKVBlock(target_tokens).ok()) {
+                reserved = false;
+                break;
+            }
+        }
+        const int64_t now_ns = awiNowNs();
+        if (!reserved) {
+            store.markBarrierFailed(barrier.operation_id);
+            std::string event = "{\"kind\":\"capacity_failure\",\"operation_id\":";
+            awiAppendJsonString(event, barrier.operation_id);
+            event += ",\"concurrency\":";
+            event += std::to_string(barrier.request_ids.size());
+            event += ",\"context_tokens\":";
+            event += std::to_string(barrier.context_tokens);
+            event += ",\"failure_kind\":\"kv_capacity_exceeded\",\"host_ns\":";
+            event += std::to_string(now_ns);
+            event += "}";
+            store.appendEvent(std::move(event), std::string(), barrier.operation_id);
+            RTP_LLM_LOG_WARNING("AWI barrier %s failed: full-context KV reservation impossible for %zu sequences",
+                                barrier.operation_id.c_str(),
+                                barrier.request_ids.size());
+            continue;
+        }
+        store.markBarrierSatisfied(barrier.operation_id);
+        // ONE scheduler snapshot listing every armed sequence with its
+        // materialized KV length and reserved capacity.
+        std::string event = "{\"kind\":\"resident\",\"operation_id\":";
+        awiAppendJsonString(event, barrier.operation_id);
+        event += ",\"sequences\":[";
+        for (size_t i = 0; i < armed.size(); ++i) {
+            if (i) {
+                event.push_back(',');
+            }
+            const auto& stream   = armed[i];
+            auto&       resource = stream->streamCacheResource();
+            event += "{\"request_id\":";
+            awiAppendJsonString(event, stream->generateInput()->request_info.request_id);
+            event += ",\"input_tokens\":";
+            event += std::to_string(stream->inputLength());
+            event += ",\"kv_tokens\":";
+            event += std::to_string(stream->seqLength());
+            event += ",\"reserved_tokens\":";
+            event += std::to_string(static_cast<int64_t>(resource.curBlocksNum()) * resource.seqSizePerBlock());
+            event += "}";
+        }
+        event += "],\"host_ns\":";
+        event += std::to_string(now_ns);
+        event += "}";
+        store.appendEvent(std::move(event), std::string(), barrier.operation_id);
+        RTP_LLM_LOG_INFO("AWI barrier %s satisfied: %zu full-context sequences resident",
+                         barrier.operation_id.c_str(),
+                         armed.size());
+    }
+    // Decode of still-unresolved barrier requests is held (their prefill keeps
+    // running); the wait naturally stays out of decode timing because held
+    // steps emit no decode events.
+    for (auto it = streams.begin(); it != streams.end();) {
+        const auto& stream = *it;
+        const bool  held   = stream && !stream->isContextStream()
+                          && store.isHeldRequest(stream->generateInput()->request_info.request_id);
+        if (held) {
+            it = streams.erase(it);
+        } else {
+            ++it;
         }
     }
 }
@@ -1021,6 +1150,7 @@ absl::Status NormalEngine::step() try {
             mayAddFakeStream(streams);
         }
         markAwiPrefillStarts(streams);
+        awiApplyBarriers(streams);
         // TP collectives and FFN-disaggregate alignment both require empty batches to enter process().
         if (shouldEarlyReturnEmptyBatch(
                 streams.empty(), parallelism_config.tp_size, ffn_disaggregate_config.enable_ffn_disaggregate)) {

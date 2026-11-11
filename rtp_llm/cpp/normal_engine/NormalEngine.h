@@ -91,6 +91,11 @@ private:
                            int64_t                             step_latency_us,
                            bool                                graph_step,
                            int64_t                             step_end_ns);
+    // Barrier admission/residency probe: holds decode of armed requests until
+    // every armed sequence is prefilled AND its full input+output KV
+    // reservation coexists, then emits the single resident snapshot; reports a
+    // genuine capacity_failure if the reservation cannot be allocated.
+    void awiApplyBarriers(std::list<GenerateStreamPtr>& streams);
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 

@@ -87,10 +87,72 @@ void AwiRankStore::armBarrier(std::string operation_id, std::vector<std::string>
             barrier.request_ids = request_ids;
             barrier.context_tokens = context_tokens;
             barrier.armed_ns = nowNs();
+            // Re-arming restarts the admission/residency probe.
+            barrier.satisfied = false;
+            barrier.failed = false;
             return;
         }
     }
     barriers_.push_back(Barrier{std::move(operation_id), std::move(request_ids), context_tokens, nowNs()});
+}
+
+std::vector<AwiRankStore::BarrierSnapshot> AwiRankStore::barriers() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::vector<BarrierSnapshot> out;
+    out.reserve(barriers_.size());
+    for (const auto& barrier : barriers_) {
+        out.push_back(BarrierSnapshot{
+            barrier.operation_id, barrier.request_ids, barrier.context_tokens, barrier.satisfied, barrier.failed});
+    }
+    return out;
+}
+
+bool AwiRankStore::hasUnresolvedBarriers() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (const auto& barrier : barriers_) {
+        if (!barrier.satisfied && !barrier.failed) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool AwiRankStore::isHeldRequest(const std::string& request_id) const {
+    if (request_id.empty()) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    for (const auto& barrier : barriers_) {
+        if (barrier.satisfied || barrier.failed) {
+            continue;
+        }
+        for (const auto& armed : barrier.request_ids) {
+            if (armed == request_id) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void AwiRankStore::markBarrierSatisfied(const std::string& operation_id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (auto& barrier : barriers_) {
+        if (barrier.operation_id == operation_id) {
+            barrier.satisfied = true;
+            return;
+        }
+    }
+}
+
+void AwiRankStore::markBarrierFailed(const std::string& operation_id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (auto& barrier : barriers_) {
+        if (barrier.operation_id == operation_id) {
+            barrier.failed = true;
+            return;
+        }
+    }
 }
 
 bool AwiRankStore::isBarrierRequest(const std::string& request_id) const {
