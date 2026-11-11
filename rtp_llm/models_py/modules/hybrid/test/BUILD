@@ -174,9 +174,9 @@ py_test (
 py_test(
     name = "gated_residual_test",
     srcs = ["gated_residual_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    tags = ["L20_CU13"],
-    exec_properties = {"gpu": "L20_CU13"},
+    deps = ["//rtp_llm:testlib", ":residual_fixtures"],
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
 )
 
 py_test(

@@ -8,6 +8,8 @@ from rtp_llm.models_py.modules.hybrid.gated_residual import (
     grouped_rms_norm,
     inject_into_residual,
 )
+from rtp_llm.models_py.modules.hybrid.test.residual_fixtures import ResidualFp8Fixture
+from rtp_llm.models_py.modules.qwen4_exp.gated_residual import Qwen4GatedResidual
 
 _HC = 4
 
@@ -263,31 +265,42 @@ class GatedResidualTest(unittest.TestCase):
                 (4, 4 * hidden),
             )
         ]
-        unit = GatedResidual(*tensors, hc_mult=4, norm_eps=_EPS)
         hyper = torch.randn(3, 4 * hidden, device="cuda", dtype=torch.bfloat16)
         sublayer = torch.randn(3, hidden, device="cuda", dtype=torch.bfloat16)
         gates = torch.rand(3, 4, device="cuda", dtype=torch.bfloat16)
-        seen = []
-
-        def alter_output(module, inputs, output):
-            seen.append(inputs[0].shape)
-            return output[0] + 1, output[1], output[2]
-
         combined = hyper + (sublayer.unsqueeze(1) * gates.unsqueeze(-1)).flatten(1)
-        expected_mixed, expected_gates = _reference(combined, *tensors, hc=4, eps=_EPS)
-        handle = unit.register_forward_hook(alter_output)
-        try:
-            mixed, residual, write_gates = unit.forward_with_injection(
-                hyper, sublayer, gates
-            )
-            self.assertEqual(seen, [hyper.shape])
-            torch.testing.assert_close(residual, combined, atol=0, rtol=0)
-            torch.testing.assert_close(mixed, expected_mixed + 1, atol=0.016, rtol=0.01)
-            torch.testing.assert_close(
-                write_gates, expected_gates, atol=0.016, rtol=0.01
-            )
-        finally:
-            handle.remove()
+        units = (
+            Qwen4GatedResidual(*tensors, hc_mult=4, norm_eps=_EPS),
+            ResidualFp8Fixture().module(True),
+        )
+        for unit in units:
+            for global_hooks in (False, True):
+                seen = []
+
+                def alter_input(module, inputs):
+                    if module is unit:
+                        seen.append("pre")
+                        return (inputs[0] + 0.25,)
+
+                def alter_output(module, inputs, output):
+                    if module is unit:
+                        seen.append("post")
+                        return output[0] + 1, output[1], output[2]
+
+                hooks = torch.nn.modules.module if global_hooks else unit
+                prefix = "register_module" if global_hooks else "register"
+                pre = getattr(hooks, prefix + "_forward_pre_hook")(alter_input)
+                post = getattr(hooks, prefix + "_forward_hook")(alter_output)
+                try:
+                    expected = unit(combined)
+                    seen.clear()
+                    actual = unit.forward_with_injection(hyper, sublayer, gates)
+                    self.assertEqual(seen, ["pre", "post"])
+                    for got, want in zip(actual, expected):
+                        torch.testing.assert_close(got, want, atol=0, rtol=0)
+                finally:
+                    pre.remove()
+                    post.remove()
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_merged_projection_matches_original_at_real_width(self):

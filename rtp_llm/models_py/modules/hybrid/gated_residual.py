@@ -173,6 +173,15 @@ class GatedResidual(nn.Module):
 
         return self._forward_normed(hyper_input, normed)
 
+    def _has_forward_hooks(self) -> bool:
+        module_hooks = torch.nn.modules.module
+        return bool(
+            self._forward_pre_hooks
+            or self._forward_hooks
+            or module_hooks._global_forward_pre_hooks
+            or module_hooks._global_forward_hooks
+        )
+
     def forward_with_injection(
         self,
         hyper_input: torch.Tensor,
@@ -180,7 +189,8 @@ class GatedResidual(nn.Module):
         inject_weights: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         if (
-            self.down_projection is not None
+            not self._has_forward_hooks()
+            and self.down_projection is not None
             and self.down_projection.use_scaled_mm
             and tuple(self.down_projection.weight.shape) == (320, 10240)
         ):

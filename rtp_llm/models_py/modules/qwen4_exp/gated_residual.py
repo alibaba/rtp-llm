@@ -56,7 +56,11 @@ class Qwen4GatedResidual(GatedResidual):
         # A BF16 descriptor has no FP8 projection/scale consumer. Fuse the
         # producer independently of the projection dtype, then ignore the
         # optional FP8 scale. Other layouts keep the shared implementation.
-        if self.down_projection is None and self.hc_mult == 4:
+        if (
+            not self._has_forward_hooks()
+            and self.down_projection is None
+            and self.hc_mult == 4
+        ):
             from rtp_llm.models_py.triton_kernels.gated_residual.prefill_inject_norm import (
                 try_inject_grouped_norm,
             )
