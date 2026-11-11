@@ -289,6 +289,58 @@ def _fp4_global_gather_bytes_rows_kernel(
     tl.store(dst + 64 + scols[None, :], scales, valid[:, None])
 
 
+def _torch_codec_supported() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    major, _ = torch.cuda.get_device_capability()
+    return major >= 9
+
+
+_E2M1_VALUES = (
+    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+)
+
+
+def _gather_fp4_rows_torch(pool_3d: torch.Tensor, slots: torch.Tensor) -> torch.Tensor:
+    """Gather the physical 288-byte rows for ``slots`` without Triton."""
+    slots = slots.reshape(-1).to(torch.int64)
+    rows = slots.numel()
+    out = torch.zeros(
+        (rows, FP4_GLOBAL_ENTRY_BYTES), dtype=torch.uint8, device=pool_3d.device
+    )
+    valid = slots >= 0
+    if not bool(valid.any()):
+        return out
+    block_size = int(pool_3d.shape[1])
+    block_stride = int(pool_3d.stride(0))
+    blocks = pool_3d.as_strided((pool_3d.shape[0], block_stride), (block_stride, 1))
+    chosen = slots[valid]
+    block_idx = chosen // block_size
+    offset = chosen % block_size
+    cols = torch.arange(FP4_GLOBAL_ENTRY_BYTES, device=pool_3d.device)
+    gather_cols = offset[:, None] * FP4_GLOBAL_ENTRY_BYTES + cols[None, :]
+    out[valid] = torch.gather(blocks[block_idx], 1, gather_cols)
+    return out
+
+
+def _dequantize_fp4_rows_torch(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """Decode interleaved 288-byte E2M1/E4M3 rows to ``[N, 512]``."""
+    rows = raw.shape[0]
+    payload = raw[:, : FP4_GLOBAL_HEAD_DIM // 2]
+    scale_bytes = raw[
+        :, FP4_GLOBAL_HEAD_DIM // 2 : FP4_GLOBAL_HEAD_DIM // 2 + 2 * FP4_GLOBAL_GROUP
+    ]
+    codes = torch.stack((payload & 0x0F, payload >> 4), dim=-1).reshape(
+        rows, FP4_GLOBAL_HEAD_DIM
+    )
+    table = torch.tensor(_E2M1_VALUES, dtype=torch.float32, device=raw.device)
+    values = table[codes.to(torch.int64)]
+    scales = scale_bytes.contiguous().view(torch.float8_e4m3fn).to(torch.float32)
+    values = values * scales.repeat_interleave(FP4_GLOBAL_GROUP, dim=1)
+    return values.to(out_dtype)
+
+
 def dequantize_k_cache_slots_fp4(
     pool_3d: torch.Tensor,  # [num_blocks, block_size, 288] uint8
     slot_indices: torch.Tensor,  # [N] int (flat slot ids; <0 = zero-fill)
@@ -303,6 +355,13 @@ def dequantize_k_cache_slots_fp4(
             (N, FP4_GLOBAL_HEAD_DIM), dtype=out_dtype, device=pool_3d.device
         )
     if N == 0:
+        return out
+    if not _torch_codec_supported():
+        out.copy_(
+            _dequantize_fp4_rows_torch(
+                _gather_fp4_rows_torch(pool_3d, slot_indices), out.dtype
+            ).view_as(out)
+        )
         return out
     slots_i64 = slot_indices.reshape(-1).to(torch.int64).contiguous()
     _OUT_DTYPE = {
@@ -379,6 +438,9 @@ def dequantize_k_cache_bytes_fp4(
             (N, FP4_GLOBAL_HEAD_DIM), dtype=out_dtype, device=raw_bytes.device
         )
     if N == 0:
+        return out
+    if not _torch_codec_supported():
+        out.copy_(_dequantize_fp4_rows_torch(raw_bytes, out.dtype).view_as(out))
         return out
     pool_view = raw_bytes.view(N, 1, FP4_GLOBAL_ENTRY_BYTES)
     _OUT_DTYPE = {
