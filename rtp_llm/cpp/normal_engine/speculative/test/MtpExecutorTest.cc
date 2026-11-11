@@ -2600,6 +2600,11 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
     components.fake_draft_prefill_model->setInputs({next_draft_input});
     components.fake_draft_prefill_model->setOutputs({next_draft_output});
     components.fake_draft_prefill_model->expectTargetVerify(false);
+    if (components.executor->useAsyncPrepare()) {
+        // Rejection accepts three of five rows. Preparing the dense verify
+        // layout would leave the draft forward using metadata for five rows.
+        components.fake_draft_prefill_model->setPrepareInputs({next_draft_input});
+    }
 
     if (with_prefill_only) {
         components.fake_target_model->setInputs({prefill_only_input, target_input});
@@ -2714,6 +2719,7 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
     }
     if (components.executor->useAsyncPrepare()) {
         EXPECT_FALSE(fake_target_model->hasPendingPrepareInputs());
+        EXPECT_FALSE(draft_prefill_fake_model->hasPendingPrepareInputs());
     }
 
     // check stream result
