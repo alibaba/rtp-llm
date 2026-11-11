@@ -202,8 +202,10 @@ def run(deploy, recipe, dataset_path, ray_address):
     from q38_split_actor import SplitActorWorker
     from q38_split_backend import ray_claim
     from q38_split_native import _write_json
+    from q38_short_recipe import configure_rollouts, configure_tool_budget
 
     config, dataset = _preflight_driver(deploy, recipe, dataset_path)
+    config = configure_rollouts(config)
     env = _checkpoint_env(deploy)
     host, port = ray_address.split(":")
     if IPv4Address(host) != IPv4Address(deploy.train[0].ip) or not 1024 <= int(port) <= 65535:
@@ -214,6 +216,7 @@ def run(deploy, recipe, dataset_path, ray_address):
     output = Path(deploy.output)
     output.mkdir(exist_ok=False)
     _tool_env(output)
+    configure_tool_budget()
     with open_dict(config):
         config.rllm.trainer.logger = ["console"]
         config.rllm.trainer.experiment_name = deploy.run_id
@@ -226,6 +229,12 @@ def run(deploy, recipe, dataset_path, ray_address):
     # process. The only forwarded variables here are the locked source inputs.
     env["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     env["NCCL_IB_GID_INDEX"] = "3"
+    env["NCCL_MNNVL_ENABLE"] = "0"
+    env["NCCL_NET"] = "IB"
+    env["NCCL_IB_DISABLE"] = "0"
+    env["NCCL_IB_HCA"] = "=mlx5_bond_0:1"
+    env["NCCL_SOCKET_IFNAME"] = "=eth0"
+    env["GLOO_SOCKET_IFNAME"] = "eth0"
     env["OMP_NUM_THREADS"] = "3"
     ray.init(address=ray_address, namespace=deploy.run_id, runtime_env={"env_vars": env})
     trainer = None
