@@ -998,6 +998,7 @@ class AttentionV41FP8(AttentionFP8):
         mega = getattr(self, "_mega_attention", None)
         if (
             mega is not None
+            and not callable(kv)
             and mega.supports_query(qkv.qr)
             and mega.supports_prefill(kv, indices, topk_length)
         ):
@@ -1286,6 +1287,30 @@ class AttentionV41FP8(AttentionFP8):
             prefixes_host, lengths_host = torch.stack((starts, lengths)).tolist()
         tile_rows = _PRODUCE_GLOBAL_TILE_ROWS
         ends = [s + l for s, l in zip(prefixes_host, lengths_host)]
+        # Long-context tight-HBM path: publish lazy pool-paged markers instead
+        # of the dense span-scaled g/k buffers (604MB + 268MB at a 1M span).
+        # Single-request eager prefill on pre-SM100 only; every other shape
+        # falls through to the untouched dense producer below.
+        from ._v41_paged_prefill_values import (
+            paged_sparse_device_eligible,
+            paged_sparse_values_enabled,
+            publish_paged_globals,
+        )
+
+        if (
+            prefill
+            and paged_sparse_values_enabled()
+            and len(ends) == 1
+            and main_pool is not None
+            and index_pool is not None
+            and (cp is None or cp.cp_size <= 1 or not cp.kv_cache_sharded)
+            and not torch.cuda.is_current_stream_capturing()
+            and paged_sparse_device_eligible(x_full.device)
+            and publish_paged_globals(
+                self, main_pool, index_pool, INDEXER_KV, ends, ratio, x_full.device
+            )
+        ):
+            return
         pair_ranges = None
         producer_meta = None
         tile_metadata = positions is None
@@ -2677,12 +2702,24 @@ class AttentionV41FP8(AttentionFP8):
                 if indices.shape[1] % 64:
                     indices = F.pad(indices, (0, 64 - indices.shape[1] % 64), value=-1)
             self._shared_attention["prefill_index_plan"] = (selected, indices, lens)
+        kv_source = None
+        if len(globals_by_req) == 1:
+            from ._v41_paged_prefill_values import (
+                PagedGlobalValues,
+                PagedSparseKVSource,
+            )
+
+            g0 = globals_by_req[0][0]
+            if isinstance(g0, PagedGlobalValues):
+                kv_source = PagedSparseKVSource(g0, swa[0] if len(swa) else None)
+        if kv_source is None:
+            kv_source = prefill_kv_workspace.combine_kv(
+                self._shared_attention, globals_by_req, swa
+            ).unsqueeze(1)
         return self._prefill_sparse_attention(
             qkv,
             common,
-            kv=prefill_kv_workspace.combine_kv(
-                self._shared_attention, globals_by_req, swa
-            ).unsqueeze(1),
+            kv=kv_source,
             indices=indices,
             topk_length=lens,
             profile_name="dsv41.prefill.shared_global",

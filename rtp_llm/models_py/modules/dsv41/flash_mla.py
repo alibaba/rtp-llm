@@ -55,7 +55,10 @@ def _sparse_fwd_reference(q, kv, indices, sm_scale, attn_sink, topk_length):
     heads, dim = shape[-2], shape[-1]
     q_flat = q.reshape(-1, heads, dim)
     rows = q_flat.shape[0]
-    kv_flat = kv.reshape(-1, dim)
+    # ``kv`` is either the dense [T, 1, D] value source or a callable row
+    # source (pool-paged long-context path) returning [N, D] for flat
+    # indices; both feed the identical per-sub-chunk math below.
+    kv_flat = None if callable(kv) else kv.reshape(-1, dim)
     idx_full = indices.reshape(rows, -1).to(torch.long)
     width = idx_full.shape[1]
     lengths = (
@@ -73,7 +76,14 @@ def _sparse_fwd_reference(q, kv, indices, sm_scale, attn_sink, topk_length):
         valid = idx >= 0
         if lengths is not None:
             valid = valid & (column[None, :] < lengths[begin:end, None])
-        selected = kv_flat[idx.clamp_min(0)].to(torch.float32)
+        if kv_flat is None:
+            selected = (
+                kv(idx.clamp_min(0).reshape(-1))
+                .to(torch.float32)
+                .view(idx.shape[0], width, dim)
+            )
+        else:
+            selected = kv_flat[idx.clamp_min(0)].to(torch.float32)
         queries = q_flat[begin:end].to(torch.float32)
         logits = torch.einsum("mhd,mkd->mhk", queries, selected) * sm_scale
         logits = logits.masked_fill(~valid[:, None, :], float("-inf"))
@@ -95,6 +105,10 @@ def flash_mla_sparse_fwd(
     if q.is_cuda and not _sparse_native_supported(q.device.index):
         return _sparse_fwd_reference(
             q, kv, indices, sm_scale, attn_sink, topk_length
+        )
+    if callable(kv):
+        raise RuntimeError(
+            "paged sparse-prefill KV source requires the pre-SM100 reference path"
         )
 
     from flash_mla import flash_mla_sparse_fwd as native
