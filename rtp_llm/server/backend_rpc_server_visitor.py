@@ -430,10 +430,12 @@ class BackendRPCServerVisitor:
         )
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
-        if selected_vit is None:
-            pinned_prefill = self._session_placement.maybe_pin_prefill(
-                full_block_cache_keys
-            )
+        # getattr guard: some tests construct the visitor via __new__ with a
+        # hand-picked attribute set; a missing balancer just disables pinning
+        # for that instance (production __init__ always sets it).
+        placement = getattr(self, "_session_placement", None)
+        if placement is not None and selected_vit is None:
+            pinned_prefill = placement.maybe_pin_prefill(full_block_cache_keys)
             if pinned_prefill is not None:
                 # Request-pinned routing (cold-session placement balancing):
                 # the prefill role is fixed by the frontend for this request;

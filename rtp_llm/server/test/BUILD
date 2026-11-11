@@ -146,6 +146,9 @@ py_test(
     deps = [
         "//rtp_llm:config",
         "//rtp_llm:config_ops",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
         "//rtp_llm/server:server",
     ],
 )
