@@ -113,7 +113,6 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     _prepare_wo_a_stacked,
     _repack_v4_fp8_scale_to_int32,
     _use_cp_cache_hit_raw_q_merge,
-    _use_read_from_pool,
     bind_attn_cache,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import kv_tag_for_compress_ratio

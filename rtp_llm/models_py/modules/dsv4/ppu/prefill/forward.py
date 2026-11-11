@@ -8,7 +8,6 @@ from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 import torch
-from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -739,7 +738,7 @@ def forward_prefill(
 
     groups = (
         None
-        if is_capturing or _rt.ENABLED or _fwd_dbg.enabled()
+        if is_capturing or _rt.ENABLED
         else reserved_page_warmup_groups(
             v4,
             parallelism_config,

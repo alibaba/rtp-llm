@@ -6,7 +6,6 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.decode.forward import (
