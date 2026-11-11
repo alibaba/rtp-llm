@@ -3162,10 +3162,35 @@ class AttentionV41FP8(AttentionFP8):
                     >= visible_i32.reshape(T, 1),
                     -torch.inf,
                 )
+        score_capacity = capacity
+        keys_dense = keys
+        if (
+            not paged
+            and candidate_blocks <= 0
+            and candidate_size <= 0
+            and shared.get("candidates") is None
+            and T > 0
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            # The dense fallback scores a [slice, heads, capacity] fp32
+            # rectangle whose capacity is the pool-wide compressed slot count
+            # (e.g. 32768 columns for a 1M-token FULL pool), independent of the
+            # request's visible span. On devices whose post-weight free HBM is
+            # measured in MiB, that pool-wide rectangle (64MiB) OOMs the first
+            # decode step even for few-hundred-token contexts. Columns at or
+            # beyond the maximum visible length are unconditionally masked to
+            # -inf, so clamping the rectangle and the keys gather to that span
+            # cannot change the selected indices; the short-context ascending
+            # shortcut below is width-independent. Graph capture keeps the
+            # static capacity shape (data-dependent shapes are not capturable).
+            span = int(visible_per_token.max().item())
+            span = ((min(max(span, 1), capacity) + 255) // 256) * 256
+            score_capacity = min(max(span, 256), capacity)
+            keys_dense = keys.narrow(1, 0, score_capacity)
         output = torch.full(
             (T, self.index_topk), -1, dtype=torch.int32, device=x.device
         )
-        columns = None if paged else torch.arange(capacity, device=x.device)
+        columns = None if paged else torch.arange(score_capacity, device=x.device)
         for b in range(B):
             for start in range(b * S, (b + 1) * S, 16):
                 end = min(start + 16, (b + 1) * S)
@@ -3175,10 +3200,12 @@ class AttentionV41FP8(AttentionFP8):
                     request_ids = shared.get("decode_packed_request_ids")
                     if request_ids is None:
                         logits = torch.einsum(
-                            "thd,kd->thk", q[start:end], keys[b]
+                            "thd,kd->thk", q[start:end], keys_dense[b]
                         ).relu_()
                     else:
-                        query_keys = keys.index_select(0, request_ids[start:end].long())
+                        query_keys = keys_dense.index_select(
+                            0, request_ids[start:end].long()
+                        )
                         logits = torch.einsum(
                             "thd,tkd->thk", q[start:end], query_keys
                         ).relu_()
@@ -3196,7 +3223,7 @@ class AttentionV41FP8(AttentionFP8):
                         mask_candidate_logits(
                             logits, candidates[start:end], candidate_size
                         )
-                count = min(self.index_topk, capacity)
+                count = min(self.index_topk, capacity if paged else score_capacity)
                 # Radix-select TopK (the shared V4 indexer kernel) serves the
                 # production paged decode shape; the per-row lengths subsume
                 # the -inf/isfinite masking. Output order is unspecified (the
