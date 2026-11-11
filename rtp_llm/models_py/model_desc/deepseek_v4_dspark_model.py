@@ -34,7 +34,10 @@ from typing import Any, Optional, Tuple
 
 import torch
 
-from rtp_llm.config.cuda_graph import CudaGraphSelectionMode, GenerationPrefillCudaGraphUnsupportedBackend
+from rtp_llm.config.cuda_graph import (
+    CudaGraphSelectionMode,
+    GenerationPrefillCudaGraphUnsupportedBackend,
+)
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
@@ -50,9 +53,6 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8.attention import BIND_KEEP, bind_attn_cache
 from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import decode_compute_qkv
-from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
-    get_or_build_sched_meta,
-)
 from rtp_llm.models_py.modules.dsv4.fp8.decode.output_proj import decode_output_proj
 from rtp_llm.models_py.modules.dsv4.fp8.decode.write_swa import decode_write_swa_fp8
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
@@ -706,15 +706,16 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             topk = int(global_indices.shape[-1])
             global_indices = global_indices.view(batch_size, gamma, topk).contiguous()
 
-            sched_meta = get_or_build_sched_meta(
+            fp8_op = attn._get_fp8_decode_op()
+            sched_meta = fp8_op.get_sched_meta(
+                qkv.q.device,
                 graph_metadata,
                 batch_size=batch_size,
                 q_len=gamma,
-                num_heads=int(attn.n_heads),
                 topk=topk,
                 extra_attn_type=None,
             )
-            output = attn._get_fp8_decode_op().forward(
+            output = fp8_op.forward(
                 q=qkv.q,
                 kv_cache=pool,
                 attn_sink=attn.attn_sink,

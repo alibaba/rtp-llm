@@ -1729,15 +1729,6 @@ def _generate_mhc_prenorm_warmup_specs(
     return tuple((split, reps_by_split[split]) for split in sorted(reps_by_split))
 
 
-def _fp8_mqa_logits_available() -> bool:
-    try:
-        import deep_gemm
-
-        return hasattr(deep_gemm, "fp8_mqa_logits")
-    except Exception:
-        return False
-
-
 @torch.inference_mode()
 def warmup_dense_gemm_jit(
     shapes: Dict[tuple[str, int, int], dict],
@@ -1833,6 +1824,12 @@ def warmup_batched_fp8_einsum_jit(
         return
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
+        return
+    from rtp_llm.models_py.modules.dsv4.fp8.attention_backend import (
+        get_sparse_attention_backend,
+    )
+
+    if not get_sparse_attention_backend(device).uses_deepgemm_einsum:
         return
     _assert_not_capturing()
 
@@ -2070,7 +2067,9 @@ def warmup_fp8_mqa_logits_jit(
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
         return
-    if not _fp8_mqa_logits_available():
+    from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import supports_mqa_logits
+
+    if not supports_mqa_logits(device):
         return
     _assert_not_capturing()
 

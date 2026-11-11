@@ -19,13 +19,6 @@ import threading
 from contextlib import contextmanager, suppress
 from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 
-# P3 (audit §3.5 / §7.4 P0): wo_a batched output projection.
-# Replaces the per-group ``for g in range(G)`` loop (G launches of
-# ``fp8_gemm_nt``) with one ``deep_gemm.fp8_einsum("bhr,hdr->bhd", ...)``
-# call.  Matches vLLM's ``deepseek_v4_attention.py:325`` exactly (same
-# API, same recipe).  Validated by ``test/test_wo_a_batched_vs_loop.py``
-# — bit-identical output + 3.5-4.4× speedup at decode B∈{1..256}.
-import deep_gemm  # noqa: E402
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -68,6 +61,12 @@ from rtp_llm.models_py.modules.dsv4.fp8._pool_reader import (
 from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
     CPByteSlicedSlotCompaction,
     build_cp_byte_sliced_slot_compaction,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.attention_backend import (
+    _prepare_wo_a_stacked as _prepare_wo_a_stacked,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.attention_backend import (
+    get_sparse_attention_backend,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
@@ -331,36 +330,6 @@ def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
     idx = torch.arange(N, device=scale.device) // 128
     scale_rep = scale.float().index_select(-2, idx)
     return get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
-
-
-def _prepare_wo_a_stacked(
-    weight_fp8: torch.Tensor,
-    scale_raw: torch.Tensor,
-    G: int,
-    R: int,
-    K: int,
-) -> tuple:
-    """Stack V4 wo_a ckpt (``[G*R, K]`` fp8 + ``[G*R/128, K/128]`` e8m0fnu)
-    into the ``fp8_einsum``-expected layout, computed once at init:
-
-    - weight: ``[G, R, K]`` fp8 contiguous (free view)
-    - scale : ``[G, R, K/512]`` int32 UE8M0 packed, MN-major TMA-aligned
-      (stride ``(K/512 * tma_R, 1, tma_R)``)
-
-    Cast e8m0fnu → fp32, row-repeat by 128 along R so
-    ``get_mn_major_tma_aligned_packed_ue8m0_tensor`` (which operates on
-    fp32 ``[*, mn, k/128]``) sees the full [G, R, K/128] grid.  The helper
-    floor-log2 bitcasts each block scale and packs 4 UE8M0 bytes per
-    int32; output shape ``[G, R, K/512]`` matches
-    ``deep_gemm.fp8_einsum(..., recipe=(1, 1, 128))`` expectations."""
-    from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
-
-    w_stk = weight_fp8.view(G, R, K).contiguous()
-    scale_fp32 = scale_raw.float().view(G, R // 128, K // 128)
-    idx = torch.arange(R, device=scale_raw.device) // 128
-    scale_rep = scale_fp32.index_select(-2, idx).contiguous()  # [G, R, K/128]
-    s_stk = get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
-    return w_stk, s_stk
 
 
 def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
@@ -947,10 +916,9 @@ class AttentionFP8(nn.Module):
 
         # wo_a grouped projection: row-split along (n_groups*o_lora_rank).
         # Stored as plain ``[N, K]`` fp8 weight + UE8M0 scale tensors;
-        # the ``fp8_einsum`` production path uses the pre-stacked
-        # ``_wo_a_stk_w`` / ``_wo_a_stk_s`` buffers below, the BF16
-        # fallback path inline-dequants from these via
-        # ``dequantize_fp8_weight``.
+        # the backend prepares its weight/scale layout once into the
+        # registered ``_wo_a_stk_w`` / ``_wo_a_stk_s`` buffers. Keep raw
+        # tensors for the BF16 fallback's ``dequantize_fp8_weight``.
         assert (n_heads * head_dim) % o_groups == 0
         wo_a_w = layer_weights[W.v4_attn_wo_a_w]
         wo_a_s = layer_weights[W.v4_attn_wo_a_s]
@@ -966,9 +934,9 @@ class AttentionFP8(nn.Module):
         self.wo_a_w = wo_a_w
         self.wo_a_s = wo_a_s
         K_local = n_heads_local * head_dim // n_groups_local
-        _stk_w, _stk_s = _prepare_wo_a_stacked(
-            wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
-        )
+        _stk_w, _stk_s = get_sparse_attention_backend(
+            wo_a_w.device
+        ).prepare_grouped_output(wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local)
         self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
         self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
 
@@ -1869,13 +1837,9 @@ class AttentionFP8(nn.Module):
                 self.indexer.compressor.init_rope_cache(freqs_cis)
 
     def _get_fp8_decode_op(self):
-        """Lazy-build the persistent ``SparseAttnV4DecodeFp8Op`` so its
-        ``sched_meta`` cache survives across decode steps.
+        """Keep one decode op per layer; bind it when the query device is known.
 
-        Iter1' instantiated the op per call inside ``_forward_decode_body``
-        which threw away the FlashMLA planner state on every call (60 layers
-        × per step = 60 planner setups). Caching here cuts that to one setup
-        per layer-type per process.
+        Planner state remains on the per-step attention metadata.
         """
         if self._fp8_decode_op is None:
             from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op import (
@@ -1967,24 +1931,19 @@ class AttentionFP8(nn.Module):
     def _wo_a_einsum_from_fp8(
         self, o_fp8: torch.Tensor, o_scale: torch.Tensor, B: int, S: int
     ) -> torch.Tensor:
-        """One ``fp8_einsum`` call on pre-quantized activations.
-
-        ``fused_inv_rope_fp8_quant`` emits ``(o_fp8 [M, G, K], o_scale
-        [M, G, K/512])`` in the exact layout ``deep_gemm.fp8_einsum``
-        consumes, so the wo_a projection is a single einsum launch.
-        Matches vLLM ``deepseek_v4_attention.py:325`` (same
-        ``"bhr,hdr->bhd"`` + recipe ``(1, 1, 128)`` for SM100 UE8M0)."""
-        M, G, _K = o_fp8.shape
-        R = self.o_lora_rank
-        out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o_fp8.device)
-        deep_gemm.fp8_einsum(
-            "bhr,hdr->bhd",
-            (o_fp8, o_scale),
-            (self._wo_a_stk_w, self._wo_a_stk_s),
-            out,
-            recipe=(1, 1, 128),
+        """Project grouped FP8 activations through the selected implementation."""
+        from rtp_llm.models_py.modules.dsv4.fp8.attention_backend import (
+            get_sparse_attention_backend,
         )
-        return out.view(B, S, G, R)
+
+        out = get_sparse_attention_backend(o_fp8.device).grouped_output(
+            o_fp8,
+            o_scale,
+            self._wo_a_stk_w,
+            self._wo_a_stk_s,
+            self.o_lora_rank,
+        )
+        return out.view(B, S, o_fp8.shape[1], self.o_lora_rank)
 
     def forward_decode(
         self,
@@ -2171,9 +2130,6 @@ class AttentionFP8(nn.Module):
         from rtp_llm.models_py.modules.dsv4.fp8.decode.attention_kernels import (
             attn_fp8_swa_paged,
         )
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
-            get_or_build_sched_meta,
-        )
         from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
 
         swa_pool_3d = self._pool_view_3d_fp8(SWA_KV)
@@ -2206,11 +2162,12 @@ class AttentionFP8(nn.Module):
         swa_global = attn_metadata.swa_global_slots[:T]
         swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
 
-        sched_meta = get_or_build_sched_meta(
+        fp8_op = self._get_fp8_decode_op()
+        sched_meta = fp8_op.get_sched_meta(
+            q.device,
             attn_metadata,
             batch_size=bsz,
             q_len=q_len,
-            num_heads=self.n_heads,
             topk=self.window_size,
             extra_attn_type=None,
         )
@@ -2228,7 +2185,7 @@ class AttentionFP8(nn.Module):
             swa_topk_3d=swa_topk_3d,
             swa_block_table=swa_pool_bt[:bsz],
             sched_meta=sched_meta,
-            fp8_op=self._get_fp8_decode_op(),
+            fp8_op=fp8_op,
             topk_length=swa_topk_length,
         )
 
@@ -2361,9 +2318,6 @@ class AttentionFP8(nn.Module):
         from rtp_llm.models_py.modules.dsv4.fp8.decode.attention_kernels import (
             attn_fp8_dual_paged,
         )
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
-            get_or_build_sched_meta,
-        )
         from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
             translate_local_to_global_slots,
         )
@@ -2423,11 +2377,12 @@ class AttentionFP8(nn.Module):
         swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
         cmp_topk_3d = cmp_global.view(bsz, q_len, K_cmp).contiguous()
 
-        sched_meta = get_or_build_sched_meta(
+        fp8_op = self._get_fp8_decode_op()
+        sched_meta = fp8_op.get_sched_meta(
+            q.device,
             attn_metadata,
             batch_size=bsz,
             q_len=q_len,
-            num_heads=self.n_heads,
             topk=win,
             extra_attn_type=cmp_attn_type,
         )
@@ -2453,7 +2408,7 @@ class AttentionFP8(nn.Module):
             cmp_topk_3d=cmp_topk_3d,
             swa_block_table=swa_pool_bt[:bsz],
             sched_meta=sched_meta,
-            fp8_op=self._get_fp8_decode_op(),
+            fp8_op=fp8_op,
             topk_length=swa_topk_length,
             extra_topk_length=extra_topk_length,
         )
@@ -5424,8 +5379,13 @@ class AttentionFP8(nn.Module):
             int(freqs_cis.shape[0]) == s_q
         ), f"RoPE rows ({freqs_cis.shape[0]}) != Q rows ({s_q})"
 
-        from rtp_llm.models_py.utils.flash_mla_legacy import (
-            flash_mla_sparse_fwd,  # type: ignore[import-not-found]
+        prepared = get_sparse_attention_backend(q.device).prepare_prefill(
+            q=q,
+            kv=kv,
+            indices=indices,
+            topk_length=topk_length,
+            attn_sink=self.attn_sink,
+            softmax_scale=self.softmax_scale,
         )
 
         chunk_rows = min(_FLASH_MLA_SPARSE_Q_CHUNK, s_q)
@@ -5447,14 +5407,7 @@ class AttentionFP8(nn.Module):
         for start in range(0, s_q, chunk_rows):
             end = min(start + chunk_rows, s_q)
             with record_function_range(profile_name):
-                o_part, _, _ = flash_mla_sparse_fwd(
-                    q=q[start:end],
-                    kv=kv,
-                    indices=indices[start:end],
-                    sm_scale=self.softmax_scale,
-                    attn_sink=self.attn_sink,
-                    topk_length=topk_length[start:end],
-                )
+                o_part = prepared.forward(start, end)
             with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
                 self._prefill_output_proj_into(
                     o_part,
