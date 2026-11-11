@@ -30,6 +30,12 @@
 
 #if USING_ASCEND
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
+#include <acl/acl.h>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#include <torch_npu/csrc/core/npu/NPUStream.h>
+#pragma GCC diagnostic pop
+#include "rtp_llm/models_py/bindings/ascend/ascend_types_hdr.h"
 #endif
 
 using namespace std;
@@ -372,9 +378,25 @@ void runtimeCopy(const CopyParams& params) {
 }
 
 void multiMergeCopy(const MultiMergeCopyParams& params) {
+    // D2D merge copy on NPU: issue one aclrtMemcpyAsync per segment on the
+    // current NPU stream (same pattern as FusedCopyOp). The previous host-side
+    // std::memcpy operated directly on NPU device pointers — gatherHiddenStates
+    // (MtpBatchStreamProcessor, decode concurrency >= 8) passes NPU buffers
+    // here, which was an invalid host access.
+    // The only caller passes device pointers on both sides, so D2D is the
+    // correct transfer mode.
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     for (size_t i = 0; i < params.src_ptrs.size(); i++) {
-        auto dst = static_cast<char*>(params.dst_ptr) + params.dst_offsets[i];
-        std::memcpy(dst, params.src_ptrs[i], params.copy_size[i]);
+        if (params.copy_size[i] == 0) {
+            continue;
+        }
+        void* dst = static_cast<char*>(params.dst_ptr) + params.dst_offsets[i];
+        ASCEND_CHECK(aclrtMemcpyAsync(dst,
+                                      params.copy_size[i],
+                                      params.src_ptrs[i],
+                                      params.copy_size[i],
+                                      ACL_MEMCPY_DEVICE_TO_DEVICE,
+                                      stream));
     }
 }
 

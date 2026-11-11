@@ -199,7 +199,7 @@ torch::Tensor emptyInt32OnPreferredDevice(std::initializer_list<int64_t> shape) 
 }
 
 torch::TensorOptions cudaInt32Options() {
-    return torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    return torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
 }
 
 torch::Tensor emptyInt32OnCuda(std::initializer_list<int64_t> shape) {
@@ -214,7 +214,7 @@ torch::Tensor toCudaInt32(const torch::Tensor& tensor, TensorHolder& host_holder
     if (!tensor.defined()) {
         return tensor;
     }
-    if (tensor.is_cuda() && tensor.scalar_type() == torch::kInt32) {
+    if ((tensor.is_cuda() || tensor.is_privateuseone()) && tensor.scalar_type() == torch::kInt32) {
         return tensor;
     }
     if (tensor.numel() == 0) {
@@ -305,8 +305,8 @@ torch::Tensor pickOneStepTargetLastToken(const GenerateStreamPtr& stream) {
     const auto state          = stream->getMtpAsyncDeviceState();
     const auto& accept_tokens = state.accept_tokens_gpu;
     const auto& accept_len    = state.accept_len_gpu;
-    if (useMtpDeviceState() && accept_tokens.defined() && accept_tokens.is_cuda() && accept_len.defined()
-        && accept_len.is_cuda()) {
+    if (useMtpDeviceState() && accept_tokens.defined() && (accept_tokens.is_cuda() || accept_tokens.is_privateuseone())
+        && accept_len.defined() && (accept_len.is_cuda() || accept_len.is_privateuseone())) {
         auto idx_t = (accept_len - 1).to(torch::kLong);
         return accept_tokens.squeeze(0).index_select(/*dim=*/0, idx_t);
     }
@@ -427,14 +427,15 @@ bool collectMtpStateProposeSlices(const std::list<GenerateStreamPtr>& streams,
     for (const auto& stream : streams) {
         const auto    state = stream->getMtpAsyncDeviceState();
         torch::Tensor gpu_t = state.propose_tokens_gpu;
-        if (!gpu_t.defined() || !gpu_t.is_cuda()) {
+        if (!gpu_t.defined() || (!gpu_t.is_cuda() && !gpu_t.is_privateuseone())) {
             logMtpStateFallback(stream, "propose_tokens_gpu_missing");
             return false;
         }
         propose_slices.push_back(lastColumnAsFlat(gpu_t));
         if (next_seq_lengths) {
             torch::Tensor next_seq_len = state.next_seq_len_gpu;
-            if (next_seq_len.defined() && next_seq_len.is_cuda()) {
+            if (next_seq_len.defined()
+                && (next_seq_len.is_cuda() || next_seq_len.is_privateuseone())) {
                 next_seq_lengths->push_back(std::move(next_seq_len));
             }
         }
@@ -451,7 +452,7 @@ bool collectLegacyProposeSlices(const std::list<GenerateStreamPtr>& streams,
             return false;
         }
         const auto& gpu_t = sp_output_buffer->propose_tokens_gpu;
-        if (!gpu_t.defined() || !gpu_t.is_cuda()) {
+        if (!gpu_t.defined() || (!gpu_t.is_cuda() && !gpu_t.is_privateuseone())) {
             return false;
         }
         propose_slices.push_back(lastColumnAsFlat(gpu_t));
@@ -723,18 +724,18 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     // The sampler already needs token history on device. Fill every proposal
     // slot once for all score rows, then let each row's sequence length expose
     // exactly proposals [0, score_position).
-    auto token_ids_gpu = sampler_inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
+    auto token_ids_gpu = sampler_inputs.token_ids.to(getTorchCudaDevice(), /*non_blocking=*/true);
     auto histories     = token_ids_gpu.view({batch_size, rows, static_cast<int64_t>(sampler_inputs.step + 1)});
-    auto proposals     = draft_token_ids.to(torch::kCUDA, /*non_blocking=*/true)
+    auto proposals     = draft_token_ids.to(getTorchCudaDevice(), /*non_blocking=*/true)
                          .contiguous()
                          .view({batch_size, 1, gamma})
                          .expand({batch_size, rows, gamma});
     auto base_lengths = sampler_inputs.sequence_lengths.view({batch_size, rows})
                             .select(1, 0)
-                            .to(torch::Device(torch::kCUDA), torch::kLong, /*non_blocking=*/true)
+                            .to(getTorchCudaDevice(), torch::kLong, /*non_blocking=*/true)
                             .view({batch_size, 1, 1});
     auto proposal_offsets =
-        torch::arange(gamma, torch::TensorOptions().dtype(torch::kLong).device(torch::Device(torch::kCUDA)))
+        torch::arange(gamma, torch::TensorOptions().dtype(torch::kLong).device(getTorchCudaDevice()))
             .view({1, 1, gamma});
     auto proposal_columns = (base_lengths + proposal_offsets).expand({batch_size, rows, gamma});
     histories.scatter_(2, proposal_columns, proposals);
@@ -781,7 +782,7 @@ void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&           
         return;
     }
 
-    const bool         on_gpu       = propose_token_ids.is_cuda();
+    const bool         on_gpu       = propose_token_ids.is_cuda() || propose_token_ids.is_privateuseone();
     const int          token_stride = propose_token_ids.size(1);
     const torch::Dtype dtype        = propose_token_ids.scalar_type();
 
@@ -1025,13 +1026,14 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
         model_input.combo_position_ids = std::move(next_position_ids);
     }
 
-    if (useMtpDeviceInput() || model_input.sequence_lengths.is_cuda()) {
-        auto seq_lengths_d           = model_input.sequence_lengths.is_cuda() ? model_input.sequence_lengths :
-                                                                                model_input.sequence_lengths.to(torch::kCUDA);
+    if (useMtpDeviceInput() || model_input.sequence_lengths.is_cuda() || model_input.sequence_lengths.is_privateuseone()) {
+        auto seq_lengths_d = (model_input.sequence_lengths.is_cuda() || model_input.sequence_lengths.is_privateuseone())
+                                 ? model_input.sequence_lengths
+                                 : model_input.sequence_lengths.to(getTorchCudaDevice());
         model_input.sequence_lengths = (seq_lengths_d + 1).to(torch::kInt32);
     } else {
         // Legacy CPU fallback when device input is disabled and the caller has
-        // not already published sequence_lengths on CUDA.
+        // not already published sequence_lengths on an accelerator device.
         auto sequence_lengths_cpu = model_input.sequence_lengths.cpu().clone().pin_memory();
         for (int i = 0; i < batch_size; i++) {
             sequence_lengths_cpu.data_ptr<int>()[i]++;
@@ -1348,9 +1350,11 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
         model_input.lm_output_indexes  = std::move(lm_output_indexes);
         hidden_states_d_t              = torch::cat(hidden_states_list).contiguous();
         model_input.last_hidden_states = hidden_states_d_t;
-        auto position_ids = model_input.combo_position_ids.defined() && model_input.combo_position_ids.is_cuda() ?
-                                model_input.combo_position_ids.cpu().contiguous() :
-                                model_input.combo_position_ids;
+        auto position_ids =
+            model_input.combo_position_ids.defined()
+            && (model_input.combo_position_ids.is_cuda() || model_input.combo_position_ids.is_privateuseone()) ?
+                model_input.combo_position_ids.cpu().contiguous() :
+                model_input.combo_position_ids;
         auto compact_position_ids = compactAcceptedPositionIds(position_ids, accept_lens, total_accept_len);
         if (compact_position_ids.defined()) {
             model_input.combo_position_ids = std::move(compact_position_ids);
@@ -1367,9 +1371,7 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
         toCudaInt32(speculative_sampler_output.accept_tokens.reshape({(int64_t)total_tokens}), host_holder);
     auto accept_len_d = toCudaInt32(speculative_sampler_output.accept_len, host_holder);
     model_input.lm_output_indexes =
-        torch::arange(
-            0, total_tokens, propose_step_ + 1, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
-        + (accept_len_d - 1);
+        torch::arange(0, total_tokens, propose_step_ + 1, cudaInt32Options()) + (accept_len_d - 1);
     model_input.last_hidden_states = model_output.all_hidden_states;
     hidden_states_d_t              = model_input.last_hidden_states;
 }
