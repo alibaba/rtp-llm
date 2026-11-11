@@ -41,7 +41,7 @@ class RtpConfigTest {
         config.remove("seq_size_per_block"); config.put("SEQ_SIZE_PER_BLOCK", "32").put("REUSE_CACHE", "on")
             .put("PREFILL_CP_SIZE", "2").put("DISABLE_DECODE_FIRST_MALLOC_DEVICE_REUSE", "true");
         var parsed = load(root);
-        assertEquals(32, parsed.blockSize()); assertTrue(parsed.reuseCache()); assertEquals(2, parsed.cpSize());
+        assertEquals(32, parsed.physicalBlockSize()); assertTrue(parsed.reuseCache()); assertEquals(2, parsed.cpSize());
         assertTrue(parsed.disableDecodeFirstReuse());
         assertEquals(2, parsed.business().path("prefill_cp_size").intValue());
         assertFalse(parsed.business().has("PREFILL_CP_SIZE"));
@@ -99,7 +99,7 @@ class RtpConfigTest {
 
     @Test void defaultsBlockGeometryButRequiresMatchingRoleFormula() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
-        config.remove("seq_size_per_block"); assertEquals(64, load(root).blockSize());
+        config.remove("seq_size_per_block"); assertEquals(64, load(root).physicalBlockSize());
         config.put("seq_size_per_block", 16); config.remove("mock.compute");
         assertThrows(Exception.class, () -> load(root));
     }
@@ -159,24 +159,24 @@ class RtpConfigTest {
         config.put("seq_size_per_block", 128).put("prefill_cp_size", 4);
         var parsed = load(root);
         assertEquals(4, parsed.cpSize());
-        assertEquals(512, parsed.cacheBlockSize());
+        assertEquals(512, parsed.tokensPerCacheKey());
         assertEquals(128, parsed.effective().path("seq_size_per_block").asInt());
         var env = RtpConfig.fromEnvironment("whale-p", org.flexlb.mock.protocol.Role.prefill, java.util.Map.of(
             "SEQ_SIZE_PER_BLOCK", "128", "TEST_BLOCK_NUM", "17",
             "PREFILL_CP_SIZE", "4", "MOCK_COMPUTE_FORWARD_EXPRESSION", "1"));
-        assertEquals(512, env.cacheBlockSize());
-        assertEquals(128, env.blockSize());
+        assertEquals(512, env.tokensPerCacheKey());
+        assertEquals(128, env.physicalBlockSize());
         config.put("prefill_cp_size", 2);
-        assertEquals(256, load(root).cacheBlockSize());
+        assertEquals(256, load(root).tokensPerCacheKey());
         config.put("prefill_cp_size", 0);
-        assertEquals(128, load(root).cacheBlockSize());
+        assertEquals(128, load(root).tokensPerCacheKey());
         config.put("prefill_cp_size", -1);
         assertThrows(IllegalArgumentException.class, () -> load(root));
         config.put("prefill_cp_size", 4);
         root.put("component_role", "decode");
         var decode = load(root);
         assertEquals(1, decode.cpSize());
-        assertEquals(128, decode.cacheBlockSize());
+        assertEquals(128, decode.tokensPerCacheKey());
         assertFalse(decode.forceSinglePrefill());
     }
 
@@ -239,7 +239,7 @@ class RtpConfigTest {
         config.remove("max_batch_tokens_size");
         config.put("max_seq_len", 100).put("max_context_batch_size", 3).put("seq_size_per_block", 0);
         var parsed = load(root);
-        assertEquals(300, parsed.maxBatchTokens()); assertEquals(64, parsed.blockSize());
+        assertEquals(300, parsed.maxBatchTokens()); assertEquals(64, parsed.physicalBlockSize());
         assertEquals(300, parsed.business().path("max_batch_tokens_size").intValue());
         assertEquals(parsed.effective(), RtpConfig.fromEnvironment(parsed.id(), parsed.role(), environmentOf(parsed.business())).effective());
         config.put("max_batch_tokens_size", 50); assertEquals(50, load(root).maxBatchTokens());

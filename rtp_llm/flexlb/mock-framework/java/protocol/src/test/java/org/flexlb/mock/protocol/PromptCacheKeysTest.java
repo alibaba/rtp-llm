@@ -13,15 +13,16 @@ class PromptCacheKeysTest {
             var tokens = Collections.nCopies(length, 19);
             var media = List.of(new PromptCacheKeys.Span(0, Collections.nCopies(length, 23)));
             var original = new PromptCacheKeys(8, tokens, media, 41);
-            var wire = org.flexlb.engine.grpc.EngineRpcService.MockDecodePromptPB.parseFrom(original.decodePrompt().toByteArray());
+            var wire = org.flexlb.engine.grpc.EngineRpcService.MockDecodePromptPB.parseFrom(original.toDecodePrompt().toByteArray());
             var decoded = PromptCacheKeys.fromDecodePrompt(wire, 8);
             assertEquals(length, decoded.inputLength());
             assertEquals(original.keys(), decoded.keys());
             assertEquals(length / 8, decoded.keys().size());
-            for (int stride : List.of(1, 2, 4)) {
-                var logical = original.withStride(stride);
-                assertEquals(8 * stride, logical.blockSize());
-                assertEquals(new PromptCacheKeys(8, tokens, media, 41, stride).keys(), logical.keys());
+            for (int cpSize : List.of(1, 2, 4)) {
+                var prefillKeys = original.toPrefillKeys(cpSize);
+                assertEquals(8, prefillKeys.physicalBlockSize());
+                assertEquals(8 * cpSize, prefillKeys.tokensPerKey());
+                assertEquals(new PromptCacheKeys(8, tokens, media, 41, cpSize).keys(), prefillKeys.keys());
             }
         }
     }

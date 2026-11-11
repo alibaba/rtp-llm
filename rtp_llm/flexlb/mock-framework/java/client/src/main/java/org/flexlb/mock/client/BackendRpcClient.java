@@ -98,7 +98,7 @@ public final class BackendRpcClient implements AutoCloseable {
         synchronized (this) {
             if (closed || closing) throw new IllegalStateException("Client closed");
             if (active.containsKey(request.getRequestId())) throw new IllegalArgumentException("Active request_id already exists");
-            call = new Call(request, prepared.input(), prepared.budget(), prepared.baseBlockSize(), prepared.expectedImageTokens());
+            call = new Call(request, prepared.input(), prepared.budget(), prepared.physicalBlockSize(), prepared.expectedImageTokens());
             events.accept(call.event("ISSUED").put("epoch_ms", Long.toString(call.sentAt.toEpochMilli())));
             active.put(request.getRequestId(), call);
         }
@@ -124,15 +124,15 @@ public final class BackendRpcClient implements AutoCloseable {
         if (!expectedImageTokens.isEmpty() && expectedImageTokens.size() != input.getMultimodalInputsCount())
             throw new IllegalArgumentException("Image reference count differs from playback input");
         if (input.getGenerateConfig().getTimeoutMs() > 0) budget = Math.min(budget, TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs()));
-        long baseBlockSize = request.getCacheKeyBlockSize();
-        if (baseBlockSize > 0) {
-            var routed = request.toBuilder().setCacheKeyBlockSize(Math.multiplyExact(Math.toIntExact(baseBlockSize), prefillCpSize));
+        long physicalBlockSize = request.getCacheKeyBlockSize();
+        if (physicalBlockSize > 0) {
+            var routed = request.toBuilder().setCacheKeyBlockSize(Math.multiplyExact(Math.toIntExact(physicalBlockSize), prefillCpSize));
             if (input.getMultimodalInputsCount() == 0) {
-                routed.clearBlockCacheKeys().addAllBlockCacheKeys(routingKeys(MultimodalProtocol.text(input), baseBlockSize));
+                routed.clearBlockCacheKeys().addAllBlockCacheKeys(routingKeys(MultimodalProtocol.text(input), physicalBlockSize));
             }
             request = routed.build();
         }
-        return new PreparedCall(request, input, budget, baseBlockSize, List.copyOf(expectedImageTokens));
+        return new PreparedCall(request, input, budget, physicalBlockSize, List.copyOf(expectedImageTokens));
     }
 
     private synchronized ManagedChannel channel(String target) {
@@ -140,9 +140,9 @@ public final class BackendRpcClient implements AutoCloseable {
         return channels.computeIfAbsent(target, t -> ManagedChannelBuilder.forTarget(t).usePlaintext().build());
     }
 
-    private List<Long> routingKeys(MultimodalProtocol.Prepared input, long baseBlockSize) {
-        if (baseBlockSize <= 0) return List.of();
-        return MultimodalProtocol.computePromptKeys(input, Math.toIntExact(baseBlockSize), cacheKeySeed, prefillCpSize).keys();
+    private List<Long> routingKeys(MultimodalProtocol.Prepared input, long physicalBlockSize) {
+        if (physicalBlockSize <= 0) return List.of();
+        return MultimodalProtocol.computePromptKeys(input, Math.toIntExact(physicalBlockSize), cacheKeySeed, prefillCpSize).keys();
     }
 
     private static String message(Status status) {
@@ -156,7 +156,7 @@ public final class BackendRpcClient implements AutoCloseable {
         return (server.getServerIp().contains(":") ? "[" + server.getServerIp() + "]" : server.getServerIp()) + ":" + server.getGrpcPort();
     }
 
-    record PreparedCall(FlexlbScheduleRequestPB request, GenerateInputPB input, long budget, long baseBlockSize,
+    record PreparedCall(FlexlbScheduleRequestPB request, GenerateInputPB input, long budget, long physicalBlockSize,
                         List<Integer> expectedImageTokens) {}
 
     public enum Outcome { success, error, cancelled, timeout }
@@ -192,14 +192,14 @@ public final class BackendRpcClient implements AutoCloseable {
         private boolean pendingSchedule;
         private boolean terminal, finalFrame, scheduleStarted, routeRejected;
 
-        private final long baseBlockSize;
+        private final long physicalBlockSize;
 
         private final List<Integer> expectedImageTokens;
 
-        private Call(FlexlbScheduleRequestPB request, GenerateInputPB input, long budget, long baseBlockSize,
+        private Call(FlexlbScheduleRequestPB request, GenerateInputPB input, long budget, long physicalBlockSize,
                      List<Integer> expectedImageTokens) {
             this.request = request; this.input = input;
-            this.baseBlockSize = baseBlockSize;
+            this.physicalBlockSize = physicalBlockSize;
             this.expectedImageTokens = expectedImageTokens;
             routes = List.copyOf(masters.get());
             if (routes.size() > 2 || routes.stream().map(MasterDiscovery.Target::rpc).distinct().count() != routes.size()
@@ -362,7 +362,7 @@ public final class BackendRpcClient implements AutoCloseable {
                             input = media;
                             request = request.toBuilder().clearGenerateInput().setSeqLen(prepared.input().getTokenIdsCount())
                                 .setSelectedVit(selected).clearBlockCacheKeys()
-                                .addAllBlockCacheKeys(routingKeys(prepared, baseBlockSize)).build();
+                                .addAllBlockCacheKeys(routingKeys(prepared, physicalBlockSize)).build();
                             schedule(0);
                         }
                     } catch (RuntimeException error) { fail(error); }

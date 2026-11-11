@@ -13,7 +13,7 @@ import org.flexlb.mock.engine.forward.ComputeModel;
 /**
  * Loads and validates effective configuration for an RTP mock engine.
  */
-public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int totalCacheBlocks, int reserveBlocks,
+public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceBlocks, int totalCacheBlocks, int reserveBlocks,
                         boolean reuseCache, boolean deviceCache, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
                         int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int cpSize,
                         JsonNode business, ComputeModel compute, int imageToken, long cacheKeySeed) {
@@ -32,7 +32,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
 
     public RtpConfig {
         if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
-                || blockSize < 1 || deviceBlocks < 1 || totalCacheBlocks < deviceBlocks || reserveBlocks < 0 || reserveBlocks > deviceBlocks
+                || physicalBlockSize < 1 || deviceBlocks < 1 || totalCacheBlocks < deviceBlocks || reserveBlocks < 0 || reserveBlocks > deviceBlocks
                 || maxSeqLen < 1 || maxBatchTokens < 0 || maxGenerateBatchSize < 1 || maxInitedKvStreams < 0 || maxUncachedBatchTokens < 0 || cpSize < 1)
             throw new IllegalArgumentException("Invalid RTP node configuration");
         business = business.deepCopy();
@@ -69,7 +69,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             throw new IllegalArgumentException("Mock RTP supports only local KV; remove Host and remote KV settings");
         nativeInt(config, "kv_cache_event_snapshot_interval_ms", 600000, 1, Integer.MAX_VALUE);
         finalizeSettings((ObjectNode) config);
-        int blockSize = config.path("seq_size_per_block").intValue();
+        int physicalBlockSize = config.path("seq_size_per_block").intValue();
         int maxSeqLen = config.path("max_seq_len").intValue();
         int maxBatchTokens = config.path("max_batch_tokens_size").intValue();
         var scheduler = config.path("mock.scheduler.mode");
@@ -82,7 +82,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         int totalBlocks = nativeInt(config, "mock.cache.total.blocks", blocks, blocks, Integer.MAX_VALUE);
         int prefillCpSize = nativeInt(config, "prefill_cp_size", 1, 0, Integer.MAX_VALUE);
         int cpSize = role == Role.prefill ? Math.max(1, prefillCpSize) : 1;
-        Math.multiplyExact(blockSize, cpSize);
+        Math.multiplyExact(physicalBlockSize, cpSize);
         ((ObjectNode) config).put("prefill_cp_size", cpSize);
         if (root.path("environment").has("compute")) throw new IllegalArgumentException("Removed environment.compute: use component.config.compute");
         var compute = ComputeModel.fromSettings(config, Map.of(
@@ -91,7 +91,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             throw new IllegalArgumentException("Decode progress settings belong in Decode compute");
         if (!root.path("id").isTextual()) throw new IllegalArgumentException("Node id must be a string");
         return new RtpConfig(root.path("id").textValue(), role,
-            blockSize, blocks, totalBlocks, reserve,
+            physicalBlockSize, blocks, totalBlocks, reserve,
             nativeBool(config, "reuse_cache", false), nativeBool(config, "enable_device_cache", true),
             nativeBool(config, "disable_decode_first_malloc_device_reuse", false),
             maxSeqLen, maxBatchTokens,
@@ -125,7 +125,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
 
     public ObjectNode effective() {
         ObjectNode result = JSON.createObjectNode();
-        result.put("id", id).put("role", role.name()).put("seq_size_per_block", blockSize)
+        result.put("id", id).put("role", role.name()).put("seq_size_per_block", physicalBlockSize)
             .put("reserve_block_ratio", nativeInt(business, "reserve_block_ratio", 5, 0, 100))
             .put("test_block_num", deviceBlocks + 1).put("device_blocks", deviceBlocks).put("reserve_blocks", reserveBlocks)
             .put("mock.cache.total.blocks", totalCacheBlocks)
@@ -135,7 +135,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("max_context_batch_size", business.path("max_context_batch_size").asInt())
             .put("cp_force_single_prefill", business.path("cp_force_single_prefill").asBoolean())
             .put("prefill_cp_size", cpSize)
-            .put("cache_key_block_size", cacheBlockSize());
+            .put("cache_key_block_size", tokensPerCacheKey());
         if (role == Role.prefill) {
             result.put("max_inited_kv_cache_streams", maxInitedKvStreams).put("max_batch_tokens_without_cache", maxUncachedBatchTokens); }
         if (business.has("image_token_id")) result.put("image_token_id", imageToken);
@@ -153,7 +153,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         return result;
     }
 
-    public int cacheBlockSize() { return Math.multiplyExact(blockSize, cpSize); }
+    public int tokensPerCacheKey() { return Math.multiplyExact(physicalBlockSize, cpSize); }
 
     public boolean groupScheduling() {
         return role == Role.prefill && business.path("mock.scheduler.mode").asText("fifo").equals("group");
@@ -195,8 +195,8 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
 
     /** Resolve native automatic values once, before constructing any execution component. */
     private static void finalizeSettings(ObjectNode config) {
-        int blockSize = nativeInt(config, "seq_size_per_block", 0, 0, Integer.MAX_VALUE);
-        if (blockSize == 0) blockSize = 64; // Native ordinary-device default; no GPU probing on a Mock host.
+        int physicalBlockSize = nativeInt(config, "seq_size_per_block", 0, 0, Integer.MAX_VALUE);
+        if (physicalBlockSize == 0) physicalBlockSize = 64; // Native ordinary-device default; no GPU probing on a Mock host.
         int maxSeqLen = nativeInt(config, "max_seq_len", 0, 0, Integer.MAX_VALUE);
         if (maxSeqLen == 0) maxSeqLen = 8192;
         int contextBatch = nativeInt(config, "max_context_batch_size", 1, 1, Integer.MAX_VALUE);
@@ -206,7 +206,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             if (derived > Integer.MAX_VALUE) throw new IllegalArgumentException("Derived max_batch_tokens_size exceeds supported integer range");
             maxBatchTokens = (int) derived;
         }
-        config.put("seq_size_per_block", blockSize).put("max_seq_len", maxSeqLen)
+        config.put("seq_size_per_block", physicalBlockSize).put("max_seq_len", maxSeqLen)
             .put("max_context_batch_size", contextBatch).put("max_batch_tokens_size", maxBatchTokens)
             .put("cp_force_single_prefill", nativeBool(config, "cp_force_single_prefill", true));
     }

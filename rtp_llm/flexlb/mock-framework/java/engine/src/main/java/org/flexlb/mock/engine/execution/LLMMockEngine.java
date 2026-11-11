@@ -35,7 +35,7 @@ public final class LLMMockEngine implements AutoCloseable {
     private LLMMockEngine(RtpConfig config, EngineScheduler.Factory schedulers) {
         this.config = Objects.requireNonNull(config);
         Objects.requireNonNull(schedulers);
-        cacheManager = new KvCacheManager(config.cacheBlockSize(), config.deviceBlocks(), config.totalCacheBlocks(), config.reserveBlocks(), config.deviceCache());
+        cacheManager = new KvCacheManager(config.tokensPerCacheKey(), config.deviceBlocks(), config.totalCacheBlocks(), config.reserveBlocks(), config.deviceCache());
         var lock = new Object();
         var finished = new TaskHistory();
         try {

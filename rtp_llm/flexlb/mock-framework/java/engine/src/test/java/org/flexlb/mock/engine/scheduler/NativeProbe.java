@@ -40,7 +40,7 @@ public final class NativeProbe {
                         @Override public void onCompleted() { replies.add("completed"); }
                     }));
                     var prompt = new org.flexlb.mock.protocol.PromptCacheKeys(Math.toIntExact(cache.getBlockSize()),
-                        List.of(1, 2, 3, 4), List.of(), cache.getMockDecodeCacheSeed()).decodePrompt();
+                        List.of(1, 2, 3, 4), List.of(), cache.getMockDecodeCacheSeed()).toDecodePrompt();
                     stream.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE).setRequestId(43).setClientId("native-probe")
                         .setMockDecodePrompt(prompt).setInput(GenerateInputPB.newBuilder().setRequestId(43)
                             .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(4))).build());

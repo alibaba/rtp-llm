@@ -19,7 +19,7 @@ class RtpRpcMetricsTest {
     @Test void statusTimingsAreRecordedBeforeCallingTheTransportObserver() throws Exception {
         var config = RtpConfig.load(new ObjectMapper().valueToTree(LLMMockEngineTest.configuration("prefill")));
         var lock = new Object(); var history = new TaskHistory();
-        try (var cache = new KvCacheManager(config.blockSize(), config.deviceBlocks(), 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), config.deviceBlocks(), 0);
              var engine = new EngineLoop(lock, AbstractRtpScheduler.factory(config), history, cache,
                  config.compute(), config.role(), config.id());
              var service = new RtpRpcService(RtpRpcService.Config.from(config), cache, lock, history, engine, false)) {

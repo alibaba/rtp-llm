@@ -129,7 +129,7 @@ class DecodeAdmissionTest {
                 var prompt = promptBuilder.build();
                 var prepared = new org.flexlb.mock.protocol.MultimodalProtocol.Prepared(prompt, spans);
                 var promptCacheKeys = org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(prepared, 2, 0, 1);
-                call.request.onNext(allocate("p", prompt, promptCacheKeys.decodePrompt())); call.ack();
+                call.request.onNext(allocate("p", prompt, promptCacheKeys.toDecodePrompt())); call.ack();
                 call.request.onNext(GenerateRequestPB.newBuilder().setRequestId(71).setStage(RemoteStage.LOAD).build());
                 assertInstanceOf(GenerateOutputsPB.class, call.replies.poll(3, TimeUnit.SECONDS));
                 call.request.onNext(GenerateRequestPB.newBuilder().setRequestId(71).setClientId("p")
@@ -155,7 +155,7 @@ class DecodeAdmissionTest {
     static GenerateRequestPB allocate(String client, GenerateInputPB input) {
         var sequence = org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(
             org.flexlb.mock.protocol.MultimodalProtocol.text(input), 2, 0, 1);
-        return allocate(client, input, sequence.decodePrompt());
+        return allocate(client, input, sequence.toDecodePrompt());
     }
 
     @Test void loadUsesTheExistingConnectionAndNeedsNoCallbackAddress() throws Exception {

@@ -33,7 +33,7 @@ class RtpSchedulerTest {
     void eosOutputLimitAndSequenceLimitDoNotReplaceAcceptanceWithDeliveredTokens(
             double eos, int maxNewTokens, int maxSequence, int delivered) throws Exception {
         var config = metricConfig(4, eos, maxSequence); var listener = new Listener();
-        try (var cache = new KvCacheManager(config.blockSize(), 32, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 32, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
             var request = scheduler.enqueue(metricInput(1, maxNewTokens), listener);
             scheduler.prepareKvAndCheckTimeouts(); drain(scheduler); generate(scheduler, request);
@@ -49,7 +49,7 @@ class RtpSchedulerTest {
 
     @Test void completedBatchIncludesCancelledStreamAcceptanceButNeverPublishesItsOutput() throws Exception {
         var config = metricConfig(2.6, 0, 128); var listener = new Listener();
-        try (var cache = new KvCacheManager(config.blockSize(), 64, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 64, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
             var first = scheduler.enqueue(metricInput(1, 20), new Listener());
             scheduler.prepareKvAndCheckTimeouts(); drain(scheduler); generate(scheduler, first);
@@ -74,7 +74,7 @@ class RtpSchedulerTest {
     @ParameterizedTest @ValueSource(booleans = {true, false})
     void allCancelledBatchReportsTpotOnlyIfComputationCompleted(boolean completed) throws Exception {
         var config = metricConfig(4, 0, 128);
-        try (var cache = new KvCacheManager(config.blockSize(), 32, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 32, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
             var request = scheduler.enqueue(metricInput(1, 20), new Listener());
             scheduler.prepareKvAndCheckTimeouts(); drain(scheduler); generate(scheduler, request);
@@ -96,7 +96,7 @@ class RtpSchedulerTest {
 
     @Test void cancelledBeforeSelectionDoesNotProduceStepMetrics() throws Exception {
         var config = metricConfig(4, 0, 128);
-        try (var cache = new KvCacheManager(config.blockSize(), 32, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 32, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
             var request = scheduler.enqueue(metricInput(1, 20), new Listener());
             scheduler.abort(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel before selection"));
@@ -110,7 +110,7 @@ class RtpSchedulerTest {
 
     @Test void retainedPrefillKeepsKvThroughReadUntilTransferAcknowledgement() throws Exception {
         var config = config("prefill", "1", 2); var listener = new Listener();
-        try (var cache = new KvCacheManager(config.blockSize(), 8, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
             var request = scheduler.enqueue(input(1, true), listener);
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
@@ -127,7 +127,7 @@ class RtpSchedulerTest {
 
     @Test void decodeBatchRetainsRunningAndCancellationCannotDamageAnotherMember() throws Exception {
         var config = config("decode", "1", 2); var first = new Listener(); var second = new Listener();
-        try (var cache = new KvCacheManager(config.blockSize(), 12, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 12, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
             var a = scheduler.enqueue(input(1, false), first); var b = scheduler.enqueue(input(2, false), second);
             scheduler.prepareKvAndCheckTimeouts(); drain(scheduler); generate(scheduler, a); generate(scheduler, b);
@@ -160,7 +160,7 @@ class RtpSchedulerTest {
 
     @Test void closingEngineDefersCleanupUntilOutstandingReadReturns() throws Exception {
         Object lock = new Object(); var config = config("prefill", "1", 1); var listener = new Listener();
-        try (var cache = new KvCacheManager(config.blockSize(), 8, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0);
              var engine = new EngineLoop(lock, AbstractRtpScheduler.factory(config), new org.flexlb.mock.engine.scheduler.TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             var request = engine.enqueue(input(1, true), listener);
             listener.output.get(2, TimeUnit.SECONDS);
@@ -176,7 +176,7 @@ class RtpSchedulerTest {
 
     @Test void transferAndGenerationAreIndependentRequirementsAndOldHandlesCannotStopNewRequests() throws Exception {
         var config = config("decode", "1", 2); var listener = new Listener();
-        try (var cache = new KvCacheManager(config.blockSize(), 8, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
             var old = scheduler.enqueue(input(1, false), listener);
             scheduler.prepareKvAndCheckTimeouts(); drain(scheduler);
@@ -196,9 +196,9 @@ class RtpSchedulerTest {
 
     @Test void prefillAdmissionWaitsForCapacityAndBatchesAccordingToConfiguredLimit() throws Exception {
         var config = config("prefill", "1", 2, 100);
-        try (var cache = new KvCacheManager(config.blockSize(), 12, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 12, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
-            var held = cache.acquire(12L * config.blockSize(), List.of()).lease();
+            var held = cache.acquire(12L * config.physicalBlockSize(), List.of()).lease();
             var first = new Listener(); scheduler.enqueue(input(1, false), first); scheduler.enqueue(input(2, false), new Listener());
             assertNull(scheduler.schedule()); assertFalse(first.terminal.isDone());
             held.close();
@@ -220,7 +220,7 @@ class RtpSchedulerTest {
                 super.progressed(request);
             }
         };
-        try (var cache = new KvCacheManager(config.blockSize(), 12, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 12, 0);
              var engine = new EngineLoop(lock, AbstractRtpScheduler.factory(config), new org.flexlb.mock.engine.scheduler.TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             engine.enqueue(input(1, false), slow);
             assertTrue(blocked.await(2, TimeUnit.SECONDS));
@@ -235,7 +235,7 @@ class RtpSchedulerTest {
             @Override public void progressed(EngineScheduler.Request request) {
             throw new IllegalStateException("closed"); }
         };
-        try (var cache = new KvCacheManager(config.blockSize(), 8, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
             var request = scheduler.enqueue(input(1, false), listener);
             scheduler.prepareKvAndCheckTimeouts(); drain(scheduler); generate(scheduler, request);
@@ -247,7 +247,7 @@ class RtpSchedulerTest {
 
     @Test void tokenBudgetDoesNotReserveKvForUnselectedRequests() throws Exception {
         var config = config("prefill", "1", 2, 5);
-        try (var cache = new KvCacheManager(config.blockSize(), 12, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 12, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
             scheduler.enqueue(input(1, false), new Listener());
             var waiting = scheduler.enqueue(input(2, false), new Listener());
@@ -269,7 +269,7 @@ class RtpSchedulerTest {
     @Test void staggeredDecodeCohortsParticipateTogetherInEverySubsequentForward() throws Exception {
         Object lock = new Object(); var config = config("decode", "200", 32);
         var batches = new CopyOnWriteArrayList<List<String>>(); var first = new CountDownLatch(1);
-        try (var cache = new KvCacheManager(config.blockSize(), 4096, 0)) {
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 4096, 0)) {
             var scheduler = new RtpFifoScheduler(lock, config, cache);
             var traced = (EngineScheduler) java.lang.reflect.Proxy.newProxyInstance(EngineScheduler.class.getClassLoader(),
                 new Class<?>[]{EngineScheduler.class}, (proxy, method, args) -> {
@@ -314,7 +314,7 @@ class RtpSchedulerTest {
                 super.progressed(request);
             }
         };
-        try (var cache = new KvCacheManager(config.blockSize(), 64, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 64, 0);
              var engine = new EngineLoop(lock, AbstractRtpScheduler.factory(config), new TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             var request = engine.enqueue(metricInput(1, 20), listener);
             listener.allocated.get(2, TimeUnit.SECONDS); generate(engine, request);
@@ -338,7 +338,7 @@ class RtpSchedulerTest {
                 throw new IllegalStateException("Transport closed while sending");
             }
         };
-        try (var cache = new KvCacheManager(config.blockSize(), 64, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 64, 0);
              var engine = new EngineLoop(lock, AbstractRtpScheduler.factory(config), new TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             var request = engine.enqueue(metricInput(1, 100), listener);
             listener.allocated.get(2, TimeUnit.SECONDS); generate(engine, request);
@@ -363,7 +363,7 @@ class RtpSchedulerTest {
             }
         };
         var lock = new Object();
-        try (var cache = new KvCacheManager(config.blockSize(), 8, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0);
              var loop = new EngineLoop(lock, AbstractRtpScheduler.factory(config), new org.flexlb.mock.engine.scheduler.TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             loop.enqueue(input(1, false), listener);
             assertTrue(entered.await(2, TimeUnit.SECONDS));
@@ -377,7 +377,7 @@ class RtpSchedulerTest {
 
     @Test void liveStatusKeepsNativeTimingSentinelsUntilDequeue() throws Exception {
         var config = config("prefill", "1", 1);
-        try (var cache = new KvCacheManager(config.blockSize(), 8, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
             scheduler.enqueue(input(1, true), new Listener());
             var before = scheduler.tasks();
@@ -404,7 +404,7 @@ class RtpSchedulerTest {
             ((ObjectNode) settings.path("mock.compute")).putObject("decode").put("tokens.per.step", 6);
             var path = directory.resolve("wide-step-" + capacity + ".json"); json.writeValue(path.toFile(), root);
             var config = RtpConfig.load(path);
-            try (var cache = new KvCacheManager(config.blockSize(), capacity, 0)) {
+            try (var cache = new KvCacheManager(config.physicalBlockSize(), capacity, 0)) {
                 var scheduler = new RtpFifoScheduler(new Object(), config, cache); var listener = new Listener();
                 try {
                     var request = scheduler.enqueue(new EngineScheduler.Input("r", 1, 0, 123, 10, 0, System.nanoTime(),
@@ -432,7 +432,7 @@ class RtpSchedulerTest {
     @Test void decodeGrowthFailureReleasesOnlyItsLeaseAndUnblocksWaitingAdmission() throws Exception {
         var config = config("decode", "1", 2);
         var finishedLog = new org.flexlb.mock.engine.scheduler.TaskHistory();
-        try (var cache = new KvCacheManager(config.blockSize(), 7, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 7, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache, finishedLog)) {
             var first = new Listener(); var second = new Listener(); var waiting = new Listener();
             var a = scheduler.enqueue(input(1, false), first);
@@ -491,7 +491,7 @@ class RtpSchedulerTest {
 
     @Test void prefillCapacityWaitExpiresOrCancelsWithoutRevivingAfterRelease() throws Exception {
         var config = config("prefill", "1", 2); var lock = new Object();
-        try (var cache = new KvCacheManager(config.blockSize(), 3, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 3, 0);
              var owner = cache.acquire(6, List.of()).lease();
              var engine = new EngineLoop(lock, AbstractRtpScheduler.factory(config), new org.flexlb.mock.engine.scheduler.TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             var expired = new Listener(); var cancelled = new Listener();
@@ -516,7 +516,7 @@ class RtpSchedulerTest {
 
     @Test void oversizedPrefillDoesNotPreventSmallerRequestFromRunning() throws Exception {
         var config = config("prefill", "1", 2);
-        try (var cache = new KvCacheManager(config.blockSize(), 2, 0);
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 2, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
             var oversized = new Listener(); var small = new Listener();
             assertEquals(RequestFailure.Reason.CAPACITY,

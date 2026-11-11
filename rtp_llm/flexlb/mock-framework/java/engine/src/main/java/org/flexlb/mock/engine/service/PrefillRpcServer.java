@@ -285,7 +285,7 @@ final class PrefillRpcServer implements AutoCloseable {
         var sequence = session.prefillCacheKeys;
         session.prefillCacheKeys = null;
         if (sequence == null)
-            sequence = MultimodalProtocol.computePromptKeys(prepared, config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
+            sequence = MultimodalProtocol.computePromptKeys(prepared, config.physicalBlockSize(), config.cacheKeySeed(), config.cpSize());
         return RpcMessages.toSchedulerInput(prepared.input(), Long.toString(session.id), session.started,
             session.deadline, session.retained, sequence);
     }
@@ -590,9 +590,9 @@ final class PrefillRpcServer implements AutoCloseable {
                 var allocation = frame(RemoteStage.ALLOCATE).toBuilder();
                 var allocationInput = input.toBuilder().clearGroupId().clearGroupSize().clearTokenIds();
                 var sequence = MultimodalProtocol.computePromptKeys(media, Math.toIntExact(layout.getBlockSize()), layout.getMockDecodeCacheSeed(), 1);
-                allocation.setMockDecodePrompt(sequence.decodePrompt());
-                if (layout.getBlockSize() == config.blockSize() && layout.getMockDecodeCacheSeed() == config.cacheKeySeed())
-                    source.prefillCacheKeys = sequence.withStride(config.cacheKeyStride());
+                allocation.setMockDecodePrompt(sequence.toDecodePrompt());
+                if (layout.getBlockSize() == config.physicalBlockSize() && layout.getMockDecodeCacheSeed() == config.cacheKeySeed())
+                    source.prefillCacheKeys = sequence.toPrefillKeys(config.cpSize());
                 allocationInput.getGenerateConfigBuilder().clearGroupTimeout();
                 if (deadline != Long.MAX_VALUE) allocationInput.getGenerateConfigBuilder().setTimeoutMs((int) Math.min(Integer.MAX_VALUE,
                     Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()))));

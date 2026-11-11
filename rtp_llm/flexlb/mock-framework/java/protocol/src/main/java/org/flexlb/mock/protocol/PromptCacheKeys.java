@@ -5,21 +5,22 @@ import java.util.function.IntUnaryOperator;
 import org.flexlb.engine.grpc.EngineRpcService.MockDecodePromptPB;
 
 /**
- * Immutable prompt length and complete cache block keys.
+ * Stores the prompt length and keys for complete cache blocks. Hashes advance at physical block
+ * boundaries, and Prefill retains one key per group of physical blocks when CP is enabled.
  */
 public final class PromptCacheKeys {
-    private final int blockSize, keyStride, inputLength;
+    private final int physicalBlockSize, tokensPerKey, inputLength;
 
     private final List<Long> promptKeys;
 
-    public PromptCacheKeys(int blockSize, List<Integer> tokens, List<Span> spans) { this(blockSize, tokens, spans, 0); }
+    public PromptCacheKeys(int physicalBlockSize, List<Integer> tokens, List<Span> spans) { this(physicalBlockSize, tokens, spans, 0); }
 
-    public PromptCacheKeys(int blockSize, List<Integer> tokens, List<Span> spans, long seed) {
-        this(blockSize,tokens,spans,seed,1);
+    public PromptCacheKeys(int physicalBlockSize, List<Integer> tokens, List<Span> spans, long seed) {
+        this(physicalBlockSize, tokens, spans, seed, 1);
     }
 
-    public PromptCacheKeys(int blockSize, List<Integer> tokens, List<Span> spans, long seed, int keyStride) {
-        if (blockSize < 1 || keyStride < 1) throw new IllegalArgumentException("Invalid cache block size");
+    public PromptCacheKeys(int physicalBlockSize, List<Integer> tokens, List<Span> spans, long seed, int cpSize) {
+        if (physicalBlockSize < 1 || cpSize < 1) throw new IllegalArgumentException("Invalid cache block size");
         long previous = 0;
         for (var span : spans) {
             long end = (long) span.offset() + span.rowHashes().size();
@@ -27,82 +28,86 @@ public final class PromptCacheKeys {
                 throw new IllegalArgumentException("Invalid multimodal cache span");
             previous = end;
         }
-        this.blockSize = Math.multiplyExact(blockSize, keyStride);
-        this.keyStride = keyStride;
+        this.physicalBlockSize = physicalBlockSize;
+        tokensPerKey = Math.multiplyExact(physicalBlockSize, cpSize);
         inputLength = tokens.size();
-        promptKeys = computePromptKeys(tokens, spans, seed, blockSize);
+        promptKeys = computePromptKeys(tokens, spans, seed);
     }
 
-    private PromptCacheKeys(PromptCacheKeys physical, int stride) {
-        keyStride = stride;
-        blockSize = Math.multiplyExact(physical.blockSize, stride);
+    private PromptCacheKeys(PromptCacheKeys physical, int cpSize) {
+        physicalBlockSize = physical.physicalBlockSize;
+        tokensPerKey = Math.multiplyExact(physicalBlockSize, cpSize);
         inputLength = physical.inputLength;
-        var keys = new ArrayList<Long>(physical.promptKeys.size() / stride);
-        for (int i = stride - 1; i < physical.promptKeys.size(); i += stride)
+        var keys = new ArrayList<Long>(physical.promptKeys.size() / cpSize);
+        for (int i = cpSize - 1; i < physical.promptKeys.size(); i += cpSize)
             keys.add(physical.promptKeys.get(i));
         promptKeys = List.copyOf(keys);
     }
 
-    private PromptCacheKeys(MockDecodePromptPB prompt, int expectedBlockSize) {
-        if (expectedBlockSize < 1 || prompt.getBlockSize() != expectedBlockSize || prompt.getInputLength() < 1
-                || prompt.getBlockKeysCount() != prompt.getInputLength() / expectedBlockSize)
+    private PromptCacheKeys(MockDecodePromptPB prompt, int expectedPhysicalBlockSize) {
+        if (expectedPhysicalBlockSize < 1 || prompt.getBlockSize() != expectedPhysicalBlockSize || prompt.getInputLength() < 1
+                || prompt.getBlockKeysCount() != prompt.getInputLength() / expectedPhysicalBlockSize)
             throw new IllegalArgumentException("Invalid Decode prompt cache identity");
-        blockSize = expectedBlockSize;
-        keyStride = 1;
+        physicalBlockSize = expectedPhysicalBlockSize;
+        tokensPerKey = physicalBlockSize;
         inputLength = prompt.getInputLength();
         promptKeys = prompt.getBlockKeysList();
     }
 
-    /** Projects an already hashed physical sequence into Prefill's logical blocks. */
-    public PromptCacheKeys withStride(int stride) {
-        if (stride < 1 || keyStride != 1)
+    /**
+     * Keeps the last key in each complete group of CP physical blocks.
+     */
+    public PromptCacheKeys toPrefillKeys(int cpSize) {
+        if (cpSize < 1 || tokensPerKey != physicalBlockSize)
             throw new IllegalArgumentException("Expected physical prompt keys");
-        return stride == 1 ? this : new PromptCacheKeys(this, stride);
+        return cpSize == 1 ? this : new PromptCacheKeys(this, cpSize);
     }
 
-    public static PromptCacheKeys fromDecodePrompt(MockDecodePromptPB prompt, int blockSize) {
-        return new PromptCacheKeys(prompt, blockSize);
+    public static PromptCacheKeys fromDecodePrompt(MockDecodePromptPB prompt, int physicalBlockSize) {
+        return new PromptCacheKeys(prompt, physicalBlockSize);
     }
 
-    public MockDecodePromptPB decodePrompt() {
-        if (keyStride != 1) throw new IllegalStateException("Expected physical prompt keys");
-        return MockDecodePromptPB.newBuilder().setInputLength(inputLength).setBlockSize(blockSize)
+    public MockDecodePromptPB toDecodePrompt() {
+        if (tokensPerKey != physicalBlockSize) throw new IllegalStateException("Expected physical prompt keys");
+        return MockDecodePromptPB.newBuilder().setInputLength(inputLength).setBlockSize(physicalBlockSize)
             .addAllBlockKeys(promptKeys).build();
     }
 
-    public int blockSize() { return blockSize; }
+    public int physicalBlockSize() { return physicalBlockSize; }
+
+    public int tokensPerKey() { return tokensPerKey; }
 
     public List<Long> keys() { return promptKeys; }
 
     public int inputLength() { return inputLength; }
 
     @Override public boolean equals(Object other) {
-        return other instanceof PromptCacheKeys sequence && blockSize == sequence.blockSize && keyStride == sequence.keyStride
-            && inputLength == sequence.inputLength && promptKeys.equals(sequence.promptKeys);
+        return other instanceof PromptCacheKeys keys && physicalBlockSize == keys.physicalBlockSize && tokensPerKey == keys.tokensPerKey
+            && inputLength == keys.inputLength && promptKeys.equals(keys.promptKeys);
     }
 
-    @Override public int hashCode() { return Objects.hash(blockSize, keyStride, inputLength, promptKeys); }
+    @Override public int hashCode() { return Objects.hash(physicalBlockSize, tokensPerKey, inputLength, promptKeys); }
 
-    private List<Long> computePromptKeys(List<Integer> tokens, List<Span> spans, long seed, int hashBlockSize) {
-        int completeTokens = inputLength - inputLength % blockSize;
-        var keys = new ArrayList<Long>(completeTokens / blockSize);
+    private List<Long> computePromptKeys(List<Integer> tokens, List<Span> spans, long seed) {
+        int completeTokens = inputLength - inputLength % tokensPerKey;
+        var keys = new ArrayList<Long>(completeTokens / tokensPerKey);
         long hash = seed;
         int spanIndex = 0;
         IntUnaryOperator tokenAt = tokens instanceof com.google.protobuf.Internal.IntList ints ? ints::getInt : tokens::get;
         // Hash at physical block boundaries and retain only complete logical block keys.
-        for (int start = 0; start < completeTokens; start += hashBlockSize) {
-            for (int i = start; i < start + hashBlockSize; i++)
+        for (int start = 0; start < completeTokens; start += physicalBlockSize) {
+            for (int i = start; i < start + physicalBlockSize; i++)
                 hash = roll(hash, tokenAt.applyAsInt(i));
             while (spanIndex < spans.size() && spans.get(spanIndex).offset() + spans.get(spanIndex).rowHashes().size() <= start)
                 spanIndex++;
-            for (int j = spanIndex; j < spans.size() && spans.get(j).offset() < start + hashBlockSize; j++) {
+            for (int j = spanIndex; j < spans.size() && spans.get(j).offset() < start + physicalBlockSize; j++) {
                 var span = spans.get(j);
-                for (int value : mediaHeader(span, start, start + hashBlockSize)) hash = roll(hash, value);
+                for (int value : mediaHeader(span, start, start + physicalBlockSize)) hash = roll(hash, value);
                 int begin = Math.max(start, span.offset()) - span.offset();
-                int end = Math.min(start + hashBlockSize - span.offset(), span.rowHashes().size());
+                int end = Math.min(start + physicalBlockSize - span.offset(), span.rowHashes().size());
                 for (int i = begin; i < end; i++) hash = roll(hash, span.rowHashes().get(i));
             }
-            if ((start + hashBlockSize) % blockSize == 0) keys.add(hash);
+            if ((start + physicalBlockSize) % tokensPerKey == 0) keys.add(hash);
         }
         return List.copyOf(keys);
     }

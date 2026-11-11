@@ -65,11 +65,11 @@ public final class MultimodalProtocol {
         return ByteString.copyFrom(output.array());
     }
 
-    public static PromptCacheKeys computePromptKeys(Prepared prepared, int blockSize, long seed, int keyStride) {
+    public static PromptCacheKeys computePromptKeys(Prepared prepared, int physicalBlockSize, long seed, int cpSize) {
         validateSpans(prepared.input(), prepared.spans());
-        return new PromptCacheKeys(blockSize, prepared.input().getTokenIdsList(),
+        return new PromptCacheKeys(physicalBlockSize, prepared.input().getTokenIdsList(),
             prepared.spans().stream().map(span -> new PromptCacheKeys.Span(
-                span.getOffset(), span.getRowHashesList())).toList(), seed, keyStride);
+                span.getOffset(), span.getRowHashesList())).toList(), seed, cpSize);
     }
 
     public static long featureSeed(String key) {

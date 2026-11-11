@@ -383,8 +383,8 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         boolean reuse = canReuseLocalKv(stream);
         var keys = stream.input.keys();
         if (prefill())
-            metrics.recordPrefillCacheKeys(keys, stream.input.tokens(), config.cacheBlockSize());
-        int matched = Math.min(keys.size(), (stream.input.tokens() - 1) / config.cacheBlockSize());
+            metrics.recordPrefillCacheKeys(keys, stream.input.tokens(), config.tokensPerCacheKey());
+        int matched = Math.min(keys.size(), (stream.input.tokens() - 1) / config.tokensPerCacheKey());
         stream.cacheMatchRequested = reuse && matched > 0;
         return completePreparation(stream,
             cache.prepare(stream.input.tokens(), reuse ? keys.subList(0, matched) : List.of()));
@@ -409,7 +409,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         metrics.cacheLookup(stream.input.tokens(), stream.reused);
         if (stream.cacheMatchRequested) metrics.cacheMatched(ready.matchNanos());
         if (config.reuseCache() && stream.input.reuse())
-            metrics.prepared((long) (stream.input.tokens() / config.cacheBlockSize()) * config.cacheBlockSize(),
+            metrics.prepared((long) (stream.input.tokens() / config.tokensPerCacheKey()) * config.tokensPerCacheKey(),
                 stream.reused, System.nanoTime() - stream.preparationStarted);
         if (!prefill()) {
             stream.phase = WAITING_LOAD;
@@ -528,9 +528,9 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         synchronized (lock) {
             var counts = queues();
             var kv = cache.snapshot(0, false);
-            long block = config.cacheBlockSize();
+            long block = config.tokensPerCacheKey();
             return new RtpMetrics.State(counts.waiting(), counts.running(), counts.loading(), counts.ready(), kv.totalBlocks() * block,
-                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, config.cacheBlockSize());
+                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, config.tokensPerCacheKey());
         }
     }
 

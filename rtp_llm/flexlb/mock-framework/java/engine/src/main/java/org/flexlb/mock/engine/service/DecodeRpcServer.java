@@ -67,7 +67,7 @@ final class DecodeRpcServer implements AutoCloseable {
             if (frame.getStage() == RemoteStage.ALLOCATE) {
                 validate(frame);
                 var input = frame.getInput();
-                var sequence = PromptCacheKeys.fromDecodePrompt(frame.getMockDecodePrompt(), config.blockSize());
+                var sequence = PromptCacheKeys.fromDecodePrompt(frame.getMockDecodePrompt(), config.physicalBlockSize());
                 prepared = RpcMessages.toSchedulerInput(input, frame.getClientId() + "/" + input.getRequestId(), call.started,
                     RpcMessages.deadline(input, call.started, call.rpcDeadline), false, sequence);
             }

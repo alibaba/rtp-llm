@@ -67,7 +67,7 @@ class KvcmProtocolTest {
     @Test void cacheManagerOwnsReporterWithoutAnEngineAndClosesItBeforeReleasingCache() throws Exception {
         try (var meta = new Meta()) {
             var config = config("prefill", meta.endpoint());
-            var cache = new org.flexlb.mock.engine.cache.KvCacheManager(config.blockSize(), config.deviceBlocks(), 0);
+            var cache = new org.flexlb.mock.engine.cache.KvCacheManager(config.physicalBlockSize(), config.deviceBlocks(), 0);
             try {
                 cache.startKvcmReporter(config, "127.0.0.1:12345");
                 await(() -> meta.has("EVENT_BLOCK_SNAPSHOT"));
