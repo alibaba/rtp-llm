@@ -1897,7 +1897,14 @@ class AttentionV41FP8(AttentionFP8):
                 out.fill_(-1)
                 if candidates_out is not None:
                     candidates_out.fill_(-1)
-                q = rope_only(q, self.freqs_cis[positions], self.rope_head_dim)
+                # Apply RoPE in bounded row slices: the all-row result is a
+                # full-context copy and can exceed the remaining A100 reserve.
+                _rope_freqs = self.freqs_cis[positions]
+                for _rs in range(0, q.shape[0], 1024):
+                    _re = min(_rs + 1024, q.shape[0])
+                    q[_rs:_re] = rope_only(
+                        q[_rs:_re], _rope_freqs[_rs:_re], self.rope_head_dim
+                    )
                 weights = (
                     raw_weights.float()
                     * (self.index_head_dim * self.index_n_heads) ** -0.5
