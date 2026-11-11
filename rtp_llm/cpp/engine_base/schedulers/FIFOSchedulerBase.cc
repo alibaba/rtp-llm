@@ -43,8 +43,8 @@ FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runt
 
 bool FIFOSchedulerBase::empty() {
     lock_guard<mutex> lock(lock_);
-    return waiting_streams_.empty() && loading_cache_streams_.empty() && running_streams_.empty()
-           && extraOnflightStreams() == 0;
+    return waiting_streams_.empty() && loading_cache_streams_.empty() && cache_ready_streams_.empty()
+           && running_streams_.empty() && extraOnflightStreams() == 0;
 }
 
 void FIFOSchedulerBase::cancelStreams(std::list<GenerateStreamPtr>& streams) {
@@ -87,6 +87,7 @@ absl::Status FIFOSchedulerBase::stop() {
         stop_ = true;
         cancelStreams(waiting_streams_);
         cancelStreams(loading_cache_streams_);
+        cancelStreams(cache_ready_streams_);
         cancelStreams(running_streams_);
         cancelExtraStreams();
     }
@@ -340,14 +341,7 @@ std::unordered_set<GenerateStream*> FIFOSchedulerBase::evaluateWaitingStreams(li
     last_admitted_context_batch_size_ = 0;
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
-    if (!waiting_streams.empty()) {
-        auto oldest_enqueue_time_us =
-            (*std::min_element(waiting_streams.begin(), waiting_streams.end(), [](const auto& lhs, const auto& rhs) {
-                return lhs->schedulerEnqueueTimeUs() < rhs->schedulerEnqueueTimeUs();
-            }))->schedulerEnqueueTimeUs();
-        last_waiting_oldest_age_us_ =
-            std::max<int64_t>(0, autil::TimeUtility::currentTimeInMicroSeconds() - oldest_enqueue_time_us);
-    }
+    const auto   now_us                    = autil::TimeUtility::currentTimeInMicroSeconds();
     const size_t inited_kv_streams         = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
     size_t       admitted_new_init_streams = 0;
 
@@ -365,39 +359,39 @@ std::unordered_set<GenerateStream*> FIFOSchedulerBase::evaluateWaitingStreams(li
         set_scheduling_type(running_streams_);
     }
     set_scheduling_type(new_streams_);
-    for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
-        auto& stream = *it;
+    for (auto* candidates : {&cache_ready_streams_, &waiting_streams}) {
+        for (const auto& stream : *candidates) {
+            last_waiting_oldest_age_us_ =
+                std::max(last_waiting_oldest_age_us_, now_us - stream->schedulerEnqueueTimeUs());
 
-        const bool prefill_only = isPrefillOnly(stream);
-        if (has_scheduling_type && scheduling_prefill_only != prefill_only) {
-            ++it;
-            continue;
-        }
+            const bool prefill_only = isPrefillOnly(stream);
+            if (has_scheduling_type && scheduling_prefill_only != prefill_only) {
+                continue;
+            }
 
-        const bool already_inited_kv = stream->curBlocksNum() > 0;
-        if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
-            && inited_kv_streams + admitted_new_init_streams >= max_inited_kv_cache_streams_) {
-            ++it;
-            continue;
-        }
+            const bool already_inited_kv = stream->curBlocksNum() > 0;
+            if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
+                && inited_kv_streams + admitted_new_init_streams >= max_inited_kv_cache_streams_) {
+                continue;
+            }
 
-        // PD decode streams may already carry CanRun before FIFO admission.
-        // Capacity checks must still run for the current scheduling round.
-        if (!stream->hasError() && evaluateRunningMemory(admitted_streams, stream)) {
-            if (!stream->hasEvent(StreamEvents::CanRun)) {
-                stream->reportEvent(StreamEvents::CanRun);
-            }
-            admitted_streams.push_back(stream);
-            admitted_stream_ptrs.insert(stream.get());
-            if (!has_scheduling_type) {
-                has_scheduling_type     = true;
-                scheduling_prefill_only = prefill_only;
-            }
-            if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv) {
-                ++admitted_new_init_streams;
+            // PD decode streams may already carry CanRun before FIFO admission.
+            // Capacity checks must still run for the current scheduling round.
+            if (!stream->hasError() && evaluateRunningMemory(admitted_streams, stream)) {
+                if (!stream->hasEvent(StreamEvents::CanRun)) {
+                    stream->reportEvent(StreamEvents::CanRun);
+                }
+                admitted_streams.push_back(stream);
+                admitted_stream_ptrs.insert(stream.get());
+                if (!has_scheduling_type) {
+                    has_scheduling_type     = true;
+                    scheduling_prefill_only = prefill_only;
+                }
+                if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv) {
+                    ++admitted_new_init_streams;
+                }
             }
         }
-        it++;
     }
 
     for (const auto& stream : admitted_streams) {
@@ -407,6 +401,7 @@ std::unordered_set<GenerateStream*> FIFOSchedulerBase::evaluateWaitingStreams(li
         }
     }
 
+    evaluateAndUpdateStreams(cache_ready_streams_, &admitted_stream_ptrs);
     evaluateAndUpdateStreams(waiting_streams, &admitted_stream_ptrs);
     return admitted_stream_ptrs;
 }
@@ -421,17 +416,14 @@ size_t FIFOSchedulerBase::countInitedKVCacheStreams() const {
         }
         return count;
     };
-    return count_inited(waiting_streams_) + count_inited(loading_cache_streams_) + count_inited(running_streams_);
+    return count_inited(waiting_streams_) + count_inited(loading_cache_streams_) + count_inited(cache_ready_streams_)
+           + count_inited(running_streams_);
 }
 
 void FIFOSchedulerBase::addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state) {
     switch (new_state) {
         case StreamState::WAITING:
-            waiting_streams_.insert(
-                std::find_if(waiting_streams_.begin(), waiting_streams_.end(), [&](const auto& waiting_stream) {
-                    return waiting_stream->schedulerEnqueueTimeUs() > stream->schedulerEnqueueTimeUs();
-                }),
-                stream);
+            cache_ready_streams_.push_back(stream);
             break;
         case StreamState::LOADING_CACHE:
             loading_cache_streams_.push_back(stream);
@@ -450,7 +442,7 @@ void FIFOSchedulerBase::addStreamToNewState(const GenerateStreamPtr& stream, Str
 
 int64_t FIFOSchedulerBase::waitingStreamsSize() {
     std::lock_guard<mutex> lock(lock_);
-    return waiting_streams_.size();
+    return waiting_streams_.size() + cache_ready_streams_.size();
 }
 
 int64_t FIFOSchedulerBase::runningStreamsSize() {
@@ -460,7 +452,8 @@ int64_t FIFOSchedulerBase::runningStreamsSize() {
 
 int64_t FIFOSchedulerBase::onflightStreams() {
     std::lock_guard<mutex> lock(lock_);
-    return waiting_streams_.size() + loading_cache_streams_.size() + running_streams_.size() + extraOnflightStreams();
+    return waiting_streams_.size() + loading_cache_streams_.size() + cache_ready_streams_.size()
+           + running_streams_.size() + extraOnflightStreams();
 }
 
 void FIFOSchedulerBase::appendTaskInfos(std::vector<EngineScheduleInfo::TaskInfo>& task_list,
@@ -479,7 +472,8 @@ void FIFOSchedulerBase::appendTaskInfos(std::vector<EngineScheduleInfo::TaskInfo
 std::vector<EngineScheduleInfo::TaskInfo> FIFOSchedulerBase::waitingTaskList() {
     std::lock_guard<mutex> lock(lock_);
     waiting_task_list_.clear();
-    waiting_task_list_.reserve(waiting_streams_.size());
+    waiting_task_list_.reserve(cache_ready_streams_.size() + waiting_streams_.size());
+    appendTaskInfos(waiting_task_list_, cache_ready_streams_);
     appendTaskInfos(waiting_task_list_, waiting_streams_);
     return waiting_task_list_;
 }
@@ -496,7 +490,7 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOSchedulerBase::runningTaskList() {
 void FIFOSchedulerBase::reportMetrics() {
     if (metrics_reporter_) {
         RtpLLMSchedulerMetricsCollector collector;
-        collector.wait_stream_size            = waiting_streams_.size();
+        collector.wait_stream_size            = waiting_streams_.size() + cache_ready_streams_.size();
         collector.running_stream_size         = running_streams_.size();
         collector.loading_cache_stream_size   = loading_cache_streams_.size();
         collector.admitted_context_batch_size = last_admitted_context_batch_size_;
