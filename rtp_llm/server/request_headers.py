@@ -3,6 +3,7 @@ from typing import Any, Dict, Mapping, Optional
 
 REQUEST_HEADER_NAMES = (
     "user_id",
+    "x-awi-request-id",
     "x-dashscope-uid",
     "x-dashscope-service",
     "x-dashscope-apikeyid",
@@ -20,6 +21,9 @@ REQUEST_HEADER_NAMES = (
     "x-dashscope-datainspection",
 )
 CORRELATION_HEADER_NAMES = (
+    # The AWI evaluator's explicit per-request ID wins over any proxy-injected
+    # correlation header so engine observations key on the exact evaluator rid.
+    "x-awi-request-id",
     "x-dashscope-request-id",
     "x-dashscope-requestid",
     "x-request-id",
