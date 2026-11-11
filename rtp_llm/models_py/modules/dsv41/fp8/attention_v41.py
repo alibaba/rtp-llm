@@ -25,6 +25,7 @@ from rtp_llm.models_py.modules.dsv41.attn_type import (
     CSA_STATE,
     HCA_KV,
     INDEXER_KV,
+    INDEXER_KV_C2,
     SWA_KV,
 )
 from rtp_llm.models_py.modules.dsv41.bounded_replay import (
@@ -75,6 +76,7 @@ from rtp_llm.models_py.modules.dsv41.fp8.attention import (
     AttentionFP8,
     _get_cp_comm_stream,
 )
+from rtp_llm.models_py.modules.dsv41.kv_cache_utils import indexer_region_for_ratio
 from rtp_llm.models_py.modules.dsv41.rope import apply_rotary_emb, precompute_freqs_cis
 from rtp_llm.models_py.modules.dsv41.utils import _v4_fp8_linear
 from rtp_llm.models_py.utils.memory import dispose_tensor
@@ -603,6 +605,7 @@ class AttentionV41FP8(AttentionFP8):
         self._pool_spec[CSA_KV] = (torch.uint8, FP4_GLOBAL_ENTRY_BYTES)
         self._pool_spec[HCA_KV] = (torch.uint8, FP4_GLOBAL_ENTRY_BYTES)
         self._pool_spec[INDEXER_KV] = (torch.uint8, FP4_INDEXER_ENTRY_BYTES)
+        self._pool_spec[INDEXER_KV_C2] = (torch.uint8, FP4_INDEXER_ENTRY_BYTES)
         self._wo_a_groups_v41 = torch.nn.ModuleList()
         scale_block = self.wo_a_w.shape[1] // self.wo_a_s.shape[1]
         for group in range(self.n_groups):
@@ -1097,14 +1100,57 @@ class AttentionV41FP8(AttentionFP8):
     def _global_region(self):
         return CSA_KV if self.compress_ratio == 2 else HCA_KV
 
+    def _indexer_region(self):
+        from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
+            indexer_region_for_ratio,
+        )
+
+        return indexer_region_for_ratio(self._kv_cache, self.compress_ratio)
+
+    def _bind_indexer_table(self, tables, cache):
+        from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
+            indexer_region_for_ratio,
+        )
+
+        tag = indexer_region_for_ratio(cache, self.compress_ratio)
+        if tag == INDEXER_KV:
+            return tables
+        if tag not in tables:
+            raise RuntimeError(f"V4.1 attention missing block table for {tag}")
+        shared = getattr(self, "_shared_attention", None)
+        if shared is None:
+            return {**tables, INDEXER_KV: tables[tag]}
+        # Preserve table identity for the forward-local prefill metadata cache.
+        # A changed input mapping/cache or replaced tensor invalidates the view;
+        # live in-place CUDA graph updates keep the same tensor identities.
+        bindings = shared.setdefault("indexer_table_bindings", {})
+        layout = tuple((key, id(value)) for key, value in tables.items())
+        cached = bindings.get(tag)
+        if (
+            cached is not None
+            and cached[0] is tables
+            and cached[1] is cache
+            and cached[2] == layout
+        ):
+            return cached[3]
+        bound = {**tables, INDEXER_KV: tables[tag]}
+        bindings[tag] = (tables, cache, layout, bound)
+        return bound
+
     def _source_pool(self, region):
         if self._kv_cache is None:
             return None
         layer_id = self.layer_id if region == SWA_KV else self.kv_source_layer_id
-        base = self._kv_cache.get_layer_cache(
-            layer_id,
-            getattr(self, "_swa_cache_region", SWA_KV) if region == SWA_KV else region,
-        ).kv_cache_base
+        tag = (
+            getattr(self, "_swa_cache_region", SWA_KV)
+            if region == SWA_KV
+            else (
+                indexer_region_for_ratio(self._kv_cache, self.compress_ratio)
+                if region == INDEXER_KV
+                else region
+            )
+        )
+        base = self._kv_cache.get_layer_cache(layer_id, tag).kv_cache_base
         if base is None or base.numel() == 0:
             return None
         dtype, width = self._pool_spec[region]
@@ -1117,7 +1163,6 @@ class AttentionV41FP8(AttentionFP8):
         stride_bytes = base.shape[1] * base.element_size()
         from ._kv_cache_utils import pool_entry_count
 
-        tag = getattr(self, "_swa_cache_region", SWA_KV) if region == SWA_KV else region
         logical_entries = pool_entry_count(self._kv_cache, tag)
         capacity = stride_bytes // (width * dtype.itemsize)
         eb = min(logical_entries, capacity) if logical_entries else capacity
@@ -1149,7 +1194,14 @@ class AttentionV41FP8(AttentionFP8):
             return None
         bt = self._block_tables_by_type[region]
         eb = self._source_entries(region, pool)
-        tpb = require_pool_tokens_per_block(self._kv_cache, region=region)
+        tpb = require_pool_tokens_per_block(
+            self._kv_cache,
+            region=(
+                indexer_region_for_ratio(self._kv_cache, self.compress_ratio)
+                if region == INDEXER_KV
+                else region
+            ),
+        )
         cp = self._cp_ctx
         sharded = cp is not None and cp.cp_size > 1 and cp.kv_cache_sharded
         slots = prefill_metadata.try_slot_mapping(
@@ -1298,7 +1350,14 @@ class AttentionV41FP8(AttentionFP8):
             for region in regions:
                 pool = self._source_pool(region)
                 assert pool is not None and self._block_tables_by_type is not None
-                tpb = require_pool_tokens_per_block(self._kv_cache, region=region)
+                tpb = require_pool_tokens_per_block(
+                    self._kv_cache,
+                    region=(
+                        indexer_region_for_ratio(self._kv_cache, self.compress_ratio)
+                        if region == INDEXER_KV
+                        else region
+                    ),
+                )
                 layouts.append(
                     _v41_producer_metadata.SlotLayout(
                         self._block_tables_by_type[region],
@@ -2744,7 +2803,10 @@ class AttentionV41FP8(AttentionFP8):
         cp = self._cp_ctx
         sharded = cp is not None and cp.cp_size > 1 and cp.kv_cache_sharded
         table = self._block_tables_by_type[INDEXER_KV][:B]
-        raw_tpb = require_pool_tokens_per_block(self._kv_cache, region=INDEXER_KV)
+        raw_tpb = require_pool_tokens_per_block(
+            self._kv_cache,
+            region=indexer_region_for_ratio(self._kv_cache, self.compress_ratio),
+        )
         logical_entries = raw_tpb // self.compress_ratio
         if (
             not sharded
@@ -2756,8 +2818,8 @@ class AttentionV41FP8(AttentionFP8):
                 x.device, index_pool.shape[1], self.index_n_heads, self.index_head_dim
             )
         ):
-            # Keep the owner's original FP8 bytes and paged layout. In V4.1's
-            # uniform INDEXER_KV pool, ratio 2 only fills half of each page.
+            # Read the owning pool directly. Compact pages have one physical
+            # row per logical entry; the legacy half-page layout stays valid.
             self._shared_attention["global"] = {
                 self.layer_id: decode_indexer.DecodeIndexerKeys(
                     index_pool, table, capacity, logical_entries

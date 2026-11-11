@@ -19,6 +19,7 @@ from rtp_llm.models_py.modules.dsv41.fp8 import _v41_fp4_triton as codec
 from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
+from rtp_llm.models_py.modules.dsv41.kv_cache_utils import indexer_region_for_ratio
 
 _PAYLOAD = codec.FP4_INDEXER_HEAD_DIM // 2
 _SCALE = codec.FP4_INDEXER_HEAD_DIM // codec.FP4_INDEXER_GROUP
@@ -244,8 +245,12 @@ def is_supported_layout(main_layout, index_layout, *, cp_size):
         or main_layout.owner_tokens_per_block != index_layout.owner_tokens_per_block
         or main_layout.entries_per_block * main_layout.ratio
         != main_layout.tokens_per_block
-        # Native INDEXER keeps full capacity; ratio2 only uses its first half.
-        or index_layout.entries_per_block != index_layout.tokens_per_block
+        # Both compact pages and older half-filled ratio2 pages are valid.
+        or index_layout.entries_per_block
+        not in (
+            index_layout.tokens_per_block // index_layout.ratio,
+            index_layout.tokens_per_block,
+        )
     ):
         return False
     return _layout_valid(
@@ -465,7 +470,9 @@ def try_gather(
     if not isinstance(mt, torch.Tensor) or not isinstance(it, torch.Tensor):
         raise ValueError("Joint pool requires both main and index block tables")
     mtpb = require_pool_tokens_per_block(cache, region=region)
-    itpb = require_pool_tokens_per_block(cache, region=INDEXER_KV)
+    itpb = require_pool_tokens_per_block(
+        cache, region=indexer_region_for_ratio(cache, attn.compress_ratio)
+    )
     ratio, owner, rank = (
         attn.compress_ratio,
         cache.get_seq_size_per_block(attn._global_region()),

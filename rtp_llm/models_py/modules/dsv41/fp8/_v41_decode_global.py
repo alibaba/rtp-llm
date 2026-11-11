@@ -31,6 +31,7 @@ from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
     _round_e2m1,
     _round_power_of_two_scale,
 )
+from rtp_llm.models_py.modules.dsv41.kv_cache_utils import indexer_region_for_ratio
 
 
 @triton.jit
@@ -426,7 +427,14 @@ def is_supported(attn, x, positions, req_ids, starts) -> bool:
             or table.stride(1) != 1
         ):
             return False
-        tpb = require_pool_tokens_per_block(attn._kv_cache, region=region)
+        tpb = require_pool_tokens_per_block(
+            attn._kv_cache,
+            region=(
+                indexer_region_for_ratio(attn._kv_cache, attn.compress_ratio)
+                if region == INDEXER_KV
+                else region
+            ),
+        )
         if region == CSA_STATE:
             eb = attn._source_entries(region, pool)
             if (
@@ -540,7 +548,10 @@ def try_produce_global(
         MAIN_CACHE_STRIDE=main.stride(0),
         MAIN_BLOCKS=main.shape[0],
         INDEX_EB=index.shape[1],
-        INDEX_TPB=require_pool_tokens_per_block(attn._kv_cache, region=INDEXER_KV),
+        INDEX_TPB=require_pool_tokens_per_block(
+            attn._kv_cache,
+            region=indexer_region_for_ratio(attn._kv_cache, attn.compress_ratio),
+        ),
         INDEX_COLS=index_table.shape[1],
         INDEX_TABLE_STRIDE=index_table.stride(0),
         **state_geometry,
@@ -573,7 +584,10 @@ def try_produce_global(
         RATIO=attn.compress_ratio,
         EPS=attn.eps,
         INDEX_EB=index.shape[1],
-        INDEX_TPB=require_pool_tokens_per_block(attn._kv_cache, region=INDEXER_KV),
+        INDEX_TPB=require_pool_tokens_per_block(
+            attn._kv_cache,
+            region=indexer_region_for_ratio(attn._kv_cache, attn.compress_ratio),
+        ),
         INDEX_COLS=index_table.shape[1],
         INDEX_TABLE_STRIDE=index_table.stride(0),
         INDEX_CACHE_STRIDE=index.stride(0),

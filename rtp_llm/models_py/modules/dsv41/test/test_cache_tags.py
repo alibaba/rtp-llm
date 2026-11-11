@@ -19,6 +19,19 @@ CACHE = _load("v41_cache_contract", Path(__file__).parents[1] / "kv_cache_utils.
 
 
 class CacheTagsTest(unittest.TestCase):
+    def test_indexer_physical_group_follows_ratio_and_cache_schema(self):
+        mixed = SimpleNamespace(group_tags=["indexer_kv", "indexer_kv_c2"])
+        compact_only = SimpleNamespace(group_tags=["indexer_kv_c2"])
+        legacy = SimpleNamespace(group_tags=["indexer_kv"])
+        self.assertEqual(CACHE.indexer_region_for_ratio(mixed, 1), "indexer_kv")
+        self.assertEqual(CACHE.indexer_region_for_ratio(mixed, 2), "indexer_kv_c2")
+        self.assertEqual(
+            CACHE.indexer_region_for_ratio(compact_only, 2), "indexer_kv_c2"
+        )
+        for cache in (legacy, None, SimpleNamespace()):
+            self.assertEqual(CACHE.indexer_region_for_ratio(cache, 2), "indexer_kv")
+        self.assertIn("indexer_kv_c2", CACHE.DSV4_KERNEL_ROW_TAGS)
+
     def test_group_metadata_is_not_silently_taken_from_primary_pool(self):
         swa = torch.tensor([[1, 3], [2, 4]], dtype=torch.int32)
         global_kv = torch.tensor([[7], [9]], dtype=torch.int32)

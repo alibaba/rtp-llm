@@ -328,6 +328,43 @@ def _compact_logits_bounded_kernel(
         )
 
 
+@triton.jit
+def _zero_missing_page_logits_kernel(
+    logits,
+    lengths,
+    table,
+    request_ids,
+    QUERY_LEN: tl.constexpr,
+    ENTRIES: tl.constexpr,
+    CAPACITY: tl.constexpr,
+    TABLE_COLS: tl.constexpr,
+    LOGIT_STRIDE: tl.constexpr,
+    PAGE_TILE: tl.constexpr,
+):
+    """Keep zero-K semantics without copying the valid packed score rows."""
+    row = tl.program_id(0)
+    request = row // QUERY_LEN if request_ids is None else tl.load(request_ids + row)
+    length = tl.minimum(tl.load(lengths + row), CAPACITY)
+    pages = tl.cdiv(length, ENTRIES)
+    offsets = tl.arange(0, PAGE_TILE)
+    entries = tl.arange(0, ENTRIES)
+    for start in tl.range(0, pages, PAGE_TILE):
+        columns = start + offsets
+        blocks = tl.load(
+            table + request * TABLE_COLS + columns,
+            (columns < pages) & (columns < TABLE_COLS),
+            other=0,
+        )
+        missing = (columns < pages) & (blocks <= 0)
+        if tl.sum(missing.to(tl.int32), 0) > 0:
+            tokens = columns[:, None] * ENTRIES + entries[None, :]
+            tl.store(
+                logits + row * LOGIT_STRIDE + tokens,
+                0.0,
+                missing[:, None] & (tokens < length),
+            )
+
+
 def is_supported(
     device: torch.device,
     block_size: int,
@@ -451,12 +488,11 @@ def score_decode_indexer(
     Pool and block table must come from the same KV source layer. Pool is the
     contiguous, unpadded uint8 [blocks,typed_entries_per_block,68] view over
     the per-block planar FP4 layout (payload plane then packed-UE8M0 scale
-    plane); entries are physical cache rows, not raw allocator blocks. With
-    uniform V4.1 cache layout, ratio-2 occupies only the first half of every
-    physical block; pass that half as ``logical_entries_per_block``. Its scale
-    region still follows ALL physical payload rows, so reinterpreting it as a
-    half-sized cache block is incorrect. Score the physical extent and
-    compact logits. ``context_lens[b,s]`` is the device-side causal visible
+    plane); entries are physical cache rows, not raw allocator blocks. Compact
+    ratio-2 pages contain64 entries. Older128-entry ratio-2 pages occupy only
+    the first half; their scales still follow ALL physical payload rows, so
+    pass64 as ``logical_entries_per_block`` and retain compaction for them.
+    ``context_lens[b,s]`` is the device-side causal visible
     key count for that individual speculative token, in [0,max_ctx_len].
     Static max_ctx_len must fit the table coverage. No device scalar is read
     during capture/replay.
@@ -566,6 +602,29 @@ def score_decode_indexer(
         return_bf16=True,
         metadata=None if metadata is None else metadata.paged,
     )
+    if (
+        logical_entries == block_size
+        and preserve_score_dtype
+        and not pad_invisible
+        and os.environ.get("DSV41_DIRECT_INDEXER_LOGITS", "1") == "1"
+    ):
+        # Packed pages already have the logical column layout. Only missing
+        # pages need correction: DG reads reserved page zero, whose bytes are
+        # not part of the allocator's zero-K contract. Never mutate KV here.
+        _zero_missing_page_logits_kernel[(b * s,)](
+            logits,
+            lengths,
+            safe_table,
+            None if metadata is None else metadata.paged.request_ids,
+            s,
+            block_size,
+            max_ctx_len,
+            safe_table.shape[1],
+            logits.stride(0),
+            128,
+            num_warps=8,
+        )
+        return logits
     compact = torch.empty(
         b * s,
         max_ctx_len,

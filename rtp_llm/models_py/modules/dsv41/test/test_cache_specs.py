@@ -1,6 +1,7 @@
 """V4.1 cache ownership and byte-layout contracts on the main descriptors."""
 
 import importlib.util
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -59,7 +60,7 @@ class CacheSpecsTest(unittest.TestCase):
             [[d.tag for d in layer] for layer in descs],
             [
                 ["swa_kv"],
-                ["swa_kv", "csa_kv", "indexer_kv", "csa_state"],
+                ["swa_kv", "csa_kv", "indexer_kv_c2", "csa_state"],
                 ["swa_kv"],
                 ["swa_kv", "hca_kv", "indexer_kv"],
                 ["swa_kv"],
@@ -69,10 +70,19 @@ class CacheSpecsTest(unittest.TestCase):
         self.assertEqual(descs[1][1].compression_ratio, 2)
         self.assertEqual(descs[3][1].compression_ratio, 1)
         self.assertEqual(descs[1][2].entry_elems, 68)
-        self.assertEqual(descs[1][2].compression_ratio, 1)
+        self.assertEqual(descs[1][2].compression_ratio, 2)
+        self.assertEqual(descs[3][2].compression_ratio, 1)
+        self.assertIsNot(descs[1][2], descs[3][2])
         self.assertEqual(descs[1][3].entry_elems, 1024)
         self.assertEqual(descs[1][3].compression_ratio, 2)
         self.assertEqual(descs[1][3].state_ring_overlap, 0)
+
+    def test_legacy_indexer_storage_is_an_explicit_compatibility_path(self):
+        descs = SPECS.build_v41_kv_cache_spec_descs(
+            2, [2, 1], [0, 1], 512, compact_indexer=False
+        )
+        self.assertEqual([layer[2].tag for layer in descs], ["indexer_kv"] * 2)
+        self.assertEqual([layer[2].compression_ratio for layer in descs], [1, 1])
 
     def test_bounded_decoder_does_not_publish_swa_prefix(self):
         descs = SPECS.build_v41_kv_cache_spec_descs(
@@ -104,12 +114,39 @@ class CacheSpecsTest(unittest.TestCase):
                 num_layers=2,
                 hybrid_attention_config=SimpleNamespace(),
             )
-            with patch.dict(sys.modules, {bounded.__name__: bounded}):
+            with patch.dict(sys.modules, {bounded.__name__: bounded}), patch.dict(
+                os.environ, {"DSV41_COMPACT_INDEXER_KV": "1"}
+            ):
                 SPECS.configure_v41_kv_cache(config)
             seeds.append(config.cache_key_hash_seed)
             self.assertNotIn(config.cache_key_hash_seed, (0, 0x4453563431525031))
             self.assertEqual(config.cache_min_replay_tokens, 128 if enabled else 1)
         self.assertNotEqual(*seeds)
+
+    def test_compact_and_legacy_indexer_caches_cannot_share_reuse_keys(self):
+        bounded = ModuleType("rtp_llm.models_py.modules.dsv41.bounded_replay")
+        bounded.enabled = lambda: True
+        seeds = []
+        for compact in ("0", "1"):
+            config = SimpleNamespace(
+                attn_config=SimpleNamespace(
+                    tokens_per_block=128,
+                    kernel_tokens_per_block=128,
+                    layer_compress_ratios=[2],
+                    v41_kv_source_layer_ids=[0],
+                    size_per_head=512,
+                ),
+                kv_cache_spec_descs=[],
+                is_mtp=False,
+                num_layers=1,
+                hybrid_attention_config=SimpleNamespace(),
+            )
+            with patch.dict(sys.modules, {bounded.__name__: bounded}), patch.dict(
+                os.environ, {"DSV41_COMPACT_INDEXER_KV": compact}
+            ):
+                SPECS.configure_v41_kv_cache(config)
+            seeds.append(config.cache_key_hash_seed)
+        self.assertEqual(seeds, [0x4453563431494231, 0x4453563431494232])
 
     def test_all_draft_layers_share_nonreusable_swa_spec(self):
         descs = SPECS.build_v41_kv_cache_spec_descs(

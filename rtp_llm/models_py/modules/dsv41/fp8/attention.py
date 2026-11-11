@@ -102,6 +102,7 @@ from rtp_llm.models_py.modules.dsv41.attn_type import (
     HCA_KV,
     HCA_STATE,
     INDEXER_KV,
+    INDEXER_KV_C2,
     INDEXER_STATE,
     SWA_KV,
 )
@@ -114,6 +115,7 @@ _CACHE_TAG_BY_NAME = {
         CSA_KV,
         HCA_KV,
         INDEXER_KV,
+        INDEXER_KV_C2,
         INDEXER_STATE,
         CSA_STATE,
         HCA_STATE,
@@ -309,6 +311,11 @@ def bind_attn_cache(attn, kv_cache=None, block_tables_by_type=None, cp_ctx=BIND_
         if block_tables_by_type is not None:
             attn._block_tables_by_type = bind_swa_table(
                 block_tables_by_type, attn._swa_cache_region
+            )
+        bind_indexer = getattr(attn, "_bind_indexer_table", None)
+        if callable(bind_indexer) and attn._block_tables_by_type is not None:
+            attn._block_tables_by_type = bind_indexer(
+                attn._block_tables_by_type, attn._kv_cache
             )
         if cp_ctx is not BIND_KEEP:
             attn._cp_ctx = cp_ctx

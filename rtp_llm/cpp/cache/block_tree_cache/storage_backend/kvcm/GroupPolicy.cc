@@ -20,16 +20,14 @@ std::string getBitHashStr(uint64_t bithash, size_t width = 64) {
 
 }  // namespace
 
-std::string genLocationSpecName(int                tp_rank,
-                                const std::string& group_name,
-                                const std::string& model_name,
-                                bool               merge_full) {
-    if (merge_full && model_name == "DeepSeekV41"
+std::string
+genLocationSpecName(int tp_rank, const std::string& group_name, const std::string& model_name, bool merge_full) {
+    const bool legacy_dsv41_specs = model_name == "DeepSeekV41" || model_name == "DeepSeekV41DSpark";
+    if (merge_full && legacy_dsv41_specs
         && (group_name == "Fglobal_kv_1" || group_name == "Fhca_kv" || group_name == "Fglobal_kv_2"
-            || group_name == "Fcsa_kv" || group_name == "Findexer_kv")) {
+            || group_name == "Fcsa_kv" || group_name == "Findexer_kv" || group_name == "Findexer_kv_c2")) {
         return "F_TP" + std::to_string(tp_rank);
     }
-    const bool legacy_dsv41_specs = model_name == "DeepSeekV41" || model_name == "DeepSeekV41DSpark";
     if (group_name == "Fglobal_kv_1" || (legacy_dsv41_specs && group_name == "Fhca_kv")) {
         return "F0_TP" + std::to_string(tp_rank);
     }
@@ -39,6 +37,9 @@ std::string genLocationSpecName(int                tp_rank,
     if (group_name == "Findexer_kv") {
         return "F2_TP" + std::to_string(tp_rank);
     }
+    if (group_name == "Findexer_kv_c2") {
+        return "F2C2_TP" + std::to_string(tp_rank);
+    }
     if (group_name == "Lcsa_state") {
         return "S3_TP" + std::to_string(tp_rank);
     }
@@ -46,6 +47,34 @@ std::string genLocationSpecName(int                tp_rank,
         return "S4_TP" + std::to_string(tp_rank);
     }
     return "tp" + std::to_string(tp_rank) + "_" + group_name;
+}
+
+bool GroupPolicy::canMergeFullSpecs(const std::string& model_name) const {
+    if ((model_name != "DeepSeekV41" && model_name != "DeepSeekV41DSpark")
+        || (full_group_tags_.size() != 3 && full_group_tags_.size() != 4)) {
+        return false;
+    }
+    const GroupBase*      first = nullptr;
+    std::set<std::string> names;
+    for (const auto& [id, group] : groups_) {
+        (void)id;
+        if (!group.is_full) {
+            continue;
+        }
+        names.insert(genLocationSpecName(0, group.group_name, model_name));
+        const auto& member = topology_.group(group.tag);
+        if (first == nullptr) {
+            first = &member;
+        } else if (member.seqSizePerBlock() != first->seqSizePerBlock()
+                   || member.cacheKeyTokenStride() != first->cacheKeyTokenStride()
+                   || member.policy.cp_mapping != first->policy.cp_mapping
+                   || member.policy.cp_slice != first->policy.cp_slice) {
+            return false;
+        }
+    }
+    return first != nullptr
+           && (names == std::set<std::string>{"F0_TP0", "F1_TP0", "F2_TP0"}
+               || names == std::set<std::string>{"F0_TP0", "F1_TP0", "F2_TP0", "F2C2_TP0"});
 }
 
 bool GroupPolicy::buildLocationSpecGroups(int                 tp_size,
@@ -70,7 +99,7 @@ bool GroupPolicy::buildLocationSpecGroups(int                 tp_size,
         const bool compound_member = genLocationSpecName(0, group.group_name, model_name, merge_full)
                                      != genLocationSpecName(0, group.group_name, model_name);
         if (compound_member) {
-            // The caller validates the three compatible FULL groups before enabling merge_full.
+            // The caller validates all compatible FULL groups before enabling merge_full.
             compound_group_names.push_back(group.group_name);
             compound_mask |= group.group_name_bithash;
         } else {
@@ -147,12 +176,17 @@ bool GroupPolicy::buildLocationSpecGroups(int                 tp_size,
             {"Fcsa_kv", "F1"},
             {"Fglobal_kv_2", "F1"},
             {"Findexer_kv", "F2"},
+            {"Findexer_kv_c2", "F2C2"},
             {"Lcsa_state", "L3"},
             {"Lswa_kv", "L4"},
             {"Fcsa_kvFhca_kvFindexer_kv", "F"},
             {"Fglobal_kv_1Fglobal_kv_2Findexer_kv", "F"},
+            {"Fcsa_kvFhca_kvFindexer_kvFindexer_kv_c2", "F"},
+            {"Fglobal_kv_1Fglobal_kv_2Findexer_kvFindexer_kv_c2", "F"},
             {"Fcsa_kvFhca_kvFindexer_kvLcsa_stateLswa_kv", "FL"},
             {"Fglobal_kv_1Fglobal_kv_2Findexer_kvLcsa_stateLswa_kv", "FL"},
+            {"Fcsa_kvFhca_kvFindexer_kvFindexer_kv_c2Lcsa_stateLswa_kv", "FL"},
+            {"Fglobal_kv_1Fglobal_kv_2Findexer_kvFindexer_kv_c2Lcsa_stateLswa_kv", "FL"},
         };
         LocationSpecGroups compact_groups;
         for (auto& [name, specs] : new_location_spec_groups) {
@@ -659,7 +693,7 @@ std::vector<uint64_t> FullOtherGroupPolicy::reachableAggregateMasks() const {
         }
     }
     std::set<uint64_t> masks;
-    uint64_t full_linear_mask = valid_full_bithash_;
+    uint64_t           full_linear_mask = valid_full_bithash_;
     for (const auto& [id, group] : groups_) {
         (void)id;
         if (topology_.group(group.tag).policy.group_type == CacheGroupType::LINEAR) {

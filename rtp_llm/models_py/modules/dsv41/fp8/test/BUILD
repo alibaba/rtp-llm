@@ -76,6 +76,7 @@ _TESTS = [
 
 # The selection chain supports both SM100 ARM and SM100/SM103 x86.
 _X86_TESTS = [
+    "test_v41_attention_pool_warmup",
     "test_v41_candidate_deepselect",
     "test_v41_packed_verify",
     "test_v41_merge_contracts",
@@ -86,6 +87,9 @@ _X86_TESTS = [
     "test_v41_host_swa_metadata",
     "test_v41_sparse_decode",
     "test_v41_decode_topk",
+    "test_v41_decode_global",
+    "test_v41_fp4_codec",
+    "test_v41_joint_pool",
     "test_v41_prefill_candidates",
     "test_v41_decode_indexer",
     "test_v41_prefill_deepselect",

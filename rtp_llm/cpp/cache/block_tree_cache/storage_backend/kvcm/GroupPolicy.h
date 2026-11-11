@@ -52,9 +52,9 @@ public:
     using GroupIdMap = std::map<int32_t, Group>;
     struct SpecInfo {
         // Representative fields retain FULL reuse semantics; payloads use every group_id.
-        int32_t     group_id;
-        int32_t     tp_rank;
-        std::string tag;
+        int32_t              group_id;
+        int32_t              tp_rank;
+        std::string          tag;
         std::vector<int32_t> group_ids;
     };
     using SpecInfoMap        = std::map<std::string, SpecInfo, std::less<>>;
@@ -103,6 +103,9 @@ public:
                                  LocationSpecGroups& location_spec_groups,
                                  const std::string&  model_name = {},
                                  bool                merge_full = false);
+
+    // Validate the actual FULL topology before combining legacy V4.1 wire specs.
+    bool canMergeFullSpecs(const std::string& model_name) const;
 
     const SpecInfoMap& spec_info_map() const {
         return spec_name_to_info_;

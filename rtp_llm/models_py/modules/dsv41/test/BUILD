@@ -4,6 +4,29 @@ load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
 
 package(default_visibility = ["//visibility:public"])
 
+py_test(
+    name = "test_v41_native_cache_specs",
+    srcs = ["test_v41_native_cache_specs.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    data = ["//rtp_llm/cpp/cache/test:cache_config_creator_py_test"],
+    tags = ["dsv41_cuda13"],
+    env = {"GPU_COUNT": "0"},
+    legacy_create_init = 0,
+)
+
+[
+    py_test(
+        name = name + "_cpu",
+        srcs = [name + ".py"],
+        main = name + ".py",
+        deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+        tags = ["dsv41_cuda13"],
+        env = {"GPU_COUNT": "0"},
+        legacy_create_init = 0,
+    )
+    for name in ["test_cache_specs", "test_cache_tags"]
+]
+
 cuda13_sm100_py_test(
     name = "test_engram_scale_shards",
     srcs = glob(["*.py"]) + ["//rtp_llm/test/pytest:pytest_main.py"],

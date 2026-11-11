@@ -40,6 +40,7 @@ SWA_KV = "swa_kv"
 CSA_KV = "csa_kv"
 HCA_KV = "hca_kv"
 INDEXER_KV = "indexer_kv"
+INDEXER_KV_C2 = "indexer_kv_c2"
 INDEXER_STATE = "indexer_state"
 CSA_STATE = "csa_state"
 HCA_STATE = "hca_state"
@@ -49,7 +50,7 @@ DEFAULT_TAG = "default"
 
 # Paged (FULL) KV pools — a block-table row covers ``kernel_seq_size_per_block``
 # raw tokens.
-DSV4_KERNEL_ROW_TAGS: Tuple[str, ...] = (CSA_KV, HCA_KV, INDEXER_KV)
+DSV4_KERNEL_ROW_TAGS: Tuple[str, ...] = (CSA_KV, HCA_KV, INDEXER_KV, INDEXER_KV_C2)
 # Fixed / ring pools — a block-table row covers ``seq_size_per_block`` raw
 # tokens.
 DSV4_PHYSICAL_ROW_TAGS: Tuple[str, ...] = (
@@ -78,6 +79,13 @@ def group_tags(kv_cache: Optional[Any]) -> List[str]:
     if not tags:
         return []
     return [str(tag) for tag in tags]
+
+
+def indexer_region_for_ratio(kv_cache: Optional[Any], ratio: int) -> str:
+    """Physical V4.1 indexer group, retaining older cache/mock compatibility."""
+    if int(ratio) == 2 and INDEXER_KV_C2 in group_tags(kv_cache):
+        return INDEXER_KV_C2
+    return INDEXER_KV
 
 
 def as_attention_inputs_by_tag(

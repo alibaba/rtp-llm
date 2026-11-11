@@ -97,13 +97,18 @@ def _collect_pool_layouts(attentions, kv_cache, cp_size, kv_cache_sharded):
                 regions.append(CSA_STATE)
         for region in regions:
             from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
+                indexer_region_for_ratio,
                 swa_region_for_layer,
             )
 
             physical_tag = (
                 swa_region_for_layer(kv_cache, attn.layer_id)
                 if region == SWA_KV
-                else region
+                else (
+                    indexer_region_for_ratio(kv_cache, ratio)
+                    if region == INDEXER_KV
+                    else region
+                )
             )
             cache = kv_cache.get_layer_cache(attn.layer_id, physical_tag)
             base = cache.kv_cache_base

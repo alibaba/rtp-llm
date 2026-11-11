@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import unittest
 from dataclasses import replace
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -240,19 +240,21 @@ def _visible_mask(case, capacity):
     return torch.arange(capacity, device="cuda")[None] < lengths[:, None]
 
 
-def _check_elided_padding(logical, ratio, capacity, preserve, poison_table):
+def _check_elided_padding(
+    logical, ratio, capacity, preserve, poison_table, physical=128
+):
     """pad_invisible=False keeps visible columns bitwise identical and every
     bounded decode selector output-identical. The elision itself (padding left
     untouched) is proven deterministically by the graph-replay staleness
     check, not by allocator contents."""
     if not torch.cuda.is_available() or not fused.is_supported(
-        torch.device("cuda"), 128
+        torch.device("cuda"), physical
     ):
         raise unittest.SkipTest("paged FP8 indexer unsupported on this device")
     selector = _selector_or_skip()
     torch.backends.cuda.matmul.allow_tf32 = False
     b, s = 2, 6
-    case, keys = make_case(b, s, capacity, 128, logical, ratio)
+    case, keys = make_case(b, s, capacity, physical, logical, ratio)
     if poison_table:
         case["block_table"][0, 0] = 0
         case["block_table"][1, 2] = -7
@@ -282,17 +284,17 @@ def _check_elided_padding(logical, ratio, capacity, preserve, poison_table):
     del padded, elided
 
 
-def _check_graph_replay_elided(logical, ratio):
+def _check_graph_replay_elided(logical, ratio, physical=128):
     """Replayed elided scoring with growing/shrinking/zero lengths keeps the
     bounded selection identical to freshly padded scoring, while the padding
     stays undefined (never -inf-filled) across replays."""
     if not torch.cuda.is_available() or not fused.is_supported(
-        torch.device("cuda"), 128
+        torch.device("cuda"), physical
     ):
         raise unittest.SkipTest("paged FP8 indexer unsupported on this device")
     selector = _selector_or_skip()
     torch.backends.cuda.matmul.allow_tf32 = False
-    case, _ = make_case(2, 6, 2053, 128, logical, ratio)
+    case, _ = make_case(2, 6, 2053, physical, logical, ratio)
     kwargs = dict(case, preserve_score_dtype=True)
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
@@ -309,7 +311,7 @@ def _check_graph_replay_elided(logical, ratio):
     prev_lengths = None
     checked_stale = 0
     for step, starts in enumerate(starts_by_step):
-        updated, _ = make_case(2, 6, 2053, 128, logical, ratio, seed=71 + step)
+        updated, _ = make_case(2, 6, 2053, physical, logical, ratio, seed=71 + step)
         if step == 2:
             updated["block_table"][0, 0] = 0
         for key in ("q", "weights", "freqs_cis", "pool", "block_table"):
@@ -345,6 +347,129 @@ def _check_graph_replay_elided(logical, ratio):
 
 
 class V41DecodeIndexerTest(unittest.TestCase):
+    def test_actual_decode_pool_builder_preserves_both_indexer_groups(self):
+        from rtp_llm.models_py.modules.dsv41.decode.forward import (
+            build_paged_pool_specs,
+        )
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+        from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_attn_metadata import (
+            allocate_decode_metadata_fp8,
+        )
+        from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_fmha_impl import (
+            DSv4DecodeFmhaImplFP8,
+        )
+
+        entries = {"indexer_kv": 128, "indexer_kv_c2": 64}
+        pools = {
+            (0, "indexer_kv_c2"): torch.empty(3, 64 * 68, dtype=torch.uint8),
+            (1, "indexer_kv"): torch.empty(3, 128 * 68, dtype=torch.uint8),
+        }
+
+        def get_layer_cache(layer, tag):
+            if (layer, tag) not in pools:
+                raise RuntimeError("layer does not own the requested group")
+            return SimpleNamespace(kv_cache_base=pools[(layer, tag)])
+
+        cache = SimpleNamespace(
+            group_tags=list(entries),
+            get_entries_per_block=lambda tag: entries[tag],
+            get_kernel_seq_size_per_block=lambda tag: 128,
+            get_layer_cache=get_layer_cache,
+        )
+        owners = []
+        for layer in range(2):
+            owner = SimpleNamespace(
+                layer_id=layer,
+                _kv_cache=None,
+                _pool_spec={tag: (torch.uint8, 68) for tag in entries},
+            )
+            owner._pool_entries_per_block = MethodType(
+                AttentionV41FP8._pool_entries_per_block, owner
+            )
+            owners.append(owner)
+        model = SimpleNamespace(layers=[SimpleNamespace(attn=a) for a in owners])
+        specs = build_paged_pool_specs(cache, model, max_seq_len=512)
+        self.assertEqual(specs["indexer_kv"], (128, 128, 5))
+        self.assertEqual(specs["indexer_kv_c2"], (64, 128, 5))
+        self.assertTrue(all(owner._kv_cache is None for owner in owners))
+        metadata = allocate_decode_metadata_fp8(
+            2, 4, 128, 512, 512, [0], 512, torch.device("cpu"), specs
+        )
+        self.assertEqual(set(metadata.pool_block_tables), set(entries))
+        self.assertEqual(metadata.pool_block_tables["indexer_kv_c2"].shape, (2, 5))
+        inputs = {
+            tag: SimpleNamespace(
+                kv_cache_kernel_block_id_device=torch.full((2, 5), i + 1),
+                is_prefill=False,
+            )
+            for i, tag in enumerate(entries)
+        }
+        impl = SimpleNamespace(config=SimpleNamespace(paged_pool_specs=specs))
+        extracted = DSv4DecodeFmhaImplFP8._extract_paged_block_tables(impl, inputs)
+        self.assertIs(
+            extracted["indexer_kv_c2"],
+            inputs["indexer_kv_c2"].kv_cache_kernel_block_id_device,
+        )
+
+    def test_compact_indexer_table_alias_is_local_and_requires_its_own_group(self):
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+
+        owner = SimpleNamespace(compress_ratio=2, _shared_attention={})
+        old_table, compact_table = object(), object()
+        tables = {"indexer_kv": old_table, "indexer_kv_c2": compact_table}
+        cache = SimpleNamespace(group_tags=list(tables))
+        bound = AttentionV41FP8._bind_indexer_table(owner, tables, cache)
+        self.assertIs(bound["indexer_kv"], compact_table)
+        self.assertIs(tables["indexer_kv"], old_table)
+        self.assertIs(AttentionV41FP8._bind_indexer_table(owner, tables, cache), bound)
+        # Replacing a device table in a stable Python mapping must invalidate.
+        replacement = object()
+        tables["indexer_kv_c2"] = replacement
+        rebound = AttentionV41FP8._bind_indexer_table(owner, tables, cache)
+        self.assertIsNot(rebound, bound)
+        self.assertIs(rebound["indexer_kv"], replacement)
+        new_cache = SimpleNamespace(group_tags=list(tables))
+        self.assertIsNot(
+            AttentionV41FP8._bind_indexer_table(owner, tables, new_cache), rebound
+        )
+        self.assertEqual(len(owner._shared_attention["indexer_table_bindings"]), 1)
+        with self.assertRaisesRegex(RuntimeError, "indexer_kv_c2"):
+            AttentionV41FP8._bind_indexer_table(owner, {"indexer_kv": old_table}, cache)
+        owner.compress_ratio = 1
+        self.assertIs(AttentionV41FP8._bind_indexer_table(owner, tables, cache), tables)
+
+    def test_packed64_elision_preserves_poisoned_zero_page_contract(self):
+        _check_elided_padding(64, 2, 2053, True, True, physical=64)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_compact64_pages_match_legacy128_pages_without_mutating_cache(self):
+        if not fused.is_supported(torch.device("cuda"), 64):
+            self.skipTest("SM10x paged indexer required")
+        case, _ = make_case(2, 4, 2053, 128, 64, 2)
+        wide = case["pool"].view(-1, 128 * 68)
+        narrow = torch.empty(wide.shape[0], 64 * 68, dtype=torch.uint8, device="cuda")
+        narrow[:, :4096].copy_(wide[:, :4096])
+        narrow[:, 4096:].copy_(wide[:, 8192:8448])
+        packed_case = dict(case, pool=narrow.view(-1, 64, 68))
+        case["block_table"][0, 0] = 0
+        case["block_table"][1, 2] = -7
+        before = packed_case["pool"].clone()
+        with patch.dict(os.environ, {"DSV41_DIRECT_INDEXER_LOGITS": "1"}):
+            actual = fused.score_decode_indexer(
+                **packed_case, preserve_score_dtype=True, pad_invisible=False
+            )
+        expected = fused.score_decode_indexer(
+            **case, preserve_score_dtype=True, pad_invisible=False
+        )
+        visible = _visible_mask(case, 2053)
+        torch.testing.assert_close(actual[visible], expected[visible], rtol=0, atol=0)
+        torch.testing.assert_close(packed_case["pool"], before, rtol=0, atol=0)
+        with patch.dict(os.environ, {"DSV41_DIRECT_INDEXER_LOGITS": "0"}):
+            fallback = fused.score_decode_indexer(
+                **packed_case, preserve_score_dtype=True, pad_invisible=False
+            )
+        torch.testing.assert_close(actual[visible], fallback[visible], rtol=0, atol=0)
+
     def test_pad_invisible_elision_keeps_visible_columns_and_bounded_selectors(self):
         for logical, ratio, capacity, preserve, poison in [
             (64, 2, 2053, False, False),
@@ -363,9 +488,9 @@ class V41DecodeIndexerTest(unittest.TestCase):
                 _check_elided_padding(logical, ratio, capacity, preserve, poison)
 
     def test_pad_invisible_elision_graph_replay_length_changes(self):
-        for logical, ratio in [(64, 2), (128, 1)]:
-            with self.subTest(logical=logical, ratio=ratio):
-                _check_graph_replay_elided(logical, ratio)
+        for physical, logical, ratio in [(128, 64, 2), (128, 128, 1), (64, 64, 2)]:
+            with self.subTest(physical=physical, logical=logical, ratio=ratio):
+                _check_graph_replay_elided(logical, ratio, physical)
 
     def test_fused_metadata_rejects_unsupported_inputs_before_launch(self):
         keys = fused.DecodeIndexerKeys(

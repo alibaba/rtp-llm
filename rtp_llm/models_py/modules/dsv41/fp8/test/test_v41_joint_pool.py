@@ -70,12 +70,14 @@ class JointPoolHostTest(unittest.TestCase):
             index = joint.PoolLayout(128, 128, 128, torch.int64, ratio)
             self.assertTrue(joint.is_supported_layout(main, index, cp_size=4))
         compact_index = joint.PoolLayout(128, 64, 128, torch.int64, 2)
-        self.assertFalse(joint.is_supported_layout(main, compact_index, cp_size=4))
+        self.assertTrue(joint.is_supported_layout(main, compact_index, cp_size=4))
+        padded_index = joint.PoolLayout(128, 65, 128, torch.int64, 2)
+        self.assertFalse(joint.is_supported_layout(main, padded_index, cp_size=4))
         with patch.object(
             torch.cuda, "current_device", side_effect=AssertionError("CUDA")
         ):
             self.assertFalse(
-                joint.warmup(main, compact_index, cp_size=4, cp_rank=0, device="cuda:0")
+                joint.warmup(main, padded_index, cp_size=4, cp_rank=0, device="cuda:0")
             )
 
     def test_exact_row_views_preserve_padding_offset_and_empty_aliases(self):
@@ -155,14 +157,24 @@ class JointPoolCudaTest(unittest.TestCase):
         )
 
     def fixture(
-        self, counts, ratio, rank, dtype=torch.int32, index_dtype=None, stride_padding=0
+        self,
+        counts,
+        ratio,
+        rank,
+        dtype=torch.int32,
+        index_dtype=None,
+        stride_padding=0,
+        compact_index=False,
     ):
         host = [n * ratio + ratio - 1 for n in counts]
         backing = torch.zeros(len(host) * 2 + 1, dtype=torch.int64, device="cuda")
         backing[1::2] = torch.tensor(host, dtype=torch.int64, device="cuda")
         ends = backing[1::2]
         tpb = 128
-        entries = {HCA_KV: tpb // ratio, INDEXER_KV: tpb}
+        entries = {
+            HCA_KV: tpb // ratio,
+            INDEXER_KV: tpb // ratio if compact_index else tpb,
+        }
         columns = max(1, (max(host, default=0) + 511) // 512)
         pages = 1 + len(host) * columns
         tables, data = {}, []
@@ -179,7 +191,7 @@ class JointPoolCudaTest(unittest.TestCase):
                 device="cuda",
             )
             pool = storage.as_strided((pages, eb, width), (storage.stride(0), width, 1))
-            if ratio == 2 and region == INDEXER_KV:
+            if ratio == 2 and region == INDEXER_KV and not compact_index:
                 # The unused native half must never leak into gathered bytes.
                 storage[:, 64 * 64 : 128 * 64] = 0xA5
                 storage[:, 128 * 64 + 64 * 4 : 128 * 68] = 0x5A
@@ -228,9 +240,15 @@ class JointPoolCudaTest(unittest.TestCase):
         attn._slots = slots
         return (attn, *data, host, ends)
 
-    def warm(self, ratio, rank, dtype, index_dtype=None):
+    def warm(self, ratio, rank, dtype, index_dtype=None, compact_index=False):
         layout = joint.PoolLayout(128, 128 // ratio, 128, dtype, ratio)
-        index_layout = joint.PoolLayout(128, 128, 128, index_dtype or dtype, ratio)
+        index_layout = joint.PoolLayout(
+            128,
+            128 // ratio if compact_index else 128,
+            128,
+            index_dtype or dtype,
+            ratio,
+        )
         self.assertTrue(
             joint.warmup(
                 layout,
@@ -378,6 +396,31 @@ class JointPoolCudaTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "transport witness"):
             pools.try_gather_prefill_pools(attn, main, index, host, ends)
         self.assertEqual(attn._gather_shards.call_count, 1)
+
+    def test_compact_ratio2_indexer_bytes_match_codec_for_each_cp_owner(self):
+        counts = tuple((i * 73) % 1100 for i in range(32))
+        for rank in range(4):
+            with self.subTest(rank=rank):
+                attn, main, index, host, ends = self.fixture(
+                    counts,
+                    2,
+                    rank,
+                    torch.int32,
+                    torch.int64,
+                    compact_index=True,
+                )
+                self.assertEqual(index.shape[1], 64)
+                self.warm(2, rank, torch.int32, torch.int64, compact_index=True)
+                expected, packets = self.oracle(attn, main, index, host)
+                observed = []
+                attn._gather_shards = lambda packet: observed.append(packet.clone())
+                actual = pools.try_gather_prefill_pools(attn, main, index, host, ends)
+                self.assertEqual(len(observed), len(packets))
+                for a, b in zip(observed, packets):
+                    self.assert_bits(a, b)
+                for (global_kv, keys), references in zip(actual, expected):
+                    for a, b in zip((global_kv, keys.quant, keys.scale), references):
+                        self.assert_bits(a, b)
 
     def test_direct_destination_all_owners_ragged_groups_and_gaps(self):
         counts = (0, 1, 63, 64, 65, 127, 128, 129, 255, 256, 257) * 3
@@ -535,11 +578,11 @@ class JointPoolCudaTest(unittest.TestCase):
                     torch.equal(actual, attn._slots(region, positions, requests))
                 )
 
-    def test_compact_index_capacity_rejected_before_allocation_or_collective(self):
+    def test_invalid_index_capacity_rejected_before_allocation_or_collective(self):
         for rank in range(4):
             attn, main, index, host, ends = self.fixture([65] * 32, 2, rank)
-            compact = torch.empty(
-                (index.shape[0], 64, 68), dtype=torch.uint8, device="cuda"
+            invalid_index = torch.empty(
+                (index.shape[0], 32, 68), dtype=torch.uint8, device="cuda"
             )
             attn._gather_shards = Mock()
             with patch.object(
@@ -549,7 +592,7 @@ class JointPoolCudaTest(unittest.TestCase):
                     joint.try_gather(
                         attn,
                         main,
-                        compact,
+                        invalid_index,
                         host,
                         ends,
                         groups=pools._request_groups(tuple(n // 2 for n in host)),

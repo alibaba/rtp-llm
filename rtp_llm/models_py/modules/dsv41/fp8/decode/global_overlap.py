@@ -14,14 +14,13 @@ from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_global, _v41_decode_
 from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
+from rtp_llm.models_py.modules.dsv41.kv_cache_utils import indexer_region_for_ratio
 
 _GLOBAL_COMPUTE_STREAMS = threading.local()
 
 
 def is_supported(attn, x, positions, req_ids, starts) -> bool:
-    if (
-        os.environ.get("DSV41_OVERLAP_GLOBAL_QKV", "1") != "1"
-    ):
+    if os.environ.get("DSV41_OVERLAP_GLOBAL_QKV", "1") != "1":
         return False
     return supports_paged_global(attn, x, positions, req_ids, starts)
 
@@ -43,7 +42,10 @@ def supports_paged_global(attn, x, positions, req_ids, starts) -> bool:
     # materializes temporary keys with a different allocator lifetime.
     pool = attn._source_pool(INDEXER_KV)
     table = attn._block_tables_by_type[INDEXER_KV]
-    raw_tpb = require_pool_tokens_per_block(attn._kv_cache, region=INDEXER_KV)
+    raw_tpb = require_pool_tokens_per_block(
+        attn._kv_cache,
+        region=indexer_region_for_ratio(attn._kv_cache, attn.compress_ratio),
+    )
     entries = raw_tpb // attn.compress_ratio
     return (
         raw_tpb % attn.compress_ratio == 0

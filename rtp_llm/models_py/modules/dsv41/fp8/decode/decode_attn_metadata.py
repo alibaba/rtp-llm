@@ -412,9 +412,14 @@ def get_or_build_sched_meta(
 
 
 def _pool_compress_ratio(attn_type: int) -> int:
-    from rtp_llm.models_py.modules.dsv41.attn_type import CSA_KV, HCA_KV, INDEXER_KV
+    from rtp_llm.models_py.modules.dsv41.attn_type import (
+        CSA_KV,
+        HCA_KV,
+        INDEXER_KV,
+        INDEXER_KV_C2,
+    )
 
-    if attn_type == CSA_KV:
+    if attn_type in (CSA_KV, INDEXER_KV_C2):
         return 2
     if attn_type in (HCA_KV, INDEXER_KV):
         return 1

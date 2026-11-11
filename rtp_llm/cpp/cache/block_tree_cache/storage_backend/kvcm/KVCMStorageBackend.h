@@ -28,15 +28,15 @@ class ClientWrapper;
 // process transfers its own GPU blocks through its locally registered client.
 class KVCMStorageBackend: public StorageBackend {
 public:
-    KVCMStorageBackend(const CacheConfig&                            cache_config,
-                       const KVCacheConfig&                          kv_cache_config,
-                       const RuntimeConfig&                          runtime_config,
-                       const ParallelismConfig&                      parallelism_config,
-                       const SpeculativeExecutionConfig&             sp_config,
-                       std::shared_ptr<BroadcastManager>             broadcast_manager,
-                       bool                                          gdr_enabled,
-                       std::shared_ptr<kmonitor::MetricsReporter>    metrics_reporter = nullptr,
-                       std::shared_ptr<kvcm::ClientWrapper>          client_wrapper = nullptr);
+    KVCMStorageBackend(const CacheConfig&                         cache_config,
+                       const KVCacheConfig&                       kv_cache_config,
+                       const RuntimeConfig&                       runtime_config,
+                       const ParallelismConfig&                   parallelism_config,
+                       const SpeculativeExecutionConfig&          sp_config,
+                       std::shared_ptr<BroadcastManager>          broadcast_manager,
+                       bool                                       gdr_enabled,
+                       std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter = nullptr,
+                       std::shared_ptr<kvcm::ClientWrapper>       client_wrapper   = nullptr);
     ~KVCMStorageBackend() override;
     BlockTreeQueueSizes queueSizes() const override;
 
@@ -47,6 +47,7 @@ public:
         bool                     enable_vipserver = false;
         std::string              vipserver_domain;
         std::vector<std::string> addresses;
+        bool                     merge_full_specs = false;
     };
     // Immutable snapshot of the effective SDK registration, available after init.
     std::optional<ControlConfig> controlConfig() const;
@@ -56,9 +57,8 @@ public:
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
 
     // Optional EOS publication; true means handled/skipped, not committed.
-    bool captureCompletedDecode(const BatchKVCacheResource& resource,
-                                size_t computed_end,
-                                bool finished = true) override;
+    bool
+    captureCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end, bool finished = true) override;
 
 protected:
     bool               initImpl() override;
@@ -74,7 +74,7 @@ protected:
     void onRemoteCacheSkipped(const char* stage) noexcept override;
     bool protectUnknownCompletion() const noexcept override;
     std::shared_ptr<void> completionResourceOwner() const override;
-    bool hasUnresolvedExternalIo() const noexcept override;
+    bool                  hasUnresolvedExternalIo() const noexcept override;
     void onQuarantined(bool is_write, StorageQuarantineReason reason, size_t block_count) noexcept override;
     void onQuarantineChanged(uint64_t                          generation,
                              size_t                            task_count,

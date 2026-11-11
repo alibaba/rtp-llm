@@ -36,7 +36,9 @@ def _fused():
     return importlib.import_module(_FUSED_MODULE)
 
 
-def _layout_owner(device, ratio, batch, *, ring_entries=_STATE_EB):
+def _layout_owner(
+    device, ratio, batch, *, ring_entries=_STATE_EB, compact_indexer=False
+):
     main_region = CSA_KV if ratio == 2 else HCA_KV
     pages = _MAX_SEQ_LEN // _KV_TPB
     # Permute physical ids independently across regions to catch pool mixups.
@@ -56,7 +58,7 @@ def _layout_owner(device, ratio, batch, *, ring_entries=_STATE_EB):
             dtype=torch.uint8,
         ),
         INDEXER_KV: torch.full(
-            (batch * pages + 1, _KV_TPB, 68),
+            (batch * pages + 1, _KV_TPB // ratio if compact_indexer else _KV_TPB, 68),
             0x7F,
             device=device,
             dtype=torch.uint8,
@@ -87,17 +89,23 @@ def _layout_owner(device, ratio, batch, *, ring_entries=_STATE_EB):
         _rope_max_seq_len=_MAX_SEQ_LEN,
         _cp_ctx=None,
         _kv_cache=SimpleNamespace(
-            group_tags=tuple(tables),
+            group_tags=tuple(
+                "indexer_kv_c2" if compact_indexer and tag == INDEXER_KV else tag
+                for tag in tables
+            ),
             get_kernel_seq_size_per_block=lambda tag: _KV_TPB,
             get_seq_size_per_block=lambda tag: _STATE_TPB,
             get_entries_per_block=lambda tag: (
-                ring_entries if tag == CSA_STATE else pools[tag].shape[1]
+                ring_entries
+                if tag == CSA_STATE
+                else pools[INDEXER_KV if tag == "indexer_kv_c2" else tag].shape[1]
             ),
         ),
         _block_tables_by_type=tables,
         _shared_attention={"global": {}, "topk": {}},
         _test_pools=pools,
         _test_ring_entries=ring_entries,
+        _test_compact_indexer=compact_indexer,
     )
     owner._source_pool = lambda region: pools[region]
     owner._source_entries = lambda region, pool: (
@@ -108,10 +116,19 @@ def _layout_owner(device, ratio, batch, *, ring_entries=_STATE_EB):
     return owner
 
 
-def _case(device, ratio, batch, span, *, seed=4141, norm_dtype=torch.float32):
+def _case(
+    device,
+    ratio,
+    batch,
+    span,
+    *,
+    seed=4141,
+    norm_dtype=torch.float32,
+    compact_indexer=False,
+):
     # CPU-only construction keeps fixture randomness independent of capture.
     generator = torch.Generator(device="cpu").manual_seed(seed)
-    owner = _layout_owner(device, ratio, batch)
+    owner = _layout_owner(device, ratio, batch, compact_indexer=compact_indexer)
     for name in ("global_wkv", "global_wgate"):
         setattr(
             owner,
@@ -155,6 +172,7 @@ def _clone_case(case):
         owner.compress_ratio,
         case.x.shape[0],
         ring_entries=owner._test_ring_entries,
+        compact_indexer=owner._test_compact_indexer,
     )
     for region, pool in owner._test_pools.items():
         cloned._test_pools[region].copy_(pool)
@@ -420,6 +438,41 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
         )
         environment.start()
         self.addCleanup(environment.stop)
+
+    @torch.inference_mode()
+    def test_compact_ratio2_producer_graph_writes_exact_physical_cache_bytes(self):
+        old = _case("cuda", 2, 4, 6, compact_indexer=True)
+        new = _clone_case(old)
+        self.assertEqual(new.owner._test_pools[INDEXER_KV].shape[1], 64)
+        initial = _snapshot(old)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                _candidate(new)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            _candidate(new)
+        for region, pool in initial.items():
+            new.owner._test_pools[region].copy_(pool)
+        for round_id, starts in enumerate(
+            ([127, 255, 7, 508], [128, 256, 8, 509], [129, 258, 9, 510])
+        ):
+            before = _snapshot(old)
+            for case in (old, new):
+                _set_starts(case, starts)
+                if round_id == 1:
+                    for table in case.owner._block_tables_by_type.values():
+                        table[2, 0] = 0
+                        table[3, -1] = -1
+            replacement = torch.randn_like(old.x)
+            old.x.copy_(replacement)
+            new.x.copy_(replacement)
+            _reference(old)
+            graph.replay()
+            torch.cuda.synchronize()
+            _assert_result(self, old, new, before)
 
     @torch.inference_mode()
     def test_ratio_batch_span_matrix_all_cache_bytes(self):

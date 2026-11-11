@@ -794,8 +794,23 @@ class V41AttentionWarmupCPU(unittest.TestCase):
         self.assertEqual(warmup._collect_pool_layouts(Unreadable(), None, 4, True), {})
 
     def test_real_schema_read_uses_metadata_and_reconstructs_cp_swa_stride(self):
-        # These objects intentionally have no tensor read/write/view interface.
-        # Collecting warmup layouts must not inspect real cache contents.
+        import torch
+
+        def load(name, path):
+            spec = importlib.util.spec_from_file_location(name, path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+
+        # Load the real tag resolver and metadata readers without importing the
+        # attention package or native bindings. Cache contents remain unreadable.
+        tags = load("_v41_warmup_tags", _FP8.parent / "attn_type.py")
+        cache_utils = load("_v41_warmup_cache_utils", _FP8.parent / "kv_cache_utils.py")
+        modules = {
+            "rtp_llm.models_py.modules.dsv41.attn_type": tags,
+            "rtp_llm.models_py.modules.dsv41.kv_cache_utils": cache_utils,
+        }
+
         class Base:
             def __init__(self, columns):
                 self.shape = (10000, columns)
@@ -803,45 +818,106 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             def element_size(self):
                 return 1
 
-        attn = attention(2, producer=True)
         u8, f32 = SimpleNamespace(itemsize=1), SimpleNamespace(itemsize=4)
-        attn._pool_spec = {7: (u8, 528), 1: (u8, 288), 3: (u8, 68), 5: (f32, 1024)}
-        sizes = {7: 19072, 1: 128 * 288, 3: 256 * 68, 5: 2 * 1024 * 4}
-        cache = SimpleNamespace(
-            get_seq_size_per_block=lambda tag: 4096,
-            get_layer_cache=lambda layer, region: SimpleNamespace(
-                kv_cache_base=Base(sizes[region])
-            ),
+        index, compact = tags.INDEXER_KV, tags.INDEXER_KV_C2
+        cases = (
+            ("mixed", (index, compact), 2, compact, 64),
+            ("compact_only", (compact,), 2, compact, 64),
+            ("ratio_one", (index, compact), 1, index, 128),
+            ("compact_disabled", (index,), 2, index, 128),
         )
-        modules = {
-            "rtp_llm.models_py.modules.dsv41.attn_type": SimpleNamespace(
-                CSA_KV=1, HCA_KV=2, INDEXER_KV=3, CSA_STATE=5, SWA_KV=7
-            ),
-            "rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils": SimpleNamespace(
-                pool_entry_count=lambda cache, tag: None,
-                require_pool_tokens_per_block=lambda cache, region: (
-                    4096 if region in (5, 7) else 256
-                ),
-            ),
-            "rtp_llm.models_py.modules.dsv41.fp8.attention": SimpleNamespace(
-                _CACHE_TAG_BY_NAME={i: i for i in sizes}
-            ),
-        }
-        modules["rtp_llm.models_py.modules.dsv41.kv_cache_utils"] = SimpleNamespace(
-            swa_region_for_layer=lambda cache, layer: 7
-        )
-        with patch.dict(sys.modules, modules):
-            layouts = warmup._collect_pool_layouts(
-                {warmup._attention_key(attn): attn}, cache, 4, True
-            )
-        by_region = {layout.region: layout for layout, _ in layouts}
-        self.assertEqual(set(by_region), {1, 3, 5, 7})
-        self.assertEqual(by_region[7].stride_bytes, 19072 * 4)
-        self.assertEqual(by_region[7].entries, (19072 * 4) // 528)
-        self.assertEqual(by_region[1].entries, 128)
-        self.assertEqual(by_region[3].entries, 256)
-        self.assertEqual(by_region[5].entries, 2)
-        self.assertEqual(by_region[1].owner_tokens_per_block, 4096)
+        full_swa_stride = 5 * 16896  # Includes padding beyond the 136 entries.
+        with patch.dict(sys.modules, modules), patch.object(
+            torch.cuda, "_lazy_init", side_effect=AssertionError("CPU-only fixture")
+        ) as cuda_init:
+            pool_utils = load("_v41_warmup_pool_utils", _FP8 / "_kv_cache_utils.py")
+            with patch.dict(
+                sys.modules,
+                {"rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils": pool_utils},
+            ):
+                for cp_size, case in product((1, 2, 4), cases):
+                    name, index_tags, ratio, physical_index, index_entries = case
+                    with self.subTest(schema=name, cp_size=cp_size):
+                        attn = attention(2, ratio=ratio, producer=True)
+                        main = tags.CSA_KV if ratio == 2 else tags.HCA_KV
+                        attn._pool_spec = {
+                            tags.SWA_KV: (u8, 528),
+                            main: (u8, 288),
+                            index: (u8, 68),
+                            tags.CSA_STATE: (f32, 1024),
+                        }
+                        sizes = {
+                            tags.SWA_KV: full_swa_stride // cp_size,
+                            main: (64 if ratio == 2 else 128) * 288,
+                            index: 128 * 68,
+                            compact: 64 * 68,
+                            tags.CSA_STATE: 2 * 1024 * 4,
+                        }
+                        entries = {
+                            tags.SWA_KV: 136,
+                            main: 64 if ratio == 2 else 128,
+                            index: 128,
+                            compact: 64,
+                            tags.CSA_STATE: 2,
+                        }
+                        physical_tags = {tags.SWA_KV, tags.CSA_STATE}
+                        cache = SimpleNamespace(
+                            group_tags=[tags.SWA_KV, main, *index_tags]
+                            + ([tags.CSA_STATE] if ratio == 2 else []),
+                            get_seq_size_per_block=Mock(
+                                side_effect=lambda tag: (
+                                    4096 if tag in physical_tags else 128
+                                )
+                            ),
+                            get_kernel_seq_size_per_block=Mock(return_value=128),
+                            get_entries_per_block=Mock(side_effect=entries.__getitem__),
+                            get_layer_cache=Mock(
+                                side_effect=lambda layer, tag: SimpleNamespace(
+                                    kv_cache_base=Base(sizes[tag])
+                                )
+                            ),
+                        )
+                        layouts = warmup._collect_pool_layouts(
+                            {warmup._attention_key(attn): attn}, cache, cp_size, True
+                        )
+                        by_region = {layout.region: layout for layout, _ in layouts}
+                        expected = {tags.SWA_KV, main, index}
+                        if ratio == 2:
+                            expected.add(tags.CSA_STATE)
+                        self.assertEqual(set(by_region), expected)
+                        self.assertEqual(
+                            by_region[tags.SWA_KV].stride_bytes, full_swa_stride
+                        )
+                        self.assertEqual(by_region[tags.SWA_KV].entries, 136)
+                        self.assertEqual(by_region[tags.SWA_KV].tokens_per_block, 4096)
+                        self.assertEqual(by_region[main].entries, entries[main])
+                        self.assertEqual(by_region[index].entries, index_entries)
+                        self.assertEqual(
+                            by_region[index].stride_bytes, index_entries * 68
+                        )
+                        self.assertEqual(by_region[index].tokens_per_block, 128)
+                        self.assertEqual(by_region[index].owner_tokens_per_block, 128)
+                        if ratio == 2:
+                            self.assertEqual(by_region[tags.CSA_STATE].entries, 2)
+                        cache.get_layer_cache.assert_any_call(
+                            attn.layer_id, physical_index
+                        )
+                        for reader in (
+                            cache.get_entries_per_block,
+                            cache.get_kernel_seq_size_per_block,
+                            cache.get_seq_size_per_block,
+                        ):
+                            reader.assert_any_call(physical_index)
+                            if physical_index == compact:
+                                self.assertNotIn(
+                                    (index,), [c.args for c in reader.call_args_list]
+                                )
+                        if physical_index == compact:
+                            self.assertNotIn(
+                                (attn.layer_id, index),
+                                [c.args for c in cache.get_layer_cache.call_args_list],
+                            )
+            cuda_init.assert_not_called()
 
     def test_required_wrapper_rejection_cannot_be_marked_warmed(self):
         for result in (False, None):
