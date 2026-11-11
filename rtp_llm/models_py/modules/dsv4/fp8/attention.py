@@ -1185,18 +1185,6 @@ class AttentionFP8(nn.Module):
             spec = self._pool_spec.get(attn_type[len("mtp_") :])
         return spec
 
-    def _block_table_for(self, attn_type: str) -> Optional[torch.Tensor]:
-        """Per-tag block table, tolerating ``mtp_``-prefixed published keys."""
-        by_type = self._block_tables_by_type
-        if by_type is None:
-            return None
-        table = by_type.get(attn_type)
-        if table is None:
-            table = by_type.get(self._resolved_pool_tag(attn_type))
-        if table is None and attn_type.startswith("mtp_"):
-            table = by_type.get(attn_type[len("mtp_") :])
-        return table
-
     def _pool_meta_get(self, mapping, attn_type: str):
         """Lookup in a framework-populated ``{tag: value}`` dict.
 
@@ -1413,7 +1401,7 @@ class AttentionFP8(nn.Module):
             write_kv_to_pool,
         )
 
-        bt = self._block_table_for(attn_type)
+        bt = self._block_tables_by_type.get(attn_type)
         if bt is None or bt.numel() == 0:
             return
         pool_view = self._pool_view(attn_type)
@@ -1469,7 +1457,7 @@ class AttentionFP8(nn.Module):
             write_kv_to_pool,
         )
 
-        bt = self._block_table_for(attn_type)
+        bt = self._block_tables_by_type.get(attn_type)
         pool_view = self._pool_view(attn_type)
         eb = self._pool_entries_per_block(attn_type)
         if bt is None or bt.numel() == 0 or pool_view is None or eb <= 0:
@@ -1522,7 +1510,7 @@ class AttentionFP8(nn.Module):
 
         if self._kv_cache is None or self._block_tables_by_type is None:
             return None
-        bt = self._block_table_for(SWA_KV)
+        bt = self._block_tables_by_type.get(SWA_KV)
         if bt is None or bt.numel() == 0:
             return None
         pool_view = self._pool_view(SWA_KV)
@@ -1604,7 +1592,7 @@ class AttentionFP8(nn.Module):
 
         if self._kv_cache is None or self._block_tables_by_type is None:
             return None
-        bt = self._block_table_for(SWA_KV)
+        bt = self._block_tables_by_type.get(SWA_KV)
         if bt is None or bt.numel() == 0:
             return None
         pool_view = self._pool_view(SWA_KV)
@@ -1697,14 +1685,14 @@ class AttentionFP8(nn.Module):
             else:
                 kv_view = self._pool_view(kv_at) if kv_at is not None else None
             kv_bt = (
-                self._block_table_for(kv_at)
+                self._block_tables_by_type.get(kv_at)
                 if (bt_by_type is not None and kv_at is not None)
                 else None
             )
             kv_eb = self._pool_entries_per_block(kv_at) if kv_at is not None else 0
             state_view = self._pool_view(state_at) if state_at is not None else None
             state_bt = (
-                self._block_table_for(state_at)
+                self._block_tables_by_type.get(state_at)
                 if (bt_by_type is not None and state_at is not None)
                 else None
             )
@@ -1790,7 +1778,7 @@ class AttentionFP8(nn.Module):
         """
         if self._kv_cache is None or self._block_tables_by_type is None:
             return None
-        bt = self._block_table_for(attn_type)
+        bt = self._block_tables_by_type.get(attn_type)
         if bt is None or bt.numel() == 0 or T == 0:
             return None
         eb = self._pool_entries_per_block(attn_type)
@@ -4492,7 +4480,7 @@ class AttentionFP8(nn.Module):
         cmp_at = CSA_KV if ratio == 4 else HCA_KV
         state_at = CSA_STATE if ratio == 4 else HCA_STATE
 
-        swa_bt = self._block_table_for(SWA_KV)
+        swa_bt = self._block_tables_by_type.get(SWA_KV)
         cmp_bt = self._block_tables_by_type.get(cmp_at)
         if (
             swa_bt is None
