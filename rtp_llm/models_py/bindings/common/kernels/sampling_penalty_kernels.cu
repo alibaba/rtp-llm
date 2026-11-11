@@ -135,6 +135,7 @@ __global__ void batchApplyPenaltyLongSeq(T*           logits,
                                          const int    batch_size,
                                          const int    vocab_size,
                                          const int*   input_lengths,
+                                         const int*   prompt_lengths,
                                          const int    max_input_length,
                                          const int    step) {
     const int batch_idx    = blockIdx.x;
@@ -151,6 +152,11 @@ __global__ void batchApplyPenaltyLongSeq(T*           logits,
     }
     logits += batch_idx * vocab_size;
     penalty_ws += batch_idx * vocab_size;
+    // Keep prompt presence in the high bit and generated-token counts in the
+    // remaining bits. Repetition penalty retains its full-history semantics;
+    // presence/frequency penalties apply only to generated tokens.
+    constexpr unsigned int kPromptSeen  = 1u << 31;
+    auto*                  token_counts = reinterpret_cast<unsigned int*>(penalty_ws);
     // Phase 1. Find indices to penalize and keep the penalized values.
     // A vocab id can appear multiple times but should be penalized once.
     for (int index = threadIdx.x; index < step; index += blockDim.x) {
@@ -163,23 +169,28 @@ __global__ void batchApplyPenaltyLongSeq(T*           logits,
         if (penalty_index >= vocab_size || penalty_index < 0) {
             continue;
         }
-        atomicAdd(&penalty_ws[penalty_index], 1);
+        if (prompt_lengths != nullptr && index < prompt_lengths[batch_idx]) {
+            atomicOr(&token_counts[penalty_index], kPromptSeen);
+        } else {
+            atomicAdd(&token_counts[penalty_index], 1u);
+        }
     }
     __syncthreads();
     // Phase 2. Replace a logit value by the penalized one.
     for (int index = threadIdx.x; index < vocab_size; index += blockDim.x) {
         // Skip the padding tokens in input sequences.
-        int count = penalty_ws[index];
-        if (count > 0) {
+        const unsigned int history         = token_counts[index];
+        const unsigned int generated_count = history & ~kPromptSeen;
+        if (history != 0) {
             float logit = logits[index];
             if (repetition_penalties) {
                 logit = logit < 0.0f ? logit * repetition_penalty : logit / repetition_penalty;
             }
-            if (presence_penalties) {
+            if (presence_penalties && generated_count > 0) {
                 logit -= presence_penalty;
             }
-            if (frequency_penalties) {
-                logit -= frequency_penalty * count;
+            if (frequency_penalties && generated_count > 0) {
+                logit -= frequency_penalty * generated_count;
             }
             logits[index] = logit;
         }
@@ -197,6 +208,7 @@ void invokeBatchApplyRepetitionPenalty(T*           logits,
                                        const int    local_batch_size,
                                        const int    vocab_size,
                                        const int*   input_lengths,
+                                       const int*   prompt_lengths,
                                        const int    max_input_length,
                                        const int    step,
                                        cudaStream_t stream) {
@@ -204,8 +216,10 @@ void invokeBatchApplyRepetitionPenalty(T*           logits,
     //   logits [local_batch_size, vocab_size] : logit values.
     //   penalties [local_batch_size] : repetition penalty factors.
     //   output_ids [step, batch_size] : output token ids (with offset ite * local_batch_size).
-    //   input_lengths [local_batch_size], input lengths (optional).
-    //      Padding tokens at [input_length, max_input_length) of input will not be penalized.
+    //   input_lengths [local_batch_size], valid sequence lengths (optional).
+    //      Padding at [input_length, max_input_length) is excluded from all penalties.
+    //   prompt_lengths [local_batch_size], original prompt lengths. Presence and
+    //      frequency counts start here; repetition also includes prompt tokens.
     dim3   block(min(step, 1024));
     dim3   grid(local_batch_size);
     size_t smem_size = step * (sizeof(float) + sizeof(int));
@@ -218,6 +232,7 @@ void invokeBatchApplyRepetitionPenalty(T*           logits,
                                                             batch_size,
                                                             vocab_size,
                                                             input_lengths,
+                                                            prompt_lengths,
                                                             max_input_length,
                                                             step);
 }
@@ -232,6 +247,7 @@ template void invokeBatchApplyRepetitionPenalty(float*       logits,
                                                 const int    local_batch_size,
                                                 const int    vocab_size,
                                                 const int*   input_lengths,
+                                                const int*   prompt_lengths,
                                                 const int    max_input_length,
                                                 const int    step,
                                                 cudaStream_t stream);
@@ -246,6 +262,7 @@ template void invokeBatchApplyRepetitionPenalty(half*        logits,
                                                 const int    local_batch_size,
                                                 const int    vocab_size,
                                                 const int*   input_lengths,
+                                                const int*   prompt_lengths,
                                                 const int    max_input_length,
                                                 const int    step,
                                                 cudaStream_t stream);
