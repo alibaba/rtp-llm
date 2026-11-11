@@ -880,23 +880,20 @@ TEST_F(ExecOpsTest, testWriteCacheStorePreservesRequestDeadlinesWithSameRequestI
     EXPECT_EQ(published_blocks, (std::vector<std::vector<int32_t>>{{1}, {2}}));
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStorePublishesCpReadyEmptyProjection) {
+TEST_F(ExecOpsTest, testWriteCacheStoreSkipsEmptyCpProjection) {
     auto inputs = makePyCacheStoreInputs(4, 1);
     inputs.cache_keys              = torch::tensor({{int64_t(100), int64_t(101), int64_t(102), int64_t(103)}}, torch::kInt64);
 
     int call_count = 0;
     inputs.p2p_layer_write = [&](size_t,
                                  int,
-                                 const std::string&          tag,
-                                 const std::vector<int64_t>& keys,
-                                 const std::vector<int32_t>& blocks,
+                                 const std::string&,
+                                 const std::vector<int64_t>&,
+                                 const std::vector<int32_t>&,
                                  int64_t,
                                  const std::shared_ptr<torch::Event>&,
                                  int64_t) {
         ++call_count;
-        EXPECT_EQ(tag, "full");
-        EXPECT_TRUE(keys.empty());
-        EXPECT_TRUE(blocks.empty());
         return true;
     };
 
@@ -914,7 +911,7 @@ TEST_F(ExecOpsTest, testWriteCacheStorePublishesCpReadyEmptyProjection) {
     inputs.host_kv_cache_offset = block_ids;
     auto config = makeCacheConfig(1, 64, 0, 16, layer_cache.tag);
     ASSERT_NO_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 3, 4, nullptr));
-    EXPECT_EQ(call_count, 1);
+    EXPECT_EQ(call_count, 0);
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStorePropagatesP2PLayerDispatchFailure) {
@@ -954,18 +951,14 @@ TEST_F(ExecOpsTest, testWriteCacheStorePropagatesP2PLayerDispatchFailure) {
     }
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStorePublishesEmptySparseP2PProjection) {
+TEST_F(ExecOpsTest, testWriteCacheStoreSkipsEmptySparseP2PProjection) {
     auto inputs = makePyCacheStoreInputs(4, 2);
     inputs.cache_keys      = torch::tensor({{int64_t(100), int64_t(101)}}, torch::kInt64);
     int calls = 0;
-    inputs.p2p_layer_write = [&](size_t, int layer, const std::string& tag,
-                                 const std::vector<int64_t>& keys, const std::vector<int32_t>& blocks,
+    inputs.p2p_layer_write = [&](size_t, int, const std::string&,
+                                 const std::vector<int64_t>&, const std::vector<int32_t>&,
                                  int64_t, const std::shared_ptr<torch::Event>&, int64_t) {
         ++calls;
-        EXPECT_EQ(layer, 0);
-        EXPECT_EQ(tag, "default");
-        EXPECT_TRUE(keys.empty());
-        EXPECT_TRUE(blocks.empty());
         return true;
     };
 
@@ -984,7 +977,7 @@ TEST_F(ExecOpsTest, testWriteCacheStorePublishesEmptySparseP2PProjection) {
     inputs.host_kv_cache_offset = block_ids;
     auto config = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
     EXPECT_NO_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr));
-    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(calls, 0);
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreRejectsNonIntegerP2PCacheKeyTensor) {

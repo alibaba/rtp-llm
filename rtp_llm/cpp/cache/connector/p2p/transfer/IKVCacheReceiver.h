@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/Types.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
 #include "rtp_llm/cpp/cache/BlockInfo.h"
@@ -45,12 +46,15 @@ public:
 
 using IKVCacheRecvTaskPtr = std::shared_ptr<IKVCacheRecvTask>;
 
+using BatchCopiedCallback = std::function<bool(const std::vector<int64_t>&)>;
+
 /// @brief 注册一层 KV cache 接收任务的请求参数
 struct RecvRequest {
-    /// unique_key = base_key + "_" + layer_id + "_" + remote_partition_id
+    /// Identifies the receive task and its route-wide target block table.
     std::string     unique_key;
     KeyBlockInfoMap block_info;
     int64_t         deadline_ms = 0;
+    BatchCopiedCallback on_batch_copied;
 };
 
 using RecvRequestPtr = std::shared_ptr<RecvRequest>;

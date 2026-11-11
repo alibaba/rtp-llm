@@ -4,7 +4,6 @@
 #include <set>
 #include <limits>
 
-#include "rtp_llm/cpp/cache/connector/KVCacheConnectorLayerContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
@@ -97,24 +96,16 @@ std::shared_ptr<AsyncContext> P2PConnectorPrefill::registerResource(const KVCach
     return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
 }
 
-std::shared_ptr<AsyncContext> P2PConnectorPrefill::asyncWriteByLayer(
-    int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) {
-    if (!worker_ || !layer_context) {
-        RTP_LLM_LOG_WARNING("asyncWriteByLayer failed, worker or layer context is null, layer_id=%d", layer_id);
-        return nullptr;
+void P2PConnectorPrefill::finishP2PPublication(int64_t request_id, int64_t deadline_ms, int64_t clock_offset_ms) {
+    const auto max_ms = std::numeric_limits<int64_t>::max();
+    if (!worker_ || deadline_ms <= 0 || deadline_ms == max_ms
+        || (clock_offset_ms > 0 && deadline_ms >= max_ms - clock_offset_ms) || clock_offset_ms <= -deadline_ms) {
+        return;
     }
-    auto resource = std::make_shared<KVCacheResource>(layer_context->kvCacheResource());
-    if (!worker_->writeByLayer(layer_id,
-                               resource,
-                               layer_context->requestId(),
-                               layer_context->attentionEvent(),
-                               layer_context->deadlineMs())) {
-        RTP_LLM_LOG_WARNING("asyncWriteByLayer failed to schedule P2P write, layer_id=%d, request_id=%ld",
-                            layer_id,
-                            layer_context->requestId());
-        return nullptr;
+    if (worker_->getComputedBuffersStore()->registerRequestHorizon(
+            request_id, deadline_ms + clock_offset_ms, deadline_ms)) {
+        worker_->finishPublication(request_id, deadline_ms);
     }
-    return std::make_shared<P2PConnectorAcceptedWriteContext>();
 }
 
 bool P2PConnectorPrefill::writeByLayerTag(int                                layer_id,
@@ -123,7 +114,8 @@ bool P2PConnectorPrefill::writeByLayerTag(int                                lay
                                           int64_t                            request_id,
                                           const std::shared_ptr<c10::Event>& event,
                                           int64_t                            deadline_ms,
-                                          int64_t                            deadline_clock_offset_ms) {
+                                          int64_t                            deadline_clock_offset_ms,
+                                          int                                  chunk_id) {
     if (!worker_ || !resource) {
         RTP_LLM_LOG_WARNING("writeByLayerTag failed, worker or resource is null, request_id=%ld layer_id=%d tag=%s",
                             request_id,
@@ -144,7 +136,7 @@ bool P2PConnectorPrefill::writeByLayerTag(int                                lay
         // Expiration or a terminal tombstone is a request outcome, not dispatch failure.
         return true;
     }
-    return worker_->writeByLayerTag(layer_id, tag, resource, request_id, event, deadline_ms);
+    return worker_->writeByLayerTag(layer_id, tag, resource, request_id, event, deadline_ms, chunk_id);
 }
 
 void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& request,

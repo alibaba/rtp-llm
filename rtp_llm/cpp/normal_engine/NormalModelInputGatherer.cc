@@ -422,10 +422,14 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     if (config_.has_engram) {
         model_input.engram_token_windows = torch::full({(int64_t)current_tokens_size, 4}, -1, pinned_i32);
     }
-    model_input.input_lengths                    = torch::empty({(int64_t)total_batch_size}, pinned_i32);
-    model_input.sequence_lengths                 = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
-    model_input.prefix_lengths                   = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
-    model_input.cache_store_publish_start_tokens = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    model_input.input_lengths    = torch::empty({(int64_t)total_batch_size}, pinned_i32);
+    model_input.sequence_lengths = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
+    model_input.prefix_lengths   = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    model_input.cache_store_publish_start_tokens =
+        torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    if (config_.role_type == RoleType::PREFILL) {
+        model_input.p2p_final_prefill = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
+    }
     if (needs_custom_output_indexes) {
         model_input.custom_output_indexes = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
     }
@@ -730,6 +734,9 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             ctx.prefix_lengths_host[prefill_batch_idx] = stream->prefixLength();
             model_input.cache_store_publish_start_tokens.data_ptr<int32_t>()[prefill_batch_idx] =
                 stream->cacheStorePublishStartToken();
+            if (model_input.p2p_final_prefill.defined()) {
+                model_input.p2p_final_prefill.data_ptr<bool>()[prefill_batch_idx] = !stream->isMiddleChunk();
+            }
             gatherMultimodalInputsForContextBatch(
                 stream, ctx, gathered_mm_features, gathered_mm_extra_input, host_holder);
             if (model_input.record_lengths) {

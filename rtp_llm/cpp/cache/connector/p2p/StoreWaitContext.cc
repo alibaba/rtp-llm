@@ -25,6 +25,29 @@ void StoreWaitContextChecker::addContext(StoreWaitContext context) {
     }
 }
 
+void StoreWaitContextChecker::finishPublication(int64_t request_id, int64_t request_deadline_ms) {
+    std::lock_guard<std::mutex> lock(contexts_mutex_);
+    pending_seals_.emplace(request_id, request_deadline_ms);
+    sealReadyPublications();
+}
+
+void StoreWaitContextChecker::sealReadyPublications() {
+    for (auto seal = pending_seals_.begin(); seal != pending_seals_.end();) {
+        const auto [request_id, deadline_ms] = *seal;
+        const bool pending = std::any_of(contexts_.begin(), contexts_.end(), [&](const StoreWaitContext& context) {
+            return context.request_id == request_id && context.request_deadline_ms == deadline_ms;
+        });
+        if (pending) {
+            ++seal;
+            continue;
+        }
+        if (auto buffer = computed_buffers_->addBuffer(request_id, nullptr, deadline_ms)) {
+            buffer->seal();
+        }
+        seal = pending_seals_.erase(seal);
+    }
+}
+
 size_t StoreWaitContextChecker::getContextCount() const {
     std::lock_guard<std::mutex> lock(contexts_mutex_);
     return contexts_.size();
@@ -40,6 +63,7 @@ void StoreWaitContextChecker::checkOnce() {
             ++iter;
         }
     }
+    sealReadyPublications();
 }
 
 bool StoreWaitContextChecker::checkContext(StoreWaitContext& context) {

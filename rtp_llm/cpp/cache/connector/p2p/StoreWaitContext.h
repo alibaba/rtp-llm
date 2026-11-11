@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <vector>
 
 namespace rtp_llm {
@@ -43,6 +44,7 @@ public:
 public:
     /// @brief 添加一个待等待 GPU event 的 store 上下文
     void addContext(StoreWaitContext context);
+    void finishPublication(int64_t request_id, int64_t request_deadline_ms);
 
     size_t getContextCount() const;
 
@@ -52,12 +54,14 @@ public:
 private:
     // Called with contexts_mutex_ held; true means the context is terminal.
     bool checkContext(StoreWaitContext& context);
+    void sealReadyPublications();
 
     kmonitor::MetricsReporterPtr                   metrics_reporter_;
     std::shared_ptr<ComputedLayerCacheBufferStore> computed_buffers_;
 
     mutable std::mutex            contexts_mutex_;
     std::vector<StoreWaitContext> contexts_;
+    std::set<std::pair<int64_t, int64_t>> pending_seals_;
 };
 
 }  // namespace rtp_llm

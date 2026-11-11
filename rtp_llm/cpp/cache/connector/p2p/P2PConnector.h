@@ -1,7 +1,6 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
-#include "rtp_llm/cpp/cache/connector/KVCacheConnectorLayerContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include <c10/core/Event.h>
@@ -47,16 +46,15 @@ public:
                                             int                          start_read_block_index,
                                             int                          read_block_num);
 
-    std::shared_ptr<AsyncContext>
-    asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context);
-
+    void finishP2PPublication(int64_t request_id, int64_t deadline_ms, int64_t clock_offset_ms);
     bool writeByLayerTag(int                                layer_id,
                          const std::string&                 tag,
                          const KVCacheResourcePtr&          resource,
                          int64_t                            request_id,
                          const std::shared_ptr<c10::Event>& event,
                          int64_t                            deadline_ms,
-                         int64_t                            deadline_clock_offset_ms);
+                         int64_t                            deadline_clock_offset_ms,
+                         int                                  chunk_id = 0);
 
 public:
     void handleRead(const P2PConnectorStartLoadRequestPB& request,

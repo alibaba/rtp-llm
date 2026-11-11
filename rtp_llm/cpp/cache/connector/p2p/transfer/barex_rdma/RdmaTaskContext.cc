@@ -301,6 +301,7 @@ RdmaTaskContext::buildRdmaBlockPairs(const std::shared_ptr<RdmaStagingBufferPool
             result.push_back({*local_buf, remote_buf});
             collector_->total_block_size += block_info.len();
         }
+        batch_keys_.push_back(cache_key);
     }
     collector_->block_count = static_cast<int>(result.size());
 

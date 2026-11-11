@@ -478,23 +478,10 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             addBlock(pair.key_index, pair.offset_index);
         }
 
-        if (param.p2p_layer_write) {
-            // NormalModelInputGatherer masks cyclic banks during middle chunks because
-            // later chunks overwrite them. A masked row is deferred publication, not
-            // an empty ready buffer; the final chunk publishes the materialized row.
-            bool deferred_cyclic_row = group.policy.active_tail_blocks > 0;
-            for (size_t offset = 0; deferred_cyclic_row && offset < max_blocks_per_batch; ++offset) {
-                deferred_cyclic_row = host_kv_cache_offset[input_index][offset] == NULL_BLOCK_IDX;
-            }
-            if (deferred_cyclic_row && max_blocks_per_batch > 0) {
-                continue;
-            }
+        if (param.p2p_layer_write && request_blocks->getBlocksCount() > 0) {
             const int64_t deadline_ms = param.request_deadline_ms.defined() ?
                                             param.request_deadline_ms.data_ptr<int64_t>()[batch_id] :
                                             std::numeric_limits<int64_t>::max();
-            // A sparse local projection may contain no materialized blocks.
-            // Publish its readiness without inventing a NULL block; the route
-            // consumer remains responsible for validating its required keys.
             if (!param.p2p_layer_write(cache_model_id,
                                        layer_kv.layer_id,
                                        layer_kv.tag,

@@ -90,6 +90,7 @@ public:
     /// @brief 委托给底层 TransferTask::startTransfer()。
     /// @return false 表示任务已在 PENDING 阶段被 cancel，调用方应立即报告失败。
     bool startTransfer();
+    bool emptyBatch() const { return empty_batch_; }
 
     std::string getRdmaServerIp() const;
     uint32_t    getRdmaServerPort() const;
@@ -120,6 +121,7 @@ private:
     kmonitor::MetricsReporterPtr                          metrics_reporter_;
 
     std::string unique_key_;
+    bool empty_batch_ = false;
 
     std::shared_ptr<TransferServerMetricsCollector> collector_;
     int64_t start_time_us_ = 0;

@@ -279,6 +279,7 @@ TEST_F(PPSerializationTest, PlanPreservesEveryModelInputTensorAndScalar) {
         {"lm_output_lengths", &GptModelInputs::lm_output_lengths},
         {"prefix_lengths", &GptModelInputs::prefix_lengths},
         {"cache_store_publish_start_tokens", &GptModelInputs::cache_store_publish_start_tokens},
+        {"p2p_final_prefill", &GptModelInputs::p2p_final_prefill},
         {"sequence_lengths_plus_1", &GptModelInputs::sequence_lengths_plus_1},
         {"combo_tokens_type_ids", &GptModelInputs::combo_tokens_type_ids},
         {"combo_position_ids", &GptModelInputs::combo_position_ids},
@@ -293,6 +294,7 @@ TEST_F(PPSerializationTest, PlanPreservesEveryModelInputTensorAndScalar) {
         {"input_embeddings_locs", &GptModelInputs::input_embeddings_locs},
         {"request_id", &GptModelInputs::request_id},
         {"request_pd_separation", &GptModelInputs::request_pd_separation},
+        {"request_deadline_ms", &GptModelInputs::request_deadline_ms},
         {"cache_keys", &GptModelInputs::cache_keys},
     };
     PPExecutionPlan plan;
@@ -358,7 +360,6 @@ TEST_F(PPSerializationTest, PlanPreservesEveryModelInputTensorAndScalar) {
 TEST_F(PPSerializationTest, PlanExecutionFlagsAreIndependent) {
     const std::vector<std::pair<const char*, bool GptModelInputs::*>> flags = {
         {"pd_separation", &GptModelInputs::pd_separation},
-        {"decode_entrance", &GptModelInputs::decode_entrance},
         {"use_opaque_kv_cache_store", &GptModelInputs::use_opaque_kv_cache_store},
         {"need_all_logits", &GptModelInputs::need_all_logits},
         {"need_all_hidden_states", &GptModelInputs::need_all_hidden_states},

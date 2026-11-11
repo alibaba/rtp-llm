@@ -57,7 +57,7 @@ bool TcpKVCacheReceiver::regMem(const BlockInfo& /*block_info*/, uint64_t /*alig
 }
 
 transfer::IKVCacheRecvTaskPtr TcpKVCacheReceiver::recv(const transfer::RecvRequest& request) {
-    return task_store_->addTask(request.unique_key, request.block_info, request.deadline_ms);
+    return task_store_->addTask(request.unique_key, request.block_info, request.deadline_ms, request.on_batch_copied);
 }
 
 void TcpKVCacheReceiver::stealTask(const std::string& unique_key) {

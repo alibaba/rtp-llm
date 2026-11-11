@@ -377,6 +377,7 @@ void modelInputFields(IO& io, Input& in) {
     io.tensor(in.lm_output_lengths);
     io.tensor(in.prefix_lengths);
     io.tensor(in.cache_store_publish_start_tokens);
+    io.tensor(in.p2p_final_prefill);
     io.tensor(in.sequence_lengths_plus_1);
     io.tensor(in.combo_tokens_type_ids);
     io.tensor(in.combo_position_ids);
@@ -393,6 +394,7 @@ void modelInputFields(IO& io, Input& in) {
     io.tensor(in.input_embeddings_locs);
     io.tensor(in.request_id);
     io.tensor(in.request_pd_separation);
+    io.tensor(in.request_deadline_ms);
     io.tensor(in.cache_keys);
     optionalTensorListFields(io, in.multimodal_features);
     optionalTensorListFields(io, in.mm_extra_input);
@@ -402,7 +404,6 @@ void modelInputFields(IO& io, Input& in) {
     io.template scalar<uint64_t>(in.seq_size_per_block);
     io.template scalar<uint64_t>(in.kernel_seq_size_per_block);
     io.flag(in.pd_separation);
-    io.flag(in.decode_entrance);
     io.flag(in.use_opaque_kv_cache_store);
     io.flag(in.need_all_logits);
     io.flag(in.skip_lm_head);
