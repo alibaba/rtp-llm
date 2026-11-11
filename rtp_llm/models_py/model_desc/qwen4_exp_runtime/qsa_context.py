@@ -53,6 +53,7 @@ class Qwen4ExpQSARuntimeContext:
     :mod:`.qsa_step_plan` (keyed by the step's ``main_inputs`` identity),
     following the same freeze-once rationale as ``_target_verify_plan``.
     """
+
     main_cache: LayerKVCache
     main_inputs: PyAttentionInputs
     indexer_kv_cache: LayerKVCache
@@ -355,9 +356,15 @@ class Qwen4ExpQSARuntimeContext:
         *,
         indexer: Any,
         rope_config: Any,
+        raw_query: bool = False,
     ) -> torch.Tensor:
         return qsa_decode.select_decode_tokens(
-            self, q, raw_keys, indexer=indexer, rope_config=rope_config
+            self,
+            q,
+            raw_keys,
+            indexer=indexer,
+            rope_config=rope_config,
+            raw_query=raw_query,
         )
 
     def select_target_verify_tokens(

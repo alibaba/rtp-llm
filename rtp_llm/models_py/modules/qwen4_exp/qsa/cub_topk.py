@@ -774,9 +774,22 @@ __global__ void qsaCubStableTopK(const float*   scores,
                     (col < columns && col < complete ? __float_as_uint(scores[row * columns + col]) : 0xff800000u);
                 bool valid = ((bits & 0x7f800000u) != 0x7f800000u || (!finite_only && bits == 0x7f800000u))
                              && col < columns && col < complete;
+                if constexpr (N == 1024 && UseMerge) {
+                    chosen[rank] = valid ? col : 0xffffffffu;
+                } else {
 #pragma unroll
-                for (int j = 0; j < 4; ++j)
-                    output[output_row * 2051 + rank * 4 + j] = valid ? static_cast<int32_t>(col * 4 + j) : -1;
+                    for (int j = 0; j < 4; ++j)
+                        output[output_row * 2051 + rank * 4 + j] = valid ? static_cast<int32_t>(col * 4 + j) : -1;
+                }
+            }
+        }
+        if constexpr (N == 1024 && UseMerge) {
+            // Sorted ranks are blocked across threads. Stage the selected
+            // columns once, then let adjacent lanes write adjacent tokens.
+            __syncthreads();
+            for (int token = threadIdx.x; token < 2048; token += Threads) {
+                const int col = static_cast<int>(chosen[token / 4]);
+                output[output_row * 2051 + token] = col >= 0 ? col * 4 + token % 4 : -1;
             }
         }
     }
@@ -805,6 +818,15 @@ void qsa_cub_topk(
     const int            rows = scores.size(0), columns = scores.size(1);
     if (!rows)
         return;
+    // A 4K decode graph reserves 1023 compressed columns. Sort the bounded
+    // row directly and expand in the same launch, preserving native tie order.
+    if (merge && columns <= 1024 && threads == 512) {
+        rtp_llm::qsaCubStableTopK<1024, 512, true><<<rows, 512, 0, stream>>>(
+            scores.data_ptr<float>(), lengths.data_ptr<int32_t>(),
+            output.data_ptr<int32_t>(), columns, finite_only);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+        return;
+    }
     // Measured 8K domains only. StableSort preserves equal-key column order;
     // the special-value second pass below remains the pinned Torch radix order.
     if (merge && (columns == 2047 || columns == 2048 || columns == 2144)) {
@@ -938,17 +960,27 @@ def is_supported(scores, lengths):
         and torch.version.git_version == _TORCH_GIT
         and scores.dtype == torch.float32
         and scores.ndim == 2
-        and 1 <= scores.shape[0] <= 32
+        and 1 <= scores.shape[0] <= 64
         # The 8K MTP draft graph reserves three additional 128-token pages:
         # (64 + 3) * 32 compressed columns. Preserve the full-width Torch order.
-        and scores.shape[1] in (2047, 2048, 2144)
+        and scores.shape[1] in (1023, 1024, 2047, 2048, 2144)
         and scores.is_contiguous()
         and lengths.dtype == torch.int32
         and lengths.shape == (scores.shape[0],)
         and lengths.device == scores.device
         and lengths.is_contiguous()
         and not (scores.requires_grad or lengths.requires_grad)
-        and torch.cuda.get_device_capability(scores.device) == (12, 0)
+        and (
+            (
+                torch.cuda.get_device_capability(scores.device) == (12, 0)
+                and scores.shape[0] <= 32
+                and scores.shape[1] in (2047, 2048, 2144)
+            )
+            or (
+                torch.cuda.get_device_capability(scores.device) == (9, 0)
+                and scores.shape[1] in (1023, 1024)
+            )
+        )
     )
 
 
@@ -1022,7 +1054,7 @@ def try_cub_qsa_tokens(scores, lengths, *, finite_only=True):
         scores,
         lengths,
         output,
-        256,
+        512 if scores.shape[1] <= 1024 else 256,
         finite_only,
         True,
     )

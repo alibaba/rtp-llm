@@ -17,12 +17,14 @@ class DecodeSnapshotTest(unittest.TestCase):
     compare = fixtures.TargetWriterFusionTest.compare
 
     def setUp(self):
-        if torch.cuda.get_device_capability() != (12, 0):
-            self.skipTest("SM120 fast path")
+        if torch.cuda.get_device_capability() not in ((9, 0), (12, 0)):
+            self.skipTest("SM90/SM120 fast path")
         torch.manual_seed(20261019)
 
     def write(self, args, fused):
         if not fused:
+            args = list(args)
+            args[0] = args[0].contiguous()
             with patch(
                 "rtp_llm.models_py.modules.qwen4_exp.qsa.decode_snapshot_triton.try_snapshot_decode",
                 return_value=None,
@@ -77,8 +79,18 @@ class DecodeSnapshotTest(unittest.TestCase):
             )
 
     def test_graph_replay_refreshes_all_snapshots_before_original_writer(self):
-        for batch in (1, 3, 8, 32):
-            args = self.case([128] * batch, 1)
+        for batch in (
+            (1, 3, 8, 16, 32, 64)
+            if torch.cuda.get_device_capability() == (9, 0)
+            else (1, 3, 8, 32)
+        ):
+            args = list(self.case([128] * batch, 1))
+            if torch.cuda.get_device_capability() == (9, 0):
+                projection = torch.empty(
+                    (batch, 640), device="cuda", dtype=torch.bfloat16
+                )
+                projection[:, 512:].copy_(args[0])
+                args[0] = projection[:, 512:]
             saved_kv, saved_state = args[5].clone(), args[7].clone()
             self.write(args, True)
             torch.cuda.synchronize()

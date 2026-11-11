@@ -248,15 +248,56 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             )
             == 128
         )
+        packed_prefill_raw = (
+            bool(qsa_runtime.main_inputs.is_prefill)
+            and not bool(qsa_runtime.main_inputs.is_target_verify)
+            and not bool(getattr(qsa_runtime.main_inputs, "is_cuda_graph", False))
+            and not bool(getattr(self, "is_mtp_draft", False))
+            and not _prefix_present(qsa_runtime.main_inputs)
+            and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
+            and (
+                self.qsa_indexer.n_heads,
+                self.qsa_indexer.head_dim,
+                self.qsa_indexer.compress_ratio,
+                self.qsa_indexer.token_budget,
+            )
+            == (4, 128, 4, 2048)
+            and hidden_states.is_cuda
+            and hidden_states.dtype == torch.bfloat16
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(hidden_states.device) == (9, 0)
+            and not any(
+                name in self.qsa_indexer.__dict__
+                for name in ("project", "project_raw", "split_projected")
+            )
+        )
+        raw_decode = (
+            not bool(qsa_runtime.main_inputs.is_prefill)
+            and not bool(qsa_runtime.main_inputs.is_target_verify)
+            and bool(qsa_runtime.main_inputs.is_cuda_graph)
+            and not bool(getattr(self, "is_mtp_draft", False))
+            and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
+            and (self.qsa_indexer.n_heads, self.qsa_indexer.head_dim) == (4, 128)
+            and hidden_states.ndim == 2
+            and 1 <= hidden_states.shape[0] <= 64
+            and hidden_states.is_cuda
+            and hidden_states.dtype == torch.bfloat16
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(hidden_states.device) == (9, 0)
+            and not any(
+                name in self.qsa_indexer.__dict__
+                for name in ("project", "project_raw", "split_projected")
+            )
+        )
         if projected is None:
             q, raw_keys = (
                 self.qsa_indexer.project_raw(hidden_states)
-                if raw_query or prefix_reuse_raw
+                if raw_query or raw_decode or prefix_reuse_raw or packed_prefill_raw
                 else self.qsa_indexer.project(hidden_states)
             )
         else:
             q, raw_keys = projected
-            if not raw_query and not prefix_reuse_raw:
+            if not (raw_query or raw_decode or prefix_reuse_raw or packed_prefill_raw):
                 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
                     exact_head_rms_norm,
                 )
@@ -278,6 +319,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 raw_keys,
                 indexer=self.qsa_indexer,
                 rope_config=self.qsa_rope_config,
+                **({"raw_query": True} if raw_decode else {}),
             )
         if self.is_mtp_draft and bool(qsa_runtime.main_inputs.is_cuda_graph):
             return qsa_runtime.select_draft_graph_tokens(
@@ -336,6 +378,31 @@ class Qwen4ExpAttention(Qwen3NextAttention):
         prepared_keys = (
             indexer_write.get("block_keys") if isinstance(indexer_write, dict) else None
         )
+        if packed_prefill_raw:
+            from rtp_llm.models_py.modules.qwen4_exp.qsa.prefill_packed_indexer import (
+                try_packed_prefill,
+            )
+
+            selected = try_packed_prefill(
+                q,
+                prepared_keys,
+                rope_cos,
+                rope_sin,
+                qsa_runtime.main_inputs.cu_seqlens_device,
+                lengths,
+                self.qsa_indexer.q_norm_gamma,
+                self.qsa_indexer.norm_eps,
+            )
+            if selected is not None:
+                return selected
+            # The existing path consumes normalized Q when the packed gate declines.
+            from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+                exact_head_rms_norm,
+            )
+
+            q = exact_head_rms_norm(
+                q, self.qsa_indexer.q_norm_gamma, self.qsa_indexer.norm_eps
+            )
         for request_idx, seq_len in enumerate(lengths):
             end = offset + seq_len
             selections.append(
@@ -1576,7 +1643,9 @@ class Qwen4ExpModel(Qwen35Model):
             ple_input_ids = self._ple_input_ids(inputs)
         pending_injection = None
         hc_defer_sm90 = os.environ.get("RTP_LLM_QWEN4_HC_DEFER_SM90", "0") == "1"
-        hc_fusion_extended = os.environ.get("RTP_LLM_QWEN4_HC_FUSION_EXTENDED", "0") == "1"
+        hc_fusion_extended = (
+            os.environ.get("RTP_LLM_QWEN4_HC_FUSION_EXTENDED", "0") == "1"
+        )
         hc_defer_shape = (
             hyper_states.ndim == 2
             and hyper_states.shape[1] == 10240

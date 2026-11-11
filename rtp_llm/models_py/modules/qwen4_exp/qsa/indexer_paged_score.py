@@ -50,6 +50,7 @@ def _qsa_paged_score_tiled_kernel(
     BN: tl.constexpr,
     K_TILES: tl.constexpr,
     STAGES: tl.constexpr,
+    SKIP_EMPTY: tl.constexpr = False,
 ):
     """Tensor-core tiled paged indexer scoring (vLLM qsa_indexer design).
 
@@ -79,6 +80,19 @@ def _qsa_paged_score_tiled_kernel(
     lane_rows = row_tile * TILE_R + lane_row
     lane_abs_rows = batch * next_n + lane_rows
     lane_valid = (lane_rows < next_n) & (lane_head < H)
+
+    if SKIP_EMPTY:
+        tl.static_assert(K_TILES == 1)
+    if SKIP_EMPTY and k_group * K_TILES * BN >= tl.max(context, 0):
+        # Decode reserves the graph's maximum width. Empty tiles still need
+        # -inf output, but do not need query/cache loads or a matrix multiply.
+        cols = k_group * BN + tl.arange(0, BN)
+        tl.store(
+            out_ptr + abs_rows[None, :] * max_ctx_len + cols[:, None],
+            float("-inf"),
+            mask=(cols[:, None] < max_ctx_len) & row_live[None, :],
+        )
+        return
 
     dims = tl.arange(0, BLOCK_D)
     query = tl.load(
@@ -170,8 +184,8 @@ def _score_tiled_supported(q_bf16, kv_pool, next_n, heads) -> bool:
     tile_r = 64 if next_n >= 64 else max(1, 16 // triton.next_power_of_2(heads))
     if tile_r * heads > 256:
         return False
-    # Single-row decode launches stay on the scalar kernel: at one query row
-    # the tiled dot's lane padding costs more than it saves.
+    # Other single-row geometries retain the scalar fallback. The qualified
+    # SM90 ordinary-decode geometry is selected explicitly by the caller.
     return 2 <= next_n
 
 
@@ -192,6 +206,7 @@ def _qsa_paged_score_kernel(
     D: tl.constexpr,
     block_size: tl.constexpr,
     BN: tl.constexpr,
+    SKIP_EMPTY: tl.constexpr = False,
 ):
     rd = tl.arange(0, D)
     row = tl.program_id(0)
@@ -202,54 +217,60 @@ def _qsa_paged_score_kernel(
     n_mask = rn < max_ctx_len
 
     T = tl.load(ctx_ptr + row)
-    in_context = n_mask & (rn < T)
+    if not SKIP_EMPTY or blk * BN < T:
+        in_context = n_mask & (rn < T)
 
-    bi = rn // block_size
-    ei = rn % block_size
-    in_block_table = bi < max_blocks
-    physical_bt = tl.load(
-        bt_ptr + batch_idx * max_blocks + bi,
-        mask=in_context & in_block_table,
-        other=0,
-    )
-    # Block zero (and negative IDs) are allocation sentinels.  The upper bound
-    # is checked again in the kernel even though the wrapper validates it, so a
-    # bad table can never turn into an out-of-bounds pool read.
-    has_block = (
-        in_context & in_block_table & (physical_bt > 0) & (physical_bt < pool_blocks)
-    )
-    slot = physical_bt * block_size + ei
-
-    acc = tl.zeros((BN,), dtype=tl.float32)
-    for h in tl.static_range(H):
-        qh = (
-            tl.load(q_ptr + row * stride_q_row + h * D + rd)
-            .to(tl.bfloat16)
-            .to(tl.float32)
+        bi = rn // block_size
+        ei = rn % block_size
+        in_block_table = bi < max_blocks
+        physical_bt = tl.load(
+            bt_ptr + batch_idx * max_blocks + bi,
+            mask=in_context & in_block_table,
+            other=0,
         )
-        w_h = tl.load(w_ptr + row * H + h)
+        # Block zero (and negative IDs) are allocation sentinels.  The upper bound
+        # is checked again in the kernel even though the wrapper validates it, so a
+        # bad table can never turn into an out-of-bounds pool read.
+        has_block = (
+            in_context
+            & in_block_table
+            & (physical_bt > 0)
+            & (physical_bt < pool_blocks)
+        )
+        slot = physical_bt * block_size + ei
 
-        k = (
-            tl.load(
-                pool_ptr + slot[:, None] * D + rd[None, :],
-                mask=has_block[:, None],
-                other=0.0,
+        acc = tl.zeros((BN,), dtype=tl.float32)
+        for h in tl.static_range(H):
+            qh = (
+                tl.load(q_ptr + row * stride_q_row + h * D + rd)
+                .to(tl.bfloat16)
+                .to(tl.float32)
             )
-            .to(tl.bfloat16)
-            .to(tl.float32)
-        )
-        dot = tl.sum(qh[None, :] * k, axis=1)
-        # The model contract is ``weight * relu(dot)``.  Applying ReLU after
-        # the multiply happens to agree for the released positive dequant
-        # weights, but changes the public helper's semantics for negative
-        # weights and can turn a negative contribution into zero.
-        acc += tl.where(has_block, tl.maximum(dot, 0.0) * w_h, 0.0)
+            w_h = tl.load(w_ptr + row * H + h)
 
-    tl.store(
-        out_ptr + row * max_ctx_len + rn,
-        tl.where(has_block, acc, float("-inf")),
-        mask=n_mask,
-    )
+            k = (
+                tl.load(
+                    pool_ptr + slot[:, None] * D + rd[None, :],
+                    mask=has_block[:, None],
+                    other=0.0,
+                )
+                .to(tl.bfloat16)
+                .to(tl.float32)
+            )
+            dot = tl.sum(qh[None, :] * k, axis=1)
+            # The model contract is ``weight * relu(dot)``.  Applying ReLU after
+            # the multiply happens to agree for the released positive dequant
+            # weights, but changes the public helper's semantics for negative
+            # weights and can turn a negative contribution into zero.
+            acc += tl.where(has_block, tl.maximum(dot, 0.0) * w_h, 0.0)
+
+        tl.store(
+            out_ptr + row * max_ctx_len + rn,
+            tl.where(has_block, acc, float("-inf")),
+            mask=n_mask,
+        )
+    else:
+        tl.store(out_ptr + row * max_ctx_len + rn, float("-inf"), mask=n_mask)
 
 
 def qsa_paged_indexer_score(
@@ -344,12 +365,25 @@ def qsa_paged_indexer_score(
     if M == 0 or max_ctx_len == 0:
         return logits
 
-    # The flattened (batch, token) rows are contiguous, each with H * D values.
-    grid = (M, triton.cdiv(max_ctx_len, block_n))
-    if _score_tiled_supported(q_bf16, kv_pool, next_n, H):
-        tile_r, bn, k_tiles, stages, warps = _score_tiled_config(
-            next_n, H, B, max_ctx_len
-        )
+    sm90_decode = (
+        next_n == 1
+        and H == 4
+        and D == 128
+        and 1 <= B <= 64
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability(q_bf16.device) == (9, 0)
+    )
+    # At B16 and below, the scalar tile is cheaper than padded tensor-core work.
+    sm90_tiled = sm90_decode and B >= 32
+    if sm90_decode and not sm90_tiled:
+        block_n = 16
+    if sm90_tiled or _score_tiled_supported(q_bf16, kv_pool, next_n, H):
+        if sm90_tiled:
+            tile_r, bn, k_tiles, stages, warps = 1, 64, 1, 1, 2
+        else:
+            tile_r, bn, k_tiles, stages, warps = _score_tiled_config(
+                next_n, H, B, max_ctx_len
+            )
         lanes = tile_r * triton.next_power_of_2(H)
         tiled_grid = (
             B,
@@ -376,9 +410,12 @@ def qsa_paged_indexer_score(
             BN=bn,
             K_TILES=k_tiles,
             STAGES=stages,
+            SKIP_EMPTY=sm90_tiled,
             num_warps=warps,
         )
         return logits
+    # The flattened (batch, token) rows are contiguous, each with H * D values.
+    grid = (M, triton.cdiv(max_ctx_len, block_n))
     _qsa_paged_score_kernel[grid](
         q_bf16,
         weight,
@@ -395,5 +432,7 @@ def qsa_paged_indexer_score(
         D=D,
         block_size=block_size,
         BN=block_n,
+        SKIP_EMPTY=sm90_decode,
+        num_warps=2 if sm90_decode else 4,
     )
     return logits

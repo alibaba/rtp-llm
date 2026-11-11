@@ -648,6 +648,25 @@ py_test(
 )
 
 py_test(
+    name = "qsa_fused_decode_test",
+    srcs = ["qsa_fused_decode_test.py", "target_writer_fusion_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "decode_snapshot_sm90_test",
+    srcs = ["decode_snapshot_test.py", "target_writer_fusion_test.py"],
+    main = "decode_snapshot_test.py",
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "main_qk_cache_test",
     srcs = ["main_qk_cache_test.py", "main_qk_norm_rope_test.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],
@@ -942,5 +961,14 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     env = {"GPU_COUNT": "1"},
     tags = ["H20_CU13", "manual"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "qsa_packed_prefill_test",
+    srcs = ["qsa_packed_prefill_test.py"],
+    deps = ["//rtp_llm/models_py:qsa_packed_prefill_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )

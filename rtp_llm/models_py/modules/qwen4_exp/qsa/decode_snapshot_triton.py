@@ -48,14 +48,20 @@ def _snapshot_decode(
     tl.store(OK + row * 128 + d, old_kv)
 
 
-def try_snapshot_decode(positions, kv, kt, state, st):
-    """Return None without writes outside the explicit bounded SM120 path."""
+def prepare_decode_snapshot(positions, kv, kt, state, st):
+    """Allocate undo buffers without reading or writing the cache."""
     if not (
         positions.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(positions.device) == (12, 0)
+        and (
+            (
+                torch.cuda.get_device_capability(positions.device) == (12, 0)
+                and positions.numel() <= 32
+            )
+            or (torch.cuda.get_device_capability(positions.device) == (9, 0))
+        )
         and positions.ndim == 1
-        and 1 <= positions.numel() <= 32
+        and 1 <= positions.numel() <= 64
         and positions.dtype == torch.int32
         and kv.ndim == state.ndim == 3
         and kv.shape[1:] == (32, 128)
@@ -78,22 +84,6 @@ def try_snapshot_decode(positions, kv, kt, state, st):
     ks = torch.empty_like(ss)
     old_state = torch.empty((batch, 128), device=positions.device, dtype=state.dtype)
     old_kv = torch.empty((batch, 128), device=positions.device, dtype=kv.dtype)
-    _snapshot_decode[(batch,)](
-        positions,
-        kv,
-        kt,
-        state,
-        st,
-        ss,
-        old_state,
-        ks,
-        old_kv,
-        kt.shape[1],
-        st.shape[1],
-        kv.shape[0],
-        state.shape[0],
-        num_warps=4,
-    )
     return IndexerCacheUndo(
         state_pool=state,
         state_slots=ss,
@@ -102,3 +92,27 @@ def try_snapshot_decode(positions, kv, kt, state, st):
         kv_slots=ks,
         original_kv=old_kv,
     )
+
+
+def try_snapshot_decode(positions, kv, kt, state, st):
+    """Return None without writes outside the qualified decode geometries."""
+    undo = prepare_decode_snapshot(positions, kv, kt, state, st)
+    if undo is None:
+        return None
+    _snapshot_decode[(positions.numel(),)](
+        positions,
+        kv,
+        kt,
+        state,
+        st,
+        undo.state_slots,
+        undo.original_state,
+        undo.kv_slots,
+        undo.original_kv,
+        kt.shape[1],
+        st.shape[1],
+        kv.shape[0],
+        state.shape[0],
+        num_warps=4,
+    )
+    return undo

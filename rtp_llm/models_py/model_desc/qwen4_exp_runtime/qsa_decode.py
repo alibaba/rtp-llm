@@ -41,6 +41,7 @@ def select_decode_tokens(
     *,
     indexer: Any,
     rope_config: Any,
+    raw_query: bool = False,
 ) -> torch.Tensor:
     """Write/score one generated text token per request, including after images.
 
@@ -80,9 +81,12 @@ def select_decode_tokens(
         )
     if q.device != raw_keys.device:
         raise RuntimeError("qwen4_exp QSA decode q/raw keys must share a device")
-    # The draft projection yields a strided raw-key view.  The fixed-shape
-    # writer accepts contiguous rows, and this copy is captured in Graph.
-    raw_keys = raw_keys.contiguous()
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
+        supports_raw_key_layout,
+    )
+
+    if not supports_raw_key_layout(raw_keys):
+        raw_keys = raw_keys.contiguous()
 
     # The engine keeps decode lengths on pinned CPU memory. Derive the
     # scorer's output width there, before the H2D copy, rather than
@@ -137,16 +141,82 @@ def select_decode_tokens(
             qsa_assert_valid(
                 (positions == positions[:, :1].expand_as(positions)).all(), message
             )
+    kv_tokens_per_block = int(self.indexer_kv_cache.seq_size_per_block)
+    if kv_tokens_per_block <= 0 or kv_tokens_per_block % ratio:
+        raise RuntimeError(
+            "qwen4_exp QSA indexer KV page size must be positive and divisible "
+            f"by ratio={ratio}, got {kv_tokens_per_block}"
+        )
+    kv_entries_per_block = kv_tokens_per_block // ratio
+    kv_pool = _typed_2d_pool(
+        self.indexer_kv_cache,
+        tag=INDEXER_KV_TAG,
+        storage_dtype=torch.uint8,
+        payload_dtype=torch.bfloat16,
+        entries=kv_entries_per_block,
+        width=head_dim,
+    )
+    state_pool = _typed_2d_pool(
+        self.indexer_state_cache,
+        tag=INDEXER_STATE_TAG,
+        storage_dtype=torch.float32,
+        payload_dtype=torch.float32,
+        entries=2 * ratio,
+        width=head_dim,
+    )
+    if kv_pool.device != q.device or state_pool.device != q.device:
+        raise RuntimeError(
+            "qwen4_exp QSA side pools and decode projection must share a device"
+        )
+    kv_table = _block_table(
+        self.indexer_kv_inputs,
+        "kv_cache_kernel_block_id_device",
+        tag=INDEXER_KV_TAG,
+        batch_size=batch_size,
+        device=q.device,
+    )
+    state_table = _block_table(
+        self.indexer_state_inputs,
+        "kv_cache_block_id_device",
+        tag=INDEXER_STATE_TAG,
+        batch_size=batch_size,
+        device=q.device,
+    )
+
     get_frequency = getattr(indexer, "rope_inv_freq", None)
     frequency = get_frequency(rope_config) if callable(get_frequency) else None
-    prepared = None
-    if graph_decode and self.is_mtp_draft:
+    prepared = prepared_undo = rotated_q = None
+    if graph_decode and target_mrope and ratio == 4:
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.decode_prepare_triton import (
+            try_prepare_decode,
+        )
+
+        combined = try_prepare_decode(
+            sequence_lengths,
+            position_ids,
+            frequency,
+            rope_config,
+            kv_pool,
+            kv_table,
+            state_pool,
+            state_table,
+            query=q if raw_query else None,
+            query_gamma=indexer.q_norm_gamma if raw_query else None,
+            norm_eps=float(indexer.norm_eps),
+        )
+        if combined is not None:
+            prepared, prepared_undo, rotated_q = combined
+    if prepared is None and graph_decode and (self.is_mtp_draft or target_mrope):
         from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_decode_positions_triton import (
             try_prepare_decode_positions,
         )
 
         prepared = try_prepare_decode_positions(
-            sequence_lengths, position_ids, frequency, rope_config
+            sequence_lengths,
+            position_ids,
+            frequency,
+            rope_config,
+            target_mrope=target_mrope,
         )
     try:
         if prepared is not None:
@@ -194,48 +264,6 @@ def select_decode_tokens(
             )
     except ValueError as error:
         raise RuntimeError(f"qwen4_exp QSA ordinary decode {error}") from error
-
-    kv_tokens_per_block = int(self.indexer_kv_cache.seq_size_per_block)
-    if kv_tokens_per_block <= 0 or kv_tokens_per_block % ratio:
-        raise RuntimeError(
-            "qwen4_exp QSA indexer KV page size must be positive and divisible "
-            f"by ratio={ratio}, got {kv_tokens_per_block}"
-        )
-    kv_entries_per_block = kv_tokens_per_block // ratio
-    kv_pool = _typed_2d_pool(
-        self.indexer_kv_cache,
-        tag=INDEXER_KV_TAG,
-        storage_dtype=torch.uint8,
-        payload_dtype=torch.bfloat16,
-        entries=kv_entries_per_block,
-        width=head_dim,
-    )
-    state_pool = _typed_2d_pool(
-        self.indexer_state_cache,
-        tag=INDEXER_STATE_TAG,
-        storage_dtype=torch.float32,
-        payload_dtype=torch.float32,
-        entries=2 * ratio,
-        width=head_dim,
-    )
-    if kv_pool.device != q.device or state_pool.device != q.device:
-        raise RuntimeError(
-            "qwen4_exp QSA side pools and decode projection must share a device"
-        )
-    kv_table = _block_table(
-        self.indexer_kv_inputs,
-        "kv_cache_kernel_block_id_device",
-        tag=INDEXER_KV_TAG,
-        batch_size=batch_size,
-        device=q.device,
-    )
-    state_table = _block_table(
-        self.indexer_state_inputs,
-        "kv_cache_block_id_device",
-        tag=INDEXER_STATE_TAG,
-        batch_size=batch_size,
-        device=q.device,
-    )
 
     if prepared is None:
         visible_token_lengths = sequence_lengths + 1
@@ -311,6 +339,7 @@ def select_decode_tokens(
     if fused_writer:
         from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
             is_supported,
+            write_decode_key_,
             write_decode_key_with_undo_,
         )
 
@@ -335,7 +364,10 @@ def select_decode_tokens(
     if fused_writer:
         if self._side_cache_undo is not None:
             raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
-        undo = write_decode_key_with_undo_(
+        writer = (
+            write_decode_key_with_undo_ if prepared_undo is None else write_decode_key_
+        )
+        undo = writer(
             raw_keys,
             sequence_lengths,
             rope_cos,
@@ -347,7 +379,9 @@ def select_decode_tokens(
             state_table,
             norm_eps=float(indexer.norm_eps),
         )
-        object.__setattr__(self, "_side_cache_undo", undo)
+        object.__setattr__(
+            self, "_side_cache_undo", undo if prepared_undo is None else prepared_undo
+        )
     else:
         cu_seqlens = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device)
         self._write_indexer_cache_transactional(
@@ -368,9 +402,24 @@ def select_decode_tokens(
             rope_is_token_aligned=True,
         )
 
-    rotated_q = apply_partial_rope(
-        q, current_cos.unsqueeze(1), current_sin.unsqueeze(1)
-    )
+    if raw_query and rotated_q is None:
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_norm_rope import (
+            try_indexer_norm_rope,
+        )
+
+        rotated_q = try_indexer_norm_rope(
+            q, current_cos, current_sin, indexer.q_norm_gamma, indexer.norm_eps
+        )
+        if rotated_q is None:
+            from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+                exact_head_rms_norm,
+            )
+
+            q = exact_head_rms_norm(q, indexer.q_norm_gamma, indexer.norm_eps)
+    if rotated_q is None:
+        rotated_q = apply_partial_rope(
+            q, current_cos.unsqueeze(1), current_sin.unsqueeze(1)
+        )
     get_weights = getattr(indexer, "score_weights", None)
     score_weights = get_weights(batch_size, q.device) if callable(get_weights) else None
     if score_weights is None:

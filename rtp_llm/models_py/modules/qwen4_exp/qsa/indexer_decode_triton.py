@@ -35,6 +35,7 @@ def _write_decode_key(
     ROTARY: tl.constexpr,
     EPS: tl.constexpr,
     HAS_VALID: tl.constexpr,
+    RAW_STRIDE: tl.constexpr,
 ):
     request = tl.program_id(0)
     d = tl.arange(0, D)
@@ -47,7 +48,9 @@ def _write_decode_key(
         other=0,
     )
     state_valid = (state_id > 0) & (state_id < STATE_POOL_BLOCKS)
-    raw = tl.load(raw_ptr + request * D + d, mask=active, other=0).to(tl.float32)
+    raw = tl.load(raw_ptr + request * RAW_STRIDE + d, mask=active, other=0).to(
+        tl.float32
+    )
     tl.store(
         state_pool_ptr + (state_id * 8 + position % 8) * D + d,
         raw,
@@ -115,6 +118,21 @@ def _write_decode_key(
         )
 
 
+def supports_raw_key_layout(raw_keys: torch.Tensor) -> bool:
+    """Read the SM90 projection's row-strided key view without copying it."""
+    return raw_keys.is_contiguous() or (
+        raw_keys.is_cuda
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability(raw_keys.device) == (9, 0)
+        and raw_keys.ndim == 2
+        and 1 <= raw_keys.shape[0] <= 64
+        and raw_keys.shape[1] == 128
+        and raw_keys.dtype == torch.bfloat16
+        and raw_keys.stride(1) == 1
+        and raw_keys.stride(0) >= 128
+    )
+
+
 def is_supported(
     raw_keys: torch.Tensor,
     positions: torch.Tensor,
@@ -159,7 +177,7 @@ def is_supported(
         batch > 0
         and raw_keys.shape[1] == 128
         and raw_keys.dtype == torch.bfloat16
-        and raw_keys.is_contiguous()
+        and supports_raw_key_layout(raw_keys)
         and all(t.device == device and t.is_contiguous() for t in tensors)
         and positions.shape == (batch,)
         and positions.dtype == torch.int32
@@ -243,6 +261,7 @@ def write_decode_key_(
         ROTARY=64,
         EPS=norm_eps,
         HAS_VALID=valid is not None,
+        RAW_STRIDE=raw_keys.stride(0),
         num_warps=4,
     )
 
