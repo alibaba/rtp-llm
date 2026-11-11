@@ -142,7 +142,7 @@ models_py_test(
 models_py_test(
     name = "topk_test",
     src = "topk_test.py",
-    gpu = "L20_CU13",
+    gpu = "RTX_5000_PRO_CU13",
     deps = [
         "//rtp_llm/models_py/kernels/cuda/qsa/test/reference:math_references",
     ],

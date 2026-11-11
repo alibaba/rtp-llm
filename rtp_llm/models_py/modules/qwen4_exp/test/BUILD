@@ -174,14 +174,14 @@ models_py_test(
 models_py_test(
     name = "qsa_topk_triton_test",
     src = "qsa/qsa_topk_triton_test.py",
-    gpu = "L20_CU13",
+    gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
 models_py_test(
     name = "qsa_decode_graph_test",
     src = "qsa/qsa_decode_graph_test.py",
-    gpu = "L20_CU13",
+    gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
