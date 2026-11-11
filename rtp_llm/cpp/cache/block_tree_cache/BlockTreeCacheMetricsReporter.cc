@@ -312,28 +312,80 @@ void BlockTreeCacheMetricsReporter::reportCacheReuseTimeMetrics(
     }
 }
 
+void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionTransferTask&     task,
+                                                           const std::vector<GroupSetPtr>& group_sets,
+                                                           bool                            success,
+                                                           const std::vector<bool>&        detached) const {
+    if (metrics_reporter_ == nullptr || task.descriptors().empty()) {
+        return;
+    }
+    RtpLLMCacheEvictionMetricsCollector collector;
+    collector.eviction_success = success;
+    std::vector<std::pair<int64_t, int64_t>> block_times_ms;
+    if (success) {
+        block_times_ms.reserve(task.descriptors().size());
+    }
+    for (size_t i = 0; i < task.descriptors().size(); ++i) {
+        if (!detached.empty() && detached[i]) {
+            continue;
+        }
+        ++collector.eviction_blocks;
+        if (success) {
+            const auto& timing = task.timings[i];
+            block_times_ms.emplace_back(
+                std::max<int64_t>(0, (timing.selected_time_us - timing.tier_enter_time_us) / 1000),
+                (timing.selected_time_us - timing.last_access_time_us) / 1000);
+        }
+    }
+    collector.block_times_ms    = block_times_ms.data();
+    collector.block_times_count = block_times_ms.size();
+    reportEvictionMetrics(task.descriptors().front(), group_sets, "watermark", collector);
+}
+
 void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionDropTask&         task,
                                                            const std::vector<GroupSetPtr>& group_sets,
                                                            const char*                     trigger_type) const {
     if (metrics_reporter_ == nullptr) {
         return;
     }
-    reportEvictedDescriptor(task.primary_desc, task.primary_timing, group_sets, trigger_type);
+    reportEvictionDescriptor(task.primary_desc, task.primary_timing, group_sets, trigger_type, true);
     for (size_t desc_index = 0; desc_index < task.dependent_prune_descs.size(); ++desc_index) {
-        reportEvictedDescriptor(
-            task.dependent_prune_descs[desc_index], task.dependent_prune_timings[desc_index], group_sets, trigger_type);
+        reportEvictionDescriptor(task.dependent_prune_descs[desc_index],
+                                 task.dependent_prune_timings[desc_index],
+                                 group_sets,
+                                 trigger_type,
+                                 true);
     }
     for (size_t desc_index = 0; desc_index < task.cascade_descs.size(); ++desc_index) {
-        reportEvictedDescriptor(
-            task.cascade_descs[desc_index], task.cascade_timings[desc_index], group_sets, trigger_type);
+        reportEvictionDescriptor(
+            task.cascade_descs[desc_index], task.cascade_timings[desc_index], group_sets, trigger_type, true);
     }
 }
 
-void BlockTreeCacheMetricsReporter::reportEvictedDescriptor(const TransferDescriptor&       desc,
-                                                            const EvictionTimingSnapshot&   timing,
-                                                            const std::vector<GroupSetPtr>& group_sets,
-                                                            const char*                     trigger_type) const {
+void BlockTreeCacheMetricsReporter::reportEvictionDescriptor(const TransferDescriptor&       desc,
+                                                             const EvictionTimingSnapshot&   timing,
+                                                             const std::vector<GroupSetPtr>& group_sets,
+                                                             const char*                     trigger_type,
+                                                             bool                            success) const {
     if (metrics_reporter_ == nullptr) {
+        return;
+    }
+    RtpLLMCacheEvictionMetricsCollector collector;
+    collector.eviction_blocks  = 1;
+    collector.eviction_success = success;
+    const std::pair<int64_t, int64_t> block_times_ms{
+        std::max<int64_t>(0, (timing.selected_time_us - timing.tier_enter_time_us) / 1000),
+        (timing.selected_time_us - timing.last_access_time_us) / 1000};
+    collector.block_times_ms    = &block_times_ms;
+    collector.block_times_count = success ? 1 : 0;
+    reportEvictionMetrics(desc, group_sets, trigger_type, collector);
+}
+
+void BlockTreeCacheMetricsReporter::reportEvictionMetrics(const TransferDescriptor&            desc,
+                                                          const std::vector<GroupSetPtr>&      group_sets,
+                                                          const char*                          trigger_type,
+                                                          RtpLLMCacheEvictionMetricsCollector& collector) const {
+    if (collector.eviction_blocks == 0) {
         return;
     }
     const size_t group_set_id = desc.group_set_id;
@@ -345,13 +397,9 @@ void BlockTreeCacheMetricsReporter::reportEvictedDescriptor(const TransferDescri
         return;
     }
 
-    RtpLLMCacheEvictionMetricsCollector collector;
     collector.source_tier       = tierName(desc.source_tier);
     collector.group_type        = metricCacheGroupTypeName(group_set->groupType());
     collector.trigger_type      = trigger_type;
-    collector.report_eviction   = true;
-    collector.block_lifetime_ms = std::max<int64_t>(0, (timing.selected_time_us - timing.tier_enter_time_us) / 1000);
-    collector.block_idletime_ms = (timing.selected_time_us - timing.last_access_time_us) / 1000;
     metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(nullptr, &collector);
 }
 

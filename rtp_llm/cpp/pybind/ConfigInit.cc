@@ -477,6 +477,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("disk_cache_write_thread_count", &KVCacheConfig::disk_cache_write_thread_count)
         .def_readwrite("disk_cache_sync_timeout_ms", &KVCacheConfig::disk_cache_sync_timeout_ms)
         .def_readwrite("disk_cache_evict_timeout_ms", &KVCacheConfig::disk_cache_evict_timeout_ms)
+        .def_readwrite("disk_cache_evict_max_pending_bytes", &KVCacheConfig::disk_cache_evict_max_pending_bytes)
         .def_readwrite("disk_cache_staging_block_count", &KVCacheConfig::disk_cache_staging_block_count)
         .def_readwrite("memory_cache_max_descriptors_per_transfer_batch",
                        &KVCacheConfig::memory_cache_max_descriptors_per_transfer_batch)
@@ -585,7 +586,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      16,
+                                      17,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -674,9 +675,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.disk_cache_write_thread_count,
                                       self.disk_cache_evict_timeout_ms,
                                       self.block_pool_frozen_abort_lower_ratio,
-                                      self.block_pool_frozen_abort_upper_ratio);
+                                      self.block_pool_frozen_abort_upper_ratio,
+                                      self.disk_cache_evict_max_pending_bytes);
             },
             [](py::tuple t) {
+                const py::tuple pending_budget_state = t;
+                const bool has_pending_budget =
+                    t.size() == 92 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 17;
+                if (has_pending_budget) {
+                    t = t[py::slice(0, 91, 1)].cast<py::tuple>();
+                    t[1] = py::int_(16);
+                }
                 const py::tuple frozen_bounds_state = t;
                 const bool has_frozen_bounds =
                     t.size() == 91 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 16;
@@ -765,6 +774,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
 
                 KVCacheConfig c;
+                if (has_pending_budget) {
+                    c.disk_cache_evict_max_pending_bytes = pending_budget_state[91].cast<int64_t>();
+                }
                 if (has_frozen_bounds) {
                     c.block_pool_frozen_abort_upper_ratio = frozen_bounds_state[90].cast<double>();
                 }

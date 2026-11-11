@@ -1664,7 +1664,9 @@ TEST_F(BlockTreeCacheTest, EvictionLifetimeStopsAtSelectionForEachSourceTier) {
         timing.tier_enter_time_us  = 100000;
         timing.last_access_time_us = 120000;
         timing.selected_time_us    = 150000;
-        reporter.reportEvictedDescriptor(desc, timing, cache_->groupSets(), "watermark");
+        EvictionTransferTask task(TransferTask({desc}, std::chrono::seconds(30)), {timing});
+
+        reporter.reportEvictionFinished(task, cache_->groupSets(), true);
         auto* metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
         ASSERT_NE(metrics, nullptr);
         kmonitor::MetricsTags tags("tier", tierName(direction.first));
@@ -1674,7 +1676,50 @@ TEST_F(BlockTreeCacheTest, EvictionLifetimeStopsAtSelectionForEachSourceTier) {
         expectCountSamples(metrics->evicted_block_idletime_ms_metric, tags, 1);
         EXPECT_DOUBLE_EQ(snapshotQps(metrics->evicted_block_lifetime_ms_metric, tags), 50);
         EXPECT_DOUBLE_EQ(snapshotQps(metrics->evicted_block_idletime_ms_metric, tags), 30);
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, tags), 1);
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_fail_qps_metric, tags), 0);
+
+        EvictionTransferTask failed_task(TransferTask({desc, desc}, std::chrono::seconds(30)), {timing, timing});
+        reporter.reportEvictionFinished(failed_task, cache_->groupSets(), false);
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, tags), 2);
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_fail_qps_metric, tags), 2);
+        expectCountSamples(metrics->evicted_block_lifetime_ms_metric, tags, 0);
+        expectCountSamples(metrics->evicted_block_idletime_ms_metric, tags, 0);
     }
+}
+
+TEST_F(BlockTreeCacheTest, EvictionBatchMetricsKeepBlockWeightsAndExcludeDetachedBlocks) {
+    auto monitor = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(monitor);
+    TransferDescriptor            desc;
+    desc.group_set_id = 0;
+    desc.source_tier  = Tier::HOST;
+    desc.target_tier  = Tier::DISK;
+    std::vector<EvictionTimingSnapshot> timings(4);
+    for (size_t i = 0; i < timings.size(); ++i) {
+        timings[i].selected_time_us    = 200000;
+        timings[i].tier_enter_time_us  = 200000 - (i + 1) * 10000;
+        timings[i].last_access_time_us = 200000 - (i + 1) * 5000;
+    }
+    EvictionTransferTask batch(TransferTask({desc, desc, desc, desc}, std::chrono::seconds(30)), timings);
+    reporter.reportEvictionFinished(batch, cache_->groupSets(), true, {false, true, false, false});
+    timings[0].tier_enter_time_us  = 100000;
+    timings[0].last_access_time_us = 150000;
+    EvictionTransferTask single(TransferTask({desc}, std::chrono::seconds(30)), {timings[0]});
+    reporter.reportEvictionFinished(single, cache_->groupSets(), true);
+    reporter.reportEvictionFinished(batch, cache_->groupSets(), false, {true, false, true, true});
+    reporter.reportEvictionFinished(batch, cache_->groupSets(), true, {true, true, true, true});
+    reporter.reportEvictionFinished(batch, cache_->groupSets(), false, {true, true, true, true});
+    auto*                 metrics = monitor->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+    kmonitor::MetricsTags tags("tier", "HOST");
+    tags.AddTag("trigger_type", "watermark");
+    tags.AddTag("group_type", "full");
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, tags), 5);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_fail_qps_metric, tags), 1);
+    expectCountSamples(metrics->evicted_block_lifetime_ms_metric, tags, 4);
+    expectCountSamples(metrics->evicted_block_idletime_ms_metric, tags, 4);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->evicted_block_lifetime_ms_metric, tags), 45);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->evicted_block_idletime_ms_metric, tags), 22.5);
 }
 
 TEST_F(BlockTreeCacheTest, DropLifetimeAndIdletimeCoverDiskAndPrunedResources) {

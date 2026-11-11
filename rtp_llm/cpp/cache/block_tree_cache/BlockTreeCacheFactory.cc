@@ -717,14 +717,12 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                  kv_cache_config.block_tree_disk_evict_high_watermark_ratio};
     }
     const auto valid_watermark = [](const TierWatermark& watermark) {
-        return (watermark.low_ratio == 0.0 && watermark.high_ratio == 0.0)
-               || (watermark.low_ratio > 0.0 && watermark.low_ratio < watermark.high_ratio
-                   && watermark.high_ratio <= 1.0);
+        return watermark.low_ratio > 0.0 && watermark.low_ratio < watermark.high_ratio && watermark.high_ratio <= 1.0;
     };
     for (const auto& tier_watermark : {std::pair<Tier, TierWatermark>{Tier::DEVICE, config.watermark_device},
                                        std::pair<Tier, TierWatermark>{Tier::HOST, config.watermark_host},
                                        std::pair<Tier, TierWatermark>{Tier::DISK, config.watermark_disk}}) {
-        if (!valid_watermark(tier_watermark.second)) {
+        if (config.isTierEnabled(tier_watermark.first) && !valid_watermark(tier_watermark.second)) {
             RTP_LLM_LOG_ERROR("invalid cache watermark: tier=%s low_ratio=%f high_ratio=%f",
                               tierName(tier_watermark.first),
                               tier_watermark.second.low_ratio,
@@ -739,7 +737,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         const TierWatermark watermark{low, high};
         if (!valid_watermark(watermark)) {
             RTP_LLM_LOG_ERROR("invalid FULL cache watermark: tier=%s low_ratio=%f high_ratio=%f; "
-                              "set both to -1 to inherit, both to 0 to disable, or 0 < low < high <= 1",
+                              "set both to -1 to inherit, or 0 < low < high <= 1",
                               tierName(tier),
                               low,
                               high);
@@ -767,6 +765,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     config.disk_cache_sync_timeout_ms =
         disk_enabled ? checkedTimeout(kv_cache_config.disk_cache_sync_timeout_ms, "disk_cache_sync_timeout_ms") :
                        config.host_cache_sync_timeout_ms;
+    config.disk_cache_evict_max_pending_bytes =
+        checkedSize(kv_cache_config.disk_cache_evict_max_pending_bytes, "disk_cache_evict_max_pending_bytes");
     config.btc_transfer_engine_async = kv_cache_config.btc_transfer_engine_async;
     const auto fallback_reason       = workLoopCompatibility(group_sets, disk_enabled);
     const bool uses_workloop         = config.btc_transfer_engine_async && fallback_reason.empty();

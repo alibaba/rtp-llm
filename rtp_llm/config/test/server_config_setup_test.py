@@ -250,6 +250,7 @@ class GenerateConfigTest(TestCase):
             "BTC_TRANSFER_ENGINE_ASYNC": "false",
             "BLOCK_TREE_BUSINESS_QUEUE_MAX_SIZE": "211",
             "BLOCK_TREE_TRANSFER_QUEUE_MAX_SIZE": "307",
+            "DISK_CACHE_EVICT_MAX_PENDING_BYTES": "83886080",
             "BLOCK_TREE_DEVICE_EVICT_LOW_WATERMARK_RATIO": "0.71",
             "BLOCK_TREE_DEVICE_EVICT_HIGH_WATERMARK_RATIO": "0.81",
             "BLOCK_TREE_MEMORY_EVICT_LOW_WATERMARK_RATIO": "0.72",
@@ -281,6 +282,7 @@ class GenerateConfigTest(TestCase):
         self.assertFalse(config.btc_transfer_engine_async)
         self.assertEqual(config.block_tree_business_queue_max_size, 211)
         self.assertEqual(config.block_tree_transfer_queue_max_size, 307)
+        self.assertEqual(config.disk_cache_evict_max_pending_bytes, 80 * 1024 * 1024)
         self.assertEqual(config.block_tree_device_evict_low_watermark_ratio, 0.71)
         self.assertEqual(config.block_tree_device_evict_high_watermark_ratio, 0.81)
         self.assertEqual(config.block_tree_memory_evict_low_watermark_ratio, 0.72)
@@ -566,8 +568,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 91)
-        self.assertEqual(state[:2], ("KVCacheConfig", 16))
+        self.assertEqual(len(state), 92)
+        self.assertEqual(state[:2], ("KVCacheConfig", 17))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)

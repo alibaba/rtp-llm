@@ -2459,8 +2459,8 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoReturnsAllKeysBeyondTenThousand) {
     kv_cache_config.reuse_cache         = true;
     kv_cache_config.reserve_block_ratio = 0;
     // Keep every inserted key available throughout the snapshot assertions.
-    kv_cache_config.block_tree_device_evict_low_watermark_ratio  = 0.0;
-    kv_cache_config.block_tree_device_evict_high_watermark_ratio = 0.0;
+    kv_cache_config.block_tree_device_evict_low_watermark_ratio  = 0.99;
+    kv_cache_config.block_tree_device_evict_high_watermark_ratio = 1.0;
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     ASSERT_TRUE(kv_cache_manager->init());

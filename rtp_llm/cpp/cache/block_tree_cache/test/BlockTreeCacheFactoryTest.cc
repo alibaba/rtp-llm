@@ -2391,12 +2391,14 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
         kv_cache_config.btc_crc_slot_count                 = 3;
         kv_cache_config.block_tree_business_queue_max_size = 211;
         kv_cache_config.block_tree_transfer_queue_max_size = 307;
+        kv_cache_config.disk_cache_evict_max_pending_bytes = 80 * 1024 * 1024;
         auto cache                                         = createBlockTreeCache(config, kv_cache_config, allocator);
         ASSERT_NE(cache, nullptr);
         EXPECT_EQ(cache->config().transfer_worker_count, 7u);
         EXPECT_EQ(cache->config().btc_crc_slot_count, 3u);
         EXPECT_EQ(cache->config().business_queue_max_size, 211u);
         EXPECT_EQ(cache->config().transfer_queue_max_size, 307u);
+        EXPECT_EQ(cache->config().disk_cache_evict_max_pending_bytes, 80u * 1024 * 1024);
     }
     {
         auto          allocator = initAllocator<CoordinatorCacheManager>(config);
@@ -2414,6 +2416,8 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
                                       std::string("slots"),
                                       std::string("total_slots"),
                                       std::string("business"),
+                                      std::string("h2disk_zero"),
+                                      std::string("h2disk_negative"),
                                       std::string("transfer")}) {
         auto          allocator = initAllocator<CoordinatorCacheManager>(config);
         KVCacheConfig kv_cache_config;
@@ -2428,6 +2432,10 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
             kv_cache_config.block_tree_transfer_worker_count = std::numeric_limits<int64_t>::max();
         } else if (invalid_field == "business") {
             kv_cache_config.block_tree_business_queue_max_size = -1;
+        } else if (invalid_field == "h2disk_zero") {
+            kv_cache_config.disk_cache_evict_max_pending_bytes = 0;
+        } else if (invalid_field == "h2disk_negative") {
+            kv_cache_config.disk_cache_evict_max_pending_bytes = -1;
         } else {
             kv_cache_config.block_tree_transfer_queue_max_size = -1;
         }
@@ -2523,6 +2531,21 @@ TEST_F(BlockTreeCacheFactoryTest, TierWatermarksPropagateAndInvalidCombinationsA
     EXPECT_DOUBLE_EQ(cache->config().watermark_disk.low_ratio, 0.63);
     EXPECT_DOUBLE_EQ(cache->config().watermark_disk.high_ratio, 0.73);
 
+    using Field = double KVCacheConfig::*;
+    for (const auto& [low, high] :
+         {std::pair<Field, Field>{&KVCacheConfig::block_tree_device_evict_low_watermark_ratio,
+                                  &KVCacheConfig::block_tree_device_evict_high_watermark_ratio},
+          std::pair<Field, Field>{&KVCacheConfig::block_tree_memory_evict_low_watermark_ratio,
+                                  &KVCacheConfig::block_tree_memory_evict_high_watermark_ratio},
+          std::pair<Field, Field>{&KVCacheConfig::block_tree_disk_evict_low_watermark_ratio,
+                                  &KVCacheConfig::block_tree_disk_evict_high_watermark_ratio}}) {
+        auto invalid_allocator = initAllocator<CoordinatorCacheManager>(config);
+        auto invalid_config    = kv_cache_config;
+        invalid_config.*low    = 0.0;
+        invalid_config.*high   = 0.0;
+        expectFactoryRejects(config, invalid_allocator, invalid_config);
+    }
+
     for (const auto& [low_ratio, high_ratio] : {std::pair<double, double>{0.8, 0.8},
                                                 std::pair<double, double>{0.9, 0.8},
                                                 std::pair<double, double>{-0.1, 0.8},
@@ -2588,6 +2611,7 @@ TEST_F(BlockTreeCacheFactoryTest, FullWatermarksPropagateAndRejectPartialOrInval
                                   &KVCacheConfig::block_tree_full_disk_evict_high_watermark_ratio}}) {
         for (const auto& [low_value, high_value] : {std::pair<double, double>{-1.0, 0.95},
                                                     std::pair<double, double>{0.90, -1.0},
+                                                    std::pair<double, double>{0.0, 0.0},
                                                     std::pair<double, double>{0.95, 0.90},
                                                     std::pair<double, double>{0.90, 1.01}}) {
             auto invalid   = runtime;

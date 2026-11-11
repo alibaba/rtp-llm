@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <future>
 #include <mutex>
 #include <map>
@@ -383,6 +384,98 @@ INSTANTIATE_TEST_SUITE_P(ExecutionBackends,
                          RequestLevelBroadcastTest,
                          ::testing::Bool(),
                          [](const ::testing::TestParamInfo<bool>& info) { return info.param ? "WorkLoop" : "Legacy"; });
+
+TEST(MultiRankDiskBytesTest, EvictionUsesEachRanksPhysicalStrideAndIndependentFile) {
+    using namespace block_transfer_engine_test;
+    TempDirGuard                                             directory("multi_rank_physical_disk_bytes");
+    const std::vector<size_t>                                payloads{732672, 7025280};
+    constexpr size_t                                         block_count = 2;
+    std::vector<GroupSetPtr>                                 groups;
+    std::vector<std::shared_ptr<PerRankBlockTransferEngine>> engines;
+    std::vector<MultiRankBlockTransferRpcConfig>             configs;
+    std::vector<TransferDescriptor>                          descriptors;
+    for (size_t rank = 0; rank < payloads.size(); ++rank) {
+        auto host = makeHostPool(payloads[rank], block_count, true);
+        auto disk = makeDiskPool(
+            payloads[rank], block_count, directory.path, nullptr, "rank_" + std::to_string(rank), false, true);
+        auto topology =
+            makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, payloads[rank])});
+        auto group = makeTestGroupSet(0, topology, topology->groupTags(), {}, host, disk, true, payloads[rank]);
+        for (size_t index = 0; index < block_count; ++index) {
+            const auto source = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+            const auto target = group->allocateSingleBlock(Tier::DISK, BlockTreeRefType::EVICTION);
+            ASSERT_FALSE(isNullBlockIdx(source));
+            ASSERT_FALSE(isNullBlockIdx(target));
+            auto* data = static_cast<uint8_t*>(host->blockBuffer(source).addr);
+            std::memset(data, 40 + rank + index, payloads[rank]);
+            encodeTestRecord(data, payloads[rank]);
+            if (rank == 0) {
+                descriptors.push_back(TransferDescriptor::hostToDisk(0, source, target));
+            } else {
+                ASSERT_EQ(source, descriptors[index].singleBlockAt(Tier::HOST));
+                ASSERT_EQ(target, descriptors[index].singleBlockAt(Tier::DISK));
+            }
+        }
+        DiskIOExecutorConfig io;
+        io.read_thread_count  = 1;
+        io.write_thread_count = 1;
+        auto engine           = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group},
+                                                                   true,
+                                                                   DeviceHostCopyOptions{},
+                                                                   2,
+                                                                   block_count,
+                                                                   1,
+                                                                   4,
+                                                                   nullptr,
+                                                                   rank,
+                                                                   1,
+                                                                   true,
+                                                                   io);
+        ASSERT_TRUE(engine->asyncEnabled());
+        MultiRankBlockTransferRpcConfig config{true, MemoryOperationResponsePB::OK, grpc::Status::OK};
+        config.groups           = {group};
+        config.local_dispatcher = std::make_shared<BlockTransferDispatcher>(engine, nullptr);
+        configs.push_back(std::move(config));
+        groups.push_back(group);
+        engines.push_back(engine);
+    }
+    EXPECT_NE(groups[0]->diskPool()->filePath(), groups[1]->diskPool()->filePath());
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto                                                          manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(manager, nullptr);
+    const std::vector<GroupSetPtr> coordinator_groups{groups.front()};
+    auto                           multi = std::make_shared<MultiRankBlockTransferEngine>(coordinator_groups, manager);
+    BlockTransferDispatcher        dispatcher(engines.front(), multi);
+    EvictionTaskRunner             runner(coordinator_groups, &dispatcher);
+    BlockTreeCacheMetricsReporter  reporter(nullptr);
+    auto task = std::make_shared<EvictionTransferTask>(TransferTask(descriptors, std::chrono::seconds(10)));
+    std::promise<ErrorInfo> done;
+    auto                    future = done.get_future();
+    runner.runTransfer(task, reporter, [&](ErrorInfo result) { done.set_value(std::move(result)); });
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    ASSERT_TRUE(future.get().ok());
+    dispatcher.waitForTransfers();
+    size_t total_write_bytes = 0;
+    for (size_t rank = 0; rank < groups.size(); ++rank) {
+        engines[rank]->waitForIdle();
+        const auto& group = groups[rank];
+        const auto  disk  = group->diskPool();
+        EXPECT_EQ(disk->writeBytes(), block_count * disk->strideBytes());
+        total_write_bytes += disk->writeBytes();
+        for (size_t index = 0; index < block_count; ++index) {
+            const auto source = descriptors[index].singleBlockAt(Tier::HOST);
+            const auto target = descriptors[index].singleBlockAt(Tier::DISK);
+            auto*      buffer = static_cast<uint8_t*>(group->hostPool()->blockBuffer(source).addr);
+            std::memset(buffer, 0, disk->strideBytes());
+            ASSERT_EQ(disk->read(target, buffer, disk->strideBytes()), BlockIOStatus::OK);
+            EXPECT_TRUE(std::all_of(
+                buffer, buffer + payloads[rank], [rank, index](uint8_t byte) { return byte == 40 + rank + index; }));
+            group->releaseBlocks(Tier::HOST, {source}, BlockTreeRefType::CACHE);
+            group->releaseBlocks(Tier::DISK, {target}, BlockTreeRefType::EVICTION);
+        }
+    }
+    EXPECT_GT(total_write_bytes, groups.front()->diskPool()->writeBytes());
+}
 
 static std::vector<TransferDescriptor> makeBroadcastDescriptors() {
     return {TransferDescriptor::hostToDevice(0, 1, {1})};
