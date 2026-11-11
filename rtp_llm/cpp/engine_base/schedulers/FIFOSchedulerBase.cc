@@ -190,9 +190,20 @@ std::unordered_set<GenerateStream*> FIFOSchedulerBase::evaluateWaitingStreams(li
     // Existing streams that will be returned this round define its execution mode. PDFusion prefill
     // rounds exclude held running decodes; new_streams_ remains relevant for state-machine promotions.
     const auto set_scheduling_type = [&](const std::list<GenerateStreamPtr>& streams) {
-        if (!has_scheduling_type && !streams.empty()) {
-            has_scheduling_type     = true;
-            scheduling_prefill_only = isPrefillOnly(streams.front());
+        if (has_scheduling_type) {
+            return;
+        }
+        for (const auto& stream : streams) {
+            // AWI barrier-held streams are excluded from the execution batch by
+            // the engine, so they must not pin the round's prefill/decode mode
+            // either - one held decode stream would otherwise block admission of
+            // every prefill (mode exclusivity) and starve the barrier's own
+            // remaining requests forever.
+            if (stream && !stream->awiBarrierHeld()) {
+                has_scheduling_type     = true;
+                scheduling_prefill_only = isPrefillOnly(stream);
+                return;
+            }
         }
     };
     if (include_running_mode) {

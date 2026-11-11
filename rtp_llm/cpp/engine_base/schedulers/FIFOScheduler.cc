@@ -349,8 +349,13 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
         if (has_execution_mode) {
             return;
         }
+        // AWI barrier-held streams never execute this round and must not define
+        // its execution mode (see FIFOSchedulerBase::evaluateWaitingStreams —
+        // one held decode stream would otherwise pin every round to decode
+        // mode and starve prefill admission, including the barrier's own
+        // remaining requests).
         const auto it = std::find_if(streams.begin(), streams.end(), [](const auto& stream) {
-            return stream && stream->getStatus() == StreamState::RUNNING;
+            return stream && stream->getStatus() == StreamState::RUNNING && !stream->awiBarrierHeld();
         });
         if (it != streams.end()) {
             has_execution_mode      = true;
