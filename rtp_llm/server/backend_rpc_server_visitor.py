@@ -37,6 +37,12 @@ from rtp_llm.server.request_headers import (
     extract_correlation_request_id,
     extract_trace_id,
 )
+from rtp_llm.server.session_placement import (
+    ENV_ENABLE_FLAG,
+    SessionPlacementBalancer,
+    env_flag_enabled,
+    env_ttl_seconds,
+)
 from rtp_llm.telemetry import attributes as trace_attrs
 from rtp_llm.telemetry import start_internal_span
 from rtp_llm.utils.base_model_datatypes import (
@@ -155,6 +161,16 @@ class BackendRPCServerVisitor:
             self.pd_sep_config, host_args, vit_separation
         )
         self.host_service = HostService(host_args)
+        # Cold-session placement balancing (env-gated, DEFAULT OFF): pins the
+        # prefill role of first-seen sessions round-robin across the VIP
+        # prefill host list so post-rollout placement does not degenerate into
+        # a winner-take-most draw; warm requests still route via the master.
+        # See rtp_llm/server/session_placement.py for the full rationale.
+        self._session_placement = SessionPlacementBalancer(
+            host_provider=self._get_prefill_vip_hosts,
+            enabled=env_flag_enabled(ENV_ENABLE_FLAG),
+            ttl_s=env_ttl_seconds(),
+        )
         self.master_config = master_config
         self._page_rr_route_cache_keys = False
         self._page_rr_cp_size = 1
@@ -414,6 +430,19 @@ class BackendRPCServerVisitor:
         )
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
+        if selected_vit is None:
+            pinned_prefill = self._session_placement.maybe_pin_prefill(
+                full_block_cache_keys
+            )
+            if pinned_prefill is not None:
+                # Request-pinned routing (cold-session placement balancing):
+                # the prefill role is fixed by the frontend for this request;
+                # route_ips skips the master call and get_domain_route_addrs
+                # fills the remaining roles (decode/vit) as usual. The master
+                # learns the placed KV via its engine cache-status poll, so
+                # later requests of this session route by cache affinity.
+                input.generate_config.role_addrs.append(pinned_prefill)
+                return None
         del token_ids, full_block_cache_keys
 
         try:
@@ -600,6 +629,13 @@ class BackendRPCServerVisitor:
         return route_cache_keys_for_page_rr(
             block_cache_keys, self._page_rr_route_cache_keys, self._page_rr_cp_size
         )
+
+    def _get_prefill_vip_hosts(self):
+        vip = self.host_service.role_vip_map.get(RoleType.PREFILL)
+        if vip is None:
+            return []
+        hosts = vip.get_hosts()
+        return hosts if hosts else []
 
     def _cache_key_block_size(self) -> int:
         if self._page_rr_route_cache_keys and self._page_rr_cp_size > 1:

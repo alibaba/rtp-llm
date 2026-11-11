@@ -139,3 +139,13 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     tags = ["manual"],
 )
+
+py_test(
+    name = "session_placement_test",
+    srcs = ["session_placement_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:config_ops",
+        "//rtp_llm/server:server",
+    ],
+)
