@@ -140,6 +140,15 @@ void GenerateStateMachine::handleRunning() {
         releaseResource();
         return;
     }
+    // AWI barrier-held streams idle in RUNNING: the engine excludes them from
+    // the execution batch, so this state machine must not advance their KV
+    // bookkeeping either — the two sides must skip the round together.
+    {
+        GenerateStream* held_stream = stream_cache_resource_->stream();
+        if (held_stream != nullptr && held_stream->awiBarrierHeld()) {
+            return;
+        }
+    }
     if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
         && stream_cache_resource_->isContextStream()) {
         return;

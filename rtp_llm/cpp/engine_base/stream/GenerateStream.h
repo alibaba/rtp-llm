@@ -386,6 +386,20 @@ public:
     bool finishWithoutGenerate();
     bool isActive() const;  // Returns true if stream is active (no error and not finished)
 
+    // AWI evaluator barrier hold: while held, the stream idles in RUNNING —
+    // GenerateStateMachine::handleRunning skips its per-round KV maintenance
+    // and the engine excludes it from the execution batch — until every armed
+    // sequence of the operation coexists with its full-context reservation
+    // (NormalEngine::awiApplyBarriers). Both sides MUST agree: excluding a
+    // stream from the executor while the state machine keeps advancing it
+    // wedges the engine loop (observed on native-n3).
+    void setAwiBarrierHold(bool held) noexcept {
+        awi_barrier_hold_.store(held, std::memory_order_release);
+    }
+    bool awiBarrierHeld() const noexcept {
+        return awi_barrier_hold_.load(std::memory_order_acquire);
+    }
+
     // A response consumer may observe GenerateDone before the scheduler has
     // committed RUNNING -> FINISHED. Preserve that successful completion and
     // wait for scheduler-owned resource release; otherwise publish cancellation
@@ -981,6 +995,7 @@ protected:
     int64_t                               load_done_to_running_us_     = 0;
     bool                                  running_started_             = false;
     int64_t                               running_started_time_us_     = 0;
+    std::atomic<bool>                     awi_barrier_hold_{false};
     bool                                  generation_done_             = false;
     int64_t                               generation_done_time_us_     = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;

@@ -1004,6 +1004,9 @@ void NormalEngine::awiApplyBarriers(std::list<GenerateStreamPtr>& streams) {
         }
         const int64_t now_ns = awiNowNs();
         if (!reserved) {
+            for (const auto& stream : armed) {
+                stream->setAwiBarrierHold(false);
+            }
             store.markBarrierFailed(barrier.operation_id);
             std::string event = "{\"kind\":\"capacity_failure\",\"operation_id\":";
             awiAppendJsonString(event, barrier.operation_id);
@@ -1019,6 +1022,9 @@ void NormalEngine::awiApplyBarriers(std::list<GenerateStreamPtr>& streams) {
                                 barrier.operation_id.c_str(),
                                 barrier.request_ids.size());
             continue;
+        }
+        for (const auto& stream : armed) {
+            stream->setAwiBarrierHold(false);
         }
         store.markBarrierSatisfied(barrier.operation_id);
         // ONE scheduler snapshot listing every armed sequence with its
@@ -1058,8 +1064,16 @@ void NormalEngine::awiApplyBarriers(std::list<GenerateStreamPtr>& streams) {
         const bool  held   = stream && !stream->isContextStream()
                           && store.isHeldRequest(stream->generateInput()->request_info.request_id);
         if (held) {
+            // Flag the stream so its state machine idles too; excluding it
+            // from the batch WITHOUT the flag wedges the engine (native-n3:
+            // handleRunning kept advancing KV bookkeeping for a stream the
+            // executor never ran, stalling the scheduler loop).
+            stream->setAwiBarrierHold(true);
             it = streams.erase(it);
         } else {
+            if (stream) {
+                stream->setAwiBarrierHold(false);
+            }
             ++it;
         }
     }

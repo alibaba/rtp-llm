@@ -923,7 +923,11 @@ StreamState GenerateStream::moveToNext() {
     // boundary is different: the allocator must append blocks to the mutable
     // host table, so join the worker before acquiring mutex_.  Waiting after
     // taking mutex_ would deadlock with specUpdate().
-    if (needsAsyncBookkeepingJoinForKvReservation()) {
+    // AWI barrier-held streams idle without KV maintenance (handleRunning
+    // returns early), so they never need the bookkeeping join while held —
+    // and waiting here could block on a commit that only progresses once the
+    // stream runs again, deadlocking the scheduler loop.
+    if (!awiBarrierHeld() && needsAsyncBookkeepingJoinForKvReservation()) {
         RTP_LLM_PROFILE_SCOPE("stream.move_to_next(wait_async_bookkeeping_for_kv)");
         waitPendingAsyncBookkeeping();
     }
