@@ -13,6 +13,7 @@ from rtp_llm.models_py.modules.dsv41.backend import V41QuantizedTensor, V41StepC
 from rtp_llm.models_py.modules.dsv41.ppu import _quant
 from rtp_llm.models_py.modules.dsv41.ppu.attention import COMBINED_WIDTH
 from rtp_llm.models_py.modules.dsv41.ppu.cache import PPUKVCache
+from rtp_llm.models_py.modules.dsv41.ppu.linear import PPUPTPCLinear
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import (
     CP8_WORKSPACE_DEQUANT_ENV,
     SharedNativeCache,
@@ -487,7 +488,17 @@ def _tiled_producer_inputs(
             # Keep the GEMM shape of each request. Tile the row-local norm,
             # rotary embedding and codec around that BF16 rounding boundary.
             weight = layer.index_wk.weight
-            if (
+            if isinstance(layer.index_wk, PPUPTPCLinear):
+                if (
+                    os.environ.get(_DIRECT_PRODUCER_WRITE_ENV, "0") == "1"
+                    and not torch.is_grad_enabled()
+                ):
+                    projected = latent.new_empty((latent.shape[0], weight.shape[0]))
+                    for rows, out in zip(latent.split(counts), projected.split(counts)):
+                        layer.index_wk.forward_into(rows, out)
+                else:
+                    projected = torch.cat([layer.index_wk(rows) for rows in latent.split(counts)])
+            elif (
                 os.environ.get(_DIRECT_PRODUCER_WRITE_ENV, "0") == "1"
                 and not torch.is_grad_enabled()
                 and weight.is_contiguous()
@@ -625,7 +636,10 @@ def _produce_global(
             )
         if packed is None:
             # Indexer K comes from the same latents.
-            projected = F.linear(latent, layer.index_wk.weight)
+            projected = (
+                layer.index_wk(latent) if isinstance(layer.index_wk, PPUPTPCLinear)
+                else F.linear(latent, layer.index_wk.weight)
+            )
             projected = _rms_norm(projected, layer.index_k_norm, geometry.norm_eps)
             index_keys = _rope_tail(projected, freqs[safe_positions])
             packed_index = ops.encode_kv(index_keys, pool_tag="indexer_kv")

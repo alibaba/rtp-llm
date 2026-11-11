@@ -35,7 +35,9 @@ if [[ "$v41_role" == ptpc-fusion-contracts || "$v41_role" == ptpc-fusion-device 
     exec "$v41_python" -B -m unittest \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc_quant \
-        rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc_norm
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc_norm \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc_prefill_out \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc_prefill_reuse
 fi
 if [[ "$v41_role" == ptpc-fusion-micro ]]; then
     export RTP_V41_PPU_PTPC_FUSION=1

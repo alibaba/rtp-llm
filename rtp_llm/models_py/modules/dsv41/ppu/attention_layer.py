@@ -474,9 +474,12 @@ class SharedPPUAttention(PPUAttentionProjections):
             index_k_norm=getattr(self, "index_k_norm", None),
         )
 
-    def _project_indexer(self, x, qr, positions, shared):
+    def _project_indexer(self, x, qr, positions, shared, *, quantized_input=None):
         g = self.geometry
-        index_q = self.index_wq(qr).reshape(-1, g.index_n_heads, g.index_head_dim)
+        index_q = (
+            self.index_wq(qr) if quantized_input is None
+            else self.project_indexer_query(qr, quantized_input=quantized_input)
+        ).reshape(-1, g.index_n_heads, g.index_head_dim)
         index_q = _rope_tail(index_q, self.runtime.freqs_for(self.layer_id)[positions])
         projection = shared.get("ced_indexer_projection")
         raw = F.linear(x, self.index_weights) if projection is None else projection(x, self.index_weights)
@@ -486,6 +489,7 @@ class SharedPPUAttention(PPUAttentionProjections):
     def _select(
         self, x, qr, context, cache, shared, *, prefill=False,
         request_slices=None, allow_tile_prep=True, yoco_small_ops=False, indexer_inputs=None,
+        quantized_input=None,
     ):
         g, source = self.geometry, self.kv_source_layer_id
         direct_indexer_output = yoco_small_ops and request_slices is not None
@@ -557,7 +561,9 @@ class SharedPPUAttention(PPUAttentionProjections):
             out = torch.where(ids[None] < ((context.positions + 1) // ratio)[:, None], ids, -1)
         else:
             index_q, weights = (
-                self._project_indexer(x, qr, context.positions, shared)
+                self._project_indexer(
+                    x, qr, context.positions, shared, quantized_input=quantized_input,
+                )
                 if indexer_inputs is None else indexer_inputs
             )
             weights_bf16 = weights.to(torch.bfloat16) if tile_prep else None
@@ -754,8 +760,15 @@ class SharedPPUAttention(PPUAttentionProjections):
         def kv_branch(value):
             return self.kv_norm(self.wkv(value))
 
+        indexer_quantized_input = None
         if parallel:
             (qr, q), kv = self.runtime.qkv_streams.run(x, query_branch, kv_branch)
+        elif state.prefill:
+            qr, q, kv, indexer_quantized_input = self.project_query_kv(
+                x, reuse_ptpc=True,
+                prepare_indexer=bool(self.compress_ratio and self.is_index_source),
+            )
+            q = q.reshape(-1, g.n_heads, g.head_dim)
         else:
             qr, q = query_branch(x)
             kv = kv_branch(x)
@@ -859,7 +872,10 @@ class SharedPPUAttention(PPUAttentionProjections):
             # Preserve the full-row projections and KV writes. Only retained
             # queries enter selection, attention and the output projections.
             exchange = state.plan.exchange
-            index_q, weights = self._project_indexer(x, qr, positions, shared)
+            index_q, weights = self._project_indexer(
+                x, qr, positions, shared, quantized_input=indexer_quantized_input,
+            )
+            indexer_quantized_input = None
             indexer_inputs = exchange.compact(index_q), exchange.compact(weights)
             del index_q, weights
             q = exchange.compact(q)
@@ -890,7 +906,9 @@ class SharedPPUAttention(PPUAttentionProjections):
             x, qr, context, cache, shared, prefill=state.prefill,
             request_slices=request_slices, allow_tile_prep=not compact_cp8,
             yoco_small_ops=yoco_small_ops, indexer_inputs=indexer_inputs,
+            quantized_input=indexer_quantized_input,
         ) if self.compress_ratio else None
+        indexer_quantized_input = None
         if diagnostic is not None:
             diagnostic_swa_before = cache._copy_rows((self.layer_id, "swa_kv"), 0, full_pos[real])
             diagnostic_global_before = None

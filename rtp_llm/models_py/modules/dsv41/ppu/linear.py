@@ -167,6 +167,53 @@ class PPUPTPCLinear:
     def forward(self, x):
         return self.forward_quantized(*self.quantize_input(x))
 
+    def forward_into(self, x, out):
+        """Write the unchanged PTPC projection into a caller-owned BF16 slab.
+
+        Contiguous request slices may have a nonzero storage offset. Validate
+        every output and alias constraint before quantization or any write;
+        unsupported callers fail without partially modifying the destination.
+        """
+        self._validate_input(x)
+        if not isinstance(out, torch.Tensor) or out.layout != torch.strided:
+            raise TypeError("PTPC output requires a strided BF16 tensor")
+        if out.dtype != torch.bfloat16:
+            raise TypeError("PTPC output must be BF16")
+        if tuple(out.shape) != (*x.shape[:-1], self.weight.shape[0]):
+            raise ValueError("PTPC output shape must match the projected input rows")
+        if out.device != x.device:
+            raise ValueError("PTPC output must share the input and weight device")
+        if not out.is_contiguous() or out.is_conj() or out.is_neg():
+            raise ValueError("PTPC output must be contiguous with no view transforms")
+        if out.requires_grad:
+            raise ValueError("PTPC output must not require gradients")
+        if out.numel():
+            first = out.data_ptr()
+            end = first + out.numel() * out.element_size()
+            for operand in (x, self.weight, self.scale):
+                if not operand.numel():
+                    continue
+                # Noncontiguous input rows can span holes. Conservatively
+                # reject an intersection with that span, without device work.
+                begin = operand.data_ptr()
+                span = 1 + sum(
+                    (size - 1) * stride
+                    for size, stride in zip(operand.shape, operand.stride())
+                )
+                stop = begin + span * operand.element_size()
+                if first < stop and begin < end:
+                    raise ValueError("PTPC output must not overlap input, weight or scale")
+        payload, scale = self.quantize_input(x)
+        flat = payload.reshape(-1, payload.shape[-1])
+        target = out.reshape(-1, self.weight.shape[0])
+        if flat.shape[0]:
+            row_scale = scale.reshape(-1, 1)
+            if x.is_cuda:
+                self._gemm((flat, row_scale), (self.weight, self.scale), target)
+            else:
+                target.copy_((flat.float() @ self.weight.float().T) * row_scale * self.scale.T)
+        return out
+
     __call__ = forward
 
 
