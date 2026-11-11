@@ -5,7 +5,7 @@ from aiter.ops.flydsl.linear_attention_kernels import flydsl_gdr_mtp_hybrid
 from atom.plugin.rtpllm.utils.replay_hybrid import _commit
 
 torch.manual_seed(123)
-for n in (2,4,8,16):
+for n in (1,2,4,8,16):
  qlen,hk,hv,d=3,8,24,128
  q=torch.randn(n,qlen,hk,d,device='cuda',dtype=torch.bfloat16);k=torch.randn_like(q)
  v=torch.randn(n,qlen,hv,d,device='cuda',dtype=torch.bfloat16)
@@ -17,11 +17,16 @@ for n in (2,4,8,16):
  candidate=backing[:,:hv*d*d].view(n*4,hv,d,d).copy_(initial)
  writes=torch.arange(n,4*n,device='cuda',dtype=torch.int32).view(n,3)
  reads=torch.arange(n,device='cuda',dtype=torch.int32)
+ read_backing=torch.zeros(n,3,device='cuda',dtype=torch.int32);read_view=read_backing[:,0]
  out=torch.empty(n,qlen,hv,d,device='cuda',dtype=torch.bfloat16);expected=torch.empty_like(out)
  records=torch.empty(1,n,qlen,hv,3,d,device='cuda');ptrs=torch.tensor([candidate.data_ptr()],device='cuda',dtype=torch.int64)
  accepted=torch.arange(n,device='cuda',dtype=torch.int32)%4
- def base():mtp_rtp(q.view(1,n*qlen,hk,d),k.view(1,n*qlen,hk,d),v.view(1,n*qlen,hv,d),a.view(n*qlen,hv),b.view(n*qlen,hv),ref.transpose(-1,-2),al,bias,reads,writes,expected.view(n*qlen,hv,d))
- def hybrid():flydsl_gdr_mtp_hybrid(q,k,v,a,b,bias,al,candidate,out,reads,writes,records[0])
+ def base():
+  read_view.copy_(reads)
+  mtp_rtp(q.view(1,n*qlen,hk,d),k.view(1,n*qlen,hk,d),v.view(1,n*qlen,hv,d),a.view(n*qlen,hv),b.view(n*qlen,hv),ref.transpose(-1,-2),al,bias,read_view,writes,expected.view(n*qlen,hv,d))
+ def hybrid():
+  read_view.copy_(reads)
+  flydsl_gdr_mtp_hybrid(q,k,v,a,b,bias,al,candidate,out,read_view,writes,records[0])
  def commit():_commit[(n,hv,4)](records,ptrs,reads,writes,accepted,hv,d,qlen,n,32,candidate.stride(0),num_warps=4)
  hybrid();commit();torch.cuda.synchronize()
  graph=torch.cuda.CUDAGraph()
