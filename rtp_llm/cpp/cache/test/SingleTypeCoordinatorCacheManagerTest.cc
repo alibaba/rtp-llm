@@ -191,6 +191,9 @@ static rtp_llm::CacheConfig makeMtpCacheConfigByCreateSpConfig(uint32_t main_lay
                                                                uint32_t mtp_module_layers = 1) {
     auto score_model_config   = makeTestModelConfig(main_layers);
     auto propose_model_config = makeTestModelConfig(mtp_module_layers);
+    // The draft declares module-scoped tags in the Python model description;
+    // the C++ side never renames, so the test declares them the same way.
+    declareModuleScopedTags(propose_model_config);
 
     rtp_llm::ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;

@@ -23,11 +23,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
-from rtp_llm.ops.compute_ops import KVCache, LayerKVCache
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import KVCache, LayerKVCache
 
 DRAFT_CACHE_TAG_PREFIX = "mtp_"
 
@@ -180,6 +181,10 @@ class SingleGroupKVCacheAdapter:
             raise RuntimeError(f"KV cache tag {tag!r} is not available")
 
     def get_layer_cache(self, layer_id: int, tag: str | None = None) -> LayerKVCache:
+        # Imported here so this module stays importable on CPU-only workers:
+        # the tag helpers above are used by config-time code with no CUDA.
+        from rtp_llm.ops.compute_ops import LayerKVCache
+
         self._validate_layer(layer_id)
         self._validate_tag(self._tag if tag is None else str(tag))
         return LayerKVCache(
