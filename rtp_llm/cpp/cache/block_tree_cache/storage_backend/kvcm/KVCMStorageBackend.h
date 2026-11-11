@@ -84,7 +84,7 @@ protected:
                        const std::shared_ptr<StorageBackendMatchMeta>& match_meta,
                        ReadCompletion                                  done) override;
     void writeImpl(const StorageRequest& request) override;
-    bool startWriteImpl(const StorageRequest& request, WriteCompletion done) override;
+    bool startWriteImpl(const StorageRequest& request, WriteCompletion done, WritePinFilter retain_pins) override;
     void shutdownImpl() noexcept override;
     void onRemoteCacheSkipped(const char* stage) noexcept override;
     bool protectUnknownCompletion() const noexcept override;

@@ -446,6 +446,8 @@ StorageBackend::prepare(StorageRequest request, bool for_write, uint64_t trace_i
         state->completion_resources = completionResourceOwner();
         RTP_LLM_CHECK_WITH_INFO(state->completion_resources != nullptr,
                                 "protected storage I/O requires an actual transport resource owner");
+    }
+    if (for_write || state->completion_protected) {
         // All metadata allocation and deduplication precedes pin acquisition.
         // In particular, recording an acquired pin cannot allocate or lose it.
         std::unordered_set<BlockKey, BlockKeyHash> seen;
@@ -817,7 +819,28 @@ bool StorageBackend::write(StorageWriteTask task) {
                                state->trace_id, CacheStageContext::storage("write"));
             if (state->request.completion_admission)
                 state->request.completion_admission->onRunning();
-            if (startWriteImpl(state->request, [complete](WriteResult result) { complete(std::move(result), true); }))
+            auto retain_pins = [this, state](const std::vector<size_t>& key_indices) {
+                if (key_indices.size() == state->request.handles.size())
+                    return;
+                std::unordered_set<BlockKey, BlockKeyHash> required;
+                for (const auto key_index : key_indices) {
+                    for (const auto& handle : state->request.handles.at(key_index)) {
+                        const auto& pool = devicePool(handle.tag);
+                        required.insert({pool.get(), handle.block});
+                        for (const auto block : handle.peer_blocks)
+                            required.insert({pool.get(), block});
+                    }
+                }
+                auto& pins = state->pins;
+                pins.erase(std::remove_if(pins.begin(), pins.end(), [&](const auto& pin) {
+                    if (required.count({pin.pool.get(), pin.block}))
+                        return false;
+                    pin.publication_release();
+                    return true;
+                }), pins.end());
+            };
+            if (startWriteImpl(state->request, [complete](WriteResult result) { complete(std::move(result), true); },
+                               std::move(retain_pins)))
                 return;
         } catch (...) {
             complete([error = std::current_exception()](bool) { std::rethrow_exception(error); }, false);

@@ -216,7 +216,7 @@ public:
     void read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
     StorageWriteTask prepareWrite(StorageRequest request);
     // Returns admission only, not the I/O result; never waits for completion.
-    // Source pins live through payload completion and publication.
+    // Retained source pins live through payload completion and publication.
     bool write(StorageWriteTask task);
     // Optional EOS publication. Non-supporting backends keep their original
     // behavior; admission is not a successful remote commit.
@@ -235,6 +235,7 @@ protected:
     // result can still check the rank responses and settle the source pins.
     using WriteResult = std::function<void(bool on_worker)>;
     using WriteCompletion = std::function<void(WriteResult)>;
+    using WritePinFilter = std::function<void(const std::vector<size_t>&)>;
     // Worker RPC payloads bypass the executor. Count their whole transaction,
     // including publishing an UNKNOWN outcome, before shutdown may finalize.
     ExternalIoGuard trackExternalIo();
@@ -258,9 +259,9 @@ protected:
         return false;
     }
     virtual void               writeImpl(const StorageRequest& request)                             = 0;
-    // False means the write finished on this worker. True keeps the request and
-    // its source pins alive until the result passed to done has been settled.
-    virtual bool startWriteImpl(const StorageRequest& request, WriteCompletion) {
+    // Filter validated handle rows once on this worker before dispatch or done.
+    // True defers completion, retaining the request and remaining pins until done's result settles.
+    virtual bool startWriteImpl(const StorageRequest& request, WriteCompletion, WritePinFilter) {
         writeImpl(request);
         return false;
     }

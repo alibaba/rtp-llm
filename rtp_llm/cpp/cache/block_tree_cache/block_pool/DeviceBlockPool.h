@@ -55,7 +55,7 @@ public:
     void decRef(BlockIdxType block, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
     void decRef(const BlockIdList& blocks, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
 
-    // EOS publication only. Allocate the release closure and reserve free-list
+    // Storage I/O. Allocate the release closure and reserve free-list
     // capacity before acquiring the connector reference. The caller must keep
     // this pool alive and invoke the returned closure exactly once. Its release
     // performs no allocation and isolates capacity-notification exceptions.

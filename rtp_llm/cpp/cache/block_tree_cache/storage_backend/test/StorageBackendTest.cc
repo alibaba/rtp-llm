@@ -446,6 +446,7 @@ public:
 
     std::function<void()>   read_action;
     std::function<void()>   write_action;
+    std::function<bool(const StorageRequest&, WriteCompletion, WritePinFilter)> start_write_action;
     size_t                  quarantine_events{0};
     bool                    last_quarantine_is_write{false};
     StorageQuarantineReason last_quarantine_reason{StorageQuarantineReason::RPC_ERROR};
@@ -468,6 +469,12 @@ protected:
         } else {
             TestBackend::writeImpl(request);
         }
+    }
+
+    bool startWriteImpl(const StorageRequest& request, WriteCompletion done, WritePinFilter retain_pins) override {
+        if (start_write_action)
+            return start_write_action(request, std::move(done), std::move(retain_pins));
+        return StorageBackend::startWriteImpl(request, std::move(done), std::move(retain_pins));
     }
 
     void onQuarantined(bool is_write, StorageQuarantineReason reason, size_t block_count) noexcept override {
@@ -817,6 +824,162 @@ TEST(StorageBackendTest, CompletedDecodePinsUniquePeersAndReleasesBudgetOnReject
     pool->decRef(first);
     pool->decRef(second);
     backend.shutdown();
+}
+
+TEST(StorageBackendTest, WriteMaskReleasesOnlyUnusedTaskPinsBeforeCompletion) {
+    for (const bool protected_io : {false, true}) {
+        auto pool = std::make_shared<TestBlockPool>();
+        const auto blocks = pool->malloc(3).value();
+        pool->incRef(blocks);
+        auto executor = std::make_shared<HoldingExecutor>();
+        std::unique_ptr<QuarantineObservingBackend> backend;
+        if (protected_io)
+            backend = std::make_unique<ProtectedBackend>(true, executor);
+        else
+            backend = std::make_unique<QuarantineObservingBackend>(true, executor);
+        ASSERT_TRUE(initBackend(*backend, pool));
+        auto other_task = backend->prepareWrite(makeRequest(blocks[2]));
+        std::function<void()> complete;
+        block_tree_cache_detail::ScopeRollback drain([&] {
+            executor->runAll();
+            if (complete)
+                complete();
+            executor->runAll();
+            backend->shutdown();
+        });
+        backend->start_write_action = [&](const StorageRequest&, auto done, auto retain_pins) {
+            EXPECT_EQ(pool->refCount(blocks[0]), 2u);
+            EXPECT_EQ(pool->refCount(blocks[1]), 2u);
+            EXPECT_EQ(pool->refCount(blocks[2]), 3u);
+            retain_pins({1, 2});
+            EXPECT_EQ(pool->refCount(blocks[0]), 2u);
+            EXPECT_EQ(pool->refCount(blocks[1]), 2u);
+            EXPECT_EQ(pool->refCount(blocks[2]), 2u);
+            complete = [done] { done([](bool) {}); };
+            return true;
+        };
+        auto request = makeRequest(blocks[0], 4);
+        request.handles[1].front().block = blocks[1];
+        request.handles[3].front().block = blocks[2];
+        ASSERT_TRUE(backend->write(backend->prepareWrite(std::move(request))));
+        ASSERT_EQ(executor->runAll(), 1u);
+        other_task = {};
+        EXPECT_EQ(pool->refCount(blocks[2]), 1u);
+        pool->decRef(blocks[2]);
+        EXPECT_FALSE(pool->isAllocated(blocks[2]));
+        ASSERT_TRUE(static_cast<bool>(complete));
+        complete();
+        complete();
+        executor->runAll();
+        backend->shutdown();
+        EXPECT_EQ(pool->refCount(blocks[0]), 1u);
+        EXPECT_EQ(pool->refCount(blocks[1]), 1u);
+        EXPECT_FALSE(pool->isAllocated(blocks[2]));
+        pool->decRef({blocks[0], blocks[1]});
+    }
+}
+
+TEST(StorageBackendTest, WriteMaskDistinguishesEqualBlockIdsInDifferentPools) {
+    auto first_pool = std::make_shared<TestBlockPool>();
+    auto second_pool = std::make_shared<TestBlockPool>();
+    const auto first = first_pool->malloc().value();
+    const auto second = second_pool->malloc().value();
+    ASSERT_EQ(first, second);
+    first_pool->incRef(first);
+    second_pool->incRef(second);
+    auto executor = std::make_shared<HoldingExecutor>();
+    QuarantineObservingBackend backend(true, executor);
+    ASSERT_TRUE(backend.init(makeSharedPoolTopology(), {{"group_0", first_pool}, {"group_1", second_pool}},
+                            [](int layer, const std::string&, int) {
+                                return std::vector<BlockInfo>{{false, layer, 0, nullptr, 16}};
+                            }));
+    backend.start_write_action = [&](const StorageRequest&, auto, auto retain_pins) {
+        retain_pins({1});
+        EXPECT_EQ(first_pool->refCount(first), 1u);
+        EXPECT_EQ(second_pool->refCount(second), 2u);
+        return false;
+    };
+    auto request = makeRequest(first, 2);
+    request.handles[0].front().tag = "group_0";
+    request.handles[1].front().tag = "group_1";
+    ASSERT_TRUE(backend.write(backend.prepareWrite(std::move(request))));
+    executor->runAll();
+    EXPECT_EQ(first_pool->refCount(first), 1u);
+    EXPECT_EQ(second_pool->refCount(second), 1u);
+    backend.shutdown();
+    first_pool->decRef(first);
+    second_pool->decRef(second);
+}
+
+TEST(StorageBackendTest, CompletedDecodeWriteMaskRetainsSharedPeersAndBudgetUntilCompletion) {
+    auto pool = std::make_shared<TestBlockPool>();
+    const auto blocks = pool->malloc(3).value();
+    pool->incRef(blocks);
+    auto executor = std::make_shared<HoldingExecutor>();
+    ProtectedBackend backend(true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+    DecodePublicationBudget budget(48, 1);
+    auto request = makeRequest(blocks[0], 2);
+    request.decode_completion = true;
+    request.completion_budget_lease = budget.tryAcquire(48);
+    request.handles[0].front().peer_blocks = {blocks[0], blocks[1], blocks[0]};
+    request.handles[1].front().block = blocks[2];
+    request.handles[1].front().peer_blocks = {blocks[0], blocks[2], blocks[2]};
+    std::function<void()> complete;
+    block_tree_cache_detail::ScopeRollback drain([&] {
+        executor->runAll();
+        if (complete)
+            complete();
+        executor->runAll();
+        backend.shutdown();
+    });
+    backend.start_write_action = [&](const StorageRequest&, auto done, auto retain_pins) {
+        retain_pins({1});
+        EXPECT_EQ(pool->refCount(blocks[0]), 2u);
+        EXPECT_EQ(pool->refCount(blocks[1]), 1u);
+        EXPECT_EQ(pool->refCount(blocks[2]), 2u);
+        complete = [done] { done([](bool) {}); };
+        return true;
+    };
+    ASSERT_TRUE(backend.write(backend.prepareWrite(std::move(request))));
+    executor->runAll();
+    EXPECT_EQ(budget.snapshot().jobs, 1u);
+    ASSERT_TRUE(static_cast<bool>(complete));
+    complete();
+    executor->runAll();
+    EXPECT_EQ(budget.snapshot().jobs, 0u);
+    for (const auto block : blocks)
+        EXPECT_EQ(pool->refCount(block), 1u);
+    backend.shutdown();
+    pool->decRef(blocks);
+}
+
+TEST(StorageBackendTest, WriteMaskQuarantinesOnlyRetainedSourcePins) {
+    auto pool = std::make_shared<TestBlockPool>();
+    const auto blocks = pool->malloc(2).value();
+    pool->incRef(blocks);
+    auto executor = std::make_shared<HoldingExecutor>();
+    ProtectedBackend backend(true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+    block_tree_cache_detail::ScopeRollback drain([&] {
+        backend.proveQuiescence();
+        backend.shutdown();
+    });
+    backend.start_write_action = [&](const StorageRequest&, auto, auto retain_pins) -> bool {
+        retain_pins({1});
+        throw StorageOperationCompletionUnknown("write completion unknown", StorageQuarantineReason::RPC_ERROR);
+    };
+    auto request = makeRequest(blocks[0], 2);
+    request.handles[1].front().block = blocks[1];
+    ASSERT_TRUE(backend.write(backend.prepareWrite(std::move(request))));
+    executor->runAll();
+    EXPECT_EQ(pool->refCount(blocks[0]), 1u);
+    EXPECT_EQ(pool->refCount(blocks[1]), 2u);
+    EXPECT_EQ(backend.quarantined_blocks, 1u);
+    drain.run();
+    EXPECT_EQ(pool->refCount(blocks[0]), 1u);
+    EXPECT_EQ(pool->refCount(blocks[1]), 1u);
+    pool->decRef(blocks);
 }
 
 TEST(StorageBackendTest, MidPreparePinFailureRollsBackRecordedPinsAndBudgetExactlyOnce) {

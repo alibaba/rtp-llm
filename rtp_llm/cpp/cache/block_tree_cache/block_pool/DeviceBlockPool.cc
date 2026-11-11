@@ -55,7 +55,7 @@ std::function<void()> DeviceBlockPool::pinForRemotePublication(BlockIdxType bloc
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     checkAllocatedNoLock(block);
-    // Only the enabled publication path pays for this reservation. At most
+    // Reserve free-list capacity before acquiring storage I/O pins. At most
     // totalBlocksNumNoLock() block IDs can be in the free list at any time.
     reserveAllReleasedBlocksNoLock();
     auto notify = capacityChangeCallbackNoLock();
