@@ -34,6 +34,18 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from rtp_llm.models_py.modules.dsv41.fp8.attention import AttentionFP8
 
 
+def _needs_reference_output_proj(o: torch.Tensor) -> bool:
+    """The fused inverse-RoPE kernel stores through FP8 E4M3; SM80 lacks it."""
+    if getattr(torch.version, "hip", None) is not None:
+        return True
+    if not o.is_cuda:
+        return True
+    try:
+        return torch.cuda.get_device_capability(o.device)[0] < 9
+    except Exception:
+        return True
+
+
 def decode_output_proj(
     attn: "AttentionFP8",
     o: torch.Tensor,  # [B, q_len, H, D]
@@ -55,7 +67,7 @@ def decode_output_proj(
     """
     rd = attn.rope_head_dim
 
-    if o.is_cuda and o.numel() > 0:
+    if o.is_cuda and o.numel() > 0 and not _needs_reference_output_proj(o):
         o_fp8, o_scale = fused_inv_rope_fp8_quant(
             o,
             freqs_cis,
