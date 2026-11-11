@@ -68,7 +68,16 @@ void AwiRankStore::appendEvent(std::string json_event, std::string request_id, s
         events_.pop_front();
         ++dropped_;
     }
-    events_.push_back(Event{std::move(json_event), std::move(request_id), std::move(operation_id)});
+    events_.push_back(Event{std::move(json_event), std::move(request_id), std::move(operation_id), false});
+}
+
+void AwiRankStore::appendGlobalEvent(std::string json_event) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (events_.size() >= cap_) {
+        events_.pop_front();
+        ++dropped_;
+    }
+    events_.push_back(Event{std::move(json_event), std::string(), std::string(), true});
 }
 
 void AwiRankStore::armBarrier(std::string operation_id, std::vector<std::string> request_ids, int64_t context_tokens) {
@@ -117,6 +126,10 @@ std::string AwiRankStore::collectJson(const std::string& operation_id) const {
             }
         }
         for (const auto& event : events_) {
+            if (event.global) {
+                selected.push_back(&event.json);
+                continue;
+            }
             if (event.operation_id == operation_id) {
                 selected.push_back(&event.json);
                 continue;

@@ -1,9 +1,29 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/model_rpc/AwiRankStore.h"
+
+#include <chrono>
+#include <string>
 
 namespace rtp_llm {
+namespace {
+// AWI evaluator event helper: backend name reported to the frontend as
+// configuration.graph_backend ("hip" on MI308X per the protocol).
+constexpr const char* awiCaptureBackendName() {
+#if USING_ROCM
+    return "hip";
+#else
+    return "cuda";
+#endif
+}
+}  // namespace
+
 void CudaGraphRunner::replayDecode(int bs) {
     replayGraph(bs);
+    // AWI: bumped only after a successful replay; the engine loop brackets
+    // executor_->process() with counter reads so decode events carry a
+    // graph_replay flag grounded in this call, never in requested settings.
+    AwiRankStore::instance().bumpGraphReplay();
 }
 
 std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
@@ -73,6 +93,22 @@ void CudaGraphRunner::captureDecode() {
         // as a partially captured graph instead of deleting in-flight storage.
         capture_session_may_be_dirty_.store(false, std::memory_order_release);
         RTP_LLM_LOG_INFO("capture success for batch size: %d", bs);
+        {
+            // AWI capture event, emitted at the actual capture site after the
+            // replay-and-sync check passed for this batch size.
+            std::string event = "{\"kind\":\"capture\",\"backend\":\"";
+            event += awiCaptureBackendName();
+            event += "\",\"mode\":\"decode\",\"batch_size\":";
+            event += std::to_string(bs);
+            event += ",\"num_tokens_per_bs\":";
+            event += std::to_string(num_tokens_per_bs_);
+            event += ",\"status\":\"ok\",\"host_ns\":";
+            event += std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        std::chrono::system_clock::now().time_since_epoch())
+                                        .count());
+            event += "}";
+            AwiRankStore::instance().appendGlobalEvent(std::move(event));
+        }
     }
     RTP_LLM_LOG_INFO("Capture Decode End");
 }

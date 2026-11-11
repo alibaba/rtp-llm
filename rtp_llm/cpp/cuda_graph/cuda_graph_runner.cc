@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cuda_graph/generation_prefill_cuda_graph_replay_metadata.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -12,6 +13,7 @@
 #include <c10/core/InferenceMode.h>
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/model_rpc/AwiRankStore.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
@@ -2562,9 +2564,36 @@ CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs
 
 CudaGraphRunner* CudaGraphRunner::initializeCapture(std::unique_ptr<CudaGraphRunner> runner) {
     RTP_LLM_CHECK_WITH_INFO(runner != nullptr, "cannot initialize a null CUDA graph runner");
+    // AWI: record genuine capture failures as global events (the success
+    // events are emitted per batch size in captureDecode/capturePrefill).
+    auto append_capture_failure = [&runner](const char* error_text) {
+        std::string sanitized;
+        sanitized.reserve(std::strlen(error_text) + 8);
+        for (const char* p = error_text; *p != '\0'; ++p) {
+            const char c = *p;
+            sanitized.push_back((c == '"' || c == '\\' || static_cast<unsigned char>(c) < 0x20) ? '\'' : c);
+        }
+        std::string event = "{\"kind\":\"capture\",\"backend\":\"";
+#if USING_ROCM
+        event += "hip";
+#else
+        event += "cuda";
+#endif
+        event += "\",\"mode\":\"";
+        event += runner->is_prefill_cuda_graph_mode_ ? "prefill" : "decode";
+        event += "\",\"status\":\"failed\",\"error\":\"";
+        event += sanitized;
+        event += "\",\"host_ns\":";
+        event += std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch())
+                                    .count());
+        event += "}";
+        AwiRankStore::instance().appendGlobalEvent(std::move(event));
+    };
     try {
         runner->initCapture();
     } catch (const std::exception& e) {
+        append_capture_failure(e.what());
         if (runner->captureSessionMayBeDirty()) {
             RTP_LLM_LOG_ERROR("Retaining failed CUDA graph runner during fail-fast initialization because "
                               "destroying a partially captured graph is unsafe");
@@ -2573,6 +2602,7 @@ CudaGraphRunner* CudaGraphRunner::initializeCapture(std::unique_ptr<CudaGraphRun
         }
         throw;
     } catch (...) {
+        append_capture_failure("unknown exception during CUDA graph capture");
         if (runner->captureSessionMayBeDirty()) {
             RTP_LLM_LOG_ERROR("Retaining failed CUDA graph runner after an unknown capture error because "
                               "destroying a partially captured graph is unsafe");

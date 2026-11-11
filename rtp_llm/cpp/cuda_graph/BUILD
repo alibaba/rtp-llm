@@ -102,6 +102,7 @@ cc_library(
         ":generation_prefill_cuda_graph_replay_metadata",
         ":cuda_graph_hdrs_lib",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/model_rpc:awi_rank_store",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:profiling_scope",

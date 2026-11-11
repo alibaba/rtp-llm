@@ -18,12 +18,14 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
+#include "rtp_llm/cpp/model_rpc/AwiRankStore.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <c10/core/InferenceMode.h>
 #include <algorithm>
 #include <chrono>
 #include <cinttypes>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -51,6 +53,40 @@ namespace {
 bool shouldCoordinateCpuTpShutdown(const ParallelismConfig& parallelism, const FfnDisAggregateConfig& ffn) {
     return parallelism.tp_size > 1 && parallelism.dp_size == 1 && parallelism.pp_size == 1
            && !ffn.enable_ffn_disaggregate && !ffn.is_ffn_service() && CpuTpBroadcaster::instance().isInitialized();
+}
+
+// AWI evaluator events (evaluator-protocol.md): the backend name must equal
+// the graph_backend the frontend reports ("hip" on MI308X), the clock is the
+// common host clock across ranks (emission is rank0-only), and JSON strings
+// are escaped without pulling a JSON library into the engine loop.
+constexpr const char* awiGraphBackendName() {
+#if USING_ROCM
+    return "hip";
+#else
+    return "cuda";
+#endif
+}
+
+int64_t awiNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+void awiAppendJsonString(std::string& out, const std::string& value) {
+    out.push_back('"');
+    for (char c : value) {
+        if (c == '"' || c == '\\') {
+            out.push_back('\\');
+        }
+        if (static_cast<unsigned char>(c) < 0x20) {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "\\u%04x", c);
+            out += buf;
+        } else {
+            out.push_back(c);
+        }
+    }
+    out.push_back('"');
 }
 
 // 释放glibc缓存的host内存，将其归还给操作系统
@@ -881,6 +917,91 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
     return {std::move(enqueue_successes), std::move(streams)};
 }
 
+void NormalEngine::markAwiPrefillStarts(const std::list<GenerateStreamPtr>& streams) {
+    const int64_t now_ns = awiNowNs();
+    for (const auto& stream : streams) {
+        if (!stream || !stream->isContextStream()) {
+            continue;
+        }
+        const std::string& rid = stream->generateInput()->request_info.request_id;
+        if (rid.empty()) {
+            continue;
+        }
+        auto& state = awi_stream_states_[rid];
+        if (state.prefill_start_ns == 0) {
+            // Covers the ENTIRE prefill including chunks: stamped at the
+            // first step this stream was scheduled as a context stream.
+            state.prefill_start_ns = now_ns;
+        }
+    }
+}
+
+void NormalEngine::emitAwiStepEvents(const std::list<GenerateStreamPtr>& streams,
+                                     int64_t                             step_latency_us,
+                                     bool                                graph_step,
+                                     int64_t                             step_end_ns) {
+    auto& store = AwiRankStore::instance();
+    for (const auto& stream : streams) {
+        if (!stream) {
+            continue;
+        }
+        const std::string& rid = stream->generateInput()->request_info.request_id;
+        if (rid.empty()) {
+            continue;  // fake/internal streams carry no frontend request id
+        }
+        auto& state = awi_stream_states_[rid];
+        // Signed on purpose: context streams report seqLength() == inputLength()
+        // (generated == 0) until the first token is appended.
+        const int64_t generated = static_cast<int64_t>(stream->seqLength()) - static_cast<int64_t>(stream->inputLength());
+        if (!state.prefill_emitted && generated >= 1) {
+            state.prefill_emitted = true;
+            const int64_t start_ns =
+                state.prefill_start_ns > 0 ? state.prefill_start_ns : step_end_ns - step_latency_us * 1000;
+            std::string event = "{\"kind\":\"prefill\",\"request_id\":";
+            awiAppendJsonString(event, rid);
+            event += ",\"input_tokens\":";
+            event += std::to_string(stream->inputLength());
+            event += ",\"start_ns\":";
+            event += std::to_string(start_ns);
+            event += ",\"end_ns\":";
+            event += std::to_string(step_end_ns);
+            event += ",\"host_ns\":";
+            event += std::to_string(step_end_ns);
+            event += "}";
+            store.appendEvent(std::move(event), rid, std::string());
+        }
+        // One aggregated decode event per output step. Step k produces the
+        // k+1-th token (the first output token belongs to prefill), so the
+        // highest completed step after this executor call is generated - 1
+        // and steps are 1..N-1 as the evaluator contract requires.
+        const int64_t last_step = generated - 1;
+        char          ms_buf[32];
+        snprintf(ms_buf, sizeof(ms_buf), "%.6f", static_cast<double>(step_latency_us) / 1000.0);
+        for (int64_t s = state.last_decode_step + 1; s <= last_step; ++s) {
+            std::string event = "{\"kind\":\"decode\",\"request_id\":";
+            awiAppendJsonString(event, rid);
+            event += ",\"step\":";
+            event += std::to_string(s);
+            event += ",\"backend\":\"";
+            event += awiGraphBackendName();
+            event += "\",\"graph_replay\":";
+            event += graph_step ? "true" : "false";
+            event += ",\"elapsed_ms\":";
+            event += ms_buf;
+            event += ",\"host_ns\":";
+            event += std::to_string(step_end_ns);
+            event += "}";
+            store.appendEvent(std::move(event), rid, std::string());
+        }
+        if (last_step > state.last_decode_step) {
+            state.last_decode_step = last_step;
+        }
+        if (stream->isFinished()) {
+            awi_stream_states_.erase(rid);
+        }
+    }
+}
+
 absl::Status NormalEngine::step() try {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
     while (pause_ && running_) {
@@ -899,6 +1020,7 @@ absl::Status NormalEngine::step() try {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);
         }
+        markAwiPrefillStarts(streams);
         // TP collectives and FFN-disaggregate alignment both require empty batches to enter process().
         if (shouldEarlyReturnEmptyBatch(
                 streams.empty(), parallelism_config.tp_size, ffn_disaggregate_config.enable_ffn_disaggregate)) {
@@ -909,6 +1031,10 @@ absl::Status NormalEngine::step() try {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
+    // AWI: bracket the executor with the process-wide graph-replay counter so
+    // a nonzero delta proves this step's decode ran a replayed captured graph
+    // (CudaGraphRunner::replayDecode bumps it) rather than an eager fallback.
+    const uint64_t awi_replays_before = AwiRankStore::instance().graphReplayCount();
 
     // Per-request timeline: if any stream requested gen_timeline and no session is
     // active yet, configure the profiler so the executor-driven step window
@@ -947,6 +1073,12 @@ absl::Status NormalEngine::step() try {
         RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
         auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
         reportMetrics({step_latency});
+        // AWI: one aggregated scheduler event per request/step, measured over
+        // the synchronized executor step (includes host/communication overhead).
+        emitAwiStepEvents(streams,
+                          step_latency,
+                          AwiRankStore::instance().graphReplayCount() != awi_replays_before,
+                          awiNowNs());
     }
 
     return status;

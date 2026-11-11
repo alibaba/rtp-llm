@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
+#include <unordered_map>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
@@ -75,6 +77,21 @@ private:
     static bool   shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_decode_scheduler, int64_t dp_size);
     void          mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
 
+    // AWI evaluator instrumentation (evaluator-protocol.md). One aggregated
+    // scheduler-side event per request/step, emitted on the engine loop
+    // thread of tp_rank 0 only (the sole rank that observes scheduled
+    // streams), from real execution — never from requested settings.
+    struct AwiStreamState {
+        int64_t prefill_start_ns = 0;   // first step this stream was scheduled as context
+        int64_t last_decode_step = 0;   // highest decode step already emitted
+        bool    prefill_emitted  = false;
+    };
+    void markAwiPrefillStarts(const std::list<GenerateStreamPtr>& streams);
+    void emitAwiStepEvents(const std::list<GenerateStreamPtr>& streams,
+                           int64_t                             step_latency_us,
+                           bool                                graph_step,
+                           int64_t                             step_end_ns);
+
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 
     bool isMTPEagle() override;
@@ -82,6 +99,9 @@ private:
     bool isDSpark() override;
 
 private:
+    // Accessed only from the engine loop thread (step()); no locking needed.
+    std::unordered_map<std::string, AwiStreamState> awi_stream_states_;
+
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
     bool                                          cpu_tp_shutdown_ = false;

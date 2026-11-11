@@ -72,6 +72,18 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Standalone (no deps beyond the standard library) so the engine loop and the
+# CUDA/HIP graph runner can both emit evaluator events without depending on
+# the RPC server target — model_rpc_server depends on normal_engine, so the
+# reverse edge would be a cycle.
+cc_library(
+    name = "awi_rank_store",
+    srcs = ["AwiRankStore.cc"],
+    hdrs = ["AwiRankStore.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "model_rpc_server",
     srcs = glob(
@@ -82,6 +94,8 @@ cc_library(
             "ResponseBuffer.cc",
             "ShutdownCoordinator.cc",
             "PrefillRequestLogger.cc",
+            # Owned by :awi_rank_store for acyclic engine/graph deps.
+            "AwiRankStore.cc",
         ],
     ),
     hdrs = glob(
@@ -92,10 +106,12 @@ cc_library(
             "ResponseBuffer.h",
             "ShutdownCoordinator.h",
             "PrefillRequestLogger.h",
+            "AwiRankStore.h",
         ],
     ),
     visibility = ["//visibility:public"],
     deps = [
+        ":awi_rank_store",
         ":embedding_arpc_deps",
         ":model_rpc_pool",
         ":response_buffer",
