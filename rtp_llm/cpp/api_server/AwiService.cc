@@ -156,15 +156,65 @@ std::vector<int> getInputIds(const JsonMap& map) {
     if (it == map.end()) {
         return ids;
     }
+    // autil's JSON parser keeps numeric array elements in a JsonNumber whose
+    // stored scalar type is not guaranteed to be int64. Try the scalar casts
+    // accepted by the parser instead of letting one cast failure discard the
+    // whole array; /awi/generate is the evaluator's only pretokenized entry.
+    auto append_number = [&ids](const Any& value) {
+        try {
+            ids.push_back(static_cast<int>(AnyCast<int64_t>(value)));
+            return true;
+        } catch (...) {
+        }
+        try {
+            ids.push_back(static_cast<int>(AnyCast<int32_t>(value)));
+            return true;
+        } catch (...) {
+        }
+        try {
+            ids.push_back(static_cast<int>(AnyCast<uint64_t>(value)));
+            return true;
+        } catch (...) {
+        }
+        try {
+            ids.push_back(static_cast<int>(AnyCast<double>(value)));
+            return true;
+        } catch (...) {
+        }
+        try {
+            ids.push_back(static_cast<int>(AnyCast<float>(value)));
+            return true;
+        } catch (...) {
+        }
+        try {
+            ids.push_back(std::stoi(AnyCast<std::string>(value)));
+            return true;
+        } catch (...) {
+        }
+        return false;
+    };
     try {
-        for (const auto& value : AnyCast<JsonArray>(it->second)) {
-            try {
-                ids.push_back(static_cast<int>(AnyCast<int64_t>(value)));
-            } catch (...) {
-                ids.push_back(static_cast<int>(AnyCast<double>(value)));
-            }
+        const auto& array = AnyCast<JsonArray>(it->second);
+        for (const auto& value : array) {
+            append_number(value);
         }
     } catch (...) {
+        try {
+            const auto& text = AnyCast<std::string>(it->second);
+            size_t      start = 0;
+            while (start <= text.size()) {
+                const auto comma = text.find(',', start);
+                const auto part  = text.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+                if (!part.empty()) {
+                    ids.push_back(std::stoi(part));
+                }
+                if (comma == std::string::npos) {
+                    break;
+                }
+                start = comma + 1;
+            }
+        } catch (...) {
+        }
     }
     return ids;
 }
