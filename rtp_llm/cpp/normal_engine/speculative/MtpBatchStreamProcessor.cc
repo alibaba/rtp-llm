@@ -1547,9 +1547,15 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     const int force_topk = is_dspark_ ? speculative::dsparkForceTopK() : 0;
     if (!target_point_mass && !sampler_inputs.cum_log_probs.defined() && !has_draft_to_target_mapping && force_topk > 0
         && force_topk <= 4096 && force_topk < static_cast<int>(vocab_size_)) {
-        const auto* ks                = sampler_inputs.top_k.data_ptr<int32_t>();
-        const bool  no_explicit_top_k = std::all_of(ks, ks + total_batch_size, [](int32_t k) { return k <= 0; });
-        compact_target                = no_explicit_top_k;
+        const auto* ks        = sampler_inputs.top_k.data_ptr<int32_t>();
+        const auto* ps        = sampler_inputs.top_p.data_ptr<float>();
+        const bool  any_top_p = std::any_of(
+            ps, ps + total_batch_size, [](float p) { return std::abs(p) >= 1e-7f && std::abs(p - 1.0f) >= 1e-7f; });
+        const bool no_explicit_top_k = std::all_of(ks, ks + total_batch_size, [](int32_t k) { return k <= 0; });
+        // With no requested top-k or top-p filtering, rejection must see the
+        // full target distribution. Keep the existing explicit-top-k guard;
+        // draft proposal truncation is independent of this target-only gate.
+        compact_target = no_explicit_top_k && any_top_p;
     }
 #endif
     if (target_point_mass) {

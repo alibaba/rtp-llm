@@ -555,7 +555,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputBuildsPositionSpec
               toVec<float>(sampler_inputs.temperature));
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testDSparkTargetWithoutExplicitTopKUsesFixedCandidateWidth) {
+TEST_F(MtpBatchStreamProcessorTest, testDSparkTargetCandidateAdmissionPreservesUnfilteredTarget) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -596,8 +596,17 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkTargetWithoutExplicitTopKUsesFixed
     second->generateConfig()->top_k = 0;
     auto pure_no_k_p1 = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
     ASSERT_TRUE(pure_no_k_p1.ok());
-    EXPECT_EQ(pure_no_k_p1->all_probs.size(1), speculative::dsparkForceTopK());
-    EXPECT_TRUE(pure_no_k_p1->all_probs_indices.defined());
+    EXPECT_EQ(pure_no_k_p1->all_probs.size(1), 8192);
+    EXPECT_FALSE(pure_no_k_p1->all_probs_indices.defined());
+
+    // Temperature remains per row and does not turn equal effective K/P into
+    // a mixed batch. Changing temperature cannot truncate target support.
+    second->generateConfig()->temperature = 0.7f;
+    auto mixed_temperature = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
+    ASSERT_TRUE(mixed_temperature.ok());
+    EXPECT_EQ(mixed_temperature->all_probs.size(1), 8192);
+    EXPECT_FALSE(mixed_temperature->all_probs_indices.defined());
+    second->generateConfig()->temperature = 1.0f;
 
     auto mapped = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft, nullptr, true);
     ASSERT_TRUE(mapped.ok());
@@ -715,6 +724,96 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkTargetWithoutExplicitTopKUsesFixed
     ASSERT_TRUE(large_eight_joint.ok());
     EXPECT_EQ(large_eight_joint->all_probs.size(1), 129280);
     EXPECT_FALSE(large_eight_joint->all_probs_indices.defined());
+}
+
+// A shape-only check misses a second sampler-side truncation. Exercise the real
+// gather -> Sampler::forward path and require every vocabulary entry to retain
+// its known mass. This fails on release1110 for every positive candidate cap.
+TEST_F(MtpBatchStreamProcessorTest, testDSparkPureNoKNoPPreservesFullTargetDistribution) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 32;
+    model_config.vocab_size  = 8192;
+    model_config.num_layers  = 1;
+    RuntimeConfig              runtime_config;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.gen_num_per_cycle = 1;
+    sp_config.type              = SP_TYPE_DSPARK;
+    auto processor              = MtpBatchStreamProcessor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, makeProcessorCacheConfig(), sp_config, false);
+    Sampler                         sampler(SamplerInitParams{});
+    speculative::SpeculativeSampler rejector(torch::Tensor(), 1);
+    auto                            options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto                            ints    = options.dtype(torch::kInt32);
+
+    for (const char* cap : {"512", "1024", "4096"}) {
+        SCOPED_TRACE(cap);
+        autil::EnvGuard force_topk("RTP_LLM_DSPARK_FORCE_TOPK", cap);
+        for (int64_t batch_size : {1, 2}) {
+            SCOPED_TRACE(batch_size);
+            // P=0 is the existing sampler alias for disabled nucleus filtering.
+            for (float top_p : {0.0f, 1.0f}) {
+                SCOPED_TRACE(top_p);
+                ResourceContext              resource_context;
+                std::list<GenerateStreamPtr> streams;
+                for (int64_t row = 0; row < batch_size; ++row) {
+                    auto stream = createContextStream(model_config, runtime_config, resource_context, {1}, row + 1);
+                    stream->setScoreLen(2);
+                    stream->generateConfig()->do_sample   = true;
+                    stream->generateConfig()->top_k       = 0;
+                    stream->generateConfig()->top_p       = top_p;
+                    stream->generateConfig()->temperature = 1.0f;
+                    streams.push_back(stream);
+                }
+                GptModelOutputs model_output;
+                model_output.logits = torch::zeros({batch_size * 2, model_config.vocab_size}, options);
+                auto input          = processor.gatherSpecSamplerInput(
+                    StreamGroups(streams), model_output, {}, torch::zeros({batch_size, 1}, torch::kInt32));
+                ASSERT_TRUE(input.ok());
+                ASSERT_EQ(input->all_probs.size(1), model_config.vocab_size);
+                ASSERT_FALSE(input->all_probs_indices.defined());
+
+                auto output = sampler.forward(*input);
+                ASSERT_FALSE(output.all_probs_indices.defined());
+                ASSERT_EQ(output.all_probs.sizes(), model_output.logits.sizes());
+                // Uniform logits have an exact binary FP32 probability 1/8192.
+                // A 4096 cap still loses half this target support; 1024 loses
+                // seven eighths. Both are distinguishable from this contract.
+                const float probability = 1.0f / model_config.vocab_size;
+                EXPECT_TRUE(output.all_probs.eq(probability).all().item<bool>());
+                EXPECT_TRUE(output.all_probs.sum(-1).eq(1.0f).all().item<bool>());
+
+                // Exercise the production compact-q/dense-p bridge too. The
+                // target is delta(V-1), outside every compact draft candidate
+                // set here, so rejection and its replacement are certain.
+                model_output.logits.fill_(-std::numeric_limits<float>::infinity());
+                model_output.logits.select(1, model_config.vocab_size - 1).zero_();
+                auto delta_input = processor.gatherSpecSamplerInput(
+                    StreamGroups(streams), model_output, {}, torch::zeros({batch_size, 1}, torch::kInt32));
+                ASSERT_TRUE(delta_input.ok());
+                ASSERT_EQ(delta_input->all_probs.size(1), model_config.vocab_size);
+                ASSERT_FALSE(delta_input->all_probs_indices.defined());
+                auto target = sampler.forward(*delta_input);
+                ASSERT_FALSE(target.all_probs_indices.defined());
+                EXPECT_TRUE(target.token_ids.select(1, target.token_ids.size(1) - 1)
+                                .eq(model_config.vocab_size - 1)
+                                .all()
+                                .item<bool>());
+                target.all_probs = target.all_probs.reshape({batch_size, 2, model_config.vocab_size});
+
+                const int64_t width = std::stoi(cap);
+                SamplerOutput draft;
+                draft.token_ids = torch::zeros({batch_size, 1}, ints);
+                draft.all_probs = torch::zeros({batch_size, 1, width}, options);
+                draft.all_probs.select(2, 0).fill_(1.0f);
+                draft.all_probs_indices =
+                    torch::arange(width, ints).reshape({1, 1, width}).expand({batch_size, 1, width}).contiguous();
+                draft.valid_draft_lengths = torch::ones({batch_size}, ints);
+                auto rejected             = rejector.forward(streams, draft, target);
+                EXPECT_TRUE(rejected.accept_len.eq(1).all().item<bool>());
+                EXPECT_TRUE(rejected.accept_tokens.select(1, 0).eq(model_config.vocab_size - 1).all().item<bool>());
+            }
+        }
+    }
 }
 
 // Per-round logits are consumable; gathering does not clone them.
