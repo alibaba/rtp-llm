@@ -512,6 +512,7 @@ py_library(
         'start_dash_sc_server.py',
         '_ft_pickler.py',
         'model_factory_register.py',
+        'awi_telemetry.py',
     ],
     deps = [
         "//rtp_llm/server:server",
