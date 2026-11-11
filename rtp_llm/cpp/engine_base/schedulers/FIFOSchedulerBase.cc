@@ -468,6 +468,7 @@ void FIFOSchedulerBase::appendTaskInfos(std::vector<EngineScheduleInfo::TaskInfo
         task_info.input_length  = stream->inputLength();
         task_info.iterate_count = stream->iterCount();
         task_info.batch_id      = stream->groupId();
+        task_info.priority      = stream->priority();
         task_list.emplace_back(task_info);
     }
 }

@@ -3,6 +3,7 @@
 #include "rtp_llm/models_py/bindings/common/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/kv_cache_kernels.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/model_utils/RopeConfig.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
@@ -16,6 +17,7 @@ namespace rtp_llm {
 
 struct CKAttn {
     KVBlockArray  kv_block_array;
+    RopeConfig    rope_config;
     torch::Tensor kv_cache_offset;
 
     torch::Tensor kv_cache_block_id_device;

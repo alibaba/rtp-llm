@@ -188,6 +188,12 @@ py_test(
 )
 
 py_test(
+    name = "qwen35_embedding_test",
+    srcs = ["qwen35_embedding_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "deepseek_v41_processor_test",
     srcs = ["deepseek_v41_processor_test.py"],
     deps = ["//rtp_llm:testlib"],
@@ -209,4 +215,34 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "qwen2_vl_newloader_routing_test",
+    srcs = ["qwen2_vl_newloader_routing_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:multimodal",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm/model_loader:loader",
+        "//rtp_llm/models_py:qwen2_vl_vision_loader",
+    ],
+)
+
+py_test(
+    name = "qwen3_vl_newloader_routing_test",
+    exec_properties = {"gpu": "H20"},
+    srcs = ["qwen3_vl_newloader_routing_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:multimodal",
+        "//rtp_llm:models",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm/model_loader:loader",
+        "//rtp_llm/models_py:qwen3_vl_vision_loader",
+    ],
 )

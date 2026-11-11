@@ -18,7 +18,6 @@ from rtp_llm.ops import (
     FMHAType,
     KvCacheDataType,
     ParallelismConfig,
-    RopeStyle,
 )
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOpAsm,
@@ -31,14 +30,6 @@ from rtp_llm.ops.compute_ops import (
     get_scalar_type,
     paged_attention_atrex,
 )
-
-
-def _is_mrope_interleaved_supported(attn_configs: AttentionConfigs) -> bool:
-    """Return whether the ROCm fused RoPE path supports this MRoPE layout."""
-    return not (
-        attn_configs.rope_config.style == RopeStyle.Mrope
-        and not attn_configs.rope_config.mrope_interleaved
-    )
 
 
 # aiter.pa_fwd_asm asserts head_size == 128.
@@ -74,9 +65,7 @@ def validate_v_layout(
     attn_inputs: PyAttentionInputs,
     fmha_config: Optional[FMHAConfig],
 ) -> bool:
-    if not attn_configs.need_rope_kv_cache or not _is_mrope_interleaved_supported(
-        attn_configs
-    ):
+    if not attn_configs.need_rope_kv_cache:
         return False
     if fmha_config is not None and not any(
         (fmha_config.use_aiter_pa, fmha_config.use_asm_pa, fmha_config.use_triton_pa)
@@ -1736,7 +1725,7 @@ class AiterPrefillImplAsm(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return _is_mrope_interleaved_supported(attn_configs)
+        return True
 
     def forward(
         self,
@@ -1796,7 +1785,7 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return _is_mrope_interleaved_supported(attn_configs)
+        return True
 
     def forward(
         self,
@@ -1935,9 +1924,6 @@ class AiterPrefillImplPaged(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        if not _is_mrope_interleaved_supported(attn_configs):
-            return False
-
         pl = attn_inputs.prefix_lengths
         has_prefix = pl is not None and pl.numel() > 0 and int(pl.max().item()) > 0
         return has_prefix
@@ -2156,7 +2142,6 @@ class AiterPrefillImplTriton(AiterPrefillImplPaged):
     ) -> bool:
         if (
             not attn_inputs.is_cuda_graph
-            or not _is_mrope_interleaved_supported(attn_configs)
             or attn_configs.dtype != torch.bfloat16
             or attn_configs.kv_cache_dtype != KvCacheDataType.BASE
             or not attn_configs.is_causal
@@ -2223,10 +2208,7 @@ class AiterDecodeImplAsm(AiterDecodeImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return (
-            _is_mrope_interleaved_supported(attn_configs)
-            and attn_configs.size_per_head in ASM_DECODE_HEAD_SIZES
-        )
+        return attn_configs.size_per_head in ASM_DECODE_HEAD_SIZES
 
     def forward(
         self,
@@ -2273,7 +2255,7 @@ class AiterDecodeImplNonAsm(AiterDecodeImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return _is_mrope_interleaved_supported(attn_configs)
+        return True
 
     def forward(
         self,
@@ -2325,7 +2307,7 @@ class AiterDecodeImplTriton(AiterDecodeImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return _is_mrope_interleaved_supported(attn_configs)
+        return True
 
     def forward(
         self,

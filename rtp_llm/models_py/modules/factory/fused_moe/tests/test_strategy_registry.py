@@ -65,6 +65,7 @@ def _config(strategy: str, quant_config=None) -> MoEConfigAdapter:
     moe_config.use_deepep_low_latency = False
     return MoEConfigAdapter(
         model_config=model_config,
+        quant_config=quant_config,
         parallelism_config=parallelism_config,
         moe_config=moe_config,
     )

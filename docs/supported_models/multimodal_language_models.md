@@ -16,10 +16,13 @@ python3 -m rtp_llm.start_server \
 
 Below the supported models are summarized in a table.
 
-> **ROCm limitation:** Qwen2-VL and Qwen2.5-VL checkpoints use the
-> non-interleaved MRoPE layout by default, which the ROCm fused attention path
-> does not support. Do not set `mrope_interleaved=true` as a workaround because
-> that changes the checkpoint's RoPE semantics; use the CUDA backend instead.
+> **ROCm MRoPE layouts:** The fused RoPE/KV-cache path supports both the
+> contiguous (non-interleaved) T/H/W sections used by Qwen2-VL/Qwen2.5-VL and
+> the interleaved layout used by Qwen3-VL/Qwen3.5. Preserve the checkpoint's
+> `mrope_interleaved` setting: changing it changes the model's RoPE semantics.
+> Both layouts require three position coordinates per token and section sizes
+> summing to half the rotary dimension; only interleaved sections are subject
+> to the additional H/W slot-capacity limits.
 
 If you are unsure if a specific architecture is implemented, you can search for it via GitHub. For example, to search for `Qwen2_5_VLForConditionalGeneration`, use the expression:
 

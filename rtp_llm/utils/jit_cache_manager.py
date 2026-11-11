@@ -17,8 +17,16 @@ from stat import S_ISREG
 from threading import Event, Thread
 from time import monotonic
 
-from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
+try:
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+except ImportError:
+    # Some accelerator images intentionally omit watchdog. Snapshot polling in
+    # _sync_loop preserves correctness; only event-driven publication is lost.
+    class FileSystemEventHandler:
+        pass
+
+    Observer = None
 
 from rtp_llm.utils import jit_cache_store as store
 from rtp_llm.utils.jit_cache_deep_gemm import (
@@ -166,6 +174,10 @@ def resolve_scope(
     torch_scope = "-".join(map(str, (soabi, libc, accelerator, cpp, *abi)))
     scopes = {"accelerator": accelerator, "torch": torch_scope, "cxx": cpp}
     selected, keys = [], [f"root-{local_root}", toolkit, accelerator, torch_scope]
+    # Preserve the established zstd scope. Only fallback archives need a new
+    # namespace so a host without zstandard never opens an incompatible .zst.
+    if store.zstd is None:
+        keys.append("archive-gzip")
     flags = [f"{k}={v}" for k in COMPILE_FLAG_ENVS if (v := os.environ.get(k))]
     if flags:  # toolchain overrides change codegen: they belong in the key
         keys.append("flags-" + sha256("\0".join(flags).encode()).hexdigest()[:12])
@@ -355,23 +367,27 @@ class JitCacheManager(FileSystemEventHandler):
         return self._start_watch()
 
     def _start_watch(self) -> bool:
-        try:
-            # RTP_JIT_WATCHDOG_DEBUG=1 keeps the raw inotify event DEBUG
-            # stream available for incident diagnosis (event loss /
-            # IN_Q_OVERFLOW blind spots); every enabled component's rules
-            # would still gate the handler, only the log volume returns.
-            if os.environ.get("RTP_JIT_WATCHDOG_DEBUG", "0") != "1":
-                for name in NOISY_WATCHDOG_LOGGERS:
-                    logging.getLogger(name).setLevel(logging.WARNING)
-            self._observer = Observer()
-            for item in self.scope.components:
-                item.local_dir.mkdir(parents=True, exist_ok=True)
-                self._observer.schedule(self, str(item.local_dir), recursive=True)
-            self._observer.start()
-        except Exception:
-            logging.exception(
-                "JIT_CACHE_FAIL_OPEN: inotify watch setup failed; polling fallback active"
+        # Polling and inotify share the same directory contract. Optional
+        # watchdog availability must not decide whether JIT paths exist.
+        for item in self.scope.components:
+            item.local_dir.mkdir(parents=True, exist_ok=True)
+        if Observer is None:
+            logging.warning(
+                "JIT_CACHE_FAIL_OPEN: watchdog unavailable; polling fallback active"
             )
+        else:
+            try:
+                if os.environ.get("RTP_JIT_WATCHDOG_DEBUG", "0") != "1":
+                    for name in NOISY_WATCHDOG_LOGGERS:
+                        logging.getLogger(name).setLevel(logging.WARNING)
+                self._observer = Observer()
+                for item in self.scope.components:
+                    self._observer.schedule(self, str(item.local_dir), recursive=True)
+                self._observer.start()
+            except Exception:
+                logging.exception(
+                    "JIT_CACHE_FAIL_OPEN: inotify watch setup failed; polling fallback active"
+                )
         self._worker = Thread(target=self._sync_loop, daemon=True)
         self._worker.start()
         return True
@@ -468,6 +484,10 @@ def start_from_config(config):
     remote = str(config.remote_jit_dir or "").strip()
     if (scope := setup_jit_cache_env()) is None or not remote:
         return
+    if store.zstd is None:
+        logging.warning(
+            "JIT_CACHE_FALLBACK: zstandard unavailable; gzip snapshot fallback active"
+        )
     manager = JitCacheManager(scope, remote)
     try:
         if manager.bootstrap(config.jit_cache_setup_timeout_s):

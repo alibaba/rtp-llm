@@ -13,6 +13,9 @@ from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseVitWeights,
     VitParameters,
 )
+from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
+    MultiModalEmbeddingInterface,
+)
 from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_vit import (
     Qwen3_5MoeVisionConfig,
     Qwen3_5MoeVisionModel,
@@ -84,8 +87,17 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
     def batched_embedding(
         self, data_list: List[Any], mm_types: List[MMUrlType], **kwargs
     ):
+        if len(data_list) != len(mm_types):
+            raise ValueError("data_list and mm_types must have the same length")
+        if not data_list:
+            return []
         if not all(mm_type == MMUrlType.IMAGE for mm_type in mm_types):
-            return super().batched_embedding(data_list, mm_types, **kwargs)
+            # Qwen3.5 returns pooled features only; the Qwen3-VL parent batch
+            # implementation also requires DeepStack outputs. Preserve the
+            # generic per-media path for DEFAULT/VIDEO and mixed batches.
+            return MultiModalEmbeddingInterface.batched_embedding(
+                self, data_list, mm_types, **kwargs
+            )
         res_list = []
         pixel_values_list = []
         grid_thw_list = []

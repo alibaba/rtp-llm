@@ -7,7 +7,6 @@ import torch
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
     AiterDecodeImplBase,
-    _is_mrope_interleaved_supported,
     prefill_writes_vectorized_v,
 )
 from rtp_llm.models_py.triton_kernels.attention.beam_search_cascade import (
@@ -30,7 +29,6 @@ class AiterCascadeDecodeImpl(AiterDecodeImplBase):
             and configs.is_causal
             and configs.q_scaling == 1.0
             and configs.softmax_extra_scale == 1.0
-            and _is_mrope_interleaved_supported(configs)
             and not inputs.is_prefill
             and not inputs.is_target_verify
             and inputs.input_lengths.numel()
