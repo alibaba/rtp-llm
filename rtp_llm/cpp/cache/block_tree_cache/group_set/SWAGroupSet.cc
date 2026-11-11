@@ -6,7 +6,7 @@ SWAGroupSet::SWAGroupSet(size_t                          sliding_window_size,
                          size_t                          seq_size_per_block,
                          std::vector<DeviceBlockPoolPtr> device_pools,
                          std::shared_ptr<HostBlockPool>  host_pool,
-                         BlockTreeDiskBlockPoolPtr       disk_pool):
+                         DiskBlockPoolPtr                disk_pool):
     GroupSet(std::move(device_pools), std::move(host_pool), std::move(disk_pool)),
     sliding_window_size_(sliding_window_size),
     seq_size_per_block_(seq_size_per_block) {}

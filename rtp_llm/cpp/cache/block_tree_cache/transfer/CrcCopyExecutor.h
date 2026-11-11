@@ -21,24 +21,27 @@ namespace rtp_llm {
 // workers share a separate instance per direction and synchronize slot use.
 // stopAndWaitForIo() closes admission and proves physical completion, leaving
 // stage callbacks for poll(); it does not wait for business settlement.
-class CrcTransferService {
+std::vector<GroupSetPtr> crcTransferGroups(const std::vector<GroupSetPtr>& groups, bool enable_disk_cache);
+
+class CrcCopyExecutor {
 public:
     using DoneCallback = std::function<void(TransferResult)>;
 
-    // Slot count is per device in this direction's service.
+    // Groups have validated physical copy geometry. Slot count is per device.
     // TODO(legacy removal): remove the async parameter. Legacy passes false and
     // shares slots_per_device among the workers of one direction.
-    CrcTransferService(const std::vector<GroupSetPtr>& groups,
-                       size_t                          max_batch,
-                       size_t                          slots_per_device = 8,
-                       int64_t                         world_rank       = 0,
-                       std::shared_ptr<CrcDumpWriter>  dump_writer      = nullptr,
-                       bool                            async            = true);
-    ~CrcTransferService();
+    CrcCopyExecutor(const std::vector<GroupSetPtr>& groups,
+                    size_t                          max_batch,
+                    size_t                          slots_per_device = 8,
+                    int64_t                         world_rank       = 0,
+                    std::shared_ptr<CrcDumpWriter>  dump_writer      = nullptr,
+                    bool                            async            = true);
+    ~CrcCopyExecutor();
 
     // TODO(legacy removal): remove copy() and its synchronous implementation.
     // Internal callers supply resolved descriptors and configured GroupSets,
-    // with one direction/device per batch, as arranged by the dispatcher.
+    // PerRank has validated descriptor endpoints; the caller supplies one
+    // direction/device per nonempty batch and one host view per descriptor.
     TransferResult copy(const std::vector<HostBufferView>&     hosts,
                         const std::vector<TransferDescriptor>& descriptors,
                         const std::vector<const GroupSet*>&    groups);
@@ -51,6 +54,7 @@ public:
     // this service. They only fill the owner's already allocated stage record.
     // The caller keeps the storage behind hosts and business block references
     // valid through completion, including diagnostics/recovery.
+    // WorkLoop supplies a validated, homogeneous CRC batch and a nonempty callback.
     bool trySubmit(const std::vector<HostBufferView>&     hosts,
                    const std::vector<TransferDescriptor>& descriptors,
                    const GroupSetPtr&                     group,
@@ -70,40 +74,37 @@ private:
         DoneCallback                    done;
     };
     struct Slot {
-        std::unique_ptr<CrcCopyWorkspace>  copy;
-        int                                device{0};
+        std::unique_ptr<CrcCopyWorkspace> copy;
+        int                               device{0};
         // TODO(legacy removal): remove updating; only legacy workers use it.
-        bool                            updating{false};
-        std::unique_ptr<Operation>      operation;
+        bool                     updating{false};
+        std::optional<Operation> operation;
     };
-    void initialize(const std::vector<GroupSetPtr>& groups,
-                    size_t                          max_batch,
-                    size_t                          slots_per_device,
-                    int64_t                         world_rank,
-                    std::shared_ptr<CrcDumpWriter>  dump_writer);
     // Construct metadata from the caller's resolved descriptor and GroupSet owner.
-    static CrcCopyItem
-                   makeItem(const HostBufferView& host, const TransferDescriptor& descriptor, const GroupSetPtr& group);
+    static CrcCopyItem makeItem(const HostBufferView&     host,
+                                const TransferDescriptor& descriptor,
+                                const GroupSetPtr&        group,
+                                bool                      borrow_descriptor = false);
     // TODO(legacy removal): remove this synchronous slot execution helper.
-    TransferResult execute(int                                    device,
-                           const std::vector<CrcCopyItem>&        items,
-                           CrcCopyDirection                       direction,
-                           const std::vector<TransferDescriptor>& descriptors);
-    static TransferResult         mapResult(CrcCopyState                           status,
-                                            CrcCopyDirection                       direction,
-                                            const std::vector<TransferDescriptor>& descriptors,
-                                            const std::vector<CrcCopyFailure>&     failures);
-    void                          advance(Slot& slot, bool deliver);
-    static int                    deviceFor(const GroupSet& group);
-    static TransferStatus         statusFor(CrcCopyState status);
+    TransferResult        execute(int                                    device,
+                                  const std::vector<CrcCopyItem>&        items,
+                                  CrcCopyDirection                       direction,
+                                  const std::vector<TransferDescriptor>& descriptors);
+    static TransferResult mapResult(CrcCopyState                           state,
+                                    CrcCopyDirection                       direction,
+                                    const std::vector<TransferDescriptor>& descriptors,
+                                    const std::vector<CrcCopyFailure>&     failures);
+    void                  advance(Slot& slot, bool deliver);
+    static int            deviceFor(const GroupSet& group);
+    static TransferStatus statusFor(CrcCopyState state);
 
     std::map<int, std::vector<Slot>>       slots_;
     std::map<const GroupSet*, GroupSetPtr> groups_;
     // TODO(legacy removal): remove mutex_/cv_; only legacy workers use them.
-    std::mutex                             mutex_;
-    std::condition_variable                cv_;
+    std::mutex              mutex_;
+    std::condition_variable cv_;
     // TODO(legacy removal): remove async_ and its mode checks; keep accepting_.
-    bool                                   async_{false}, accepting_{true};
+    bool async_{false}, accepting_{true};
 };
 
 }  // namespace rtp_llm

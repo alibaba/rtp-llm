@@ -75,7 +75,7 @@ CUDA13_ONLY = select({
     "//conditions:default": ["@platforms//:incompatible"],
 })
 
-# Kernel-level checksum rigor: production store() checksums vs an independent
+# Kernel-level checksum rigor: production evict() checksums vs an independent
 # byte-wise CRC32C reference and nvCOMP's batched CRC32C on identical bytes.
 cc_test(
     name = "crc32c_checksum_test",

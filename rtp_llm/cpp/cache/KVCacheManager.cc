@@ -108,7 +108,7 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
                          "reserve=%zu request_ref_blocks=%zu "
                          "remote_connector_ref_blocks=%zu pd_connector_ref_blocks=%zu "
                          "block_cache_ref_blocks=%zu "
-                         "load_ref_blocks=%zu eviction_target_ref_blocks=%zu store_ref_blocks=%zu used_ratio=%.4f%%",
+                         "load_ref_blocks=%zu eviction_target_ref_blocks=%zu used_ratio=%.4f%%",
                          pool_snapshot.tier.c_str(),
                          pool_snapshot.pool_name.c_str(),
                          pool_snapshot.block_size_bytes,
@@ -124,7 +124,6 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
                          pool_snapshot.block_cache_ref_blocks,
                          pool_snapshot.load_ref_blocks,
                          pool_snapshot.eviction_target_ref_blocks,
-                         pool_snapshot.store_ref_blocks,
                          pool_snapshot.used_ratio);
     }
 
@@ -143,7 +142,6 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     pool_collector.load_ref_blocks                   = static_cast<int64_t>(pool_snapshot.load_ref_blocks);
     pool_collector.eviction_target_ref_blocks        = static_cast<int64_t>(pool_snapshot.eviction_target_ref_blocks);
     pool_collector.report_eviction_target_ref_blocks = pool_snapshot.tier != tierName(Tier::DEVICE);
-    pool_collector.store_ref_blocks                  = static_cast<int64_t>(pool_snapshot.store_ref_blocks);
     pool_collector.frozen_ref_blocks                 = static_cast<int64_t>(pool_snapshot.frozen_ref_blocks);
     pool_collector.report_frozen_ref_blocks          = report_frozen_ref_blocks;
     pool_collector.used_ratio                        = pool_snapshot.used_ratio;

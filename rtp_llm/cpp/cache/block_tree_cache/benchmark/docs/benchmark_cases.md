@@ -52,7 +52,7 @@ Tree 的逻辑 block 固定覆盖 256 tokens。20 个请求长度桶（tokens）
 | `transfer_device_disk_swa_direct` | swa | direct | auto（c×4） |
 | `transfer_device_disk_swa_buffered` | swa | buffered | 4096 blocks |
 
-方向为 `d2disk,disk2d`。device 仅分配 8 个可复用 lane blocks，disk 分配并寻址完整 working set；每个 wave 先完成全部 write，再提交相同 coordinate 的 read。WorkLoop 和 legacy 的两个方向都提交最多 8 个 descriptor 的 batch，并受引擎有效上限约束；legacy executor 按 staging 容量进一步切批。报告按方向展示 API 提交的实际 avg/max batch size。
+方向为 `d2h,h2disk,disk2d`。device 和 host 使用可复用的 lane blocks，disk 分配完整 working set；每个 wave 先完成 Device→Host 和 Host→Disk，再读取相同 coordinate 的 Disk→Device。各方向按对应的批次上限提交；legacy 的磁盘读取按 staging 容量进一步切批。报告按方向展示 API 提交的实际 avg/max batch size。
 
 ### Host↔Disk（4 个）
 
@@ -63,7 +63,7 @@ Tree 的逻辑 block 固定覆盖 256 tokens。20 个请求长度桶（tokens）
 | `transfer_host_disk_swa_direct` | swa | direct | auto（c×8） |
 | `transfer_host_disk_swa_buffered` | swa | buffered | 4096 blocks |
 
-方向为 `h2disk,disk2h`。两个方向都按最多 8 个 descriptor 的 batch 提交；host 不需要 GPU staging，不限制最小操作数。
+方向为 `h2disk`。按最多 8 个 descriptor 的 batch 提交；host 不需要 GPU staging，不限制最小操作数。
 
 ### Batch API matrix（单方向）
 
@@ -87,7 +87,7 @@ matrix_{label}_{direction}_{group_set}_{strategy}_c640_t{tasks}_d{descriptors}_b
 e2e_B_{direction}_{group_set}_{strategy}_u{upper}_l{lower}_n160_b8
 ```
 
-方向 `d2h`/`h2d` 各有 `cuda_batch`、`staged_sm` 两种策略；`h2disk`/`disk2h` 各使用 `direct`。每种组合展开 `full_context`/`swa`、上层业务并发 1/4、下层 worker 数 1/4，共 48 个 case。每个业务包含 160 个 descriptor，API descriptor batch 为 8，working set 为 640 blocks。driver 先按 profile payload 与最小字节数上调操作数，再向上对齐到 160 的整数倍，保证完整业务请求；case manifest 的 `resolved_transfer_operation_count` 记录送入 native 的值，native pilot 仍可继续上调，最终测量操作数以 result 为准。
+方向 `d2h`/`h2d` 各有 `cuda_batch`、`staged_sm` 两种策略；`h2disk`/`disk2d` 各使用 `direct`。每种组合展开 `full_context`/`swa`、上层业务并发 1/4、下层 worker 数 1/4，共 48 个 case。每个业务包含 160 个 descriptor，API descriptor batch 为 8，working set 为 640 blocks。driver 先按 profile payload 与最小字节数上调操作数，再向上对齐到 160 的整数倍，保证完整业务请求；case manifest 的 `resolved_transfer_operation_count` 记录送入 native 的值，native pilot 仍可继续上调，最终测量操作数以 result 为准。
 
 用于观察业务并发和 transfer worker 并发的组合影响。报告可按方向、group set 和策略分别展示 2×2 并发矩阵，或仅展示与实验问题有关的组合。这里的 e2e 是 transfer 业务提交路径，不代表完整模型推理；不要解释为线上请求吞吐。
 

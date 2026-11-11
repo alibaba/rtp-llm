@@ -56,7 +56,7 @@ struct BlockTreeCacheConfig {
     EvictionPolicy host_eviction_policy{EvictionPolicy::LRU};
     EvictionPolicy disk_eviction_policy{EvictionPolicy::LRU};
 
-    // ---- Shared Store/Load/Evict task pool ----
+    // ---- Shared load/eviction task pool ----
     int    task_pool_size{4};
     size_t business_queue_max_size{10000};
 
@@ -70,10 +70,10 @@ struct BlockTreeCacheConfig {
     int host_cache_sync_timeout_ms{10000};
     // Preserve the existing name for disk loads.
     int disk_cache_sync_timeout_ms{30000};
-    // Outbound disk transfers from both eviction and store.
+    // Outbound disk transfers for eviction.
     int disk_cache_evict_timeout_ms{30000};
 
-    // Async: blocks per Load/Offload pair, split by direction and shared by groups.
+    // Async: blocks per load/evict pair, split by direction and shared by groups.
     // Legacy: rank-wide byte budget measured in maximum-stride blocks.
     size_t device_disk_staging_block_count{128};
     // Shared descriptor batching limit for watermark planning and all transfer directions.
@@ -127,9 +127,9 @@ struct BlockTreeCacheConfig {
 };
 
 // BlockTreeCache: eviction workflow coordinator.
-// Owns BlockTree, GroupSets, HostBlockPool (L2), BlockTreeDiskBlockPool (L3),
+// Owns BlockTree, GroupSets, HostBlockPool (L2), DiskBlockPool (L3),
 // StorageBackend, and the cache workflow collaborators injected by the factory.
-// Each storage tier (Device/Host/Disk/Remote) can be independently enabled/disabled.
+// Local tiers require DISK -> HOST -> DEVICE; remote storage is independent.
 class BlockTreeCache {
 public:
     using TierWatermark = BlockTreeCacheConfig::TierWatermark;

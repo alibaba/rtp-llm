@@ -41,7 +41,6 @@ struct BlockTreePoolMetricsSnapshot {
     size_t      block_cache_ref_blocks{0};
     size_t      load_ref_blocks{0};
     size_t      eviction_target_ref_blocks{0};
-    size_t      store_ref_blocks{0};
     size_t      frozen_ref_blocks{0};
 
     std::optional<int64_t> read_bytes;
@@ -53,7 +52,6 @@ struct BlockTreePoolMetricsSnapshot {
 enum class CacheTransferOperation : uint8_t {
     LOAD,
     EVICT,
-    STORE,
 };
 
 const char* cacheTransferOperationName(CacheTransferOperation operation);
@@ -126,7 +124,6 @@ public:
     void reportEvictableCandidateCount(const std::vector<BlockTreeEvictableMetricsSnapshot>& snapshots) const;
     void reportVictimSelectionMetrics(const VictimSelectionMetrics& snapshot) const;
     void reportCacheReuseTimeMetrics(const std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots) const;
-    void reportEvictionFinished(const EvictionTransferTask& task, const std::vector<GroupSetPtr>& group_sets) const;
     void reportEvictionFinished(const EvictionDropTask&         task,
                                 const std::vector<GroupSetPtr>& group_sets,
                                 const char*                     trigger_type) const;
@@ -162,7 +159,6 @@ public:
                                Tier        source_tier,
                                Tier        target_tier,
                                int64_t     latency_us) const noexcept;
-    void reportStorePublish(Tier target_tier, size_t accepted_blocks, size_t duplicate_blocks) const;
     void reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes, const char* pool_type) const;
     // Buffered, bounded and nonblocking on the WorkLoop owner. Rejections before
     // admission are stage failures, not consumed queue tasks. Availability follows
@@ -178,13 +174,12 @@ private:
 
     std::unordered_map<const IBlockPool*, PoolIOSample> pool_io_samples_;
 
-    static constexpr size_t kOperationCount = 3;
-    static constexpr size_t kDirectionCount = 5;
+    static constexpr size_t kOperationCount = 2;
+    static constexpr size_t kDirectionCount = 4;
 
     static int transferDirectionIndex(Tier source_tier, Tier target_tier);
     void
     reportEvictionTrigger(Tier source_tier, CacheGroupType group_type, const char* trigger_type, int64_t count) const;
-    void reportStoreBlocks(Tier target_tier, const char* outcome, size_t block_count) const;
     void accumulateTransferBytes(const TransferDescriptor& desc,
                                  const GroupSetPtr&        group_set,
                                  BlockTreeTransferBytes&   transfer_bytes) const;

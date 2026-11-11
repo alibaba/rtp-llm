@@ -79,7 +79,7 @@ BlockTreeInsertResult insertLowerTierPrefix(BlockTree& tree, const CacheKeysType
     std::vector<std::vector<GroupSetResource>> resources(keys.size(),
                                                          std::vector<GroupSetResource>(tree.groupSets().size()));
     for (size_t group_id = 0; group_id < tree.groupSets().size(); ++group_id) {
-        const auto blocks = tree.groupSets()[group_id]->allocateBlocks(keys.size(), tier, BlockTreeRefType::STORE);
+        const auto blocks = tree.groupSets()[group_id]->allocateBlocks(keys.size(), tier, BlockTreeRefType::EVICTION);
         RTP_LLM_CHECK(blocks.has_value());
         for (size_t index = 0; index < keys.size(); ++index) {
             resources[index][group_id].setBlocks(tier, {(*blocks)[index]});
@@ -89,7 +89,7 @@ BlockTreeInsertResult insertLowerTierPrefix(BlockTree& tree, const CacheKeysType
     for (size_t index = 0; index < keys.size(); ++index) {
         for (size_t group_id = 0; group_id < tree.groupSets().size(); ++group_id) {
             tree.groupSets()[group_id]->releaseBlocks(
-                tier, resources[index][group_id].getBlocks(tier), BlockTreeRefType::STORE);
+                tier, resources[index][group_id].getBlocks(tier), BlockTreeRefType::EVICTION);
         }
     }
     return result;
@@ -740,7 +740,7 @@ TEST(BlockTreeTest, InsertBatchesReplacedReferencesByGroupAndTier) {
     std::vector<std::vector<GroupSetResource>> original(4, std::vector<GroupSetResource>(2));
     for (size_t group_id = 0; group_id < 2; ++group_id) {
         for (Tier tier : {Tier::HOST, Tier::DISK}) {
-            const auto blocks = tree.groupSets()[group_id]->allocateBlocks(2, tier, BlockTreeRefType::STORE);
+            const auto blocks = tree.groupSets()[group_id]->allocateBlocks(2, tier, BlockTreeRefType::EVICTION);
             ASSERT_TRUE(blocks.has_value());
             const size_t begin = tier == Tier::HOST ? 0 : 2;
             for (size_t index = 0; index < 2; ++index) {
@@ -753,7 +753,7 @@ TEST(BlockTreeTest, InsertBatchesReplacedReferencesByGroupAndTier) {
         for (size_t group_id = 0; group_id < 2; ++group_id) {
             const Tier tier = per_node[group_id].getTopTier();
             tree.groupSets()[group_id]->releaseBlocks(
-                tier, per_node[group_id].getBlocks(tier), BlockTreeRefType::STORE);
+                tier, per_node[group_id].getBlocks(tier), BlockTreeRefType::EVICTION);
         }
     }
     std::array<std::array<size_t, 2>, 2>   capacity_notifications{};

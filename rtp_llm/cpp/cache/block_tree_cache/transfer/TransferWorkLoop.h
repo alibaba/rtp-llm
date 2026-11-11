@@ -16,7 +16,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostStagingBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcTransferService.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -34,7 +34,7 @@ public:
     using BeforeCompleteCallback = std::function<void(const TransferResult&)>;
 
     TransferWorkLoop(std::vector<GroupSetPtr>                       groups,
-                     std::unique_ptr<CrcTransferService>            crc,
+                     std::unique_ptr<CrcCopyExecutor>               crc,
                      DiskIOExecutor*                                disk_io_executor,
                      TransferDirection                              direction,
                      size_t                                         batch_limit,
@@ -48,10 +48,14 @@ public:
     TransferWorkLoop& operator=(const TransferWorkLoop&) = delete;
 
     void start();
-    // PerRank validates a single homogeneous batch before submission.
+    // PerRank supplies a validated, nonempty homogeneous batch within batch_limit_.
     // Each stage expires during resource waits and before submission.
     // Submitted stages retain their buffers until completion, even after deadline.
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task, BeforeCompleteCallback before_complete = {});
+    // With retryable supplied, a full owner returns null and leaves both
+    // arguments intact. Other failures are terminal. Without it, full admission
+    // returns a completed failure and records one rejected observation.
+    std::shared_ptr<TransferAsyncContext>
+    execute(TransferTask&& task, BeforeCompleteCallback&& before_complete = {}, bool* retryable = nullptr);
     // Fixed limit supplied by PerRank for both direction owners.
     size_t batchLimit() const noexcept {
         return batch_limit_;
@@ -67,6 +71,7 @@ public:
     size_t outstandingBatches() const;
 
 private:
+    std::shared_ptr<TransferAsyncContext> reject(const TransferTask& task, const char* message, ErrorCode code);
     struct Entry;
     using Entries = std::list<std::unique_ptr<Entry>>;
     using WaitDeadlines = std::multimap<TransferTask::Clock::time_point, Entry*>;
@@ -87,7 +92,7 @@ private:
         DISK_READ,
         DISK_WRITE,
         CRC_LOAD,
-        CRC_STORE
+        CRC_EVICT
     };
     // Constructed by the submitter; otherwise owned by the WorkLoop. While a Disk
     // operation is pending, its callback exclusively writes result; the owner
@@ -169,7 +174,7 @@ private:
     // ==================== Fixed configuration/handles: no WorkLoop lock ====================
     // Initialized before start(); CRC is exclusive to this owner until join.
     std::vector<GroupSetPtr>                       groups_;
-    std::unique_ptr<CrcTransferService>            crc_;
+    std::unique_ptr<CrcCopyExecutor>               crc_;
     DiskIOExecutor* const                          disk_io_executor_;  // Owned by the engine through shutdown/join.
     TransferDirection                              direction_;
     size_t                                         batch_limit_, capacity_;

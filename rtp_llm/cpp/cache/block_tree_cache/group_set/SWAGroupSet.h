@@ -8,11 +8,11 @@ namespace rtp_llm {
 // Uses Any-node heaps: any node with data can be evicted.
 class SWAGroupSet: public GroupSet {
 public:
-    SWAGroupSet(size_t                         sliding_window_size,
-                size_t                         seq_size_per_block,
+    SWAGroupSet(size_t                          sliding_window_size,
+                size_t                          seq_size_per_block,
                 std::vector<DeviceBlockPoolPtr> device_pools,
-                std::shared_ptr<HostBlockPool> host_pool,
-                BlockTreeDiskBlockPoolPtr      disk_pool);
+                std::shared_ptr<HostBlockPool>  host_pool,
+                DiskBlockPoolPtr                disk_pool);
 
     std::unique_ptr<MatchValidator> createMatchValidator() override;
 

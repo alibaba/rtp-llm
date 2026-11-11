@@ -22,17 +22,13 @@ struct CacheStageContext {
         const char* path = "unknown";
         if (source == Tier::DISK && target == Tier::DEVICE)
             path = "disk_to_device";
-        if (source == Tier::DEVICE && target == Tier::DISK)
-            path = "device_to_disk";
         if (source == Tier::HOST && target == Tier::DEVICE)
             path = "host_to_device";
         if (source == Tier::DEVICE && target == Tier::HOST)
             path = "device_to_host";
         if (source == Tier::HOST && target == Tier::DISK)
             path = "host_to_disk";
-        if (source == Tier::DISK && target == Tier::HOST)
-            path = "disk_to_host";
-        return {target == Tier::DEVICE ? "load" : "store", tierName(source), tierName(target), path};
+        return {target == Tier::DEVICE ? "load" : "evict", tierName(source), tierName(target), path};
     }
     static CacheStageContext storage(const char* operation) {
         return {operation,

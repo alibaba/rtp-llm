@@ -117,7 +117,7 @@ public:
     bool enableDeviceCache() const;
     bool enableDiskCache() const;
     bool enableCacheLookup() const;
-    Tier storeTarget() const;
+    Tier insertTarget() const;
     void reportCacheReuseMetrics();
     bool hasPendingRemoteRestore() const {
         return remote_restore_lifecycle_.pendingForward();

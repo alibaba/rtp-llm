@@ -25,6 +25,8 @@ protected:
                      BlockTreeTaskPool*                             load_task_pool = nullptr,
                      int64_t                                        world_rank     = -1);
 
+    // PerRank validates endpoints and submits nonempty batches of one direction
+    // and GroupSet. The caller supplies one host view and group per descriptor.
     virtual TransferResult executeBatch(const std::vector<HostBufferView>&     hosts,
                                         const std::vector<TransferDescriptor>& descriptors,
                                         const std::vector<const GroupSet*>&    group_sets) = 0;

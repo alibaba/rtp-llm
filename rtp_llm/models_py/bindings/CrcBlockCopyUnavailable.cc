@@ -26,7 +26,7 @@ CrcCopyWorkspace::CrcCopyWorkspace(int, size_t, size_t, size_t, std::shared_ptr<
 
 CrcCopyWorkspace::~CrcCopyWorkspace() = default;
 
-CrcCopyState CrcCopyWorkspace::store(const std::vector<CrcCopyItem>&, std::vector<CrcCopyFailure>&) {
+CrcCopyState CrcCopyWorkspace::evict(const std::vector<CrcCopyItem>&, std::vector<CrcCopyFailure>&) {
     return CrcCopyState::DEVICE_ERROR;
 }
 

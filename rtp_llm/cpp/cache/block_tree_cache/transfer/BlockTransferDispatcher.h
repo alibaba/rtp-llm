@@ -20,14 +20,13 @@ public:
     using TransferDoneCallback = std::function<void(TransferResult)>;
 
     BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
-                            std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine         = nullptr,
-                            size_t                                        max_descriptors_per_batch = 32);
+                            std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine = nullptr);
     ~BlockTransferDispatcher();
 
-    // Requests are grouped and split locally before entering either engine.
+    // The per-rank engine groups and batches the logical request.
     std::shared_ptr<TransferAsyncContext> executePerRank(TransferTask task) const;
 
-    // Broadcast once per direction; each rank owns physical batching.
+    // Broadcast one single-direction request; each rank owns physical batching.
     // completion_operation is an optional borrowed literal for new completion
     // observations only. Existing physical transfer stage identities are unchanged.
     void
@@ -48,26 +47,17 @@ public:
     void waitForTransfers() const;
 
 private:
-    struct CompletionTicket;
-    void registerTransfer() const;
-    void retireTransfer() const noexcept;
-
-    // Local dispatch uses bounded, homogeneous batches. Broadcast dispatch
-    // groups by direction only, as required by MemoryOperationRequestPB.
-    void dispatchGroups(TransferTask         task,
-                        TransferDoneCallback callback,
-                        bool                 local,
-                        const char*          completion_operation = nullptr) const;
+    class InflightTicket;
+    std::shared_ptr<InflightTicket> trackTransfer() const;
 
     std::shared_ptr<TransferAsyncContext> executeMultiRank(TransferTask task,
                                                            const char*  completion_operation = nullptr) const;
 
     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine_;
-    size_t                                        max_descriptors_per_batch_{32};
-    mutable std::mutex                            completion_mutex_;
-    mutable std::condition_variable               completion_cv_;
-    mutable size_t                                inflight_transfers_{0};
+    mutable std::mutex                            inflight_mutex_;
+    mutable std::condition_variable               inflight_cv_;
+    mutable size_t                                inflight_count_{0};
     std::function<void()>                         drain_observer_for_test_;
 };
 

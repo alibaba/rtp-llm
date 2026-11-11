@@ -13,18 +13,18 @@ namespace rtp_llm {
 
 class BlockTreeTaskPool;
 class DeviceDiskTransferExecutor;
-class CrcTransferService;
+class CrcCopyExecutor;
 
 class DeviceHostTransferExecutor: public TransferExecutor {
 public:
     DeviceHostTransferExecutor(BlockTreeTaskPool&                             transfer_task_pool,
                                size_t                                         max_descriptors_per_batch,
-                               DeviceHostCopyOptions                          options             = {},
-                               std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter    = nullptr,
-                               std::shared_ptr<CrcTransferService>            load_crc_service    = nullptr,
-                               std::shared_ptr<CrcTransferService>            offload_crc_service = nullptr,
-                               BlockTreeTaskPool*                             load_task_pool      = nullptr,
-                               int64_t                                        world_rank          = -1);
+                               DeviceHostCopyOptions                          options            = {},
+                               std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter   = nullptr,
+                               std::shared_ptr<CrcCopyExecutor>               load_crc_executor  = nullptr,
+                               std::shared_ptr<CrcCopyExecutor>               evict_crc_executor = nullptr,
+                               BlockTreeTaskPool*                             load_task_pool     = nullptr,
+                               int64_t                                        world_rank         = -1);
     ~DeviceHostTransferExecutor() = default;
 
 private:
@@ -39,7 +39,7 @@ private:
                  const std::vector<TransferDescriptor>& descriptors,
                  const std::vector<const GroupSet*>&    group_sets) const;
 
-    std::shared_ptr<CrcTransferService> load_crc_service_, offload_crc_service_;
+    std::shared_ptr<CrcCopyExecutor>    load_crc_executor_, evict_crc_executor_;
     DeviceHostCopyOptions               options_;
     // A rank uses one device. Bind its stream pair on the first copy; call_once
     // publishes it safely to concurrent transfer workers.
