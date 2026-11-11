@@ -19,10 +19,23 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/CrcBlockCopy.h"
 
 namespace rtp_llm::block_transfer_engine_test {
 namespace {
+
+class TransferDiagnosticsEnvironment final: public ::testing::Environment {
+public:
+    void SetUp() override {
+        // Native workers need an appender to emit lifecycle evidence.
+        // Initialize before any worker/registry is created.
+        ASSERT_TRUE(initLogger());
+    }
+};
+
+[[maybe_unused]] const auto* diagnostics_environment =
+    ::testing::AddGlobalTestEnvironment(new TransferDiagnosticsEnvironment());
 
 std::string makeTempDir(const char* name) {
     std::string       path = std::string("/tmp/") + name + "_XXXXXX";
@@ -194,10 +207,10 @@ std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_
     config->physical_block_count = usable_count + 1;
     // Copy/lifetime fixtures may freeze the entire small pool; guard tests use their own configs.
     config->frozen_block_abort_lower_ratio = 0.0;
-    config->payload_bytes        = payload_bytes;
-    const size_t storage_bytes   = enable_crc ? ((payload_bytes + 4 + 15) / 16) * 16 : payload_bytes;
-    config->stride_bytes         = ((storage_bytes + 4095) / 4096) * 4096;
-    config->alignment            = 4096;
+    config->payload_bytes                  = payload_bytes;
+    const size_t storage_bytes             = enable_crc ? ((payload_bytes + 4 + 15) / 16) * 16 : payload_bytes;
+    config->stride_bytes                   = ((storage_bytes + 4095) / 4096) * 4096;
+    config->alignment                      = 4096;
 
     auto pool = std::make_shared<HostBlockPool>(config);
     RTP_LLM_CHECK(pool->init());
@@ -221,16 +234,16 @@ std::shared_ptr<DiskBlockPool> makeDiskPool(size_t                       payload
     const size_t stride_bytes  = ((storage_bytes + 4095) / 4096) * 4096;
 
     auto config                            = std::make_shared<DiskBlockPoolConfig>();
-    config->pool_type       = BlockPoolType::DISK;
-    config->pool_name       = pool_name;
-    config->work_dir        = work_dir;
+    config->pool_type                      = BlockPoolType::DISK;
+    config->pool_name                      = pool_name;
+    config->work_dir                       = work_dir;
     config->frozen_block_abort_lower_ratio = 0.0;
-    config->local_rank      = 0;
-    config->world_rank      = 0;
-    config->disk_size_bytes = stride_bytes * (usable_count + 1);
-    config->payload_bytes   = payload_bytes;
-    config->stride_bytes    = stride_bytes;
-    config->buffered_io     = buffered_io;
+    config->local_rank                     = 0;
+    config->world_rank                     = 0;
+    config->disk_size_bytes                = stride_bytes * (usable_count + 1);
+    config->payload_bytes                  = payload_bytes;
+    config->stride_bytes                   = stride_bytes;
+    config->buffered_io                    = buffered_io;
 
     auto pool = std::make_shared<DiskBlockPool>(config, std::move(io));
     RTP_LLM_CHECK(pool->init());

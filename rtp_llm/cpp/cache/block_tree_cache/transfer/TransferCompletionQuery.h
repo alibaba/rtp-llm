@@ -10,12 +10,12 @@ namespace rtp_llm {
 
 class BroadcastManager;
 
-// One read-only observation of the execution's original participants. Results
+// Query the execution's original participants, fencing missing executions. Results
 // are independent of its frozen failure snapshot and never release references.
 class TransferCompletionQuery {
 public:
-    // The local reader only observes the selected registry; it must not perform
-    // remote I/O or mutate admission/completion state.
+    // The local reader atomically bans missing executions in the selected registry
+    // and returns REJECTED for those bans. Plain UNKNOWN is never safety proof.
     using LocalReader = std::function<TransferTaskRegistry::State(const TransferExecutionTrace&)>;
 
     explicit TransferCompletionQuery(std::shared_ptr<BroadcastManager> broadcast_manager,

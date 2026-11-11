@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 
 #include <algorithm>
+#include <exception>
 #include <iterator>
 #include <string>
 #include <unordered_map>
@@ -8,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -174,6 +176,30 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
                                                    const std::vector<GroupSetPtr>&  group_sets,
                                                    bool                             allow_absent_group_sets,
                                                    std::vector<size_t>*             wire_item_indices) {
+    // This boundary is shared by the real RPC service and native smoke workers.
+    // group_set links in-process ranks to worker_init and dispatcher_init logs.
+    const auto log_decode = [&](const char* event, const char* result) noexcept {
+        try {
+            RTP_LLM_LOG_INFO("transfer_lifecycle event=%s trace=%lu request=%ld group_set=%p timeout_ms=%ld "
+                             "items=%d result=%s",
+                             event,
+                             request.transfer_trace_id(),
+                             request.transfer_request_id(),
+                             group_sets.empty() ? nullptr : static_cast<const void*>(group_sets.front().get()),
+                             request.timeout_ms(),
+                             request.copy_items_size(),
+                             result);
+        } catch (...) {}
+    };
+    bool      decoded_ok         = false;
+    const int initial_exceptions = std::uncaught_exceptions();
+    log_decode("decode_enter", "received");
+    block_tree_cache_detail::ScopeRollback log_decode_exit([&] {
+        log_decode("decode_exit",
+                   decoded_ok                                      ? "accepted" :
+                   std::uncaught_exceptions() > initial_exceptions ? "exception" :
+                                                                     "rejected");
+    });
     if (request.copy_items_size() == 0) {
         return false;
     }
@@ -256,6 +282,7 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
     if (wire_item_indices) {
         wire_item_indices->insert(wire_item_indices->end(), decoded_item_indices.begin(), decoded_item_indices.end());
     }
+    decoded_ok = true;
     return true;
 }
 
