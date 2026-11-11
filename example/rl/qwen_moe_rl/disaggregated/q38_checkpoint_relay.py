@@ -170,6 +170,38 @@ def fetch(host, port, selected, *, local_ip, timeout=15):
         connection.close()
 
 
+def stage_metadata(root, files, official):
+    """Create a metadata-only snapshot after checking the official object IDs."""
+    if set(files) != METADATA or set(official) != METADATA:
+        raise ValueError('exactly the tokenizer/config metadata may be staged')
+    checks = {}
+    for name, data in files.items():
+        entry = official[name]
+        if len(data) != entry['size']:
+            raise ValueError(f'incorrect official metadata size: {name}')
+        digest = hashlib.sha256(data).hexdigest()
+        if entry.get('sha256'):
+            valid = digest == entry['sha256']
+        else:
+            blob = hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
+            valid = blob == entry['blob_id']
+        if not valid:
+            raise ValueError(f'incorrect official metadata identity: {name}')
+        checks[name] = {'size':len(data), 'sha256':digest}
+    root = Path(root)
+    if not root.is_absolute():
+        raise ValueError('the destination must be a fresh absolute directory')
+    root.mkdir(parents=True, mode=0o700, exist_ok=False)
+    for name,data in files.items():
+        with (root/name).open('xb') as out:
+            out.write(data)
+        if hashlib.sha256((root/name).read_bytes()).hexdigest() != checks[name]['sha256']:
+            raise ValueError(f'metadata write did not preserve verified bytes: {name}')
+    verify_identity(root)
+    with (root/'METADATA-READY.json').open('x') as out:
+        json.dump({'revision':REVISION, 'weights_present':False, 'metadata':checks},out,indent=2)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('role', choices=('serve', 'fetch'))
@@ -179,14 +211,19 @@ def main():
     ap.add_argument('--local-ip')
     ap.add_argument('--root', default=MODEL)
     ap.add_argument('--seconds', type=int, default=50)
+    ap.add_argument('--stage-metadata')
+    ap.add_argument('--official-objects-b64')
     args = ap.parse_args()
     raw = json.loads(base64.b64decode(args.plan_b64, validate=True))
     plan = {peer: [Range(**item) for item in entries] for peer, entries in raw.items()}
     if args.role == 'serve':
+        if args.stage_metadata or args.official_objects_b64:
+            ap.error('metadata staging is receiver-only')
         verify_identity(args.root)
         receipts = serve(args.root, args.host, args.port, plan, seconds=args.seconds)
     else:
         receipts = []
+        metadata = {}
         expires = time.monotonic() + args.seconds
         for selected in plan[args.local_ip]:
             while True:
@@ -203,7 +240,17 @@ def main():
                 raise ValueError('received index is not the pinned model')
             receipts.append(dict(peer=args.local_ip, name=selected.name, offset=selected.offset,
                                  length=len(data), sha256=sha))
+            if args.stage_metadata:
+                if (selected.name not in METADATA or selected.name in metadata
+                        or selected.offset != 0 or selected.length != selected.size):
+                    raise ValueError('staging requires complete metadata objects only')
+                metadata[selected.name] = data
             del data
+        if args.stage_metadata:
+            if not args.official_objects_b64:
+                ap.error('official metadata object identities are required')
+            objects = json.loads(base64.b64decode(args.official_objects_b64, validate=True))
+            stage_metadata(args.stage_metadata, metadata, objects)
     print('Q38_CHECKPOINT_RELAY ' + json.dumps(receipts, separators=(',', ':')), flush=True)
 
 
