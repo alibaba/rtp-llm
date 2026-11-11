@@ -259,6 +259,7 @@ private:
     // graph-private pool does not steal headroom from a long-context prefill.
     bool                    decode_capture_deferred_{false};
     bool                    decode_capture_done_{false};
+    bool                    decode_init_deferred_{false};
     bool                    is_target_verify_{false};
     bool                    is_packed_target_verify_{false};
     int                     dspark_capacity_query_width_{0};

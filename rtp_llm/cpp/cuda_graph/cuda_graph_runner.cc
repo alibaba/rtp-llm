@@ -2080,6 +2080,18 @@ void CudaGraphRunner::logCudaGraphPoolMemory(const char* phase) {
 void CudaGraphRunner::initCapture() {
     c10::InferenceMode inference_guard(true);
 
+    if (enable_cuda_graph_ && !is_prefill_cuda_graph_mode_ && !decode_init_deferred_) {
+        // A 1M-token prefill and the decode graph's private pool/workspace
+        // cannot both fit on an 80 GiB A100.  Defer the entire decode-graph
+        // initialization to the first decode, after full-context prefill
+        // scratch has been released.
+        decode_init_deferred_     = true;
+        decode_capture_deferred_  = true;
+        RTP_LLM_LOG_INFO("CUDA decode graph initialization deferred until first decode");
+        return;
+    }
+    decode_init_deferred_ = false;
+
     if (enable_cuda_graph_) {
         RTP_LLM_LOG_INFO("CUDA graph capture is enabled");
         shared_graph_pool_ = cuda_graph::graphPoolHandle();
@@ -2226,12 +2238,7 @@ void CudaGraphRunner::initCapture() {
                                     "prefill cuda graph: unsupported graph role");
             capturePrefill();
         } else {
-            // A 1M-token prefill and the decode graph-private pool cannot both
-            // fit on an 80 GiB A100.  Defer decode capture to the first decode:
-            // prefill then runs with the pool absent, and capture happens after
-            // the full-context scratch has been released.
-            decode_capture_deferred_ = true;
-            RTP_LLM_LOG_INFO("CUDA decode graph capture deferred until first decode");
+            captureDecode();
         }
         logCudaGraphPoolMemory("after_capture");
     } else {
