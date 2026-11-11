@@ -512,8 +512,20 @@ def hipgraph_capture_all_reduce(
     tensor: torch.Tensor,
     process_group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> torch.Tensor:
-    """Allreduce during HIPGraph capture. Tries trt_allreduce first, falls back to ncclAllReduce."""
+    """Allreduce during HIPGraph capture.
+
+    Raw ncclAllReduce is the primary path on this stack: the trtllm custom
+    allreduce records hipErrorInvalidConfiguration from the very FIRST
+    captured collective (load33 probes: ffn segment of every layer, all 8
+    ranks, first capture session - refining the load25 "slot exhaustion"
+    theory), while raw RCCL capture+replay is verified correct on 8 ranks at
+    production sizes (awi_rccl_capture_test: 4B..690KB, cold and warm).
+    RTP_LLM_HIPGRAPH_ALLREDUCE_TRTLLM=1 restores the trtllm-first behavior.
+    """
     global _trtllm_fallback_warned
+
+    if os.environ.get("RTP_LLM_HIPGRAPH_ALLREDUCE_TRTLLM", "0") != "1":
+        return hipgraph_capture_all_reduce_rccl(tensor, process_group)
 
     if (
         process_group is not None
