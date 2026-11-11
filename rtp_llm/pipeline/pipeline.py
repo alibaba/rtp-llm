@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import functools
 import logging
 import queue
 import threading
@@ -557,10 +558,12 @@ class Pipeline(object):
         # Off-loop tensor construction: converting a ~192K-element Python list
         # is per-request CPU on the uvicorn loop; the tok-encode executor (the
         # same pool 00032 uses for the tokenize) builds it without blocking
-        # the loop. Values/dtype are identical to the inline construction.
+        # the loop. Values/dtype are identical to the inline construction
+        # (torch.tensor's dtype is keyword-only, hence the partial).
         loop = asyncio.get_running_loop()
         token_ids = await loop.run_in_executor(
-            self._encode_executor, torch.tensor, token_ids, torch.int
+            self._encode_executor,
+            functools.partial(torch.tensor, token_ids, dtype=torch.int),
         )
 
         input = GenerateInput(

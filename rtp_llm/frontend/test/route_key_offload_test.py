@@ -21,6 +21,7 @@ pinned by cache_key_routing_test.py.
 """
 
 import asyncio
+import functools
 import time
 import unittest
 from unittest.mock import patch
@@ -149,8 +150,10 @@ class RouteKeyOffloadTest(unittest.TestCase):
             pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tok-encode")
             try:
                 loop = asyncio.get_running_loop()
+                # Mirror generate_stream exactly: torch.tensor's dtype is
+                # keyword-only, so the off-loop call needs a partial.
                 built = await loop.run_in_executor(
-                    pool, torch.tensor, token_ids, torch.int
+                    pool, functools.partial(torch.tensor, token_ids, dtype=torch.int)
                 )
             finally:
                 pool.shutdown(wait=False)
