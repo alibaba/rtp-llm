@@ -31,6 +31,12 @@ class PpuDecodeMetadataGraph(DSv4DecodeFmhaImplFP8):
     by the base class and shared with the model's captured attention kernels.
     """
 
+    def supports_device_only_replay_prepare(self):
+        # C++ may omit CPU mirrors only for this explicit contract. Captured
+        # inputs always carry device length buffers; direct Python callers may
+        # still supply host-only inputs through the reference-compatible path.
+        return True
+
     def __init__(
         self,
         config,

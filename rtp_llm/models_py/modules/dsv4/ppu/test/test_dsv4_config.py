@@ -58,7 +58,7 @@ class Dsv4ConfigTest(unittest.TestCase):
         for gamma in (0, 1, 2, 3):
             self.config.gen_num_per_cycle = gamma
             self.assertEqual(self.build().execution_options["DSV4_PPU_DECODE_METADATA"],
-                             "reference")
+                             "graph_fused")
         self.config.model_type = "deepseek_v4_mtp"
         self.config.num_layers = 1
         self.config.attn_config.layer_compress_ratios = [0]
