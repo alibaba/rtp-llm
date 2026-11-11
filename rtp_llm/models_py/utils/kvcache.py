@@ -1,10 +1,67 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 import torch
 
-from rtp_llm.ops.compute_ops import LayerKVCache
+from rtp_llm.models.cache_tags import DRAFT_CACHE_TAG_PREFIX, canonical_cache_tag
+from rtp_llm.ops.compute_ops import KVCache, LayerKVCache
+
+
+class ModuleLocalKVCache:
+    """Module-local view of the framework ``KVCache`` handle.
+
+    Each cache module publishes its own group tags. A draft module prefixes
+    them with ``DRAFT_CACHE_TAG_PREFIX`` so the engine's tag -> module mapping
+    stays bijective, while Python consumers keep addressing a module's pools by
+    the canonical names (``swa_kv``, ``csa_kv``, ...). The view is installed
+    once, where the handle enters Python, and translates at that boundary:
+    reported group tags are canonical, and a canonical tag is mapped onto the
+    published one before it reaches the engine.
+
+    ``LayerKVCache.tag`` stays as published: the tensors are handed back to the
+    C++ cache-store writer, which resolves the group on the engine side.
+    """
+
+    def __init__(self, kv_cache: KVCache) -> None:
+        self._kv_cache = kv_cache
+        # Topology is fixed for the allocator's lifetime, so resolve the two
+        # names once instead of per layer per decode step.
+        published = [str(tag) for tag in kv_cache.group_tags or []]
+        self._group_tags = [canonical_cache_tag(tag) for tag in published]
+        self._published_tags = {canonical_cache_tag(tag): tag for tag in published}
+
+    @property
+    def group_tags(self) -> list[str]:
+        return self._group_tags
+
+    @property
+    def layer_count(self) -> int:
+        return self._kv_cache.layer_count
+
+    def _published_tag(self, tag: str) -> str:
+        return self._published_tags.get(str(tag), str(tag))
+
+    def get_layer_cache(self, layer_id: int, tag: str | None = None) -> LayerKVCache:
+        if tag is None:
+            return self._kv_cache.get_layer_cache(layer_id)
+        return self._kv_cache.get_layer_cache(layer_id, self._published_tag(tag))
+
+    def get_layer_cache_groups(self, layer_id: int) -> list[LayerKVCache]:
+        return self._kv_cache.get_layer_cache_groups(layer_id)
+
+    def get_seq_size_per_block(self, tag: str) -> int:
+        return self._kv_cache.get_seq_size_per_block(self._published_tag(tag))
+
+    def get_kernel_seq_size_per_block(self, tag: str) -> int:
+        return self._kv_cache.get_kernel_seq_size_per_block(self._published_tag(tag))
+
+    def get_entries_per_block(self, tag: str) -> int:
+        return self._kv_cache.get_entries_per_block(self._published_tag(tag))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._kv_cache, name)
 
 
 class SingleGroupKVCacheAdapter:

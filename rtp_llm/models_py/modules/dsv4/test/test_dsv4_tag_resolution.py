@@ -14,6 +14,7 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     CSA_KV,
     DRAFT_CACHE_TAG_PREFIX,
     SWA_KV,
+    as_attention_inputs_by_tag,
     group_tags,
     resolve_dsv4_tag,
 )
@@ -68,6 +69,23 @@ class SemanticTagTest(unittest.TestCase):
         self.assertEqual(_semantic_tag("mtp_" + SWA_KV), SWA_KV)
         self.assertEqual(_semantic_tag(SWA_KV), SWA_KV)
         self.assertIsNone(_semantic_tag(None))
+
+
+class AttentionInputMappingTest(unittest.TestCase):
+    def test_published_keys_are_normalized_to_canonical_tags(self):
+        # The framework hands one PyAttentionInputs per cache group keyed by
+        # the module's *published* tag; callers index the mapping by the
+        # canonical tag.
+        csa, swa = object(), object()
+        mapping = {
+            DRAFT_CACHE_TAG_PREFIX + CSA_KV: csa,
+            DRAFT_CACHE_TAG_PREFIX + SWA_KV: swa,
+        }
+        self.assertEqual(
+            as_attention_inputs_by_tag(mapping),
+            {CSA_KV: csa, SWA_KV: swa},
+        )
+        self.assertIs(as_attention_inputs_by_tag(mapping)[SWA_KV], swa)
 
 
 if __name__ == "__main__":

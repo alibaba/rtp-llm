@@ -27,7 +27,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 
-from rtp_llm.models.cache_tags import DRAFT_CACHE_TAG_PREFIX
+from rtp_llm.models.cache_tags import DRAFT_CACHE_TAG_PREFIX, canonical_cache_tag
 
 # ---------------------------------------------------------------------------
 # Canonical cache-group tags. These are the *consumer* side of the tags that
@@ -127,7 +127,11 @@ def as_attention_inputs_by_tag(
         if attention_inputs is None:
             return {}
     if isinstance(attention_inputs, Mapping):
-        return {str(tag): value for tag, value in attention_inputs.items()}
+        # The framework keys the mapping by the group's *published* tag
+        # (``mtp_swa_kv`` for a draft module); callers index by canonical tag.
+        return {
+            canonical_cache_tag(tag): value for tag, value in attention_inputs.items()
+        }
     tags = group_tags(kv_cache)
     tag = tags[0] if len(tags) == 1 else DEFAULT_TAG
     return {tag: attention_inputs}
