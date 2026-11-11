@@ -274,22 +274,15 @@ class TestFuser(unittest.TestCase):
         self.assertEqual(self.fuser._mount_src_map[str(mount_path)], (uri, 1))
 
     @patch("requests.post")
-    def test_readonly_weights_are_checked_without_writes(self, mock_post):
+    def test_readonly_mount_is_not_read(self, mock_post):
         uri = "oss://bucket/model/"
         mount_path = self.external_mount(uri, options=("ro",))
         weights = mount_path / "weights.bin"
         weights.write_bytes(b"weights")
 
-        with patch("rtp_llm.utils.fuser.open", wraps=builtins.open) as open_file, patch(
-            "rtp_llm.utils.fuser.os.rename"
-        ) as rename, patch("rtp_llm.utils.fuser.os.unlink") as unlink, patch(
-            "rtp_llm.utils.fuser.os.chmod"
-        ) as chmod:
+        with patch("rtp_llm.utils.fuser.open", wraps=builtins.open) as open_file:
             self.assertEqual(self.fuser.mount_or_reuse_dir(uri), str(mount_path))
-            open_file.assert_called_once_with(str(weights), "rb")
-            rename.assert_not_called()
-            unlink.assert_not_called()
-            chmod.assert_not_called()
+            open_file.assert_not_called()
 
         self.assertEqual(weights.read_bytes(), b"weights")
         self.assertEqual(list(mount_path.iterdir()), [weights])
@@ -308,70 +301,53 @@ class TestFuser(unittest.TestCase):
         mock_post.assert_not_called()
 
     @patch("requests.post")
-    def test_unreadable_weights_do_not_trigger_remount(self, mock_post):
-        uri = "oss://bucket/model/"
-        mount_path = self.external_mount(uri, options=("ro",))
-        weights = mount_path / "weights.bin"
-        weights.write_bytes(b"weights")
-        with patch(
-            "rtp_llm.utils.fuser.open",
-            side_effect=PermissionError(errno.EACCES, "weights are not readable"),
-        ), self.assertRaises(PermissionError):
-            self.fuser.mount_or_reuse_dir(uri)
-        self.assertEqual(self.fuser._mount_src_map, {})
-        self.assertEqual(list(mount_path.iterdir()), [weights])
-        mock_post.assert_not_called()
-
-    @patch("requests.post")
-    def test_external_mount_access_errors_do_not_remount(self, mock_post):
-        uri = "oss://bucket/cache/"
-        mount_path = self.external_mount(uri)
-
-        for operation in ("list", "write", "read", "rename", "delete"):
-
-            def open_file(path, mode="r", *args, **kwargs):
-                if (operation == "write" and mode == "xb") or (
-                    operation == "read" and mode == "rb"
-                ):
-                    raise PermissionError(errno.EACCES, "access denied", str(path))
-                return builtins.open(path, mode, *args, **kwargs)
-
-            real_operation = {
-                "list": "scandir",
-                "rename": "rename",
-                "delete": "unlink",
-            }.get(operation)
-            with self.subTest(operation=operation), patch(
-                "rtp_llm.utils.fuser.open", side_effect=open_file
-            ):
-                if real_operation:
-                    with patch(
-                        f"rtp_llm.utils.fuser.os.{real_operation}",
-                        side_effect=PermissionError(errno.EACCES, "access denied"),
-                    ), self.assertRaises(PermissionError):
-                        self.fuser.mount_or_reuse_dir(uri, MountRwMode.RWMODE_RW)
-                else:
-                    with self.assertRaises(PermissionError):
-                        self.fuser.mount_or_reuse_dir(uri, MountRwMode.RWMODE_RW)
-            if operation == "delete":
-                # The deliberately denied deletion leaves only our probe behind.
-                for probe in mount_path.iterdir():
-                    self.assertTrue(probe.name.startswith(".rtp_llm_fuse_probe_"))
-                    probe.unlink()
-            self.assertEqual(list(mount_path.iterdir()), [])
-        self.assertEqual(self.fuser._mount_src_map, {})
-        mock_post.assert_not_called()
-
-    @patch("requests.post")
-    def test_disconnected_external_mount_does_not_remount(self, mock_post):
+    def test_dead_external_mount_does_not_remount(self, mock_post):
         uri = "oss://bucket/model/"
         self.external_mount(uri)
         with patch(
-            "rtp_llm.utils.fuser.os.scandir",
+            "rtp_llm.utils.fuser.os.statvfs",
             side_effect=OSError(errno.ENOTCONN, "Transport endpoint is not connected"),
         ), self.assertRaises(OSError) as error:
             self.fuser.mount_or_reuse_dir(uri)
         self.assertEqual(error.exception.errno, errno.ENOTCONN)
+        mock_post.assert_not_called()
+
+    @patch("requests.post")
+    def test_external_mount_reuse_never_writes(self, mock_post):
+        uri = "oss://bucket/jit-cache/"
+        mount_path = self.external_mount(uri)
+        with patch("rtp_llm.utils.fuser.open", wraps=builtins.open) as open_file, patch(
+            "rtp_llm.utils.fuser.os.rename"
+        ) as rename, patch("rtp_llm.utils.fuser.os.unlink") as unlink:
+            self.assertEqual(
+                self.fuser.mount_or_reuse_dir(uri, MountRwMode.RWMODE_RW),
+                str(mount_path),
+            )
+        open_file.assert_not_called()
+        rename.assert_not_called()
+        unlink.assert_not_called()
+        self.assertEqual(list(mount_path.iterdir()), [])
+        self.assertEqual(self.fuser._mount_src_map, {})
+        mock_post.assert_not_called()
+
+    @patch("requests.post")
+    def test_oss_delayed_visibility_does_not_block_reuse(self, mock_post):
+        # OSS FUSE only exposes an object after its background upload, so any
+        # read/write probe would race it. Reuse must not touch the mount.
+        uri = "oss://bucket/jit-cache/"
+        mount_path = self.external_mount(uri)
+
+        def still_uploading(*args, **kwargs):
+            raise OSError(errno.EIO, "object is still uploading")
+
+        with patch("rtp_llm.utils.fuser.open", side_effect=still_uploading), patch(
+            "rtp_llm.utils.fuser.os.rename", side_effect=still_uploading
+        ), patch("rtp_llm.utils.fuser.os.unlink", side_effect=still_uploading):
+            self.assertEqual(
+                self.fuser.mount_or_reuse_dir(uri, MountRwMode.RWMODE_RW),
+                str(mount_path),
+            )
+        self.assertEqual(list(mount_path.iterdir()), [])
         mock_post.assert_not_called()
 
     @patch("requests.post")
@@ -390,78 +366,6 @@ class TestFuser(unittest.TestCase):
         ) as logs:
             self.assertIsNone(resolve_remote(uri, "v1", "test-scope"))
         self.assertTrue(any("JIT_CACHE_FAIL_OPEN" in line for line in logs.output))
-        self.assertEqual(list(mount_path.iterdir()), [])
-        mock_post.assert_not_called()
-
-    @patch("requests.post")
-    @patch("rtp_llm.utils.fuser.time.sleep")
-    def test_external_rw_probe_waits_for_file_visibility(self, mock_sleep, mock_post):
-        uri = "oss://bucket/jit-cache/"
-        mount_path = self.external_mount(uri)
-        reads = 0
-
-        def open_file(path, mode="r", *args, **kwargs):
-            nonlocal reads
-            if mode == "rb":
-                reads += 1
-                if reads == 1:
-                    raise FileNotFoundError("upload still pending")
-            return builtins.open(path, mode, *args, **kwargs)
-
-        with patch("rtp_llm.utils.fuser.open", side_effect=open_file):
-            self.assertEqual(
-                self.fuser.mount_or_reuse_dir(uri, MountRwMode.RWMODE_RW),
-                str(mount_path),
-            )
-        self.assertEqual(reads, 2)
-        self.assertEqual(list(mount_path.iterdir()), [])
-        mock_sleep.assert_called_once()
-        mock_post.assert_not_called()
-
-    @patch("requests.post")
-    @patch("rtp_llm.utils.fuser.time.sleep")
-    def test_external_wo_probe_waits_for_file_visibility(self, mock_sleep, mock_post):
-        uri = "oss://bucket/write-only/"
-        mount_path = self.external_mount(uri)
-        original_rename, attempts = os.rename, 0
-
-        def rename_file(source, destination):
-            nonlocal attempts
-            attempts += 1
-            if attempts == 1:
-                raise FileNotFoundError("upload still pending")
-            return original_rename(source, destination)
-
-        with patch("rtp_llm.utils.fuser.os.rename", side_effect=rename_file), patch(
-            "rtp_llm.utils.fuser.open", wraps=builtins.open
-        ) as open_file, patch("rtp_llm.utils.fuser.os.scandir") as scandir:
-            self.assertEqual(
-                self.fuser.mount_or_reuse_dir(uri, MountRwMode.RWMODE_WO),
-                str(mount_path),
-            )
-            scandir.assert_not_called()
-            open_file.assert_called_once()
-            self.assertEqual(open_file.call_args.args[1], "xb")
-        self.assertEqual(attempts, 2)
-        self.assertEqual(list(mount_path.iterdir()), [])
-        self.assertEqual(self.fuser._mount_src_map, {})
-        mock_sleep.assert_called_once()
-        mock_post.assert_not_called()
-
-    @patch("requests.post")
-    def test_external_rw_probe_timeout_cleans_up_without_remount(self, mock_post):
-        uri = "oss://bucket/jit-cache/"
-        mount_path = self.external_mount(uri)
-
-        def open_file(path, mode="r", *args, **kwargs):
-            if mode == "rb":
-                raise FileNotFoundError("upload still pending")
-            return builtins.open(path, mode, *args, **kwargs)
-
-        with patch("rtp_llm.utils.fuser.open", side_effect=open_file), patch(
-            "rtp_llm.utils.fuser.time.time", side_effect=(0, 11)
-        ), self.assertRaises(TimeoutError):
-            self.fuser.mount_or_reuse_dir(uri, MountRwMode.RWMODE_RW)
         self.assertEqual(list(mount_path.iterdir()), [])
         mock_post.assert_not_called()
 
