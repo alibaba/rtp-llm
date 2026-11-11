@@ -92,7 +92,19 @@ class KimiK31ModelAdapter:
         owner.route_chunk_rows = self._row_exchange.chunk_capacity
         owner.route_bytes, owner.route_allocation_granularity = route_allocation_budget(self._row_exchange)
 
-    def _prepare_dsa(self, inputs, is_cuda_graph):
+    def _prepare_dsa(self, inputs, is_cuda_graph, *, prepare_host_metadata=None):
+        """Prepare a batch; pass local-only host preparation inside this boundary.
+
+        The model caller must not run that callback before entering this method:
+        otherwise a malformed tag can make one rank exit before the agreement.
+        QueryCP and Graph paths retain their existing preparation order.
+        """
+        # Select the boundary from model/call-site state, never from a local
+        # tag or cache hit: even an empty/malformed mapping must enter the vote.
+        if not self.prefill_query_cp and not is_cuda_graph:
+            return self._prepare_dsa_tp_batch(inputs, prepare_host_metadata)
+        if prepare_host_metadata is not None:
+            prepare_host_metadata(inputs)
         from rtp_llm.models_py.modules.hybrid.query_layout import QueryLayout
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_page_rr_impl import SparseMlaPageRRImpl
 
@@ -165,29 +177,8 @@ class KimiK31ModelAdapter:
                     kda_layout.prepare_kda_buffers(a.input.weight.shape[0], a.width,
                                                quantized=a._fp8_output_norm)
             self._query_layout = layout
+        self._update_dsa_workspace_layout(inputs)
         owner = self.dsa_workspace
-        owner.query_layout = self._query_layout
-        owner.producer_layout = self._outer_layout if self._outer_layout is not None else self._query_layout
-        owner.routing_plan = self._routing_plan
-        owner.row_exchange = self._row_exchange
-        # Storage identity, rather than tensor identity, counts views only once.
-        storages = {}
-        tensors = [*self._query_layout_buffers.values(), *self._outer_layout_buffers.values()]
-        for layout in (self._query_layout, self._outer_layout):
-            if layout is not None:
-                tensors.extend(x for x in layout.__dict__.values()
-                               if isinstance(x, torch.Tensor) and x.device == layout.device)
-        for layouts in getattr(self, "_natural_layout_cache", {}).values():
-            for layout in layouts[:2]:
-                tensors.extend(x for x in layout.__dict__.values() if isinstance(x, torch.Tensor))
-        for entry in getattr(self, "_natural_validation_cache", {}).values():
-            tensors.extend(entry)
-        for tensor in tensors:
-            if tensor.device != inputs.input_ids.device:
-                continue
-            storage = tensor.untyped_storage()
-            storages[storage.data_ptr()] = storage.nbytes()
-        owner.layout_bytes = sum(storages.values())
 
         def create(attention_inputs, phase=None):
             parallel = self.parallelism_config
@@ -215,6 +206,125 @@ class KimiK31ModelAdapter:
                 for tag in tags
             }
         return create(tagged)
+
+
+    def _update_dsa_workspace_layout(self, inputs):
+        owner = self.dsa_workspace
+        owner.query_layout = self._query_layout
+        owner.producer_layout = self._outer_layout if self._outer_layout is not None else self._query_layout
+        owner.routing_plan = self._routing_plan
+        owner.row_exchange = self._row_exchange
+        # Storage identity, rather than tensor identity, counts views only once.
+        storages = {}
+        tensors = [*self._query_layout_buffers.values(), *self._outer_layout_buffers.values()]
+        for layout in (self._query_layout, self._outer_layout):
+            if layout is not None:
+                tensors.extend(x for x in layout.__dict__.values()
+                               if isinstance(x, torch.Tensor) and x.device == layout.device)
+        for layouts in getattr(self, "_natural_layout_cache", {}).values():
+            for layout in layouts[:2]:
+                tensors.extend(x for x in layout.__dict__.values() if isinstance(x, torch.Tensor))
+        for entry in getattr(self, "_natural_validation_cache", {}).values():
+            tensors.extend(entry)
+        for tensor in tensors:
+            if tensor.device != inputs.input_ids.device:
+                continue
+            storage = tensor.untyped_storage()
+            storages[storage.data_ptr()] = storage.nbytes()
+        owner.layout_bytes = sum(storages.values())
+
+
+    def _prepare_dsa_tp_batch(self, inputs, prepare_host_metadata=None):
+        from rtp_llm.models_py.distributed.collective_torch import Group, get_process_group
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_page_rr_impl import (
+            SparseMlaPageRRImpl, agree_tp_prefill_batch,
+        )
+
+        # This region must remain local-only. In particular, constructing an
+        # attention implementation can initialize its communicator, so defer
+        # constructors (and any layout scatter) until the one final agreement.
+        records, contracts, error = [], [], None
+        mapping = False
+        try:
+            # block_map uses RuntimeError for malformed mappings. Validate this
+            # recoverable input explicitly, without classifying RuntimeErrors
+            # from CUDA/native operations by their message text.
+            if isinstance(inputs.attention_inputs, Mapping) and not inputs.attention_inputs:
+                raise ValueError("DSA batch requires a nonempty tag mapping")
+            tagged = get_attention_inputs_value(inputs)
+            mapping = isinstance(tagged, Mapping)
+            if mapping:
+                tags = self._get_fmha_group_tags()
+                tags = tuple(tagged if tags is None else tags)
+                if not tags or any(not isinstance(tag, str) or not tag for tag in tags):
+                    raise ValueError("DSA batch requires nonempty cache tags")
+                if len(set(tags)) != len(tags):
+                    raise ValueError("DSA batch contains duplicate cache tags")
+                for tag in tags:
+                    if tag not in tagged or tagged[tag] is None:
+                        raise ValueError(f"DSA attention input tag {tag!r} is missing")
+            else:
+                tags = (None,)
+            if prepare_host_metadata is not None:
+                prepare_host_metadata(inputs)
+            self._query_layout = None
+            self._outer_layout = None
+            self._routing_plan = None
+            self._update_dsa_workspace_layout(inputs)
+            mode, shared = None, None
+            for tag in tags:
+                attention_inputs = tagged[tag] if mapping else tagged
+                current_mode = (
+                    bool(attention_inputs.is_prefill),
+                    bool(attention_inputs.is_target_verify),
+                    bool(attention_inputs.is_mtp_draft_update),
+                )
+                if mode is not None and current_mode != mode:
+                    raise ValueError("DSA cache tags disagree on batch execution mode")
+                mode = current_mode
+                phase = ("indexer" if tag == "indexer_kv" else "sfa") if mapping else None
+                prepared = None
+                if mode == (True, False, False):
+                    prepared = SparseMlaPageRRImpl.prepare_tp_prefill(
+                        self.config, self.parallelism_config, self.dsa_workspace,
+                        attention_inputs, phase,
+                    )
+                    # Request geometry must agree across tags too. Per-phase
+                    # KV representation/capacity is compared across ranks below.
+                    current = prepared.contract[:3]
+                    if shared is not None and current != shared:
+                        raise ValueError("DSA cache tags disagree on Prefill query geometry")
+                    shared = current
+                    contract = prepared.contract
+                else:
+                    # Eager decode shares this fixed boundary; its existing
+                    # scheduler/metadata preparation still runs after agreement.
+                    contract = (
+                        int(attention_inputs.physical_token_count),
+                        int(attention_inputs.logical_token_count),
+                    )
+                records.append((tag, attention_inputs, phase, prepared))
+                contracts.append((tag, mode, contract))
+        except ValueError as exc:
+            # Only metadata/geometry/capacity validation rejections participate
+            # in agreement. MemoryError, CUDA OOM/fatal RuntimeError and unknown
+            # exceptions propagate unchanged to the existing fatal boundary.
+            # A poisoned CUDA context is not made recoverable by an NCCL vote.
+            error = f"{type(exc).__name__}: {exc}"
+        agree_tp_prefill_batch(
+            (mapping, tuple(contracts)), error,
+            get_process_group(Group.TP), self.parallelism_config.tp_size,
+        )
+        self.dsa_workspace.graph_cache_groups = len(records)
+        result = {}
+        for tag, attention_inputs, phase, prepared in records:
+            result[tag] = SparseMlaPageRRImpl(
+                self.config, self.parallelism_config, self.weight,
+                attention_inputs, self.fmha_config, False,
+                workspace_owner=self.dsa_workspace, execution_phase=phase,
+                prepared_tp_prefill=prepared,
+            )
+        return result if mapping else result[None]
 
 
     def _initialize_mtp_hidden_handoff(self, init_resource):
