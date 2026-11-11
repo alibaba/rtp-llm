@@ -421,6 +421,18 @@ class ModelLoader:
         for key, loaded_tensor in all_tensors:
             if key not in tensor_to_weight_map:
                 continue
+            # AWI census: observe every CONSUMED checkpoint key at the true
+            # load boundary. Stacked MoE experts are essential here — their
+            # module-level names differ from the per-expert checkpoint keys,
+            # so the WeightModule.load hook alone cannot see them. The
+            # iterator loads straight to the target device, so this tensor's
+            # classification is the resident placement of the key's data.
+            try:
+                from rtp_llm.model_loader import awi_placement
+
+                awi_placement.record_load([key], [loaded_tensor])
+            except Exception:
+                logging.warning("AWI census hook failed", exc_info=True)
             weight_info = tensor_to_weight_map[key]
             _total_count += 1
 

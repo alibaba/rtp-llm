@@ -404,6 +404,32 @@ def register_from_model(
         elif not checkpoint_dir:
             logging.warning("AWI census: checkpoint dir unknown; ballast skipped")
 
+        # The evaluator requires the row-name set to EQUAL the checkpoint
+        # manifest: filter out module-level alias names (e.g. stacked MoE
+        # template keys) that no manifest entry corresponds to.
+        index_names = None
+        if checkpoint_dir:
+            try:
+                index_path = os.path.join(
+                    checkpoint_dir, "model.safetensors.index.json"
+                )
+                with open(index_path, "r") as reader:
+                    index_names = set(json.load(reader)["weight_map"].keys())
+            except Exception:
+                logging.warning(
+                    "AWI census: index unreadable; extra-name filter disabled",
+                    exc_info=True,
+                )
+        if index_names is not None:
+            extras = set(_ROWS.keys()) - index_names
+            if extras:
+                logging.warning(
+                    "AWI census: dropping %d non-manifest alias names, sample: %s",
+                    len(extras), sorted(extras)[:5],
+                )
+                for name in extras:
+                    _ROWS.pop(name, None)
+
         # Each rank registers ONLY its own rows; the query-time RPC fan-out
         # exposes every rank's partitions to the evaluator ("all resident
         # partitions/copies ... inspect all ranks"). The all-ranks union is
@@ -438,27 +464,19 @@ def register_from_model(
 
         # Completeness against the checkpoint index (same name universe the
         # evaluator's manifest enumerates).
-        if checkpoint_dir:
-            try:
-                index_path = os.path.join(
-                    checkpoint_dir, "model.safetensors.index.json"
+        if index_names is not None:
+            missing = index_names - union_names
+            if missing:
+                logging.error(
+                    "AWI census INCOMPLETE: %d keys missing, sample: %s",
+                    len(missing), sorted(missing)[:10],
                 )
-                with open(index_path, "r") as reader:
-                    index_names = set(json.load(reader)["weight_map"].keys())
-                missing = index_names - union_names
-                if missing:
-                    logging.error(
-                        "AWI census INCOMPLETE: %d keys missing, sample: %s",
-                        len(missing), sorted(missing)[:10],
-                    )
-                else:
-                    logging.info(
-                        "AWI census complete: %d checkpoint keys covered "
-                        "(%d rows on this rank)",
-                        len(union_names), len(rows),
-                    )
-            except Exception:
-                logging.warning("AWI census: index check failed", exc_info=True)
+            else:
+                logging.info(
+                    "AWI census complete: %d checkpoint keys covered "
+                    "(%d rows on this rank)",
+                    len(union_names), len(rows),
+                )
 
         module = _pybind_module()
         if module is None:
