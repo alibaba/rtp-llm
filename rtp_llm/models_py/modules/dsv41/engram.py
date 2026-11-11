@@ -322,6 +322,26 @@ def _prefault_host_tensor(tensor: torch.Tensor, name: str) -> None:
 _STALE_CACHE_DROPPED = False
 
 
+def _hip_engram_tp_layout():
+    """(tp_rank, tp_world) for the ROCm Engram registration/broadcast split.
+
+    The AMD driver accounts host registrations against a global budget of
+    roughly physical RAM: 8 ranks x 2 tables x 94.4 GiB (= 1.5 TiB) is
+    rejected instantly with hipErrorInvalidValue (reproduced with an
+    8-process probe; even non-Portable flags fail). One registration set
+    (2 x 94.4 GiB in a single process) succeeds, so only tp_rank 0 pins the
+    tables and gathers over UVA during graph capture; the other ranks join
+    the capture-safe TP all-reduce that distributes the rows. Ranks are
+    laid out TP-innermost; DP>1 deployments would need the group-relative
+    rank instead (this lane is DP1/TP8).
+    """
+    world_rank = int(os.environ.get("WORLD_RANK", "0"))
+    tp_world = int(os.environ.get("TP_SIZE", "1"))
+    if tp_world < 1:
+        tp_world = 1
+    return world_rank % tp_world, tp_world
+
+
 def _release_stale_checkpoint_cache(root: Path, weight_map: dict) -> None:
     """Free host reclaim headroom before Engram pages get pinned.
 
@@ -1144,12 +1164,46 @@ class HostEngramEmbedding:
                             uva[1].record_stream(
                                 torch.cuda.current_stream(indices.device)
                             )
-        # UVA device-side gather. CUDA builds _uva through _PinnedSharedTable
-        # (cuda.bindings + tmpfs shared copy); ROCm builds it through
-        # HipRegisteredTable (hipHostRegister in place on the safetensors
-        # mmap, no copy). Without either, fall through to the host gather,
-        # which keeps the tables in host RAM and stages selected rows.
-        if indices.is_cuda and self._uva is not None:
+        # ROCm decode-graph capture: the host gather below D2H-syncs and
+        # cannot live inside a HIP graph, and only tp_rank 0 holds the
+        # registered UVA tables (global driver registration budget). During
+        # capture every rank therefore takes this uniform branch: rank 0
+        # gathers rows device-side over UVA, other ranks contribute zeros,
+        # and the capture-safe TP all-reduce (SUM) distributes the rows -
+        # the same collective path the MoE TP reduction already uses inside
+        # captured graphs. Eager ROCm runs keep using the host gather
+        # (lower latency, no communication).
+        if (
+            indices.is_cuda
+            and torch.version.hip is not None
+            and torch.cuda.is_current_stream_capturing()
+        ):
+            from rtp_llm.models_py.modules.dsv41 import _engram_triton
+
+            dim = self.weight.shape[1]
+            out = torch.zeros(
+                (*indices.shape, dim), dtype=torch.bfloat16, device=indices.device
+            )
+            if self._uva is not None:
+                out.copy_(
+                    _engram_triton.lookup_host_rows(
+                        self._uva[0], self._uva[1], indices, self._num_sms
+                    )
+                )
+            _, tp_world = _hip_engram_tp_layout()
+            if tp_world > 1:
+                from rtp_llm.models_py.distributed.collective_torch import (
+                    Group,
+                    all_reduce,
+                )
+
+                all_reduce(out, Group.TP)
+            return out
+        # UVA device-side gather (CUDA): _PinnedSharedTable via
+        # cuda.bindings. Without it, fall through to the host gather, which
+        # keeps the tables in host RAM and stages only the selected rows to
+        # the device.
+        if indices.is_cuda and self._uva is not None and torch.version.hip is None:
             from rtp_llm.models_py.modules.dsv41 import _engram_triton
 
             lookup = (
@@ -2228,7 +2282,23 @@ class Engram(nn.Module):
                     )
                 pinned = None
                 identity = None
-                if target.type == "cuda":
+                hip_rank, hip_world = _hip_engram_tp_layout()
+                hip_uva_wanted = (
+                    torch.version.hip is not None
+                    and os.getenv("DSV41_ENGRAM_HIP_UVA", "1") == "1"
+                    and os.getenv("ENABLE_CUDA_GRAPH", "0").strip().lower()
+                    in ("1", "true", "on", "yes")
+                )
+                # ROCm: only tp_rank 0 may pin (global driver registration
+                # budget ~ physical RAM; see _hip_engram_tp_layout), and only
+                # when decode graphs are wanted (eager runs are faster on the
+                # host gather). CUDA keeps the frozen reference behavior on
+                # every rank.
+                register_here = target.type == "cuda" and (
+                    torch.version.hip is None
+                    or (hip_rank == 0 and hip_uva_wanted)
+                )
+                if register_here:
                     parts = [str(root.resolve()), prefix]
                     for suffix in ("embed.weight", "embed.scale"):
                         path = root / weight_map[prefix + suffix]
@@ -2246,23 +2316,12 @@ class Engram(nn.Module):
                     # the libamdhip64 shim. Registering the MAP_PRIVATE
                     # safetensors mmap in place instead would COW ~92 GiB of
                     # private anonymous pages per rank under long-term pins.
-                    try:
-                        pinned = _PinnedSharedTable(table, scales, identity, target)
-                        table, scales = pinned.weight, pinned.scales
-                    except Exception as table_error:  # noqa: BLE001
-                        if (
-                            torch.version.hip is None
-                            or os.getenv("DSV41_ENGRAM_HIP_UVA", "1") != "1"
-                        ):
-                            raise
-                        logger.warning(
-                            "Engram shared pinned table unavailable on ROCm "
-                            "(%s); falling back to the host gather (decode "
-                            "graph capture stays disabled for Engram)",
-                            table_error,
-                        )
-                        pinned = None
-                        identity = None
+                    # No silent fallback: on ROCm this path only runs when
+                    # decode graphs are wanted, and a capture where rank 0
+                    # cannot gather would silently broadcast zeros. Fail the
+                    # load loudly instead.
+                    pinned = _PinnedSharedTable(table, scales, identity, target)
+                    table, scales = pinned.weight, pinned.scales
                 if pinned is None:
                     _prefault_host_tensor(table, prefix + "embed.weight")
                     _prefault_host_tensor(scales, prefix + "embed.scale")

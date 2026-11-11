@@ -66,11 +66,38 @@ class _HipHostRuntime:
         ]
         lib.hipHostUnregister.restype = ctypes.c_int
         lib.hipHostUnregister.argtypes = [ctypes.c_void_p]
+        lib.hipGetLastError.restype = ctypes.c_int
+        lib.hipGetLastError.argtypes = []
+        lib.hipGetErrorString.restype = ctypes.c_char_p
+        lib.hipGetErrorString.argtypes = [ctypes.c_int]
+
+    def _consume_error(self, status):
+        """Drain the thread-local HIP error and return a detailed message.
+
+        A failed ctypes call leaves hipErrorInvalidValue pending; the next
+        torch HIP op would otherwise pick it up and report it as its own
+        asynchronous failure (load22: a plain torch.zeros died this way
+        after a registration failure).
+        """
+        self._lib.hipGetLastError()
+        try:
+            text = self._lib.hipGetErrorString(status)
+            return text.decode() if text else str(status)
+        except Exception:  # noqa: BLE001
+            return str(status)
 
     def cudaHostRegister(self, ptr, nbytes, flags):  # noqa: N802
         status = self._lib.hipHostRegister(
             ctypes.c_void_p(ptr), ctypes.c_size_t(nbytes), ctypes.c_uint(flags)
         )
+        if status != 0:
+            logger.error(
+                "hipHostRegister(ptr=%#x, nbytes=%d, flags=%d) failed: %s",
+                ptr,
+                nbytes,
+                flags,
+                self._consume_error(status),
+            )
         return (status,)
 
     def cudaHostGetDevicePointer(self, ptr, flags):  # noqa: N802
@@ -78,10 +105,18 @@ class _HipHostRuntime:
         status = self._lib.hipHostGetDevicePointer(
             ctypes.byref(device_ptr), ctypes.c_void_p(ptr), ctypes.c_uint(flags)
         )
+        if status != 0:
+            logger.error(
+                "hipHostGetDevicePointer(ptr=%#x) failed: %s",
+                ptr,
+                self._consume_error(status),
+            )
         return (status, device_ptr.value if device_ptr.value is not None else 0)
 
     def cudaHostUnregister(self, ptr):  # noqa: N802
         status = self._lib.hipHostUnregister(ctypes.c_void_p(ptr))
+        if status != 0:
+            self._consume_error(status)
         return (status,)
 
 
