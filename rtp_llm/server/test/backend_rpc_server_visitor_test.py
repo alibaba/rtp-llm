@@ -301,7 +301,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
             input = _FakeRouteInput()
 
             with patch(
-                "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys",
+                "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys_async",
                 return_value=[11, 22],
             ), patch(
                 "rtp_llm.server.backend_rpc_server_visitor.trans_input",
