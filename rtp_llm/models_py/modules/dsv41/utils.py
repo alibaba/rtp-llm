@@ -110,6 +110,45 @@ class V41MXFP8Linear(torch.nn.Module):
             else quantized.view(x.shape)
         ), scales
 
+    def _dequantize_foreign_fp8(
+        self, x_q: torch.Tensor, x_s: torch.Tensor
+    ) -> torch.Tensor:
+        """Expand E4M3 + packed group32 UE8M0 into the exact BF16 boundary.
+
+        The packed layout stores four consecutive 8-bit exponents in one int32,
+        little-endian by group.  Some producers return it column-major; indexing
+        by logical [row, pack] is layout-independent.
+        """
+        rows = x_q.numel() // self.K
+        if x_q.numel() % self.K:
+            raise ValueError(
+                f"foreign FP8 activation shape {tuple(x_q.shape)} is not a "
+                f"multiple of K={self.K}"
+            )
+        groups = self.K // 32
+        packs = (groups + 3) // 4
+        if x_s.dtype != torch.int32 or x_s.ndim != 2:
+            raise ValueError(
+                "foreign FP8 activation requires int32 packed UE8M0 scales, "
+                f"got {x_s.dtype} {tuple(x_s.shape)}"
+            )
+        if x_s.shape[0] < rows or x_s.shape[1] != packs:
+            raise ValueError(
+                f"foreign FP8 scale shape {tuple(x_s.shape)} does not cover "
+                f"{rows} rows x {packs} packs (K={self.K})"
+            )
+        packed = x_s[:rows].to(torch.int64)
+        exponents = torch.empty(
+            (rows, packs * 4), dtype=torch.int32, device=x_q.device
+        )
+        for shift in range(4):
+            exponents[:, shift::4] = (
+                (packed >> (8 * shift)) & 0xFF
+            ).to(torch.int32)
+        scales = (exponents[:, :groups] << 23).view(torch.float32)
+        expanded = scales.repeat_interleave(32, dim=1)
+        return (x_q.reshape(rows, self.K).float() * expanded).to(torch.bfloat16)
+
     def forward_quantized(self, x_q: torch.Tensor, x_s: torch.Tensor, out=None):
         """Consume group32 E4M3/packed UE8M0 without another quantization.
 
@@ -119,10 +158,18 @@ class V41MXFP8Linear(torch.nn.Module):
         """
         if self._fallback:
             if x_q.dtype == torch.float8_e4m3fn:
-                raise RuntimeError(
-                    "A100 reference V41MXFP8Linear cannot consume a foreign FP8 "
-                    "activation; callers must use _quantize_input on this module"
-                )
+                # SM80 has no native grouped FP8 GEMM, but the producer may
+                # hand us the exact E4M3 payload plus group32 UE8M0 scales
+                # (query_norm_quant, the quantized Engram lookup, or the fused
+                # QKV path).  Decode that payload back to BF16 and reuse the
+                # reference linear; this preserves the checkpoint's quantized
+                # values and does not introduce a second quantization.
+                if x_s is None:
+                    raise RuntimeError(
+                        "A100 reference V41MXFP8Linear requires group32 UE8M0 "
+                        "scales for a foreign FP8 activation"
+                    )
+                x_q = self._dequantize_foreign_fp8(x_q, x_s)
             shape = (*x_q.shape[:-1], self.N)
             from rtp_llm.models_py.modules.dsv41.fp4_dequant_gemm import (
                 fp8_dequant_matmul,
