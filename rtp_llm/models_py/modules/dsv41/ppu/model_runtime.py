@@ -119,7 +119,8 @@ class SharedNativeRuntime:
         model.v4._ppu_runtime = self
         for layer in model.v4.layers:
             layer.attn.runtime = self
-            layer.attn_hc.runtime = self
+            if not model.v4.commit_only:
+                layer.attn_hc.runtime = self
             if getattr(layer, "ffn", None) is not None:
                 layer.ffn.runtime = self
                 layer.ffn_hc.runtime = self
