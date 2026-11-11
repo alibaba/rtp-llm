@@ -56,6 +56,90 @@ TPUPrefillExecutionPolicyConfig typedRuntimePolicy()
 
 class GeometryIntegrationTest : public TESTBASE {};
 
+TEST_F(GeometryIntegrationTest, testSharedBatchQueueObservationsRemainTrainable)
+{
+    // A shared execution span is unsuitable for execution-model training, but
+    // the batch's ready-to-first-execution wait is still directly observed.
+    for (const int scenario : {0, 1, 2}) {
+        const bool windows = scenario != 0;
+        const bool started = scenario != 2;
+        navi::NaviResourceHelper helper;
+        ASSERT_TRUE(helper.addExternalRes(std::make_shared<AgentReportBridgeR>()));
+        auto inputs = std::make_shared<AgentLatencyInputR>();
+        if (windows) inputs->enableObservedExecutionWindowTraining();
+        ASSERT_TRUE(helper.addExternalRes(inputs));
+        auto batches = std::make_shared<AgentBatchR>();
+        ASSERT_TRUE(helper.addExternalRes(batches));
+        ASSERT_TRUE(helper.config(AgentHistoryR::RESOURCE_ID,
+                                  R"({"fit_batch_size":1,"warmup_sample_count":0})"));
+        ASSERT_TRUE(helper.config(
+            NonLinearPrefillModelR::RESOURCE_ID,
+            R"({"pd_separated":true,"use_batch_count_feature":true,"use_capacity_split_feature":false,"execution_geometry_enabled":true,"projected_execution_geometry_enabled":false,"execution_cache_source_enabled":true})"));
+        ASSERT_TRUE(helper.config(
+            AgentReportR::RESOURCE_ID,
+            R"({"server_ip":"127.0.0.1","server_port":0,"pd_separated":true,"unified_latency_prediction":false})"));
+        auto report = helper.getOrCreateResPtr<AgentReportR>();
+        auto model = helper.getOrCreateResPtr<LatencyModelR>();
+        ASSERT_TRUE(report && model);
+        report->_controlConfig.executionGeometryEnabled = true;
+        report->_controlConfig.prefillExecutionPolicy = typedRuntimePolicy();
+        navi::KernelTesterBuilder builder;
+        auto tester = builder.kernel("navi_sched.agent_latency_k")
+                          .output("save")
+                          .output("finished")
+                          .attrs(std::string("{\"input_pipe_generation\":") +
+                                 std::to_string(inputs->beginInputPipeGeneration()) + "}")
+                          .resource(helper.getResourceMap())
+                          .build();
+        ASSERT_TRUE(tester);
+        ASSERT_EQ(navi::EC_NONE, tester->getErrorCode());
+        auto kernel = dynamic_cast<AgentLatencyKernel *>(tester->getKernel());
+        ASSERT_TRUE(kernel);
+        const auto modelRevision = model->getSnapshot()->revision;
+        const auto fitStep = kernel->_queueFitStep;
+        NaviSchedRequestStats request;
+        request.requestId = 101;
+        request.totalTokenCount = 512;
+        request.blockSize = 16;
+        request.executionSharedPrefixBoundary = 0;
+        request.executionExternalReadTokens = 0;
+        request.predictedExecutionLatencyMs = 3.0;
+        NaviSchedBatchPtr batch;
+        ASSERT_TRUE(batches->addRequest(
+            request, 81, 1, [&](const NaviSchedBatchPtr &value) { batch = value; }));
+        ASSERT_TRUE(batch);
+        const auto readyUs = batch->readyTimeUs;
+        ASSERT_TRUE(inputs->submitBatchReady(batch, 0, 1, 0, readyUs));
+        ASSERT_TRUE(tester->compute());
+        if (started) {
+            AgentBatchR::ExecutionState state;
+            ASSERT_TRUE(
+                batches->startBatch(batch->batchId, {101}, readyUs + 2000, state));
+            ASSERT_TRUE(
+                inputs->submitBatchStarted(batch->batchId, 0, 0, 1, readyUs + 2000));
+            ASSERT_TRUE(tester->compute());
+        }
+        AgentLatencyInput finished;
+        finished.type = AgentLatencyInputType::BATCH_FINISHED;
+        finished.batchId = batch->batchId;
+        finished.eventTimeUs = readyUs + 5000;
+        finished.latencyMs = 3.0;
+        finished.backendQueueLatencyMs = 2.0;
+        finished.latencySampleValid = false;
+        finished.latencyValidationValid = false;
+        finished.completedRequestCount = 1;
+        finished.queries = {request};
+        finished.localBatch = batch->makeLocalBatchInfo();
+        ASSERT_TRUE(inputs->submit(std::move(finished)));
+        ASSERT_TRUE(tester->compute());
+        EXPECT_EQ(fitStep + (windows && started ? 1 : 0), kernel->_queueFitStep);
+        EXPECT_EQ(modelRevision, model->getSnapshot()->revision);
+        EXPECT_TRUE(kernel->_batchLatencyUs.empty());
+        EXPECT_TRUE(kernel->_batchQueueFeatures.empty());
+        EXPECT_TRUE(kernel->_runningBatches.empty());
+    }
+}
+
 TEST_F(GeometryIntegrationTest,
        testExecutionWindowsReplaceTrainingWithoutChangingValidation)
 {

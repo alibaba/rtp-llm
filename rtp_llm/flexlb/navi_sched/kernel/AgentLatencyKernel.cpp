@@ -1323,16 +1323,26 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
                     hasQueueFeatures ? &queueFeaturesIt->second : nullptr,
                     agentPredictedQueueLatencyMs);
             }
-            if (shouldFitQueueLatency(_agentReportR->usesUnifiedLatencyPrediction(),
-                                      input.type, hasQueueFeatures,
-                                      input.latencySampleValid)) {
+            // Physical-window training rejects shared execution spans, not the
+            // independently measured ready-to-first-execution queue interval.
+            const bool independentQueueObservation =
+                _agentLatencyInputR->shouldTrainInput(
+                    AgentLatencyInputType::OBSERVED_EXECUTION_SAMPLE) &&
+                AgentLatencyInputType::BATCH_FINISHED == input.type && hasQueueFeatures &&
+                input.completedRequestCount > 0 &&
+                queueFeaturesIt->second.readyTimeUs > 0 &&
+                queueFeaturesIt->second.queueEndCanRunTimeUs >=
+                    queueFeaturesIt->second.readyTimeUs &&
+                input.eventTimeUs >= queueFeaturesIt->second.queueEndCanRunTimeUs &&
+                std::isfinite(input.backendQueueLatencyMs) &&
+                input.backendQueueLatencyMs >= 0.0;
+            if (shouldFitQueueLatency(
+                    _agentReportR->usesUnifiedLatencyPrediction(), input.type,
+                    hasQueueFeatures,
+                    input.latencySampleValid || independentQueueObservation)) {
                 logQueueDebugSample(input, scheduleBatchId, queueFeaturesIt->second,
                                     agentPredictedQueueLatencyMs,
                                     agentPredictedExecutionLatencyMs);
-            }
-            if (!_agentReportR->usesUnifiedLatencyPrediction() &&
-                AgentLatencyInputType::BATCH_FINISHED == input.type && hasQueueFeatures &&
-                input.latencySampleValid) {
                 fitQueueLatency(queueFeaturesIt->second, input.backendQueueLatencyMs);
                 _latencyValidationStats.queueModelWeights.assign(_queueWeights.begin(),
                                                                  _queueWeights.end());
