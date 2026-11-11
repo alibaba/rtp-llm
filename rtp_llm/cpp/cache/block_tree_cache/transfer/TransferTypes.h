@@ -6,12 +6,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSetResource.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBufferSafety.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
@@ -105,6 +108,50 @@ inline ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
     }
     return ErrorInfo(ErrorCode::UNKNOWN_ERROR, "unknown block transfer status");
 }
+enum class TransferRpcDispatchState { NOT_SUBMITTED, POSSIBLY_SUBMITTED, SUBMITTED };
+
+// Preserve the existing execution identity and its namespace: ordinary transfer
+// uses a numeric trace, while KVCM READ uses the original string from its request.
+using TransferExecutionTrace = std::variant<uint64_t, std::string>;
+
+inline bool validTransferExecutionTrace(const TransferExecutionTrace& trace) noexcept {
+    if (const auto* numeric = std::get_if<uint64_t>(&trace)) {
+        return *numeric != 0;
+    }
+    const auto* remote = std::get_if<std::string>(&trace);
+    return remote && !remote->empty();
+}
+
+// A snapshot of one participant in one actual execution. A missing status is
+// unknown, never an implicit successful RPC. Local executions have remote=false.
+struct TransferRankSnapshot {
+    size_t                   rank{0};
+    std::string              server_address;
+    bool                     remote{true};
+    TransferRpcDispatchState dispatch_state{TransferRpcDispatchState::NOT_SUBMITTED};
+    std::string              dispatch_error;
+    bool                     cq_received{false};
+    bool                     cq_ok{false};
+    std::optional<int>       grpc_code;
+    std::string              grpc_message;
+    bool                     response_received{false};
+    bool                     response_valid{false};
+    std::string              response_error;
+    std::optional<int64_t>   worker_error_code;
+    std::string              worker_error_message;
+    std::optional<CacheCopyError> worker_copy_error;
+    std::vector<CacheCopyError>   block_errors;
+    std::optional<bool>           buffer_safe;
+    std::optional<int>            worker_transfer_status;
+    std::optional<bool>           sdk_failed;
+};
+
+struct TransferExecutionDiagnostics {
+    TransferExecutionTrace            trace_id{uint64_t{0}};
+    std::string                       failure_reason;
+    std::vector<TransferRankSnapshot> ranks;
+};
+
 // Results are ordered like the task's descriptors; NONE means the target copy completed,
 // and NOT_EXECUTED means no target was committed to the caller. The copy may
 // have been skipped or discarded after a batch CRC failure; target bytes can change.
@@ -123,13 +170,38 @@ struct TransferResult {
                                                                 CacheCopyError::COPY_FAILED) {}
     TransferResult(ErrorInfo error, CacheCopyError copy_error): status(std::move(error)), copy_error(copy_error) {}
 
+    // Identity for combining independent operations, not proof for an executed
+    // operation. Every contributing result must explicitly prove buffer safety.
+    static TransferResult emptyAggregate(size_t block_count = 0) {
+        TransferResult result(block_count);
+        result.buffer_safe = true;
+        return result;
+    }
+
     bool ok() const {
         return status.ok();
+    }
+
+    // Completion evidence must survive failure to allocate the diagnostic itself.
+    static TransferResult executionException(bool safe, const char* message = nullptr) noexcept {
+        TransferResult result;
+        result.status.setErrorCode(ErrorCode::EXECUTION_EXCEPTION);
+        result.copy_error = CacheCopyError::COPY_FAILED;
+        result.buffer_safe = safe;
+        if (message) {
+            try {
+                result.status = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, message);
+            } catch (...) {}
+        }
+        return result;
     }
 
     // Append every failure message; keep unknown completion ahead of known failures
     // without losing higher-priority copy diagnostics such as confirmed CRC errors.
     void merge(TransferResult other) {
+        // A successful business result can still lack completion proof. Merge
+        // safety before either early return, independently of error precedence.
+        buffer_safe = buffer_safe && other.buffer_safe;
         if (other.ok()) {
             return;
         }
@@ -143,7 +215,11 @@ struct TransferResult {
             || other.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
             code = ErrorCode::TRANSFER_COMPLETION_UNKNOWN;
         }
-        status          = ErrorInfo(code, status.ToString() + "; " + other.status.ToString());
+        try {
+            status = ErrorInfo(code, status.ToString() + "; " + other.status.ToString());
+        } catch (...) {
+            status.setErrorCode(code);
+        }
         copy_error      = std::max(copy_error, other.copy_error);
     }
 
@@ -160,6 +236,14 @@ struct TransferResult {
     ErrorInfo                   status{ErrorInfo::OkStatus()};
     CacheCopyError              copy_error{CacheCopyError::NONE};
     std::vector<CacheCopyError> block_errors;
+    // True only when this operation can no longer access any of its buffers.
+    // False means unproven, not necessarily in-flight. Business success, error
+    // codes and NOT_EXECUTED diagnostics never implicitly grant this proof.
+    bool buffer_safe{false};
+    // Leaf execution diagnostics belong to this exact trace. The coordinator
+    // captures them before merging into a parent task; merge() never conflates
+    // snapshots belonging to different executions.
+    std::shared_ptr<const TransferExecutionDiagnostics> execution_diagnostics;
 };
 
 struct HostBufferView {
@@ -332,6 +416,13 @@ public:
         }
     }
 
+    const std::shared_ptr<TransferBufferSafety>& completionProof() const noexcept {
+        return completion_proof_;
+    }
+    void setCompletionProof(std::shared_ptr<TransferBufferSafety> proof) noexcept {
+        completion_proof_ = std::move(proof);
+    }
+
     const std::vector<TransferDescriptor>& descriptors() const {
         return descriptors_;
     }
@@ -362,7 +453,25 @@ public:
     }
 
     TransferTask subtask(std::vector<TransferDescriptor> descriptors) const {
-        return TransferTask(std::move(descriptors), *this);
+        // The proof covers this complete physical batch, not an arbitrary
+        // subset or intermediate stage. Ownership must be transferred explicitly.
+        auto task      = TransferTask(std::move(descriptors), *this);
+        task.completion_proof_.reset();
+        task.trace_id_ = trace_id_;
+        task.workflow_id_     = workflow_id_;
+        task.parent_trace_id_ = parent_trace_id_;
+        return task;
+    }
+
+    // Construction gives each independently submitted RPC batch a new trace ID
+    // as its execution identity. Nested worker batches inherit that trace ID
+    // through subtask(), while the workflow links independent RPC batches.
+    TransferTask rpcSubtask(std::vector<TransferDescriptor> descriptors) const {
+        auto task = TransferTask(std::move(descriptors), *this);
+        task.completion_proof_.reset();
+        task.trace_id_ = next_trace_id_.fetch_add(1, std::memory_order_relaxed);
+        task.setWorkflow(workflow_id_, trace_id_);
+        return task;
     }
 
 private:
@@ -374,9 +483,10 @@ private:
         workflow_id_(parent.workflow_id_),
         parent_trace_id_(parent.parent_trace_id_) {}
 
-    std::vector<TransferDescriptor>     descriptors_;
-    Clock::time_point                   deadline_;
-    std::optional<int64_t>              request_id_;
+    std::vector<TransferDescriptor>       descriptors_;
+    Clock::time_point                     deadline_;
+    std::optional<int64_t>                request_id_;
+    std::shared_ptr<TransferBufferSafety> completion_proof_;
     inline static std::atomic<uint64_t> next_trace_id_{1};
     uint64_t                            trace_id_{next_trace_id_.fetch_add(1, std::memory_order_relaxed)};
     uint64_t                            workflow_id_{trace_id_};
