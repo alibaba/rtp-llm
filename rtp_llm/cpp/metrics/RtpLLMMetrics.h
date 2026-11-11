@@ -5,12 +5,14 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
 #include <thread>
 #include <unistd.h>
+#include <utility>
 
 namespace kmonitor {
 class MetricsTags;
@@ -1220,12 +1222,14 @@ public:
     int64_t     eviction_trigger_count    = 0;
     int64_t     eviction_required_blocks  = 0;
     int64_t     eviction_scheduled_blocks = 0;
-    int64_t     block_lifetime_ms         = 0;
-    int64_t     block_idletime_ms         = 0;
-    bool        report_evictable          = false;
-    bool        report_eviction_trigger   = false;
-    bool        report_eviction_blocks    = false;
-    bool        report_eviction           = false;
+    int64_t     eviction_blocks           = 0;
+    // Samples are borrowed for the synchronous report call.
+    const std::pair<int64_t, int64_t>* block_times_ms{nullptr};
+    size_t                             block_times_count{0};
+    bool                               report_evictable        = false;
+    bool                               report_eviction_trigger = false;
+    bool                               report_eviction_blocks  = false;
+    bool                               eviction_success        = false;
 };
 
 // Interval deltas; QPS metrics receive event counts/total work, never batch means.
@@ -1249,6 +1253,8 @@ public:
     kmonitor::MutableMetric* evictable_candidate_count_metric = nullptr;
     kmonitor::MutableMetric* eviction_trigger_qps_metric      = nullptr;
     kmonitor::MutableMetric* eviction_blocks_count_metric     = nullptr;
+    kmonitor::MutableMetric* eviction_blocks_qps_metric       = nullptr;
+    kmonitor::MutableMetric* eviction_blocks_fail_qps_metric  = nullptr;
     kmonitor::MutableMetric* evicted_block_lifetime_ms_metric = nullptr;
     kmonitor::MutableMetric* evicted_block_idletime_ms_metric = nullptr;
 

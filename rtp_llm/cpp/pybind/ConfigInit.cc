@@ -496,6 +496,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("disk_cache_write_thread_count", &KVCacheConfig::disk_cache_write_thread_count)
         .def_readwrite("disk_cache_sync_timeout_ms", &KVCacheConfig::disk_cache_sync_timeout_ms)
         .def_readwrite("disk_cache_evict_timeout_ms", &KVCacheConfig::disk_cache_evict_timeout_ms)
+        .def_readwrite("disk_cache_evict_max_pending_bytes", &KVCacheConfig::disk_cache_evict_max_pending_bytes)
         .def_readwrite("disk_cache_staging_block_count", &KVCacheConfig::disk_cache_staging_block_count)
         .def_readwrite("memory_cache_max_descriptors_per_transfer_batch",
                        &KVCacheConfig::memory_cache_max_descriptors_per_transfer_batch)
@@ -605,7 +606,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      18,
+                                      19,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -694,19 +695,23 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.btc_transfer_engine_async,
                                       self.disk_cache_read_thread_count,
                                       self.disk_cache_write_thread_count,
-                                      self.block_pool_frozen_abort_upper_ratio);
+                                      self.block_pool_frozen_abort_upper_ratio,
+                                      self.disk_cache_evict_max_pending_bytes);
             },
             [](py::tuple t) {
                 if (t.size() < 2 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
                     || t[0].cast<std::string>() != "KVCacheConfig"
                     || !((t.size() == 83 && t[1].cast<int>() == 13) || (t.size() == 84 && t[1].cast<int>() == 14)
                          || (t.size() == 85 && t[1].cast<int>() == 15) || (t.size() == 86 && t[1].cast<int>() == 16)
-                         || (t.size() == 90 && t[1].cast<int>() == 17)
-                         || (t.size() == 91 && t[1].cast<int>() == 18))) {
+                         || (t.size() == 90 && t[1].cast<int>() == 17) || (t.size() == 91 && t[1].cast<int>() == 18)
+                         || (t.size() == 92 && t[1].cast<int>() == 19))) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
                 KVCacheConfig c;
+                if (t.size() >= 92) {
+                    c.disk_cache_evict_max_pending_bytes = t[91].cast<int64_t>();
+                }
                 c.reuse_cache                          = t[2].cast<bool>();
                 c.multi_task_prompt                    = t[3].cast<std::string>();
                 c.multi_task_prompt_str                = t[4].cast<std::string>();

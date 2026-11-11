@@ -199,14 +199,15 @@ public:
     }
 };
 
-std::shared_ptr<DiskBlockPool> makeTestDiskPool(size_t usable_blocks, const std::string& name) {
+std::shared_ptr<DiskBlockPool>
+makeTestDiskPool(size_t usable_blocks, const std::string& name, size_t stride_bytes = 64) {
     auto config                            = std::make_shared<DiskBlockPoolConfig>();
     config->pool_type            = BlockPoolType::DISK;
     config->pool_name            = name;
     config->work_dir             = "/tmp";
     config->frozen_block_abort_lower_ratio = 0.0;
     config->payload_bytes        = 64;
-    config->stride_bytes         = 64;
+    config->stride_bytes                   = stride_bytes;
     config->disk_size_bytes      = (usable_blocks + 1) * config->stride_bytes;
     config->physical_block_count = usable_blocks + 1;
     config->buffered_io          = true;
@@ -574,7 +575,9 @@ public:
         }
     }
 
-    bool init() {
+    bool init(CacheGroupType secondary_type              = CacheGroupType::LINEAR,
+              size_t         max_descriptors_per_batch   = 8,
+              size_t         secondary_disk_stride_bytes = 64) {
         const auto* test_info = ::testing::UnitTest::GetInstance()->current_test_info();
         if (test_info == nullptr) {
             return false;
@@ -583,7 +586,8 @@ public:
         device_pools_               = {makeTestDevicePool(4, test_name + "_device_0"),
                          makeTestDevicePool(4, test_name + "_device_1")};
         host_pools_                 = {makePinnedHostPool(4), makePinnedHostPool(4)};
-        disk_pools_ = {makeTestDiskPool(4, test_name + "_disk_0"), makeTestDiskPool(4, test_name + "_disk_1")};
+        disk_pools_                 = {makeTestDiskPool(4, test_name + "_disk_0"),
+                                       makeTestDiskPool(4, test_name + "_disk_1", secondary_disk_stride_bytes)};
         if (device_pools_[0] == nullptr || device_pools_[1] == nullptr || host_pools_[0] == nullptr
             || host_pools_[1] == nullptr || disk_pools_[0] == nullptr || disk_pools_[1] == nullptr) {
             return false;
@@ -594,13 +598,18 @@ public:
                    std::make_shared<LinearGroupSet>(
                        std::vector<DeviceBlockPoolPtr>{device_pools_[1]}, host_pools_[1], disk_pools_[1])};
         auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+        auto secondary_policy             = defaultCacheGroupPolicy(secondary_type);
+        if (secondary_type == CacheGroupType::SWA) {
+            groups_[1] = std::make_shared<SWAGroupSet>(
+                2, 1, std::vector<DeviceBlockPoolPtr>{device_pools_[1]}, host_pools_[1], disk_pools_[1]);
+            secondary_policy.sliding_window_size = 2;
+        }
         full_policy.enable_prefix_reuse   = true;
-        linear_policy.enable_prefix_reuse = true;
+        secondary_policy.enable_prefix_reuse = true;
         initializeGroups(groups_,
                          device_pools_,
                          {block_transfer_engine_test::makeTestGroupBase(full_policy, {0}, 16),
-                          block_transfer_engine_test::makeTestGroupBase(linear_policy, {0}, 16)});
+                          block_transfer_engine_test::makeTestGroupBase(secondary_policy, {0}, 16)});
 
         tree_      = std::make_unique<BlockTree>(groups_);
         task_pool_ = std::make_unique<BlockTreeTaskPool>(/*thread_count=*/2, /*queue_size=*/2, test_name);
@@ -620,7 +629,7 @@ public:
             cache_mutex_,
             BlockTreeTaskPool::kDefaultQueueWaitTimeout.count(),
             BlockTreeTaskPool::kDefaultQueueWaitTimeout.count(),
-            /*max_descriptors_per_batch=*/8,
+            max_descriptors_per_batch,
             [](Tier) { return true; },
             [this](bool check_watermark) {
                 {
@@ -725,6 +734,625 @@ private:
     std::condition_variable            settled_cv_;
     std::vector<bool> settled_events_;
 };
+
+class HostDiskWatermarkTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        ASSERT_TRUE(
+            env_.init(CacheGroupType::SWA, /*max_descriptors_per_batch=*/1, /*secondary_disk_stride_bytes=*/128));
+        env_.evictor_->disk_cache_evict_max_pending_bytes_ = 64;
+        const auto settled                                 = env_.evictor_->settled_;
+        env_.evictor_->settled_                            = [this, settled](bool check_watermark) {
+            settled(check_watermark);
+            if (check_watermark) {
+                env_.evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark_, full_watermark_);
+            }
+        };
+    }
+
+    void TearDown() override {
+        if (env_.evictor_ == nullptr) {
+            return;
+        }
+        env_.task_pool_->waitForIdle();
+        {
+            std::lock_guard<std::mutex> lock(env_.cache_mutex_);
+            env_.evictor_->settled_ = [](bool) {};
+        }
+        env_.task_pool_->stopAdmission();
+        for (size_t i = 0; !env_.transfer_engine_->batchDescriptors(i).empty(); ++i) {
+            env_.transfer_engine_->completeBatch(i, false);
+        }
+        env_.task_pool_->waitForIdle();
+    }
+
+    void insertHostNodes(size_t count, std::optional<size_t> group_set_id = std::nullopt) {
+        std::lock_guard<std::mutex> lock(env_.cache_mutex_);
+        for (size_t i = 0; i < count; ++i) {
+            std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
+            for (size_t gid = 0; gid < 2; ++gid) {
+                if (group_set_id && gid != *group_set_id) {
+                    continue;
+                }
+                resources[0][gid].host_block =
+                    env_.groups_[gid]->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+                ASSERT_FALSE(isNullBlockIdx(resources[0][gid].host_block));
+            }
+            auto inserted = env_.tree_->insertNode({next_key_++}, resources, false, false);
+            releaseLowerTierSeedRefs(env_.groups_, resources);
+            env_.evictor_->onInserted(inserted);
+        }
+    }
+
+    void schedule() {
+        {
+            std::lock_guard<std::mutex> lock(env_.cache_mutex_);
+            env_.evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark_, full_watermark_);
+        }
+        env_.task_pool_->waitForIdle();
+    }
+
+    void complete(size_t batch_index, bool success = true) {
+        ASSERT_TRUE(env_.transfer_engine_->completeBatch(batch_index, success));
+        env_.task_pool_->waitForIdle();
+    }
+
+    void expectBatch(size_t index, size_t group_set_id) {
+        const auto descriptors = env_.transfer_engine_->batchDescriptors(index);
+        ASSERT_EQ(descriptors.size(), 1u);
+        EXPECT_EQ(descriptors.front().group_set_id, group_set_id);
+        EXPECT_EQ(descriptors.front().source_tier, Tier::HOST);
+        EXPECT_EQ(descriptors.front().target_tier, Tier::DISK);
+        EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(index + 1).empty());
+        EXPECT_EQ(env_.pendingReleaseCount(), 1u);
+    }
+
+    void expectEvictionQps(size_t group_set_id, double total, double failed) {
+        auto* metrics = env_.metricsReporter()->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+        ASSERT_NE(metrics, nullptr);
+        kmonitor::MetricsTags tags("tier", tierName(Tier::HOST));
+        tags.AddTag("trigger_type", "watermark");
+        tags.AddTag("group_type", metricCacheGroupTypeName(env_.groups_[group_set_id]->groupType()));
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, tags), total);
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_fail_qps_metric, tags), failed);
+    }
+
+    MultiGroupAsyncEvictionEnvironment env_;
+    TierWatermark                      watermark_{0.25, 0.75};
+    std::optional<TierWatermark>       full_watermark_;
+    int64_t                            next_key_{100};
+};
+
+TEST_F(HostDiskWatermarkTest, SettlesOneBatchAtATimeInRoundRobinOrder) {
+    insertHostNodes(3);
+    schedule();
+    for (size_t i = 0; i < 4; ++i) {
+        schedule();
+        schedule();
+        expectBatch(i, i % 2);
+        if (i == 0) {
+            EXPECT_EQ(env_.disk_pools_[1]->usedBlocksNum(), 0u);
+        }
+        complete(i);
+    }
+    EXPECT_EQ(env_.pendingReleaseCount(), 0u);
+    for (size_t gid = 0; gid < 2; ++gid) {
+        EXPECT_EQ(env_.host_pools_[gid]->usedBlocksNum(), 1u);
+        EXPECT_EQ(env_.disk_pools_[gid]->usedBlocksNum(), 2u);
+    }
+    insertHostNodes(1);
+    schedule();
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(4).empty());
+    EXPECT_EQ(env_.pendingReleaseCount(), 0u);
+}
+
+TEST_F(HostDiskWatermarkTest, BothGroupsMakeProgressUnderContinuousGrowth) {
+    insertHostNodes(3);
+    schedule();
+    for (size_t i = 0; i < 6; ++i) {
+        const size_t group = i % 2;
+        expectBatch(i, group);
+        insertHostNodes(1, group);
+        // Repeated watermark checks must not reset the scheduling cursor.
+        schedule();
+        schedule();
+        expectBatch(i, group);
+        complete(i);
+    }
+    EXPECT_EQ(env_.disk_pools_[0]->usedBlocksNum(), 4u);
+    EXPECT_EQ(env_.disk_pools_[1]->usedBlocksNum(), 3u);
+    expectBatch(6, 0);
+}
+
+TEST_F(HostDiskWatermarkTest, LargeBudgetSubmitsOneBatchPerGroupPerCheck) {
+    env_.evictor_->disk_cache_evict_max_pending_bytes_ = 256 * 1024 * 1024;
+    insertHostNodes(3);
+    schedule();
+    ASSERT_EQ(env_.transfer_engine_->batchDescriptors(0).size(), 1u);
+    ASSERT_EQ(env_.transfer_engine_->batchDescriptors(1).size(), 1u);
+    EXPECT_NE(env_.transfer_engine_->batchDescriptors(0).front().group_set_id,
+              env_.transfer_engine_->batchDescriptors(1).front().group_set_id);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(2).empty());
+    EXPECT_EQ(env_.pendingReleaseCount(), 2u);
+    for (size_t i = 0; i < 4; ++i) {
+        complete(i);
+    }
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(4).empty());
+    EXPECT_EQ(env_.pendingReleaseCount(), 0u);
+    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 1u);
+    EXPECT_EQ(env_.host_pools_[1]->usedBlocksNum(), 1u);
+}
+
+TEST_F(HostDiskWatermarkTest, LargerGroupWaitsForBudgetWithoutSmallGroupRefilling) {
+    env_.evictor_->disk_cache_evict_max_pending_bytes_ = 128;
+    insertHostNodes(3, /*group_set_id=*/0);
+    schedule();
+    schedule();
+    insertHostNodes(3, /*group_set_id=*/1);
+    schedule();
+    ASSERT_EQ(env_.transfer_engine_->batchDescriptors(0).size(), 1u);
+    ASSERT_EQ(env_.transfer_engine_->batchDescriptors(1).size(), 1u);
+    insertHostNodes(1, 0);
+    complete(0);
+    // Only 64 bytes are free; leave them for the waiting 128-byte SWA block.
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(2).empty());
+    schedule();
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(2).empty());
+    complete(1);
+    expectBatch(2, 1);
+    complete(2);
+    expectBatch(3, 0);
+}
+
+TEST_F(HostDiskWatermarkTest, PendingGroupAllowsOtherGroupToReachLowWithinSharedBudget) {
+    env_.evictor_->disk_cache_evict_max_pending_bytes_ = 256;
+    env_.evictor_->max_descriptors_per_batch_          = 2;
+    insertHostNodes(3);
+    schedule();
+    ASSERT_FALSE(env_.transfer_engine_->batchDescriptors(0).empty());
+    const size_t full_index = env_.transfer_engine_->batchDescriptors(0).front().group_set_id == 0 ? 0 : 1;
+    const size_t swa_index  = 1 - full_index;
+    const auto   full       = env_.transfer_engine_->batchDescriptors(full_index);
+    const auto   swa        = env_.transfer_engine_->batchDescriptors(swa_index);
+    ASSERT_EQ(full.size(), 2u);
+    ASSERT_EQ(swa.size(), 1u);
+    EXPECT_EQ(full.front().group_set_id, 0u);
+    EXPECT_EQ(swa.front().group_set_id, 1u);
+    EXPECT_EQ(env_.pendingReleaseCount(), 3u);
+    EXPECT_EQ(full.size() * env_.disk_pools_[0]->strideBytes() + swa.size() * env_.disk_pools_[1]->strideBytes(),
+              env_.evictor_->disk_cache_evict_max_pending_bytes_);
+    schedule();
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(2).empty());
+
+    complete(swa_index);
+    const auto next_swa = env_.transfer_engine_->batchDescriptors(2);
+    ASSERT_EQ(next_swa.size(), 1u);
+    EXPECT_EQ(next_swa.front().group_set_id, 1u);
+    EXPECT_EQ(env_.pendingReleaseCount(), 3u);
+    complete(2);
+    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 3u);
+    EXPECT_EQ(env_.host_pools_[1]->usedBlocksNum(), 1u);
+    EXPECT_EQ(env_.pendingReleaseCount(), 2u);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(3).empty());
+
+    complete(full_index);
+    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 1u);
+    EXPECT_EQ(env_.pendingReleaseCount(), 0u);
+}
+
+TEST_F(HostDiskWatermarkTest, CompletedBatchKeepsRoundWhileWaitingForSharedBudget) {
+    env_.evictor_->disk_cache_evict_max_pending_bytes_ = 256;
+    env_.evictor_->max_descriptors_per_batch_          = 2;
+    insertHostNodes(3);
+    schedule();
+    ASSERT_FALSE(env_.transfer_engine_->batchDescriptors(0).empty());
+    const size_t full_index = env_.transfer_engine_->batchDescriptors(0).front().group_set_id == 0 ? 0 : 1;
+    const size_t swa_index  = 1 - full_index;
+    ASSERT_EQ(env_.transfer_engine_->batchDescriptors(full_index).size(), 2u);
+    ASSERT_EQ(env_.transfer_engine_->batchDescriptors(swa_index).size(), 1u);
+
+    insertHostNodes(1, /*group_set_id=*/0);
+    complete(swa_index);
+    const auto next_full = env_.transfer_engine_->batchDescriptors(2);
+    ASSERT_EQ(next_full.size(), 1u);
+    EXPECT_EQ(next_full.front().group_set_id, 0u);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(3).empty());
+    const auto& swa_round = env_.evictor_->heaps_[1].watermark_rounds[static_cast<size_t>(Tier::HOST)];
+    EXPECT_TRUE(swa_round.watermark.has_value());
+    EXPECT_EQ(swa_round.required_count, 2u);
+    EXPECT_EQ(swa_round.scheduled_count, 1u);
+    EXPECT_EQ(swa_round.pending_count, 0u);
+
+    complete(full_index);
+    const auto next_swa = env_.transfer_engine_->batchDescriptors(3);
+    ASSERT_EQ(next_swa.size(), 1u);
+    EXPECT_EQ(next_swa.front().group_set_id, 1u);
+    complete(2);
+    complete(3);
+    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 1u);
+    EXPECT_EQ(env_.host_pools_[1]->usedBlocksNum(), 1u);
+    EXPECT_EQ(env_.pendingReleaseCount(), 0u);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(4).empty());
+}
+
+TEST_F(HostDiskWatermarkTest, FinishedGroupRestartsWhileAnotherGroupRemainsPending) {
+    env_.evictor_->disk_cache_evict_max_pending_bytes_ = 384;
+    env_.evictor_->max_descriptors_per_batch_          = 2;
+    insertHostNodes(3);
+    schedule();
+    ASSERT_EQ(env_.transfer_engine_->batchDescriptors(0).size(), 2u);
+    ASSERT_EQ(env_.transfer_engine_->batchDescriptors(1).size(), 2u);
+    const size_t full_index = env_.transfer_engine_->batchDescriptors(0).front().group_set_id == 0 ? 0 : 1;
+    const size_t swa_index  = 1 - full_index;
+    EXPECT_EQ(env_.transfer_engine_->batchDescriptors(swa_index).front().group_set_id, 1u);
+    complete(full_index);
+    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 1u);
+    EXPECT_EQ(env_.pendingReleaseCount(), 2u);
+
+    insertHostNodes(2, /*group_set_id=*/0);
+    schedule();
+    const auto full = env_.transfer_engine_->batchDescriptors(2);
+    ASSERT_EQ(full.size(), 2u);
+    EXPECT_EQ(full.front().group_set_id, 0u);
+    schedule();
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(3).empty());
+    const auto& swa_round = env_.evictor_->heaps_[1].watermark_rounds[static_cast<size_t>(Tier::HOST)];
+    EXPECT_EQ(swa_round.required_count, 2u);
+    EXPECT_EQ(swa_round.scheduled_count, 2u);
+    EXPECT_EQ(swa_round.pending_count, 2u);
+    EXPECT_EQ(env_.pendingReleaseCount(), 4u);
+
+    complete(2);
+    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 1u);
+    EXPECT_EQ(env_.host_pools_[1]->usedBlocksNum(), 3u);
+    EXPECT_EQ(env_.pendingReleaseCount(), 2u);
+    complete(swa_index);
+    EXPECT_EQ(env_.host_pools_[1]->usedBlocksNum(), 1u);
+    EXPECT_EQ(env_.pendingReleaseCount(), 0u);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(3).empty());
+}
+
+TEST_F(HostDiskWatermarkTest, ReportsEvictionBlockQpsAndFailuresBeforeRoundFinishes) {
+    env_.evictor_->disk_cache_evict_max_pending_bytes_ = 128;
+    env_.evictor_->max_descriptors_per_batch_          = 2;
+    auto* metrics = env_.metricsReporter()->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    kmonitor::MetricsTags full_tags("tier", tierName(Tier::HOST));
+    full_tags.AddTag("trigger_type", "watermark");
+    full_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    kmonitor::MetricsTags swa_tags("tier", tierName(Tier::HOST));
+    swa_tags.AddTag("trigger_type", "watermark");
+    swa_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::SWA));
+    auto scheduled_tags = full_tags;
+    scheduled_tags.AddTag("block_type", "scheduled");
+
+    insertHostNodes(4);
+    schedule();
+    ASSERT_EQ(env_.transfer_engine_->batchDescriptors(0).size(), 2u);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, full_tags), 0);
+
+    complete(0);
+    expectBatch(1, 1);
+    const auto& full_round = env_.evictor_->heaps_[0].watermark_rounds[static_cast<size_t>(Tier::HOST)];
+    EXPECT_EQ(full_round.pending_count, 0u);
+    EXPECT_TRUE(full_round.watermark.has_value());
+    expectCountSamples(metrics->eviction_blocks_count_metric, scheduled_tags, 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, full_tags), 2);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_fail_qps_metric, full_tags), 0);
+
+    complete(1);
+    expectBatch(2, 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, swa_tags), 1);
+    complete(2, false);
+    expectBatch(3, 1);
+    expectCountSamples(metrics->eviction_blocks_count_metric, scheduled_tags, 1);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, full_tags), 1);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_fail_qps_metric, full_tags), 1);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, swa_tags), 0);
+    for (size_t i = 3; i < 6; ++i) {
+        expectBatch(i, i == 4 ? 0 : 1);
+        complete(i);
+    }
+    EXPECT_EQ(env_.pendingReleaseCount(), 0u);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, swa_tags), 2);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_fail_qps_metric, swa_tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, full_tags), 1);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_fail_qps_metric, full_tags), 0);
+}
+
+TEST_F(HostDiskWatermarkTest, IdleChecksDoNotBlockLaterEviction) {
+    schedule();
+    insertHostNodes(1);
+    schedule();
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(0).empty());
+    insertHostNodes(2);
+    schedule();
+    expectBatch(0, 0);
+}
+
+TEST_F(HostDiskWatermarkTest, FailureRollsBackAndAllowsRetryOnNextWatermarkCheck) {
+    insertHostNodes(3);
+    schedule();
+    expectBatch(0, 0);
+    complete(0, false);
+    expectBatch(1, 1);
+    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 3u);
+    EXPECT_EQ(env_.disk_pools_[0]->usedBlocksNum(), 0u);
+    EXPECT_EQ(env_.evictor_->candidateCount(0, Tier::HOST), 3u);
+    const auto& full_round = env_.evictor_->heaps_[0].watermark_rounds[static_cast<size_t>(Tier::HOST)];
+    EXPECT_FALSE(full_round.watermark.has_value());
+    EXPECT_EQ(full_round.pending_count, 0u);
+    EXPECT_EQ(full_round.required_count, 0u);
+    EXPECT_EQ(full_round.scheduled_count, 0u);
+    schedule();
+    EXPECT_TRUE(full_round.watermark.has_value());
+    EXPECT_EQ(full_round.required_count, 2u);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(2).empty());
+    complete(1);
+    expectBatch(2, 0);
+    complete(2);
+    expectBatch(3, 1);
+    complete(3);
+    expectBatch(4, 0);
+    complete(4);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(5).empty());
+    EXPECT_EQ(env_.settledEvents(), (std::vector<bool>{false, true, true, true, true}));
+    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 1u);
+    EXPECT_EQ(env_.host_pools_[1]->usedBlocksNum(), 1u);
+    EXPECT_EQ(env_.pendingReleaseCount(), 0u);
+}
+
+TEST_F(HostDiskWatermarkTest, NewGrowthContinuesUntilActualLowWatermark) {
+    insertHostNodes(3);
+    schedule();
+    insertHostNodes(1);
+    for (size_t i = 0; i < 6; ++i) {
+        schedule();
+        expectBatch(i, i % 2);
+        complete(i);
+    }
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(6).empty());
+    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 1u);
+    EXPECT_EQ(env_.host_pools_[1]->usedBlocksNum(), 1u);
+}
+
+TEST_F(HostDiskWatermarkTest, RefillsByteBudgetWithMultipleBatchesAndNewGrowth) {
+    env_.evictor_->disk_cache_evict_max_pending_bytes_ = 128;
+    insertHostNodes(3, /*group_set_id=*/0);
+    schedule();
+    schedule();
+    insertHostNodes(3, /*group_set_id=*/1);
+    schedule();
+    ASSERT_EQ(env_.transfer_engine_->batchDescriptors(0).size(), 1u);
+    ASSERT_EQ(env_.transfer_engine_->batchDescriptors(1).size(), 1u);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(2).empty());
+    EXPECT_EQ(env_.pendingReleaseCount(), 2u);
+    insertHostNodes(1);
+    complete(1);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(2).empty());
+    EXPECT_EQ(env_.pendingReleaseCount(), 1u);
+    complete(0);
+    expectBatch(2, 1);
+    complete(2);
+    for (size_t i = 3; i < 6; ++i) {
+        expectBatch(i, i == 3 ? 0 : 1);
+        complete(i);
+    }
+    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 1u);
+    EXPECT_EQ(env_.host_pools_[1]->usedBlocksNum(), 1u);
+    EXPECT_EQ(env_.pendingReleaseCount(), 0u);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(6).empty());
+}
+
+TEST_F(HostDiskWatermarkTest, SharesByteBudgetAcrossFailedAndFollowingGroups) {
+    env_.evictor_->disk_cache_evict_max_pending_bytes_ = 192;
+    insertHostNodes(3, /*group_set_id=*/0);
+    schedule();
+    schedule();
+    insertHostNodes(3, /*group_set_id=*/1);
+    schedule();
+    ASSERT_EQ(env_.transfer_engine_->batchDescriptors(1).size(), 1u);
+    complete(0, false);
+    const auto& full_round = env_.evictor_->heaps_[0].watermark_rounds[static_cast<size_t>(Tier::HOST)];
+    EXPECT_FALSE(full_round.watermark.has_value());
+    EXPECT_EQ(full_round.pending_count, 1u);
+    EXPECT_EQ(full_round.required_count, 2u);
+    EXPECT_EQ(full_round.scheduled_count, 2u);
+    const auto swa = env_.transfer_engine_->batchDescriptors(2);
+    ASSERT_EQ(swa.size(), 1u);
+    EXPECT_EQ(swa.front().group_set_id, 1u);
+    EXPECT_EQ(env_.pendingReleaseCount(), 2u);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(3).empty());
+    complete(2);
+    ASSERT_EQ(env_.transfer_engine_->batchDescriptors(3).size(), 1u);
+    EXPECT_EQ(env_.transfer_engine_->batchDescriptors(3).front().group_set_id, 1u);
+    EXPECT_EQ(env_.pendingReleaseCount(), 2u);
+    complete(3);
+    complete(1);
+    EXPECT_FALSE(full_round.watermark.has_value());
+    EXPECT_EQ(full_round.required_count, 0u);
+    EXPECT_EQ(full_round.scheduled_count, 0u);
+    EXPECT_EQ(full_round.pending_count, 0u);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(4).empty());
+    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 2u);
+    EXPECT_EQ(env_.host_pools_[1]->usedBlocksNum(), 1u);
+    EXPECT_EQ(env_.pendingReleaseCount(), 0u);
+    schedule();
+    expectBatch(4, 0);
+    complete(4);
+    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 1u);
+}
+
+TEST_F(HostDiskWatermarkTest, WaitsWhenRemainingBudgetCannotFitNextGroupBlock) {
+    env_.evictor_->disk_cache_evict_max_pending_bytes_ = 128;
+    insertHostNodes(3, /*group_set_id=*/0);
+    schedule();
+    schedule();
+    insertHostNodes(3, /*group_set_id=*/1);
+    schedule();
+    complete(0, false);
+    EXPECT_EQ(env_.pendingReleaseCount(), 1u);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(2).empty());
+    complete(1);
+    expectBatch(2, 1);
+    complete(2);
+    expectBatch(3, 1);
+    complete(3);
+    expectBatch(4, 0);
+    complete(4);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(5).empty());
+    EXPECT_EQ(env_.pendingReleaseCount(), 0u);
+}
+
+TEST_F(HostDiskWatermarkTest, OversizedBlocksRunExclusively) {
+    env_.evictor_->disk_cache_evict_max_pending_bytes_ = 32;
+    insertHostNodes(3);
+    schedule();
+    for (size_t i = 0; i < 4; ++i) {
+        expectBatch(i, i % 2);
+        complete(i);
+    }
+    EXPECT_EQ(env_.pendingReleaseCount(), 0u);
+}
+
+TEST_F(HostDiskWatermarkTest, ByteLimitBoundsDescriptorsWithinEachBatch) {
+    env_.evictor_->disk_cache_evict_max_pending_bytes_ = 128;
+    env_.evictor_->max_descriptors_per_batch_          = 8;
+    insertHostNodes(3);
+    schedule();
+    const auto full = env_.transfer_engine_->batchDescriptors(0);
+    ASSERT_EQ(full.size(), 2u);
+    EXPECT_EQ(full.front().group_set_id, 0u);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(1).empty());
+    complete(0);
+    expectBatch(1, 1);
+    complete(1);
+    expectBatch(2, 1);
+    complete(2);
+    EXPECT_EQ(env_.pendingReleaseCount(), 0u);
+}
+
+TEST_F(HostDiskWatermarkTest, PendingLeafCompletionMakesParentEligible) {
+    env_.evictor_->disk_cache_evict_max_pending_bytes_ = 192;
+    {
+        std::lock_guard<std::mutex>                lock(env_.cache_mutex_);
+        std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(2));
+        for (auto& row : resources) {
+            for (size_t gid = 0; gid < 2; ++gid) {
+                row[gid].host_block = env_.groups_[gid]->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+                ASSERT_FALSE(isNullBlockIdx(row[gid].host_block));
+            }
+        }
+        auto inserted = env_.tree_->insertNode({100, 101, 102}, resources, false, false);
+        releaseLowerTierSeedRefs(env_.groups_, resources);
+        env_.evictor_->onInserted(inserted);
+    }
+    schedule();
+    ASSERT_EQ(env_.transfer_engine_->batchDescriptors(0).size(), 1u);
+    ASSERT_EQ(env_.transfer_engine_->batchDescriptors(1).size(), 1u);
+    const size_t full_index = env_.transfer_engine_->batchDescriptors(0).front().group_set_id == 0 ? 0 : 1;
+    const size_t swa_index  = 1 - full_index;
+    EXPECT_EQ(env_.transfer_engine_->batchDescriptors(swa_index).front().group_set_id, 1u);
+    EXPECT_EQ(env_.pendingReleaseCount(), 2u);
+    complete(swa_index);
+    ASSERT_EQ(env_.transfer_engine_->batchDescriptors(2).size(), 1u);
+    EXPECT_EQ(env_.transfer_engine_->batchDescriptors(2).front().group_set_id, 1u);
+    complete(2);
+    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 3u);
+    EXPECT_EQ(env_.host_pools_[1]->usedBlocksNum(), 1u);
+    complete(full_index);
+    expectBatch(3, 0);
+    complete(3);
+    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 1u);
+    EXPECT_EQ(env_.host_pools_[1]->usedBlocksNum(), 1u);
+}
+
+TEST_F(HostDiskWatermarkTest, DiskAllocationFailureSkipsGroup) {
+    insertHostNodes(3);
+    const auto occupied = env_.groups_[0]->allocateBlocks(4, Tier::DISK, BlockTreeRefType::CACHE);
+    ASSERT_TRUE(occupied.has_value());
+    schedule();
+    expectBatch(0, 1);
+    EXPECT_EQ(env_.evictor_->candidateCount(0, Tier::HOST), 3u);
+    complete(0);
+    expectBatch(1, 1);
+    complete(1);
+    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 3u);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(2).empty());
+    env_.groups_[0]->releaseBlocks(Tier::DISK, *occupied, BlockTreeRefType::CACHE);
+    expectEvictionQps(0, 3, 3);
+    expectEvictionQps(1, 2, 0);
+}
+
+TEST_F(HostDiskWatermarkTest, AdmissionRejectionClearsPassAndReservations) {
+    insertHostNodes(3);
+    env_.task_pool_->stopAdmission();
+    schedule();
+    EXPECT_EQ(env_.pendingReleaseCount(), 0u);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(0).empty());
+    for (size_t gid = 0; gid < 2; ++gid) {
+        EXPECT_EQ(env_.host_pools_[gid]->usedBlocksNum(), 3u);
+        EXPECT_EQ(env_.disk_pools_[gid]->usedBlocksNum(), 0u);
+        EXPECT_EQ(env_.evictor_->candidateCount(gid, Tier::HOST), 3u);
+        expectEvictionQps(gid, 1, 1);
+    }
+}
+
+TEST_F(HostDiskWatermarkTest, HigherFullWatermarkStillEvictsSwa) {
+    insertHostNodes(3);
+    full_watermark_ = TierWatermark{0.75, 1.0};
+    schedule();
+    expectBatch(0, 1);
+    complete(0);
+    expectBatch(1, 1);
+    complete(1);
+    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 3u);
+    EXPECT_EQ(env_.host_pools_[1]->usedBlocksNum(), 1u);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(2).empty());
+}
+
+TEST_F(HostDiskWatermarkTest, DetachedCompletionStillAdvancesPass) {
+    const auto path = env_.insertParentDeviceChildHost();
+    ASSERT_EQ(path.size(), 2u);
+    next_key_ = 300;
+    insertHostNodes(2);
+    schedule();
+    expectBatch(0, 0);
+    ASSERT_EQ(env_.transfer_engine_->batchDescriptors(0).front().node, path.back());
+    {
+        std::lock_guard<std::mutex> lock(env_.cache_mutex_);
+        ASSERT_TRUE(env_.evictor_->dropLocked(0, Tier::DEVICE, /*notify_settled=*/false));
+        EXPECT_TRUE(path.back()->group_set_resources[0].transfer_detached);
+    }
+    complete(0);
+    EXPECT_EQ(env_.settledEvents(), (std::vector<bool>{false}));
+    expectBatch(1, 1);
+    complete(1);
+    expectBatch(2, 0);
+    complete(2);
+    EXPECT_EQ(env_.pendingReleaseCount(), 0u);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(3).empty());
+    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 1u);
+    EXPECT_EQ(env_.host_pools_[1]->usedBlocksNum(), 1u);
+}
+
+TEST_F(HostDiskWatermarkTest, ExpiredBatchesDoNotLeavePassStuck) {
+    insertHostNodes(3);
+    env_.evictor_->disk_timeout_ms_ = 0;
+    schedule();
+    EXPECT_EQ(env_.settledEvents(), (std::vector<bool>{false, false}));
+    EXPECT_EQ(env_.pendingReleaseCount(), 0u);
+    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(0).empty());
+    for (size_t gid = 0; gid < 2; ++gid) {
+        EXPECT_EQ(env_.host_pools_[gid]->usedBlocksNum(), 3u);
+        EXPECT_EQ(env_.disk_pools_[gid]->usedBlocksNum(), 0u);
+        EXPECT_EQ(env_.evictor_->candidateCount(gid, Tier::HOST), 3u);
+        expectEvictionQps(gid, 1, 1);
+    }
+    env_.evictor_->disk_timeout_ms_ = BlockTreeTaskPool::kDefaultQueueWaitTimeout.count();
+    schedule();
+    expectBatch(0, 0);
+}
 
 TEST(BlockTreeEvictorAsyncTest, SameNodeGroupSetsSettleInReverseCompletionOrder) {
     MultiGroupAsyncEvictionEnvironment environment;
@@ -1016,6 +1644,13 @@ void verifyMixedDetachedBatchSettlement(bool transfer_success) {
         }
     };
     expect_detached_timing();
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, detached_tags), 1);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_fail_qps_metric, detached_tags), 0);
+    kmonitor::MetricsTags parent_drop_tags("tier", tierName(Tier::DEVICE));
+    parent_drop_tags.AddTag("trigger_type", "force_drop");
+    parent_drop_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, parent_drop_tags), 1);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_fail_qps_metric, parent_drop_tags), 0);
     {
         std::lock_guard<std::mutex> lock(settled_mutex);
         ASSERT_EQ(settled_events, (std::vector<bool>{false}));
@@ -1025,6 +1660,13 @@ void verifyMixedDetachedBatchSettlement(bool transfer_success) {
     task_pool.waitForIdle();
 
     expect_detached_timing();
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, detached_tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_fail_qps_metric, detached_tags), 0);
+    auto watermark_tags = kmonitor::MetricsTags("tier", tierName(Tier::HOST));
+    watermark_tags.AddTag("trigger_type", "watermark");
+    watermark_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_qps_metric, watermark_tags), 1);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_blocks_fail_qps_metric, watermark_tags), transfer_success ? 0 : 1);
     EXPECT_TRUE(evictor.heaps_[0].pending_timings.empty());
     EXPECT_EQ(metrics->evicted_block_lifetime_ms_metric->metric_data_->Size(), transfer_success ? 3u : 2u);
     EXPECT_EQ(metrics->evicted_block_idletime_ms_metric->metric_data_->Size(), transfer_success ? 3u : 2u);
@@ -1519,8 +2161,7 @@ TEST(FullWatermarkTest, OverridesLeaveSwaAndLinearOnSharedWatermarks) {
     };
     const std::vector<Scenario> scenarios = {
         {{0.5, 0.6}, TierWatermark{0.8, 1.0}, 9, 5},
-        {{0.5, 0.6}, TierWatermark{0.0, 0.0}, 9, 5},
-        {{0.0, 0.0}, TierWatermark{0.8, 0.9}, 8, 9},
+        {{0.9, 1.0}, TierWatermark{0.8, 0.9}, 8, 9},
         {{0.5, 0.6}, std::nullopt, 5, 5},
     };
     for (size_t index = 0; index < scenarios.size(); ++index) {
@@ -1896,7 +2537,10 @@ TEST_F(BlockTreeEvictorTest, HostDiskWatermarkConvergesAcrossBoundedBatches) {
     evictor_runtime_.transferEngine()->enqueue(true);
     evictor_runtime_.transferEngine()->enqueue(true);
     evictor_runtime_.transferEngine()->enqueue(true);
-    evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark);
+    {
+        std::lock_guard<std::mutex> lock(*evictor_->mutex_);
+        evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark);
+    }
     task_pool.waitForIdle();
 
     EXPECT_EQ(evictor_runtime_.transferEngine()->submittedBatchCount(), 3u);

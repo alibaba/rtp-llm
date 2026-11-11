@@ -25,6 +25,7 @@ namespace rtp_llm {
 struct BlockTreeInsertHardStopInfo;
 struct BlockTreeQueueSizes;
 class CacheStageMetrics;
+class RtpLLMCacheEvictionMetricsCollector;
 
 struct BlockTreePoolMetricsSnapshot {
     Tier        tier{Tier::DEVICE};
@@ -124,13 +125,18 @@ public:
     void reportEvictableCandidateCount(const std::vector<BlockTreeEvictableMetricsSnapshot>& snapshots) const;
     void reportVictimSelectionMetrics(const VictimSelectionMetrics& snapshot) const;
     void reportCacheReuseTimeMetrics(const std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots) const;
+    void reportEvictionFinished(const EvictionTransferTask&     task,
+                                const std::vector<GroupSetPtr>& group_sets,
+                                bool                            success,
+                                const std::vector<bool>&        detached = {}) const;
     void reportEvictionFinished(const EvictionDropTask&         task,
                                 const std::vector<GroupSetPtr>& group_sets,
                                 const char*                     trigger_type) const;
-    void reportEvictedDescriptor(const TransferDescriptor&       desc,
-                                 const EvictionTimingSnapshot&   timing,
-                                 const std::vector<GroupSetPtr>& group_sets,
-                                 const char*                     trigger_type) const;
+    void reportEvictionDescriptor(const TransferDescriptor&       desc,
+                                  const EvictionTimingSnapshot&   timing,
+                                  const std::vector<GroupSetPtr>& group_sets,
+                                  const char*                     trigger_type,
+                                  bool                            success) const;
     void reportEvictionTriggered(Tier source_tier, CacheGroupType group_type, bool force_drop) const;
     void reportEvictionBlocks(Tier           source_tier,
                               CacheGroupType group_type,
@@ -178,6 +184,10 @@ private:
     static constexpr size_t kDirectionCount = 4;
 
     static int transferDirectionIndex(Tier source_tier, Tier target_tier);
+    void       reportEvictionMetrics(const TransferDescriptor&            desc,
+                                     const std::vector<GroupSetPtr>&      group_sets,
+                                     const char*                          trigger_type,
+                                     RtpLLMCacheEvictionMetricsCollector& collector) const;
     void
     reportEvictionTrigger(Tier source_tier, CacheGroupType group_type, const char* trigger_type, int64_t count) const;
     void accumulateTransferBytes(const TransferDescriptor& desc,

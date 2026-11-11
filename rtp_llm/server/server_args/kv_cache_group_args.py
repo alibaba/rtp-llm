@@ -393,6 +393,17 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         ),
     )
     kv_cache_group.add_argument(
+        "--disk_cache_evict_max_pending_bytes",
+        env_name="DISK_CACHE_EVICT_MAX_PENDING_BYTES",
+        bind_to=(kv_cache_config, "disk_cache_evict_max_pending_bytes"),
+        type=int,
+        default=64 * 1024 * 1024,
+        help=(
+            "HOST->DISK 水位淘汰共享的未结算字节上限，按协调 rank 的落盘 stride 计费（不累加其他 rank）；"
+            "必须大于 0，超大单块允许独占提交。"
+        ),
+    )
+    kv_cache_group.add_argument(
         "--memory_cache_max_descriptors_per_transfer_batch",
         env_name="MEMORY_CACHE_MAX_DESCRIPTORS_PER_TRANSFER_BATCH",
         bind_to=(kv_cache_config, "memory_cache_max_descriptors_per_transfer_batch"),
@@ -485,7 +496,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
                 type=float,
                 default=-1.0,
                 help=f"BlockTreeCache FULL {tier} 淘汰水位 {boundary} 比例。"
-                "low/high 均为 -1 时继承共享水位，均为 0 时禁用 FULL 水位淘汰；"
+                "low/high 均为 -1 时继承共享水位；"
                 "否则需满足 0 < low < high <= 1。",
             )
 

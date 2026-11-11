@@ -45,8 +45,7 @@ struct BlockTreeCacheConfig {
     TierWatermark watermark_device;
     TierWatermark watermark_host;
     TierWatermark watermark_disk;
-    // Unset overrides inherit the per-tier watermarks above. An explicit {0, 0}
-    // disables watermark eviction only for FULL; on-demand reclamation is unchanged.
+    // Unset overrides inherit the per-tier watermarks above.
     std::optional<TierWatermark> full_watermark_device;
     std::optional<TierWatermark> full_watermark_host;
     std::optional<TierWatermark> full_watermark_disk;
@@ -78,6 +77,7 @@ struct BlockTreeCacheConfig {
     size_t device_disk_staging_block_count{128};
     // Shared descriptor batching limit for watermark planning and all transfer directions.
     size_t max_descriptors_per_transfer_batch{32};
+    size_t disk_cache_evict_max_pending_bytes{64 * 1024 * 1024};
 
     // ---- FULL prefix invariant scanner (diagnostic only) ----
     // The factory zeroes this on ranks that do not own a mutable BlockTree.

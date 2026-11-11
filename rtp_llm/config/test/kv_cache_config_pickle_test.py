@@ -14,6 +14,7 @@ class KVCacheConfigPickleTest(TestCase):
     def test_event_fields_round_trip_with_block_tree_configuration(self):
         config = KVCacheConfig()
         config.block_tree_transfer_worker_count = 7
+        config.disk_cache_evict_max_pending_bytes = 80 * 1024 * 1024
         config.btc_crc_slot_count = 3
         config.btc_transfer_engine_async = True
         config.disk_cache_read_thread_count = 3
@@ -34,8 +35,8 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 91)
-                self.assertEqual(state[:2], ("KVCacheConfig", 18))
+                self.assertEqual(len(state), 92)
+                self.assertEqual(state[:2], ("KVCacheConfig", 19))
                 self.assertEqual(
                     state[64:69], tuple(list(KV_CACHE_EVENT_FIELD_VALUES.values())[:5])
                 )
@@ -56,6 +57,9 @@ class KVCacheConfigPickleTest(TestCase):
                 restored = pickle.loads(pickle.dumps(config))
                 self.assertIs(restored.enable_crc, enable_crc)
                 self.assertEqual(restored.block_tree_transfer_worker_count, 7)
+                self.assertEqual(
+                    restored.disk_cache_evict_max_pending_bytes, 80 * 1024 * 1024
+                )
                 self.assertEqual(restored.btc_crc_slot_count, 3)
                 self.assertTrue(restored.btc_transfer_engine_async)
                 self.assertEqual(restored.disk_cache_read_thread_count, 3)
@@ -68,9 +72,7 @@ class KVCacheConfigPickleTest(TestCase):
                 self.assertEqual(restored.disk_cache_evict_timeout_ms, 45000)
                 self.assertEqual(restored.kvcm_task_timeout_ms, 23000)
                 self.assertEqual(restored.block_pool_frozen_abort_lower_ratio, 0.45)
-                self.assertEqual(
-                    restored.block_pool_frozen_abort_upper_ratio, 0.8
-                )
+                self.assertEqual(restored.block_pool_frozen_abort_upper_ratio, 0.8)
                 for name, value in field_values.items():
                     self.assertEqual(getattr(restored, name), value, name)
                 self.assertIn(f"enable_crc: {int(enable_crc)}\n", restored.to_string())
@@ -93,8 +95,8 @@ class KVCacheConfigPickleTest(TestCase):
                 config = KVCacheConfig()
                 config.btc_transfer_engine_async = enabled
                 state = config.__getstate__()
-                self.assertEqual(state[:2], ("KVCacheConfig", 18))
-                self.assertEqual(len(state), 91)
+                self.assertEqual(state[:2], ("KVCacheConfig", 19))
+                self.assertEqual(len(state), 92)
                 self.assertIs(state[87], enabled)
                 self.assertIs(
                     pickle.loads(pickle.dumps(config)).btc_transfer_engine_async,
@@ -112,12 +114,22 @@ class KVCacheConfigPickleTest(TestCase):
         source.disk_cache_read_thread_count = 3
         source.disk_cache_write_thread_count = 5
         state = source.__getstate__()
-        for version, size in ((13, 83), (14, 84), (15, 85), (16, 86), (17, 90)):
+        for version, size in (
+            (13, 83),
+            (14, 84),
+            (15, 85),
+            (16, 86),
+            (17, 90),
+            (18, 91),
+        ):
             with self.subTest(version=version):
                 previous = (state[0], version, *state[2:size])
                 restored = KVCacheConfig.__new__(KVCacheConfig)
                 restored.__setstate__(previous)
                 self.assertEqual(restored.block_tree_transfer_worker_count, 7)
+                self.assertEqual(
+                    restored.disk_cache_evict_max_pending_bytes, 64 * 1024 * 1024
+                )
                 self.assertEqual(
                     restored.kvcm_task_timeout_ms, 20000 if version == 13 else 23000
                 )
@@ -128,9 +140,7 @@ class KVCacheConfigPickleTest(TestCase):
                     restored.block_pool_frozen_abort_lower_ratio,
                     0.3 if version < 16 else 0.35,
                 )
-                self.assertEqual(
-                    restored.block_pool_frozen_abort_upper_ratio, 0.4
-                )
+                self.assertEqual(restored.block_pool_frozen_abort_upper_ratio, 0.4)
                 self.assertEqual(restored.btc_crc_slot_count, 8 if version < 17 else 3)
                 self.assertEqual(restored.btc_transfer_engine_async, version < 17)
                 self.assertEqual(
@@ -155,7 +165,7 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertEqual(restored.kvcm_read_backend_type, 3)
         self.assertEqual(restored.kvcm_min_replica_count, 2)
         self.assertEqual(restored.block_pool_frozen_abort_lower_ratio, 0.3)
-        self.assertEqual(restored.__getstate__()[:2], ("KVCacheConfig", 18))
+        self.assertEqual(restored.__getstate__()[:2], ("KVCacheConfig", 19))
 
     def test_disk_timeout_defaults_and_overrides_survive_worker_round_trips(self):
         self.assertEqual(KVCacheConfig().disk_cache_sync_timeout_ms, 30000)
@@ -224,9 +234,7 @@ class KVCacheConfigPickleTest(TestCase):
                 config.block_pool_frozen_abort_upper_ratio = upper
                 restored = pickle.loads(pickle.dumps(config))
                 self.assertEqual(restored.block_pool_frozen_abort_lower_ratio, lower)
-                self.assertEqual(
-                    restored.block_pool_frozen_abort_upper_ratio, upper
-                )
+                self.assertEqual(restored.block_pool_frozen_abort_upper_ratio, upper)
 
     def test_invalid_frozen_abort_ranges_are_rejected(self):
         state = KVCacheConfig().__getstate__()
@@ -238,17 +246,21 @@ class KVCacheConfigPickleTest(TestCase):
         )
         for lower, upper in invalid_ranges:
             with self.subTest(lower=lower, upper=upper), self.assertRaisesRegex(
-                RuntimeError, "invalid KVCacheConfig block pool frozen abort ratio range"
+                RuntimeError,
+                "invalid KVCacheConfig block pool frozen abort ratio range",
             ):
                 restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__((*state[:85], lower, *state[86:90], upper))
+                restored.__setstate__(
+                    (*state[:85], lower, *state[86:90], upper, *state[91:])
+                )
 
     def test_old_frozen_abort_lower_above_default_upper_is_rejected(self):
         state = KVCacheConfig().__getstate__()
         for version, size in ((16, 86), (17, 90)):
             previous = (state[0], version, *state[2:85], 0.45, *state[86:size])
             with self.subTest(version=version), self.assertRaisesRegex(
-                RuntimeError, "invalid KVCacheConfig block pool frozen abort ratio range"
+                RuntimeError,
+                "invalid KVCacheConfig block pool frozen abort ratio range",
             ):
                 restored = KVCacheConfig.__new__(KVCacheConfig)
                 restored.__setstate__(previous)

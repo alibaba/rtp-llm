@@ -31,10 +31,6 @@ class EvictionTaskRunner;
 struct TierWatermark {
     double low_ratio{0.0};
     double high_ratio{0.0};
-
-    bool enabled() const {
-        return high_ratio > 0.0;
-    }
 };
 
 // Aggregated candidate counts across all group sets, one number per tier.
@@ -64,7 +60,8 @@ public:
                      int                            disk_timeout_ms,
                      size_t                         max_descriptors_per_batch,
                      IsTierEnabledFn                is_tier_enabled,
-                     SettledFn                      settled);
+                     SettledFn                      settled,
+                     size_t                         disk_cache_evict_max_pending_bytes = 64 * 1024 * 1024);
     ~BlockTreeEvictor();
 
     // ---- Semantic events (must be called while holding BlockTreeCache mutex) ----
@@ -84,7 +81,7 @@ public:
     // or no candidate remains. Return the actual number of physically reclaimed blocks.
     size_t reclaimDeviceBlocksLocked(size_t group_set_id, size_t member_group_id, size_t num_blocks);
     void   scheduleWatermarkEvictionsLocked(Tier                         tier,
-                                            const TierWatermark&         watermark,
+                                            std::optional<TierWatermark> watermark      = std::nullopt,
                                             std::optional<TierWatermark> full_watermark = std::nullopt);
     size_t computeWatermarkEvictCount(const GroupSet& group_set, Tier tier, const TierWatermark& watermark);
     // Release a detached operation's source CACHE reference after it settles, without publishing its target.
@@ -124,9 +121,10 @@ private:
     };
 
     struct WatermarkEvictionRound {
-        size_t required_count{0};
-        size_t scheduled_count{0};
-        size_t pending_count{0};
+        std::optional<TierWatermark> watermark;
+        size_t                       required_count{0};
+        size_t                       scheduled_count{0};
+        size_t                       pending_count{0};
     };
 
     struct GroupSetTierHeaps {
@@ -170,7 +168,7 @@ private:
     bool   submitEvictionTask(std::vector<TransferDescriptor> descriptors, std::vector<EvictionTimingSnapshot> timings);
     void   finishWatermarkRoundLocked(size_t group_set_id, Tier source_tier);
     Tier   watermarkTargetTier(Tier source_tier) const;
-    size_t watermarkLogicalBatchLimit(Tier source_tier, Tier target_tier) const;
+    size_t watermarkLogicalBatchLimit(const GroupSet& group_set, Tier source_tier, Tier target_tier) const;
     void   runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept;
     void   completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task, ErrorInfo error) noexcept;
     BatchEvictResult batchEvictLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count);
@@ -196,10 +194,6 @@ private:
     void                            settleSingleEviction(TreeNode* node);
     void                            eraseNodeFromAllHeaps(TreeNode* node);
     void                            updatePendingRelease(const std::vector<TransferDescriptor>& descs, bool reserve);
-    size_t                          computePoolWatermarkRequired(IBlockPool*          pool,
-                                                                 size_t               pending_count,
-                                                                 const TierWatermark& watermark,
-                                                                 bool&                high_reached) const;
 
     BlockTree*                          tree_;
     BlockTreeTaskPool*                  task_pool_{nullptr};
@@ -211,6 +205,8 @@ private:
     int                                 host_timeout_ms_{0};
     int                                 disk_timeout_ms_{0};
     size_t                              max_descriptors_per_batch_{32};
+    size_t                              disk_cache_evict_max_pending_bytes_;
+    size_t                              next_disk_evict_group_{0};
 
     // Heap ownership: vector index is the declared group_set_id.
     std::vector<GroupSetTierHeaps>          heaps_;
