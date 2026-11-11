@@ -177,7 +177,21 @@ class RocmFp4DequantStrategy(RoutedExpertsStrategy):
         x_2d = x.reshape(t, -1)
         if x_2d.dtype != torch.bfloat16:
             x_2d = x_2d.to(torch.bfloat16)
-        if torch.cuda.is_current_stream_capturing():
+        from ..warmup_sync import cuda_graph_warmup_forward_enabled
+
+        if (
+            torch.cuda.is_current_stream_capturing()
+            or cuda_graph_warmup_forward_enabled()
+        ):
+            # The C++ capture harness sets RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD=1
+            # around the two eager warmup forwards that precede every capture
+            # (cuda_graph_runner.cc). Those warmups MUST run the exact branch
+            # the capture will record: keying only on
+            # is_current_stream_capturing() left every graph-safe-only kernel
+            # (fixed-shape masks, full-batch Triton launches, hipBLASLt
+            # solutions for padded shapes) cold during capture, which records
+            # a sticky hipErrorInvalidConfiguration in EVERY layer's MoE
+            # (load32 capture probes: ffn0..ffn60, all ranks, capture-only).
             self._forward_graph_safe(x_2d, weights, indices, y)
         else:
             self._forward_eager(x_2d, weights, indices, y)

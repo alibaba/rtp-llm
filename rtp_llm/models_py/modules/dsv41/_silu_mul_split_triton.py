@@ -30,7 +30,13 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+# N must not participate in Triton's value specialization (==1 / %16 cache
+# keys): the eager decode path launches with per-expert token subsets while
+# HIP graph capture always launches with the full padded batch, so a
+# capture-only N class would JIT-compile during capture (illegal, sticky
+# hipErrorInvalidConfiguration). One binary for every N keeps the pre-capture
+# warmup sufficient.
+@triton.jit(do_not_specialize=["N"])
 def _silu_mul_split_kernel(
     gate_ptr,  # [N, D] fp32 contiguous
     up_ptr,  # [N, D] fp32 contiguous
