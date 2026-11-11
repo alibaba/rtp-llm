@@ -134,6 +134,15 @@ public:
         return local_server_->SetRestart(context, request, response);
     }
 
+    ::grpc::Status AwiBarrier(::grpc::ServerContext* context, const AwiBarrierRequestPB* request, EmptyPB* response) override {
+        return local_server_->AwiBarrier(context, request, response);
+    }
+
+    ::grpc::Status
+    AwiObservations(::grpc::ServerContext* context, const AwiObservationsRequestPB* request, AwiObservationsResponsePB* response) override {
+        return local_server_->AwiObservations(context, request, response);
+    }
+
     WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version) {
         return local_server_->getWorkerStatusInfo(latest_finished_version);
     }
