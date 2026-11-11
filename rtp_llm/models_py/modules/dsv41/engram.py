@@ -833,12 +833,9 @@ def _checkpoint_tensor_rows(file, name, row_range=None):
 
 def _shard_all_reduce_rows(rows):
     """Sum each rank's partial BF16 lookup, graph-capturable on ROCm."""
-    from rtp_llm.models_py.distributed.collective_torch import Group
-    from rtp_llm.models_py.modules.dsv41.moe.strategies.rocm_ep import (
-        all_reduce as _capture_all_reduce,
-    )
+    from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
-    return _capture_all_reduce(rows, Group.TP, inplace=False)
+    return all_reduce(rows, Group.TP, inplace=False)
 
 
 class HostEngramEmbedding:
