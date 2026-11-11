@@ -365,8 +365,14 @@ void AwiService::generate(const std::unique_ptr<http_server::HttpResponseWriter>
                                                          torch::kInt32)
                                             .clone();
                 auto fill_config               = std::make_shared<GenerateConfig>();
-                fill_config->max_new_tokens    = 0;
-                fill_config->min_new_tokens    = 0;
+                // max_new_tokens==0 disables reuse_cache in StreamCacheResource,
+                // so a zero-token fill would re-prefill every growing prefix and
+                // OOM.  One token enables the normal reuse-cache write; its block
+                // is released when the fill stream finishes and the final
+                // full-context request reuses only the input prefix.
+                fill_config->max_new_tokens    = 1;
+                fill_config->min_new_tokens    = 1;
+                fill_config->ignore_eos        = true;
                 fill_config->is_streaming      = false;
                 fill_config->return_output_ids = false;
                 fill_input->generate_config    = fill_config;
@@ -375,9 +381,9 @@ void AwiService::generate(const std::unique_ptr<http_server::HttpResponseWriter>
                     writeError(writer, 500, "engine failed to create prefix-fill stream");
                     return;
                 }
-                fill_stream->setReserveStep(0);
+                fill_stream->setReserveStep(1);
                 runtime_for_fill.bindRequest(fill_stream->streamId(), request_id);
-                runtime_for_fill.setRequestTarget(fill_stream->streamId(), end);
+                runtime_for_fill.setRequestTarget(fill_stream->streamId(), end + 1);
                 const auto fill_status = engine_->getScheduler().enqueue(fill_stream);
                 if (!fill_status.ok() || fill_stream->hasError()) {
                     const auto detail = fill_status.ok() ? fill_stream->statusInfo().ToString()
