@@ -798,7 +798,7 @@ MasterScheduleResultKernel::getAdmissionPredictionAudit(
 }
 
 void MasterScheduleResultKernel::logAdmissionPredictions(
-    const NaviSchedScheduleContext &context) const
+    const NaviSchedScheduleContext &context, const char *admissionPhase) const
 {
     std::unordered_set<int64_t> loggedBatchIds;
     for (size_t requestIndex = 0; requestIndex < context._decisions.size();
@@ -828,7 +828,7 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
                 audit.cacheObservation.value_or(TPUPrefillCacheObservation{});
             NAVI_KERNEL_LOG(
                 INFO,
-                "[navi-master-frozen-prefill-input] schedule_time_us=%ld "
+                "[navi-master-frozen-prefill-input] admission_phase=%s schedule_time_us=%ld "
                 "schedule_id=%lu schedule_batch_id=%ld request_id=%lu "
                 "agent=%s model_revision=%ld prompt_tokens=%ld computed_tokens=%ld "
                 "shared_prefix_boundary=%ld external_read_tokens=%ld "
@@ -838,7 +838,7 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
                 "block_pool_tail_ready_blocks=%lu block_pool_cached_checksum=%lu "
                 "block_pool_full_ready_checksum=%lu block_pool_tail_ready_checksum=%lu "
                 "full_prefix_before_query_drop_blocks=%ld",
-                context.getScheduleTimeUs(), decision.scheduleId, decision.batchId,
+                admissionPhase, context.getScheduleTimeUs(), decision.scheduleId, decision.batchId,
                 entry.requestId, node.getAgentId().c_str(),
                 node.getLatencyModelRevision(), input.promptTokens, input.computedTokens,
                 input.sharedPrefixBoundary, input.externalReadTokens,
@@ -881,7 +881,7 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
                 : std::string();
         NAVI_KERNEL_LOG(
             INFO,
-            "[navi-master-admission-prediction] schedule_time_us=%ld "
+            "[navi-master-admission-prediction] admission_phase=%s schedule_time_us=%ld "
             "schedule_id=%lu schedule_batch_id=%ld request_id=%lu "
             "request_count=%ld agent=%s collector=%s unified=%d "
             "peer_cache_read_available=%d peer_cache_read_revision=%lu "
@@ -931,7 +931,7 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
             "floor_waiting_miss_tokens=%ld "
             "floor_waiting_miss_square_sum=%.0f "
             "floor_waiting_hit_miss_sum=%.0f%s",
-            decision.scheduleTimeUs, decision.scheduleId, decision.batchId,
+            admissionPhase, decision.scheduleTimeUs, decision.scheduleId, decision.batchId,
             decision.requestId, decision.expectedBatchSize, node.getAgentId().c_str(),
             decision.target.agentAddress.c_str(),
             node.usesUnifiedLatencyPrediction() ? 1 : 0,
@@ -1238,6 +1238,10 @@ bool MasterScheduleResultKernel::prepareContext(NaviSchedScheduleContext &contex
     const auto preparedUs = autil::TimeUtility::monotonicTimeUs();
     context._resultPrepareUs = preparedUs - resultBeginUs;
     if (context._queueOverloadAfterCost) {
+        // Retain bounded pre-drop predictions before rejected decisions lose their target.
+        if (context._scheduleId < 10 || context._scheduleId % 100 == 0) {
+            logAdmissionPredictions(context, "pre_drop_sample");
+        }
         applySelectedQueueAdmission(context, *_masterScheduleR);
     }
     logAdmissionPredictions(context);

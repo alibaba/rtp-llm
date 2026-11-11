@@ -134,7 +134,8 @@ protected:
     static AdmissionPredictionAudit getAdmissionPredictionAudit(
         const NaviSchedScheduleContext &context, size_t requestIndex,
         bool includeFrozenExecutionInputs = false);
-    void logAdmissionPredictions(const NaviSchedScheduleContext &context) const;
+    void logAdmissionPredictions(const NaviSchedScheduleContext &context,
+                                const char *admissionPhase = "admitted") const;
     bool finishContext(NaviSchedScheduleContext &context);
     bool prepareContext(NaviSchedScheduleContext &context, int64_t resultBeginUs);
     void reportResultTiming(NaviSchedScheduleContext &context,
