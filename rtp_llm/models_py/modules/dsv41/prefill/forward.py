@@ -997,6 +997,14 @@ def _chunk_attention_entry(entry: PyAttentionInputs, start: int, length: int, de
     chunk.sequence_lengths_plus_1_device = (chunk.sequence_lengths + 1).to(
         device=device, dtype=torch.int32
     )
+    # cu_kv_seqlens is the cumulative KV boundary the attention/indexer paths
+    # use when addressing the prefix.  Leaving the full-request boundary here
+    # makes chunk 0 address KV slots that have not been written yet and can
+    # index past the live compressed-cache extent.
+    chunk.cu_kv_seqlens_device = torch.tensor(
+        [0, start + length], dtype=torch.int32, device=device
+    )
+    chunk.context_total_kv_length = start + length
     chunk.total_tokens = length
     chunk.is_cuda_graph = False
     return chunk

@@ -191,6 +191,19 @@ std::vector<int> getInputIds(const JsonMap& map) {
             return true;
         } catch (...) {
         }
+        // autil JSON stores parsed numbers in a JsonNumber wrapper which the
+        // generic AnyCast<int64/double> helpers do not unwrap.  Its canonical
+        // serialisation is an integer literal, so parse that instead of
+        // silently dropping the evaluator's input_ids array.
+        try {
+            std::string text = autil::legacy::json::ToString(value, true);
+            if (text.size() >= 2 && text.front() == '"' && text.back() == '"') {
+                text = text.substr(1, text.size() - 2);
+            }
+            ids.push_back(std::stoi(text));
+            return true;
+        } catch (...) {
+        }
         return false;
     };
     try {
