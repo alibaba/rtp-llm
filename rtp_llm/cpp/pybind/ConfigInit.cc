@@ -530,6 +530,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reuse_cache_tail_blocks", &KVCacheConfig::reuse_cache_tail_blocks)
         .def_readwrite("linear_pool_blocks", &KVCacheConfig::linear_pool_blocks)
         .def_readwrite("linear_pool_avg_prompt_tokens", &KVCacheConfig::linear_pool_avg_prompt_tokens)
+        .def_readwrite("lower_tier_linear_pool_avg_prompt_tokens",
+                       &KVCacheConfig::lower_tier_linear_pool_avg_prompt_tokens)
         .def_readwrite("swa_pool_blocks", &KVCacheConfig::swa_pool_blocks)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
@@ -602,8 +604,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("kv_cache_event_snapshot_interval_ms", &KVCacheConfig::kv_cache_event_snapshot_interval_ms)
         .def(py::pickle(
             [](const KVCacheConfig& self) {
-                return py::make_tuple(std::string("KVCacheConfig"),
-                                      14,
+                const bool has_lower_tier_ratio = self.lower_tier_linear_pool_avg_prompt_tokens != -1;
+                py::tuple state = py::make_tuple(std::string("KVCacheConfig"),
+                                      has_lower_tier_ratio ? 15 : 14,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -687,9 +690,21 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kvcm_min_replica_count,
                                       self.kv_cache_event_snapshot_interval_ms,
                                       self.linear_pool_avg_prompt_tokens,
-                                      self.disk_cache_evict_timeout_ms);
+                                      self.disk_cache_evict_timeout_ms,
+                                      self.lower_tier_linear_pool_avg_prompt_tokens);
+                if (!has_lower_tier_ratio) {
+                    return state[py::slice(0, 86, 1)].cast<py::tuple>();
+                }
+                return state;
             },
             [](py::tuple t) {
+                const py::tuple lower_tier_linear_pool_state = t;
+                const bool has_lower_tier_linear_pool_field =
+                    t.size() == 87 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 15;
+                if (has_lower_tier_linear_pool_field) {
+                    t = t[py::slice(0, 86, 1)].cast<py::tuple>();
+                    t[1] = py::int_(14);
+                }
                 const py::tuple disk_timeout_state = t;
                 const bool has_disk_evict_timeout =
                     t.size() == 86 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 14;
@@ -766,6 +781,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
 
                 KVCacheConfig c;
+                if (has_lower_tier_linear_pool_field) {
+                    const auto tokens = lower_tier_linear_pool_state[86].cast<int>();
+                    if (tokens < -1 || tokens == 0) {
+                        throw std::runtime_error("invalid KVCacheConfig lower-tier LINEAR pool average prompt tokens");
+                    }
+                    c.lower_tier_linear_pool_avg_prompt_tokens = tokens;
+                }
                 if (has_disk_evict_timeout) {
                     c.disk_cache_evict_timeout_ms = disk_timeout_state[85].cast<int64_t>();
                 }

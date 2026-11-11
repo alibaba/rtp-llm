@@ -762,6 +762,7 @@ class KVCacheConfig:
     reuse_cache_tail_blocks: int
     linear_pool_blocks: int
     linear_pool_avg_prompt_tokens: int
+    lower_tier_linear_pool_avg_prompt_tokens: int
     swa_pool_blocks: int
     max_block_size_per_item: int
     memory_cache_size_mb: int

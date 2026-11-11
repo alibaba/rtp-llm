@@ -128,9 +128,10 @@ void configureLinearPrefillPoolRatio(CacheConfig&             config,
 
     const auto cp_size        = config.local_kv_cache_sharded ? parallelism_config.tp_size : 1;
     const auto max_page_span  = static_cast<size_t>(std::numeric_limits<int>::max());
-    RTP_LLM_CHECK_WITH_INFO(cp_size > 0 && config.seq_size_per_block <= max_page_span / cp_size,
+    RTP_LLM_CHECK_WITH_INFO(cp_size > 0 && config.seq_size_per_block > 0
+                                && config.seq_size_per_block <= max_page_span / cp_size,
                             "LINEAR_POOL_AVG_PROMPT_TOKENS requires a valid CP page span");
-    const auto page_tokens = config.seq_size_per_block * static_cast<uint64_t>(cp_size);
+    const auto page_tokens = static_cast<uint32_t>(config.seq_size_per_block * cp_size);
     const auto& groups = config.topology().groups();
     const bool has_full_pages = std::any_of(groups.begin(), groups.end(), [&](const GroupBase& group) {
         return group.policy.group_type == CacheGroupType::FULL
@@ -141,15 +142,11 @@ void configureLinearPrefillPoolRatio(CacheConfig&             config,
     RTP_LLM_CHECK_WITH_INFO(has_full_pages && model_config.max_seq_len > 0,
                             "LINEAR_POOL_AVG_PROMPT_TOKENS requires a shared full KV pool and a positive max_seq_len");
 
-    const auto reference_pages  = 1 + (tokens - 1) / page_tokens;
-    const auto reference_states = static_cast<uint64_t>(config.reuse_cache_tail_blocks) + 1;
-    const auto max_prompt_pages  = 1 + (model_config.max_seq_len - 1) / page_tokens;
-    config.linear_prefill_pool_ratio = {
-        static_cast<uint32_t>(reference_pages),
-        static_cast<uint32_t>(reference_states),
-        // A cold prompt can use at most one state per CP page it occupies.
-        static_cast<uint32_t>(std::min(reference_states, max_prompt_pages)),
-    };
+    auto ratio = LinearPrefillPoolRatio::fromReferenceTokens(tokens, page_tokens, config.reuse_cache_tail_blocks);
+    const auto max_prompt_pages = 1 + (model_config.max_seq_len - 1) / page_tokens;
+    // A cold prompt can use at most one state per CP page it occupies.
+    ratio.min_states                 = static_cast<uint32_t>(std::min<uint64_t>(ratio.reference_states, max_prompt_pages));
+    config.linear_prefill_pool_ratio = ratio;
     RTP_LLM_CHECK_WITH_INFO(std::any_of(groups.begin(), groups.end(), [&](const GroupBase& group) {
                                 return config.usesLinearPrefillPoolRatio(group);
                             }),

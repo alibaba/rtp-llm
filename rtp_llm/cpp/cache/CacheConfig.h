@@ -39,6 +39,11 @@ struct LinearPrefillPoolRatio {
     uint32_t reference_states = 0;
     uint32_t min_states       = 0;
 
+    static LinearPrefillPoolRatio
+    fromReferenceTokens(uint32_t reference_tokens, uint32_t page_tokens, uint32_t tail_checkpoints) {
+        return {1 + (reference_tokens - 1) / page_tokens, tail_checkpoints + 1, 0};
+    }
+
     // Apply the ratio to usable pages, then add the LINEAR pool's block zero.
     uint64_t physicalBlocks(uint32_t physical_pages) const {
         const auto usable_pages = physical_pages - 1;

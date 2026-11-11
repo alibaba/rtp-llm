@@ -208,6 +208,7 @@ struct KVCacheConfig {
     int      reuse_cache_tail_blocks                      = std::numeric_limits<int>::max();
     uint32_t linear_pool_blocks                           = 0;
     int      linear_pool_avg_prompt_tokens                = -1;
+    int      lower_tier_linear_pool_avg_prompt_tokens     = -1;
     uint32_t swa_pool_blocks                              = 0;
     // Fields merged from PyKvCacheConfig
     int fp8_kv_cache = 0;

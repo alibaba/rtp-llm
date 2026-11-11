@@ -273,6 +273,18 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         ),
     )
     kv_cache_group.add_argument(
+        "--lower_tier_linear_pool_avg_prompt_tokens",
+        env_name="LOWER_TIER_LINEAR_POOL_AVG_PROMPT_TOKENS",
+        bind_to=(kv_cache_config, "lower_tier_linear_pool_avg_prompt_tokens"),
+        type=_linear_pool_avg_prompt_tokens,
+        default=-1,
+        help=(
+            "Prefill HOST 和 SSD 共用的 FULL 参考长度，单位为 token，可填多轮请求的等效增量。"
+            "按 FULL 页跨度向上取整，再用 REUSE_CACHE_TAIL_BLOCKS + 1 除以参考页数得到 LINEAR/FULL 块数比。"
+            "-1 沿用原有容量分配。"
+        ),
+    )
+    kv_cache_group.add_argument(
         "--swa_pool_blocks",
         env_name="SWA_POOL_BLOCKS",
         bind_to=(kv_cache_config, "swa_pool_blocks"),
