@@ -202,10 +202,53 @@ def _query_norm_quant_kernel(
     tl.store(SF + packs * stride_sf + row, packed, packs < triton.cdiv(D, 128))
 
 
+def _needs_reference_query_norm_quant(x: torch.Tensor) -> bool:
+    """SM80/ROCm Triton cannot store through an FP8 E4M3 pointer."""
+    if getattr(torch.version, "hip", None) is not None:
+        return True
+    if not x.is_cuda:
+        return True
+    try:
+        return torch.cuda.get_device_capability(x.device)[0] < 9
+    except Exception:
+        return True
+
+
+def _query_norm_quant_reference(x, weight, eps):
+    """Exact legacy torch form: BF16 norm boundary, E4M3, packed UE8M0."""
+    shape = x.shape
+    flat = x.reshape(-1, shape[-1]).float()
+    rows, width = flat.shape
+    inv = torch.rsqrt(flat.pow(2).mean(-1, keepdim=True) + eps)
+    y = (flat * inv * weight.float()).to(torch.bfloat16)
+    normalized = y.view(shape)
+    groups = y.float().reshape(rows, width // 32, 32)
+    amax = groups.abs().amax(-1)
+    raw = (amax / 448.0).clamp_min(1.0e-10)
+    bits = raw.view(torch.int32)
+    exponent = (bits >> 23) + ((bits & 0x7FFFFF) != 0).to(torch.int32)
+    scale = (exponent << 23).view(torch.float32)
+    quant = (groups / scale[..., None]).clamp(-448.0, 448.0)
+    quantized = quant.reshape(rows, width).to(torch.float8_e4m3fn)
+    ngroups = width // 32
+    packs = (ngroups + 3) // 4
+    padded = torch.zeros((rows, packs * 4), dtype=torch.int32, device=x.device)
+    padded[:, :ngroups] = exponent
+    packed = torch.zeros((rows, packs), dtype=torch.int32, device=x.device)
+    for shift in range(4):
+        packed |= padded[:, shift::4] << (8 * shift)
+    row_stride = ((rows + 3) // 4) * 4
+    scales = torch.zeros((packs, row_stride), dtype=torch.int32, device=x.device).T[:rows]
+    scales.copy_(packed)
+    return normalized, (quantized.view(shape), scales)
+
+
 def query_norm_quant(
     x: torch.Tensor, weight: torch.Tensor, eps: float, *, pdl: bool = False
 ):
     """Return BF16 Q plus FP8 Q and packed MN-major UE8M0 scales."""
+    if _needs_reference_query_norm_quant(x):
+        return _query_norm_quant_reference(x, weight, eps)
     import deep_gemm
 
     pdl = pdl or (
