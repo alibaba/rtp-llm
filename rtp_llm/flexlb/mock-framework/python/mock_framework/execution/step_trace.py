@@ -4,7 +4,6 @@ import subprocess
 import tempfile
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -49,7 +48,7 @@ class StepTrace:
         self.directory.mkdir(parents=True, exist_ok=False)
         write_json(
             self.directory / "configuration.json",
-            {"run_id": self.run_id, "case": asdict(case), "launch": launch},
+            {"run_id": self.run_id, "case": case.to_dict(), "launch": launch},
         )
         if case.view is not None:
             view = json.loads(case.view.read_text(encoding="utf-8"))

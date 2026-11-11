@@ -41,6 +41,27 @@ class CompiledCase:
     source: Path
     shared_root: Path | None = None
 
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "describe": self.describe,
+            "name": self.name,
+            "directory": self.directory,
+            "environment": copy.deepcopy(self.environment),
+            "phases": tuple(
+                {
+                    "id": phase.id,
+                    "describe": phase.describe,
+                    "timeout": phase.timeout,
+                    "steps": tuple(step.to_dict() for step in phase.steps),
+                }
+                for phase in self.phases
+            ),
+            "view": self.view,
+            "source": self.source,
+            "shared_root": self.shared_root,
+        }
+
 
 _ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _GLOBALS = {
@@ -97,12 +118,12 @@ def _has_reference(value):
     return False
 
 
-def _expectation(raw, interface, previous):
+def _expectation(raw, definition, previous):
     fields(raw, {"eq", "count", "gte", "lte"}, where="expect")
     if set(raw) not in ({"eq"}, {"count"}, {"gte"}, {"lte"}, {"gte", "lte"}):
         raise ConfigError("expect needs eq, count, or gte/lte")
     result = {}
-    output = interface.returns
+    output = definition.returns
     for op, value in raw.items():
         expected = output
         if op == "count":
@@ -119,7 +140,7 @@ def _expectation(raw, interface, previous):
             ):
                 raise ConfigError(f"{op} requires numeric output")
             expected = {"type": "number"}
-        if isinstance(value, str) and interface.unit == "s" and op != "count":
+        if isinstance(value, str) and definition.unit == "s" and op != "count":
             value = float(duration(value))
         result[op] = _argument(value, expected, previous, "expect." + op)
     if (
@@ -170,22 +191,22 @@ def _compile_step(raw, registry, ids, previous):
     )
     step_id = _identity(raw["id"], ids)
     description = text(raw["describe"], "step.describe")
-    interface = registry.get(raw["interface"])
-    args = _argument(raw.get("args", {}), interface.args, previous, step_id + ".args")
+    definition = registry.get(raw["interface"])
+    args = _argument(raw.get("args", {}), definition.args, previous, step_id + ".args")
     if not _has_reference(args):
-        interface.arguments(args)
+        definition.arguments(args)
     within = raw.get("within")
     if within is not None:
         duration(within, positive=True)
     wait_after = raw.get("wait_after", "0s")
     duration(wait_after)
     expect = (
-        _expectation(raw["expect"], interface, previous) if "expect" in raw else None
+        _expectation(raw["expect"], definition, previous) if "expect" in raw else None
     )
     background = raw.get("background", False)
     if type(background) is not bool:
         raise ConfigError(f"{step_id}.background: expected a boolean")
-    result_type = interface.returns
+    result_type = definition.returns
     if result_type.get("variants") == [
         {"type": "number"},
         {"type": "array", "items": {"type": "number"}},
@@ -195,15 +216,14 @@ def _compile_step(raw, registry, ids, previous):
         ]
     previous[step_id] = None if background else result_type
     return Step(
-        step_id,
-        description,
-        interface.name,
-        args,
-        expect,
-        within,
-        wait_after,
-        background,
-        action=interface,
+        id=step_id,
+        describe=description,
+        args=args,
+        expect=expect,
+        within=within,
+        wait_after=wait_after,
+        background=background,
+        definition=definition,
     )
 
 

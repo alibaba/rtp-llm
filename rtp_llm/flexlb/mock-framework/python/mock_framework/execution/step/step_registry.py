@@ -114,13 +114,13 @@ def _construct(kind, value, where="argument"):
     return value
 
 
-def _result_value(value):
+def to_record_value(value):
     if is_dataclass(value):
         return asdict(value)
     if isinstance(value, list):
-        return [_result_value(item) for item in value]
+        return [to_record_value(item) for item in value]
     if isinstance(value, dict):
-        return {key: _result_value(item) for key, item in value.items()}
+        return {key: to_record_value(item) for key, item in value.items()}
     return value
 
 
@@ -142,7 +142,7 @@ class StepDefinition:
     async def call(self, context, arguments):
         """Execute arguments already prepared by the Runner; validate the returned value."""
         result = await self.handler(context, arguments)
-        result = _result_value(result)
+        result = to_record_value(result)
         validate(result, self.returns, self.name + ".result")
         return result
 

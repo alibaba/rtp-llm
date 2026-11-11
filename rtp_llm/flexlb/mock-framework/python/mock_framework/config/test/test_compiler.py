@@ -23,7 +23,7 @@ def test_shipped_cases_compile_and_reference_existing_inputs(path, registry):
     case = compile_case(path, registry)
     for phase in case.phases:
         for step in phase.steps:
-            if step.interface == "client/start":
+            if step.definition.name == "client/start":
                 assert (case.shared_root / step.args["requests_file"]).is_file()
 
 
@@ -365,23 +365,21 @@ def test_registered_actions_are_functions_and_compiled_steps_share_only_the_defi
             "args": {"threshold": 2},
         },
     ]
-    first, second = compile_data(case_data, interfaces=registry).phases[0].steps
+    case = compile_data(case_data, interfaces=registry)
+    first, second = case.phases[0].steps
     assert type(first) is Step and type(second) is Step
     assert first.definition is second.definition is definition
     assert first.args == {"threshold": 1} and second.args == {"threshold": 2}
-    from dataclasses import asdict
-
-    assert set(asdict(first)) == {
-        "id",
-        "describe",
-        "interface",
-        "args",
-        "expect",
-        "within",
-        "wait_after",
-        "background",
+    assert case.to_dict()["phases"][0]["steps"][0] == {
+        "id": "one",
+        "describe": "first call",
+        "interface": "extension/queue",
+        "args": {"threshold": 1},
+        "expect": None,
+        "within": None,
+        "wait_after": "0s",
+        "background": False,
     }
-    assert "handler" not in asdict(first) and "definition" not in asdict(first)
 
 
 def test_action_registration_rejects_classes_sync_functions_and_wrong_signatures():

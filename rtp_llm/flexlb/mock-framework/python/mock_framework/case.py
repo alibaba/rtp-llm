@@ -3,7 +3,6 @@ import asyncio
 import json
 import signal
 import sys
-from dataclasses import asdict
 from pathlib import Path
 
 import yaml
@@ -87,7 +86,7 @@ def main():
         if args.launch is not None:
             parser.error("--launch is only valid with run")
         encoded = (
-            json.dumps(asdict(case), default=str, ensure_ascii=False, indent=2) + "\n"
+            json.dumps(case.to_dict(), default=str, ensure_ascii=False, indent=2) + "\n"
         )
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -2,15 +2,13 @@
 
 import asyncio
 import time
-from dataclasses import InitVar, dataclass, field
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from .step_registry import StepDefinition
+from dataclasses import dataclass, field
+from typing import Any
 
 from ...config.validation import duration, validate
 from .. import ExecutionError
 from .assertions import matches_expectation
+from .step_registry import StepDefinition, to_record_value
 
 
 def resolve_refs(value, results, case_globals):
@@ -46,32 +44,35 @@ class Expect:
 
 @dataclass(frozen=True)
 class Step:
-    action: InitVar["StepDefinition"] = field(kw_only=True)
+    definition: StepDefinition = field(kw_only=True, repr=False)
     id: str
     describe: str
-    interface: str
     args: dict[str, Any]
     expect: Expect | None = None
     within: str | None = None
     wait_after: str = "0s"
     background: bool = False
 
-    def __post_init__(self, action):
-        # The bound callable is runtime wiring, not part of the saved Case configuration.
-        object.__setattr__(self, "_definition", action)
-
-    @property
-    def definition(self) -> "StepDefinition":
-        return self._definition
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "describe": self.describe,
+            "interface": self.definition.name,
+            "args": to_record_value(self.args),
+            "expect": to_record_value(self.expect),
+            "within": self.within,
+            "wait_after": self.wait_after,
+            "background": self.background,
+        }
 
     async def run(self, context):
-        with context.records.step(context.phase_id, self.id, self.interface):
+        with context.records.step(context.phase_id, self.id, self.definition.name):
             await self._run(context)
 
     async def _run(self, context):
         results, phase_id = context.results, context.phase_id
         started = time.monotonic()
-        interface = self.definition
+        definition = self.definition
         runtime, records = context.runtime, context.records
         gate, invoked, returned = None, False, False
         stage = "arguments"
@@ -79,13 +80,13 @@ class Step:
             event="step_started",
             phase=phase_id,
             step=self.id,
-            interface=self.interface,
+            interface=definition.name,
             describe=self.describe,
             query_time=context.query_time,
         )
         try:
             args = resolve_refs(self.args, results, context.globals())
-            arguments = interface.arguments(args)
+            arguments = definition.arguments(args)
             expected = (
                 resolve_refs(self.expect.comparisons, results, context.globals())
                 if self.expect
@@ -93,7 +94,7 @@ class Step:
             )
             if expected is not None:
                 for op, value in expected.items():
-                    expected_type = interface.returns
+                    expected_type = definition.returns
                     if op == "count":
                         expected_type = {"type": "integer", "minimum": 0}
                     elif op in ("gte", "lte"):
@@ -101,8 +102,8 @@ class Step:
                     validate(value, expected_type, "expect." + op)
                 gate = {
                     "step": self.id,
-                    "interface": self.interface,
-                    "unit": interface.unit,
+                    "interface": definition.name,
+                    "unit": definition.unit,
                     "args": args,
                     "query_time": context.query_time,
                     "expect": expected,
@@ -111,7 +112,7 @@ class Step:
             stage = "invoke"
             invoked = True
             actual = await runtime.supervisor.guard(
-                interface.call(context, arguments), budget
+                definition.call(context, arguments), budget
             )
             returned = True
             stage = "expect"
@@ -158,7 +159,7 @@ class Step:
                 duration_ms=round((time.monotonic() - started) * 1000, 3),
                 outcome_unknown=invoked
                 and not returned
-                and interface.effect == "write",
+                and definition.effect == "write",
                 **({"result": actual} if returned else {}),
             )
             raise
