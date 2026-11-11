@@ -61,7 +61,7 @@ public:
                      size_t                         max_descriptors_per_batch,
                      IsTierEnabledFn                is_tier_enabled,
                      SettledFn                      settled,
-                     size_t                         disk_cache_evict_max_pending_bytes = 64 * 1024 * 1024);
+                     size_t                         disk_cache_evict_max_pending_bytes);
     ~BlockTreeEvictor();
 
     // ---- Semantic events (must be called while holding BlockTreeCache mutex) ----

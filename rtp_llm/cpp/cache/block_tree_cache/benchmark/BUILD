@@ -82,6 +82,7 @@ cc_library(
         "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
+        "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/utils:core_utils",
     ] + select({
         "@//:using_cuda": [

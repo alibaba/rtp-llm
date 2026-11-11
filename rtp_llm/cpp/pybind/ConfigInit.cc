@@ -680,14 +680,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 const py::tuple pending_budget_state = t;
-                const bool has_pending_budget =
+                const bool      has_pending_budget =
                     t.size() == 92 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 17;
                 if (has_pending_budget) {
-                    t = t[py::slice(0, 91, 1)].cast<py::tuple>();
+                    t    = t[py::slice(0, 91, 1)].cast<py::tuple>();
                     t[1] = py::int_(16);
                 }
                 const py::tuple frozen_bounds_state = t;
-                const bool has_frozen_bounds =
+                const bool      has_frozen_bounds =
                     t.size() == 91 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 16;
                 if (has_frozen_bounds) {
                     t = t[py::slice(0, 90, 1)].cast<py::tuple>();

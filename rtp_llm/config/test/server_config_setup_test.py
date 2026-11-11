@@ -367,6 +367,9 @@ class GenerateConfigTest(TestCase):
             config = setup_args([]).kv_cache_config
             self.assertTrue(config.btc_transfer_engine_async)
             self.assertEqual(config.btc_crc_slot_count, 8)
+            self.assertEqual(
+                config.disk_cache_evict_max_pending_bytes, 100 * 1024 * 1024
+            )
         with patch.dict(
             "os.environ",
             _jit_env(BTC_TRANSFER_ENGINE_ASYNC="true", BTC_CRC_SLOT_COUNT="11"),
@@ -607,8 +610,8 @@ class GenerateConfigTest(TestCase):
             value.__setstate__(pickle_state)
             return value
 
-        # Legacy payloads do not carry the async fields appended in v13.
-        event_state = (*state[:84], 8, True, 16, 16)
+        # Legacy payloads do not carry fields appended after v6.
+        event_state = (*state[:64], *KVCacheConfig().__getstate__()[64:])
         state = (state[0], 6, *state[2:64])
         self.assertEqual(restore(state).__getstate__(), event_state)
         version_five_state = (state[0], 5, *state[2:], True)
@@ -664,6 +667,10 @@ class GenerateConfigTest(TestCase):
             self.assertTrue(legacy_config.btc_transfer_engine_async)
             self.assertEqual(legacy_config.disk_cache_read_thread_count, 16)
             self.assertEqual(legacy_config.disk_cache_write_thread_count, 16)
+            self.assertEqual(
+                legacy_config.disk_cache_evict_max_pending_bytes,
+                default_config.disk_cache_evict_max_pending_bytes,
+            )
 
     def test_kv_cache_config_pickle_rejects_incompatible_states(self):
         from rtp_llm.ops import KVCacheConfig
