@@ -87,9 +87,11 @@ void AwiRankStore::armBarrier(std::string operation_id, std::vector<std::string>
             barrier.request_ids = request_ids;
             barrier.context_tokens = context_tokens;
             barrier.armed_ns = nowNs();
-            // Re-arming restarts the admission/residency probe.
+            // Re-arming restarts the admission/residency probe AND the
+            // barrier-arm cache eviction.
             barrier.satisfied = false;
             barrier.failed = false;
+            barrier.eviction_done = false;
             return;
         }
     }
@@ -105,6 +107,18 @@ std::vector<AwiRankStore::BarrierSnapshot> AwiRankStore::barriers() const {
             barrier.operation_id, barrier.request_ids, barrier.context_tokens, barrier.satisfied, barrier.failed});
     }
     return out;
+}
+
+std::vector<std::string> AwiRankStore::takePendingEvictions() {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::vector<std::string> pending;
+    for (auto& barrier : barriers_) {
+        if (!barrier.eviction_done) {
+            barrier.eviction_done = true;
+            pending.push_back(barrier.operation_id);
+        }
+    }
+    return pending;
 }
 
 bool AwiRankStore::hasUnresolvedBarriers() const {

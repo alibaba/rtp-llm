@@ -951,6 +951,25 @@ void NormalEngine::markAwiPrefillStarts(const std::list<GenerateStreamPtr>& stre
     }
 }
 
+void NormalEngine::awiEvictForNewlyArmedBarriers() {
+    const auto pending = AwiRankStore::instance().takePendingEvictions();
+    if (pending.empty()) {
+        return;
+    }
+    const auto& cache_manager = resource_context_.cache_manager;
+    if (cache_manager == nullptr) {
+        return;
+    }
+    auto block_tree = cache_manager->blockTreeCache();
+    if (block_tree == nullptr) {
+        return;
+    }
+    for (const auto& operation_id : pending) {
+        RTP_LLM_LOG_INFO("AWI barrier %s armed: emptying reusable device cache entries", operation_id.c_str());
+        block_tree->evictAllReusableDeviceEntries();
+    }
+}
+
 void NormalEngine::awiApplyBarriers(std::list<GenerateStreamPtr>& streams) {
     auto& store = AwiRankStore::instance();
     if (!store.hasUnresolvedBarriers()) {
@@ -1151,6 +1170,11 @@ absl::Status NormalEngine::step() try {
         // Stop must reach the existing step boundary even if the engine is paused.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
+
+    // AWI: every rank empties reusable device cache entries once per newly
+    // armed barrier operation (the arm reached each rank's AwiRankStore via
+    // the AwiCommand broadcast).
+    awiEvictForNewlyArmedBarriers();
 
     int64_t                 tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     list<GenerateStreamPtr> streams;

@@ -96,6 +96,10 @@ private:
     // reservation coexists, then emits the single resident snapshot; reports a
     // genuine capacity_failure if the reservation cannot be allocated.
     void awiApplyBarriers(std::list<GenerateStreamPtr>& streams);
+    // Runs on EVERY rank at the top of each step: drains newly armed barrier
+    // operations from this process's AwiRankStore (armed via the AwiCommand
+    // broadcast) and empties reusable device-tier cache entries once per arm.
+    void awiEvictForNewlyArmedBarriers();
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 

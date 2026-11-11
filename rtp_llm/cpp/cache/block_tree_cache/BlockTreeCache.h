@@ -166,6 +166,13 @@ public:
     // Skips plans containing device blocks that would remain referenced after dropping.
     int evictForGroup(std::string_view group_tag, size_t num_blocks);
 
+    // AWI evaluator barrier (evaluator-protocol.md): empty EVERY reusable
+    // (reference-free) device-tier cache entry across all group sets so a
+    // benchmark operation starts without prior prefix entries, while the
+    // reuse machinery itself stays enabled. Blocks still referenced by
+    // running streams are never touched. Returns total blocks reclaimed.
+    int evictAllReusableDeviceEntries();
+
     CacheStats                                getStats() const;
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
     void                                      reportMetrics() const;

@@ -204,6 +204,27 @@ int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks)
     return static_cast<int>(reclaimed);
 }
 
+int BlockTreeCache::evictAllReusableDeviceEntries() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!config_.isTierEnabled(Tier::DEVICE)) {
+        return 0;
+    }
+    int reclaimed_total = 0;
+    for (const GroupSetPtr& group_set : tree_->groupSets()) {
+        for (const std::string& tag : group_set->groupTags()) {
+            const ReusableGroupLocation* location = tree_->reusableGroupLocation(tag);
+            if (location == nullptr) {
+                continue;
+            }
+            // SIZE_MAX budget: drain every eviction candidate for the group.
+            reclaimed_total += static_cast<int>(evictor_.reclaimDeviceBlocksLocked(
+                location->group_set_id, location->member_group_id, ~size_t(0)));
+        }
+    }
+    RTP_LLM_LOG_INFO("AWI barrier eviction: reclaimed %d reusable device blocks", reclaimed_total);
+    return reclaimed_total;
+}
+
 BlockIndicesType BlockTreeCache::matchedBlocksForGroup(std::string_view                      group_tag,
                                                        const std::vector<MultiNodeResource>& matched_resources) const {
     return loader_.matchedBlocksForGroup(group_tag, matched_resources);

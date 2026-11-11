@@ -50,6 +50,11 @@ public:
     std::vector<BarrierSnapshot> barriers() const;
     // True while any armed barrier is neither satisfied nor failed.
     bool hasUnresolvedBarriers() const;
+    // Operation ids armed (or re-armed) since the previous call, atomically
+    // marked as picked up. Every rank's engine loop drains this once per step
+    // to run the barrier-arm cache eviction locally (protocol: empty prior
+    // benchmark prefix entries while retaining memory KV reuse).
+    std::vector<std::string> takePendingEvictions();
     // True when the request belongs to an unresolved barrier: its decode
     // steps are held (prefill still runs) until the barrier resolves.
     bool isHeldRequest(const std::string& request_id) const;
@@ -94,6 +99,7 @@ private:
         int64_t armed_ns = 0;
         bool satisfied = false;
         bool failed = false;
+        bool eviction_done = false;
     };
 
     mutable std::mutex     mu_;
