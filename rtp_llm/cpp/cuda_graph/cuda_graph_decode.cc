@@ -3,6 +3,12 @@
 
 namespace rtp_llm {
 void CudaGraphRunner::replayDecode(int bs) {
+    if (decode_capture_deferred_ && !decode_capture_done_) {
+        decode_capture_deferred_ = false;
+        decode_capture_done_     = true;
+        RTP_LLM_LOG_INFO("Capturing deferred decode CUDA graphs on first decode");
+        captureDecode();
+    }
     replayGraph(bs);
 }
 

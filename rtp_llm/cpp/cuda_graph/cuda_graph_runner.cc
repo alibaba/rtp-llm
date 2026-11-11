@@ -2226,7 +2226,12 @@ void CudaGraphRunner::initCapture() {
                                     "prefill cuda graph: unsupported graph role");
             capturePrefill();
         } else {
-            captureDecode();
+            // A 1M-token prefill and the decode graph-private pool cannot both
+            // fit on an 80 GiB A100.  Defer decode capture to the first decode:
+            // prefill then runs with the pool absent, and capture happens after
+            // the full-context scratch has been released.
+            decode_capture_deferred_ = true;
+            RTP_LLM_LOG_INFO("CUDA decode graph capture deferred until first decode");
         }
         logCudaGraphPoolMemory("after_capture");
     } else {

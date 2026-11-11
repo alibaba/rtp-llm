@@ -255,6 +255,10 @@ private:
     py::object              py_attn_pyobj_method_;
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
+    // Decode graph capture is deferred until the first decode step so the
+    // graph-private pool does not steal headroom from a long-context prefill.
+    bool                    decode_capture_deferred_{false};
+    bool                    decode_capture_done_{false};
     bool                    is_target_verify_{false};
     bool                    is_packed_target_verify_{false};
     int                     dspark_capacity_query_width_{0};
