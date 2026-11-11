@@ -52,9 +52,9 @@ protected:
 };
 
 std::shared_ptr<TestPool> makeInitializedPool(size_t                physical_block_count,
-                                            BlockPoolType         pool_type         = BlockPoolType::HOST,
-                                            std::optional<double> abort_lower_ratio = std::nullopt,
-                                            std::optional<double> abort_upper_ratio = std::nullopt) {
+                                              BlockPoolType         pool_type         = BlockPoolType::HOST,
+                                              std::optional<double> abort_lower_ratio = std::nullopt,
+                                              std::optional<double> abort_upper_ratio = std::nullopt) {
     auto config = std::make_shared<TestPoolConfig>("test", physical_block_count, pool_type);
     if (abort_lower_ratio) {
         config->frozen_block_abort_lower_ratio = *abort_lower_ratio;
@@ -121,7 +121,6 @@ TEST_P(IBlockPoolFrozenAbortRatioTest, IntervalCountsDistinctBlocksAndAllowsLowe
         "");
     EXPECT_ANY_THROW(pool->incTreeRef(blocks->at(5), BlockTreeRefType::FROZEN));
     EXPECT_ANY_THROW(pool->incTreeRef(blocks->at(6), BlockTreeRefType::FROZEN));
-
 }
 
 TEST_P(IBlockPoolFrozenAbortRatioTest, BatchFrozenReferencesCannotBypassGuard) {
@@ -129,7 +128,6 @@ TEST_P(IBlockPoolFrozenAbortRatioTest, BatchFrozenReferencesCannotBypassGuard) {
     auto blocks = pool->malloc(7);
     ASSERT_TRUE(blocks.has_value());
     EXPECT_ANY_THROW(pool->incTreeRef(*blocks, BlockTreeRefType::FROZEN));
-
 }
 
 TEST_P(IBlockPoolFrozenAbortRatioTest, ZeroLowerBoundAndFixedOneAllowEntirePoolToFreeze) {
@@ -156,10 +154,10 @@ TEST(IBlockPoolTest, FrozenAbortIntervalIsStableAcrossPoolsAndPreservesConfigure
         for (const auto type : {BlockPoolType::DEVICE, BlockPoolType::HOST, BlockPoolType::DISK}) {
             SCOPED_TRACE(static_cast<int>(type));
             for (int repetition = 0; repetition < 3; ++repetition) {
-                auto config = std::make_shared<TestPoolConfig>("interval", 11, type);
-                config->frozen_block_abort_lower_ratio       = lower;
+                auto config                            = std::make_shared<TestPoolConfig>("interval", 11, type);
+                config->frozen_block_abort_lower_ratio = lower;
                 config->frozen_block_abort_upper_ratio = upper;
-                auto pool = std::make_shared<TestPool>(config);
+                auto pool                              = std::make_shared<TestPool>(config);
                 ASSERT_TRUE(pool->init());
                 EXPECT_EQ(config->frozen_block_abort_lower_ratio, lower);
                 EXPECT_EQ(config->frozen_block_abort_upper_ratio, upper);
@@ -175,7 +173,7 @@ TEST(IBlockPoolTest, FrozenAbortIntervalIsStableAcrossPoolsAndPreservesConfigure
 
 TEST(IBlockPoolTest, FrozenAbortIntervalsShareTheSameProcessRandomFraction) {
     const auto   reference = makeInitializedPool(11, BlockPoolType::HOST, 0.1, 0.9);
-    const double fraction = (reference->effective_frozen_block_abort_ratio_ - 0.1) / 0.8;
+    const double fraction  = (reference->effective_frozen_block_abort_ratio_ - 0.1) / 0.8;
     for (const auto& [lower, upper] : {std::pair{0.2, 0.8}, {0.3, 0.31}, {0.5, 0.9}}) {
         SCOPED_TRACE(::testing::Message() << "lower=" << lower << " upper=" << upper);
         const auto pool = makeInitializedPool(11, BlockPoolType::DEVICE, lower, upper);
@@ -211,9 +209,9 @@ TEST_P(IBlockPoolFrozenAbortRatioTest, AdjacentBoundsCannotRoundToUpperBound) {
 
 TEST_P(IBlockPoolFrozenAbortRatioTest, RuntimeIntervalThresholdControlsFreezeApi) {
     constexpr size_t usable_blocks = 1000;
-    auto         pool      = makeInitializedPool(usable_blocks + 1, GetParam(), 0.3, 0.8);
-    const double effective = pool->effective_frozen_block_abort_ratio_;
-    size_t       allowed   = static_cast<size_t>(std::floor(effective * usable_blocks));
+    auto             pool          = makeInitializedPool(usable_blocks + 1, GetParam(), 0.3, 0.8);
+    const double     effective     = pool->effective_frozen_block_abort_ratio_;
+    size_t           allowed       = static_cast<size_t>(std::floor(effective * usable_blocks));
     if (static_cast<double>(allowed) / usable_blocks > effective) {
         --allowed;
     }
@@ -239,7 +237,6 @@ TEST_P(IBlockPoolFrozenAbortRatioTest, RuntimeIntervalThresholdControlsFreezeApi
         ::testing::KilledBySignal(SIGABRT),
         "");
     EXPECT_ANY_THROW(pool->incTreeRef(blocks->back(), BlockTreeRefType::FROZEN));
-
 }
 
 TEST_P(IBlockPoolFrozenAbortRatioTest, UpperBoundOneStillAbortsWhenEntirePoolFreezes) {
@@ -492,68 +489,60 @@ TEST(IBlockPoolTest, MultipleTreeRefsReleaseOnlyAtLastHolder) {
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
 }
 
-TEST(IBlockPoolTest, FreezeDeduplicatesOperationsAndSurvivesOrdinaryReferenceRelease) {
+TEST(IBlockPoolTest, FrozenHoldsArePerExecutionAndReleaseOnlyTheirOwnReferences) {
     auto pool   = makeUnprotectedPool(/*physical_block_count=*/4);
     auto blocks = pool->malloc(2);
     ASSERT_TRUE(blocks.has_value());
-    const auto load_block     = blocks->at(0);
-    const auto eviction_block = blocks->at(1);
+    const auto first  = blocks->at(0);
+    const auto second = blocks->at(1);
     pool->incTreeRef(*blocks, BlockTreeRefType::CACHE);
-    pool->incTreeRef(eviction_block, BlockTreeRefType::EVICTION);
+    pool->incTreeRef(first, BlockTreeRefType::LOAD);
+    pool->incTreeRef(second, BlockTreeRefType::EVICTION);
     size_t notifications = 0;
     pool->setCapacityChangeCallback([&] { ++notifications; });
 
-    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
-    EXPECT_FALSE(pool->isFrozen(load_block));
-    // Freezing needs no operation reference and concurrent calls share one hold.
-    std::vector<std::thread> threads;
+    std::vector<std::function<void()>> releases;
     for (size_t i = 0; i < 8; ++i) {
-        threads.emplace_back([&] { pool->freezeBlock(load_block); });
+        releases.push_back(pool->prepareFrozenReferenceRelease({first}));
+    }
+    auto                     release_second = pool->prepareFrozenReferenceRelease({second});
+    std::vector<std::thread> threads;
+    for (size_t i = 0; i < releases.size(); ++i) {
+        threads.emplace_back([&] { pool->freezeBlock(first); });
     }
     for (auto& thread : threads) {
         thread.join();
     }
-    pool->incTreeRef(load_block, BlockTreeRefType::LOAD);
-    pool->freezeBlock(load_block);
-    pool->freezeBlock(load_block);
-    pool->freezeBlock(eviction_block);
-    pool->freezeBlock(eviction_block);
+    pool->freezeBlock(second);
+    EXPECT_EQ(pool->treeRefCount(first), 10u);
+    EXPECT_EQ(pool->treeRefCount(second), 3u);
+    // Stock metrics count physical blocks, independently of the number of executions.
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 2u);
-    EXPECT_TRUE(pool->isFrozen(load_block));
-    EXPECT_TRUE(pool->isFrozen(eviction_block));
-    EXPECT_EQ(pool->treeRefCount(load_block), 3u);
-    EXPECT_EQ(pool->treeRefCount(eviction_block), 3u);
-
-    // A successful peer Task releases only its own ordinary reference.
-    pool->incTreeRef(load_block, BlockTreeRefType::LOAD);
-    pool->decTreeRef(load_block, BlockTreeRefType::LOAD);
-    pool->decTreeRef(load_block, BlockTreeRefType::LOAD);
-    pool->decTreeRef(eviction_block, BlockTreeRefType::EVICTION);
+    pool->decTreeRef(first, BlockTreeRefType::LOAD);
+    pool->decTreeRef(second, BlockTreeRefType::EVICTION);
     pool->decTreeRef(*blocks, BlockTreeRefType::CACHE);
-    EXPECT_EQ(pool->treeRefCount(load_block), 1u);
-    EXPECT_EQ(pool->treeRefCount(eviction_block), 1u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 2u);
-    EXPECT_EQ(pool->activeBlocksNum(), 2u);
-    EXPECT_EQ(pool->availableBlocksNum(), 1u);
-    EXPECT_EQ(pool->freeBlocksNum(), 1u);
+    EXPECT_EQ(pool->treeRefCount(first), 8u);
+    EXPECT_EQ(pool->treeRefCount(second), 1u);
     EXPECT_EQ(notifications, 0u);
+    for (size_t i = 0; i + 1 < releases.size(); ++i) {
+        releases[i]();
+        EXPECT_TRUE(pool->isFrozen(first));
+        EXPECT_TRUE(pool->isAllocated(first));
+    }
+    EXPECT_EQ(pool->treeRefCount(first), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 2u);
+    releases.back()();
+    EXPECT_FALSE(pool->isAllocated(first));
+    EXPECT_TRUE(pool->isFrozen(second));
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    EXPECT_EQ(notifications, 1u);
+    release_second();
+    EXPECT_FALSE(pool->isAllocated(second));
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+    EXPECT_EQ(notifications, 2u);
     EXPECT_EQ(pool->first_tree_edges, 2u);
-    EXPECT_EQ(pool->last_tree_edges, 0u);
-    EXPECT_EQ(pool->malloc(), std::optional<BlockIdxType>{3});
-    EXPECT_FALSE(pool->malloc().has_value());
-
-    // The same block ID in another pool has its own FROZEN reference, even without other holders.
-    auto other_pool = makeUnprotectedPool(3);
-    ASSERT_EQ(other_pool->malloc(), std::optional<BlockIdxType>{load_block});
-    other_pool->freezeBlock(load_block);
-    EXPECT_EQ(other_pool->treeRefCount(load_block), 1u);
-    EXPECT_EQ(other_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
-    EXPECT_EQ(other_pool->activeBlocksNum(), 1u);
-    EXPECT_EQ(other_pool->availableBlocksNum(), 1u);
-    EXPECT_NE(other_pool->debugString().find("frozen_ref_blocks=1"), std::string::npos);
+    EXPECT_EQ(pool->last_tree_edges, 2u);
 }
 
 TEST(IBlockPoolTest, DecTreeRefRejectsWrongInternalType) {

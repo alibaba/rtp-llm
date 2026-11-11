@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <utility>
@@ -14,7 +15,7 @@ public:
     using DoneCallback = std::function<void(TransferResult)>;
 
     explicit TransferStageState(DoneCallback callback, size_t block_count = 0):
-        callback_(std::move(callback)), result_(block_count) {}
+        callback_(std::move(callback)), result_(TransferResult::emptyAggregate(block_count)) {}
 
     void addBatch() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -27,7 +28,7 @@ public:
     void completeBatch(TransferResult batch_result, const std::vector<size_t>& block_indices = {}) {
         DoneCallback   callback;
         TransferResult result;
-        {
+        try {
             std::lock_guard<std::mutex> lock(mutex_);
             if (completed_ || remaining_ <= (submitting_finished_ ? 0u : 1u)) {
                 return;
@@ -38,16 +39,20 @@ public:
             result_.merge(std::move(batch_result));
             --remaining_;
             finishIfReadyLocked(callback, result);
+        } catch (...) {
+            // Losing an UNKNOWN result before the coordinator freezes its
+            // targets must never become an ordinary business rollback.
+            std::terminate();
         }
         if (callback) {
             callback(std::move(result));
         }
     }
 
-    void finishSubmitting(TransferResult submission_error = {}) {
+    void finishSubmitting(TransferResult submission_error = TransferResult::emptyAggregate()) {
         DoneCallback   callback;
         TransferResult result;
-        {
+        try {
             std::lock_guard<std::mutex> lock(mutex_);
             if (submitting_finished_ || completed_) {
                 return;
@@ -56,6 +61,8 @@ public:
             submitting_finished_ = true;
             --remaining_;
             finishIfReadyLocked(callback, result);
+        } catch (...) {
+            std::terminate();
         }
         if (callback) {
             callback(std::move(result));
@@ -68,7 +75,7 @@ private:
             return;
         }
         completed_ = true;
-        result     = result_;
+        result     = std::move(result_);
         callback   = std::move(callback_);
     }
 

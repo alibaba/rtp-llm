@@ -344,12 +344,25 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (value_.order != 0)
             return false;
-        value_ = {error, next_order_.fetch_add(1, std::memory_order_relaxed)};
+        value_.error.setErrorCode(error.code());
+        value_.order = next_order_.fetch_add(1, std::memory_order_relaxed);
+        try {
+            value_.error = error;
+        } catch (...) {
+            // Preserve the first code/order when diagnostic string copying fails.
+        }
         return true;
     }
     Snapshot snapshot() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return value_;
+        try {
+            return value_;
+        } catch (...) {
+            Snapshot fallback;
+            fallback.error.setErrorCode(value_.error.code());
+            fallback.order = value_.order;
+            return fallback;
+        }
     }
     static Snapshot earlier(const Snapshot& a, const Snapshot& b) {
         return a.order != 0 && (b.order == 0 || a.order < b.order) ? a : b;

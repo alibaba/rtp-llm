@@ -43,15 +43,17 @@ enum class StrategyStatus {
 struct StrategyResult {
     StrategyStatus status{StrategyStatus::NOT_APPLICABLE};
     TransferStatus copy_status{TransferStatus::OK};
+    // Includes any attempted copy before a strategy declines and permits fallback.
+    bool buffer_safe{false};
 
-    static StrategyResult done() {
-        return {StrategyStatus::DONE, TransferStatus::OK};
+    static StrategyResult done(bool buffer_safe = false) {
+        return {StrategyStatus::DONE, TransferStatus::OK, buffer_safe};
     }
-    static StrategyResult notApplicable() {
-        return {StrategyStatus::NOT_APPLICABLE, TransferStatus::OK};
+    static StrategyResult notApplicable(bool buffer_safe = false) {
+        return {StrategyStatus::NOT_APPLICABLE, TransferStatus::OK, buffer_safe};
     }
-    static StrategyResult failed(TransferStatus s) {
-        return {StrategyStatus::FAILED, s};
+    static StrategyResult failed(TransferStatus s, bool buffer_safe = false) {
+        return {StrategyStatus::FAILED, s, buffer_safe};
     }
 };
 
@@ -74,7 +76,7 @@ public:
     StrategyResult tryExecute(const DeviceHostCopyPlan&,
                               const DeviceHostCopyOptions&,
                               const DeviceHostCopyExecutionContext&) override {
-        return StrategyResult::notApplicable();
+        return StrategyResult::notApplicable(true);
     }
     virtual StrategyResult tryExecute(const std::vector<HostBufferView>&     hosts,
                                       const std::vector<TransferDescriptor>& descriptors,

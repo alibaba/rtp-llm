@@ -73,7 +73,7 @@ public:
 private:
     std::shared_ptr<TransferAsyncContext> reject(const TransferTask& task, const char* message, ErrorCode code);
     struct Entry;
-    using Entries = std::list<std::unique_ptr<Entry>>;
+    using Entries       = std::list<std::unique_ptr<Entry>>;
     using WaitDeadlines = std::multimap<TransferTask::Clock::time_point, Entry*>;
     // Intrusive, allocation-free indexes. The disk completion queue uses mutex_;
     // other queues belong to the owner. An Entry belongs to at most one queue.
@@ -160,13 +160,14 @@ private:
         }
     }
 
-    // Ordinary preparation/submission errors finish this Entry after RAII cleanup.
+    // CRC and disk submission throw only before accepting I/O. Accepted work
+    // completes through their callbacks, including partial submission failures.
     template<typename Action>
     void withEntry(Entry& entry, Action&& action) noexcept {
         try {
             abortOnOom(std::forward<Action>(action));
         } catch (const std::exception& error) {
-            abortOnOom([&] { fail(entry, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what())); });
+            abortOnOom([&] { fail(entry, TransferResult::executionException(true, error.what())); });
         }
     }
 
@@ -185,12 +186,12 @@ private:
     // ==================== Owner-thread-only state: no lock ====================
     // One private pool per direction owner, shared by all cache group types.
     // Declared before entries_ so the pool outlives all Entry leases.
-    StagingResource                staging_;
-    std::map<int, Queue>           crc_waiting_;
-    Entries                        entries_;
-    Queue                          ready_, completed_;
-    WaitDeadlines                  wait_deadlines_;
-    bool                           has_crc_pending_{false};
+    StagingResource      staging_;
+    std::map<int, Queue> crc_waiting_;
+    Entries              entries_;
+    Queue                ready_, completed_;
+    WaitDeadlines        wait_deadlines_;
+    bool                 has_crc_pending_{false};
 
     // ==================== Shared state: protected by mutex_ ====================
     // API callers, owner and Disk callbacks use this mutex; cv_ waits on it.

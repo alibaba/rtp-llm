@@ -7,6 +7,8 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 class RemoteOperationRequestPB;
@@ -19,6 +21,7 @@ class MetricsReporter;
 namespace rtp_llm {
 
 class BroadcastManager;
+class TransferCompletionCleanup;
 namespace kvcm {
 class ClientWrapper;
 }
@@ -28,15 +31,15 @@ class ClientWrapper;
 // process transfers its own GPU blocks through its locally registered client.
 class KVCMStorageBackend final: public StorageBackend {
 public:
-    KVCMStorageBackend(const CacheConfig& cache_config,
-                       const KVCacheConfig& kv_cache_config,
-                       const RuntimeConfig& runtime_config,
-                       const ParallelismConfig& parallelism_config,
-                       const SpeculativeExecutionConfig& sp_config,
-                       std::shared_ptr<BroadcastManager> broadcast_manager,
-                       bool gdr_enabled,
+    KVCMStorageBackend(const CacheConfig&                         cache_config,
+                       const KVCacheConfig&                       kv_cache_config,
+                       const RuntimeConfig&                       runtime_config,
+                       const ParallelismConfig&                   parallelism_config,
+                       const SpeculativeExecutionConfig&          sp_config,
+                       std::shared_ptr<BroadcastManager>          broadcast_manager,
+                       bool                                       gdr_enabled,
                        std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter = nullptr,
-                       std::shared_ptr<kvcm::ClientWrapper> client_wrapper = nullptr);
+                       std::shared_ptr<kvcm::ClientWrapper>       client_wrapper   = nullptr);
     KVCMStorageBackend(const CacheConfig&                         cache_config,
                        const KVCacheConfig&                       kv_cache_config,
                        const RuntimeConfig&                       runtime_config,
@@ -63,6 +66,15 @@ public:
     // Returns whether the request was handled and response is valid. Transfer
     // success, failure, and timeout are carried by response.transfer_status().
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
+    // Local READ completion evidence; this accessor does not issue a query RPC.
+    const TransferTaskRegistry& taskRegistry() const;
+    // Removes only completed READ evidence. Running executions remain queryable.
+    TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string& trace_id);
+    // Configure before serving READ requests; cleanup does not own their buffers.
+    void setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup);
+    // Retained non-protected READ targets; enumeration removes only RELEASED
+    // records. It never queries completion or releases frozen references.
+    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
 
 protected:
     bool               initImpl() override;

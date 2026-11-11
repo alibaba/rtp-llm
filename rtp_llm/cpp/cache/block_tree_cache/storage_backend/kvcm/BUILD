@@ -11,6 +11,18 @@ config_setting(
 )
 
 cc_library(
+    name = "sdk_buffer_safety",
+    hdrs = ["SdkBufferSafety.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "worker_payload_proof",
+    hdrs = ["WorkerPayloadProof.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "kvcm_storage_backend",
     srcs = ["KVCMStorageBackend.cc"],
     hdrs = ["KVCMStorageBackend.h"],
@@ -19,8 +31,12 @@ cc_library(
     deps = [
         ":client",
         ":group_policy",
+        ":worker_payload_proof",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/block_tree_cache:block_tree_task_pool",
+        "//rtp_llm/cpp/cache/block_tree_cache:transfer_common",
+        "//rtp_llm/cpp/cache/block_tree_cache:transfer_buffer_safety",
+        "//rtp_llm/cpp/cache/block_tree_cache:transfer_task_registry",
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
@@ -72,6 +88,7 @@ cc_library(
     deps = [
         ":config",
         ":subscriber",
+        ":sdk_buffer_safety",
         "//rtp_llm/cpp/cache/events:kvcm_discovery_proto",
         "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client",
         "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_headers",

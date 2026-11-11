@@ -146,6 +146,27 @@ void BlockTreeCache::onCapacityChanged() {
     }
 }
 
+std::vector<std::shared_ptr<FrozenTask>> BlockTreeCache::frozenTasks() const {
+    return transfer_dispatcher_ ? transfer_dispatcher_->frozenTasks() : std::vector<std::shared_ptr<FrozenTask>>{};
+}
+
+TransferTaskRegistry::ForgetResult BlockTreeCache::forgetLocalTransferCompletion(uint64_t trace_id) const {
+    return transfer_dispatcher_ ? transfer_dispatcher_->forgetLocalCompletion(trace_id) :
+                                  TransferTaskRegistry::ForgetResult::FAILED;
+}
+
+void BlockTreeCache::setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup) {
+    if (transfer_dispatcher_)
+        transfer_dispatcher_->setCompletionCleanup(std::move(cleanup));
+}
+
+TransferTaskRegistry::State BlockTreeCache::localTransferCompletion(uint64_t trace_id) const {
+    if (!transfer_dispatcher_) {
+        return TransferTaskRegistry::State::UNKNOWN;
+    }
+    return transfer_dispatcher_->taskRegistry().queryLocal(std::vector<uint64_t>{trace_id}).front();
+}
+
 TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
     auto context = transfer_dispatcher_->executePerRank(std::move(task));
     context->waitDone();
@@ -227,8 +248,8 @@ BlockIndicesType BlockTreeCache::matchedBlocksForGroup(std::string_view         
 }
 
 CacheStats BlockTreeCache::getStats() const {
-    CacheLockGuard              lock(mutex_, *metrics_reporter_, "other");
-    CacheStats                  stats;
+    CacheLockGuard lock(mutex_, *metrics_reporter_, "other");
+    CacheStats     stats;
     stats.tree_node_count           = tree_->size();
     const CandidateStats candidates = evictor_.candidateStats();
     stats.device_heap_total_size    = candidates.device_candidates;
@@ -267,8 +288,8 @@ KVCacheSnapshot BlockTreeCache::logicalCacheSnapshot() const {
 }
 
 BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(int64_t latest_version) const {
-    CacheLockGuard              lock(mutex_, *metrics_reporter_, "snapshot");
-    BlockTreeKeySnapshot        snapshot;
+    CacheLockGuard       lock(mutex_, *metrics_reporter_, "snapshot");
+    BlockTreeKeySnapshot snapshot;
     snapshot.version = tree_->keyVersion();
     if (latest_version != snapshot.version) {
         snapshot.keys = tree_->cacheKeys();

@@ -16,6 +16,7 @@
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
 #include "pybind11/stl.h"
+#include <limits>
 
 namespace py = pybind11;
 using namespace rtp_llm;
@@ -502,6 +503,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("block_tree_transfer_worker_count", &KVCacheConfig::block_tree_transfer_worker_count)
         .def_readwrite("block_tree_business_queue_max_size", &KVCacheConfig::block_tree_business_queue_max_size)
         .def_readwrite("block_tree_transfer_queue_max_size", &KVCacheConfig::block_tree_transfer_queue_max_size)
+        .def_readwrite("block_tree_frozen_recovery_interval_ms", &KVCacheConfig::block_tree_frozen_recovery_interval_ms)
+        .def_readwrite("block_tree_frozen_recovery_query_timeout_ms",
+                       &KVCacheConfig::block_tree_frozen_recovery_query_timeout_ms)
         .def_readwrite("block_pool_frozen_abort_lower_ratio", &KVCacheConfig::block_pool_frozen_abort_lower_ratio)
         .def_readwrite("block_pool_frozen_abort_upper_ratio", &KVCacheConfig::block_pool_frozen_abort_upper_ratio)
         .def_readwrite("block_tree_device_evict_low_watermark_ratio",
@@ -602,7 +606,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      17,
+                                      18,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -692,9 +696,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.disk_cache_evict_timeout_ms,
                                       self.block_pool_frozen_abort_lower_ratio,
                                       self.block_pool_frozen_abort_upper_ratio,
-                                      self.disk_cache_evict_max_pending_bytes);
+                                      self.disk_cache_evict_max_pending_bytes,
+                                      self.block_tree_frozen_recovery_interval_ms,
+                                      self.block_tree_frozen_recovery_query_timeout_ms);
             },
             [](py::tuple t) {
+                const py::tuple recovery_timing_state = t;
+                const bool      has_recovery_timing =
+                    t.size() == 94 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 18;
+                if (has_recovery_timing) {
+                    t    = t[py::slice(0, 92, 1)].cast<py::tuple>();
+                    t[1] = py::int_(17);
+                }
                 const py::tuple pending_budget_state = t;
                 const bool      has_pending_budget =
                     t.size() == 92 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 17;
@@ -706,21 +719,21 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 const bool      has_frozen_bounds =
                     t.size() == 91 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 16;
                 if (has_frozen_bounds) {
-                    t = t[py::slice(0, 90, 1)].cast<py::tuple>();
+                    t    = t[py::slice(0, 90, 1)].cast<py::tuple>();
                     t[1] = py::int_(15);
                 }
                 const py::tuple frozen_ratio_state = t;
-                const bool has_frozen_ratio =
+                const bool      has_frozen_ratio =
                     t.size() == 90 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 15;
                 if (has_frozen_ratio) {
-                    t = t[py::slice(0, 89, 1)].cast<py::tuple>();
+                    t    = t[py::slice(0, 89, 1)].cast<py::tuple>();
                     t[1] = py::int_(14);
                 }
                 const py::tuple disk_timeout_state = t;
-                const bool has_disk_timeout =
+                const bool      has_disk_timeout =
                     t.size() == 89 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 14;
                 if (has_disk_timeout) {
-                    t = t[py::slice(0, 88, 1)].cast<py::tuple>();
+                    t    = t[py::slice(0, 88, 1)].cast<py::tuple>();
                     t[1] = py::int_(13);
                 }
                 const py::tuple backend_state = t;
@@ -790,6 +803,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
 
                 KVCacheConfig c;
+                if (has_recovery_timing) {
+                    c.block_tree_frozen_recovery_interval_ms      = recovery_timing_state[92].cast<int64_t>();
+                    c.block_tree_frozen_recovery_query_timeout_ms = recovery_timing_state[93].cast<int64_t>();
+                }
+                if (c.block_tree_frozen_recovery_interval_ms < 0
+                    || c.block_tree_frozen_recovery_interval_ms > std::numeric_limits<int>::max()
+                    || c.block_tree_frozen_recovery_query_timeout_ms <= 0
+                    || c.block_tree_frozen_recovery_query_timeout_ms > std::numeric_limits<int>::max()) {
+                    throw std::runtime_error("invalid KVCacheConfig frozen recovery timing: expected interval in "
+                                             "[0, INT_MAX] and query timeout in [1, INT_MAX]");
+                }
                 if (has_pending_budget) {
                     c.disk_cache_evict_max_pending_bytes = pending_budget_state[91].cast<int64_t>();
                 }
@@ -804,8 +828,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     || c.block_pool_frozen_abort_lower_ratio < 0.0
                     || c.block_pool_frozen_abort_lower_ratio > c.block_pool_frozen_abort_upper_ratio
                     || c.block_pool_frozen_abort_upper_ratio > 1.0) {
-                    throw std::runtime_error("invalid KVCacheConfig block pool frozen abort ratio range: expected finite "
-                                             "0 <= lower <= upper <= 1");
+                    throw std::runtime_error(
+                        "invalid KVCacheConfig block pool frozen abort ratio range: expected finite "
+                        "0 <= lower <= upper <= 1");
                 }
                 if (has_disk_timeout) {
                     c.disk_cache_evict_timeout_ms = disk_timeout_state[88].cast<int64_t>();

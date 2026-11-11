@@ -36,8 +36,8 @@ kv_cache_manager::WriteLocation singleWriteLocation() {
 TEST(KVCMSafetyTest, LocalSdkResultPermanentlyProtectsUnknownCompletion) {
     for (const auto code :
          {kv_cache_manager::ER_OK, kv_cache_manager::ER_SDKREAD_ERROR, kv_cache_manager::ER_SDK_TIMEOUT}) {
-        auto environment = makeBackendEnvironment("kvcm_safety_local_status");
-        auto wrapper     = std::make_shared<MockClientWrapper>();
+        auto environment     = makeBackendEnvironment("kvcm_safety_local_status");
+        auto wrapper         = std::make_shared<MockClientWrapper>();
         wrapper->load_status = code;
         EXPECT_CALL(*wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
         EXPECT_CALL(*wrapper, shutdown()).Times(1);
@@ -100,6 +100,7 @@ TEST(KVCMSafetyTest, WorkerPublishesSdkStatusAndRejectsInvalidRequestBeforeIo) {
              {REMOTE_TRANSFER_STATUS_SUCCESS, REMOTE_TRANSFER_STATUS_FAILED, REMOTE_TRANSFER_STATUS_TIMEOUT}) {
             RemoteOperationRequestPB request;
             request.set_op(operation);
+            identifyReadRequest(request);
             request.add_group_tags("default");
             request.add_block_ids(environment.block_id);
             request.add_uris("uri");
@@ -119,6 +120,7 @@ TEST(KVCMSafetyTest, WorkerPublishesSdkStatusAndRejectsInvalidRequestBeforeIo) {
     }
     RemoteOperationRequestPB invalid;
     invalid.set_op(REMOTE_OPERATION_READ);
+    identifyReadRequest(invalid);
     invalid.add_group_tags("not_registered");
     invalid.add_block_ids(environment.block_id);
     invalid.add_uris("uri");
@@ -163,6 +165,7 @@ TEST(KVCMSafetyTest, TpApplicationTimeoutWinsOverFailedForEitherRankOrder) {
         SafetyBroadcastGroup group;
         ASSERT_TRUE(group.start());
         group.states[timeout_rank]->transfer_status     = REMOTE_TRANSFER_STATUS_TIMEOUT;
+        group.states[timeout_rank]->payload_buffer_safe = false;
         group.states[1 - timeout_rank]->transfer_status = REMOTE_TRANSFER_STATUS_FAILED;
         auto environment                                = makeBackendEnvironment("kvcm_safety_tp_timeout");
         auto wrapper                                    = std::make_shared<MockClientWrapper>();
@@ -180,7 +183,7 @@ TEST(KVCMSafetyTest, TpApplicationTimeoutWinsOverFailedForEitherRankOrder) {
     }
 }
 
-TEST(KVCMSafetyTest, TpFailedAndLegacyResponsesRetainExistingSemantics) {
+TEST(KVCMSafetyTest, TpFailedAndLegacyResponsesRequireExplicitCompletionProof) {
     for (const auto status :
          {REMOTE_TRANSFER_STATUS_FAILED, REMOTE_TRANSFER_STATUS_UNSPECIFIED, REMOTE_TRANSFER_STATUS_SUCCESS}) {
         SafetyBroadcastGroup group;
@@ -196,9 +199,10 @@ TEST(KVCMSafetyTest, TpFailedAndLegacyResponsesRetainExistingSemantics) {
         auto matched = match(*backend.backend, makeStorageRequest(environment));
         ASSERT_TRUE(matched.success);
         const auto error = readStatus(*backend.backend, makeStorageRequest(environment), matched.match_meta);
-        EXPECT_EQ(error.ok(), status != REMOTE_TRANSFER_STATUS_FAILED);
-        EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
-        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 1u);
+        EXPECT_EQ(error.ok(), status == REMOTE_TRANSFER_STATUS_SUCCESS);
+        const bool unknown = status == REMOTE_TRANSFER_STATUS_UNSPECIFIED;
+        EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), unknown);
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), unknown ? 2u : 1u);
     }
 }
 
@@ -258,10 +262,17 @@ TEST(KVCMSafetyTest, BroadcastWaitClassifiesDeadlineAndRpcFailureBeforeFreezing)
             EXPECT_FALSE(timeout);
             EXPECT_EQ(exception.reason(), StorageQuarantineReason::RPC_ERROR);
         }
+        ASSERT_EQ(backend->frozenTasks().size(), 1u);
+        ASSERT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
         const auto error = readStatus(*backend.backend, makeStorageRequest(environment), matched.match_meta);
         EXPECT_EQ(error.code(), timeout ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION);
         EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
-        EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
+        // Direct readImpl and asynchronous read are distinct executions and
+        // retain separate holds even when they target the same physical block.
+        EXPECT_EQ(backend->frozenTasks().size(), 2u);
+        EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 2u);
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 2u);
+        EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
     }
 }
 
@@ -279,6 +290,8 @@ TEST(KVCMSafetyTest, RejectedBroadcastHasNoSubmittedWorkersAndDoesNotFreeze) {
     EXPECT_EQ(readStatus(*backend.backend, makeStorageRequest(environment), matched.match_meta).code(),
               ErrorCode::EXECUTION_EXCEPTION);
     EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_TRUE(backend->frozenTasks().empty());
+    EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 0u);
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 1u);
 }
 
@@ -487,12 +500,14 @@ TEST(KVCMSafetyTest, QuarantineThresholdIsDisabledByDefaultAndUsesStrictGreaterC
             environment.device_pool->freezeBlock(environment.block_id);
             // Logical task pins can exceed capacity while one physical block is frozen.
             backend->onQuarantineChanged(1, 1, total * 2, {});
-            EXPECT_DEATH({
-                const auto next = environment.device_pool->malloc().value();
-                environment.device_pool->incRef(next);
-                environment.device_pool->freezeBlock(next);
-                backend->onQuarantineChanged(2, 2, total * 2, {});
-            }, "");
+            EXPECT_DEATH(
+                {
+                    const auto next = environment.device_pool->malloc().value();
+                    environment.device_pool->incRef(next);
+                    environment.device_pool->freezeBlock(next);
+                    backend->onQuarantineChanged(2, 2, total * 2, {});
+                },
+                "");
         }
     }
     autil::EnvGuard guard("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", "0.01");
