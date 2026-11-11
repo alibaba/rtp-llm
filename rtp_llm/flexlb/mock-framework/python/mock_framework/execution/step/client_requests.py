@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Annotated
 
 from .. import ExecutionError
-from ..evidence.client import RequestRecord, read_requests
+from ..evidence.request_journal import RequestRecord, read_requests
 from .step import StepContext
 from .step_registry import Bounds, register_step
 

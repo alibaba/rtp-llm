@@ -16,7 +16,7 @@ from urllib.request import urlopen
 
 from ..execution.processes import ProcessSupervisor
 from .grafana import annotations, instance_filters, provision
-from .records import experiment, read_json
+from .records import load_experiment_view, read_json
 
 
 def free_port():
@@ -25,7 +25,7 @@ def free_port():
         return probe.getsockname()[1]
 
 
-async def ready(url):
+async def wait_for_http_ready(url):
     def fetch():
         with urlopen(url, timeout=1) as response:
             response.read()
@@ -38,7 +38,7 @@ async def ready(url):
             await asyncio.sleep(0.1)
 
 
-def handler(body):
+def make_http_handler(body):
     page = Path(__file__).with_name("page.html").read_bytes()
 
     class Handler(BaseHTTPRequestHandler):
@@ -81,7 +81,7 @@ def handler(body):
     return Handler
 
 
-async def metrics(body, result, output, prometheus, grafana_home):
+async def run_metrics_session(body, result, output, prometheus, grafana_home):
     supervisor = ProcessSupervisor(
         SimpleNamespace(emit=lambda **event: logging.debug("%s", event))
     )
@@ -159,7 +159,7 @@ check_for_plugin_updates = false
             output / "prometheus",
             zero_exit=True,
         )
-        await supervisor.guard(ready(prom_url + "/-/ready"), 60)
+        await supervisor.guard(wait_for_http_ready(prom_url + "/-/ready"), 60)
         filters = await supervisor.guard(
             asyncio.to_thread(
                 instance_filters, prom_url, body["start"], body["end"], view
@@ -197,7 +197,7 @@ check_for_plugin_updates = false
             env,
             output / "grafana",
         )
-        await supervisor.guard(ready(grafana_url + "/api/health"), 60)
+        await supervisor.guard(wait_for_http_ready(grafana_url + "/api/health"), 60)
         await supervisor.guard(
             asyncio.to_thread(
                 annotations, grafana_url, password, body["annotations"], cancelled
@@ -241,10 +241,10 @@ async def serve(result, output, prometheus, grafana_home, port):
         raise ValueError(
             "View output must be outside the completed experiment directory"
         )
-    body = experiment(result)
+    body = load_experiment_view(result)
     body["metrics"] = {"status": "starting", "url": None, "error": None}
     output.mkdir(parents=True, mode=0o700)
-    server = ThreadingHTTPServer(("127.0.0.1", port), handler(body))
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_http_handler(body))
     thread = None
     task = None
     stopped = asyncio.get_running_loop().create_future()
@@ -265,7 +265,7 @@ async def serve(result, output, prometheus, grafana_home, port):
         )
         print(address, flush=True)
         task = asyncio.create_task(
-            metrics(body, result, output, prometheus, grafana_home)
+            run_metrics_session(body, result, output, prometheus, grafana_home)
         )
         done, _ = await asyncio.wait(
             (task, stopped), return_when=asyncio.FIRST_COMPLETED

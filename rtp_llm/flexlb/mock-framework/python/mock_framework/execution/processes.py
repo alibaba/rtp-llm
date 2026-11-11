@@ -50,8 +50,8 @@ class ProcessSupervisor:
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-    def _process_event(self, event, name, **fields):
-        instance_id, _, generation = name.partition("-restart-")
+    def _process_event(self, event, process_name, **fields):
+        instance_id, _, generation = process_name.partition("-restart-")
         role = instance_id.split("-", 1)[0]
         if role in (
             "master",
@@ -65,7 +65,7 @@ class ProcessSupervisor:
             fields.update(
                 role=role, instance_id=instance_id, generation=int(generation or "0")
             )
-        self.records.emit(event=event, node=name, **fields)
+        self.records.emit(event=event, node=process_name, **fields)
 
     async def spawn(
         self, name, command, cwd, env, directory, *, describe=None, zero_exit=False
@@ -201,9 +201,9 @@ class ProcessSupervisor:
 async def launch_component(
     supervisor, records, environment, role, index, recipe, *, configure=None, attempt=0
 ):
-    name = f"{role}-{index}"
-    directory = records.directory / "components" / name
-    process = name if attempt == 0 else f"{name}-restart-{attempt}"
+    instance_id = f"{role}-{index}"
+    directory = records.directory / "components" / instance_id
+    process_name = instance_id if attempt == 0 else f"{instance_id}-restart-{attempt}"
     if attempt:
         directory = directory / f"restart-{attempt}"
     directory.mkdir(parents=True)
@@ -215,12 +215,12 @@ async def launch_component(
             "component": environment[role],
             "environment": environment,
             "index": index,
-            "id": name,
+            "id": instance_id,
         },
     )
     env = {} if configure is None else configure(directory)
     child = await supervisor.spawn(
-        process,
+        process_name,
         recipe["command"],
         recipe["cwd"],
         {
@@ -228,7 +228,7 @@ async def launch_component(
             **recipe["env"],
             **env,
             "MOCK_TOPOLOGY_FILE": str(records.directory / "topology.json"),
-            "MOCK_NODE_ID": name,
+            "MOCK_NODE_ID": instance_id,
             "MOCK_CONFIG_FILE": str(config),
             "MOCK_READY_FILE": str(ready),
             "MOCK_OUTPUT_DIR": str(directory),
@@ -241,7 +241,7 @@ async def launch_component(
             await asyncio.sleep(0.02)
         value = json.loads(ready.read_text())
         if set(value) != {"url"} or not isinstance(value["url"], str):
-            raise ExecutionError(f"Invalid readiness file for {name}")
+            raise ExecutionError(f"Invalid readiness file for {instance_id}")
         return value["url"]
 
     control = await supervisor.guard(
@@ -249,10 +249,10 @@ async def launch_component(
     )
     records.emit(
         event="process_ready",
-        node=process,
+        node=process_name,
         url=control,
         role=role,
-        instance_id=name,
+        instance_id=instance_id,
         generation=attempt,
     )
     path = directory / "endpoints.json"

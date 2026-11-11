@@ -1,4 +1,4 @@
-"""Streaming reader for Client-owned facts; an unsealed stream is never complete evidence."""
+"""Stream Client request records and validate the journal seal."""
 
 import json
 from collections import Counter

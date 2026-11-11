@@ -14,8 +14,8 @@ from mock_framework.execution.step.step_registry import StepRegistry
 from mock_framework.execution.step_trace import StepTrace
 from mock_framework.execution.test.helpers import FRAMEWORK
 from mock_framework.view.grafana import dashboard, provision
-from mock_framework.view.records import experiment, gate_text
-from mock_framework.view.service import handler, serve
+from mock_framework.view.records import gate_text, load_experiment_view
+from mock_framework.view.service import make_http_handler, serve
 
 ROOT = FRAMEWORK
 
@@ -143,7 +143,7 @@ def completed(tmp_path):
 
 
 def test_view_uses_saved_values_windows_versions_and_failed_results(completed):
-    value = experiment(completed)
+    value = load_experiment_view(completed)
     assert value["result"]["status"] == "ERROR"
     assert value["gates"][0]["status"] == "FAIL" and value["gates"][0]["actual"] == 1
     assert value["gates"][0]["unit"] == "requests/s"
@@ -172,7 +172,7 @@ def test_running_output_is_rejected(completed):
         {"status": "PASS", "started_at": "2026-10-29T00:00:00Z"},
     )
     with pytest.raises(ValueError, match="completed"):
-        experiment(completed)
+        load_experiment_view(completed)
 
 
 def test_case_without_view_saves_framework_default_dashboard(tmp_path):
@@ -283,10 +283,10 @@ def test_saved_address_filters_use_prometheus_interpolation_including_nested_row
 
 
 def test_view_http_server_only_serves_fixed_read_only_resources(completed):
-    body = experiment(completed)
+    body = load_experiment_view(completed)
     body["name"] = "<script>must not execute</script>"
     body["metrics"] = {"status": "starting", "url": None, "error": None}
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler(body))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_http_handler(body))
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     url = f"http://127.0.0.1:{server.server_port}"
@@ -337,7 +337,7 @@ def test_view_refuses_to_write_inside_experiment_outputs(completed):
 )
 def test_missing_optional_artifact_preserves_saved_verdict(completed, name):
     (completed / name).unlink(missing_ok=True)
-    body = experiment(completed)
+    body = load_experiment_view(completed)
     assert body["result"]["status"] == "ERROR"
     assert any(name in warning for warning in body["warnings"])
     if name == "configuration.json":
@@ -354,7 +354,7 @@ def test_damaged_optional_artifact_and_partial_journal_are_reported(completed):
         stream.write(
             json.dumps({"event": "metric_window", "start": "wrong", "end": 1}) + "\n"
         )
-    body = experiment(completed)
+    body = load_experiment_view(completed)
     assert body["versions"] is None
     assert len(body["gates"]) == 2
     assert body["result"]["status"] == "ERROR"
@@ -379,13 +379,13 @@ def test_damaged_optional_artifact_and_partial_journal_are_reported(completed):
 def test_invalid_core_result_names_its_artifact(completed, value):
     write(completed / "result.json", value)
     with pytest.raises(ValueError, match="result.json"):
-        experiment(completed)
+        load_experiment_view(completed)
 
 
 def test_metrics_endpoint_reflects_service_changes(completed):
-    body = experiment(completed)
+    body = load_experiment_view(completed)
     body["metrics"] = {"status": "starting", "url": None, "error": None}
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler(body))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_http_handler(body))
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -499,7 +499,7 @@ def test_metrics_processes_are_reaped_after_failure_or_cancel(
     import os
     import signal
 
-    from mock_framework.view.service import metrics
+    from mock_framework.view.service import run_metrics_session
 
     async def scenario():
         data = completed / "prometheus/data"
@@ -507,13 +507,15 @@ def test_metrics_processes_are_reaped_after_failure_or_cancel(
         (data / "source").write_text("immutable data")
         output = tmp_path / "session"
         output.mkdir()
-        body = experiment(completed)
+        body = load_experiment_view(completed)
         body["metrics"] = {"status": "starting", "url": None, "error": None}
         if fault in ("startup", "cleanup"):
             monkeypatch.setenv(
                 "VIEW_TEST_FAIL", "grafana" if fault == "startup" else "shutdown"
             )
-        task = asyncio.create_task(metrics(body, completed, output, *metrics_binaries))
+        task = asyncio.create_task(
+            run_metrics_session(body, completed, output, *metrics_binaries)
+        )
         try:
             if fault == "startup":
                 await asyncio.wait_for(task, 10)
@@ -551,7 +553,7 @@ def test_nonfinite_optional_json_is_reported_instead_of_breaking_http(
     completed, number
 ):
     (completed / "code.json").write_text('[{"value":' + number + "}]")
-    body = experiment(completed)
+    body = load_experiment_view(completed)
     assert body["versions"] is None
     json.dumps(body, allow_nan=False)
     assert any("Non-finite" in warning for warning in body["warnings"])
@@ -635,7 +637,7 @@ def test_busy_http_port_starts_no_metrics_processes(
 
 
 def test_gate_annotations_include_saved_conditions_values_and_errors(completed):
-    body = experiment(completed)
+    body = load_experiment_view(completed)
     texts = [
         event["text"] for event in body["events"] if event["text"].startswith("门禁 ")
     ]
@@ -705,7 +707,7 @@ def test_annotation_html_escapes_saved_values_and_preserves_line_breaks(monkeypa
 def test_annotations_merge_steps_and_gates_without_filtering_execution_records(
     completed,
 ):
-    body = experiment(completed)
+    body = load_experiment_view(completed)
     assert len(body["events"]) == 5
     assert [event["step"] for event in body["annotations"]] == ["qps", "raw"]
     assert body["annotations"][0]["timeEnd"] == body["gates"][0]["to"]
@@ -732,7 +734,7 @@ def test_annotations_merge_steps_and_gates_without_filtering_execution_records(
             )
             + "\n"
         )
-    stop = experiment(completed)["annotations"][-1]
+    stop = load_experiment_view(completed)["annotations"][-1]
     assert stop == {"step": "stop", "time": 1793232015000, "text": "stop · PASS"}
 
 
@@ -742,7 +744,7 @@ def test_annotation_defaults_can_include_steps_not_reached_by_a_failed_case(
     configuration = json.loads((completed / "configuration.json").read_text())
     configuration["case"]["phases"][0]["steps"].append({"id": "not_reached"})
     write(completed / "configuration.json", configuration)
-    body = experiment(completed)
+    body = load_experiment_view(completed)
     assert "not_reached" in body["annotation_steps"]
     assert all(event["step"] != "not_reached" for event in body["annotations"])
     selected = provision(
@@ -809,7 +811,7 @@ def test_invalid_unit_metadata_does_not_hide_a_saved_gate(completed):
     gates = [json.loads(line) for line in path.read_text().splitlines()]
     gates[0]["unit"] = None
     path.write_text("".join(json.dumps(gate) + "\n" for gate in gates))
-    body = experiment(completed)
+    body = load_experiment_view(completed)
     assert len(body["gates"]) == 2
     assert body["gates"][0]["actual"] == 1
     assert "gates.jsonl:1: unit must be a string" in body["warnings"]
@@ -1026,7 +1028,7 @@ def test_view_distinguishes_role_process_evidence_from_missing_roles(completed):
             stream.write(
                 json.dumps({"recorded_at": "2026-10-29T00:00:05Z", **event}) + "\n"
             )
-    roles = experiment(completed)["roles"]
+    roles = load_experiment_view(completed)["roles"]
     (instance,) = roles["master"]["instances"]
     assert instance["attempts"]["master-0"]["process_stopped"]["code"] == 137
     assert "process_ready" in instance["attempts"]["master-0-restart-1"]

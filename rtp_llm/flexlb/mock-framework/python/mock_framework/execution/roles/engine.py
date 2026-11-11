@@ -39,9 +39,9 @@ class EngineRole:
         raise ExecutionError("Cannot allocate a fresh Engine listener port")
 
     async def _start_instance(self, role, index):
-        node = f"{role}-{index}"
+        instance_id = f"{role}-{index}"
         rpc_port, control_port = self._port(), self._port()
-        self.processes.add(node)
+        self.processes.add(instance_id)
         child, control, endpoint = await launch_component(
             self.supervisor,
             self.records,
@@ -57,7 +57,7 @@ class EngineRole:
             },
         )
         expected = {
-            "id": node,
+            "id": instance_id,
             "role": role,
             "rpc": f"127.0.0.1:{rpc_port}",
             "control": f"http://127.0.0.1:{control_port}",
@@ -89,7 +89,7 @@ class EngineRole:
         return rpc
 
     async def scale_out(self, role, count):
-        return await self._start_roles({role: count}, concurrency=1)
+        return await self._start_instances({role: count}, concurrency=1)
 
     async def scale_in(self, role, targets, count):
         async with self.lock:
@@ -158,10 +158,10 @@ class EngineRole:
                 for role, count in counts.items()
             )
             await self.supervisor.guard(
-                self._start_roles(counts, INITIAL_START_CONCURRENCY), timeout
+                self._start_instances(counts, INITIAL_START_CONCURRENCY), timeout
             )
 
-    async def _start_roles(self, counts, concurrency):
+    async def _start_instances(self, counts, concurrency):
         async with self.lock:
             if any(
                 role not in ROLES

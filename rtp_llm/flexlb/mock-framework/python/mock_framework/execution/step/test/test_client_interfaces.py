@@ -410,7 +410,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
             and plan["sha256"] == manifest["sha256"]
         )
         assert (plan["first_index"], plan["stride"]) == (i, replicas)
-    from mock_framework.execution.evidence.client import read_requests
+    from mock_framework.execution.evidence.request_journal import read_requests
     from mock_framework.execution.step.client_requests import playback_directories
 
     assert not (output / "topology-history.json").exists()

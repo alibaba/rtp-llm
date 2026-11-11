@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from mock_framework.execution import ExecutionError
-from mock_framework.execution.evidence.client import read_requests
+from mock_framework.execution.evidence.request_journal import read_requests
 from mock_framework.execution.roles import client as client_runtime
 from mock_framework.execution.step.client_requests import playback_directories
 from mock_framework.execution.step.step_registry import StepRegistry

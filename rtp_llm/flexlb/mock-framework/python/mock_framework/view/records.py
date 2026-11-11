@@ -64,7 +64,7 @@ def gate_text(gate):
     return text
 
 
-def experiment(directory):
+def load_experiment_view(directory):
     directory = Path(directory)
     path = directory / "result.json"
     result = read_json(path)
