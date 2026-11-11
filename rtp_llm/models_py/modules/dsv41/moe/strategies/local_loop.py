@@ -382,8 +382,10 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         """Grouped exact-dequant MoE for decode-sized batches.
 
         Semantically mirrors :meth:`_forward_graph_safe`: the same exact
-        FP4→bf16 row dequantization (``_fp4_unpack_rows_to_bf16`` on the
-        stacked EP-slice views — bitwise-identical rows), the same
+        FP4→bf16 row dequantization (fused single-launch Triton kernel over
+        the stacked EP-slice views — bitwise-identical rows to the reference
+        unpack: LUT-gathered e2m1 values times power-of-two UE8M0 scales are
+        exact in fp32 and share the reference's bf16 cast), the same
         silu/clamp → routing-weight → down-projection order, fp32
         accumulation into ``y``. Each kernel here processes ``group_size``
         experts through stacked tensors + bmm instead of one expert per
@@ -394,8 +396,8 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         variant. Only summation order across groups differs from the
         sequential per-expert accumulation (fp32, ≤1ulp).
         """
-        from rtp_llm.models_py.modules.dsv41.qlinear import (
-            _fp4_unpack_rows_to_bf16,
+        from rtp_llm.models_py.modules.dsv41.moe._fp4_group_dequant import (
+            dequant_fp4_group_to_bf16,
         )
 
         cfg = self.cfg
@@ -411,13 +413,13 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             ids = torch.arange(g0, g1, device=x.device)
             mask = indices.unsqueeze(0) == ids.view(gg, 1, 1)
             w_g = (weights.unsqueeze(0) * mask.to(weights.dtype)).sum(-1).unsqueeze(-1)
-            w1 = _fp4_unpack_rows_to_bf16(
+            w1 = dequant_fp4_group_to_bf16(
                 self._W1_w[s0:s1].reshape(gg * inter, -1),
                 self._W1_s[s0:s1].reshape(gg * inter, -1),
             ).view(gg, inter, dim)
             gate = torch.bmm(x_exp.expand(gg, T, dim), w1.transpose(1, 2)).float()
             del w1
-            w3 = _fp4_unpack_rows_to_bf16(
+            w3 = dequant_fp4_group_to_bf16(
                 self._W3_w[s0:s1].reshape(gg * inter, -1),
                 self._W3_s[s0:s1].reshape(gg * inter, -1),
             ).view(gg, inter, dim)
@@ -430,7 +432,7 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             )
             del gate, up
             h = h.view(gg, T, inter) * w_g
-            w2 = _fp4_unpack_rows_to_bf16(
+            w2 = dequant_fp4_group_to_bf16(
                 self._W2_w[s0:s1].reshape(gg * dim, -1),
                 self._W2_s[s0:s1].reshape(gg * dim, -1),
             ).view(gg, dim, inter)
