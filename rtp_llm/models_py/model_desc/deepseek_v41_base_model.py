@@ -63,6 +63,17 @@ from rtp_llm.models_py.modules.dsv41.transformer import V4Args, V4Transformer
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
+# Long-context lane knob: return caching-allocator fragments to CUDA after
+# every prefill forward. Chunked prefill (RTP_LLM_PREFILL_CHUNK_TOKENS) leaves
+# per-chunk transients (indexer score rectangles, gathered keys, hc-expanded
+# hidden) cached; on ranks whose post-weight free HBM is measured in tens of
+# MiB, the first decode step then OOMs on those held segments (observed:
+# rank0 64MiB einsum vs 27.88MiB free with 305MiB reserved-but-unallocated).
+# Default off: deployments with headroom keep allocator reuse.
+_EMPTY_CACHE_AFTER_PREFILL = (
+    os.environ.get("DSV41_EMPTY_CACHE_AFTER_PREFILL", "0") == "1"
+)
+
 
 def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
     """Walk the module tree and replace any meta-device buffer with a
@@ -1315,13 +1326,16 @@ class DeepSeekV4Model(GptModelBase):
                 self._shared_runtime_buffers.ensure_mtp_hidden_capacity(
                     inputs.input_ids.numel()
                 )
-            return forward_prefill(
+            result = forward_prefill(
                 self.v4,
                 self.kv_cache,
                 self.parallelism_config,
                 inputs,
                 prepare_hidden_fn=prep_prefill,
             )
+            if _EMPTY_CACHE_AFTER_PREFILL and not torch.cuda.is_current_stream_capturing():
+                torch.cuda.empty_cache()
+            return result
         else:
             return forward_decode(
                 self.v4,
