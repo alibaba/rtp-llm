@@ -188,6 +188,12 @@ class W13SharedExpert(nn.Module):
             and (x.dim() == 2)
             and isinstance(self.w13, V41MXFP8Linear)
             and isinstance(self.w2, V41MXFP8Linear)
+            # The fused quantizer stores e4m3 with ``tl.float8e4nv``, which
+            # Triton rejects on SM80/ROCm; those devices also run
+            # V41MXFP8Linear's reference dequant path. Only native FP8 GEMM
+            # devices may enter the fused kernel.
+            and not getattr(self.w13, "_fallback", True)
+            and not getattr(self.w2, "_fallback", True)
         )
 
     def _forward_mxfp8_fused_silu(self, x: torch.Tensor) -> torch.Tensor:
