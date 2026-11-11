@@ -1,6 +1,25 @@
 load(":defs.bzl", "custom_smoke_test", "smoke_test")
+load(":suites_timeout_recovery.bzl", "timeout_recovery_suites")
 load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu")
 package(default_visibility = ["//visibility:public"])
+
+# Native cache-stack smoke: real disk/SDK transfers, RPC deadlines and the
+# background frozen-task recovery worker, without loading model weights.
+test_suite(
+    name = "smoke_cache_timeout_recovery_native",
+    tests = [
+        "//rtp_llm/cpp/cache/block_tree_cache/transfer/test:local_timeout_recovery_smoke_test",
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test:kvcm_timeout_recovery_smoke_test",
+    ],
+    tags = ["manual"],
+)
+
+timeout_recovery_suites()
+
+py_test(
+    name = "timeout_recovery_checks_test",
+    srcs = ["timeout_recovery_checks.py", "timeout_recovery_checks_test.py"],
+)
 
 # Framework source files for cross-package smoke tests.
 # Used as data dep (not srcs/deps) so internal smoke targets can merge their

@@ -49,6 +49,8 @@ const char* completionStateName(TransferTaskRegistry::State state) {
             return "RUNNING";
         case TransferTaskRegistry::State::BUFFER_SAFE:
             return "BUFFER_SAFE";
+        case TransferTaskRegistry::State::REJECTED:
+            return "REJECTED";
     }
     return "UNKNOWN";
 }
@@ -171,8 +173,8 @@ bool FrozenTask::unfreeze() noexcept {
     for (const auto& target : targets_) {
         target.release();
     }
-    // Cleanup can forget only worker evidence. Transfer its preallocated node
-    // after every physical release, without holding task or pool locks.
+    // Cleanup acknowledges every participant after physical release. Workers
+    // delete safe completion records but retain admission bans on forget.
     cleanup_.submit();
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -311,7 +313,8 @@ std::string FrozenTask::debugString() const {
                 out << ',';
             const auto& rank = query.ranks[i];
             out << "{rank=" << rank.rank << ",address=" << std::quoted(rank.server_address)
-                << ",state=" << completionStateName(rank.state) << ",grpc_code=";
+                << ",state=" << completionStateName(rank.state)
+                << ",admission_closed=" << rank.admission_closed << ",grpc_code=";
             writeOptional(out, rank.grpc_code);
             out << ",error=" << std::quoted(rank.error) << ",cq_received=" << rank.cq_received
                 << ",cq_ok=" << rank.cq_ok << '}';

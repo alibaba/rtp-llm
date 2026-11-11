@@ -56,7 +56,9 @@ Proof validate(const FrozenTask::ExecutionInfo& execution, const TransferComplet
             return {false, false, "recovery query participant has a transport error"};
         if (row->state != State::UNKNOWN && row->state != State::RUNNING && row->state != State::BUFFER_SAFE)
             return {false, false, "recovery query participant has an invalid completion state"};
-        all_safe = all_safe && row->state == State::BUFFER_SAFE;
+        if (row->admission_closed && row->state != State::UNKNOWN)
+            return {false, false, "admission ban requires UNKNOWN completion state"};
+        all_safe = all_safe && row->bufferSafe();
     }
     if (query.all_safe != all_safe)
         return {false, false, "recovery query summary disagrees with participant completion states"};
@@ -193,7 +195,7 @@ FrozenTaskRecovery::runOnce(int query_timeout_ms, const std::function<bool()>& s
     // recovery pass becomes eligible for cleanup on a later pass.
     if (cleanup_) {
         try {
-            cleanup_(query_timeout_ms, should_stop);
+            summary.cleanup_failed = cleanup_(query_timeout_ms, should_stop).failed;
         } catch (...) {
             summary.cleanup_failed = true;
         }

@@ -60,6 +60,11 @@ public:
         return *task_registry_;
     }
 
+    // Recovery queries fence unseen executions before returning their evidence.
+    TransferTaskRegistry::State queryLocalCompletion(uint64_t trace_id) const {
+        return task_registry_->queryAndBlockMissing(std::vector<uint64_t>{trace_id}).front();
+    }
+
     TransferTaskRegistry::ForgetResult forgetLocalCompletion(uint64_t trace_id) const {
         return task_registry_->forget(trace_id);
     }

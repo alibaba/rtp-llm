@@ -19,10 +19,23 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/CrcBlockCopy.h"
 
 namespace rtp_llm::block_transfer_engine_test {
 namespace {
+
+class TransferDiagnosticsEnvironment final: public ::testing::Environment {
+public:
+    void SetUp() override {
+        // Native workers need an appender to emit lifecycle evidence.
+        // Initialize before any worker/registry is created.
+        ASSERT_TRUE(initLogger());
+    }
+};
+
+[[maybe_unused]] const auto* diagnostics_environment =
+    ::testing::AddGlobalTestEnvironment(new TransferDiagnosticsEnvironment());
 
 std::string makeTempDir(const char* name) {
     std::string       path = std::string("/tmp/") + name + "_XXXXXX";

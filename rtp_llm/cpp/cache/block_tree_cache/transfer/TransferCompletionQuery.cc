@@ -31,7 +31,8 @@ bool sameKey(const TransferCompletionKeyPB& key, const TransferExecutionTrace& t
 }
 
 bool validState(State state) {
-    return state == State::UNKNOWN || state == State::RUNNING || state == State::BUFFER_SAFE;
+    return state == State::UNKNOWN || state == State::RUNNING || state == State::BUFFER_SAFE
+           || state == State::REJECTED;
 }
 
 void decodeResponse(const FunctionResponsePB& response,
@@ -64,6 +65,9 @@ void decodeResponse(const FunctionResponsePB& response,
             row.error = "invalid completion query state";
             break;
     }
+    row.admission_closed = query.entries(0).admission_closed();
+    if (row.admission_closed && row.state != State::UNKNOWN)
+        row.error = "admission ban requires UNKNOWN completion state";
 }
 
 int remainingTimeout(Clock::time_point deadline) {
@@ -76,6 +80,7 @@ void fail(TransferCompletionQueryResult& result, const std::string& error) {
     result.error = error;
     for (auto& row : result.ranks) {
         row.state = State::UNKNOWN;
+        row.admission_closed = false;
         row.error = error;
     }
 }
@@ -128,8 +133,10 @@ TransferCompletionQuery::query(const FrozenTask::ExecutionInfo& execution, int t
             } else if (remainingTimeout(deadline) == 0) {
                 fail(result, "completion query deadline exceeded");
             } else {
-                result.ranks.front().state = state;
-                result.all_safe = state == State::BUFFER_SAFE;
+                auto& row = result.ranks.front();
+                row.admission_closed = state == State::REJECTED;
+                row.state = row.admission_closed ? State::UNKNOWN : state;
+                result.all_safe = row.bufferSafe();
             }
         } catch (const std::exception& error) {
             fail(result, error.what());
@@ -199,7 +206,7 @@ TransferCompletionQuery::query(const FrozenTask::ExecutionInfo& execution, int t
         }
         result.all_safe = result.error.empty()
                           && std::all_of(result.ranks.begin(), result.ranks.end(),
-                                         [](const auto& row) { return row.state == State::BUFFER_SAFE; });
+                                         [](const auto& row) { return row.bufferSafe(); });
     } catch (const std::exception& error) {
         fail(result, error.what());
     } catch (...) {

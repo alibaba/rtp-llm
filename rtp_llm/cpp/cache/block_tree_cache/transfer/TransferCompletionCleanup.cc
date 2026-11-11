@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 
@@ -85,12 +86,51 @@ void TransferCompletionCleanup::requeue(std::list<Entry>& entries) noexcept {
     pending_.splice(pending_.end(), entries);
 }
 
+void TransferCompletionCleanup::logFailure(
+    const char* reason, const Entry* entry,
+    const TransferCompletionForgetEntryResult* response) noexcept {
+    try {
+        size_t pending;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto now = std::chrono::steady_clock::now();
+            if (now < next_failure_log_)
+                return;
+            next_failure_log_ = now + std::chrono::seconds(60);
+            pending = outstanding_;
+        }
+        std::ostringstream context;
+        if (entry) {
+            context << " remote=" << entry->target.remote << " trace=";
+            std::visit([&](const auto& trace) { context << trace; }, entry->trace_id);
+            for (const auto& peer : entry->target.peers)
+                context << " peer=" << peer.rank << "@" << peer.address;
+        }
+        if (response) {
+            for (const auto& rank : response->ranks) {
+                if (rank.result == TransferTaskRegistry::ForgetResult::DONE && rank.error.empty())
+                    continue;
+                context << " failed_rank=" << rank.rank << " address=" << rank.server_address
+                        << " status=" << static_cast<int>(rank.result)
+                        << " grpc_code=" << rank.grpc_code.value_or(-1)
+                        << " error=" << rank.error;
+                break;  // One representative failed rank keeps the diagnostic bounded.
+            }
+        }
+        RTP_LLM_LOG_WARNING("completion cleanup failed: reason=%s pending=%zu%s", reason, pending,
+                            context.str().c_str());
+    } catch (...) {
+        // Diagnostics must never prevent retry or change cleanup ownership.
+    }
+}
+
 TransferCompletionCleanup::Summary
 TransferCompletionCleanup::drain(const Forget& forget, int timeout_ms,
                                   const std::function<bool()>& should_stop) noexcept {
     Summary summary;
     if (!forget || timeout_ms <= 0) {
         summary.failed = true;
+        logFailure("missing forget callback or nonpositive timeout");
         summary.pending = size();
         return summary;
     }
@@ -99,8 +139,12 @@ TransferCompletionCleanup::drain(const Forget& forget, int timeout_ms,
             try {
                 if (!should_stop())
                     return false;
+            } catch (const std::exception& error) {
+                summary.failed = true;
+                logFailure(error.what());
             } catch (...) {
                 summary.failed = true;
+                logFailure("stop predicate threw an unknown exception");
             }
             summary.stopped = true;
             return true;
@@ -136,10 +180,13 @@ TransferCompletionCleanup::drain(const Forget& forget, int timeout_ms,
                 break;
             summary.attempted += batch.size();
             const auto result = forget(target, traces, timeout_ms);
+            // Prefer the per-entry rank error over a generic batch failure.
             if (!result.error.empty())
                 summary.failed = true;
             if (result.entries.size() != batch.size()) {
                 summary.failed = true;
+                logFailure(result.error.empty() ? "forget acknowledgement count mismatch" : result.error.c_str(),
+                           &batch.front());
             } else {
                 size_t index = 0;
                 size_t forgotten = 0;
@@ -150,6 +197,9 @@ TransferCompletionCleanup::drain(const Forget& forget, int timeout_ms,
                         ++forgotten;
                     } else {
                         summary.failed = true;
+                        logFailure(response.trace_id != it->trace_id ? "forget acknowledgement trace mismatch" :
+                                   (result.error.empty() ? "forget entry not done" : result.error.c_str()),
+                                   &*it, &response);
                         ++it;
                     }
                 }
@@ -159,7 +209,13 @@ TransferCompletionCleanup::drain(const Forget& forget, int timeout_ms,
                     summary.forgotten += forgotten;
                 }
             }
+            if (!result.error.empty())
+                logFailure(result.error.c_str(), batch.empty() ? nullptr : &batch.front());
+        } catch (const std::exception& error) {
+            summary.failed = true;
+            logFailure(error.what(), batch.empty() ? nullptr : &batch.front());
         } catch (...) {
+            logFailure("forget threw an unknown exception", batch.empty() ? nullptr : &batch.front());
             // No acknowledgement means no deletion, even if the remote worker
             // applied the request before the exception or transport failure.
             summary.failed = true;

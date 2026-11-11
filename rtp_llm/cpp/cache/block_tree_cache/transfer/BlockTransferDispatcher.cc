@@ -125,7 +125,10 @@ std::shared_ptr<BlockTransferDispatcher::InflightTicket> BlockTransferDispatcher
 
 BlockTransferDispatcher::BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
                                                  std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine):
-    per_rank_engine_(std::move(per_rank_engine)), multi_rank_engine_(std::move(multi_rank_engine)) {}
+    per_rank_engine_(std::move(per_rank_engine)), multi_rank_engine_(std::move(multi_rank_engine)) {
+    RTP_LLM_LOG_INFO("transfer_lifecycle event=dispatcher_init registry=%s engine=%p",
+                    task_registry_->epoch().c_str(), static_cast<const void*>(per_rank_engine_.get()));
+}
 
 BlockTransferDispatcher::~BlockTransferDispatcher() {
     shutdown();
@@ -150,6 +153,8 @@ void BlockTransferDispatcher::waitForTransfers() const {
 std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(TransferTask task) const {
     const auto numeric_trace_id = task.traceId();
     const auto trace_id = std::to_string(numeric_trace_id);
+    RTP_LLM_LOG_INFO("transfer_lifecycle event=worker_execute_enter trace=%s request=%ld registry=%s",
+                      trace_id.c_str(), task.requestId().value_or(-1), task_registry_->epoch().c_str());
     // Allocate the owner and its completion path before registering execution.
     // The safety callback owns the registry, not the dispatcher's business lifetime.
     const auto ticket = trackTransfer();

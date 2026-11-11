@@ -932,6 +932,9 @@ message TransferCompletionQueryRequestPB {
 message TransferCompletionEntryPB {
     TransferCompletionKeyPB key = 1;
     TransferCompletionStatePB state = 2;
+    // UNKNOWN is safe only when the worker atomically banned this missing trace.
+    // The ban must survive cleanup so arbitrarily late requests cannot execute.
+    bool admission_closed = 3;
 }
 
 message TransferCompletionQueryResponsePB {

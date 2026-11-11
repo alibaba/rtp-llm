@@ -2503,6 +2503,7 @@ TEST_F(KVCacheManagerTest, CompletionQueryWithoutInitializedBackendsReturnsUnkno
     for (int index = 0; index < query->keys_size(); ++index) {
         EXPECT_EQ(result.entries(index).key().SerializeAsString(), query->keys(index).SerializeAsString());
         EXPECT_EQ(result.entries(index).state(), TRANSFER_COMPLETION_UNKNOWN);
+        EXPECT_FALSE(result.entries(index).admission_closed());
     }
     EXPECT_EQ(manager.blockTreeCache(), nullptr);
     EXPECT_FALSE(manager.initialized());
@@ -2565,9 +2566,10 @@ TEST_F(KVCacheManagerTest, CompletionQueryPreservesEvidenceNamespacesAndNeverSub
         for (int index = 0; index < query->keys_size(); ++index) {
             EXPECT_EQ(result.entries(index).key().SerializeAsString(), query->keys(index).SerializeAsString());
             EXPECT_EQ(result.entries(index).state(), expected[index]);
+            EXPECT_EQ(result.entries(index).admission_closed(), index == 3);
         }
         EXPECT_EQ(engine->submitted_batch_count, 2u);
-        EXPECT_EQ(registry.size(), 2u);
+        EXPECT_EQ(registry.size(), 3u);
     }
 
     FrozenTask::ExecutionInfo execution;
@@ -2593,15 +2595,16 @@ TEST_F(KVCacheManagerTest, CompletionQueryPreservesEvidenceNamespacesAndNeverSub
     EXPECT_EQ(missing_backend.ranks.front().state, TransferTaskRegistry::State::UNKNOWN);
     EXPECT_FALSE(missing_backend.all_safe);
     EXPECT_EQ(engine->submitted_batch_count, 2u);
-    EXPECT_EQ(registry.size(), 2u);
+    EXPECT_EQ(registry.size(), 3u);
 
-    // Querying an absent execution did not consume its future admission.
+    // Recovery querying an absent execution permanently closes its admission.
     FunctionRequestPB transfer;
     appendValidGroupedTransfer(manager, transfer);
     transfer.mutable_mem_request()->set_transfer_trace_id(missing_trace);
     ASSERT_TRUE(manager->executeFunction(transfer, response));
-    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::OK);
-    EXPECT_EQ(engine->submitted_batch_count, 3u);
+    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::NOT_EXECUTED);
+    EXPECT_TRUE(response.mem_response().buffer_safe());
+    EXPECT_EQ(engine->submitted_batch_count, 2u);
     EXPECT_EQ(registry.size(), 3u);
 }
 
@@ -2630,6 +2633,7 @@ TEST_F(KVCacheManagerTest, CompletionQueryClearsReusedResponseAndAcceptsEmptyKey
               TransferCompletionKeyPB::kTransferTraceId);
     EXPECT_EQ(response.completion_query().entries(0).key().transfer_trace_id(), 72u);
     EXPECT_EQ(response.completion_query().entries(0).state(), TRANSFER_COMPLETION_UNKNOWN);
+    EXPECT_TRUE(response.completion_query().entries(0).admission_closed());
 
     query->clear_keys();
     ASSERT_TRUE(manager->executeFunction(request, response));
@@ -2641,7 +2645,7 @@ TEST_F(KVCacheManagerTest, CompletionQueryClearsReusedResponseAndAcceptsEmptyKey
     EXPECT_EQ(response.completion_query().worker_case(), TransferCompletionQueryResponsePB::kRank);
     EXPECT_EQ(response.completion_query().rank(), 0u);
     EXPECT_EQ(response.completion_query().entries_size(), 0);
-    EXPECT_EQ(registry.size(), 0u);
+    EXPECT_EQ(registry.size(), 2u);
 }
 
 TEST_F(KVCacheManagerTest, CompletionForgetDeletesOnlySafeLocalEvidenceAndPreservesNamespaces) {

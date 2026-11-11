@@ -1638,6 +1638,10 @@ public:
         return *read_registry_;
     }
 
+    TransferTaskRegistry::State queryReadCompletion(const std::string& trace_id) const {
+        return read_registry_->queryAndBlockMissing(std::vector<std::string>{trace_id}).front();
+    }
+
     void setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup) {
         completion_cleanup_ = std::move(cleanup);
     }
@@ -1781,6 +1785,10 @@ public:
         response.set_sdk_failed(false);
         response.set_payload_buffer_safe(true);
         if (request.timeout_ms() < 0 || task.expired()) {
+            if (request.op() == REMOTE_OPERATION_READ) {
+                RTP_LLM_LOG_WARNING("KVCM READ payload expired before I/O: trace=%s timeout_ms=%d",
+                                    request.trace_id().c_str(), request.timeout_ms());
+            }
             response.set_transfer_status(REMOTE_TRANSFER_STATUS_TIMEOUT);
             return false;
         }
@@ -3127,6 +3135,10 @@ bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, Remote
 
 const TransferTaskRegistry& KVCMStorageBackend::taskRegistry() const {
     return impl_->taskRegistry();
+}
+
+TransferTaskRegistry::State KVCMStorageBackend::queryReadCompletion(const std::string& trace_id) const {
+    return impl_->queryReadCompletion(trace_id);
 }
 
 TransferTaskRegistry::ForgetResult KVCMStorageBackend::forgetReadCompletion(const std::string& trace_id) {

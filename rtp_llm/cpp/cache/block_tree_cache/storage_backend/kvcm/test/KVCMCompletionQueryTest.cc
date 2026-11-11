@@ -339,11 +339,15 @@ TEST(KVCMCompletionQueryTest, QueryNamespacesStaySeparateAndObserveReadCompletio
         EXPECT_EQ(observed.entries(1).state(), TRANSFER_COMPLETION_BUFFER_SAFE);
         EXPECT_EQ(observed.entries(2).state(), TRANSFER_COMPLETION_UNKNOWN);
         EXPECT_EQ(observed.entries(3).state(), TRANSFER_COMPLETION_UNKNOWN);
+        EXPECT_FALSE(observed.entries(0).admission_closed());
+        EXPECT_FALSE(observed.entries(1).admission_closed());
+        EXPECT_TRUE(observed.entries(2).admission_closed());
+        EXPECT_TRUE(observed.entries(3).admission_closed());
         const auto local = worker->manager->queryTransferCompletion(local_execution, 2000);
         ASSERT_EQ(local.ranks.size(), 1u);
         EXPECT_EQ(local.ranks.front().state, completed ? RegistryState::BUFFER_SAFE : RegistryState::RUNNING);
         EXPECT_EQ(local.all_safe, completed);
-        EXPECT_EQ(worker->backend->taskRegistry().size(), 1u);
+        EXPECT_EQ(worker->backend->taskRegistry().size(), 3u);
         EXPECT_EQ(ordinary.size(), 1u);
     }
 }
@@ -429,7 +433,8 @@ TEST(KVCMCompletionQueryTest, RpcBatchForgetKeepsRunningReadsAndSeparatesTraceNa
         EXPECT_EQ(observed.entries(0).key().kvcm_trace_id(), "71");
         EXPECT_EQ(observed.entries(0).status(), completed ? TRANSFER_FORGET_DONE : TRANSFER_FORGET_RUNNING);
         EXPECT_EQ(observed.entries(1).key().transfer_trace_id(), 71u);
-        for (int index = 1; index < 4; ++index) {
+        EXPECT_EQ(observed.entries(1).status(), TRANSFER_FORGET_DONE);
+        for (int index = 2; index < 4; ++index) {
             EXPECT_EQ(observed.entries(index).status(), TRANSFER_FORGET_DONE);
         }
         for (int index = 4; index < 7; ++index) {
@@ -445,8 +450,10 @@ TEST(KVCMCompletionQueryTest, RpcBatchForgetKeepsRunningReadsAndSeparatesTraceNa
         EXPECT_EQ(query_response.completion_query().entries(0).state(),
                   completed ? TRANSFER_COMPLETION_UNKNOWN : TRANSFER_COMPLETION_RUNNING);
         EXPECT_EQ(query_response.completion_query().entries(1).state(), TRANSFER_COMPLETION_UNKNOWN);
-        EXPECT_EQ(worker->backend->taskRegistry().size(), completed ? 0u : 1u);
-        EXPECT_EQ(ordinary.size(), 0u);
+        EXPECT_EQ(query_response.completion_query().entries(0).admission_closed(), completed);
+        EXPECT_TRUE(query_response.completion_query().entries(1).admission_closed());
+        EXPECT_EQ(worker->backend->taskRegistry().size(), 1u);
+        EXPECT_EQ(ordinary.size(), 1u);
         EXPECT_TRUE(worker->backend->frozenTasks().empty());
         EXPECT_FALSE(worker->environment->device_pool->isFrozen(worker->environment->block_id));
         EXPECT_EQ(worker->environment->device_pool->refCount(worker->environment->block_id), references);
@@ -608,9 +615,12 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
     ASSERT_EQ(partial.ranks.size(), 2u);
     EXPECT_EQ(partial.ranks[0].state, RegistryState::UNKNOWN);
     EXPECT_EQ(partial.ranks[1].state, RegistryState::BUFFER_SAFE);
-    EXPECT_FALSE(partial.all_safe);
+    EXPECT_TRUE(partial.ranks[0].admission_closed);
+    EXPECT_FALSE(partial.ranks[1].admission_closed);
+    EXPECT_TRUE(partial.all_safe);
     // The preallocated token moved through FrozenTask. One rank already
-    // deleted its record; the queued retry still confirms the full target.
+    // deleted its completed record and the query installed an admission fence;
+    // the queued aggregate forget preserves that fence and confirms all ranks.
     EXPECT_EQ(cleanup->drain(forget, 2000).forgotten, 1u);
     EXPECT_EQ(cleanup->size(), 0u);
 
@@ -632,16 +642,28 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
         ASSERT_EQ(queried.ranks.size(), 2u);
         for (const auto& rank : queried.ranks) {
             EXPECT_EQ(rank.state, RegistryState::UNKNOWN);
+            EXPECT_TRUE(rank.admission_closed);
         }
-        EXPECT_FALSE(queried.all_safe);
-        EXPECT_EQ(worker0->backend->taskRegistry().size(), 0u);
-        EXPECT_EQ(worker1->backend->taskRegistry().size(), 0u);
+        EXPECT_TRUE(queried.all_safe);
+        EXPECT_EQ(worker0->backend->taskRegistry().size(), 1u);
+        EXPECT_EQ(worker1->backend->taskRegistry().size(), 1u);
         EXPECT_EQ(record->snapshot().state, FrozenTask::State::RELEASED);
         EXPECT_EQ(record->debugString(), released_debug);
         EXPECT_EQ(record->failure().status.ToString(), failure_message);
         EXPECT_EQ(record->failure().execution_diagnostics, failure_diagnostics);
         EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references - 1);
+    }
+    // Aggregate forget acknowledges cleanup but must not reopen a fenced trace.
+    for (const auto& worker : {worker0, worker1}) {
+        const auto trace = std::get<std::string>(record->execution().trace_id);
+        const auto late = payloadRequest(*worker->environment, trace);
+        FunctionResponsePB response;
+        ASSERT_TRUE(worker->manager->executeFunction(late, response));
+        EXPECT_EQ(response.remote_response().transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
+        EXPECT_TRUE(response.remote_response().payload_buffer_safe());
+        EXPECT_EQ(worker->backend->taskRegistry().queryLocal(std::vector<std::string>{trace}).front(),
+                  RegistryState::REJECTED);
     }
     auto normal_match = match(*backend, makeStorageRequest(environment));
     ASSERT_TRUE(normal_match.success);
@@ -655,8 +677,8 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
     }
     EXPECT_EQ(cleanup->drain(forget, 2000).forgotten, 1u);
     EXPECT_EQ(cleanup->size(), 0u);
-    EXPECT_EQ(worker0->backend->taskRegistry().size(), 0u);
-    EXPECT_EQ(worker1->backend->taskRegistry().size(), 0u);
+    EXPECT_EQ(worker0->backend->taskRegistry().size(), 1u);
+    EXPECT_EQ(worker1->backend->taskRegistry().size(), 1u);
     EXPECT_EQ(record->debugString(), released_debug);
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references - 1);
 }

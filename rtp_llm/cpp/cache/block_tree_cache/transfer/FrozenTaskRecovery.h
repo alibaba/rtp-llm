@@ -12,6 +12,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionQuery.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
 
 namespace rtp_llm {
 
@@ -21,7 +22,7 @@ class FrozenTaskRecovery {
 public:
     using TaskSource = std::function<std::vector<std::shared_ptr<FrozenTask>>()>;
     using Query = std::function<TransferCompletionQueryResult(const FrozenTask::ExecutionInfo&, int)>;
-    using Cleanup = std::function<void(int, const std::function<bool()>&)>;
+    using Cleanup = std::function<TransferCompletionCleanup::Summary(int, const std::function<bool()>&)>;
 
     struct Summary {
         size_t inspected{0};

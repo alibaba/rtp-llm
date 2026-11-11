@@ -192,6 +192,88 @@ TEST(TransferTaskRegistryTest, LocalStringQueryPreservesOrderWithoutCreatingReco
     EXPECT_TRUE(registry.begin("missing"));
 }
 
+TEST(TransferTaskRegistryTest, RecoveryQueryBeforeAdmissionPermanentlyRejectsLateExecution) {
+    Registry registry;
+    const std::vector<std::string> ids{"late"};
+    EXPECT_EQ(registry.queryLocal(ids), (std::vector<State>{State::UNKNOWN}));
+    EXPECT_EQ(registry.size(), 0u);
+    ASSERT_EQ(registry.queryAndBlockMissing(ids), (std::vector<State>{State::REJECTED}));
+
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        EXPECT_FALSE(registry.begin("late"));
+        EXPECT_EQ(registry.forget("late"), ForgetResult::DONE);
+        EXPECT_TRUE(registry.finish("late", true));
+        EXPECT_TRUE(registry.finish("late", false));
+        EXPECT_EQ(registry.queryAndBlockMissing(ids), (std::vector<State>{State::REJECTED}));
+        EXPECT_EQ(registry.queryLocal(ids), (std::vector<State>{State::REJECTED}));
+        EXPECT_EQ(registry.size(), 1u);
+    }
+}
+
+TEST(TransferTaskRegistryTest, RecoveryQueryPreservesAdmittedExecutionsAndInputOrder) {
+    Registry registry;
+    ASSERT_TRUE(registry.begin("running"));
+    ASSERT_TRUE(registry.begin("safe"));
+    ASSERT_TRUE(registry.finish("safe", true));
+    const std::vector<std::string> ids{"running", "missing", "safe", "missing", ""};
+    EXPECT_EQ(registry.queryAndBlockMissing(ids),
+              (std::vector<State>{State::RUNNING, State::REJECTED, State::BUFFER_SAFE,
+                                  State::REJECTED, State::UNKNOWN}));
+    EXPECT_EQ(registry.size(), 3u);
+    EXPECT_EQ(registry.forget("running"), ForgetResult::RUNNING);
+    ASSERT_TRUE(registry.finish("running", true));
+    EXPECT_EQ(registry.queryAndBlockMissing(std::vector<std::string>{"running"}),
+              (std::vector<State>{State::BUFFER_SAFE}));
+    EXPECT_EQ(registry.forget("running"), ForgetResult::DONE);
+    EXPECT_EQ(registry.forget("safe"), ForgetResult::DONE);
+    EXPECT_FALSE(registry.begin("missing"));
+}
+
+TEST(TransferTaskRegistryTest, RecoveryQueryRejectsInvalidIdsWithoutBlockingStringZero) {
+    Registry registry;
+    EXPECT_EQ(registry.queryAndBlockMissing(std::vector<std::string>{""}),
+              (std::vector<State>{State::UNKNOWN}));
+    EXPECT_EQ(registry.queryAndBlockMissing(std::vector<uint64_t>{0}),
+              (std::vector<State>{State::UNKNOWN}));
+    EXPECT_EQ(registry.size(), 0u);
+    ASSERT_TRUE(registry.begin("0"));
+    ASSERT_TRUE(registry.finish("0", true));
+    const auto largest = std::numeric_limits<uint64_t>::max();
+    EXPECT_EQ(registry.queryAndBlockMissing(std::vector<uint64_t>{0, largest, largest}),
+              (std::vector<State>{State::UNKNOWN, State::REJECTED, State::REJECTED}));
+    EXPECT_FALSE(registry.begin(largest));
+    EXPECT_FALSE(registry.begin(std::to_string(largest)));
+    EXPECT_EQ(registry.queryLocal(std::vector<std::string>{"0"}),
+              (std::vector<State>{State::BUFFER_SAFE}));
+    EXPECT_EQ(registry.size(), 2u);
+    EXPECT_TRUE(registry.queryAndBlockMissing(std::vector<uint64_t>{}).empty());
+    EXPECT_TRUE(registry.queryAndBlockMissing(std::vector<std::string>{}).empty());
+}
+
+TEST(TransferTaskRegistryTest, ConcurrentRecoveryQueryAndAdmissionCannotBothAuthorizeProgress) {
+    Registry registry;
+    for (uint64_t trace_id = 1; trace_id <= 32; ++trace_id) {
+        SCOPED_TRACE(trace_id);
+        std::promise<void> start;
+        const auto ready = start.get_future().share();
+        auto admission = std::async(std::launch::async, [&] {
+            ready.wait();
+            return registry.begin(trace_id);
+        });
+        auto query = std::async(std::launch::async, [&] {
+            ready.wait();
+            return registry.queryAndBlockMissing(std::vector<uint64_t>{trace_id}).front();
+        });
+        start.set_value();
+        const bool admitted = admission.get();
+        const auto observed = query.get();
+        EXPECT_EQ(observed, admitted ? State::RUNNING : State::REJECTED);
+        EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{trace_id}), (std::vector<State>{observed}));
+        EXPECT_FALSE(registry.begin(trace_id));
+        EXPECT_EQ(registry.forget(trace_id), admitted ? ForgetResult::RUNNING : ForgetResult::DONE);
+    }
+}
+
 TEST(TransferTaskRegistryTest, LocalNumericQueryRejectsZeroAndObservesMonotonicProof) {
     Registry registry;
     const uint64_t largest = std::numeric_limits<uint64_t>::max();
