@@ -1,5 +1,6 @@
 package org.flexlb.mock.engine.vit;
 
+import org.flexlb.mock.protocol.MockFeatureHashes;
 import org.flexlb.mock.protocol.MediaInput;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -139,6 +140,28 @@ class VitTest {
         return ManagedChannelBuilder.forTarget((String)node.endpoints().get("rpc")).usePlaintext().build();
     }
 
+    @Test void compactEmbeddingAndRoutingReturnIdenticalFeatureSeeds() throws Exception {
+        try (var node = VitNode.start(config("1", 1024, 1024, 1024, 0), 0, 0)) {
+            var channel = channel(node);
+            try {
+                var rpc = MultimodalRpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS);
+                var media = input("compact");
+                var nativeOutput = rpc.remoteMultimodalEmbedding(media);
+                var compact = rpc.remoteMultimodalEmbedding(media.toBuilder().setAcceptMockFeatureSeeds(true).build());
+                int rows = nativeOutput.getSplitSize(0);
+                assertEquals(List.of(rows), compact.getSplitSizeList());
+                assertFalse(compact.hasMultimodalFeatureHash());
+                long seed = compact.getMockFeatureSeeds(0);
+                assertEquals(nativeOutput.getMultimodalFeatureHash().getInt32Data(), MockFeatureHashes.expand(seed, rows));
+                var routing = rpc.getMultimodalHashes(MultimodalHashRequestPB.newBuilder()
+                    .addKeys(MediaInput.key(media.getMultimodalInputs(0))).setInputs(media).setAcceptMockFeatureSeeds(true).build()).getEntries(0);
+                assertTrue(routing.hasMockFeatureSeed());
+                assertEquals(seed, routing.getMockFeatureSeed());
+                assertTrue(routing.getFeatureHashes().isEmpty());
+            } finally { channel.shutdownNow().awaitTermination(2, TimeUnit.SECONDS); }
+        }
+    }
+
     @Test void geometryMatchesNativeDsv41PlannerAtPinnedSource() {
         // Values evaluated from ba26ddf1dd plan_image_grid/num_image_tokens, not this Java implementation.
         int[][] vectors = {{1,1,184},{56,28,202},{512,512,184},{1024,1024,652},{1920,1080,968},
@@ -231,7 +254,7 @@ class VitTest {
         var nativeInput=GenerateInputPB.newBuilder().setRequestId(1).addAllTokenIds(List.of(10,-200,20))
             .addAllMultimodalInputs(input("x").getMultimodalInputsList())
             .build();
-        var hashes=VitGeometry.hashes(MediaInput.key(input("x").getMultimodalInputs(0)),2);
+        var hashes=MockFeatureHashes.expand(MockFeatureHashes.seed(MediaInput.key(input("x").getMultimodalInputs(0))), 2);
         var output=MultimodalOutputPB.newBuilder().addSplitSize(2)
             .setMultimodalEmbedding(TensorPB.newBuilder().setDataType(TensorPB.DataType.BF16).addShape(2).addShape(4))
             .setMultimodalFeatureHash(TensorPB.newBuilder().setDataType(TensorPB.DataType.INT32).addShape(2).setInt32Data(hashes)).build();

@@ -1,10 +1,6 @@
 package org.flexlb.mock.engine.vit;
 
 import io.grpc.Status;
-import com.google.protobuf.ByteString;
-import java.nio.*;
-import java.nio.charset.StandardCharsets;
-import java.security.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.protocol.MediaInput;
 
@@ -12,19 +8,6 @@ import org.flexlb.mock.protocol.MediaInput;
  * V-owned image geometry, logical output size and simulated feature hashes.
  */
 final class VitGeometry {
-    static ByteString hashes(String key, int rows) {
-        byte[] digest;
-        try { digest = MessageDigest.getInstance("SHA-256").digest(key.getBytes(StandardCharsets.UTF_8)); }
-        catch (NoSuchAlgorithmException error) { throw new AssertionError(error); }
-        long hash = ByteBuffer.wrap(digest).getLong();
-        var output = ByteBuffer.allocate(Math.multiplyExact(rows, 4)).order(ByteOrder.LITTLE_ENDIAN);
-        for (int i = 0; i < rows; i++) {
-            hash ^= 0x9e3779b97f4a7c15L + i + (hash << 12) + (hash >> 32);
-            output.putInt((int) (hash ^ (hash >>> 32)));
-        }
-        return ByteString.copyFrom(output.array());
-    }
-
     /** The DSV4.1 grid planner, without tensor materialization. */
     static int rows(int width, int height, int patch, int downsample, int minPixels, int maxTokens) {
         if ((long) width * height < minPixels) {

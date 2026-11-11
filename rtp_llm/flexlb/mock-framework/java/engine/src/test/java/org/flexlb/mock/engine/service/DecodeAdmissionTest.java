@@ -82,18 +82,30 @@ class DecodeAdmissionTest {
         }
     }
 
-    @Test void firstMallocReuseHonorsNativePolicyAndDoesNotPublishUncomputedKeys() throws Exception {
+    @Test void compactDecodeSharesPromptBlocksWhenFirstMallocReuseIsEnabled() throws Exception {
         for (boolean disabled : List.of(false, true)) {
-            try (var node = node(disabled); var call = new Call(node, 0)) {
-                var input = input("p", 1, 5, 0);
-                var keys = org.flexlb.mock.protocol.MediaInput.sequence(org.flexlb.mock.protocol.MediaInput.text(input.getInput()), 2, 0, 1).keys();
+            try (var node = node(disabled); var first = new Call(node, 0); var second = new Call(node, 0)) {
+                var request = input("p", 1, 5, 0);
+                var prepared = org.flexlb.mock.protocol.MediaInput.text(request.getInput());
+                var prompt = org.flexlb.mock.protocol.MediaInput.sequence(prepared, 2, 0, 1);
                 try (var lease = node.node.cacheManager().acquire(6, List.of()).lease()) {
-                    lease.publish(keys, 5);
+                    lease.publish(prompt.keys(), 5);
                 }
-                call.request.onNext(input); call.ack();
-                assertEquals(disabled ? 0 : 4, node.status().getRunningTaskInfo(0).getPrefixLength());
-                call.close(); await(() -> node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 0);
-                assertEquals(Set.copyOf(keys), cacheKeys(node.node));
+                first.request.onNext(request); first.ack();
+                assertEquals(10, node.status().getAvailableKvCache());
+
+                var compact = input("p", 2, 5, 0).toBuilder().setMockDecodePrompt(prompt.decodePrompt());
+                compact.getInputBuilder().clearTokenIds();
+                second.request.onNext(compact.build()); second.ack();
+                var status = node.status();
+                assertEquals(2, status.getRunningTaskInfoCount());
+                for (var task : status.getRunningTaskInfoList())
+                    assertEquals(disabled ? 0 : 4, task.getPrefixLength());
+                assertEquals(disabled ? 4 : 8, status.getAvailableKvCache());
+
+                first.close(); second.close();
+                await(() -> node.status().getRunningTaskInfoCount() == 0);
+                assertEquals(Set.copyOf(prompt.keys()), cacheKeys(node.node));
             }
         }
     }
@@ -107,7 +119,7 @@ class DecodeAdmissionTest {
         }
     }
 
-    @Test void completedDecodeCachesComputedOutputButNotTheFinalSample() throws Exception {
+    @Test void completedDecodePublishesOnlyCompletePromptBlocks() throws Exception {
         for (boolean media : List.of(false, true)) {
             try (var node = node(false); var call = new Call(node, 0)) {
                 var allocate = input("p", 71, 3, 3000).toBuilder();
@@ -117,6 +129,13 @@ class DecodeAdmissionTest {
                     allocate.getInputBuilder().setTokenIds(2, -200);
                     spans.add(MultimodalCacheSpanPB.newBuilder().setOffset(2).addRowHashes(777).build());
                     allocate.addAllMultimodalCacheSpans(spans);
+                }
+                var prompt = allocate.getInput();
+                var prepared = new org.flexlb.mock.protocol.MediaInput.Prepared(prompt, spans);
+                var promptSequence = org.flexlb.mock.protocol.MediaInput.sequence(prepared, 2, 0, 1);
+                if (media) {
+                    allocate.setMockDecodePrompt(promptSequence.decodePrompt()).clearMultimodalCacheSpans();
+                    allocate.getInputBuilder().clearTokenIds();
                 }
                 call.request.onNext(allocate.build()); call.ack();
                 call.request.onNext(GenerateRequestPB.newBuilder().setRequestId(71).setStage(RemoteStage.LOAD).build());
@@ -129,17 +148,13 @@ class DecodeAdmissionTest {
                     assertNotNull(reply);
                     assertTrue(reply instanceof GenerateOutputsPB || "completed".equals(reply), String.valueOf(reply));
                 } while (!"completed".equals(reply));
-                var all = allocate.getInput().toBuilder().addAllTokenIds(Collections.nCopies(5, 7)).build();
+                var all = prompt.toBuilder().addAllTokenIds(Collections.nCopies(5, 7)).build();
                 var full = new org.flexlb.mock.protocol.MediaInput.Prepared(all, spans);
                 var allKeys = org.flexlb.mock.protocol.MediaInput.sequence(full, 2, 0, 1).keys();
-                // Three input tokens + four computed output tokens: three full blocks.
-                var expected = Set.copyOf(allKeys.subList(0, 3));
-                await(() -> cacheKeys(node.node).equals(expected));
-                assertFalse(Arrays.stream(node.node.cacheManager().snapshot(-1, true).keys()).anyMatch(key -> key == allKeys.get(3)));
-                // A later request reuses the output prefix, including a block crossing the media tail.
+                await(() -> cacheKeys(node.node).equals(Set.copyOf(promptSequence.keys())));
                 try (var lease = node.node.cacheManager().acquire(8, allKeys).lease()) {
                     assertNotNull(lease);
-                    assertEquals(6, lease.reusedTokens());
+                    assertEquals(2, lease.reusedTokens());
                 }
             }
         }

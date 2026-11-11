@@ -14,6 +14,8 @@ import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.RtpTransferResult;
 import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.flexlb.mock.engine.scheduler.RequestState;
+import org.flexlb.mock.protocol.CacheSequence;
+import org.flexlb.mock.protocol.MediaInput;
 
 /**
  * Handles the native ALLOCATE/LOAD/GENERATE protocol for Decode.
@@ -65,9 +67,12 @@ final class DecodeRpcServer implements AutoCloseable {
             if (frame.getStage() == RemoteStage.ALLOCATE) {
                 validate(frame);
                 var input = frame.getInput();
-                prepared = RpcMessages.toSchedulerInput(new org.flexlb.mock.protocol.MediaInput.Prepared(input, frame.getMultimodalCacheSpansList()),
-                    frame.getClientId() + "/" + input.getRequestId(), call.started,
-                    RpcMessages.deadline(input, call.started, call.rpcDeadline), false, config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
+                var sequence = frame.hasMockDecodePrompt()
+                    ? CacheSequence.fromDecodePrompt(frame.getMockDecodePrompt(), config.blockSize())
+                    : MediaInput.sequence(new MediaInput.Prepared(input, frame.getMultimodalCacheSpansList()),
+                        config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
+                prepared = RpcMessages.toSchedulerInput(input, frame.getClientId() + "/" + input.getRequestId(), call.started,
+                    RpcMessages.deadline(input, call.started, call.rpcDeadline), false, sequence);
             }
             synchronized (executionLock) {
                 if (call.terminal) return;
@@ -75,6 +80,7 @@ final class DecodeRpcServer implements AutoCloseable {
                 if (call.input == null) {
                     if (prepared == null) throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Expected ALLOCATE frame"), 605);
                     call.input = frame.getInput();
+                    call.compact = frame.hasMockDecodePrompt();
                     call.client = frame.getClientId();
                     call.request = engine.enqueue(prepared, call);
                     return;
@@ -92,7 +98,7 @@ final class DecodeRpcServer implements AutoCloseable {
                     engine.updateRequest(call.request, RtpControl.PREFILL_COMPLETE);
                 } else if (frame.getStage() == RemoteStage.GENERATE && call.stage == Stage.LOADED) {
                     if (frame.hasPrefillKvHandoff() && (!frame.getClientId().equals(call.client)
-                            || frame.getPrefillKvHandoff().getComputedKvEnd() != call.input.getTokenIdsCount()))
+                            || frame.getPrefillKvHandoff().getComputedKvEnd() != call.request.input().tokens()))
                         throw Status.INVALID_ARGUMENT.withDescription("Prefill KV handoff does not match loaded prompt").asRuntimeException();
                     if (frame.getProposeTokenIdsCount() > 0 || frame.getPositionIdsCount() > 0 || frame.hasProposeProbs() || frame.hasProposeHidden())
                         throw Status.UNIMPLEMENTED.withDescription("Speculative/position handoff is not supported").asRuntimeException();
@@ -100,7 +106,7 @@ final class DecodeRpcServer implements AutoCloseable {
                         throw Status.FAILED_PRECONDITION.withDescription("Single-token request is already complete at Prefill").asRuntimeException();
                     call.stage = Stage.GENERATING;
                     call.token = frame.getFirstGenerateTokenId();
-                    call.delivery.startAt(1);
+                    call.delivery.startAt(1, call.compact);
                     engine.updateRequest(call.request, new RtpControl.Generate(call.token));
                 } else {
                     throw Status.FAILED_PRECONDITION.withDescription("Expected ALLOCATE, LOAD, then GENERATE or PREFILL_COMPLETE").asRuntimeException();
@@ -122,8 +128,10 @@ final class DecodeRpcServer implements AutoCloseable {
         RpcMessages.supported(input);
         if (org.flexlb.mock.protocol.MediaInput.present(input))
             throw Status.FAILED_PRECONDITION.withDescription("Decode ALLOCATE requires the prepared P input").asRuntimeException();
-        if (input.getTokenIdsCount() < 1
-                || generation.getTimeoutMs() < 0 || generation.getMaxNewTokens() < 1 || generation.getMinNewTokens() < 0
+        if (request.hasMockDecodePrompt() ? input.getTokenIdsCount() != 0 || request.getMultimodalCacheSpansCount() != 0
+                : input.getTokenIdsCount() < 1)
+            throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid Decode prompt"), 605);
+        if (generation.getTimeoutMs() < 0 || generation.getMaxNewTokens() < 1 || generation.getMinNewTokens() < 0
                 || generation.getMinNewTokens() > generation.getMaxNewTokens() || generation.getNumBeams() < 0 || generation.getNumReturnSequences() < 0)
             throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid decode allocation settings"), 605);
     }
@@ -230,6 +238,7 @@ final class DecodeRpcServer implements AutoCloseable {
         Stage stage = Stage.ALLOCATING;
         SimulatedKvLoad.Execution transfer;
         int token;
+        boolean compact;
 
         Call(ServerCallStreamObserver<GenerateOutputsPB> response, Context context) {
             this.response = response;
@@ -254,7 +263,7 @@ final class DecodeRpcServer implements AutoCloseable {
         @Override public void progressed(EngineScheduler.Request request) {
             var progress = request.progress();
             int elapsedUs = (int) Math.min(Integer.MAX_VALUE, (System.nanoTime() - started) / 1000);
-            var info = AuxInfoPB.newBuilder().setInputLen(input.getTokenIdsCount())
+            var info = AuxInfoPB.newBuilder().setInputLen(request.input().tokens())
                 .setIterCount(progress.iterations() + 1).setPrefixLen(request.reused()).setTotalReuseLen(request.reused())
                 .setLocalReuseLen(request.reused()).setPdSep(true)
                 .setCostTimeUs(elapsedUs).setFirstTokenCostTimeUs(elapsedUs);

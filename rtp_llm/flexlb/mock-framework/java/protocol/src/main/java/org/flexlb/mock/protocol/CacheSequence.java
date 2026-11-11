@@ -1,17 +1,14 @@
 package org.flexlb.mock.protocol;
 
 import java.util.*;
+import java.util.function.IntUnaryOperator;
+import org.flexlb.engine.grpc.EngineRpcService.MockDecodePromptPB;
 
 /**
- * Immutable semantic input, cache-only media identity and model-owned cache key namespace.
+ * Immutable prompt length and complete cache block keys.
  */
 public final class CacheSequence {
-    private final int blockSize, hashBlockSize, keyStride;
-
-    private final List<Integer> tokens;
-    private final List<Span> spans;
-
-    private final long seed;
+    private final int blockSize, keyStride, inputLength;
 
     private final List<Long> promptKeys;
 
@@ -23,10 +20,6 @@ public final class CacheSequence {
 
     public CacheSequence(int blockSize, List<Integer> tokens, List<Span> spans, long seed, int keyStride) {
         if (blockSize < 1 || keyStride < 1) throw new IllegalArgumentException("Invalid cache block size");
-        // Generated messages expose an immutable primitive list. Keep that storage for hashing.
-        tokens = tokens instanceof com.google.protobuf.Internal.IntList ints && !ints.isModifiable()
-            ? ints : List.copyOf(tokens);
-        spans = List.copyOf(spans);
         long previous = 0;
         for (var span : spans) {
             long end = (long) span.offset() + span.rowHashes().size();
@@ -34,64 +27,80 @@ public final class CacheSequence {
                 throw new IllegalArgumentException("Invalid multimodal cache span");
             previous = end;
         }
-        this.hashBlockSize=blockSize; this.keyStride=keyStride;
-        this.blockSize = Math.multiplyExact(blockSize,keyStride); this.tokens = tokens; this.spans = spans; this.seed = seed;
-        promptKeys = appendKeys(List.of(), 0, 0);
+        this.blockSize = Math.multiplyExact(blockSize, keyStride);
+        this.keyStride = keyStride;
+        inputLength = tokens.size();
+        promptKeys = hashPrompt(tokens, spans, seed, blockSize);
+    }
+
+    private CacheSequence(CacheSequence physical, int stride) {
+        keyStride = stride;
+        blockSize = Math.multiplyExact(physical.blockSize, stride);
+        inputLength = physical.inputLength;
+        var keys = new ArrayList<Long>(physical.promptKeys.size() / stride);
+        for (int i = stride - 1; i < physical.promptKeys.size(); i += stride)
+            keys.add(physical.promptKeys.get(i));
+        promptKeys = List.copyOf(keys);
+    }
+
+    private CacheSequence(MockDecodePromptPB prompt, int expectedBlockSize) {
+        if (expectedBlockSize < 1 || prompt.getBlockSize() != expectedBlockSize || prompt.getInputLength() < 1
+                || prompt.getBlockKeysCount() != prompt.getInputLength() / expectedBlockSize)
+            throw new IllegalArgumentException("Invalid Decode prompt cache identity");
+        blockSize = expectedBlockSize;
+        keyStride = 1;
+        inputLength = prompt.getInputLength();
+        promptKeys = prompt.getBlockKeysList();
+    }
+
+    /** Projects an already hashed physical sequence into Prefill's logical blocks. */
+    public CacheSequence withStride(int stride) {
+        if (stride < 1 || keyStride != 1)
+            throw new IllegalArgumentException("Expected physical prompt keys");
+        return stride == 1 ? this : new CacheSequence(this, stride);
+    }
+
+    public static CacheSequence fromDecodePrompt(MockDecodePromptPB prompt, int blockSize) {
+        return new CacheSequence(prompt, blockSize);
+    }
+
+    public MockDecodePromptPB decodePrompt() {
+        if (keyStride != 1) throw new IllegalStateException("Expected physical prompt keys");
+        return MockDecodePromptPB.newBuilder().setInputLength(inputLength).setBlockSize(blockSize)
+            .addAllBlockKeys(promptKeys).build();
     }
 
     public int blockSize() { return blockSize; }
 
-    public List<Integer> tokens() { return tokens; }
-
-    public List<Span> spans() { return spans; }
-
-    public long seed() { return seed; }
-
     public List<Long> keys() { return promptKeys; }
 
-    /** Append only output tokens whose KV has actually been computed. Mock output repeats one token. */
-    public List<Long> keys(int computedOutputTokens, int outputToken) {
-        if (computedOutputTokens < 0) throw new IllegalArgumentException("Negative computed output length");
-        if (computedOutputTokens == 0) return promptKeys;
-        return appendKeys(promptKeys, computedOutputTokens, outputToken);
-    }
+    public int inputLength() { return inputLength; }
 
     @Override public boolean equals(Object other) {
-        return other instanceof CacheSequence sequence && hashBlockSize == sequence.hashBlockSize && keyStride == sequence.keyStride && seed == sequence.seed
-            && tokens.equals(sequence.tokens) && spans.equals(sequence.spans);
+        return other instanceof CacheSequence sequence && blockSize == sequence.blockSize && keyStride == sequence.keyStride
+            && inputLength == sequence.inputLength && promptKeys.equals(sequence.promptKeys);
     }
 
-    @Override public int hashCode() { return Objects.hash(hashBlockSize, keyStride, tokens, spans, seed); }
+    @Override public int hashCode() { return Objects.hash(blockSize, keyStride, inputLength, promptKeys); }
 
-    @Override public String toString() {
-        return "CacheSequence[blockSize=" + blockSize + ", hashBlockSize=" + hashBlockSize + ", keyStride=" + keyStride + ", tokens=" + tokens + ", spans=" + spans + ", seed=" + seed + "]";
-    }
-
-    private List<Long> appendKeys(List<Long> prefix, int computedOutputTokens, int outputToken) {
-        int length = Math.addExact(tokens.size(), computedOutputTokens);
-        int completeTokens = length - length % blockSize;
-        int prefixTokens = prefix.size() * blockSize;
-        if (completeTokens == prefixTokens) return prefix;
-
-        var keys = new ArrayList<>(prefix);
-        long hash = prefix.isEmpty() ? seed : prefix.getLast();
+    private List<Long> hashPrompt(List<Integer> tokens, List<Span> spans, long seed, int hashBlockSize) {
+        int completeTokens = inputLength - inputLength % blockSize;
+        var keys = new ArrayList<Long>(completeTokens / blockSize);
+        long hash = seed;
         int spanIndex = 0;
-        java.util.function.IntUnaryOperator tokenAt = tokens instanceof com.google.protobuf.Internal.IntList ints
-            ? ints::getInt : tokens::get;
+        IntUnaryOperator tokenAt = tokens instanceof com.google.protobuf.Internal.IntList ints ? ints::getInt : tokens::get;
         // Hash at physical block boundaries and retain only complete logical block keys.
-        for (int start = prefixTokens; start < completeTokens; start += hashBlockSize) {
+        for (int start = 0; start < completeTokens; start += hashBlockSize) {
             for (int i = start; i < start + hashBlockSize; i++)
-                hash = roll(hash, i < tokens.size() ? tokenAt.applyAsInt(i) : outputToken);
+                hash = roll(hash, tokenAt.applyAsInt(i));
             while (spanIndex < spans.size() && spans.get(spanIndex).offset() + spans.get(spanIndex).rowHashes().size() <= start)
                 spanIndex++;
             for (int j = spanIndex; j < spans.size() && spans.get(j).offset() < start + hashBlockSize; j++) {
                 var span = spans.get(j);
-                int begin = Math.max(start, span.offset());
-                int end = Math.min(start + hashBlockSize, span.offset() + span.rowHashes().size());
-                if (begin >= end) continue;
-                for (int value : new int[]{-42, begin - start, span.rowHashes().size(), begin - span.offset(), end - begin})
-                    hash = roll(hash, value);
-                for (int i = begin; i < end; i++) hash = roll(hash, span.rowHashes().get(i - span.offset()));
+                for (int value : mediaHeader(span, start, start + hashBlockSize)) hash = roll(hash, value);
+                int begin = Math.max(start, span.offset()) - span.offset();
+                int end = Math.min(start + hashBlockSize - span.offset(), span.rowHashes().size());
+                for (int i = begin; i < end; i++) hash = roll(hash, span.rowHashes().get(i));
             }
             if ((start + hashBlockSize) % blockSize == 0) keys.add(hash);
         }
@@ -100,6 +109,12 @@ public final class CacheSequence {
 
     private static long roll(long hash, long value) {
         return hash ^ (value + 0x9e3779b97f4a7c15L + (hash << 12) + (hash >> 32));
+    }
+
+    private static int[] mediaHeader(Span span, int start, int end) {
+        int begin = Math.max(start, span.offset());
+        int limit = Math.min(end, span.offset() + span.rowHashes().size());
+        return new int[]{-42, begin - start, span.rowHashes().size(), begin - span.offset(), limit - begin};
     }
 
     /**

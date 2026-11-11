@@ -73,7 +73,6 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
                 throw new RequestFailure(INVALID, "Generation requires loaded KV and a new generation permit");
             stream.timingStarted = System.nanoTime();
             stream.waitNanos = 0; stream.canRun = stream.firstRunning = 0;
-            stream.outputToken = generate.tokenId();
             stream.generating = true;
             stream.state.transferred(1);
             // The first P token may already reach D's context/output limit. No Decode forward is needed.
@@ -405,10 +404,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         stream.reused = Math.toIntExact(stream.lease.reusedTokens());
         stream.state.attach(stream.lease, () -> {
             if (!config.reuseCache() || !config.deviceCache() || !stream.input.reuse()) return;
-            // The final sampled token has not entered a Forward and owns no computed KV.
-            int computedOutput = !prefill() && stream.generating ? Math.max(0, stream.state.snapshot().generated() - 1) : 0;
-            stream.lease.publish(stream.input.cacheSequence().keys(computedOutput, stream.outputToken),
-                (long) stream.input.tokens() + computedOutput);
+            stream.lease.publish(stream.input.keys(), stream.input.tokens());
         });
         metrics.cacheLookup(stream.input.tokens(), stream.reused);
         if (stream.cacheMatchRequested) metrics.cacheMatched(ready.matchNanos());
@@ -568,7 +564,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
 
         long preparationStarted;
         boolean cacheMatchRequested;
-        int reused, outputToken;
+        int reused;
         boolean prefillFinished;
 
         final long begun = System.nanoTime();

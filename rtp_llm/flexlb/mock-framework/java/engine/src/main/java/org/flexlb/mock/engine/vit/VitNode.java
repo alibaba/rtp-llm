@@ -1,6 +1,7 @@
 package org.flexlb.mock.engine.vit;
 
 import com.google.protobuf.ByteString;
+import org.flexlb.mock.protocol.MockFeatureHashes;
 import io.grpc.*;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.*;
@@ -83,7 +84,7 @@ public final class VitNode implements AutoCloseable {
         }
 
         @Override public void remoteMultimodalEmbedding(MultimodalInputsPB input,StreamObserver<MultimodalOutputPB> response) {
-            var context=Context.current(); reply(response,()->output(compute(input,context)));
+            var context=Context.current(); reply(response,()->output(compute(input,context), input.getAcceptMockFeatureSeeds()));
         }
 
         @Override public void getMultimodalHashes(MultimodalHashRequestPB input,StreamObserver<MultimodalHashResponsePB> response) {
@@ -117,7 +118,12 @@ public final class VitNode implements AutoCloseable {
                     var image=computed.get(key);if(image==null) image=cache.hash(key);
                     var entry=MultimodalHashEntryPB.newBuilder().setKey(key);String tier=cache.tier(key);
                     entry.setEmbeddingHit(!tier.isEmpty()).setEmbeddingTier(tier);
-                    if(image!=null) entry.setHashHit(true).setEntryGeneration(instance+":"+key).addSplitSize(image.rows()).setFeatureHashes(VitGeometry.hashes(image.featureIdentity(),image.rows()));
+                    if (image != null) {
+                        long seed = MockFeatureHashes.seed(image.featureIdentity());
+                        entry.setHashHit(true).setEntryGeneration(instance+":"+key).addSplitSize(image.rows());
+                        if (input.getAcceptMockFeatureSeeds()) entry.setMockFeatureSeed(seed);
+                        else entry.setFeatureHashes(MockFeatureHashes.expand(seed, image.rows()));
+                    }
                     result.addEntries(entry);
                 }
                 return result.build();
@@ -207,12 +213,20 @@ public final class VitNode implements AutoCloseable {
             }); } catch(RejectedExecutionException error) { response.onError(Status.UNAVAILABLE.asRuntimeException()); }
         }
 
-        private MultimodalOutputPB output(List<VitGeometry.Image> images) throws Exception {
-            int rows=Math.toIntExact(images.stream().mapToLong(VitGeometry.Image::rows).sum());var hashes=new ByteArrayOutputStream();
-            var output=MultimodalOutputPB.newBuilder();
-            for(var image:images) { output.addSplitSize(image.rows());VitGeometry.hashes(image.featureIdentity(),image.rows()).writeTo(hashes); }
-            return output.setMultimodalEmbedding(TensorPB.newBuilder().setDataType(TensorPB.DataType.BF16).addShape(rows).addShape(config.hidden()))
-                .setMultimodalFeatureHash(TensorPB.newBuilder().setDataType(TensorPB.DataType.INT32).addShape(rows).setInt32Data(ByteString.copyFrom(hashes.toByteArray()))).build();
+        private MultimodalOutputPB output(List<VitGeometry.Image> images, boolean compact) throws Exception {
+            int rows = Math.toIntExact(images.stream().mapToLong(VitGeometry.Image::rows).sum());
+            var output = MultimodalOutputPB.newBuilder().setMultimodalEmbedding(
+                TensorPB.newBuilder().setDataType(TensorPB.DataType.BF16).addShape(rows).addShape(config.hidden()));
+            var hashes = new ByteArrayOutputStream();
+            for (var image : images) {
+                output.addSplitSize(image.rows());
+                long seed = MockFeatureHashes.seed(image.featureIdentity());
+                if (compact) output.addMockFeatureSeeds(seed);
+                else MockFeatureHashes.expand(seed, image.rows()).writeTo(hashes);
+            }
+            if (!compact) output.setMultimodalFeatureHash(TensorPB.newBuilder()
+                .setDataType(TensorPB.DataType.INT32).addShape(rows).setInt32Data(ByteString.copyFrom(hashes.toByteArray())));
+            return output.build();
         }
     }
 }

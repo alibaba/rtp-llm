@@ -39,14 +39,28 @@ public final class MediaInput {
         if (output.getOutputRdmaSlotsCount() != 0 || !tensor.getFp32Data().isEmpty() || !tensor.getBf16Data().isEmpty()
                 || !tensor.getFp16Data().isEmpty() || !tensor.getInt32Data().isEmpty()
                 || tensor.getShapeCount() != 2 || tensor.getShape(0) < 1 || tensor.getShape(1) < 1
-                || tensor.getDataType() != TensorPB.DataType.BF16 || hashes.getDataType() != TensorPB.DataType.INT32
-                || hashes.getShapeCount() != 1 || hashes.getShape(0) != tensor.getShape(0)
-                || hashes.getInt32Data().size() != (long) tensor.getShape(0) * 4)
+                || tensor.getDataType() != TensorPB.DataType.BF16)
             throw Status.DATA_LOSS.withDescription("Malformed Mock vision metadata").asRuntimeException();
         if (output.hasMultimodalPosId() || output.getMultimodalExtraInputCount() != 0 || !hashes.getFp32Data().isEmpty()
                 || !hashes.getBf16Data().isEmpty() || !hashes.getFp16Data().isEmpty())
             throw Status.DATA_LOSS.withDescription("Unexpected vision tensor payload").asRuntimeException();
-        return applyRows(input,output.getSplitSizeList(),hashes.getInt32Data(),imageToken);
+        var sizes = output.getSplitSizeList();
+        if (output.getMockFeatureSeedsCount() != 0) {
+            if (output.hasMultimodalFeatureHash() || sizes.size() != output.getMockFeatureSeedsCount()
+                    || sizes.size() != input.getMultimodalInputsCount()
+                    || sizes.stream().anyMatch(size -> size < 1)
+                    || sizes.stream().mapToLong(Integer::longValue).sum() != tensor.getShape(0))
+                throw Status.DATA_LOSS.withDescription("Invalid Mock feature seeds").asRuntimeException();
+            ByteString payload = ByteString.EMPTY;
+            for (int i = 0; i < sizes.size(); i++)
+                payload = payload.concat(MockFeatureHashes.expand(output.getMockFeatureSeeds(i), sizes.get(i)));
+            return applyRows(input, sizes, payload, imageToken);
+        }
+        if (hashes.getDataType() != TensorPB.DataType.INT32 || hashes.getShapeCount() != 1
+                || hashes.getShape(0) != tensor.getShape(0)
+                || hashes.getInt32Data().size() != (long) tensor.getShape(0) * 4)
+            throw Status.DATA_LOSS.withDescription("Malformed vision feature hashes").asRuntimeException();
+        return applyRows(input, sizes, hashes.getInt32Data(), imageToken);
     }
 
     public static CacheSequence sequence(Prepared prepared, int blockSize, long seed, int keyStride) {
@@ -86,9 +100,13 @@ public final class MediaInput {
         for(var media:input.getMultimodalInputsList()) {
             var entry=entries.get(key(media));
             if(entry==null || !entry.getHashHit() || entry.getSplitSizeCount()!=1 || entry.getSplitSize(0)<1
-                    || entry.getFeatureHashes().size()!=(long)entry.getSplitSize(0)*4)
+                    || (entry.hasMockFeatureSeed() ? !entry.getFeatureHashes().isEmpty()
+                        : entry.getFeatureHashes().size() != (long) entry.getSplitSize(0) * 4))
                 throw Status.DATA_LOSS.withDescription("Missing or invalid vision feature hashes").asRuntimeException();
-            sizes.add(entry.getSplitSize(0));payload=payload.concat(entry.getFeatureHashes());
+            int rows = entry.getSplitSize(0);
+            sizes.add(rows);
+            payload = payload.concat(entry.hasMockFeatureSeed()
+                ? MockFeatureHashes.expand(entry.getMockFeatureSeed(), rows) : entry.getFeatureHashes());
         }
         return applyRows(input,sizes,payload,imageToken);
     }

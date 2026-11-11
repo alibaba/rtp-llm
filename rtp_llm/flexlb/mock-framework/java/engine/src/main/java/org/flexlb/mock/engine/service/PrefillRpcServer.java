@@ -15,6 +15,8 @@ import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import org.flexlb.mock.engine.scheduler.RequestState;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
+import java.util.concurrent.locks.ReentrantLock;
+import org.flexlb.mock.protocol.CacheSequence;
 import org.flexlb.mock.protocol.MediaInput;
 
 /**
@@ -153,8 +155,7 @@ final class PrefillRpcServer implements AutoCloseable {
     Session submit(Session session, MediaInput.Prepared prepared) {
         try {
             requirePrepared(prepared.input());
-            var input = RpcMessages.toSchedulerInput(prepared, Long.toString(session.id), session.started,
-                session.deadline, session.retained, config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
+            var input = schedulerInput(session, prepared);
             synchronized (executionLock) {
                 requirePending(session, prepared.input());
                 session.input = prepared.input();
@@ -180,8 +181,7 @@ final class PrefillRpcServer implements AutoCloseable {
                 long started = System.nanoTime();
                 if (session == null) session = new Session(item.input(), true, started,
                     RpcMessages.deadline(item.input(), started, item.deadline()));
-                var input = RpcMessages.toSchedulerInput(item.prepared(), Long.toString(session.id),
-                    session.started, session.deadline, true, config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
+                var input = schedulerInput(session, item.prepared());
                 prepared.add(new PreparedAdmission(i, session, new EngineScheduler.InputItem(input, session)));
             } catch (RuntimeException error) {
                 var failure = error instanceof RequestFailure f ? rpcFailure(f) : error;
@@ -279,6 +279,15 @@ final class PrefillRpcServer implements AutoCloseable {
             call.finish(preempted());
             return CancelStatusPB.CANCEL_STATUS_ACCEPTED;
         }
+    }
+
+    private EngineScheduler.Input schedulerInput(Session session, MediaInput.Prepared prepared) {
+        var sequence = session.prefillSequence;
+        session.prefillSequence = null;
+        if (sequence == null)
+            sequence = MediaInput.sequence(prepared, config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
+        return RpcMessages.toSchedulerInput(prepared.input(), Long.toString(session.id), session.started,
+            session.deadline, session.retained, sequence);
     }
 
     private void requirePending(Session session, GenerateInputPB input) {
@@ -416,6 +425,7 @@ final class PrefillRpcServer implements AutoCloseable {
         final CompletableFuture<Result> termination = new CompletableFuture<>();
 
         EngineScheduler.Request request;
+        CacheSequence prefillSequence;
 
         Session(GenerateInputPB input, boolean retained, long started, long deadline) {
             this.input = input; this.retained = retained; this.started = started; this.deadline = deadline;
@@ -569,18 +579,29 @@ final class PrefillRpcServer implements AutoCloseable {
                 media = vision.prepare(input, deadline);
                 checkActive();
                 input = media.input();
+                var peer = channels.get(target);
+                var layout = peer.decodeLayout(deadline);
                 var inbox = new Inbox(error -> {
                     synchronized (this) { if (!source.result.isDone()) finish(error); }
                 });
-                var stub = RpcServiceGrpc.newStub(channels.get(target));
+                var stub = RpcServiceGrpc.newStub(peer.channel);
                 if (deadline != Long.MAX_VALUE) stub = stub.withDeadlineAfter(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
                 var stream = stub.remoteGenerate(inbox);
+                var allocation = frame(RemoteStage.ALLOCATE).toBuilder();
                 var allocationInput = input.toBuilder().clearGroupId().clearGroupSize();
+                if (layout.hasMockDecodeCacheSeed()) {
+                    var sequence = MediaInput.sequence(media, Math.toIntExact(layout.getBlockSize()), layout.getMockDecodeCacheSeed(), 1);
+                    allocation.setMockDecodePrompt(sequence.decodePrompt());
+                    allocationInput.clearTokenIds();
+                    if (layout.getBlockSize() == config.blockSize() && layout.getMockDecodeCacheSeed() == config.cacheKeySeed())
+                        source.prefillSequence = sequence.withStride(config.cacheKeyStride());
+                } else {
+                    allocation.addAllMultimodalCacheSpans(media.spans());
+                }
                 allocationInput.getGenerateConfigBuilder().clearGroupTimeout();
                 if (deadline != Long.MAX_VALUE) allocationInput.getGenerateConfigBuilder().setTimeoutMs((int) Math.min(Integer.MAX_VALUE,
                     Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()))));
-                stream.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE).setRequestId(input.getRequestId()).setClientId(config.id())
-                    .setInput(allocationInput).addAllMultimodalCacheSpans(media.spans()).build());
+                stream.onNext(allocation.setInput(allocationInput).build());
                 var allocated = inbox.next();
                 if (allocated == null || allocated.hasFlattenOutput() || allocated.hasErrorInfo() && allocated.getErrorInfo().getErrorCodeValue() != 0)
                     throw Status.DATA_LOSS.withDescription("Invalid ALLOCATE acknowledgement").asRuntimeException();
@@ -692,21 +713,54 @@ final class PrefillRpcServer implements AutoCloseable {
      * Node-owned connections shared by Prefill sessions.
      */
     private static final class RpcChannels implements AutoCloseable {
-        private final Map<String, ManagedChannel> channels = new HashMap<>();
+        private final Map<String, Peer> channels = new HashMap<>();
 
         private boolean closed;
 
         @Override public void close() {
             List<ManagedChannel> owned;
-            synchronized (this) { closed = true; owned = List.copyOf(channels.values()); channels.clear(); }
+            synchronized (this) { closed = true; owned = channels.values().stream().map(peer -> peer.channel).toList(); channels.clear(); }
             owned.forEach(ManagedChannel::shutdownNow);
             for (var channel : owned) try { channel.awaitTermination(3, TimeUnit.SECONDS); }
             catch (InterruptedException error) { Thread.currentThread().interrupt(); return; }
         }
 
-        synchronized ManagedChannel get(String address) {
+        synchronized Peer get(String address) {
             if (closed) throw Status.UNAVAILABLE.withDescription("RPC connections closed").asRuntimeException();
-            return channels.computeIfAbsent(address, key -> ManagedChannelBuilder.forTarget(key).usePlaintext().build());
+            return channels.computeIfAbsent(address, key -> new Peer(ManagedChannelBuilder.forTarget(key).usePlaintext().build()));
+        }
+    }
+
+    /**
+     * Caches the immutable layout for the lifetime of a peer connection.
+     */
+    private static final class Peer {
+        final ManagedChannel channel;
+        private final ReentrantLock layoutLock = new ReentrantLock();
+        private volatile CacheStatusPB layout;
+
+        Peer(ManagedChannel channel) { this.channel = channel; }
+
+        CacheStatusPB decodeLayout(long deadline) {
+            var known = layout;
+            if (known != null) return known;
+            layoutLock.lock();
+            try {
+                if (layout != null) return layout;
+                long budget = Math.min(TimeUnit.SECONDS.toNanos(5), deadline == Long.MAX_VALUE
+                    ? Long.MAX_VALUE : deadline - System.nanoTime());
+                if (budget <= 0) throw Status.DEADLINE_EXCEEDED.withDescription("Decode layout query expired").asRuntimeException();
+                try {
+                    layout = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(budget, TimeUnit.NANOSECONDS)
+                        .getCacheStatus(CacheVersionPB.getDefaultInstance());
+                } catch (StatusRuntimeException error) {
+                    if (error.getStatus().getCode() != Status.Code.UNIMPLEMENTED) throw error;
+                    layout = CacheStatusPB.getDefaultInstance();
+                }
+                return layout;
+            } finally {
+                layoutLock.unlock();
+            }
         }
     }
 }

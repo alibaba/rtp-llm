@@ -6,6 +6,7 @@ import java.nio.*;
 import java.util.concurrent.TimeUnit;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
+import org.flexlb.mock.protocol.CacheSequence;
 
 /**
  * Translation at the native RTP boundary; scheduling state contains no protobuf objects.
@@ -13,12 +14,11 @@ import org.flexlb.mock.engine.scheduler.EngineScheduler;
 final class RpcMessages {
     private RpcMessages() {}
 
-    static EngineScheduler.Input toSchedulerInput(org.flexlb.mock.protocol.MediaInput.Prepared prepared, String identity, long started, long rpcDeadline,
-                                 boolean retained, int blockSize, long seed, int keyStride) {
-        var input = prepared.input();
+    static EngineScheduler.Input toSchedulerInput(GenerateInputPB input, String identity, long started, long rpcDeadline,
+                                                   boolean retained, CacheSequence sequence) {
         return new EngineScheduler.Input(identity, input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
-            input.getTokenIdsCount(), input.getGenerateConfig().getMaxNewTokens(), input.getPriority(), started, rpcDeadline,
-            org.flexlb.mock.protocol.MediaInput.sequence(prepared, blockSize, seed, keyStride), input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos(),
+            sequence.inputLength(), input.getGenerateConfig().getMaxNewTokens(), input.getPriority(), started, rpcDeadline,
+            sequence, input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos(),
             input.getGenerateConfig().getIsStreaming());
     }
 
@@ -84,12 +84,19 @@ final class RpcMessages {
     }
 
     static GenerateOutputsPB token(long requestId, int tokenId, int generated, int stepTokens, AuxInfoPB metadata, boolean finished) {
-        var tokens = ByteBuffer.allocate(Math.multiplyExact(4, stepTokens)).order(ByteOrder.LITTLE_ENDIAN);
-        for (int i = 0; i < stepTokens; i++) tokens.putInt(tokenId);
+        return progress(requestId, tokenId, generated, stepTokens, metadata, finished, false);
+    }
+
+    static GenerateOutputsPB progress(long requestId, int tokenId, int generated, int stepTokens,
+                                      AuxInfoPB metadata, boolean finished, boolean compact) {
         var aux = metadata.toBuilder().setOutputLen(generated).setStepOutputLen(stepTokens);
-        var output = FlattenOutputPB.newBuilder().addFinished(finished).addAuxInfo(aux).setOutputIds(TensorPB.newBuilder()
-            .setDataType(TensorPB.DataType.INT32).addShape(1).addShape(1).addShape(stepTokens)
-            .setInt32Data(ByteString.copyFrom(tokens.array())));
+        var output = FlattenOutputPB.newBuilder().addFinished(finished).addAuxInfo(aux);
+        if (!compact) {
+            var tokens = ByteBuffer.allocate(Math.multiplyExact(4, stepTokens)).order(ByteOrder.LITTLE_ENDIAN);
+            for (int i = 0; i < stepTokens; i++) tokens.putInt(tokenId);
+            output.setOutputIds(TensorPB.newBuilder().setDataType(TensorPB.DataType.INT32)
+                .addShape(1).addShape(1).addShape(stepTokens).setInt32Data(ByteString.copyFrom(tokens.array())));
+        }
         return GenerateOutputsPB.newBuilder().setRequestId(requestId).setFlattenOutput(output).build();
     }
 }

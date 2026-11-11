@@ -22,7 +22,7 @@ public final class VitClient implements AutoCloseable {
         long remaining=deadline-System.nanoTime();
         if(remaining<=0) throw Status.DEADLINE_EXCEEDED.withDescription("Request expired acquiring vision hashes").asRuntimeException();
         var request=MultimodalHashRequestPB.newBuilder().addAllKeys(input.getMultimodalInputsList().stream().map(MediaInput::key).distinct().toList())
-            .setInputs(MediaInput.media(input)).setTimeoutMs(Math.max(1,TimeUnit.NANOSECONDS.toMillis(remaining))).build();
+            .setAcceptMockFeatureSeeds(true).setInputs(MediaInput.media(input)).setTimeoutMs(Math.max(1,TimeUnit.NANOSECONDS.toMillis(remaining))).build();
         checkActive();
         var metadata=MultimodalRpcServiceGrpc.newBlockingStub(channel(MediaInput.address(input))).withDeadlineAfter(remaining,TimeUnit.NANOSECONDS).getMultimodalHashes(request);
         checkActive();
@@ -47,7 +47,7 @@ public final class VitClient implements AutoCloseable {
         checkActive();
         var stub=MultimodalRpcServiceGrpc.newBlockingStub(channel(MediaInput.address(input)));
         if(deadline!=Long.MAX_VALUE) stub=stub.withDeadlineAfter(remaining,TimeUnit.NANOSECONDS);
-        var result=stub.remoteMultimodalEmbedding(MediaInput.media(input));
+        var result=stub.remoteMultimodalEmbedding(MediaInput.media(input).toBuilder().setAcceptMockFeatureSeeds(true).build());
         checkActive();
         return result;
     }

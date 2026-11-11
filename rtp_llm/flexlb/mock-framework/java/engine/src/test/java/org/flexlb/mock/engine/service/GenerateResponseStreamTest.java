@@ -74,11 +74,37 @@ class GenerateResponseStreamTest {
     @Test void decodeFinalMarkerDoesNotRepeatThePrefillToken() {
         var tasks = new ArrayDeque<Runnable>(); var observer = new Observer();
         observer.ready = true; observer.received = 1;
-        var output = output(tasks::add); output.startAt(1); output.attach(observer, () -> {});
+        var output = output(tasks::add); output.startAt(1, false); output.attach(observer, () -> {});
         output.advance(7, 42, 1, AuxInfoPB.getDefaultInstance(), true); output.finish(null);
         tasks.remove().run();
         assertEquals(1, observer.received); assertEquals(1, observer.frames);
         assertEquals(1, observer.finals); assertTrue(observer.completed);
+    }
+
+    @Test void compactDecodeCoalescesProgressWithoutBuildingTokenTensors() {
+        var tasks = new ArrayDeque<Runnable>();
+        var receivedFrames = new java.util.ArrayList<GenerateOutputsPB>();
+        var observer = new Observer() {
+            @Override public void onNext(GenerateOutputsPB value) { receivedFrames.add(value); }
+        };
+        var stream = output(tasks::add);
+        stream.startAt(1, true);
+        stream.attach(observer, () -> {});
+        stream.advance(7, 42, 4, AuxInfoPB.getDefaultInstance(), false);
+        stream.advance(7, 42, 7, AuxInfoPB.getDefaultInstance(), true);
+        stream.finish(null);
+        tasks.remove().run();
+        assertTrue(receivedFrames.isEmpty());
+        observer.ready = true;
+        observer.onReady.run();
+        tasks.remove().run();
+        assertEquals(1, receivedFrames.size());
+        var frame = receivedFrames.getFirst().getFlattenOutput();
+        assertFalse(frame.hasOutputIds());
+        assertEquals(7, frame.getAuxInfo(0).getOutputLen());
+        assertEquals(6, frame.getAuxInfo(0).getStepOutputLen());
+        assertTrue(frame.getFinished(0));
+        assertTrue(observer.completed);
     }
 
     @Test void completedUnwritableOutputExpiresAndRemovesRegistryEntry() {

@@ -32,7 +32,7 @@ final class GenerateResponseStream {
     private AuxInfoPB metadata = AuxInfoPB.getDefaultInstance();
 
     private boolean allocateReady, allocateSent, loadReady, loadSent, generationFinished, finalSent;
-    private boolean attached, draining, terminal, delivered, cancelled;
+    private boolean attached, draining, terminal, delivered, cancelled, compact;
 
     private Throwable failure;
 
@@ -66,7 +66,10 @@ final class GenerateResponseStream {
     synchronized boolean expired() { return !attached && System.nanoTime() >= expires; }
 
     // D starts after P has already delivered its first token.
-    synchronized void startAt(int length) { generated = sent = length; }
+    synchronized void startAt(int length, boolean compact) {
+        generated = sent = length;
+        this.compact = compact;
+    }
 
     /** P relays synthetic D frames by retaining only cumulative length and fixed metadata. */
     void add(GenerateOutputsPB value) {
@@ -140,7 +143,7 @@ final class GenerateResponseStream {
                 int end = 0, width = 0, token = 0, control = 0;
                 long id = 0;
                 AuxInfoPB info = null;
-                boolean last = false, complete = false;
+                boolean last = false, complete = false, progressOnly = false;
                 Throwable error = null;
                 synchronized (this) {
                     if (cancelled || response.isCancelled()) { cancelled = true; draining = false; cancelTimeout(); return; }
@@ -151,6 +154,7 @@ final class GenerateResponseStream {
                         width = Math.min(MAX_FRAME_TOKENS, generated - sent);
                         end = sent + width; token = tokenId; id = requestId; info = metadata;
                         last = generationFinished && end == generated;
+                        progressOnly = compact;
                     } else if (terminal) { complete = true; delivered = true; cancelTimeout(); }
                     else { draining = false; return; }
                     if (error == null && !complete && !response.isReady()) { draining = false; return; }
@@ -160,7 +164,7 @@ final class GenerateResponseStream {
                 GenerateOutputsPB value = switch (control) {
                     case 1 -> GenerateOutputsPB.newBuilder().setSupportsPrefillCompletion(true).build();
                     case 2 -> GenerateOutputsPB.newBuilder().setRequestId(id).setErrorInfo(RpcErrorPB.newBuilder().setErrorCodeValue(0)).build();
-                    default -> RpcMessages.token(id, token, end, width, info, last);
+                    default -> RpcMessages.progress(id, token, end, width, info, last, progressOnly);
                 };
                 response.onNext(value);
                 synchronized (this) {

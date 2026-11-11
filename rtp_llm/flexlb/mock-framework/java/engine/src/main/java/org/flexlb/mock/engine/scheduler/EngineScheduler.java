@@ -77,7 +77,7 @@ public interface EngineScheduler extends AutoCloseable {
             if (identity == null || identity.isBlank() || tokens < 1 || maxNewTokens < 1 || minNewTokens < 0 || minNewTokens > maxNewTokens)
                 throw new IllegalArgumentException("Invalid scheduling input");
             Objects.requireNonNull(cacheSequence);
-            if (cacheSequence.tokens().size() != tokens) throw new IllegalArgumentException("Cache identity length differs from input");
+            if (cacheSequence.inputLength() != tokens) throw new IllegalArgumentException("Cache identity length differs from input");
         }
         public List<Long> keys() { return cacheSequence.keys(); }
     }
