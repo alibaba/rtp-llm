@@ -564,7 +564,6 @@ TEST(KVCMMockFullLinearTest, FullLinearWriteRoutesEachGroupToItsOwnLayerBuffers)
     backend->write(backend->prepareWrite(std::move(request)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
     for (const auto& [tag, pool] : environment.pools_by_tag) {
-        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
         EXPECT_EQ(pool->refCount(environment.block_id), 1u);
     }
 }
@@ -626,7 +625,6 @@ TEST(KVCMMockFullLinearTest, TwoFullTwoLinearWritePreservesMaskOrderAndActualUri
     backend->write(backend->prepareWrite(std::move(request)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
     for (const auto& [tag, pool] : environment.pools_by_tag) {
-        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
         EXPECT_EQ(pool->refCount(environment.block_id), 1u);
     }
 }
@@ -696,7 +694,6 @@ TEST(KVCMMockFullLinearTest, IncompleteLinearGroupSetFailsBeforeClientIO) {
     backend->write(backend->prepareWrite(std::move(request)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
     for (const auto& [tag, pool] : environment.pools_by_tag) {
-        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
         EXPECT_EQ(pool->refCount(environment.block_id), 1u);
     }
 }

@@ -76,7 +76,7 @@ ControlledPerRankBlockTransferEngine::ControlledPerRankBlockTransferEngine(const
     action_(action),
     barrier_(std::move(barrier)) {}
 
-std::shared_ptr<TransferAsyncContext> ControlledPerRankBlockTransferEngine::execute(TransferTask task) {
+std::shared_ptr<TransferAsyncContext> ControlledPerRankBlockTransferEngine::executeBatch(TransferTask task) {
     submit_count_.fetch_add(1);
     if (barrier_ != nullptr) {
         barrier_->enterAndWait();
@@ -88,7 +88,7 @@ std::shared_ptr<TransferAsyncContext> ControlledPerRankBlockTransferEngine::exec
         return std::make_shared<CompletedTransferAsyncContext>(
             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected copy failure"));
     }
-    return PerRankBlockTransferEngine::execute(std::move(task));
+    return PerRankBlockTransferEngine::executeBatch(std::move(task));
 }
 
 void ControlledPerRankBlockTransferEngine::setCopyBehavior(TransferCopyAction               action,
@@ -158,7 +158,7 @@ std::string MemoryDiskBlockIO::debugString() const {
     return "MemoryDiskBlockIO";
 }
 
-std::shared_ptr<BlockTreeDiskBlockPool>
+std::shared_ptr<DiskBlockPool>
 makeDiskPool(size_t payload_bytes, size_t usable_count, std::unique_ptr<DiskBlockIO> io) {
     return block_transfer_engine_test::makeDiskPool(
         payload_bytes, usable_count, "/tmp", std::move(io), "block_tree_cache_disk", true, true);
@@ -491,7 +491,11 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
         };
     }
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));
-    auto per_rank_engine        = std::make_shared<PerRankBlockTransferEngine>(group_sets,
+    const bool async =
+        config.btc_transfer_engine_async && std::all_of(group_sets.begin(), group_sets.end(), [](const auto& group) {
+            return group->devicePools().empty() || (!group->hostPool() && !group->diskPool()) || group->crcEnabled();
+        });
+    auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(group_sets,
                                                                         config.enable_disk_cache,
                                                                         DeviceHostCopyOptions{},
                                                                         config.device_disk_staging_block_count,
@@ -501,18 +505,13 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                                         cache_metrics_reporter,
                                                                         0,
                                                                         config.btc_crc_slot_count,
-                                                                        config.btc_transfer_engine_async);
-    if (std::all_of(group_sets.begin(), group_sets.end(), [](const auto& group) {
-            return group->devicePools().empty() || (!group->hostPool() && !group->diskPool()) || group->crcEnabled();
-        })) {
-        EXPECT_TRUE(per_rank_engine->asyncEnabled());
-    }
+                                                                        async);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
     }
-    auto transfer_dispatcher = std::make_unique<BlockTransferDispatcher>(
-        std::move(per_rank_engine), std::move(multi_rank_engine), config.max_descriptors_per_transfer_batch);
+    auto transfer_dispatcher =
+        std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
     auto task_pool =
         std::make_unique<BlockTreeTaskPool>(static_cast<size_t>(config.task_pool_size), 1000, "BlockTreeCacheTaskPool");
     auto tree  = std::make_unique<BlockTree>(std::move(group_sets));
@@ -642,11 +641,6 @@ void BlockTreeCacheTestPeer::runMaintenanceForTest(BlockTreeCache& cache) {
     cache.checkWatermark();
 }
 
-void BlockTreeCacheTestPeer::beginStoreShutdownForTest(BlockTreeCache& cache) {
-    std::lock_guard<std::mutex> lock(cache.mutex_);
-    cache.storer_.stopAdmissionLocked();
-}
-
 bool BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(BlockTreeCache& cache,
                                                          size_t          group_set_id,
                                                          Tier            tier,
@@ -717,9 +711,9 @@ void BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(const BlockTreeCache& ca
         engine.waitForIdle();
         cache.task_pool_->waitForIdle();
         engine.waitForIdle();
-        std::lock_guard<std::mutex> lock(cache.transfer_dispatcher_->completion_mutex_);
         const auto                  queues = engine.queueSizes();
-        if (cache.transfer_dispatcher_->inflight_transfers_ == 0 && cache.task_pool_->pending_tasks_.load() == 0
+        std::lock_guard<std::mutex> lock(cache.transfer_dispatcher_->inflight_mutex_);
+        if (cache.transfer_dispatcher_->inflight_count_ == 0 && cache.task_pool_->pending_tasks_.load() == 0
             && queues.load == 0 && queues.background == 0 && queues.completion == 0) {
             return;
         }
@@ -756,7 +750,6 @@ bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& c
         cache.task_pool_          = std::move(replacement);
         cache.evictor_.task_pool_ = cache.task_pool_.get();
         cache.loader_.task_pool_  = cache.task_pool_.get();
-        cache.storer_.task_pool_  = cache.task_pool_.get();
         return true;
     } catch (const std::exception& error) {
         ADD_FAILURE() << "queue-rejection guard failed to restore thread pool: " << error.what();
@@ -776,7 +769,7 @@ ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(const std
     group_set_results_(groups.size()),
     perform_successful_transfers_(perform_successful_transfers) {}
 
-std::shared_ptr<TransferAsyncContext> ScriptedPerRankBlockTransferEngine::execute(TransferTask task) {
+std::shared_ptr<TransferAsyncContext> ScriptedPerRankBlockTransferEngine::executeBatch(TransferTask task) {
     const auto& descriptors = task.descriptors();
     bool        success     = true;
     {
@@ -793,7 +786,7 @@ std::shared_ptr<TransferAsyncContext> ScriptedPerRankBlockTransferEngine::execut
         }
     }
     if (success && perform_successful_transfers_) {
-        return PerRankBlockTransferEngine::execute(std::move(task));
+        return PerRankBlockTransferEngine::executeBatch(std::move(task));
     }
     if (success) {
         return std::make_shared<CompletedTransferAsyncContext>(ErrorInfo::OkStatus());

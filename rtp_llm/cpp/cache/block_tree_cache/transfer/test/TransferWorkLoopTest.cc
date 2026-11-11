@@ -39,6 +39,14 @@ namespace {
 using namespace block_transfer_engine_test;
 using namespace std::chrono_literals;
 
+// Physical disk reads are exercised directly below; this is not an admitted logical route.
+TransferDescriptor physicalDiskRead(size_t group, BlockIdxType disk, BlockIdxType host) {
+    auto desc = TransferDescriptor::hostToDisk(group, host, disk);
+    std::swap(desc.source_tier, desc.target_tier);
+    std::swap(desc.source_blocks, desc.target_blocks);
+    return desc;
+}
+
 size_t seriesCount(kmonitor::MutableMetric* metric) {
     return metric->metric_data_->Size();
 }
@@ -242,7 +250,7 @@ protected:
                     Tier        source  = Tier::HOST,
                     Tier        target  = Tier::DISK,
                     const char* scope   = "worker_batch") {
-        kmonitor::MetricsTags tags("operation", target == Tier::DEVICE ? "load" : "store");
+        kmonitor::MetricsTags tags("operation", target == Tier::DEVICE ? "load" : "evict");
         tags.AddTag("source_tier", tierName(source));
         tags.AddTag("target_tier", tierName(target));
         tags.AddTag("stage", stage);
@@ -267,7 +275,7 @@ protected:
     }
     TempDirGuard                                   temp{"transfer_workloop"};
     std::shared_ptr<HostBlockPool>                 host;
-    BlockTreeDiskBlockPoolPtr                      disk;
+    DiskBlockPoolPtr                               disk;
     GroupSetPtr                                    group;
     std::shared_ptr<PerRankBlockTransferEngine>    engine;
     std::unique_ptr<BlockTransferDispatcher>       request_dispatcher;
@@ -350,16 +358,13 @@ TEST_P(TransferWorkLoopProfileBenchmark, TraceCardinalityFollowsBatches) {
     initialize(8, 8, 1, 2);
     auto session = AsyncProfileSession::start(100000);
     ASSERT_TRUE(await(engine->execute(writes(8))));
-    std::vector<TransferDescriptor> reads;
-    for (size_t i = 0; i < 8; ++i)
-        reads.push_back(TransferDescriptor::diskToHost(0, disks[i], hosts[i]));
-    ASSERT_TRUE(await(engine->execute(makeTransferTask(std::move(reads)))));
+    ASSERT_TRUE(await(engine->execute(writes(8))));
     engine->shutdown();
     const auto events = session->finish();
     checkWorkLoopTrace(events);
     EXPECT_EQ(events.size(), 6u);  // Three intervals per batch, for eight blocks and any Disk worker count.
-    EXPECT_EQ(io->writes, 8u);
-    EXPECT_EQ(io->reads, 8u);
+    EXPECT_EQ(io->writes, 16u);
+    EXPECT_EQ(io->reads, 0u);
 }
 
 INSTANTIATE_TEST_SUITE_P(DiskWorkers, TransferWorkLoopProfileBenchmark, ::testing::Values(1u, 8u, 16u));
@@ -375,7 +380,7 @@ TEST_F(TransferWorkLoopTest, MultipleOwnersRoundRobinWithStaticDirectionCapacity
         engine->shutdown();
     });
     ASSERT_EQ(engine->load_loops_.size(), 2u);
-    ASSERT_EQ(engine->offload_loops_.size(), 2u);
+    ASSERT_EQ(engine->evict_loops_.size(), 2u);
     for (size_t i = 0; i < 2; ++i) {
         auto context = engine->execute(makeTransferTask({TransferDescriptor::hostToDisk(0, hosts[i], disks[i])}));
         context->onDone([&, i](TransferResult result) {
@@ -387,8 +392,8 @@ TEST_F(TransferWorkLoopTest, MultipleOwnersRoundRobinWithStaticDirectionCapacity
         contexts.push_back(std::move(context));
     }
     EXPECT_EQ(engine->queueSizes().background, 2u);
-    EXPECT_EQ(engine->offload_loops_[0]->outstandingBatches(), 1u);
-    EXPECT_EQ(engine->offload_loops_[1]->outstandingBatches(), 1u);
+    EXPECT_EQ(engine->evict_loops_[0]->outstandingBatches(), 1u);
+    EXPECT_EQ(engine->evict_loops_[1]->outstandingBatches(), 1u);
     auto rejected = engine->execute(writes());
     ASSERT_TRUE(rejected->done());
     EXPECT_EQ(rejected->result().copy_error, CacheCopyError::NOT_EXECUTED);
@@ -396,27 +401,82 @@ TEST_F(TransferWorkLoopTest, MultipleOwnersRoundRobinWithStaticDirectionCapacity
     engine->waitForIdle();
     for (size_t i = 0; i < 2; ++i) {
         ASSERT_EQ(observed[i].wait_for(5s), std::future_status::ready);
-        EXPECT_EQ(observed[i].get(), "btc_offload_" + std::to_string(i));
+        EXPECT_EQ(observed[i].get(), "btc_evict_" + std::to_string(i));
     }
     EXPECT_EQ(engine->queueSizes().background, 0u);
     auto reused = engine->execute(writes());
     ASSERT_TRUE(await(reused));
     EXPECT_TRUE(reused->success());
     cleanup.run();
-    for (const auto& loop : engine->offload_loops_)
+    for (const auto& loop : engine->evict_loops_)
         EXPECT_FALSE(loop->accepting_);
-    for (const auto& loop : engine->offload_loops_) {
+    for (const auto& loop : engine->evict_loops_) {
         EXPECT_EQ(loop->capacity_, 1u);
         EXPECT_EQ(loop->outstandingBatches(), 0u);
     }
 }
 
-TEST_F(TransferWorkLoopTest, DirectionCapacityPartitionsRemainderWithoutBorrowingFromOtherOwners) {
+TEST_F(TransferWorkLoopTest, AdmissionRetriesOnlyFullOwnersAndPreservesUnacceptedArguments) {
+    initialize(1, 1);
+    io->blocked = true;
+    block_tree_cache_detail::ScopeRollback cleanup([&] {
+        io->release();
+        engine->shutdown();
+    });
+    auto&                                  owner  = *engine->evict_loops_.front();
+    auto                                   active = owner.execute(writes());
+    ASSERT_TRUE(io->waitWrites());
+
+    auto                                     task      = writes();
+    const auto                               trace_id  = task.traceId();
+    size_t                                   callbacks = 0;
+    TransferWorkLoop::BeforeCompleteCallback callback  = [&](const TransferResult& result) {
+        EXPECT_TRUE(result.ok());
+        ++callbacks;
+    };
+    bool retryable = false;
+    EXPECT_EQ(owner.execute(std::move(task), std::move(callback), &retryable), nullptr);
+    EXPECT_TRUE(retryable);
+    ASSERT_EQ(task.descriptors().size(), 1u);
+    EXPECT_EQ(task.traceId(), trace_id);
+    EXPECT_TRUE(callback);
+    EXPECT_EQ(callbacks, 0u);
+
+    auto invalid  = makeTransferTask({});
+    auto rejected = engine->execute(std::move(invalid));
+    ASSERT_NE(rejected, nullptr);
+    EXPECT_EQ(rejected->errorInfo().code(), ErrorCode::INVALID_PARAMS);
+    auto expired      = writes();
+    expired.deadline_ = TransferTask::Clock::now() - 1ms;
+    rejected          = owner.execute(std::move(expired), {}, &retryable);
+    ASSERT_NE(rejected, nullptr);
+    EXPECT_FALSE(retryable);
+    EXPECT_EQ(rejected->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
+
+    io->release();
+    ASSERT_TRUE(await(active));
+    engine->waitForIdle();
+    auto accepted = owner.execute(std::move(task), std::move(callback), &retryable);
+    ASSERT_NE(accepted, nullptr);
+    EXPECT_FALSE(retryable);
+    ASSERT_TRUE(await(accepted));
+    EXPECT_TRUE(accepted->success());
+    engine->waitForIdle();
+    EXPECT_EQ(callbacks, 1u);
+
+    owner.stopAdmission();
+    rejected = owner.execute(writes(), {}, &retryable);
+    ASSERT_NE(rejected, nullptr);
+    EXPECT_FALSE(retryable);
+    EXPECT_FALSE(rejected->success());
+}
+
+TEST_F(TransferWorkLoopTest, FullOwnerRetriesOtherOwnersUntilDirectionCapacityIsExhausted) {
     initialize(5, 1, 1, 3);
     for (size_t worker = 0; worker < 3; ++worker) {
         const auto expected = worker < 2 ? 2u : 1u;
         EXPECT_EQ(engine->load_loops_[worker]->capacity_, expected);
-        EXPECT_EQ(engine->offload_loops_[worker]->capacity_, expected);
+        EXPECT_EQ(engine->evict_loops_[worker]->capacity_, expected);
     }
     io->blocked = true;
     std::vector<std::shared_ptr<TransferAsyncContext>> contexts;
@@ -425,24 +485,25 @@ TEST_F(TransferWorkLoopTest, DirectionCapacityPartitionsRemainderWithoutBorrowin
         engine->shutdown();
     });
     // Fill the last owner's single slot while the other owners still have room.
-    contexts.push_back(engine->offload_loops_[2]->execute(writes()));
+    contexts.push_back(engine->evict_loops_[2]->execute(writes()));
     for (size_t i = 1; i < 3; ++i)
         contexts.push_back(engine->execute(makeTransferTask({TransferDescriptor::hostToDisk(0, hosts[i], disks[i])})));
     EXPECT_EQ(engine->queueSizes().background, 3u);
-    auto rejected = engine->execute(makeTransferTask({TransferDescriptor::hostToDisk(0, hosts[3], disks[3])}));
-    ASSERT_TRUE(rejected->done());
-    EXPECT_EQ(rejected->result().copy_error, CacheCopyError::NOT_EXECUTED);
-    EXPECT_EQ(engine->offload_loops_[0]->outstandingBatches(), 1u);
-    EXPECT_EQ(engine->offload_loops_[1]->outstandingBatches(), 1u);
-    EXPECT_EQ(engine->offload_loops_[2]->outstandingBatches(), 1u);
-    // Round robin advances to owner 0, which can accept its second batch.
+    contexts.push_back(engine->execute(makeTransferTask({TransferDescriptor::hostToDisk(0, hosts[3], disks[3])})));
+    EXPECT_FALSE(contexts.back()->done());
+    EXPECT_EQ(engine->evict_loops_[0]->outstandingBatches(), 2u);
+    EXPECT_EQ(engine->evict_loops_[1]->outstandingBatches(), 1u);
+    EXPECT_EQ(engine->evict_loops_[2]->outstandingBatches(), 1u);
     contexts.push_back(engine->execute(makeTransferTask({TransferDescriptor::hostToDisk(0, hosts[4], disks[4])})));
     EXPECT_FALSE(contexts.back()->done());
-    EXPECT_EQ(engine->queueSizes().background, 4u);
+    EXPECT_EQ(engine->queueSizes().background, 5u);
+    auto rejected = engine->execute(writes());
+    ASSERT_TRUE(rejected->done());
+    EXPECT_EQ(rejected->result().copy_error, CacheCopyError::NOT_EXECUTED);
     cleanup.run();
     for (const auto& context : contexts)
         EXPECT_TRUE(context->success());
-    EXPECT_EQ(io->writes, 4u);
+    EXPECT_EQ(io->writes, 5u);
 }
 
 TEST_F(TransferWorkLoopTest, ConcurrentSubmittersRespectStaticDirectionCapacity) {
@@ -484,7 +545,7 @@ TEST_F(TransferWorkLoopTest, ConcurrentSubmittersRespectStaticDirectionCapacity)
 
 TEST_F(TransferWorkLoopTest, EngineIdleWaitIncludesCallbackSuccessorOnAnEarlierOwner) {
     initialize(4, 1, 1, 2);
-    engine->next_offload_.store(1);
+    engine->next_evict_.store(1);
     io->blocked = true;
     std::promise<void>                                  parent_entered, release_parent, wait_started;
     auto                                                entered         = parent_entered.get_future();
@@ -539,7 +600,7 @@ TEST_F(TransferWorkLoopTest, EngineIdleWaitIncludesCallbackSuccessorOnAnEarlierO
 TEST_F(TransferWorkLoopDeathTest, EntryBadAllocIsFatal) {
     EXPECT_EXIT(
         {
-            TransferWorkLoop owner({group}, nullptr, direct_disk_executor.get(), TransferDirection::OFFLOAD, 1, 8, {});
+            TransferWorkLoop owner({group}, nullptr, direct_disk_executor.get(), TransferDirection::EVICT, 1, 8, {});
             TransferWorkLoop::Entry entry(writes(), {});
             prepareOomDeathTest("exercising Entry OOM boundary");
             owner.withEntry(entry, [] { throw std::bad_alloc(); });
@@ -552,7 +613,7 @@ TEST_F(TransferWorkLoopDeathTest, EntryBadAllocIsFatal) {
 TEST_F(TransferWorkLoopDeathTest, BeforeCompleteCallbackBadAllocIsFatal) {
     EXPECT_EXIT(
         {
-            TransferWorkLoop owner({group}, nullptr, direct_disk_executor.get(), TransferDirection::OFFLOAD, 1, 8, {});
+            TransferWorkLoop owner({group}, nullptr, direct_disk_executor.get(), TransferDirection::EVICT, 1, 8, {});
             owner.start();
             prepareOomDeathTest("exercising before_complete OOM boundary");
             auto context = owner.execute(writes(), [](const TransferResult&) { throw std::bad_alloc(); });
@@ -566,7 +627,7 @@ TEST_F(TransferWorkLoopDeathTest, BeforeCompleteCallbackBadAllocIsFatal) {
 }
 
 TEST_F(TransferWorkLoopTest, OrdinaryEntryExceptionCompletesOnlyThatTask) {
-    TransferWorkLoop owner({group}, nullptr, direct_disk_executor.get(), TransferDirection::OFFLOAD, 1, 8, {});
+    TransferWorkLoop owner({group}, nullptr, direct_disk_executor.get(), TransferDirection::EVICT, 1, 8, {});
     auto             context = owner.execute(writes());
     owner.entries_.splice(owner.entries_.end(), owner.incoming_);
     auto& entry    = **owner.entries_.begin();
@@ -588,7 +649,7 @@ TEST_F(TransferWorkLoopTest, SuppliedBatchLimitStaysFixedWhileStagingIsLeased) {
         auto pool =
             limits.blocks ? std::make_shared<HostStagingBlockPool>(limits.blocks, disk->strideBytes()) : nullptr;
         TransferWorkLoop owner(
-            {group}, nullptr, direct_disk_executor.get(), TransferDirection::OFFLOAD, limits.expected, 8, pool);
+            {group}, nullptr, direct_disk_executor.get(), TransferDirection::EVICT, limits.expected, 8, pool);
         EXPECT_EQ(owner.batchLimit(), limits.expected);
         // A fully occupied pool does not change the cached admission geometry.
         const auto leases = pool ? pool->tryMallocBatch(limits.blocks) : std::nullopt;
@@ -598,19 +659,20 @@ TEST_F(TransferWorkLoopTest, SuppliedBatchLimitStaysFixedWhileStagingIsLeased) {
 }
 
 TEST_F(TransferWorkLoopTest, FixedBatchLimitAlsoBoundsRoutesWithoutStaging) {
-    auto             pool = std::make_shared<HostStagingBlockPool>(2, disk->strideBytes());
-    TransferWorkLoop owner(
-        {group}, nullptr, direct_disk_executor.get(), TransferDirection::OFFLOAD, 2, 8, std::move(pool));
-    auto rejected = owner.execute(writes(3));
-    ASSERT_TRUE(rejected->done());
-    EXPECT_EQ(rejected->errorInfo().code(), ErrorCode::INVALID_PARAMS);
-    EXPECT_EQ(io->writes, 0u);
-    owner.start();
-    auto accepted = owner.execute(writes(2));
-    ASSERT_TRUE(await(accepted));
-    owner.shutdown();
-    EXPECT_TRUE(accepted->success());
-    EXPECT_EQ(io->writes, 2u);
+    initialize(3, 2);
+    io->blocked = true;
+    block_tree_cache_detail::ScopeRollback cleanup([&] {
+        io->release();
+        engine->shutdown();
+    });
+    auto                                   context = engine->execute(writes(3));
+    ASSERT_TRUE(io->waitWrites());
+    // PerRank splits the request before either physical batch reaches its owner.
+    EXPECT_EQ(engine->evict_loops_.front()->outstandingBatches(), 2u);
+    EXPECT_FALSE(context->done());
+    cleanup.run();
+    EXPECT_TRUE(context->success());
+    EXPECT_EQ(io->writes, 3u);
 }
 
 TEST_F(TransferWorkLoopTest, LegacyLocalRequestGroupsBeforeIndependentBatchExecution) {
@@ -644,6 +706,8 @@ TEST_F(TransferWorkLoopTest, LegacyLocalRequestGroupsBeforeIndependentBatchExecu
 
 TEST_F(TransferWorkLoopTest, PureDiskResultsAndCallbacksBelongToOwner) {
     initialize();
+    auto* source = static_cast<uint8_t*>(host->blockBuffer(hosts[2]).addr);
+    std::memset(source + group->storageBytes(), 0xa5, disk->strideBytes() - group->storageBytes());
     io->blocked  = true;
     auto context = executeRequest(writes(3));
     ASSERT_TRUE(io->waitWrites());
@@ -654,22 +718,19 @@ TEST_F(TransferWorkLoopTest, PureDiskResultsAndCallbacksBelongToOwner) {
     });
     io->release();
     ASSERT_TRUE(await(context));
-    // Retain actual references until both operations finish; no lease is added
-    // by the WorkLoop. The second transfer must wake a Disk-only sleeping loop.
+    // Inspect the physical record after the accepted eviction has completed.
     std::memset(host->blockBuffer(hosts[3]).addr, 0, 384);
-    auto read = engine->execute(makeTransferTask({TransferDescriptor::diskToHost(0, disks[2], hosts[3])}));
-    ASSERT_TRUE(await(read));
-    EXPECT_TRUE(read->success());
+    ASSERT_EQ(disk->read(disks[2], host->blockBuffer(hosts[3]).addr, disk->strideBytes()), BlockIOStatus::OK);
     engine->shutdown();
     EXPECT_NE(callback_thread, io->worker);
     EXPECT_NE(callback_thread, std::this_thread::get_id());
     EXPECT_EQ(std::memcmp(host->blockBuffer(hosts[2]).addr, host->blockBuffer(hosts[3]).addr, 384), 0);
     for (size_t i = group->storageBytes(); i < disk->strideBytes(); ++i)
-        EXPECT_EQ(io->data[disk->blockOffset(disks[2]) + i], 0u);
+        EXPECT_EQ(io->data[disk->blockOffset(disks[2]) + i], 0xa5u);
 }
 
 TEST_F(TransferWorkLoopTest, DiskResultPublicationWaitsForNotificationMutex) {
-    TransferWorkLoop        owner({group}, nullptr, direct_disk_executor.get(), TransferDirection::OFFLOAD, 2, 8, {});
+    TransferWorkLoop        owner({group}, nullptr, direct_disk_executor.get(), TransferDirection::EVICT, 2, 8, {});
     TransferWorkLoop::Entry entry(writes(2), {});
     entry.step = TransferWorkLoop::Step::DISK_WRITE;
     std::promise<void> started;
@@ -696,16 +757,16 @@ TEST_F(TransferWorkLoopTest, DiskResultPublicationWaitsForNotificationMutex) {
     EXPECT_EQ(owner.disk_completed_.pop(), &entry);
 }
 
-TEST_F(TransferWorkLoopTest, DiskToHostPromotionRunsOnLoadOwner) {
+TEST_F(TransferWorkLoopTest, HostToDiskEvictionRunsOnEvictOwner) {
     initialize();
     io->blocked  = true;
-    auto context = engine->execute(makeTransferTask({TransferDescriptor::diskToHost(0, disks[0], hosts[0])}));
-    ASSERT_TRUE(io->waitReads());
-    EXPECT_EQ(engine->queueSizes().load, 1u);
-    EXPECT_EQ(engine->queueSizes().background, 0u);
+    auto context = engine->execute(makeTransferTask({TransferDescriptor::hostToDisk(0, hosts[0], disks[0])}));
+    ASSERT_TRUE(io->waitWrites());
+    EXPECT_EQ(engine->queueSizes().load, 0u);
+    EXPECT_EQ(engine->queueSizes().background, 1u);
     std::thread::id completing_thread;
     context->onDone([&](TransferResult) { completing_thread = std::this_thread::get_id(); });
-    const auto owner_thread = engine->load_loops_.front()->thread_.get_id();
+    const auto owner_thread = engine->evict_loops_.front()->thread_.get_id();
     io->release();
     ASSERT_TRUE(await(context));
     engine->shutdown();
@@ -714,7 +775,7 @@ TEST_F(TransferWorkLoopTest, DiskToHostPromotionRunsOnLoadOwner) {
 }
 
 TEST_F(TransferWorkLoopTest, DiskQueuePreservesCompletionsPublishedDuringConsumption) {
-    TransferWorkLoop owner({group}, nullptr, direct_disk_executor.get(), TransferDirection::OFFLOAD, 2, 8, {});
+    TransferWorkLoop owner({group}, nullptr, direct_disk_executor.get(), TransferDirection::EVICT, 2, 8, {});
     auto             first     = owner.execute(writes());
     auto             second    = owner.execute(writes());
     size_t           callbacks = 0;
@@ -784,13 +845,13 @@ TEST_F(TransferWorkLoopTest, ResidentDiskBatchesFitDerivedWorkerQueues) {
             std::vector<TransferDescriptor> descriptors;
             for (size_t i = offset; i < offset + count; ++i)
                 descriptors.push_back(write ? TransferDescriptor::hostToDisk(0, hosts[i], disks[i]) :
-                                              TransferDescriptor::diskToHost(0, disks[i], hosts[i]));
+                                              physicalDiskRead(0, disks[i], hosts[i]));
             return makeTransferTask(std::move(descriptors));
         };
         TransferWorkLoop                       owner({group},
                                nullptr,
                                engine->disk_io_executor_.get(),
-                               write ? TransferDirection::OFFLOAD : TransferDirection::LOAD,
+                               write ? TransferDirection::EVICT : TransferDirection::LOAD,
                                batch_size,
                                q,
                                                      {},
@@ -868,7 +929,8 @@ TEST_F(TransferWorkLoopTest, ResidentBatchesIncludeInflightCallbackAndEntryClean
     auto context = engine->execute(writes(2));
     ASSERT_TRUE(io->waitWrites());
     check_backlog(1);  // In-flight work remains in the existing backlog series.
-    auto rejected = engine->execute(writes(3));
+    auto invalid  = TransferDescriptor::hostToDisk(0, std::numeric_limits<BlockIdxType>::max(), disks[0]);
+    auto rejected = engine->execute(makeTransferTask({invalid}));
     EXPECT_TRUE(rejected->done());
     EXPECT_EQ(rejected->result().copy_error, CacheCopyError::INVALID_REQUEST);
     std::promise<void>                     entered, release;
@@ -900,7 +962,7 @@ TEST_F(TransferWorkLoopTest, AdmissionAndQueueTimeoutsDoNotStartIo) {
     enableMetrics();
     size_t           callbacks = 0;
     TransferWorkLoop owner(
-        {group}, nullptr, direct_disk_executor.get(), TransferDirection::OFFLOAD, 5, 3, {}, reporter, 3);
+        {group}, nullptr, direct_disk_executor.get(), TransferDirection::EVICT, 5, 3, {}, reporter, 3);
     const auto expect_timeout = [](const std::shared_ptr<TransferAsyncContext>& context) {
         EXPECT_TRUE(context->done());
         EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
@@ -950,7 +1012,7 @@ TEST_F(TransferWorkLoopTest, AdmissionAndQueueTimeoutsDoNotStartIo) {
 }
 
 TEST_F(TransferWorkLoopTest, StartedExpiredTaskAndDroppedContextStillFinishAfterStop) {
-    TransferWorkLoop owner({group}, nullptr, direct_disk_executor.get(), TransferDirection::OFFLOAD, 5, 8, {});
+    TransferWorkLoop owner({group}, nullptr, direct_disk_executor.get(), TransferDirection::EVICT, 5, 8, {});
     block_tree_cache_detail::ScopeRollback finish([&] {
         if (!owner.thread_.joinable())
             owner.start();
@@ -1021,7 +1083,7 @@ TEST_F(TransferWorkLoopTest, CallbackSubmitsSuccessorWithoutReenteringOwner) {
     auto               future = successor_done.get_future();
     context->onDone([&](TransferResult) {
         in_callback = true;
-        auto next   = engine->execute(makeTransferTask({TransferDescriptor::diskToHost(0, disks[0], hosts[1])}));
+        auto next   = engine->execute(makeTransferTask({TransferDescriptor::hostToDisk(0, hosts[1], disks[1])}));
         EXPECT_FALSE(next->done());
         next->onDone([&](TransferResult result) {
             EXPECT_FALSE(in_callback);
@@ -1033,7 +1095,7 @@ TEST_F(TransferWorkLoopTest, CallbackSubmitsSuccessorWithoutReenteringOwner) {
     io->release();
     ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
     engine->shutdown();
-    EXPECT_EQ(std::memcmp(host->blockBuffer(hosts[0]).addr, host->blockBuffer(hosts[1]).addr, 384), 0);
+    EXPECT_EQ(std::memcmp(host->blockBuffer(hosts[1]).addr, io->data.data() + disk->blockOffset(disks[1]), 384), 0);
 }
 
 TEST_F(TransferWorkLoopTest, ClosingRejectsCallbackDerivedTransferSafely) {
@@ -1076,7 +1138,7 @@ TEST_F(TransferWorkLoopTest, ThrowingCallbackDoesNotLoseOtherCallbacksOrAdmissio
 TEST_F(TransferWorkLoopTest, DiskRejectionHasNoCallbackAndIsNotRetried) {
     enableMetrics();
     initialize();
-    disk->close();
+    engine->disk_io_executor_->stop();
     auto context = engine->execute(writes());
     ASSERT_TRUE(await(context));
     engine->shutdown();
@@ -1161,9 +1223,6 @@ TEST_F(TransferWorkLoopTest, QueueAndDescriptorCapacityRejectOverflowAndMalforme
     PerRankBlockTransferEngine legacy({}, false, {}, 4, 2, 3, 2, nullptr, 0, 1, false);
     EXPECT_FALSE(legacy.asyncEnabled());  // Legacy does not statically partition Q.
     initialize(1, 2);
-    auto too_large = engine->execute(writes(3));
-    EXPECT_TRUE(too_large->done());
-    EXPECT_EQ(too_large->result().copy_error, CacheCopyError::INVALID_REQUEST);
     auto invalid = TransferDescriptor::hostToDisk(0, hosts[0], disks[0]);
     invalid.source_blocks.push_back(hosts[1]);
     EXPECT_EQ(engine->execute(makeTransferTask({invalid}))->result().copy_error, CacheCopyError::INVALID_REQUEST);
@@ -1171,26 +1230,16 @@ TEST_F(TransferWorkLoopTest, QueueAndDescriptorCapacityRejectOverflowAndMalforme
     EXPECT_EQ(engine->execute(makeTransferTask({invalid}))->result().copy_error, CacheCopyError::INVALID_REQUEST);
 }
 
-TEST_F(TransferWorkLoopTest, PerRankRejectsMixedGroupsAndDirectionsBeforeAdmission) {
-    auto second             = makeTestGroupSet(1, group->topologyPtr(), {"group0"}, {}, host, disk);
-    engine                  = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group, second},
-                                                          true,
-                                                          DeviceHostCopyOptions{},
-                                                          4,
-                                                          2,
-                                                          1,
-                                                          8,
-                                                          nullptr,
-                                                          0,
-                                                          1,
-                                                          true,
-                                                          diskOptions());
-    const auto mixed_groups = makeTransferTask(
-        {TransferDescriptor::hostToDisk(0, hosts[0], disks[0]), TransferDescriptor::hostToDisk(1, hosts[1], disks[1])});
-    const auto mixed_directions = makeTransferTask(
-        {TransferDescriptor::hostToDisk(0, hosts[0], disks[0]), TransferDescriptor::diskToHost(0, disks[1], hosts[1])});
-    for (const auto& task : {mixed_groups, mixed_directions}) {
-        auto context = engine->execute(task);
+TEST_F(TransferWorkLoopTest, PerRankRejectsInvalidDescriptorsBeforeAdmission) {
+    initialize();
+    const std::vector<TransferDescriptor> invalid{
+        physicalDiskRead(0, disks[0], hosts[0]),
+        TransferDescriptor::hostToDevice(0, hosts[0], {1}),
+        TransferDescriptor::hostToDisk(0, hosts[0], std::numeric_limits<BlockIdxType>::max()),
+        TransferDescriptor::hostToDisk(std::numeric_limits<size_t>::max(), hosts[0], disks[0]),
+    };
+    for (const auto& descriptor : invalid) {
+        auto context = engine->execute(makeTransferTask({descriptor}));
         ASSERT_TRUE(context->done());
         EXPECT_EQ(context->result().copy_error, CacheCopyError::INVALID_REQUEST);
     }
@@ -1236,7 +1285,7 @@ TEST_F(TransferWorkLoopTest, BeforeCompleteCallbackRunsBeforeReadyAndOutsideInpu
         TransferWorkLoop owner({group},
                                nullptr,
                                direct_disk_executor.get(),
-                               TransferDirection::OFFLOAD,
+                               TransferDirection::EVICT,
                                2,
                                8,
                                {},
@@ -1293,10 +1342,9 @@ TEST_F(TransferWorkLoopTest, TraceOnlyMultipleOwnersPreserveBatchWorkflow) {
     request.setWorkflow(1234, 5678);
     const auto          transfer_id = request.traceId();
     std::atomic<size_t> callbacks{0};
-    for (bool write : {true, false}) {
+    for (size_t round = 0; round < 2; ++round) {
         for (size_t i = 0; i < 8; ++i) {
-            auto task    = request.subtask({write ? TransferDescriptor::hostToDisk(0, hosts[i], disks[i]) :
-                                                    TransferDescriptor::diskToHost(0, disks[i], hosts[i])});
+            auto task    = request.subtask({TransferDescriptor::hostToDisk(0, hosts[i], disks[i])});
             auto context = engine->execute(std::move(task));
             context->onDone([&](TransferResult result) {
                 EXPECT_TRUE(result.ok());
@@ -1324,8 +1372,8 @@ TEST_F(TransferWorkLoopTest, TraceOnlyMultipleOwnersPreserveBatchWorkflow) {
         reads += event.record.stage == "disk_read";
         writes += event.record.stage == "disk_write";
     }
-    EXPECT_EQ(reads, 8u);
-    EXPECT_EQ(writes, 8u);
+    EXPECT_EQ(reads, 0u);
+    EXPECT_EQ(writes, 16u);
     const auto json = mergeAsyncProfileTrace(R"({"traceEvents":[]})", events);
     // The exporter keeps request-owned logical intervals off physical CPU tracks.
     EXPECT_EQ(json.find("worker_task_total"), std::string::npos);
@@ -1358,7 +1406,7 @@ TEST_F(TransferWorkLoopTest, StageCapturePreservesMetricSampleCounts) {
 
 TEST_F(TransferWorkLoopTest, RejectedAdmissionAndTruncatedCaptureDoNotChangeCompletion) {
     TransferWorkLoop owner(
-        {group}, nullptr, direct_disk_executor.get(), TransferDirection::OFFLOAD, 2, 8, {}, nullptr, 3);
+        {group}, nullptr, direct_disk_executor.get(), TransferDirection::EVICT, 2, 8, {}, nullptr, 3);
     owner.stopAdmission();
     auto session  = AsyncProfileSession::start(100000);
     auto rejected = owner.execute(writes());
@@ -1400,7 +1448,7 @@ TEST_F(TransferWorkLoopTest, InlineTimersDoNotAllocateSharedObserversOrRetainRep
         TransferWorkLoop owner({group},
                                nullptr,
                                direct_disk_executor.get(),
-                               TransferDirection::OFFLOAD,
+                               TransferDirection::EVICT,
                                2,
                                8,
                                {},
@@ -1499,9 +1547,8 @@ protected:
         ASSERT_EQ(cudaMemcpy(bytes.data(), buffer(targets[i]), bytes.size(), cudaMemcpyDeviceToHost), cudaSuccess);
         EXPECT_EQ(bytes, std::vector<uint8_t>(384, uint8_t(i + 17)));
     }
-    TransferTask store(size_t i, Tier target = Tier::DISK) {
-        return makeTransferTask({target == Tier::DISK ? TransferDescriptor::deviceToDisk(0, {sources[i]}, disks[i]) :
-                                                        TransferDescriptor::deviceToHost(0, {sources[i]}, hosts[i])});
+    TransferTask evict(size_t i) {
+        return makeTransferTask({TransferDescriptor::deviceToHost(0, {sources[i]}, hosts[i])});
     }
     void seedDisk(size_t i) {
         auto* record = io->data.data() + disk->blockOffset(disks[i]);
@@ -1516,7 +1563,7 @@ protected:
         std::memcpy(record + group->storageBytes() - 4, &crc, sizeof(crc));
     }
     DeviceBlockPoolPtr        device;
-    BlockTreeDiskBlockPoolPtr retained_controlled_disk;
+    DiskBlockPoolPtr          retained_controlled_disk;
     std::vector<BlockIdxType> sources, targets;
 };
 
@@ -1554,8 +1601,8 @@ TEST_F(TransferWorkLoopCrcTest, ExpiredStagingHeadLetsSmallerBatchUseExistingFre
 
 TEST_F(TransferWorkLoopCrcTest, DeadlineSkipsUnsubmittedCrcAndReleasesResources) {
     initialize();
-    ASSERT_TRUE(await(engine->execute(store(0, Tier::HOST))));
-    ASSERT_TRUE(await(engine->execute(store(1, Tier::HOST))));
+    ASSERT_TRUE(await(engine->execute(evict(0))));
+    ASSERT_TRUE(await(engine->execute(evict(1))));
     seedDisk(1);
     engine->shutdown();
     for (bool from_disk : {false, true}) {
@@ -1566,7 +1613,7 @@ TEST_F(TransferWorkLoopCrcTest, DeadlineSkipsUnsubmittedCrcAndReleasesResources)
             if (from_disk)
                 pool = std::make_shared<HostStagingBlockPool>(1, disk->strideBytes());
             TransferWorkLoop                       owner({group},
-                                   std::make_unique<CrcTransferService>(std::vector<GroupSetPtr>{group}, 1, 1),
+                                   std::make_unique<CrcCopyExecutor>(std::vector<GroupSetPtr>{group}, 1, 1),
                                    direct_disk_executor.get(),
                                    TransferDirection::LOAD,
                                    1,
@@ -1641,9 +1688,9 @@ TEST_F(TransferWorkLoopCrcTest, DeadlineSkipsUnsubmittedCrcAndReleasesResources)
 
 TEST_F(TransferWorkLoopCrcTest, CombinedRoutesKeepOnlyBatchStageIntervals) {
     initialize(8, 2, 1, 2);
-    auto session = AsyncProfileSession::start(100000);
     for (size_t i = 0; i < 2; ++i)
-        ASSERT_TRUE(await(engine->execute(store(i))));
+        seedDisk(i);
+    auto session = AsyncProfileSession::start(100000);
     for (size_t i = 0; i < 2; ++i) {
         auto context = engine->execute(makeTransferTask({TransferDescriptor::diskToDevice(0, disks[i], {targets[i]})}));
         ASSERT_TRUE(await(context));
@@ -1652,65 +1699,61 @@ TEST_F(TransferWorkLoopCrcTest, CombinedRoutesKeepOnlyBatchStageIntervals) {
     }
     engine->shutdown();
     const auto events = session->finish();
-    ASSERT_EQ(events.size(), 24u);  // Six intervals per combined task.
+    ASSERT_EQ(events.size(), 12u);
     checkWorkLoopTrace(events);
     std::map<std::string, size_t> stages;
     for (const auto& event : events)
         ++stages[event.record.stage];
     EXPECT_EQ(stages,
-              (std::map<std::string, size_t>{{"worker_task_total", 4},
-                                             {"worker_batch_total", 4},
-                                             {"staging_wait", 4},
-                                             {"transfer_queue_wait", 4},
+              (std::map<std::string, size_t>{{"worker_task_total", 2},
+                                             {"worker_batch_total", 2},
+                                             {"staging_wait", 2},
+                                             {"transfer_queue_wait", 2},
                                              {"h2d", 2},
-                                             {"d2h", 2},
-                                             {"disk_read", 2},
-                                             {"disk_write", 2}}));
+                                             {"disk_read", 2}}));
 }
 
 TEST_F(TransferWorkLoopCrcTest, SlowWriteBackpressureKeepsOtherStagesAndDirectionProgressing) {
     enableMetrics();
-    initialize(8, 8, 1);  // Each direction has one staging lease.
+    initialize(8, 8, 1);
+    for (size_t i = 0; i < 2; ++i) {
+        auto sealed = engine->execute(evict(i));
+        ASSERT_TRUE(await(sealed));
+        ASSERT_TRUE(sealed->success());
+    }
     io->blocked = true;
-    auto first  = engine->execute(store(0));
+    auto first  = engine->execute(makeTransferTask({TransferDescriptor::hostToDisk(0, hosts[0], disks[0])}));
     ASSERT_TRUE(io->waitWrites());
-    auto waiting    = engine->execute(store(1));
-    auto host_store = engine->execute(store(2, Tier::HOST));
-    ASSERT_TRUE(await(host_store));      // Owner planned the earlier staging waiter.
-    EXPECT_TRUE(host_store->success());  // CRC slot was released before slow write.
+    auto waiting    = engine->execute(makeTransferTask({TransferDescriptor::hostToDisk(0, hosts[1], disks[1])}));
+    auto host_evict = engine->execute(evict(2));
+    ASSERT_TRUE(await(host_evict));
+    EXPECT_TRUE(host_evict->success());
     auto load = engine->execute(makeTransferTask({TransferDescriptor::hostToDevice(0, hosts[2], {targets[2]})}));
     ASSERT_TRUE(await(load));
     EXPECT_TRUE(load->success());
     expectTarget(2);
     EXPECT_FALSE(first->done());
     EXPECT_FALSE(waiting->done());
-    engine->cancelPendingStagingTransfers();
-    ASSERT_TRUE(await(waiting));
-    EXPECT_EQ(waiting->result().copy_error, CacheCopyError::NOT_EXECUTED);
     engine->stopAdmission();
     io->release();
     engine->shutdown();
-    reporter->flushStageMetrics();
-    EXPECT_EQ(seriesCount(metrics()->transfer_stage_qps_metric), 15u);
-    checkStage("staging_wait", 1, true, Tier::DEVICE, Tier::DISK);
-    checkStage("staging_wait", 1, false, Tier::DEVICE, Tier::DISK);
-    checkStage("worker_batch_total", 1, true, Tier::DEVICE, Tier::DISK);
-    checkStage("worker_batch_total", 1, false, Tier::DEVICE, Tier::DISK);
-    checkStage("worker_task_total", 1, false, Tier::DEVICE, Tier::DISK, "worker_task");
-    checkStage("d2h", 1, true, Tier::DEVICE, Tier::DISK);
-    checkStage("disk_write", 1, true, Tier::DEVICE, Tier::DISK);
     EXPECT_TRUE(first->success());
-    EXPECT_EQ(io->writes, 1u);
+    EXPECT_TRUE(waiting->success());
+    EXPECT_EQ(io->writes, 2u);
+    reporter->flushStageMetrics();
+    checkStage("d2h", 3, true, Tier::DEVICE, Tier::HOST);
+    checkStage("disk_write", 2, true, Tier::HOST, Tier::DISK);
 }
 
 TEST_F(TransferWorkLoopCrcTest, ExpiredStagingWaiterIsSkippedWithoutBlockingTheNextTask) {
-    // LOAD checks the records written by STORE, including the resumed task.
-    for (const auto direction : {TransferDirection::OFFLOAD, TransferDirection::LOAD}) {
+    for (size_t i = 0; i < 3; ++i)
+        seedDisk(i);
+    for (const auto direction : {TransferDirection::LOAD}) {
         enableMetrics();
-        SCOPED_TRACE(direction == TransferDirection::OFFLOAD ? "store" : "load");
+        SCOPED_TRACE(direction == TransferDirection::EVICT ? "evict" : "load");
         size_t              callbacks = 0;
         std::atomic<size_t> submissions{0};
-        auto                crc = std::make_unique<CrcTransferService>(std::vector<GroupSetPtr>{group}, 2, 1);
+        auto                crc = std::make_unique<CrcCopyExecutor>(std::vector<GroupSetPtr>{group}, 2, 1);
         for (auto& [ordinal, slots] : crc->slots_)
             for (auto& slot : slots)
                 slot.copy->setTestHook([&](const char* point, void*, void*) {
@@ -1732,9 +1775,7 @@ TEST_F(TransferWorkLoopCrcTest, ExpiredStagingWaiterIsSkippedWithoutBlockingTheN
         const auto reads = io->reads, writes = io->writes;
         io->blocked     = true;
         const auto task = [&](size_t i) {
-            auto result      = direction == TransferDirection::OFFLOAD ?
-                                   store(i) :
-                                   makeTransferTask({TransferDescriptor::diskToDevice(0, disks[i], {targets[i]})});
+            auto result      = makeTransferTask({TransferDescriptor::diskToDevice(0, disks[i], {targets[i]})});
             result.deadline_ = TransferTask::Clock::now() + 1h;
             return result;
         };
@@ -1766,7 +1807,7 @@ TEST_F(TransferWorkLoopCrcTest, ExpiredStagingWaiterIsSkippedWithoutBlockingTheN
             ++callbacks;
         });
         owner.start();
-        if (direction == TransferDirection::OFFLOAD)
+        if (direction == TransferDirection::EVICT)
             ASSERT_TRUE(io->waitWrites(writes + 1));
         else
             ASSERT_TRUE(io->waitReads(reads + 1));
@@ -1779,7 +1820,7 @@ TEST_F(TransferWorkLoopCrcTest, ExpiredStagingWaiterIsSkippedWithoutBlockingTheN
         EXPECT_TRUE(next->success());
         EXPECT_EQ(callbacks, 1u);
         EXPECT_EQ(submissions.load(), 2u);
-        EXPECT_EQ(io->writes, writes + (direction == TransferDirection::OFFLOAD ? 2u : 0u));
+        EXPECT_EQ(io->writes, writes + (direction == TransferDirection::EVICT ? 2u : 0u));
         EXPECT_EQ(io->reads, reads + (direction == TransferDirection::LOAD ? 2u : 0u));
         EXPECT_EQ(owner.outstandingBatches(), 0u);
         EXPECT_EQ(owner.entry_count_, 0u);
@@ -1890,7 +1931,7 @@ TEST_F(TransferWorkLoopCrcTest, BurstWithOneSlotCompletesEveryWaitingEntryExactl
     initialize(16, 2, 1);
     auto session = AsyncProfileSession::start(100000);
     io->blocked  = true;
-    auto first   = engine->execute(store(0));
+    auto first   = engine->execute(makeTransferTask({TransferDescriptor::hostToDisk(0, hosts[0], disks[0])}));
     ASSERT_TRUE(io->waitWrites());
     std::promise<void>                     entered, release;
     auto                                   entered_future = entered.get_future();
@@ -1905,7 +1946,7 @@ TEST_F(TransferWorkLoopCrcTest, BurstWithOneSlotCompletesEveryWaitingEntryExactl
     std::vector<std::shared_ptr<TransferAsyncContext>> contexts;
     std::atomic<size_t>                                calls{0};
     for (size_t i = 0; i < 8; ++i) {
-        contexts.push_back(engine->execute(store(i, Tier::HOST)));
+        contexts.push_back(engine->execute(evict(i)));
         contexts.back()->onDone([&](TransferResult result) {
             EXPECT_TRUE(result.ok());
             ++calls;
@@ -1916,7 +1957,7 @@ TEST_F(TransferWorkLoopCrcTest, BurstWithOneSlotCompletesEveryWaitingEntryExactl
     auto                                   query_released = release_query.get_future();
     bool                                   first_query    = true;
     block_tree_cache_detail::ScopeRollback unblock_query([&] { release_query.set_value(); });
-    for (auto& [ordinal, slots] : engine->offload_loops_.front()->crc_->slots_)
+    for (auto& [ordinal, slots] : engine->evict_loops_.front()->crc_->slots_)
         for (auto& slot : slots)
             slot.copy->setTestHook([&](const char* point, void*, void*) {
                 if (std::strcmp(point, "query") == 0 && std::exchange(first_query, false)) {
@@ -1935,29 +1976,32 @@ TEST_F(TransferWorkLoopCrcTest, BurstWithOneSlotCompletesEveryWaitingEntryExactl
     engine->shutdown();
     EXPECT_EQ(calls, 8u);
     reporter->flushStageMetrics();
-    EXPECT_EQ(seriesCount(metrics()->transfer_stage_qps_metric), 9u);
     checkStage("d2h", 8, true, Tier::DEVICE, Tier::HOST);
     checkStage("worker_task_total", 8, true, Tier::DEVICE, Tier::HOST, "worker_task");
     checkStage("transfer_queue_wait", 8, true, Tier::DEVICE, Tier::HOST, "worker_task");
-    for (const char* stage : {"worker_batch_total", "staging_wait", "d2h", "disk_write"})
-        checkStage(stage, 1, true, Tier::DEVICE, Tier::DISK);
+    checkStage("disk_write", 1, true, Tier::HOST, Tier::DISK);
     checkQueueWait(8, Tier::DEVICE, Tier::HOST);
-    checkQueueWait(1, Tier::DEVICE, Tier::DISK);
+    checkQueueWait(1, Tier::HOST, Tier::DISK);
     const auto events = session->finish();
     checkWorkLoopTrace(events);
-    EXPECT_EQ(events.size(), 30u);  // Busy retries add no intervals: 8 direct tasks and 1 combined task.
+    EXPECT_EQ(events.size(), 27u);  // Busy retries add no intervals: nine direct tasks.
 }
 
-TEST_F(TransferWorkLoopCrcTest, ClosingWithQueuedDiskWritesKeepsBothStagingLeasesUntilWritesFinish) {
+TEST_F(TransferWorkLoopCrcTest, ClosingWithQueuedDiskWritesDrainsBothWrites) {
     engine = std::make_shared<PerRankBlockTransferEngine>(
         std::vector<GroupSetPtr>{group}, true, DeviceHostCopyOptions{}, 4, 8, 1, 8, nullptr, 0, 1, true, diskOptions());
+    for (size_t i = 0; i < 2; ++i) {
+        auto sealed = engine->execute(evict(i));
+        ASSERT_TRUE(await(sealed));
+        ASSERT_TRUE(sealed->success());
+    }
     io->blocked = true;
-    auto first  = engine->execute(store(0));
+    auto first  = engine->execute(makeTransferTask({TransferDescriptor::hostToDisk(0, hosts[0], disks[0])}));
     ASSERT_TRUE(io->waitWrites());
-    auto waiting        = engine->execute(store(1));
+    auto waiting        = engine->execute(makeTransferTask({TransferDescriptor::hostToDisk(0, hosts[1], disks[1])}));
     auto pending_writes = std::make_shared<size_t>(0);
-    auto marker         = engine->offload_loops_.front()->execute(
-        store(2, Tier::HOST), [loop = engine->offload_loops_.front().get(), pending_writes](const TransferResult&) {
+    auto marker         = engine->evict_loops_.front()->execute(
+        evict(2), [loop = engine->evict_loops_.front().get(), pending_writes](const TransferResult&) {
             // The before_complete callback runs on the owner before publishing the marker context.
             for (const auto& entry : loop->entries_)
                 if (entry->step == TransferWorkLoop::Step::DISK_WRITE)
@@ -1976,7 +2020,7 @@ TEST_F(TransferWorkLoopCrcTest, ClosingWithQueuedDiskWritesKeepsBothStagingLease
     EXPECT_EQ(io->data[disk->blockOffset(disks[1])], 18u);
 }
 
-TEST_F(TransferWorkLoopCrcTest, DirectIoRoundTripUsesAlignedStrideAndZeroesDiskPadding) {
+TEST_F(TransferWorkLoopCrcTest, DirectIoRoundTripPreservesNonzeroPaddingAndCrc) {
     retained_controlled_disk = disk;
     for (auto block : disks)
         releasePoolBlock(*disk, block);
@@ -1985,58 +2029,56 @@ TEST_F(TransferWorkLoopCrcTest, DirectIoRoundTripUsesAlignedStrideAndZeroesDiskP
     for (size_t i = 0; i < 8; ++i)
         disks.push_back(poolMalloc(*disk));
     group = makeTestGroupSet(0, group->topologyPtr(), {"group0"}, {device}, host, disk, true);
-    initialize();
-    auto offload = engine->execute(store(0));
-    ASSERT_TRUE(await(offload));
-    ASSERT_TRUE(offload->success());
-    auto load = engine->execute(makeTransferTask({TransferDescriptor::diskToDevice(0, disks[0], {targets[0]})}));
-    ASSERT_TRUE(await(load));
-    EXPECT_TRUE(load->success());
-    engine->shutdown();
-    expectTarget(0);
-    HostStagingBlockPool scratch(1, disk->strideBytes());
-    auto                 leases = scratch.tryMallocBatch(1);
-    ASSERT_TRUE(leases);
-    const auto buffer = leases->front().blockBuffer(384);
-    ASSERT_EQ(disk->read(disks[0], buffer.base, disk->strideBytes()), BlockIOStatus::OK);
-    for (size_t i = group->storageBytes(); i < disk->strideBytes(); ++i)
-        EXPECT_EQ(static_cast<uint8_t*>(buffer.base)[i], 0u);
+    for (const bool async : {false, true}) {
+        SCOPED_TRACE(async ? "workloop" : "legacy");
+        initialize(8, 2, 1, 1, 2, async);
+        auto sealed = engine->execute(evict(0));
+        ASSERT_TRUE(await(sealed));
+        ASSERT_TRUE(sealed->success());
+        auto* source = static_cast<uint8_t*>(host->blockBuffer(hosts[0]).addr);
+        std::memset(source + group->storageBytes(), 0xa5, disk->strideBytes() - group->storageBytes());
+        auto evict = engine->execute(makeTransferTask({TransferDescriptor::hostToDisk(0, hosts[0], disks[0])}));
+        ASSERT_TRUE(await(evict));
+        ASSERT_TRUE(evict->success());
+        auto load = engine->execute(makeTransferTask({TransferDescriptor::diskToDevice(0, disks[0], {targets[0]})}));
+        ASSERT_TRUE(await(load));
+        EXPECT_TRUE(load->success());
+        engine->shutdown();
+        expectTarget(0);
+        HostStagingBlockPool scratch(1, disk->strideBytes());
+        auto                 leases = scratch.tryMallocBatch(1);
+        ASSERT_TRUE(leases);
+        const auto buffer = leases->front().blockBuffer(384);
+        ASSERT_EQ(disk->read(disks[0], buffer.base, disk->strideBytes()), BlockIOStatus::OK);
+        for (size_t i = group->storageBytes(); i < disk->strideBytes(); ++i) {
+            EXPECT_EQ(static_cast<uint8_t*>(buffer.base)[i], 0xa5u);
+            EXPECT_EQ(source[i], 0xa5u);
+        }
+    }
 }
 
-TEST_F(TransferWorkLoopCrcTest, CrcErrorsAndDeadlineNeverStartDiskSuccessor) {
-    for (const char* phase : {"metadata", "query", "deadline"}) {
+TEST_F(TransferWorkLoopCrcTest, CrcErrorsDoNotIssueDiskWrites) {
+    for (const char* phase : {"metadata", "query"}) {
         SCOPED_TRACE(phase);
         auto session = AsyncProfileSession::start(100000);
         enableMetrics();
         initialize();
-        const bool timeout = std::strcmp(phase, "deadline") == 0;
-        auto&      owner   = *engine->offload_loops_.front();
+        auto& owner = *engine->evict_loops_.front();
         for (auto& [ordinal, slots] : owner.crc_->slots_)
             for (auto& slot : slots)
-                slot.copy->setTestHook([phase, timeout, &owner](const char* point, void*, void*) {
-                    if (timeout && std::strcmp(point, "query") == 0)
-                        for (auto& entry : owner.entries_)
-                            entry->task.deadline_ = TransferTask::Clock::now() - 1s;
+                slot.copy->setTestHook([phase](const char* point, void*, void*) {
                     return int(std::strcmp(point, phase) == 0 ? cudaErrorInvalidValue : cudaSuccess);
                 });
-        auto context = engine->execute(store(0));
+        auto context = engine->execute(evict(0));
         ASSERT_TRUE(await(context));
         engine->shutdown();
-        EXPECT_EQ(context->result().copy_error, timeout ? CacheCopyError::NOT_EXECUTED : CacheCopyError::COPY_FAILED);
-        if (timeout) {
-            EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
-        }
+        EXPECT_EQ(context->result().copy_error, CacheCopyError::COPY_FAILED);
         EXPECT_EQ(io->writes, 0u);
         EXPECT_TRUE(device->isAllocated(sources[0]));
         reporter->flushStageMetrics();
-        EXPECT_EQ(seriesCount(metrics()->transfer_stage_qps_metric), 5u);  // No disk_write stage.
-        checkStage("d2h", 1, timeout, Tier::DEVICE, Tier::DISK);
-        checkStage("staging_wait", 1, true, Tier::DEVICE, Tier::DISK);
-        checkStage("worker_batch_total", 1, false, Tier::DEVICE, Tier::DISK);
-        checkStage("worker_task_total", 1, false, Tier::DEVICE, Tier::DISK, "worker_task");
-        checkStage("transfer_queue_wait", 1, true, Tier::DEVICE, Tier::DISK, "worker_task");
-        EXPECT_EQ(seriesCount(metrics()->transfer_qps_metric), 0u);
-        EXPECT_EQ(seriesCount(metrics()->host_cache_copy_error_qps_metric), 0u);
+        checkStage("d2h", 1, false, Tier::DEVICE, Tier::HOST);
+        checkStage("worker_task_total", 1, false, Tier::DEVICE, Tier::HOST, "worker_task");
+        checkStage("transfer_queue_wait", 1, true, Tier::DEVICE, Tier::HOST, "worker_task");
         checkWorkLoopTrace(session->finish());
     }
 }
@@ -2070,11 +2112,14 @@ TEST_F(TransferWorkLoopCrcTest, SmallStagingRequestCompletesHealthyBatchesAfterC
     checkStage("worker_task_total", 1, false, Tier::DISK, Tier::DEVICE, "worker_task");
 }
 
-TEST_F(TransferWorkLoopCrcTest, DiskWriteFailureReplacesSuccessfulCrcStoreResult) {
+TEST_F(TransferWorkLoopCrcTest, DiskWriteFailureAfterSuccessfulCrcEviction) {
     enableMetrics();
     initialize();
+    auto sealed = engine->execute(evict(0));
+    ASSERT_TRUE(await(sealed));
+    ASSERT_TRUE(sealed->success());
     io->fail_write = 1;
-    auto context   = engine->execute(store(0));
+    auto context   = engine->execute(makeTransferTask({TransferDescriptor::hostToDisk(0, hosts[0], disks[0])}));
     ASSERT_TRUE(await(context));
     engine->shutdown();
     EXPECT_FALSE(context->success());
@@ -2082,32 +2127,35 @@ TEST_F(TransferWorkLoopCrcTest, DiskWriteFailureReplacesSuccessfulCrcStoreResult
     EXPECT_EQ(context->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::IO_FAILED}));
     EXPECT_EQ(io->writes, 1u);
     reporter->flushStageMetrics();
-    EXPECT_EQ(seriesCount(metrics()->transfer_stage_qps_metric), 6u);
-    checkStage("d2h", 1, true, Tier::DEVICE, Tier::DISK);
-    checkStage("disk_write", 1, false, Tier::DEVICE, Tier::DISK);
-    checkStage("staging_wait", 1, true, Tier::DEVICE, Tier::DISK);
-    checkStage("worker_batch_total", 1, false, Tier::DEVICE, Tier::DISK);
-    checkStage("worker_task_total", 1, false, Tier::DEVICE, Tier::DISK, "worker_task");
+    checkStage("d2h", 1, true, Tier::DEVICE, Tier::HOST);
+    checkStage("disk_write", 1, false, Tier::HOST, Tier::DISK);
+    checkStage("worker_task_total", 1, false, Tier::HOST, Tier::DISK, "worker_task");
 }
 
-TEST_F(TransferWorkLoopCrcTest, DeviceDiskBatchesRoundTripWithTailAndZeroedPadding) {
+TEST_F(TransferWorkLoopCrcTest, HostDiskBatchesPreservePaddingAndLoadBackToDevice) {
     for (const bool async : {false, true}) {
         SCOPED_TRACE(async);
         enableMetrics();
         initialize(8, 3, 1, 1, 12, async);
-        ASSERT_EQ(engine->batchLimit(), 3u);
+        ASSERT_EQ(engine->batchLimit(Tier::DEVICE, Tier::HOST), 3u);
         const auto writes_before = io->writes;
         const auto reads_before  = io->reads;
         std::fill(io->data.begin(), io->data.end(), 0xa5);
-        std::vector<TransferDescriptor> stores, loads;
+        std::vector<TransferDescriptor> evictions, disk_evictions, loads;
         for (size_t i = sources.size(); i-- > 0;) {
-            stores.push_back(TransferDescriptor::deviceToDisk(0, {sources[i]}, disks[i]));
+            auto* host_data = static_cast<uint8_t*>(host->blockBuffer(hosts[i]).addr);
+            std::memset(host_data + group->storageBytes(), 0xa5, disk->strideBytes() - group->storageBytes());
+            evictions.push_back(TransferDescriptor::deviceToHost(0, {sources[i]}, hosts[i]));
+            disk_evictions.push_back(TransferDescriptor::hostToDisk(0, hosts[i], disks[i]));
             loads.push_back(TransferDescriptor::diskToDevice(0, disks[i], {targets[i]}));
         }
-        auto stored = executeRequest(makeTransferTask(stores));
-        ASSERT_TRUE(await(stored));
-        ASSERT_TRUE(stored->success());
-        EXPECT_EQ(stored->result().block_errors, std::vector<CacheCopyError>(8, CacheCopyError::NONE));
+        auto evicted = executeRequest(makeTransferTask(evictions));
+        ASSERT_TRUE(await(evicted));
+        ASSERT_TRUE(evicted->success());
+        EXPECT_EQ(evicted->result().block_errors, std::vector<CacheCopyError>(8, CacheCopyError::NONE));
+        auto disk_evicted = executeRequest(makeTransferTask(disk_evictions));
+        ASSERT_TRUE(await(disk_evicted));
+        ASSERT_TRUE(disk_evicted->success());
         auto loaded = executeRequest(makeTransferTask(loads));
         ASSERT_TRUE(await(loaded));
         ASSERT_TRUE(loaded->success());
@@ -2118,68 +2166,74 @@ TEST_F(TransferWorkLoopCrcTest, DeviceDiskBatchesRoundTripWithTailAndZeroedPaddi
         for (size_t i = 0; i < sources.size(); ++i) {
             expectTarget(i);
             for (size_t byte = group->storageBytes(); byte < disk->strideBytes(); ++byte)
-                ASSERT_EQ(io->data[disk->blockOffset(disks[i]) + byte], 0u);
+                ASSERT_EQ(io->data[disk->blockOffset(disks[i]) + byte], 0xa5u);
         }
         reporter->flushStageMetrics();
-        for (const char* stage : {"worker_batch_total", "staging_wait", "d2h", "disk_write"})
-            checkStage(stage, 3, true, Tier::DEVICE, Tier::DISK);
         for (const char* stage : {"worker_batch_total", "staging_wait", "disk_read", "h2d"})
             checkStage(stage, 3, true, Tier::DISK, Tier::DEVICE);
     }
 }
 
-TEST_F(TransferWorkLoopCrcTest, DeviceDiskBatchRetainsAllStagingUntilWriteCompletes) {
+TEST_F(TransferWorkLoopCrcTest, DiskDeviceBatchRetainsAllStagingUntilReadCompletes) {
     for (const bool async : {false, true}) {
         SCOPED_TRACE(async);
         initialize(8, 2, 1, 2, 4, async);
-        const auto writes_before = io->writes;
-        io->blocked              = true;
-        auto stored = engine->execute(makeTransferTask({TransferDescriptor::deviceToDisk(0, {sources[0]}, disks[0]),
-                                                        TransferDescriptor::deviceToDisk(0, {sources[1]}, disks[1])}));
-        ASSERT_TRUE(io->waitWrites(writes_before + 1));
-        auto waiting = engine->execute(store(2));
-        auto marker  = engine->execute(store(3, Tier::HOST));
+        for (size_t i = 0; i < 3; ++i)
+            seedDisk(i);
+        auto marker_data = engine->execute(evict(3));
+        ASSERT_TRUE(await(marker_data));
+        ASSERT_TRUE(marker_data->success());
+        const auto reads_before = io->reads;
+        io->blocked             = true;
+        auto loaded = engine->execute(makeTransferTask({TransferDescriptor::diskToDevice(0, disks[0], {targets[0]}),
+                                                        TransferDescriptor::diskToDevice(0, disks[1], {targets[1]})}));
+        ASSERT_TRUE(io->waitReads(reads_before + 1));
+        auto waiting = engine->execute(makeTransferTask({TransferDescriptor::diskToDevice(0, disks[2], {targets[2]})}));
+        auto marker  = engine->execute(makeTransferTask({TransferDescriptor::hostToDevice(0, hosts[3], {targets[3]})}));
         ASSERT_TRUE(await(marker));
-        EXPECT_TRUE(marker->success());
-        auto* pool = async ? engine->offload_loops_.front()->staging_.pool.get() :
+        ASSERT_TRUE(marker->success());
+        auto* pool = async ? engine->load_loops_.front()->staging_.pool.get() :
                              engine->legacy_->device_disk_executor_->full_staging_pool_.get();
         EXPECT_FALSE(pool->tryMallocBatch(1));
-        EXPECT_FALSE(stored->done());
+        EXPECT_FALSE(loaded->done());
         EXPECT_FALSE(waiting->done());
         io->release();
-        ASSERT_TRUE(await(stored));
+        ASSERT_TRUE(await(loaded));
         ASSERT_TRUE(await(waiting));
         engine->shutdown();
-        EXPECT_TRUE(stored->success());
+        EXPECT_TRUE(loaded->success());
         EXPECT_TRUE(waiting->success());
-        EXPECT_EQ(io->writes, writes_before + 3);
+        EXPECT_EQ(io->reads, reads_before + 3);
         auto leases = pool->tryMallocBatch(2);
         ASSERT_TRUE(leases);
         EXPECT_EQ(leases->size(), 2u);
     }
 }
 
-TEST_F(TransferWorkLoopCrcTest, PartialDeviceDiskBatchWriteFailsEveryDescriptorAndReleasesStaging) {
+TEST_F(TransferWorkLoopCrcTest, PartialHostDiskBatchWriteFailsEveryDescriptorAndCanRetry) {
     for (const bool async : {false, true}) {
         SCOPED_TRACE(async);
         initialize(8, 3, 1, 1, 6, async);
         const auto                      writes_before = io->writes;
-        std::vector<TransferDescriptor> stores, loads;
+        std::vector<TransferDescriptor> evictions, loads;
         for (size_t i = 0; i < 3; ++i) {
-            stores.push_back(TransferDescriptor::deviceToDisk(0, {sources[i]}, disks[i]));
+            auto sealed = engine->execute(evict(i));
+            ASSERT_TRUE(await(sealed));
+            ASSERT_TRUE(sealed->success());
+            evictions.push_back(TransferDescriptor::hostToDisk(0, hosts[i], disks[i]));
             loads.push_back(TransferDescriptor::diskToDevice(0, disks[i], {targets[i]}));
         }
         io->fail_write = writes_before + 2;
-        auto failed    = engine->execute(makeTransferTask(stores));
+        auto failed    = engine->execute(makeTransferTask(evictions));
         ASSERT_TRUE(await(failed));
         EXPECT_FALSE(failed->success());
         EXPECT_EQ(failed->result().block_errors, std::vector<CacheCopyError>(3, CacheCopyError::IO_FAILED));
         engine->waitForIdle();
         EXPECT_EQ(io->writes, writes_before + 2);
         io->fail_write = 0;
-        auto stored    = engine->execute(makeTransferTask(stores));
-        ASSERT_TRUE(await(stored));
-        ASSERT_TRUE(stored->success());
+        auto evicted   = engine->execute(makeTransferTask(evictions));
+        ASSERT_TRUE(await(evicted));
+        ASSERT_TRUE(evicted->success());
         auto loaded = engine->execute(makeTransferTask(loads));
         ASSERT_TRUE(await(loaded));
         ASSERT_TRUE(loaded->success());
@@ -2223,7 +2277,7 @@ TEST_F(TransferWorkLoopCrcTest, EightDescriptorStagingBatchKeepsOneResultPerDesc
 
 TEST_F(TransferWorkLoopCrcTest, ClosingDuringDiagnosticsWaitsForPhysicalSafetyAndOwnerCompletion) {
     initialize();
-    auto sealed = engine->execute(store(0, Tier::HOST));
+    auto sealed = engine->execute(evict(0));
     ASSERT_TRUE(await(sealed));
     static_cast<uint8_t*>(host->blockBuffer(hosts[0]).addr)[0] ^= 1;
     std::promise<void>                     entered, release;
@@ -2241,9 +2295,9 @@ TEST_F(TransferWorkLoopCrcTest, ClosingDuringDiagnosticsWaitsForPhysicalSafetyAn
             });
     auto context = engine->execute(makeTransferTask({TransferDescriptor::hostToDevice(0, hosts[0], {targets[0]})}));
     ASSERT_EQ(entered_future.wait_for(5s), std::future_status::ready);
-    // Diagnostics hold only the load owner; the independent offload service
+    // Diagnostics hold only the load owner; the independent evict service
     // can still complete healthy work before engine shutdown joins both owners.
-    auto healthy = engine->execute(store(1, Tier::HOST));
+    auto healthy = engine->execute(evict(1));
     ASSERT_TRUE(await(healthy));
     EXPECT_TRUE(healthy->success());
     auto drain = std::async(std::launch::async, [&] { engine->shutdown(); });
@@ -2282,7 +2336,7 @@ TEST_F(TransferWorkLoopTest, IndependentFullAndSwaDiskPoolsShareOneExecutorAcros
         ASSERT_NE(engine->diskIOExecutor(), nullptr);
         EXPECT_EQ(engine->diskIOExecutor()->config().read_thread_count, diskOptions().read_thread_count);
         EXPECT_EQ(engine->diskIOExecutor()->config().write_thread_count, diskOptions().write_thread_count);
-        for (const auto& owners : {&engine->load_loops_, &engine->offload_loops_})
+        for (const auto& owners : {&engine->load_loops_, &engine->evict_loops_})
             for (const auto& owner : *owners)
                 EXPECT_EQ(owner->disk_io_executor_, engine->diskIOExecutor());
         auto full_context = engine->execute(writes());
@@ -2320,10 +2374,10 @@ TEST_F(TransferWorkLoopCrcTest, FullAndSwaShareStagingWhileDirectionsKeepIndepen
         engine->shutdown();
     });
     auto&                                  load_staging    = engine->load_loops_.front()->staging_;
-    auto&                                  offload_staging = engine->offload_loops_.front()->staging_;
+    auto&                                  evict_staging   = engine->evict_loops_.front()->staging_;
     ASSERT_EQ(load_staging.pool->capacity(), 2u);
-    ASSERT_EQ(offload_staging.pool->capacity(), 2u);
-    ASSERT_TRUE(await(engine->execute(store(4, Tier::HOST))));
+    ASSERT_EQ(evict_staging.pool->capacity(), 2u);
+    ASSERT_TRUE(await(engine->execute(evict(4))));
     seedDisk(0);
     seedDisk(1);
     seedDisk(2);
@@ -2339,10 +2393,10 @@ TEST_F(TransferWorkLoopCrcTest, FullAndSwaShareStagingWhileDirectionsKeepIndepen
     ASSERT_NE(load_staging.waiting.head, nullptr);
     EXPECT_EQ(load_staging.waiting.head->task.descriptors().front().group_set_id, 1u);
     EXPECT_FALSE(load_staging.pool->tryMallocBatch(1));
-    auto offload_leases = offload_staging.pool->tryMallocBatch(2);
-    ASSERT_TRUE(offload_leases);
+    auto evict_leases = evict_staging.pool->tryMallocBatch(2);
+    ASSERT_TRUE(evict_leases);
     EXPECT_FALSE(swa_load->done());
-    offload_leases.reset();
+    evict_leases.reset();
     finish.run();
     EXPECT_TRUE(full_load->success());
     EXPECT_TRUE(swa_load->success());
@@ -2382,7 +2436,7 @@ TEST_F(TransferWorkLoopCrcTest, DirectionPollScansAllDevicesWithIndependentSlots
                                                           1,
                                                           true,
                                                           diskOptions());
-    auto first  = engine->execute(store(0, Tier::HOST));
+    auto first  = engine->execute(evict(0));
     auto second = engine->execute(makeTransferTask({TransferDescriptor::deviceToHost(1, {source}, destination)}));
     ASSERT_TRUE(await(first));
     ASSERT_TRUE(await(second));
@@ -2394,25 +2448,23 @@ TEST_F(TransferWorkLoopCrcTest, DirectionPollScansAllDevicesWithIndependentSlots
     releasePoolBlock(*other_host, destination);
 }
 
-TEST_F(TransferWorkLoopCrcTest, UniformBatchLimitBoundsBothDirectionsAndDispatcherSplitsRequests) {
+TEST_F(TransferWorkLoopCrcTest, StagingBatchLimitDoesNotShrinkDeviceHostBatches) {
     engine = std::make_shared<PerRankBlockTransferEngine>(
         std::vector<GroupSetPtr>{group}, true, DeviceHostCopyOptions{}, 6, 8, 1, 8, nullptr, 0, 1, true, diskOptions());
     ASSERT_EQ(engine->load_loops_.front()->staging_.pool->capacity(), 3u);
-    ASSERT_EQ(engine->offload_loops_.front()->staging_.pool->capacity(), 3u);
-    EXPECT_EQ(engine->load_loops_.front()->batchLimit(), 3u);
-    EXPECT_EQ(engine->offload_loops_.front()->batchLimit(), 3u);
-    EXPECT_EQ(engine->batchLimit(), 3u);
+    ASSERT_EQ(engine->evict_loops_.front()->staging_.pool->capacity(), 3u);
+    EXPECT_EQ(engine->load_loops_.front()->batchLimit(), 8u);
+    EXPECT_EQ(engine->evict_loops_.front()->batchLimit(), 8u);
+    EXPECT_EQ(engine->batchLimit(Tier::DISK, Tier::DEVICE), 3u);
+    EXPECT_EQ(engine->batchLimit(Tier::DEVICE, Tier::HOST), 8u);
 
-    auto stores   = makeTransferTask({TransferDescriptor::deviceToHost(0, {sources[0]}, hosts[0]),
-                                      TransferDescriptor::deviceToHost(0, {sources[1]}, hosts[1]),
-                                      TransferDescriptor::deviceToHost(0, {sources[2]}, hosts[2]),
-                                      TransferDescriptor::deviceToHost(0, {sources[3]}, hosts[3])});
-    auto rejected = engine->execute(stores);
-    ASSERT_TRUE(rejected->done());
-    EXPECT_EQ(rejected->result().copy_error, CacheCopyError::INVALID_REQUEST);
-    auto stored = executeRequest(std::move(stores));
-    ASSERT_TRUE(await(stored));
-    ASSERT_TRUE(stored->success());
+    auto evictions = makeTransferTask({TransferDescriptor::deviceToHost(0, {sources[0]}, hosts[0]),
+                                       TransferDescriptor::deviceToHost(0, {sources[1]}, hosts[1]),
+                                       TransferDescriptor::deviceToHost(0, {sources[2]}, hosts[2]),
+                                       TransferDescriptor::deviceToHost(0, {sources[3]}, hosts[3])});
+    auto evicted   = engine->execute(std::move(evictions));
+    ASSERT_TRUE(await(evicted));
+    ASSERT_TRUE(evicted->success());
     auto loaded = executeRequest(makeTransferTask({TransferDescriptor::hostToDevice(0, hosts[0], {targets[0]}),
                                                    TransferDescriptor::hostToDevice(0, hosts[1], {targets[1]}),
                                                    TransferDescriptor::hostToDevice(0, hosts[2], {targets[2]}),
@@ -2432,14 +2484,14 @@ TEST_F(TransferWorkLoopCrcTest, SharedStagingUsesLargestDiskStrideAcrossGroups) 
     auto topology = makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 384),
                                       makeTestGroupBase(swa_policy, {1}, 384)});
     group->initialize(0, topology, {"group0"}, makeTestBackingLayout(384, true));
-    auto config             = std::make_shared<BlockTreeDiskBlockPoolConfig>();
+    auto config             = std::make_shared<DiskBlockPoolConfig>();
     config->pool_type       = BlockPoolType::DISK;
     config->pool_name       = "swa_larger_stride";
     config->work_dir        = temp.path;
     config->payload_bytes   = 384;
     config->stride_bytes    = 8192;
     config->disk_size_bytes = 8192 * 17;
-    auto swa_disk           = std::make_shared<BlockTreeDiskBlockPool>(config, std::make_unique<ControlledDiskIO>());
+    auto swa_disk           = std::make_shared<DiskBlockPool>(config, std::make_unique<ControlledDiskIO>());
     ASSERT_TRUE(swa_disk->init());
     auto swa        = makeTestGroupSet(1, topology, {"group1"}, {device}, host, swa_disk, true);
     auto single_swa = makeTestGroupSet(
@@ -2448,22 +2500,23 @@ TEST_F(TransferWorkLoopCrcTest, SharedStagingUsesLargestDiskStrideAcrossGroups) 
         SCOPED_TRACE(groups.size());
         PerRankBlockTransferEngine bounded(groups, true, {}, 12, 8, 1, 8, nullptr, 0, 1, true);
         ASSERT_TRUE(bounded.asyncEnabled());
-        for (const auto* direction : {&bounded.load_loops_, &bounded.offload_loops_}) {
+        for (const auto* direction : {&bounded.load_loops_, &bounded.evict_loops_}) {
             const auto& pool = direction->front()->staging_.pool;
             ASSERT_NE(pool, nullptr);
             EXPECT_EQ(pool->capacity(), 6u);
             EXPECT_EQ(pool->stride_bytes_, 8192u);
-            EXPECT_EQ(direction->front()->batchLimit(), 6u);
+            EXPECT_EQ(direction->front()->batchLimit(), 8u);
         }
-        EXPECT_EQ(bounded.batchLimit(), 6u);
+        EXPECT_EQ(bounded.batchLimit(Tier::DEVICE, Tier::HOST), 8u);
+        EXPECT_EQ(bounded.batchLimit(Tier::DISK, Tier::DEVICE), 6u);
     }
 }
 
 TEST_F(TransferWorkLoopCrcTest, DefaultStagingBudgetKeepsConfiguredBatchLimit) {
     PerRankBlockTransferEngine defaults({group}, true, {}, 128, 8, 1, 8, nullptr, 0, 1, true);
     EXPECT_EQ(defaults.load_loops_.front()->batchLimit(), 8u);
-    EXPECT_EQ(defaults.offload_loops_.front()->batchLimit(), 8u);
-    EXPECT_EQ(defaults.batchLimit(), 8u);
+    EXPECT_EQ(defaults.evict_loops_.front()->batchLimit(), 8u);
+    EXPECT_EQ(defaults.batchLimit(Tier::DISK, Tier::DEVICE), 8u);
 }
 
 TEST_F(TransferWorkLoopCrcTest, LoopPairsOwnIndependentCountBasedStagingAndCrcSlots) {
@@ -2472,14 +2525,14 @@ TEST_F(TransferWorkLoopCrcTest, LoopPairsOwnIndependentCountBasedStagingAndCrcSl
     auto topology = makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 384),
                                       makeTestGroupBase(swa_policy, {1}, 384)});
     group->initialize(0, topology, {"group0"}, makeTestBackingLayout(384, true));
-    auto config             = std::make_shared<BlockTreeDiskBlockPoolConfig>();
+    auto config             = std::make_shared<DiskBlockPoolConfig>();
     config->pool_type       = BlockPoolType::DISK;
     config->pool_name       = "multi_loop_swa_stride";
     config->work_dir        = temp.path;
     config->payload_bytes   = 384;
     config->stride_bytes    = 8192;
     config->disk_size_bytes = 8192 * 17;
-    auto swa_disk           = std::make_shared<BlockTreeDiskBlockPool>(config, std::make_unique<ControlledDiskIO>());
+    auto swa_disk           = std::make_shared<DiskBlockPool>(config, std::make_unique<ControlledDiskIO>());
     ASSERT_TRUE(swa_disk->init());
     auto swa = makeTestGroupSet(1, topology, {"group1"}, {device}, host, swa_disk, true);
     engine   = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group, swa},
@@ -2500,11 +2553,11 @@ TEST_F(TransferWorkLoopCrcTest, LoopPairsOwnIndependentCountBasedStagingAndCrcSl
     block_tree_cache_detail::ScopeRollback cleanup([&] { engine->shutdown(); });
     size_t                                 owner_index   = 0;
     size_t                                 staging_bytes = 0;
-    for (const auto* direction : {&engine->load_loops_, &engine->offload_loops_}) {
+    for (const auto* direction : {&engine->load_loops_, &engine->evict_loops_}) {
         ASSERT_EQ(direction->size(), 2u);
         for (size_t worker = 0; worker < direction->size(); ++worker) {
             const auto& loop = (*direction)[worker];
-            EXPECT_EQ(loop->batchLimit(), 4u);
+            EXPECT_EQ(loop->batchLimit(), 8u);
             const auto& pool = loop->staging_.pool;
             ASSERT_NE(pool, nullptr);
             EXPECT_EQ(pool->capacity(), 4u);
@@ -2513,7 +2566,7 @@ TEST_F(TransferWorkLoopCrcTest, LoopPairsOwnIndependentCountBasedStagingAndCrcSl
             EXPECT_TRUE(pools.insert(pool.get()).second);
             ASSERT_NE(loop->crc_, nullptr);
             const auto expected =
-                (direction == &engine->load_loops_ ? "btc_load_" : "btc_offload_") + std::to_string(worker);
+                (direction == &engine->load_loops_ ? "btc_load_" : "btc_evict_") + std::to_string(worker);
             for (auto& [device_index, slots] : loop->crc_->slots_) {
                 EXPECT_EQ(slots.size(), 2u);
                 for (auto& slot : slots) {
@@ -2537,15 +2590,17 @@ TEST_F(TransferWorkLoopCrcTest, LoopPairsOwnIndependentCountBasedStagingAndCrcSl
     EXPECT_EQ(staging_bytes, 2u * 8u * 8192u);
     std::vector<std::shared_ptr<TransferAsyncContext>> contexts;
     for (size_t i = 0; i < 2; ++i)
-        contexts.push_back(engine->execute(store(i)));
+        contexts.push_back(engine->execute(evict(i)));
     for (const auto& context : contexts) {
         ASSERT_TRUE(await(context));
         ASSERT_TRUE(context->success());
     }
     contexts.clear();
-    for (size_t i = 0; i < 2; ++i)
+    for (size_t i = 0; i < 2; ++i) {
+        seedDisk(i);
         contexts.push_back(
             engine->execute(makeTransferTask({TransferDescriptor::diskToDevice(0, disks[i], {targets[i]})})));
+    }
     for (const auto& context : contexts) {
         ASSERT_TRUE(await(context));
         ASSERT_TRUE(context->success());
@@ -2558,31 +2613,31 @@ TEST_F(TransferWorkLoopCrcTest, LoopPairsOwnIndependentCountBasedStagingAndCrcSl
 }
 
 TEST_F(TransferWorkLoopCrcTest, LargerPhysicalDiskStridePreservesConfiguredStagingBlockCounts) {
-    auto config             = std::make_shared<BlockTreeDiskBlockPoolConfig>();
+    auto config             = std::make_shared<DiskBlockPoolConfig>();
     config->pool_type       = BlockPoolType::DISK;
     config->pool_name       = "larger_stride";
     config->work_dir        = temp.path;
     config->payload_bytes   = 384;
     config->stride_bytes    = 8192;
     config->disk_size_bytes = 8192 * 17;
-    auto wider_disk         = std::make_shared<BlockTreeDiskBlockPool>(config, std::make_unique<ControlledDiskIO>());
+    auto wider_disk         = std::make_shared<DiskBlockPool>(config, std::make_unique<ControlledDiskIO>());
     ASSERT_TRUE(wider_disk->init());
     auto wider_group = makeTestGroupSet(0, group->topologyPtr(), {"group0"}, {device}, host, wider_disk, true);
     PerRankBlockTransferEngine minimum({wider_group}, true, {}, 2, 8, 1, 8, nullptr, 0, 1, true);
     EXPECT_EQ(minimum.load_loops_.front()->staging_.pool->capacity(), 1u);
-    EXPECT_EQ(minimum.offload_loops_.front()->staging_.pool->capacity(), 1u);
+    EXPECT_EQ(minimum.evict_loops_.front()->staging_.pool->capacity(), 1u);
     PerRankBlockTransferEngine bounded({wider_group}, true, {}, 8, 8, 1, 8, nullptr, 0, 1, true);
     EXPECT_EQ(bounded.load_loops_.front()->staging_.pool->capacity(), 4u);
-    EXPECT_EQ(bounded.offload_loops_.front()->staging_.pool->capacity(), 4u);
+    EXPECT_EQ(bounded.evict_loops_.front()->staging_.pool->capacity(), 4u);
     EXPECT_EQ(bounded.load_loops_.front()->staging_.pool->stride_bytes_, 8192u);
 }
 
-TEST_F(TransferWorkLoopCrcTest, InitializationRejectsInvalidStagingAndFallsBackForPlainCopy) {
+TEST_F(TransferWorkLoopCrcTest, InitializationRejectsInvalidStagingAndAcceptsSelectedLegacy) {
     for (const size_t blocks : {0u, 1u, 3u})
         EXPECT_THROW((PerRankBlockTransferEngine({group}, true, {}, blocks, 8, 1, 8, nullptr, 0, 1, true)),
                      std::invalid_argument);
     auto plain = makeTestGroupSet(0, group->topologyPtr(), {"group0"}, {device}, host, disk, false);
-    PerRankBlockTransferEngine fallback({plain}, true, {}, 4, 8, 1, 0, nullptr, 0, 1, true);
+    PerRankBlockTransferEngine fallback({plain}, true, {}, 4, 8, 1, 0, nullptr, 0, 1, false);
     EXPECT_FALSE(fallback.asyncEnabled());
 }
 

@@ -59,7 +59,7 @@ Tree 和 Transfer binary 均通过 `--model-profile` 加载完整 model profile�
 采集前确认 `result.json` 中状态为 completed、失败操作数为 0，并保存 resolved configuration。切换 workload 时只修改需要比较的维度：
 
 - GroupSet：`full_context` 或 `swa`。
-- 方向：`d2h`、`h2d`、`d2disk`、`disk2d`、`h2disk`、`disk2h`。
+- 方向：`d2h`、`h2d`、`h2disk`、`disk2d`。
 - Device/Host strategy：`batch` 或 `staged-sm`。
 - Disk case 还需要设置 `--disk-path`、`--disk-io-mode` 和 `--disk-access-pattern`。
 

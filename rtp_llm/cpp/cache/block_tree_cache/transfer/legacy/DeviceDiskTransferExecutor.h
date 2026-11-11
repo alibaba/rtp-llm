@@ -42,7 +42,6 @@ private:
 
     DeviceHostTransferExecutor&                    device_host_executor_;
     HostDiskTransferExecutor&                      host_disk_executor_;
-    BlockTreeTaskPool&                             transfer_task_pool_;
     BlockTreeTaskPool*                             load_task_pool_;
     std::unique_ptr<HostStagingBlockPool>          full_staging_pool_;
     std::unique_ptr<HostStagingBlockPool>          swa_staging_pool_;

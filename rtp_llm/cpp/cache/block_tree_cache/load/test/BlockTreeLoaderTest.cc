@@ -298,7 +298,6 @@ TEST(BlockTreeLoaderTest, HostLoadUsesReservedAdmissionWhenBackgroundQueueIsFull
     environment->cache->task_pool_          = std::move(replacement);
     environment->cache->evictor_.task_pool_ = environment->cache->task_pool_.get();
     environment->cache->loader_.task_pool_  = environment->cache->task_pool_.get();
-    environment->cache->storer_.task_pool_  = environment->cache->task_pool_.get();
 
     auto release_promise = std::make_shared<std::promise<void>>();
     auto release_future  = release_promise->get_future().share();
@@ -728,7 +727,7 @@ class DeferredLoadEngine final: public PerRankBlockTransferEngine {
 public:
     explicit DeferredLoadEngine(const std::vector<GroupSetPtr>& groups): PerRankBlockTransferEngine(groups) {}
 
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         auto context  = std::make_shared<TransferBatchAsyncContext>();
         bool released = false;
         {

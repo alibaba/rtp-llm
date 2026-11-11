@@ -50,7 +50,6 @@ BlockTreePoolMetricsSnapshot makePoolMetricsSnapshot(Tier tier, const IBlockPool
     snapshot.block_cache_ref_blocks     = pool.referencedBlocksNum(BlockTreeRefType::CACHE);
     snapshot.load_ref_blocks            = pool.referencedBlocksNum(BlockTreeRefType::LOAD);
     snapshot.eviction_target_ref_blocks = pool.referencedBlocksNum(BlockTreeRefType::EVICTION);
-    snapshot.store_ref_blocks           = pool.referencedBlocksNum(BlockTreeRefType::STORE);
     snapshot.frozen_ref_blocks          = pool.referencedBlocksNum(BlockTreeRefType::FROZEN);
     return snapshot;
 }
@@ -106,7 +105,7 @@ BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<Gro
             snapshots.push_back(makePoolMetricsSnapshot(Tier::HOST, *host_pool));
         }
 
-        const std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = group_set->diskPool();
+        const std::shared_ptr<DiskBlockPool> disk_pool = group_set->diskPool();
         if (disk_pool != nullptr) {
             auto               snapshot = makePoolMetricsSnapshot(Tier::DISK, *disk_pool);
             const PoolIOSample sample{disk_pool->readBytes(), disk_pool->writeBytes(), now};
@@ -313,16 +312,6 @@ void BlockTreeCacheMetricsReporter::reportCacheReuseTimeMetrics(
     }
 }
 
-void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionTransferTask&     task,
-                                                           const std::vector<GroupSetPtr>& group_sets) const {
-    if (metrics_reporter_ == nullptr) {
-        return;
-    }
-    for (size_t desc_index = 0; desc_index < task.descriptors().size(); ++desc_index) {
-        reportEvictedDescriptor(task.descriptors()[desc_index], task.timings[desc_index], group_sets, "watermark");
-    }
-}
-
 void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionDropTask&         task,
                                                            const std::vector<GroupSetPtr>& group_sets,
                                                            const char*                     trigger_type) const {
@@ -434,9 +423,6 @@ int BlockTreeCacheMetricsReporter::transferDirectionIndex(Tier source_tier, Tier
     }
     if (source_tier == Tier::DISK && target_tier == Tier::DEVICE) {
         return 3;
-    }
-    if (source_tier == Tier::DEVICE && target_tier == Tier::DISK) {
-        return 4;
     }
     return -1;
 }
@@ -581,28 +567,8 @@ const char* cacheTransferOperationName(CacheTransferOperation operation) {
             return "load";
         case CacheTransferOperation::EVICT:
             return "evict";
-        case CacheTransferOperation::STORE:
-            return "store";
     }
     return "unknown";
-}
-
-void BlockTreeCacheMetricsReporter::reportStorePublish(Tier   target_tier,
-                                                       size_t accepted_blocks,
-                                                       size_t duplicate_blocks) const {
-    reportStoreBlocks(target_tier, "accepted", accepted_blocks);
-    reportStoreBlocks(target_tier, "duplicate", duplicate_blocks);
-}
-
-void BlockTreeCacheMetricsReporter::reportStoreBlocks(Tier target_tier, const char* outcome, size_t block_count) const {
-    if (metrics_reporter_ == nullptr || block_count == 0) {
-        return;
-    }
-    RtpLLMTierStoreMetricsCollector collector;
-    collector.target_tier = tierName(target_tier);
-    collector.outcome     = outcome;
-    collector.block_count = static_cast<int64_t>(block_count);
-    metrics_reporter_->report<RtpLLMTierStoreMetrics, RtpLLMTierStoreMetricsCollector>(nullptr, &collector);
 }
 
 void BlockTreeCacheMetricsReporter::accumulateTransferBytes(const TransferDescriptor& desc,

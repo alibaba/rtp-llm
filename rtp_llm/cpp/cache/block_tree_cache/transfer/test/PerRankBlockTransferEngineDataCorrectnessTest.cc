@@ -139,10 +139,10 @@ std::vector<uint8_t> readHostStride(const std::shared_ptr<HostBlockPool>& pool, 
     return std::vector<uint8_t>(begin, begin + buffer.stride_bytes);
 }
 
-void writeDiskPayload(const BlockTreeDiskBlockPoolPtr& pool,
-                      BlockIdxType                     block,
-                      const std::vector<uint8_t>&      bytes,
-                      uint8_t                          padding) {
+void writeDiskPayload(const DiskBlockPoolPtr&     pool,
+                      BlockIdxType                block,
+                      const std::vector<uint8_t>& bytes,
+                      uint8_t                     padding) {
     ASSERT_EQ(bytes.size(), pool->payloadBytes());
     std::vector<uint8_t> stride(pool->strideBytes(), padding);
     std::copy(bytes.begin(), bytes.end(), stride.begin());
@@ -150,18 +150,18 @@ void writeDiskPayload(const BlockTreeDiskBlockPoolPtr& pool,
     ASSERT_EQ(pool->write(block, stride.data(), stride.size()), BlockIOStatus::OK);
 }
 
-void writeDiskStride(const BlockTreeDiskBlockPoolPtr& pool, BlockIdxType block, uint8_t value) {
+void writeDiskStride(const DiskBlockPoolPtr& pool, BlockIdxType block, uint8_t value) {
     std::vector<uint8_t> stride(pool->strideBytes(), value);
     ASSERT_EQ(pool->write(block, stride.data(), stride.size()), BlockIOStatus::OK);
 }
 
-std::vector<uint8_t> readDiskStride(const BlockTreeDiskBlockPoolPtr& pool, BlockIdxType block) {
+std::vector<uint8_t> readDiskStride(const DiskBlockPoolPtr& pool, BlockIdxType block) {
     std::vector<uint8_t> stride(pool->strideBytes());
     EXPECT_EQ(pool->read(block, stride.data(), stride.size()), BlockIOStatus::OK);
     return stride;
 }
 
-std::vector<uint8_t> readDiskPayload(const BlockTreeDiskBlockPoolPtr& pool, BlockIdxType block) {
+std::vector<uint8_t> readDiskPayload(const DiskBlockPoolPtr& pool, BlockIdxType block) {
     auto bytes = readDiskStride(pool, block);
     bytes.resize(pool->payloadBytes());
     return bytes;
@@ -200,7 +200,7 @@ struct TransferFixture {
     TempDirGuard                                temp_dir;
     DeviceBlockPoolPtr                          device_pool;
     std::shared_ptr<HostBlockPool>              host_pool;
-    BlockTreeDiskBlockPoolPtr                   disk_pool;
+    DiskBlockPoolPtr                            disk_pool;
     GroupSetPtr                                 group_set;
     std::shared_ptr<PerRankBlockTransferEngine> engine;
     std::unique_ptr<BlockTransferDispatcher>    dispatcher;
@@ -261,11 +261,12 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, DeviceHostRoundTripsNineDi
     EXPECT_EQ(readHostStride(env.host_pool, host_blocks.after), host_after);
 }
 
-TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, HostDiskRoundTripsDistinctBlocksExactly) {
+TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, HostDiskEvictionAndDiskDeviceLoadPreserveDistinctBlocks) {
     constexpr size_t kDescriptorCount = 3;
     TransferFixture  env(GetParam(), kDescriptorCount, "data_correctness_host_disk_" + groupTypeName(GetParam()));
     const auto       host_blocks = allocateBlocks(*env.host_pool, kDescriptorCount);
     const auto       disk_blocks = allocateBlocks(*env.disk_pool, kDescriptorCount);
+    const auto       device_blocks = allocateBlocks(*env.device_pool, kDescriptorCount);
     writeHostStride(env.host_pool, host_blocks.before, 0xC1);
     writeHostStride(env.host_pool, host_blocks.after, 0xC2);
     writeDiskStride(env.disk_pool, disk_blocks.before, 0xB1);
@@ -289,18 +290,19 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, HostDiskRoundTripsDistinct
         EXPECT_EQ(readHostPayload(env.host_pool, host_blocks.data[index]), h2disk_expected[index]);
     }
 
-    std::vector<std::vector<uint8_t>> disk2h_expected;
-    std::vector<TransferDescriptor>   disk2h;
+    std::vector<std::vector<uint8_t>> disk2d_expected;
+    std::vector<TransferDescriptor>   disk2d;
     for (size_t index = 0; index < kDescriptorCount; ++index) {
-        disk2h_expected.push_back(makePattern(500 + index));
-        writeDiskPayload(env.disk_pool, disk_blocks.data[index], disk2h_expected.back(), 0xA5);
+        disk2d_expected.push_back(makePattern(500 + index));
+        writeDiskPayload(env.disk_pool, disk_blocks.data[index], disk2d_expected.back(), 0xA5);
         writeHostPayload(env.host_pool, host_blocks.data[index], makePattern(550 + index));
-        disk2h.push_back(makeDescriptor(Tier::DISK, Tier::HOST, {}, host_blocks.data[index], disk_blocks.data[index]));
+        disk2d.push_back(makeDescriptor(
+            Tier::DISK, Tier::DEVICE, {device_blocks.data[index]}, NULL_BLOCK_IDX, disk_blocks.data[index]));
     }
-    expectTransferSuccess(*env.dispatcher, disk2h);
+    expectTransferSuccess(*env.dispatcher, disk2d);
     for (size_t index = 0; index < kDescriptorCount; ++index) {
-        EXPECT_EQ(readHostPayload(env.host_pool, host_blocks.data[index]), disk2h_expected[index]);
-        EXPECT_EQ(readDiskPayload(env.disk_pool, disk_blocks.data[index]), disk2h_expected[index]);
+        EXPECT_EQ(readDevicePayload(env.device_pool, device_blocks.data[index]), disk2d_expected[index]);
+        EXPECT_EQ(readDiskPayload(env.disk_pool, disk_blocks.data[index]), disk2d_expected[index]);
     }
 
     EXPECT_EQ(readHostStride(env.host_pool, host_blocks.before), host_before);
@@ -309,7 +311,7 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, HostDiskRoundTripsDistinct
     EXPECT_EQ(readDiskStride(env.disk_pool, disk_blocks.after), disk_after);
 }
 
-TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, DeviceDiskRoundTripsDistinctBlocksWithoutStaleStagingData) {
+TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, ThreeTierRoundTripsDistinctBlocksWithoutStaleStagingData) {
     for (const bool async : {false, true}) {
         SCOPED_TRACE(async);
         constexpr size_t kDescriptorCount = 3;
@@ -317,6 +319,7 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, DeviceDiskRoundTripsDistin
             GetParam(), kDescriptorCount, "data_correctness_device_disk_" + groupTypeName(GetParam()), async);
         const auto device_blocks = allocateBlocks(*env.device_pool, kDescriptorCount);
         const auto disk_blocks   = allocateBlocks(*env.disk_pool, kDescriptorCount);
+        const auto host_blocks   = allocateBlocks(*env.host_pool, kDescriptorCount);
         writeDevicePayload(env.device_pool, device_blocks.before, makePattern(600));
         writeDevicePayload(env.device_pool, device_blocks.after, makePattern(601));
         writeDiskStride(env.disk_pool, disk_blocks.before, 0x91);
@@ -327,15 +330,18 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, DeviceDiskRoundTripsDistin
         const auto disk_after    = readDiskStride(env.disk_pool, disk_blocks.after);
 
         std::vector<std::vector<uint8_t>> d2disk_expected;
-        std::vector<TransferDescriptor>   d2disk;
+        std::vector<TransferDescriptor>   d2h, h2disk;
         for (size_t index = 0; index < kDescriptorCount; ++index) {
             d2disk_expected.push_back(makePattern(700 + index));
             writeDevicePayload(env.device_pool, device_blocks.data[index], d2disk_expected.back());
             writeDiskPayload(env.disk_pool, disk_blocks.data[index], makePattern(750 + index), 0xF0);
-            d2disk.push_back(makeDescriptor(
-                Tier::DEVICE, Tier::DISK, {device_blocks.data[index]}, NULL_BLOCK_IDX, disk_blocks.data[index]));
+            d2h.push_back(
+                makeDescriptor(Tier::DEVICE, Tier::HOST, {device_blocks.data[index]}, host_blocks.data[index]));
+            h2disk.push_back(
+                makeDescriptor(Tier::HOST, Tier::DISK, {}, host_blocks.data[index], disk_blocks.data[index]));
         }
-        expectTransferSuccess(*env.dispatcher, d2disk);
+        expectTransferSuccess(*env.dispatcher, d2h);
+        expectTransferSuccess(*env.dispatcher, h2disk);
         for (size_t index = 0; index < kDescriptorCount; ++index) {
             EXPECT_EQ(readDiskPayload(env.disk_pool, disk_blocks.data[index]), d2disk_expected[index]);
             EXPECT_EQ(readDevicePayload(env.device_pool, device_blocks.data[index]), d2disk_expected[index]);

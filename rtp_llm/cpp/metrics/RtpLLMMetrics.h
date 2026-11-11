@@ -1073,7 +1073,6 @@ public:
     int64_t block_cache_ref_blocks            = 0;
     int64_t load_ref_blocks                   = 0;
     int64_t eviction_target_ref_blocks        = 0;
-    int64_t store_ref_blocks                  = 0;
     int64_t frozen_ref_blocks                 = 0;
     float   used_ratio                        = 0;
     bool    report_eviction_target_ref_blocks = false;
@@ -1106,7 +1105,6 @@ public:
     kmonitor::MutableMetric* eviction_target_ref_blocks_metric = nullptr;
     // Compatibility alias retained while dashboards migrate to the clarified name.
     kmonitor::MutableMetric* eviction_ref_blocks_compat_metric = nullptr;
-    kmonitor::MutableMetric* store_ref_blocks_metric           = nullptr;
     kmonitor::MutableMetric* frozen_ref_blocks_metric          = nullptr;
     kmonitor::MutableMetric* used_ratio_metric                 = nullptr;
 
@@ -1266,25 +1264,6 @@ public:
 
 private:
     kmonitor::MutableMetric* insert_hard_stop_qps_metric = nullptr;
-    AUTIL_LOG_DECLARE();
-};
-
-class RtpLLMTierStoreMetricsCollector final {
-public:
-    std::string target_tier;
-    std::string outcome;
-    int64_t     block_count = 0;
-};
-
-class RtpLLMTierStoreMetrics: public kmonitor::MetricsGroup {
-public:
-    bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags* tags, RtpLLMTierStoreMetricsCollector* collector);
-
-private:
-    kmonitor::MutableMetric* store_publish_block_qps_metric = nullptr;
-
-private:
     AUTIL_LOG_DECLARE();
 };
 

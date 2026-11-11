@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferEngineSelection.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheLayout.h"
 
 #include <algorithm>
@@ -9,6 +9,7 @@
 #include <iterator>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -33,6 +34,52 @@
 
 namespace rtp_llm {
 namespace {
+
+bool hasDeviceRoute(const GroupSet& group, bool enable_disk_cache) {
+    return !group.devicePools().empty() && (group.hostPool() || (enable_disk_cache && group.diskPool()));
+}
+
+std::string workLoopCompatibility(const std::vector<GroupSetPtr>& groups, bool enable_disk_cache) {
+    std::string reason;
+    for (size_t index = 0; index < groups.size(); ++index) {
+        const auto& group = groups[index];
+        if (!group || group->groupSetId() != index || !group->topologyPtr() || group->groupTags().empty()
+            || !group->payloadBytes() || group->storageBytes() < group->payloadBytes())
+            throw std::invalid_argument("invalid transfer GroupSet mapping or backing layout");
+        if (group->crcEnabled()
+            && (group->payloadBytes() > std::numeric_limits<size_t>::max() - 19
+                || group->storageBytes() != CrcCopyWorkspace::encodedBytes(group->payloadBytes())))
+            throw std::invalid_argument("invalid CRC encoded storage geometry");
+        if ((group->hostPool()
+             && (group->hostPool()->payloadBytes() < group->payloadBytes()
+                 || group->hostPool()->strideBytes() < group->storageBytes()))
+            || (enable_disk_cache && group->diskPool()
+                && (group->diskPool()->payloadBytes() < group->payloadBytes()
+                    || group->diskPool()->strideBytes() < group->storageBytes())))
+            throw std::invalid_argument("transfer backing cannot hold encoded payload");
+        const auto& pools = group->devicePools();
+        if (!pools.empty()
+            && (pools.size() != group->groupTags().size()
+                || std::any_of(pools.begin(), pools.end(), [](const auto& pool) { return !pool; })))
+            throw std::invalid_argument("invalid transfer member pools");
+        if (!hasDeviceRoute(*group, enable_disk_cache))
+            continue;
+        if (!group->crcEnabled()) {
+            reason = "Device route has no CRC layout";
+            continue;
+        }
+        const int device = pools.front()->deviceIndex();
+        if (device < 0 || std::any_of(pools.begin(), pools.end(), [device](const auto& pool) {
+                return pool->deviceIndex() != device;
+            }))
+            throw std::invalid_argument("CRC backings must reside on a single GPU per GroupSet");
+        if (!CrcCopyWorkspace::available())
+            throw std::invalid_argument("CRC Device routes require the CUDA13 backend");
+        // HostBlockPool's allocator guarantees pinned/registered storage.
+        (void)getDeviceHostCopyTiles(*group, std::vector<BlockIdxType>(pools.size(), 0));
+    }
+    return reason;
+}
 
 constexpr size_t kCopyAlignment     = 16;
 constexpr size_t kDirectIOAlignment = 4096;
@@ -88,7 +135,7 @@ int slidingWindowSize(const GroupBase& group) {
 GroupSetPtr createGroupSet(const GroupBase&                group,
                            std::vector<DeviceBlockPoolPtr> device_pools,
                            std::shared_ptr<HostBlockPool>  host_pool,
-                           BlockTreeDiskBlockPoolPtr       disk_pool) {
+                           DiskBlockPoolPtr                disk_pool) {
     GroupSetPtr result;
     switch (group.policy.group_type) {
         case CacheGroupType::FULL:
@@ -207,17 +254,17 @@ createDiskMountGuard(const KVCacheConfig& config, int64_t local_world_size, int6
     return guard->init(path) ? guard : nullptr;
 }
 
-BlockTreeDiskBlockPoolPtr createDiskPool(const KVCacheConfig&                            kv_config,
-                                         const std::shared_ptr<BlockTreeDiskMountGuard>& guard,
-                                         const std::string&                              name,
-                                         const BackingLayout&                            layout,
-                                         size_t                                          usable_blocks,
-                                         int64_t                                         world_rank,
-                                         int64_t                                         local_rank) {
+DiskBlockPoolPtr createDiskPool(const KVCacheConfig&                            kv_config,
+                                const std::shared_ptr<BlockTreeDiskMountGuard>& guard,
+                                const std::string&                              name,
+                                const BackingLayout&                            layout,
+                                size_t                                          usable_blocks,
+                                int64_t                                         world_rank,
+                                int64_t                                         local_rank) {
     if (!guard || layout.payload_bytes == 0 || usable_blocks == 0) {
         return nullptr;
     }
-    auto config                  = std::make_shared<BlockTreeDiskBlockPoolConfig>();
+    auto config                            = std::make_shared<DiskBlockPoolConfig>();
     config->pool_type            = BlockPoolType::DISK;
     config->pool_name            = name;
     config->work_dir             = guard->workDir();
@@ -231,7 +278,7 @@ BlockTreeDiskBlockPoolPtr createDiskPool(const KVCacheConfig&                   
     config->frozen_block_abort_lower_ratio = kv_config.block_pool_frozen_abort_lower_ratio;
     config->frozen_block_abort_upper_ratio = kv_config.block_pool_frozen_abort_upper_ratio;
     config->mount_guard          = guard;
-    auto pool                    = std::make_shared<BlockTreeDiskBlockPool>(config);
+    auto pool                              = std::make_shared<DiskBlockPool>(config);
     return pool->init() ? pool : nullptr;
 }
 
@@ -440,6 +487,13 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
 
     const bool host_enabled = kv_cache_config.enable_memory_cache;
     const bool disk_enabled = kv_cache_config.enable_disk_cache;
+    if ((host_enabled && !kv_cache_config.enable_device_cache) || (disk_enabled && !host_enabled)) {
+        RTP_LLM_LOG_ERROR("local cache tiers require DISK -> HOST -> DEVICE: device=%d host=%d disk=%d",
+                          kv_cache_config.enable_device_cache,
+                          host_enabled,
+                          disk_enabled);
+        return nullptr;
+    }
     if (!kv_cache_config.enable_crc && (host_enabled || disk_enabled)) {
         RTP_LLM_LOG_WARNING(
             "CRC32C KV cache protection disabled by KVCacheConfig.enable_crc; host/disk transfers use plain copies");
@@ -572,7 +626,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         }
     }
 
-    std::vector<BlockTreeDiskBlockPoolPtr> disk_pools(group_members.size());
+    std::vector<DiskBlockPoolPtr> disk_pools(group_members.size());
     if (disk_enabled && !group_members.empty()) {
         const size_t bytes        = static_cast<size_t>(kv_cache_config.disk_cache_size_mb) * 1024UL * 1024UL;
         const auto   block_counts = computeTierBlockCounts(bytes, device_block_counts, pool_strides);
@@ -714,8 +768,12 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         disk_enabled ? checkedTimeout(kv_cache_config.disk_cache_sync_timeout_ms, "disk_cache_sync_timeout_ms") :
                        config.host_cache_sync_timeout_ms;
     config.btc_transfer_engine_async = kv_cache_config.btc_transfer_engine_async;
-    const bool uses_workloop =
-        config.btc_transfer_engine_async && workLoopCompatibility(group_sets, disk_enabled).empty();
+    const auto fallback_reason       = workLoopCompatibility(group_sets, disk_enabled);
+    const bool uses_workloop         = config.btc_transfer_engine_async && fallback_reason.empty();
+    RTP_LLM_LOG_INFO("BlockTree transfer: requested_async=%d implementation=%s fallback_reason=%s",
+                     config.btc_transfer_engine_async,
+                     uses_workloop ? "workloop" : "legacy",
+                     config.btc_transfer_engine_async && !uses_workloop ? fallback_reason.c_str() : "none");
     if (uses_workloop
         && (!transfer_queue_size || transfer_queue_size > std::numeric_limits<size_t>::max() / max_blocks_per_batch)) {
         RTP_LLM_LOG_ERROR("WorkLoop transfer requires positive, nonoverflowing Q*M");
@@ -783,15 +841,15 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                                                         cache_metrics_reporter,
                                                                         parallelism_config.world_rank,
                                                                         config.btc_crc_slot_count,
-                                                                        config.btc_transfer_engine_async,
+                                                                        uses_workloop,
                                                                         disk_io_config);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(
             group_sets, std::move(broadcast_manager), cache_metrics_reporter);
     }
-    auto transfer_dispatcher = std::make_unique<BlockTransferDispatcher>(
-        std::move(per_rank_engine), std::move(multi_rank_engine), config.max_descriptors_per_transfer_batch);
+    auto transfer_dispatcher =
+        std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
     const size_t business_queue_size = config.business_queue_max_size == 0 ?
                                            0 :
                                            config.business_queue_max_size + BlockTreeTaskPool::kLoadReservedSlots;

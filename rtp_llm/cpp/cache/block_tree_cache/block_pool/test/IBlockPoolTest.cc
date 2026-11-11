@@ -394,7 +394,7 @@ TEST(IBlockPoolTest, ActiveBlocksDeduplicateReferenceTypes) {
     EXPECT_EQ(active_blocks, 0u);
 
     pool->incTreeRef(*block, BlockTreeRefType::LOAD);
-    pool->incTreeRef(*block, BlockTreeRefType::STORE);
+    pool->incTreeRef(*block, BlockTreeRefType::EVICTION);
     active_blocks = pool->activeBlocksNum();
     EXPECT_EQ(active_blocks, 1u);
 
@@ -402,7 +402,7 @@ TEST(IBlockPoolTest, ActiveBlocksDeduplicateReferenceTypes) {
     active_blocks = pool->activeBlocksNum();
     EXPECT_EQ(active_blocks, 1u);
 
-    pool->decTreeRef(*block, BlockTreeRefType::STORE);
+    pool->decTreeRef(*block, BlockTreeRefType::EVICTION);
     active_blocks = pool->activeBlocksNum();
     EXPECT_EQ(active_blocks, 0u);
 
@@ -432,12 +432,12 @@ TEST(IBlockPoolTest, AvailableBlocksCountOnlyFreeAndCacheOnlyBlocks) {
 
     pool->incTreeRef(*block, BlockTreeRefType::LOAD);
     EXPECT_EQ(pool->availableBlocksNum(), total_blocks - 1);
-    pool->incTreeRef(*block, BlockTreeRefType::STORE);
+    pool->incTreeRef(*block, BlockTreeRefType::EVICTION);
     EXPECT_EQ(pool->availableBlocksNum(), total_blocks - 1);
 
     pool->decTreeRef(*block, BlockTreeRefType::LOAD);
     EXPECT_EQ(pool->availableBlocksNum(), total_blocks - 1);
-    pool->decTreeRef(*block, BlockTreeRefType::STORE);
+    pool->decTreeRef(*block, BlockTreeRefType::EVICTION);
     EXPECT_EQ(pool->availableBlocksNum(), total_blocks);
 
     pool->decTreeRef(*block, BlockTreeRefType::CACHE);
@@ -455,15 +455,15 @@ TEST(IBlockPoolTest, AscendingOrderReturnsSortedBlockIds) {
     auto blocks = pool.malloc(3);
     ASSERT_TRUE(blocks.has_value());
     ASSERT_EQ(*blocks, (BlockIdList{1, 2, 3}));
-    pool.incTreeRef(BlockIdList{2}, BlockTreeRefType::STORE);
-    pool.decTreeRef(BlockIdList{2}, BlockTreeRefType::STORE);
+    pool.incTreeRef(BlockIdList{2}, BlockTreeRefType::EVICTION);
+    pool.decTreeRef(BlockIdList{2}, BlockTreeRefType::EVICTION);
 
     auto more = pool.malloc(2);
     ASSERT_TRUE(more.has_value());
     EXPECT_EQ(*more, (BlockIdList{4, 5}));
 
-    pool.incTreeRef(BlockIdList{1, 3}, BlockTreeRefType::STORE);
-    pool.decTreeRef(BlockIdList{1, 3}, BlockTreeRefType::STORE);
+    pool.incTreeRef(BlockIdList{1, 3}, BlockTreeRefType::EVICTION);
+    pool.decTreeRef(BlockIdList{1, 3}, BlockTreeRefType::EVICTION);
     auto afterMerge = pool.malloc(2);
     ASSERT_TRUE(afterMerge.has_value());
     EXPECT_EQ(*afterMerge, (BlockIdList{1, 2}));
@@ -588,8 +588,8 @@ TEST(IBlockPoolTest, BatchIncTreeRefRejectsInvalidTailWithoutMutatingPrefix) {
     EXPECT_EQ(pool->treeRefCount(*block), 0u);
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
     if (pool->treeRefCount(*block) == 0) {
-        pool->incTreeRef(*block, BlockTreeRefType::STORE);
-        pool->decTreeRef(*block, BlockTreeRefType::STORE);
+        pool->incTreeRef(*block, BlockTreeRefType::EVICTION);
+        pool->decTreeRef(*block, BlockTreeRefType::EVICTION);
     } else {
         pool->decTreeRef(*block, BlockTreeRefType::CACHE);
     }
@@ -628,10 +628,10 @@ TEST(IBlockPoolTest, CapacityNotificationsOnlyPublishReleasedCapacityOutsidePool
     pool->incTreeRef(*block, BlockTreeRefType::CACHE);
     EXPECT_EQ(notifications, 1u);
     pool->incTreeRef(*block, BlockTreeRefType::LOAD);
-    pool->incTreeRef(*block, BlockTreeRefType::STORE);
+    pool->incTreeRef(*block, BlockTreeRefType::EVICTION);
     pool->decTreeRef(*block, BlockTreeRefType::LOAD);
     EXPECT_EQ(notifications, 1u);
-    pool->decTreeRef(*block, BlockTreeRefType::STORE);
+    pool->decTreeRef(*block, BlockTreeRefType::EVICTION);
     EXPECT_EQ(notifications, 2u);
     pool->decTreeRef(*block, BlockTreeRefType::CACHE);
     EXPECT_EQ(notifications, 3u);

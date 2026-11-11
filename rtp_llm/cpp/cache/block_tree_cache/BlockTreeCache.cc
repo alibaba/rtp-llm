@@ -52,16 +52,9 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
             config_.enable_device_cache,
             storage_backend_,
             [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); }),
-    storer_(tree_.get(),
-            evictor_,
-            transfer_dispatcher_.get(),
-            task_pool_.get(),
-            *metrics_reporter_,
-            mutex_,
-            config_.host_cache_sync_timeout_ms,
-            config_.disk_cache_evict_timeout_ms,
-            storage_backend_,
-            [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); }) {
+    storer_(tree_.get(), evictor_, *metrics_reporter_, storage_backend_, [this](bool check_watermark) {
+        onWorkflowSettledLocked(check_watermark);
+    }) {
     if (storage_backend_)
         storage_backend_->setStageMetricsReporter(metrics_reporter_);
 }
@@ -114,11 +107,7 @@ BlockTreeCache::~BlockTreeCache() {
     if (storage_backend_) {
         storage_backend_->shutdown();
     }
-    RTP_LLM_LOG_INFO("load tickets closed, stopping store admission and draining cache tasks...");
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        storer_.stopAdmissionLocked();
-    }
+    RTP_LLM_LOG_INFO("load tickets closed, draining cache tasks...");
     task_pool_->stopAdmission();
     transfer_dispatcher_->cancelPendingStagingTransfers();
     task_pool_->waitForIdle();

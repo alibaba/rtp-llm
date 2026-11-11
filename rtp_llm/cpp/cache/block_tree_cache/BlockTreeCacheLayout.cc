@@ -129,12 +129,7 @@ size_t blockTreeTransferDeviceMemory(const CacheConfig& config, const KVCacheCon
     }
     if (!max_payload)
         return 0;
-    size_t batch = positive(options.memory_cache_max_descriptors_per_transfer_batch, "transfer batch size");
-    if (async)
-        batch = asyncTransferBatchLimit(
-            batch,
-            options.enable_disk_cache ? positive(options.disk_cache_staging_block_count, "disk staging blocks") : 0,
-            options.enable_disk_cache);
+    const size_t batch = positive(options.memory_cache_max_descriptors_per_transfer_batch, "transfer batch size");
     const auto count = crcTransferWorkspaceCount(positive(options.block_tree_transfer_worker_count, "transfer workers"),
                                                  async ? positive(options.btc_crc_slot_count, "CRC slots") : 1,
                                                  async);

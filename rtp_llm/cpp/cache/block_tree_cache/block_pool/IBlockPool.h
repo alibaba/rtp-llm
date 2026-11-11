@@ -27,7 +27,6 @@ enum class BlockTreeRefType : uint8_t {
     CACHE = 0,
     LOAD,
     EVICTION,
-    STORE,
     FROZEN,
     COUNT,
 };

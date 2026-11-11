@@ -90,7 +90,7 @@ private:
                                      const std::string&             pool_prefix,
                                      bool                           need_device,
                                      std::shared_ptr<HostBlockPool> host_pool,
-                                     BlockTreeDiskBlockPoolPtr      disk_pool);
+                                     DiskBlockPoolPtr               disk_pool);
 
     TransferDescriptor createDescriptor(const std::string&               direction,
                                         const MemberDeviceBlocks&        device_blocks,

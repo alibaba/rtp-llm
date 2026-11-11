@@ -36,7 +36,7 @@ class GroupSet {
 public:
     GroupSet(std::vector<DeviceBlockPoolPtr> device_pools,
              std::shared_ptr<HostBlockPool>  host_pool,
-             BlockTreeDiskBlockPoolPtr       disk_pool);
+             DiskBlockPoolPtr                disk_pool);
 
     virtual ~GroupSet() = default;
 
@@ -83,7 +83,7 @@ public:
     std::shared_ptr<HostBlockPool> hostPool() const {
         return host_pool_;
     }
-    std::shared_ptr<BlockTreeDiskBlockPool> diskPool() const {
+    std::shared_ptr<DiskBlockPool> diskPool() const {
         return disk_pool_;
     }
 
@@ -100,7 +100,7 @@ public:
 private:
     std::vector<DeviceBlockPoolPtr>         device_pools_;
     std::shared_ptr<HostBlockPool>          host_pool_;
-    std::shared_ptr<BlockTreeDiskBlockPool> disk_pool_;
+    std::shared_ptr<DiskBlockPool>          disk_pool_;
     size_t                                  group_set_id_{0};
     std::shared_ptr<const CacheTopology>    topology_;
     std::vector<std::string>                group_tags_;

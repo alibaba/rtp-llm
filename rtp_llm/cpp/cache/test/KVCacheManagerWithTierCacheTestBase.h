@@ -173,7 +173,7 @@ public:
         PerRankBlockTransferEngine(
             groups, enable_disk_cache, {}, device_disk_staging_block_count, 8, 4, 10000, nullptr, 0, 4, true) {}
 
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         const auto& descriptors      = task.descriptors();
         bool        scripted_success = true;
         {
@@ -196,7 +196,7 @@ public:
             return std::make_shared<CompletedTransferAsyncContext>(
                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
         }
-        return PerRankBlockTransferEngine::execute(std::move(task));
+        return PerRankBlockTransferEngine::executeBatch(std::move(task));
     }
 
     void enqueueResult(bool success) {
@@ -249,7 +249,7 @@ public:
                 submit.context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
                 continue;
             }
-            auto context = PerRankBlockTransferEngine::execute(std::move(submit.task));
+            auto context = PerRankBlockTransferEngine::executeBatch(std::move(submit.task));
             context->waitDone();
             submit.context->complete(context->result());
         }

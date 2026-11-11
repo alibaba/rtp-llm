@@ -1,13 +1,14 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 
+#include <exception>
+#include <iterator>
 #include <memory>
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/LegacyTransferEngine.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferEngineSelection.h"
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <array>
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcTransferService.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
 #include <utility>
 #include <vector>
 
@@ -20,6 +21,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"
 
 namespace rtp_llm {
 
@@ -55,7 +57,7 @@ makeAsyncStaging(const std::vector<GroupSetPtr>& groups, size_t block_count, boo
         throw std::overflow_error("async disk staging size overflow");
     result[0] = std::make_shared<HostStagingBlockPool>(count, stride);
     result[1] = std::make_shared<HostStagingBlockPool>(count, stride);
-    RTP_LLM_LOG_INFO("async staging: stride=%zu load_blocks=%zu offload_blocks=%zu data_bytes=%zu",
+    RTP_LLM_LOG_INFO("async staging: stride=%zu load_blocks=%zu evict_blocks=%zu data_bytes=%zu",
                      stride,
                      count,
                      count,
@@ -100,18 +102,15 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
                                                        DiskIOExecutorConfig disk_io_config):
     group_sets_(std::move(group_sets)),
     max_descriptors_per_batch_(max_descriptors_per_batch),
+    staging_batch_limit_(max_descriptors_per_batch),
     enable_disk_cache_(enable_disk_cache),
     transfer_worker_count_(transfer_worker_count),
     crc_slot_count_(btc_crc_slot_count) {
     RTP_LLM_CHECK(max_descriptors_per_batch > 0);
     RTP_LLM_CHECK(transfer_worker_count > 0 && transfer_worker_count <= std::numeric_limits<size_t>::max() / 2);
     RTP_LLM_CHECK(btc_crc_slot_count > 0 && btc_crc_slot_count <= std::numeric_limits<size_t>::max() / 2);
-    const auto fallback_reason = workLoopCompatibility(group_sets_, enable_disk_cache);
-    async_                     = btc_transfer_engine_async && fallback_reason.empty();
-    RTP_LLM_LOG_INFO("BlockTree transfer: requested_async=%d implementation=%s fallback_reason=%s",
-                     btc_transfer_engine_async,
-                     async_ ? "workloop" : "legacy",
-                     btc_transfer_engine_async && !async_ ? fallback_reason.c_str() : "none");
+    // Factory selects the backend once after validating the GroupSet layouts.
+    async_ = btc_transfer_engine_async;
     std::array<std::shared_ptr<HostStagingBlockPool>, 2> staging;
     if (async_) {
         RTP_LLM_CHECK(transfer_worker_count <= std::numeric_limits<size_t>::max() / (2 * btc_crc_slot_count));
@@ -120,13 +119,13 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
             throw std::invalid_argument("async transfer requires Q >= worker count and nonoverflowing Q*M");
         staging                = makeAsyncStaging(group_sets_, device_disk_staging_block_count, enable_disk_cache);
         const bool has_staging = staging[0] != nullptr;
-        max_descriptors_per_batch_ =
+        staging_batch_limit_ =
             asyncTransferBatchLimit(max_descriptors_per_batch_, device_disk_staging_block_count, has_staging);
     }
     if (enable_disk_cache_ && std::any_of(group_sets_.begin(), group_sets_.end(), [](const auto& group) {
             return group && group->diskPool();
         })) {
-        // Disk reads use LOAD and writes use OFFLOAD. Q covers all owners/files;
+        // Disk reads use LOAD and writes use EVICT. Q covers all owners/files;
         // each resident batch has at most one disk stage in flight.
         if (async_
             && !disk_io_config.setQueueSizesFromBatchCapacity(
@@ -148,13 +147,13 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
     if (async_) {
         const auto crc_groups = crcTransferGroups(group_sets_, enable_disk_cache);
         const bool needs_crc  = !crc_groups.empty();
-        const auto make_crc   = [&]() -> std::unique_ptr<CrcTransferService> {
-            return needs_crc ? std::make_unique<CrcTransferService>(
+        const auto make_crc   = [&]() -> std::unique_ptr<CrcCopyExecutor> {
+            return needs_crc ? std::make_unique<CrcCopyExecutor>(
                                    crc_groups, max_descriptors_per_batch_, crc_slot_count_, world_rank) :
                                  nullptr;
         };
         load_loops_.reserve(transfer_worker_count);
-        offload_loops_.reserve(transfer_worker_count);
+        evict_loops_.reserve(transfer_worker_count);
         for (size_t worker = 0; worker < transfer_worker_count; ++worker) {
             const auto queue_capacity = transfer_queue_max_size / transfer_worker_count
                                         + (worker < transfer_queue_max_size % transfer_worker_count ? 1 : 0);
@@ -170,23 +169,23 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
                                                                      metrics_reporter,
                                                                      world_rank,
                                                                      worker));
-            offload_loops_.push_back(std::make_unique<TransferWorkLoop>(group_sets_,
-                                                                        make_crc(),
-                                                                        disk_io_executor_.get(),
-                                                                        TransferDirection::OFFLOAD,
-                                                                        max_descriptors_per_batch_,
-                                                                        queue_capacity,
-                                                                        std::move(staging[1]),
-                                                                        metrics_reporter,
-                                                                        world_rank,
-                                                                        worker));
+            evict_loops_.push_back(std::make_unique<TransferWorkLoop>(group_sets_,
+                                                                      make_crc(),
+                                                                      disk_io_executor_.get(),
+                                                                      TransferDirection::EVICT,
+                                                                      max_descriptors_per_batch_,
+                                                                      queue_capacity,
+                                                                      std::move(staging[1]),
+                                                                      metrics_reporter,
+                                                                      world_rank,
+                                                                      worker));
         }
         // Warm both disk pools before owners or business producers can submit.
         if (disk_io_executor_)
             disk_io_executor_->start();
         for (auto& loop : load_loops_)
             loop->start();
-        for (auto& loop : offload_loops_)
+        for (auto& loop : evict_loops_)
             loop->start();
         RTP_LLM_LOG_INFO(
             "BlockTree async transfer: owners_per_direction=%zu C=%zu total_crc_slots_per_device=%zu M=%zu "
@@ -218,7 +217,7 @@ void PerRankBlockTransferEngine::stopAdmission() {
     if (async_) {
         for (auto& loop : load_loops_)
             loop->stopAdmission();
-        for (auto& loop : offload_loops_)
+        for (auto& loop : evict_loops_)
             loop->stopAdmission();
     } else {
         legacy_->stopAdmission();
@@ -230,7 +229,7 @@ void PerRankBlockTransferEngine::shutdown() {
     if (async_) {
         for (auto& loop : load_loops_)
             loop->shutdown();
-        for (auto& loop : offload_loops_)
+        for (auto& loop : evict_loops_)
             loop->shutdown();
     } else {
         cancelPendingStagingTransfers();
@@ -245,7 +244,7 @@ void PerRankBlockTransferEngine::cancelPendingStagingTransfers() {
     if (async_) {
         for (auto& loop : load_loops_)
             loop->cancelPendingStagingTransfers();
-        for (auto& loop : offload_loops_)
+        for (auto& loop : evict_loops_)
             loop->cancelPendingStagingTransfers();
     } else {
         legacy_->cancelPendingStagingTransfers();
@@ -257,8 +256,8 @@ BlockTreeQueueSizes PerRankBlockTransferEngine::queueSizes() const {
         BlockTreeQueueSizes sizes;
         for (const auto& loop : load_loops_)
             sizes.load += loop->outstandingBatches();
-        for (const auto& loop : offload_loops_)
-            // Preserve the historical monitoring field/tag for the offload lane.
+        for (const auto& loop : evict_loops_)
+            // Preserve the historical monitoring field/tag for the evict lane.
             sizes.background += loop->outstandingBatches();
         return sizes;
     }
@@ -266,48 +265,127 @@ BlockTreeQueueSizes PerRankBlockTransferEngine::queueSizes() const {
 }
 
 std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(TransferTask task) {
-    const auto& descriptors = task.descriptors();
-    if (descriptors.empty()) {
-        return invalidTransferContext(descriptors.size());
+    auto&        descriptors = task.mutableDescriptorsForPreparation();
+    const size_t count       = descriptors.size();
+    if (count == 0) {
+        return invalidTransferContext(count);
     }
-    const Tier source = descriptors.front().source_tier;
-    const Tier target = descriptors.front().target_tier;
-    if (async_ && descriptors.size() > batchLimit())
-        return invalidTransferContext(descriptors.size());
-    std::vector<const GroupSet*> group_sets;
-    group_sets.reserve(descriptors.size());
-    for (const auto& descriptor : descriptors) {
-        if (descriptor.source_tier != source || descriptor.target_tier != target
-            || (async_ && descriptor.group_set_id != descriptors.front().group_set_id)) {
-            return invalidTransferContext(descriptors.size());
-        }
-        if (descriptor.group_set_id >= group_sets_.size() || !group_sets_[descriptor.group_set_id])
-            return invalidTransferContext(descriptors.size());
-        const auto* group_set = group_sets_[descriptor.group_set_id].get();
-        if (!validDescriptor(descriptor, *group_set))
-            return invalidTransferContext(descriptors.size());
-        group_sets.push_back(group_set);
+    if (task.expired()) {
+        return std::make_shared<CompletedTransferAsyncContext>(
+            TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before dispatch"),
+                           CacheCopyError::NOT_EXECUTED),
+            count);
     }
 
-    if ((source == Tier::DEVICE || target == Tier::DEVICE)
-        && std::any_of(group_sets.begin(), group_sets.end(), [&](const auto* group) {
-               return group->crcEnabled() != group_sets.front()->crcEnabled();
-           }))
+    struct Group {
+        Tier                source;
+        Tier                target;
+        size_t              group_set_id;
+        std::vector<size_t> indices;
+    };
+    std::vector<Group> groups;
+    for (size_t index = 0; index < count; ++index) {
+        const auto& descriptor = descriptors[index];
+        auto        group      = std::find_if(groups.begin(), groups.end(), [&](const Group& item) {
+            return item.source == descriptor.source_tier && item.target == descriptor.target_tier
+                   && item.group_set_id == descriptor.group_set_id;
+        });
+        if (group == groups.end()) {
+            groups.push_back({descriptor.source_tier, descriptor.target_tier, descriptor.group_set_id, {}});
+            group = std::prev(groups.end());
+        }
+        group->indices.push_back(index);
+    }
+
+    auto context = std::make_shared<TransferBatchAsyncContext>(count);
+    auto state   = std::make_shared<TransferStageState>(
+        [context](TransferResult result) { context->complete(std::move(result)); }, count);
+    bool any_registered = false;
+    for (const auto& group : groups) {
+        const size_t limit = batchLimit(group.source, group.target);
+        for (size_t begin = 0; begin < group.indices.size();) {
+            std::vector<size_t> indices;
+            bool                registered = false;
+            TransferResult      error;
+            try {
+                const size_t end = begin + std::min(limit, group.indices.size() - begin);
+                indices.assign(group.indices.begin() + begin, group.indices.begin() + end);
+                begin = end;
+                std::vector<TransferDescriptor> batch;
+                const bool                      whole_task = indices.size() == count;
+                if (!whole_task) {
+                    batch.reserve(indices.size());
+                    for (const size_t index : indices) {
+                        batch.push_back(std::move(descriptors[index]));
+                    }
+                }
+                state->addBatch();
+                registered = any_registered = true;
+                auto child = executeBatch(whole_task ? std::move(task) : task.subtask(std::move(batch)));
+                if (!child) {
+                    error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer engine returned a null context");
+                } else {
+                    child->onDone(
+                        [state, indices](TransferResult result) { state->completeBatch(std::move(result), indices); });
+                }
+            } catch (const std::exception& exception) {
+                if (!any_registered) {
+                    throw;
+                }
+                error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
+            } catch (...) {
+                if (!any_registered) {
+                    throw;
+                }
+                error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer submission exception");
+            }
+            if (!error.ok()) {
+                if (!registered) {
+                    state->finishSubmitting(std::move(error));
+                    return context;
+                }
+                state->completeBatch(std::move(error), indices);
+            }
+        }
+    }
+    // Already submitted batches retain their resources until every completion
+    // arrives, including when a later batch is rejected or throws.
+    state->finishSubmitting();
+    return context;
+}
+
+std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::executeBatch(TransferTask task) {
+    const auto& descriptors  = task.descriptors();
+    const Tier source = descriptors.front().source_tier;
+    const Tier target = descriptors.front().target_tier;
+    const auto  group_set_id = descriptors.front().group_set_id;
+    if (group_set_id >= group_sets_.size() || !group_sets_[group_set_id])
         return invalidTransferContext(descriptors.size());
+    const auto* group_set = group_sets_[group_set_id].get();
+    for (const auto& descriptor : descriptors) {
+        if (!validDescriptor(descriptor, *group_set))
+            return invalidTransferContext(descriptors.size());
+    }
     if ((source == Tier::DISK || target == Tier::DISK) && !enable_disk_cache_)
         return invalidTransferContext(descriptors.size());
-    if (((source == Tier::DISK && target == Tier::DEVICE) || (source == Tier::DEVICE && target == Tier::DISK))
-        && std::any_of(group_sets.begin(), group_sets.end(), [&](const auto* group) {
-               return group->groupType() != group_sets.front()->groupType();
-           }))
-        return invalidTransferContext(descriptors.size());
+    std::vector<const GroupSet*> group_sets(descriptors.size(), group_set);
     if (async_) {
-        auto&      loops  = isLoadTransfer(source, target) ? load_loops_ : offload_loops_;
-        auto&      next   = isLoadTransfer(source, target) ? next_load_ : next_offload_;
+        auto&      loops  = isLoadTransfer(source, target) ? load_loops_ : evict_loops_;
+        auto&      next   = isLoadTransfer(source, target) ? next_load_ : next_evict_;
         const auto worker = loops.size() == 1 ? 0 : next.fetch_add(1, std::memory_order_relaxed) % loops.size();
-        return loops[worker]->execute(std::move(task));
+        std::shared_ptr<TransferAsyncContext> context;
+        for (size_t offset = 0; offset < loops.size(); ++offset) {
+            bool retryable = false;
+            // The last owner returns the final rejection and records it once.
+            context = loops[(worker + offset) % loops.size()]->execute(
+                std::move(task), {}, offset + 1 < loops.size() ? &retryable : nullptr);
+            if (!retryable) {
+                break;
+            }
+        }
+        return context;
     }
-    return legacy_->execute(std::move(task), group_sets);
+    return legacy_->execute(std::move(task), std::move(group_sets));
 }
 
 void PerRankBlockTransferEngine::waitForIdle() {
@@ -319,7 +397,7 @@ void PerRankBlockTransferEngine::waitForIdle() {
     do {
         for (auto& loop : load_loops_)
             loop->waitForIdle();
-        for (auto& loop : offload_loops_)
+        for (auto& loop : evict_loops_)
             loop->waitForIdle();
         // A later owner's callback may have submitted to an earlier owner.
         pending = queueSizes();

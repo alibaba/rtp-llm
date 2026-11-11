@@ -61,14 +61,6 @@ bool BlockTransferRequestConverter::directionFor(const TransferDescriptor&      
         request_direction = MemoryOperationRequestPB::H2DISK;
         return true;
     }
-    if (descriptor.source_tier == Tier::DISK && descriptor.target_tier == Tier::HOST) {
-        request_direction = MemoryOperationRequestPB::DISK2H;
-        return true;
-    }
-    if (descriptor.source_tier == Tier::DEVICE && descriptor.target_tier == Tier::DISK) {
-        request_direction = MemoryOperationRequestPB::D2DISK;
-        return true;
-    }
     if (descriptor.source_tier == Tier::DISK && descriptor.target_tier == Tier::DEVICE) {
         request_direction = MemoryOperationRequestPB::DISK2D;
         return true;
@@ -206,24 +198,6 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
                 descriptor =
                     TransferDescriptor::hostToDisk(group_set.groupSetId(), item.mem_block(), item.disk_block());
                 break;
-            case MemoryOperationRequestPB::DISK2H:
-                if (!group_set.hostPool() || !group_set.hostPool()->validBlock(item.mem_block())
-                    || !group_set.diskPool() || !group_set.diskPool()->validBlock(item.disk_block())) {
-                    return false;
-                }
-                descriptor =
-                    TransferDescriptor::diskToHost(group_set.groupSetId(), item.disk_block(), item.mem_block());
-                break;
-            case MemoryOperationRequestPB::D2DISK: {
-                std::vector<BlockIdxType> device_blocks;
-                if (!group_set.diskPool() || !group_set.diskPool()->validBlock(item.disk_block())
-                    || !decodeDeviceBlocks(item, group_set, device_blocks)) {
-                    return false;
-                }
-                descriptor = TransferDescriptor::deviceToDisk(
-                    group_set.groupSetId(), std::move(device_blocks), item.disk_block());
-                break;
-            }
             case MemoryOperationRequestPB::DISK2D: {
                 std::vector<BlockIdxType> device_blocks;
                 if (!group_set.diskPool() || !group_set.diskPool()->validBlock(item.disk_block())
