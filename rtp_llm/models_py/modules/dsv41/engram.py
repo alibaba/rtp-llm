@@ -1192,12 +1192,14 @@ class HostEngramEmbedding:
                 )
             _, tp_world = _hip_engram_tp_layout()
             if tp_world > 1:
-                from rtp_llm.models_py.distributed.collective_torch import (
-                    Group,
-                    all_reduce,
-                )
+                # Raw RCCL on the bootstrapped hipgraph comm - deliberately
+                # NOT collective_torch.all_reduce, whose trtllm custom-kernel
+                # path (hidden 1024 is trtllm-supported) consumes per-capture
+                # -session IPC handle slots and broke the 4th capture session
+                # (load25: bs 1/2/4 ok, bs 8 hipErrorInvalidConfiguration).
+                from rtp_llm.models_py.distributed import rocm_rccl
 
-                all_reduce(out, Group.TP)
+                rocm_rccl.hipgraph_capture_all_reduce_rccl(out, None)
             return out
         # UVA device-side gather (CUDA): _PinnedSharedTable via
         # cuda.bindings. Without it, fall through to the host gather, which

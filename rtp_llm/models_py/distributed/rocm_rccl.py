@@ -557,6 +557,24 @@ def hipgraph_capture_all_reduce(
                 _trtllm_fallback_warned = True
 
     # Fallback to raw RCCL ncclAllReduce.
+    return hipgraph_capture_all_reduce_rccl(tensor, process_group)
+
+
+def hipgraph_capture_all_reduce_rccl(
+    tensor: torch.Tensor,
+    process_group: Optional[torch.distributed.ProcessGroup] = None,
+) -> torch.Tensor:
+    """Raw RCCL all-reduce on the current (possibly capturing) stream.
+
+    Deliberately bypasses the trtllm custom kernel and its per-capture-session
+    IPC handle state machine. Small auxiliary collectives (e.g. distributing
+    rank-0-gathered Engram rows, two per forward at hidden size 1024 which IS
+    trtllm-supported) would otherwise consume trtllm capture slots on every
+    captured graph; the multi-size capture loop failed on the fourth session
+    with hipErrorInvalidConfiguration (load25: bs 1/2/4 captured, bs 8 died).
+    Raw ncclAllReduce on the bootstrapped hipgraph comm is capture-safe at any
+    size and session count.
+    """
     lib, rccl_comm = _get_rccl_runtime(process_group)
     nccl_result = lib.ncclAllReduce(
         tensor.data_ptr(),
