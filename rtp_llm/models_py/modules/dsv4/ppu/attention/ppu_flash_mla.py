@@ -1,5 +1,7 @@
 """Deterministic MODEL1 sparse Decode scheduling for the PPU FlashMLA ABI."""
 
+import os
+
 import torch
 from rtp_llm.models_py.kernels.ppu.attention.ppu_sparse_attention import (
     MODEL1_NATIVE_PAGES,
@@ -12,12 +14,20 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op import 
 
 
 class PpuSparseAttnV4DecodeFp8Op(SparseAttnV4DecodeFp8Op):
+    def __init__(self, n_heads, head_dim, softmax_scale):
+        super().__init__(n_heads, head_dim, softmax_scale)
+        # The Triton MODEL1 kernel is the default for the common decode shape,
+        # but PR1434 reached the same shape through the compiled FlashMLA
+        # kernel at a fraction of the cost. Snapshot the choice once so a
+        # process cannot switch kernels between Graph capture and replay.
+        self.triton_sparse = os.environ.get("DSV4_PPU_SPARSE_TRITON", "1") != "0"
+
     def _forward_flash_mla(
         self, q, kv_cache, attn_sink, topk_idxs, sched_meta,
         cache_seqlens=None, block_table=None, topk_length=None,
         extra_k_cache=None, extra_topk_idxs=None, extra_topk_length=None,
     ):
-        if (
+        if self.triton_sparse and (
             q.shape[-2:] == (64, 512)
             and self.softmax_scale == 512 ** -0.5
             and kv_cache.shape[1] in MODEL1_NATIVE_PAGES

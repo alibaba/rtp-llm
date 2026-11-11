@@ -5,7 +5,7 @@ _PPU_CONTRACT_TESTS = [
     "mtp_weights", "mtp_hidden", "compressor_norm_dispatch", "mtp_swa_ring_page",
     "chunked_moe", "deepep_graph_dispatch", "ppu_deep_gemm_layout_compat",
     "strategy_select", "tp_norm", "v4_router_contract", "v4_tp_reduce_contract",
-    "hc_post",
+    "hc_post", "sparse_triton_gate",
 ]
 
 # Model contracts use the PPU dependency closure and test workers.
