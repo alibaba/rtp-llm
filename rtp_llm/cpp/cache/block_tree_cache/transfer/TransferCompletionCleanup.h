@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <chrono>
 #include <functional>
 #include <list>
 #include <memory>
@@ -65,13 +66,17 @@ public:
     Summary drain(const Forget& forget, int timeout_ms, const std::function<bool()>& should_stop = {}) noexcept;
 
 private:
+    void logFailure(const char*                                reason,
+                    const Entry*                               entry    = nullptr,
+                    const TransferCompletionForgetEntryResult* response = nullptr) noexcept;
     void submit(std::list<Entry>& node) noexcept;
     void requeue(std::list<Entry>& entries) noexcept;
 
-    mutable std::mutex mutex_;
-    std::list<Entry>   pending_;
-    size_t             outstanding_{0};
-    size_t             next_warning_{4096};
+    mutable std::mutex                    mutex_;
+    std::list<Entry>                      pending_;
+    std::chrono::steady_clock::time_point next_failure_log_{};
+    size_t                                outstanding_{0};
+    size_t                                next_warning_{4096};
 };
 
 }  // namespace rtp_llm
