@@ -1322,6 +1322,12 @@ class DeepSeekV4Model(GptModelBase):
                 prepare_hidden_fn=prep_decode,
             )
         elif attn.is_prefill:
+            # Prefill allocates large transient activations on top of the
+            # resident weights. Release warmup/decoder cached segments first so
+            # long-context prefill reuses the 500MB+ allocator cache instead of
+            # failing on an 80-160MB transient allocation.
+            if torch.cuda.is_available() and not torch.cuda.is_current_stream_capturing():
+                torch.cuda.empty_cache()
             if self._lazy_mtp_hidden_prefill:
                 self._shared_runtime_buffers.ensure_mtp_hidden_capacity(
                     inputs.input_ids.numel()
