@@ -1,3 +1,81 @@
+diff --git a/atom/model_ops/attention_gdn.py b/atom/model_ops/attention_gdn.py
+--- a/atom/model_ops/attention_gdn.py
++++ b/atom/model_ops/attention_gdn.py
+@@ -349,6 +349,9 @@
+                 1, num_tokens_nonspec, -1, self.head_v_dim
+             )
+
++        use_flydsl_mtp = bool(getattr(gdn_metadata, "rtp_flydsl_mtp", False))
++        if use_flydsl_mtp and use_replayssm:
++            raise ValueError("FlyDSL GDN MTP cannot run ReplaySSM")
+         use_flydsl_decode = False
+         if (
+             flydsl_policy is not None
+@@ -374,7 +377,7 @@
+                 non_spec_state_indices_tensor,
+             )
+
+-        if use_lossy_gdn_decode or use_flydsl_decode:
++        if use_lossy_gdn_decode or use_flydsl_decode or use_flydsl_mtp:
+             g_spec = None
+             beta_spec = None
+             g_non_spec = None
+@@ -403,7 +406,29 @@
+
+         # 2.1: Process the multi-query part
+         if spec_sequence_masks is not None:
+-            if use_replayssm:
++            if use_flydsl_mtp:
++                from atom.model_ops.fla_ops.gdn_flydsl import mtp_rtp
++                hybrid_records = getattr(gdn_metadata, "rtp_hybrid_records", None)
++                if hybrid_records is not None:
++                    from aiter.ops.flydsl.linear_attention_kernels import flydsl_gdr_mtp_hybrid
++                    batch, width = spec_state_indices_tensor.shape
++                    output = core_attn_out[:query_spec.shape[1]]
++                    flydsl_gdr_mtp_hybrid(
++                        query_spec.reshape(batch,width,*query_spec.shape[-2:]),
++                        key_spec.reshape(batch,width,*key_spec.shape[-2:]),
++                        value_spec.reshape(batch,width,*value_spec.shape[-2:]),
++                        a.reshape(batch,width,-1), b.reshape(batch,width,-1),
++                        self.dt_bias,self.A_log,ssm_state.transpose(-1,-2),
++                        output.reshape(batch,width,*value_spec.shape[-2:]),
++                        gdn_metadata.rtp_flydsl_read_indices,spec_state_indices_tensor,
++                        hybrid_records[self.layer_num])
++                    core_attn_out_spec, last_recurrent_state = output.unsqueeze(0), None
++                else:
++                    core_attn_out_spec, last_recurrent_state = mtp_rtp(
++                        query_spec, key_spec, value_spec, a, b, ssm_state,
++                        self.A_log, self.dt_bias, gdn_metadata.rtp_flydsl_read_indices,
++                        spec_state_indices_tensor, core_attn_out[:query_spec.shape[1]])
++            elif use_replayssm:
+                 # No per-draft state snapshot: the kernel rebuilds the state
+                 # from the checkpoint plus the committed records, so the
+                 # rejected drafts of the previous step are undone simply by
+diff --git a/atom/model_ops/fla_ops/gdn_flydsl.py b/atom/model_ops/fla_ops/gdn_flydsl.py
+--- a/atom/model_ops/fla_ops/gdn_flydsl.py
++++ b/atom/model_ops/fla_ops/gdn_flydsl.py
+@@ -344,3 +344,21 @@
+         need_shuffle_state=False,
+     )
+     return output.transpose(0, 1), state
++
++
++def mtp_rtp(q, k, v, a, b, state, A_log, dt_bias, reads, writes, out):
++    from aiter.ops.flydsl.linear_attention_kernels import flydsl_gdr_mtp_rtp
++    batch, width = writes.shape
++    if q.shape[1] != batch * width:
++        raise ValueError("FlyDSL MTP requires fixed-length candidate chains")
++    if state.stride(-2) != 1:
++        raise ValueError("FlyDSL MTP state must use physical VK storage")
++    query = q.reshape(batch, width, *q.shape[-2:])
++    key = k.reshape(batch, width, *k.shape[-2:])
++    value = v.reshape(batch, width, *v.shape[-2:])
++    output = out.reshape(batch, width, *v.shape[-2:])
++    flydsl_gdr_mtp_rtp(query, key, value, a.reshape(batch, width, -1),
++                       b.reshape(batch, width, -1), dt_bias, A_log,
++                       state.transpose(-1, -2), output, (reads if reads.ndim == 1 else reads[:, 0].contiguous()),
++                       writes, use_qk_l2norm=True)
++    return out.unsqueeze(0), None
 diff --git a/atom/model_ops/minimax_m3/index_topk.py b/atom/model_ops/minimax_m3/index_topk.py
 --- a/atom/model_ops/minimax_m3/index_topk.py
 +++ b/atom/model_ops/minimax_m3/index_topk.py
@@ -93,32 +171,6 @@ diff --git a/atom/model_ops/minimax_m3/sparse_attn.py b/atom/model_ops/minimax_m
      }
  )
  @triton.jit
-diff --git a/atom/plugin/rtpllm/models/base_model_wrapper.py b/atom/plugin/rtpllm/models/base_model_wrapper.py
---- a/atom/plugin/rtpllm/models/base_model_wrapper.py
-+++ b/atom/plugin/rtpllm/models/base_model_wrapper.py
-@@ -44,6 +44,7 @@
- _register_atom_glm5_moe()
-
- # Qwen3.8-Flash-Next uses the Qwen4Exp architecture, not Qwen3.5-MoE.
--register_model("atom_qwen4_exp", ATOMQwen4Exp, ["Qwen4ExpForConditionalGeneration"])
-+# Native RTP also registers this architecture; retain explicit ATOM selection.
-+register_model("atom_qwen4_exp", ATOMQwen4Exp, [])
- register_model("atom_qwen4_exp_mtp", ATOMQwen4ExpMTP, [])
- register_renderer("atom_qwen4_exp", Qwen35Renderer)
-diff --git a/atom/plugin/rtpllm/models/qwen4_exp.py b/atom/plugin/rtpllm/models/qwen4_exp.py
---- a/atom/plugin/rtpllm/models/qwen4_exp.py
-+++ b/atom/plugin/rtpllm/models/qwen4_exp.py
-@@ -813,6 +813,10 @@
- class _ATOMQwen4ExpMTPRuntime(_ATOMQwen4ExpRuntime):
-     """Bridge RTP's flat HC hand-off to ATOM's reusable QSA draft layer."""
-
-+    def cuda_graph_draft_prefill_uses_request_lanes(self) -> bool:
-+        # RTP captures only active request lanes for each draft-prefill key.
-+        return True
-+
-     @staticmethod
-     def _draft_vision_embeddings(input_ids, embed_tokens, is_multimodal):
-         if not is_multimodal or embed_tokens.tp_size != 1:
 diff --git a/atom/plugin/config.py b/atom/plugin/config.py
 --- a/atom/plugin/config.py
 +++ b/atom/plugin/config.py
@@ -136,3 +188,276 @@ diff --git a/atom/plugin/config.py b/atom/plugin/config.py
          max_num_seqs=max_generate_batch_size,
          max_model_len=max_model_len,
          gpu_memory_utilization=0.9,
+diff --git a/atom/plugin/rtpllm/models/base_model_wrapper.py b/atom/plugin/rtpllm/models/base_model_wrapper.py
+--- a/atom/plugin/rtpllm/models/base_model_wrapper.py
++++ b/atom/plugin/rtpllm/models/base_model_wrapper.py
+@@ -44,6 +44,7 @@
+ _register_atom_glm5_moe()
+
+ # Qwen3.8-Flash-Next uses the Qwen4Exp architecture, not Qwen3.5-MoE.
+-register_model("atom_qwen4_exp", ATOMQwen4Exp, ["Qwen4ExpForConditionalGeneration"])
++# Native RTP also registers this architecture; retain explicit ATOM selection.
++register_model("atom_qwen4_exp", ATOMQwen4Exp, [])
+ register_model("atom_qwen4_exp_mtp", ATOMQwen4ExpMTP, [])
+ register_renderer("atom_qwen4_exp", Qwen35Renderer)
+diff --git a/atom/plugin/rtpllm/models/qwen4_exp.py b/atom/plugin/rtpllm/models/qwen4_exp.py
+--- a/atom/plugin/rtpllm/models/qwen4_exp.py
++++ b/atom/plugin/rtpllm/models/qwen4_exp.py
+@@ -11,7 +11,7 @@
+ import torch
+ from rtp_llm.config.model_config import ModelConfig, ssm_state_dtype_str_to_data_type
+ from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
+-from rtp_llm.ops import HybridAttentionType, KVCacheSpecType
++from rtp_llm.ops import CacheTailPolicyDesc, HybridAttentionType, KVCacheSpecType
+ from rtp_llm.ops.compute_ops import PyModelOutputs
+ from rtp_llm.utils.model_weight import W
+
+@@ -66,6 +66,9 @@
+                 raise ValueError("Qwen4Exp MTP requires positive request capacity")
+             self._rtp_mtp_request_capacity = max_batch
+         self._atom_attn_pyobj = _Qwen4ExpAttnPyObj(self)
++        from atom.plugin.rtpllm.utils.replay_hybrid import install_runtime
++
++        install_runtime(self)
+
+     def copy_plugin_cache_blocks(self, mapping: torch.Tensor, tags: list[str]) -> None:
+         """Mirror RTP's tagged block relocations into QSA and PLE side pools.
+@@ -668,6 +671,15 @@
+             model_config.hybrid_attention_config.hybrid_attention_types,
+             KVCacheSpecType.MHA,
+         )
++        # Retain sparse GDN checkpoints at 1024-token intervals for 64-token
++        # blocks, matching the existing RTP prefix-cache policy.
++        for layer in model_config.kv_cache_spec_descs:
++            for desc in layer:
++                if desc.cache_type == KVCacheSpecType.LINEAR:
++                    tail = desc.tail or CacheTailPolicyDesc()
++                    tail.prefix_checkpoint_stride_blocks = 16
++                    desc.tail = tail
++
+
+     @classmethod
+     def _apply_kv_cache_config(cls, model_config: ModelConfig, kv_cache_config) -> None:
+@@ -812,6 +824,10 @@
+
+ class _ATOMQwen4ExpMTPRuntime(_ATOMQwen4ExpRuntime):
+     """Bridge RTP's flat HC hand-off to ATOM's reusable QSA draft layer."""
++
++    def cuda_graph_draft_prefill_uses_request_lanes(self) -> bool:
++        # RTP captures only active request lanes for each draft-prefill key.
++        return True
+
+     @staticmethod
+     def _draft_vision_embeddings(input_ids, embed_tokens, is_multimodal):
+diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
+--- a/atom/plugin/rtpllm/utils/qwen4_exp_context.py
++++ b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
+@@ -5,6 +5,9 @@
+ from collections.abc import Iterator
+ from contextlib import contextmanager
+ from typing import Any
++
++import os
++import numpy as np
+
+ import torch
+ import triton
+@@ -389,10 +392,12 @@
+         # AITER decode expects physical VK storage exposed as a logical KV
+         # view. Bind that view before the first state write; the prefill path
+         # and Triton decode fallback both honor its inner strides. MTP target
+-        # verification still uses the original KV state layout.
+-        if not getattr(
+-            model_config, "atom_qwen4_exp_mtp_target", False
+-        ) and not getattr(model_config, "is_mtp", False):
++        # verification uses physical VK storage for FlyDSL MTP.
++        from atom.plugin.rtpllm.utils.replay_policy import flydsl_mtp_enabled
++        if (not getattr(model_config, "atom_qwen4_exp_mtp_target", False)
++            and not getattr(model_config, "is_mtp", False)) or (
++                flydsl_mtp_enabled()
++                and getattr(model_config, "atom_qwen4_exp_mtp_target", False)):
+             for layer_num, layer in layer_maps[0].items():
+                 state = caches[f"layer_{layer_num}"].v_cache
+                 k_dim, v_dim = state.shape[-2:]
+@@ -708,6 +713,27 @@
+                 gdn_metadata.ssm_conv_state_len = (
+                     int(model.config.linear_conv_kernel_dim) - 1
+                 )
++            from atom.plugin.rtpllm.utils.replay_policy import flydsl_mtp_enabled
++            from atom.plugin.rtpllm.utils.replay_hybrid import prepare_metadata
++
++            if gdn_metadata is not None:
++                gdn_metadata.rtp_flydsl_mtp = (
++                    flydsl_mtp_enabled()
++                    and bool(resolved_layer_maps[0])
++                    and all(
++                        layer.allow_aiter_flydsl
++                        and forward_context.kv_cache_data[f"layer_{number}"].v_cache.stride(-2) == 1
++                        for number, layer in resolved_layer_maps[0].items()
++                    )
++                    and gdn_metadata.num_spec_decodes > 0
++                    and gdn_metadata.num_prefills == 0
++                    and gdn_metadata.num_decodes == 0
++                )
++                if gdn_metadata.rtp_flydsl_mtp:
++                    gdn_metadata.rtp_flydsl_read_indices = (
++                        gdn_metadata.spec_state_indices_in_tensor[:, 0].contiguous()
++                    )
++            prepare_metadata(runtime, gdn_metadata, forward_context.kv_cache_data, resolved_layer_maps[0])
+             cls._configure_gdn_backends(
+                 metadata.gdn_metadata,
+                 resolved_layer_maps[0],
+@@ -779,7 +805,36 @@
+                     ratio,
+                     compressed,
+                 )
++            host_lens = context_slots = None
++            if (
++                os.getenv("ATOM_QSA_FLYDSL_ATTN", "0") == "1"
++                and forward_context.context.is_prefill
++                and not forward_context.context.is_draft
++                and not in_capture
++                and full_inputs.input_lengths.device.type == "cpu"
++                and full_inputs.prefix_lengths.device.type == "cpu"
++            ):
++                query_lens = tuple(int(v) for v in full_inputs.input_lengths.tolist())
++                prefix_lens = tuple(int(v) for v in full_inputs.prefix_lengths.tolist())
++                seq_lens = tuple(q + p for q, p in zip(query_lens, prefix_lens))
++                if (len(query_lens) == full_blocks.shape[0]
++                    and len(query_lens) == len(prefix_lens)
++                    and sum(query_lens) == int(logical.numel())
++                    and all(q >= 0 and p >= 0 for q, p in zip(query_lens, prefix_lens))):
++                    host_lens = (query_lens, seq_lens)
++                    if any(prefix_lens):
++                        lengths = np.asarray(seq_lens, dtype=np.int64)
++                        requests = np.repeat(np.arange(len(seq_lens), dtype=np.int64), lengths)
++                        tokens = np.arange(len(requests), dtype=np.int64) - np.repeat(
++                            np.cumsum(lengths) - lengths, lengths
++                        )
++                        host = torch.from_numpy(np.stack((requests, tokens))).pin_memory()
++                        requests, tokens = host.to(full_blocks.device, non_blocking=True)
++                        pages = full_blocks[requests, tokens // full_block_size].to(torch.int64)
++                        context_slots = pages * full_block_size + tokens % full_block_size
+             metadata.qsa_metadata = Qwen4ExpQSAMetadata(
++                host_lens=host_lens,
++                context_slots=context_slots,
+                 block_tables=full_blocks,
+                 slot_mapping=slots,
+                 compressed_slot_mapping=compressed,
+diff --git a/atom/plugin/rtpllm/utils/replay_hybrid.py b/atom/plugin/rtpllm/utils/replay_hybrid.py
+new file mode 100644
+--- /dev/null
++++ b/atom/plugin/rtpllm/utils/replay_hybrid.py
+@@ -0,0 +1,93 @@
++"""Experimental final-state fast path with replay only for partial acceptance."""
++import os
++import logging
++from types import MethodType
++import torch
++import triton
++import triton.language as tl
++
++@triton.jit
++def _commit(R,PTR,READ,WRITE,ACCEPT,HV:tl.constexpr,D:tl.constexpr,Q:tl.constexpr,CAP:tl.constexpr,BV:tl.constexpr,STATE_STRIDE:tl.constexpr):
++    n=tl.program_id(0);lh=tl.program_id(1);tile=tl.program_id(2)
++    layer=lh//HV;h=lh%HV
++    count=tl.load(ACCEPT+n);src=tl.load(READ+n);last=tl.load(WRITE+n*Q+Q-1)
++    if (count>0)&(src>=0)&((count<Q)|(src==last)):
++        state=tl.load(PTR+layer).to(tl.pointer_type(tl.float32))
++        vv=tile*BV+tl.arange(0,BV);kk=tl.arange(0,D)
++        value=tl.load(state+src.to(tl.int64)*STATE_STRIDE+h*D*D+vv[:,None]*D+kk[None,:],vv[:,None]<D,0)
++        for t in tl.static_range(Q):
++            base=(((layer*CAP+n)*Q+t)*HV+h)*3*D
++            k=tl.load(R+base+kk);u=tl.load(R+base+D+vv,vv<D,0);decay=tl.load(R+base+2*D)
++            value=tl.where(t<count,value*decay+u[:,None]*k[None,:],value)
++        dst=tl.load(WRITE+n*Q+count-1)
++        tl.store(state+dst.to(tl.int64)*STATE_STRIDE+h*D*D+vv[:,None]*D+kk[None,:],value,(vv[:,None]<D)&(dst>=0))
++
++def enabled(runtime):
++    return bool(getattr(runtime, '_hybrid_enabled', False))
++
++def prepare_metadata(runtime,metadata,caches,layers):
++    if not enabled(runtime) or metadata is None or not getattr(metadata,'rtp_flydsl_mtp',False):return
++    keys=tuple(sorted(layers));writes=metadata.spec_state_indices_tensor;reads=metadata.rtp_flydsl_read_indices
++    n,q=writes.shape;state=caches[f'layer_{keys[0]}'].v_cache
++    if state.dtype!=torch.float32 or state.shape[-2:]!=(128,128):raise RuntimeError('Hybrid replay supports FP32 128x128 state only')
++    hv=state.shape[1];key=(n,q)
++    if key not in runtime._hybrid_stages:
++        if torch.cuda.is_current_stream_capturing():raise RuntimeError('Hybrid replay buffers not warmed')
++        for layer in keys:
++            st=caches[f'layer_{layer}'].v_cache
++            if st.shape!=state.shape or st.stride()!=state.stride() or st.stride(-2)!=1:raise RuntimeError('Hybrid replay state layout differs')
++        records=torch.empty(len(keys),n,q,hv,3,128,device=state.device,dtype=torch.float32)
++        ptrs=torch.tensor([caches[f'layer_{i}'].v_cache.data_ptr() for i in keys],device=state.device,dtype=torch.int64)
++        runtime._hybrid_stages[key]=(records,ptrs)
++    records,ptrs=runtime._hybrid_stages[key]
++    metadata.rtp_hybrid_records={layer:records[i] for i,layer in enumerate(keys)}
++    runtime._hybrid_active=(records,ptrs,reads,writes,state.stride(0))
++
++def _clear(self):self._hybrid_active=None
++
++def _save(self,key):
++    if self._hybrid_active is None:raise RuntimeError('Missing hybrid capture stage')
++    self._hybrid_graphs[int(key)]=self._hybrid_active
++
++def _activate(self,key):self._hybrid_active=self._hybrid_graphs[int(key)]
++
++def _prepare(self,accept):
++    stage=self._hybrid_active
++    if stage is None or self._hybrid_pending is not None:raise RuntimeError('Invalid hybrid transaction')
++    if accept.ndim!=1 or accept.dtype!=torch.int32 or not 0<accept.numel()<=stage[2].numel() or accept.device!=stage[0].device:raise RuntimeError('Invalid accept vector')
++    self._hybrid_pending=accept;self._hybrid_modified=False
++
++def _finish(self,commit):
++    if not commit:
++        if self._hybrid_modified:raise RuntimeError('Hybrid partial commit requires fail-stop')
++        self._hybrid_pending=None;return
++    accept=self._hybrid_pending
++    if accept is None:raise RuntimeError('Hybrid commit not prepared')
++    records,ptrs,reads,writes,state_stride=self._hybrid_active
++    layers,cap,q,hv,_,d=records.shape
++    self._hybrid_modified=True
++    _commit[(accept.numel(),layers*hv,4)](records,ptrs,reads,writes,accept,hv,d,q,cap,32,state_stride,num_warps=4)
++
++def _finalize(self):
++    if self._hybrid_pending is None:raise RuntimeError('Hybrid finalize without prepare')
++    self._hybrid_pending=None;self._hybrid_modified=False
++
++def _has(self):return self._hybrid_reducer is not None
++
++def _reduce(self,ok):return self._hybrid_reducer.reduce(ok)
++
++def install_runtime(runtime):
++    from atom.plugin.rtpllm.utils.replay_policy import replay_mode
++    runtime._hybrid_enabled = False
++    if (not torch.version.hip or replay_mode() != "1"
++            or not getattr(runtime._rtp_model_config, "atom_qwen4_exp_mtp_target", False)):
++        return
++    from rtp_llm.models_py.modules.qwen4_exp.cpu_target_status import prepare_cpu_target_status
++    runtime._hybrid_reducer=prepare_cpu_target_status(runtime._rtp_model_config,runtime.parallelism_config)
++    if runtime._hybrid_reducer is None:
++        # Keep the supported FlyDSL path when this topology lacks CPU consensus.
++        return
++    runtime._hybrid_enabled = True
++    logging.getLogger(__name__).info("RTP GDN default route: FlyDSL + hybrid Replay; ATOM_ENABLE_REPLAYSSM=%s", os.getenv("ATOM_ENABLE_REPLAYSSM", "<unset>"))
++    runtime._hybrid_stages={};runtime._hybrid_graphs={};runtime._hybrid_active=None;runtime._hybrid_pending=None;runtime._hybrid_modified=False
++    for name,fn in [('has_speculative_target_status_reducer',_has),('reduce_speculative_target_prepare_status',_reduce),('clear_speculative_target_graph_capture',_clear),('save_speculative_target_graph_capture',_save),('activate_speculative_target_graph_replay',_activate),('prepare_speculative_target_commit',_prepare),('finish_speculative_target_commit',_finish),('finalize_speculative_target_commit',_finalize)]:setattr(runtime,name,MethodType(fn,runtime))
+diff --git a/atom/plugin/rtpllm/utils/replay_policy.py b/atom/plugin/rtpllm/utils/replay_policy.py
+new file mode 100644
+--- /dev/null
++++ b/atom/plugin/rtpllm/utils/replay_policy.py
+@@ -0,0 +1,14 @@
++"""Use ATOM's existing ReplaySSM switch for the RTP hybrid implementation."""
++import torch
++from atom.utils import envs
++
++
++def replay_mode():
++    override = envs.ATOM_ENABLE_REPLAYSSM
++    enabled = bool(torch.version.hip) if override is None else override
++    return "1" if enabled else "0"
++
++
++def flydsl_mtp_enabled():
++    # ReplaySSM selects the hybrid algorithm, which also uses FlyDSL MTP.
++    return bool(torch.version.hip)
