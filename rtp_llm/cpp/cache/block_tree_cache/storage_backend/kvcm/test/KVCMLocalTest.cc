@@ -175,6 +175,105 @@ TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings
     }
 }
 
+TEST(KVCMLocalTest, Dsv41PublisherUsesEffectiveBackendFullSpecMerge) {
+    for (const std::string model_name : {"DeepSeekV41", "DeepSeekV41DSpark"}) {
+        for (const bool tair_backend : {false, true}) {
+            SCOPED_TRACE(model_name);
+            SCOPED_TRACE(tair_backend);
+            std::vector<std::string> tags{"hca_kv", "csa_kv", "indexer_kv"};
+            BackendEnvironment       environment;
+            environment.cache_config.dtype              = DataType::TYPE_FP16;
+            environment.cache_config.layer_num          = tags.size();
+            environment.cache_config.seq_size_per_block = 8;
+            std::vector<KVCacheSpecPtr>   specs;
+            std::vector<std::vector<int>> layers;
+            for (size_t index = 0; index < tags.size(); ++index) {
+                specs.push_back(test::makeMhaSpec(tags[index], 8, DataType::TYPE_FP16, 1, 2));
+                layers.push_back({static_cast<int>(index)});
+            }
+            environment.cache_config.fromGroupedSpecs(
+                specs, layers, std::vector<CacheGroupType>(tags.size(), CacheGroupType::FULL), tags);
+            environment.cache_config.finalizeBlockNums(8, RuntimeConfig{});
+            initializeEnvironmentPools(environment, "kvcm_three_full_control", 8);
+
+            auto                                  client = std::make_shared<MockClientWrapper>();
+            kvcm::KVCMConfig::LocationSpecInfoMap actual_payload_specs;
+            EXPECT_CALL(*client, initForPools(_, _, _, _))
+                .WillOnce(Invoke([&](const auto& configs, auto, auto&, auto&) {
+                    const auto fields =
+                        autil::legacy::AnyCast<autil::legacy::json::JsonMap>(autil::legacy::ToJson(configs.at("")));
+                    autil::legacy::FromJson(actual_payload_specs, fields.at("location_spec_infos"));
+                    return true;
+                }));
+            EXPECT_CALL(*client, shutdown()).Times(1);
+            KVCacheConfig config;
+            config.enable_remote_cache                 = true;
+            config.kvcm_server_address                 = "outer-rpc";
+            config.kvcm_model_sdk_config               = tair_backend ? R"([{"type":"pace"}])" : R"([{"type":"file"}])";
+            config.reuse_cache                         = true;
+            config.enable_device_cache                 = true;
+            config.kv_cache_event_publisher_type       = "kvcm";
+            config.kv_cache_event_instance_id          = "hbm-event-instance";
+            config.kv_cache_event_host_ip_port         = "127.0.0.1:19999";
+            config.kv_cache_event_snapshot_interval_ms = 600000;
+            RuntimeConfig runtime;
+            runtime.model_name = model_name;
+            auto backend       = std::make_shared<KVCMStorageBackend>(environment.cache_config,
+                                                                config,
+                                                                runtime,
+                                                                singleRankConfig(),
+                                                                SpeculativeExecutionConfig{},
+                                                                nullptr,
+                                                                false,
+                                                                nullptr,
+                                                                client);
+            ASSERT_TRUE(initSingleRank(*backend, environment));
+            ASSERT_TRUE(backend->controlConfig().has_value());
+            EXPECT_EQ(backend->controlConfig()->merge_full_specs, tair_backend);
+            std::set<std::string> payload_names;
+            for (const auto& [name, bytes] : actual_payload_specs) {
+                EXPECT_GT(bytes, 0);
+                payload_names.insert(name);
+            }
+            std::set<std::string> expected_payload{"F0_TP0", "F1_TP0", "F2_TP0"};
+            EXPECT_EQ(payload_names, tair_backend ? std::set<std::string>{"F_TP0"} : expected_payload);
+
+            KVCacheManager manager(environment.cache_config, false, nullptr, config, singleRankConfig(), runtime);
+            std::vector<DeviceBlockPoolPtr> pools;
+            for (const auto& tag : tags) {
+                pools.push_back(environment.pools_by_tag.at(tag));
+            }
+            auto full = std::make_shared<FullGroupSet>(std::move(pools), nullptr, nullptr);
+            full->initialize(0, environment.cache_config.topologyPtr(), tags);
+            manager.block_tree_cache_                   = block_tree_cache_test::makeBlockTreeCacheForTest({full});
+            manager.block_tree_cache_->storage_backend_ = backend;
+            auto reporter                               = std::make_shared<ControlOnlyReporter>();
+            reporter->enabled.store(true);
+            manager.initCacheEventPublisher(reporter);
+            ASSERT_NE(manager.cache_event_publisher_, nullptr);
+            ASSERT_TRUE(reporter->waitFor("EVENT_NODE_REGISTER"));
+            EXPECT_EQ(manager.block_tree_cache_->tree()->publication_groups_.size(), tair_backend ? 1 : tags.size());
+            manager.stopCacheEventPublisher();
+            std::set<std::string> event_names;
+            for (const auto& [route, body] : reporter->requests()) {
+                if (route != "/api/registerInstance") {
+                    continue;
+                }
+                autil::legacy::json::JsonMap registration;
+                autil::legacy::FromJsonString(registration, body);
+                const auto infos =
+                    autil::legacy::AnyCast<autil::legacy::json::JsonArray>(registration.at("location_spec_infos"));
+                for (const auto& info : infos) {
+                    const auto fields = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(info);
+                    event_names.insert(autil::legacy::AnyCast<std::string>(fields.at("name")));
+                }
+            }
+            std::set<std::string> expected_events{"F0", "F1", "F2"};
+            EXPECT_EQ(event_names, tair_backend ? std::set<std::string>{"F"} : expected_events);
+        }
+    }
+}
+
 double snapshotGauge(kmonitor::MutableMetric* metric) {
     if (metric == nullptr) {
         ADD_FAILURE() << "metric is null";
