@@ -1531,6 +1531,11 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "invalid peer ip");
         }
 
+        // A CP peer may have no cache groups to transfer for this PP stage.
+        if (layer_caches.empty()) {
+            return ErrorInfo::OkStatus();
+        }
+
         auto layer_cache_load_context =
             resource_.cache_store->loadBuffers(layer_caches,
                                                ip_parts[0],

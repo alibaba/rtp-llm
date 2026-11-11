@@ -1835,6 +1835,9 @@ public:
                                              int                                                     partition_count,
                                              int partition_id) override {
         calls.push_back({peer, buffers});
+        if (buffers.empty() || peer.empty()) {
+            return nullptr;
+        }
         /** Complete the real LoadContext synchronously without starting cache-store transport. */
         auto context = std::make_shared<LoadContext>(shared_from_this(), false);
         context->load(buffers, peer, port, rdma_port, timeout_ms, check_cancel, partition_count, partition_id);
@@ -1994,6 +1997,30 @@ TEST_F(DecodeRpcLoadRoutingTest, TailOnlyStageDoesNotUnderreportCompletedPrefix)
             }
         }
     }
+}
+
+TEST_F(DecodeRpcLoadRoutingTest, CpShardedLinearStageSkipsPeersWithoutLocalLayers) {
+    auto config                            = test::makeSimpleLinearCacheConfig(1, 8, 4, DataType::TYPE_FP32);
+    config.model_has_multiple_cache_groups = true;
+    ASSERT_TRUE(initReceiver(true, config));
+    auto& pc                    = server_.maga_init_params_.parallelism_config;
+    pc.pp_stage_layer_counts    = {2, 1, 1};
+    pc.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
+
+    auto request = makeRequest(false);
+    request.set_prefill_cp_size(2);
+    request.add_peer_addrs("prefill-cp1:1:2");
+    request.mutable_tagged_group_block_ids(0)->set_tag("linear");
+    grpc::ServerContext     context;
+    BroadcastLoadResponsePB response;
+
+    ASSERT_TRUE(server_.RemoteLoad(&context, &request, &response).ok());
+    ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_EQ(response.loaded_cache_block_count(), 1);
+    ASSERT_EQ(store_->calls.size(), 1u);
+    EXPECT_EQ(store_->calls[0].peer, "prefill-whole");
+    ASSERT_EQ(store_->calls[0].buffers.size(), 1u);
+    EXPECT_EQ(store_->calls[0].buffers[0]->getBlocksCount(), 1u);
 }
 
 TEST_F(DecodeRpcLoadRoutingTest, PipelineReceiverSplitsGlobalLayersAcrossPrefillStages) {
