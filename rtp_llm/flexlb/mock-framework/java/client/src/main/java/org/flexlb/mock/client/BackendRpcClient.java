@@ -20,8 +20,10 @@ import org.flexlb.mock.protocol.*;
  */
 public final class BackendRpcClient implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(BackendRpcClient.class.getName());
+    private static final int GENERATE_INPUT_REQUIRED = 8409;
+    private static final int INVALID_REQUEST = 8406;
 
-    private final java.util.function.Supplier<List<String>> masters;
+    private final java.util.function.Supplier<List<MasterDiscovery.Target>> masters;
     private final java.util.function.Consumer<ObjectNode> events;
     private final VitClient vision;
 
@@ -47,6 +49,13 @@ public final class BackendRpcClient implements AutoCloseable {
     }
 
     BackendRpcClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<ObjectNode> events, int imageToken, long seed, int prefillCpSize) {
+        this(events, imageToken, seed, prefillCpSize,
+            () -> masters.get().stream().map(rpc -> new MasterDiscovery.Target(rpc, true)).toList());
+        Objects.requireNonNull(masters);
+    }
+
+    BackendRpcClient(java.util.function.Consumer<ObjectNode> events, int imageToken, long seed, int prefillCpSize,
+                     java.util.function.Supplier<List<MasterDiscovery.Target>> masters) {
         cacheKeySeed = seed;
         this.prefillCpSize = prefillCpSize;
         vision = new VitClient(imageToken);
@@ -148,7 +157,7 @@ public final class BackendRpcClient implements AutoCloseable {
         private FlexlbScheduleRequestPB request;
         private GenerateInputPB input;
 
-        private final List<String> routes;
+        private final List<MasterDiscovery.Target> routes;
 
         private String scheduledMaster;
 
@@ -179,7 +188,8 @@ public final class BackendRpcClient implements AutoCloseable {
             this.baseBlockSize = baseBlockSize;
             this.expectedImageTokens = expectedImageTokens;
             routes = List.copyOf(masters.get());
-            if (routes.size() > 2 || new HashSet<>(routes).size() != routes.size() || routes.stream().anyMatch(String::isBlank))
+            if (routes.size() > 2 || routes.stream().map(MasterDiscovery.Target::rpc).distinct().count() != routes.size()
+                    || routes.stream().map(MasterDiscovery.Target::rpc).anyMatch(String::isBlank))
                 throw new IllegalArgumentException("Expected distinct primary and optional backup Master");
             context = Context.ROOT.withDeadlineAfter(budget, TimeUnit.NANOSECONDS, timers);
         }
@@ -208,16 +218,27 @@ public final class BackendRpcClient implements AutoCloseable {
             events.accept(result);
         }
 
-        private void schedule(int attempt) {
+        private void schedule(int attempt) { schedule(attempt, false); }
+
+        private void schedule(int attempt, boolean forceInput) {
             if (routes.isEmpty()) { finish(Status.UNAVAILABLE.withDescription("No healthy Master"), 0, Outcome.error); return; }
             try {
-                scheduledMaster = routes.get(attempt);
+                var target = routes.get(attempt);
+                scheduledMaster = target.rpc();
                 scheduleAttempt++; pendingSchedule = true;
                 events.accept(event("SCHEDULE_START").put("attempt", scheduleAttempt).put("master", scheduledMaster));
                 boolean visionRoute = MediaInput.present(input) && !visionPrepared;
                 if (!visionRoute) scheduleStarted = true;
-                var query = visionRoute ? request.toBuilder().setVitRouteOnly(true).clearSelectedVit()
-                    .clearCacheAffinityKeys().addAllCacheAffinityKeys(input.getMultimodalInputsList().stream().map(MediaInput::key).toList()).build() : request;
+                boolean includeInput = !visionRoute && (forceInput || target.requiresGenerateInput());
+                var query = request;
+                if (visionRoute) {
+                    query = request.toBuilder().setVitRouteOnly(true).clearSelectedVit().clearGenerateInput().clearBlockCacheKeys()
+                        .clearCacheAffinityKeys().addAllCacheAffinityKeys(input.getMultimodalInputsList().stream().map(MediaInput::key).toList()).build();
+                } else if (includeInput && request.getGenerateInput().isEmpty()) {
+                    query = request.toBuilder().setGenerateInput(input.toByteString()).build();
+                } else if (!includeInput && !request.getGenerateInput().isEmpty()) {
+                    query = request.toBuilder().clearGenerateInput().build();
+                }
                 FlexlbServiceGrpc.newStub(channel(scheduledMaster)).schedule(query, new StreamObserver<>() {
                     private boolean received;
                     @Override public void onNext(FlexlbScheduleResponsePB route) {
@@ -227,6 +248,10 @@ public final class BackendRpcClient implements AutoCloseable {
                             received = true;
                             scheduleResult(Status.OK.withDescription(route.getErrorMessage()), route.getCode(), route.getSuccess());
                             batchId = route.hasLifecycle() ? route.getLifecycle().getBatchId() : 0;
+                            if (!visionRoute && !includeInput && rejectedWithoutInput(route)) {
+                                // The capability may be stale or the target may forward to a BATCH leader.
+                                context.run(() -> schedule(attempt, true)); return;
+                            }
                             if (!route.getSuccess() && route.getCode() == 8408 && visionPrepared && !visionRerouted) {
                                 // A new Master has its own worker generation; acquire a fresh V pin once.
                                 visionPrepared = false; visionRerouted = true; request = request.toBuilder().clearSelectedVit().build();
@@ -288,6 +313,12 @@ public final class BackendRpcClient implements AutoCloseable {
                 outcome, status.getCode().name(), code, status.getDescription() == null ? "" : status.getDescription(), tpot));
         }
 
+        private boolean rejectedWithoutInput(FlexlbScheduleResponsePB route) {
+            return !route.getSuccess() && !route.hasLifecycle() && !route.getEnqueuedByMaster() && route.getServerStatusCount() == 0
+                && (route.getCode() == GENERATE_INPUT_REQUIRED || route.getCode() == INVALID_REQUEST
+                    && route.getErrorMessage().equals("missing serialized generate_input for batch dispatch"));
+        }
+
         private void prepareVision(FlexlbScheduleResponsePB route) {
             try {
                 var targets = route.getServerStatusList().stream().filter(s -> s.getRole().equals("VIT")).toList();
@@ -314,7 +345,8 @@ public final class BackendRpcClient implements AutoCloseable {
                                 }
                             }
                             visionPrepared = true;
-                            request = request.toBuilder().setGenerateInput(media.toByteString()).setSeqLen(prepared.input().getTokenIdsCount())
+                            input = media;
+                            request = request.toBuilder().clearGenerateInput().setSeqLen(prepared.input().getTokenIdsCount())
                                 .setSelectedVit(selected).clearBlockCacheKeys()
                                 .addAllBlockCacheKeys(routingKeys(prepared, baseBlockSize)).build();
                             schedule(0);

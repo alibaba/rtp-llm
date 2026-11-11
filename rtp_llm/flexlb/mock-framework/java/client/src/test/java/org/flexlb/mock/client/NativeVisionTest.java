@@ -42,7 +42,10 @@ class NativeVisionTest {
             var master=NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1",0)).addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
                 @Override public void schedule(FlexlbScheduleRequestPB request,StreamObserver<FlexlbScheduleResponsePB> response) {
                     try {
-                        if(request.getVitRouteOnly()) { stages.incrementAndGet();response.onNext(FlexlbScheduleResponsePB.newBuilder().setSuccess(true).setCode(200).addServerStatus(routes.get(0).toBuilder().setWorkerGeneration(epoch.get())).build()); }
+                        if(request.getVitRouteOnly()) {
+                            assertTrue(request.getGenerateInput().isEmpty());assertEquals(0,request.getBlockCacheKeysCount());assertEquals(1,request.getCacheAffinityKeysCount());
+                            stages.incrementAndGet();response.onNext(FlexlbScheduleResponsePB.newBuilder().setSuccess(true).setCode(200).addServerStatus(routes.get(0).toBuilder().setWorkerGeneration(epoch.get())).build());
+                        }
                         else {
                             assertTrue(request.hasSelectedVit());assertEquals(epoch.get(),request.getSelectedVit().getWorkerGeneration());stages.incrementAndGet();
                             assertEquals(4, request.getCacheKeyBlockSize());
@@ -52,28 +55,32 @@ class NativeVisionTest {
                             if(request.getRequestId()==1 && rejectedPin.compareAndSet(false,true)) {
                                 epoch.incrementAndGet();response.onNext(FlexlbScheduleResponsePB.newBuilder().setSuccess(false).setCode(8408).build());response.onCompleted();return;
                             }
-                            var input=GenerateInputPB.parseFrom(request.getGenerateInput());assertNotEquals(0,input.getTokenIds(1));
                             boolean batch=request.getRequestId()==2;
                             if(batch) {
+                                if (request.getGenerateInput().isEmpty()) {
+                                    response.onNext(FlexlbScheduleResponsePB.newBuilder().setCode(8409).build());response.onCompleted();return;
+                                }
+                                var input=GenerateInputPB.parseFrom(request.getGenerateInput());assertNotEquals(0,input.getTokenIds(1));
                                 var routed=input.toBuilder();routed.getGenerateConfigBuilder().clearRoleAddrs();
                                 for(var route:routes) routed.getGenerateConfigBuilder().addRoleAddrs(RoleAddrPB.newBuilder().setRole(RoleAddrPB.RoleType.valueOf(route.getRole())).setIp(route.getServerIp()).setGrpcPort(route.getGrpcPort()));
                                 var reply=RpcServiceGrpc.newBlockingStub(pChannel).enqueueBatch(EnqueueBatchRequestPB.newBuilder().setBatchId(2).addDpSlots(EnqueueBatchDpSlotPB.newBuilder()
                                     .setDpRank(0).addRequests(EnqueueBatchExternalInputPB.newBuilder().setInput(routed))).build());
                                 assertEquals(0,reply.getErrorsCount());
-                            }
+                            } else assertTrue(request.getGenerateInput().isEmpty());
                             response.onNext(FlexlbScheduleResponsePB.newBuilder().setSuccess(true).setCode(200).setEnqueuedByMaster(batch).addAllServerStatus(routes).build());
                         }
                         response.onCompleted();
                     } catch(Exception error) { response.onError(Status.INTERNAL.withCause(error).asRuntimeException()); }
                 }
             }).build().start();
-            try(var client=new BackendRpcClient(() -> List.of("127.0.0.1:"+master.getPort()), event -> {}, 1000, 0L, 4)) {
+            try(var client=new BackendRpcClient(event -> {}, 1000, 0L, 4,
+                    () -> List.of(new MasterDiscovery.Target("127.0.0.1:"+master.getPort(), false)))) {
                 for(long id:List.of(1L,2L,3L)) {
                     var input=GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(id == 3 ? List.of(10,1000) : List.of(10,1000,20))
                         .addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl("same-image")
                             .setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(56).setHeight(28)))
                         .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(3).setIgnoreEos(true).setReturnIncremental(true).setCanUsePdSeparation(true).setReuseCache(true)).build();
-                    var request=FlexlbScheduleRequestPB.newBuilder().setRequestId(id).setSeqLen(input.getTokenIdsCount()).setMaxNewTokens(3).setCacheKeyBlockSize(1).setGenerateInput(input.toByteString()).build();
+                    var request=FlexlbScheduleRequestPB.newBuilder().setRequestId(id).setSeqLen(input.getTokenIdsCount()).setMaxNewTokens(3).setCacheKeyBlockSize(1).build();
                     var result=client.send(request,input,Duration.ofSeconds(8),List.of(924)).completion().toCompletableFuture().get(10,TimeUnit.SECONDS);
                     assertEquals(BackendRpcClient.Outcome.success,result.outcome(),result.toString());assertEquals(3,result.outputTokens());
                     var cache = RpcServiceGrpc.newBlockingStub(pChannel).getCacheStatus(CacheVersionPB.newBuilder()
@@ -81,7 +88,7 @@ class NativeVisionTest {
                     assertEquals(4, cache.getBlockSize());
                     assertTrue(cache.getCacheKeysMap().keySet().containsAll(routeKeys.get(id)));
                 }
-                assertEquals(8,stages.get());
+                assertEquals(9,stages.get());
             } finally { master.shutdownNow().awaitTermination(2,TimeUnit.SECONDS);pChannel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
     }

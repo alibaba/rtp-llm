@@ -344,7 +344,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
             discovery = new MasterDiscovery(topology, plan.masters());
             try { journal = new RequestJournal(evidence, id, plan); }
             catch (Exception error) { discovery.close(); throw error; }
-            client = new BackendRpcClient(discovery::routes, journal::record, imageToken, seed, prefillCpSize);
+            client = new BackendRpcClient(journal::record, imageToken, seed, prefillCpSize, discovery::routes);
             // A lost begin command must not leave a prepared worker alive forever.
             dispatcher = Thread.ofVirtual().name("client-dispatch").start(this::dispatch);
         }
@@ -484,7 +484,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                             var request = FlexlbScheduleRequestPB.newBuilder().setRequestId(item.requestId())
                                 .setCacheKeyBlockSize(blockSize).setSeqLen(input.getTokenIdsCount())
                                 .setMaxNewTokens(input.getGenerateConfig().getMaxNewTokens()).setPriority(entry.priority())
-                                .setGenerateInput(generateInput.toByteString()).build();
+                                .build();
                             var call = client.send(request, generateInput, Duration.ofMillis(plan.request_timeout_ms()), entry.expectedImageTokens());
                             active.put(item.requestId(), call);
                             synchronized (stateLock) { issued++; }

@@ -376,6 +376,7 @@ class BackendRpcClientTest {
     static final class Harness implements AutoCloseable {
         final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
         final BlockingQueue<FlexlbCancelRequestPB> cancellations = new LinkedBlockingQueue<>();
+        final BlockingQueue<FlexlbScheduleRequestPB> scheduleInputs = new LinkedBlockingQueue<>();
         final CountDownLatch scheduleEntered = new CountDownLatch(1), scheduleCancelled = new CountDownLatch(1), streamCancelled = new CountDownLatch(1);
         final AtomicInteger generates = new AtomicInteger(), fetches = new AtomicInteger(), schedules = new AtomicInteger();
         final Server engine, master;
@@ -384,6 +385,7 @@ class BackendRpcClientTest {
         volatile String leader;
 
         volatile int heartbeatStatus = 200;
+        volatile Boolean requiresGenerateInput;
 
         final BackendRpcClient client;
 
@@ -420,13 +422,17 @@ class BackendRpcClientTest {
             heartbeat = heartbeatListener();
             leader = "127.0.0.1:" + heartbeat.getAddress().getPort();
             heartbeat.createContext("/rtp_llm/master/info", exchange -> {
-                byte[] body = ("{\"real_master_host\":\"" + leader + "\",\"queue_length\":0}").getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                var capability = requiresGenerateInput;
+                byte[] body = ("{\"real_master_host\":\"" + leader + "\",\"queue_length\":0"
+                    + (capability == null ? "" : ",\"requires_generate_input\":" + capability) + "}")
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
                 exchange.sendResponseHeaders(heartbeatStatus, body.length);
                 try (var output = exchange.getResponseBody()) { output.write(body); }
             });
             heartbeat.start();
             master = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", heartbeat.getAddress().getPort() + 2)).addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
                 @Override public void schedule(FlexlbScheduleRequestPB input, StreamObserver<FlexlbScheduleResponsePB> response) {
+                    scheduleInputs.add(input);
                     schedules.incrementAndGet(); scheduleEntered.countDown();
                     if (scheduleFailure != null) { response.onError(scheduleFailure.asRuntimeException()); return; }
                     Context.current().addListener(c -> scheduleCancelled.countDown(), Runnable::run);

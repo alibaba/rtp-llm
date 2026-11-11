@@ -23,7 +23,7 @@ final class MasterDiscovery implements AutoCloseable {
     private final ScheduledExecutorService refresh = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, Host> hosts = new HashMap<>();
 
-    private volatile List<String> routes = List.of();
+    private volatile List<Target> routes = List.of();
     private volatile Exception failure;
     private String primary;
 
@@ -45,7 +45,7 @@ final class MasterDiscovery implements AutoCloseable {
         catch (InterruptedException error) { Thread.currentThread().interrupt(); }
     }
 
-    List<String> routes() { check(); return routes; }
+    List<Target> routes() { check(); return routes; }
 
     void check() {
         if (failure != null) throw new IllegalStateException("Master discovery failed", failure);
@@ -76,6 +76,7 @@ final class MasterDiscovery implements AutoCloseable {
             Host host = entry.getKey();
             JsonNode value = entry.getValue().get();
             host.lastProbe = System.nanoTime();
+            host.requiresGenerateInput = value == null || !BooleanNode.FALSE.equals(value.get("requires_generate_input"));
             if (value == null) {
                 if (++host.failures >= 2) host.healthy = false;
             } else if (value.has("ready") && !BooleanNode.TRUE.equals(value.get("ready"))) {
@@ -101,7 +102,7 @@ final class MasterDiscovery implements AutoCloseable {
         primary = selected.rpc;
         String chosen = primary;
         Host backup = healthy.stream().filter(h -> !h.leader && !h.rpc.equals(chosen)).findFirst().orElse(null);
-        routes = backup == null ? List.of(primary) : List.of(primary, backup.rpc);
+        routes = backup == null ? List.of(selected.target()) : List.of(selected.target(), backup.target());
     }
 
     private JsonNode heartbeat(Host host) {
@@ -121,13 +122,19 @@ final class MasterDiscovery implements AutoCloseable {
     }
 
     /**
+     * One Master address and the capability advertised by its heartbeat.
+     */
+    record Target(String rpc, boolean requiresGenerateInput) {}
+
+    /**
      * Stores the last health and leadership observations for one Master endpoint.
      */
     private static final class Host {
         final String http, rpc;
-        boolean healthy, leader;
+        boolean healthy, leader, requiresGenerateInput;
         int failures;
         long lastProbe;
         Host(String http, String rpc) { this.http = http; this.rpc = rpc; }
+        Target target() { return new Target(rpc, requiresGenerateInput); }
     }
 }
