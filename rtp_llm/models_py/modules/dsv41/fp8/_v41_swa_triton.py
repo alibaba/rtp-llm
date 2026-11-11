@@ -36,10 +36,24 @@ SCALE_BYTES_PER_TOKEN = HEAD_DIM // QUANT_BLOCK
 ENTRY_BYTES = HEAD_DIM + SCALE_BYTES_PER_TOKEN
 
 
+def _pool_readable_from_kernel(pool_3d: torch.Tensor, slots: torch.Tensor) -> bool:
+    """CUDA pool co-located with slots, or a HOST_PINNED pool read over UVA.
+
+    ``--dsv4_fixed_pool_use_memory`` places swa_kv in pinned host memory (the
+    per-position SWA pool needs ~22 GiB per 1M sequence per rank, which does
+    not fit beside the weights on pre-Blackwell cards). Triton kernels take
+    the pinned base pointer and read/write it over UVA, same mechanism as the
+    host-resident Engram GEMM.
+    """
+    if pool_3d.is_cuda:
+        return slots.device == pool_3d.device
+    return pool_3d.device.type == "cpu" and pool_3d.is_pinned() and slots.is_cuda
+
+
 def is_supported(pool_3d: torch.Tensor, slots: torch.Tensor) -> bool:
     """Check the device/layout contract without reading device metadata."""
     return (
-        pool_3d.is_cuda
+        _pool_readable_from_kernel(pool_3d, slots)
         and pool_3d.dtype == torch.uint8
         and pool_3d.ndim == 3
         and pool_3d.shape[1] > 0
@@ -47,7 +61,6 @@ def is_supported(pool_3d: torch.Tensor, slots: torch.Tensor) -> bool:
         and pool_3d.stride(2) == 1
         and pool_3d.stride(1) == ENTRY_BYTES
         and pool_3d.stride(0) >= pool_3d.shape[1] * ENTRY_BYTES
-        and slots.device == pool_3d.device
         and slots.dtype in (torch.int32, torch.int64)
     )
 
@@ -251,8 +264,12 @@ def dequantize_swa_k_cache(
 ) -> torch.Tensor:
     """Gather to ``[slots.numel(), 512]``; masked slots produce zero rows."""
     if out is None:
+        # A HOST_PINNED swa pool (--dsv4_fixed_pool_use_memory) arrives as a
+        # pinned CPU tensor that the Triton kernel reads over UVA; gathered
+        # rows belong on the compute device that owns the slot table.
+        out_device = slots.device if slots.is_cuda else pool_3d.device
         out = torch.empty(
-            (slots.numel(), HEAD_DIM), dtype=out_dtype, device=pool_3d.device
+            (slots.numel(), HEAD_DIM), dtype=out_dtype, device=out_device
         )
     if slots.numel():
         _dequantize_swa_kernel[(slots.numel(),)](
