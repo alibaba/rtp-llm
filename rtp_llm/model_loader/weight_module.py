@@ -194,6 +194,17 @@ class WeightModule(ABC):
 
         __extract_tensor(processed_tensors)
         shape_info = {k: (v.shape, v.dtype) for k, v in flat_res.items()}
+        # AWI evaluator census: every weight class funnels through this base
+        # load(), so recording here captures the FINAL placement of each
+        # consumed checkpoint tensor. Must never affect loading.
+        try:
+            from rtp_llm.model_loader import awi_placement
+
+            awi_placement.record_load(
+                self.get_tensor_names(layer_id, load_config), flat_res.values()
+            )
+        except Exception:
+            logging.warning("AWI census hook failed", exc_info=True)
         return flat_res
 
     @torch.inference_mode()

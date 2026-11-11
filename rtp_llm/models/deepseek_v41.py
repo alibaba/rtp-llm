@@ -150,6 +150,19 @@ class DeepSeekV41(DeepSeekV4):
             device_resource_config=self.device_resource_config,
             engram_runtime=process_runtime,
         )
+        # AWI evaluator instrumentation: complete the weight-placement census
+        # (Engram rows from live modules + device-resident ballast for keys
+        # this runtime never consumes) and register build/config metadata.
+        # Runs before engine/cache init so ballast is visible to KV sizing.
+        from rtp_llm.model_loader import awi_placement
+
+        awi_placement.register_from_model(
+            self.py_model,
+            self.model_config,
+            self.parallelism_config,
+            self.kv_cache_config,
+            self.hw_kernel_config,
+        )
 
     @staticmethod
     def get_weight_cls():
