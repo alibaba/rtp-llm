@@ -139,8 +139,15 @@ class NewLoaderConfig:
     lm_head_tp_rank: Optional[int] = None
     keep_mla_checkpoint_weights: bool = False
     custom_weight_mappings: Tuple[Tuple[str, str], ...] = ()
+    max_generate_batch_size: int = 0
 
     def __post_init__(self) -> None:
+        if (
+            isinstance(self.max_generate_batch_size, bool)
+            or not isinstance(self.max_generate_batch_size, int)
+            or self.max_generate_batch_size < 0
+        ):
+            raise ValueError("max_generate_batch_size must be a nonnegative integer")
         if isinstance(self.load_method, str):
             try:
                 object.__setattr__(

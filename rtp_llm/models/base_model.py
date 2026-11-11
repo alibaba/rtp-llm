@@ -728,6 +728,7 @@ class BaseModel(object):
             fmha_config=self.fmha_config,
             keep_mla_checkpoint_weights=self.keep_mla_checkpoint_weights,
             custom_weight_mappings=custom_weight_mappings,
+            max_generate_batch_size=self.max_generate_batch_size,
         )
         loader = NewModelLoader(
             model_config=self.model_config,

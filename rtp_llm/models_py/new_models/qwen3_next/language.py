@@ -275,9 +275,13 @@ def _extract_config_values(
     vocab_size = _positive_int(
         required_config_value(model_config, "vocab_size"), "vocab_size"
     )
-    inter_size = _positive_int(
-        required_config_value(model_config, "inter_size"), "inter_size"
-    )
+    inter_size = required_config_value(model_config, "inter_size")
+    if (
+        isinstance(inter_size, bool)
+        or not isinstance(inter_size, int)
+        or inter_size < 0
+    ):
+        raise ValueError("inter_size must be a nonnegative integer")
 
     attn_config = required_config_value(model_config, "attn_config")
     num_heads = _positive_int(
@@ -356,8 +360,11 @@ def _extract_config_values(
         moe_inter_size = _positive_int(
             required_config_value(model_config, "moe_inter_size"), "moe_inter_size"
         )
-        if required_config_value(model_config, "moe_style") != 2:
-            raise ValueError("Qwen3-Next newloader requires shared+routed MoE style 2")
+        moe_style = required_config_value(model_config, "moe_style")
+        if moe_style not in (1, 2) or (moe_style == 2 and inter_size == 0):
+            raise ValueError(
+                "Qwen3-Next requires routed MoE style 1 or shared+routed style 2"
+            )
     moe_layer_index = list(required_config_value(model_config, "moe_layer_index"))
     if len(set(moe_layer_index)) != len(moe_layer_index):
         raise ValueError("moe_layer_index contains duplicate layers")
@@ -368,6 +375,8 @@ def _extract_config_values(
         for index in moe_layer_index
     ):
         raise ValueError(f"Invalid moe_layer_index {moe_layer_index!r}")
+    if inter_size == 0 and (dense_model or len(moe_layer_index) != num_layers):
+        raise ValueError("Dense FFN layers require positive inter_size")
     has_moe_norm = _config_bool(model_config, "has_moe_norm", True)
     tie_word_embeddings = _config_bool(model_config, "tie_word_embeddings", False)
     if not isinstance(expects_mtp, bool):
@@ -460,6 +469,7 @@ def _extract_config_values(
         expert_num=expert_num,
         moe_inter_size=moe_inter_size,
         inter_size=inter_size,
+        shared_inter_size=inter_size if not dense_model and moe_style == 2 else 0,
         moe_layer_index=moe_layer_index,
         has_moe_norm=has_moe_norm,
         partial_rotary_factor=partial_rotary_factor,
@@ -1580,19 +1590,23 @@ class Qwen3NextMoEBlock(RtpModule):
             prefix=f"{prefix}.experts",
         )
 
-        # Shared expert
-        self.shared_expert = Qwen3NextSharedExpert(
-            hidden_size,
-            shared_inter_size,
-            tp_size,
-            tp_rank,
-            params_dtype,
-            quant_config,
-            prefix=f"{prefix}.shared_expert",
+        # Routed-only checkpoints have no shared expert or gate parameters.
+        self.shared_expert = (
+            Qwen3NextSharedExpert(
+                hidden_size,
+                shared_inter_size,
+                tp_size,
+                tp_rank,
+                params_dtype,
+                quant_config,
+                prefix=f"{prefix}.shared_expert",
+            )
+            if shared_inter_size > 0
+            else None
         )
 
         # Shared expert gate
-        if has_shared_expert_gate:
+        if has_shared_expert_gate and self.shared_expert is not None:
             self.shared_expert_gate = ColumnParallelLinear(
                 input_size=hidden_size,
                 output_size=1,
@@ -1634,23 +1648,40 @@ class Qwen3NextMoEBlock(RtpModule):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
-        experts_output = self.experts(hidden_states, topk_weights, topk_ids)
+        router = getattr(self.experts.fused_moe, "router", None)
+        defer_tp_allreduce = bool(
+            self.shared_expert is not None
+            and self.tp_size > 1
+            and getattr(router, "supports_skip_tp_allreduce", False)
+            and getattr(router, "tp_collective_size", None) == self.tp_size
+        )
+        experts_output = self.experts(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            skip_tp_allreduce=defer_tp_allreduce,
+        )
+
+        if self.shared_expert is None:
+            return experts_output
 
         use_ep_shared_allreduce = self.tp_size > 1 and self.ep_size > 1
         shared_output = self.shared_expert(
-            hidden_states, skip_allreduce=use_ep_shared_allreduce
+            hidden_states, skip_allreduce=use_ep_shared_allreduce or defer_tp_allreduce
         )
         if self.shared_expert_gate is not None:
             gate_output = self.shared_expert_gate(hidden_states)
             shared_contribution = torch.sigmoid(gate_output) * shared_output
-            if use_ep_shared_allreduce:
+            if use_ep_shared_allreduce and not defer_tp_allreduce:
                 shared_contribution = all_reduce(shared_contribution, group=Group.TP)
             experts_output = experts_output + shared_contribution
         else:
-            if use_ep_shared_allreduce:
+            if use_ep_shared_allreduce and not defer_tp_allreduce:
                 shared_output = all_reduce(shared_output, group=Group.TP)
             experts_output = experts_output + shared_output
 
+        if defer_tp_allreduce:
+            experts_output = all_reduce(experts_output, group=Group.TP)
         return experts_output
 
 
@@ -1712,7 +1743,7 @@ class Qwen3NextDecoderLayer(RtpModule):
                 moe_inter_size=cfg["moe_inter_size"],
                 expert_num=cfg["expert_num"],
                 top_k=cfg["moe_k"],
-                shared_inter_size=cfg["inter_size"],
+                shared_inter_size=cfg["shared_inter_size"],
                 layer_idx=layer_idx,
                 tp_size=cfg["ffn_tp_size"],
                 tp_rank=cfg["ffn_tp_rank"],
@@ -1920,7 +1951,7 @@ class Qwen3NextForCausalLM(NewLoaderModelBase):
             config=model_config,
             parallelism_config=parallelism_config,
             weight=None,
-            max_generate_batch_size=0,
+            load_config=load_config,
             fmha_config=fmha_config,
         )
 

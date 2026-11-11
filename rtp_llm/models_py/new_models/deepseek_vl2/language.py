@@ -532,7 +532,7 @@ class DeepSeekVLV2ForCausalLM(MlaRuntimeLayoutMixin, NewLoaderModelBase):
             config=model_config,
             parallelism_config=parallelism_config,
             weight=None,
-            max_generate_batch_size=0,
+            load_config=load_config,
             fmha_config=load_config.fmha_config,
         )
         ckpt_path = model_config.ckpt_path

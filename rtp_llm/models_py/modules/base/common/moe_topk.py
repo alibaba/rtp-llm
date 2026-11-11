@@ -18,6 +18,8 @@ def group_topk_supported(
     trigger the kernel's uniform-routing fallback. Group and expert selection
     also share one 32-lane warp. ``GROUP_TOPK_WARP_SIZE`` mirrors WARP_SIZE and
     the WarpSelect capability in ``no_aux_tc_kernels.cu``.
+    Unlike SelectTopk's fused-MoE finalize path, no_aux_tc supports normalized
+    top-1 routing: its selected score is divided by the selected-score sum.
     """
 
     return (
@@ -29,7 +31,6 @@ def group_topk_supported(
         and 0 < top_k <= topk_group * (num_experts // n_group)
         and n_group <= GROUP_TOPK_WARP_SIZE
         and top_k <= GROUP_TOPK_WARP_SIZE
-        and not (top_k == 1 and renormalize)
     )
 
 

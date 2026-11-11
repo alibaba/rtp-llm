@@ -23,7 +23,13 @@ class NewLoaderModelBase(GptModelBase):
         max_generate_batch_size=0,
         fmha_config=None,
         py_hw_kernel_config=None,
+        *,
+        load_config=None,
     ):
+        if load_config is not None:
+            max_generate_batch_size = load_config.max_generate_batch_size
+            quant_config = load_config.quant_config
+            py_hw_kernel_config = getattr(quant_config, "hw_kernel_config", None)
         super().__init__(
             config,
             parallelism_config,

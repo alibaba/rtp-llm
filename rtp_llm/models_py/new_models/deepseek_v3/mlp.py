@@ -160,5 +160,9 @@ class DeepSeekV32MLP(RtpModule):
         for name, tensor in items:
             super().load_weights({name: self._pad_checkpoint_tensor(name, tensor)})
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(self.act_fn(self.gate_up_proj(x)))
+    def forward(
+        self, x: torch.Tensor, *, reduce_output: Optional[bool] = None
+    ) -> torch.Tensor:
+        return self.down_proj(
+            self.act_fn(self.gate_up_proj(x)), reduce_output=reduce_output
+        )

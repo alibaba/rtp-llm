@@ -425,7 +425,7 @@ class Qwen2MoeForCausalLM(NewLoaderModelBase):
             config=model_config,
             parallelism_config=parallelism_config,
             weight=None,
-            max_generate_batch_size=0,
+            load_config=load_config,
             fmha_config=getattr(load_config, "fmha_config", None),
         )
         cfg = _extract_moe_config_values(model_config, load_config)

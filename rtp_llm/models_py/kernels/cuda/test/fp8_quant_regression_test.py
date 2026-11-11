@@ -16,6 +16,18 @@ from rtp_llm.models_py.kernels.cuda.fp8_quant import (  # isort: skip
 
 
 class Fp8ScaleAllocationTest(TestCase):
+    def test_legacy_block_quant_import_is_preserved(self):
+        from rtp_llm.models_py.kernels.cuda.fp8_quant import block_quant_dequant
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
+            block_quant_dequant as legacy_import,
+        )
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            block_quant_dequant as package_import,
+        )
+
+        self.assertIs(legacy_import, block_quant_dequant)
+        self.assertIs(package_import, block_quant_dequant)
+
     def test_dense_silu_rounding_flag_reaches_v2(self):
         x = torch.ones((2, 1024), dtype=torch.bfloat16)
         module = "rtp_llm.models_py.kernels.cuda.fp8_quant"

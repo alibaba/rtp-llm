@@ -99,7 +99,7 @@ class MLATest(TestCase):
     NUM_EXPERT = [256]
     NUM_EXPERT_GROUP = [8]
     TOPK_GROUP = [4]
-    TOPK = [8]
+    TOPK = [8, 1]
 
     def setUp(self) -> None:
         if not torch.cuda.is_available():

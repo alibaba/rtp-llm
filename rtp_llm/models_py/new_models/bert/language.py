@@ -1,7 +1,9 @@
 import hashlib
+import json
 import logging
+import os
 from numbers import Real
-from typing import Any, Dict, Iterator, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -428,7 +430,7 @@ class _BertNewLoaderBase(GptModelBase):
             config=model_config,
             parallelism_config=parallelism_config,
             weight=None,
-            max_generate_batch_size=0,
+            max_generate_batch_size=load_config.max_generate_batch_size,
             fmha_config=getattr(load_config, "fmha_config", None),
             py_hw_kernel_config=getattr(
                 getattr(load_config, "quant_config", None),
@@ -474,6 +476,23 @@ class _BertNewLoaderBase(GptModelBase):
         hidden_size, num_heads, head_dim = _validate_attention_config(model_config)
         intermediate_size = _positive_config_int(model_config, "inter_size")
         num_layers = _positive_config_int(model_config, "num_layers")
+        self._checkpoint_num_layers = num_layers
+        ckpt_path = getattr(model_config, "ckpt_path", None)
+        if ckpt_path and os.path.isfile(os.path.join(ckpt_path, "config.json")):
+            with open(
+                os.path.join(ckpt_path, "config.json"), encoding="utf-8"
+            ) as source:
+                checkpoint_config = json.load(source)
+            checkpoint_layers = checkpoint_config.get("num_hidden_layers", num_layers)
+            if (
+                isinstance(checkpoint_layers, bool)
+                or not isinstance(checkpoint_layers, int)
+                or checkpoint_layers < num_layers
+            ):
+                raise ValueError(
+                    "checkpoint num_hidden_layers must cover the runtime layers"
+                )
+            self._checkpoint_num_layers = checkpoint_layers
         vocab_size = _positive_config_int(model_config, "vocab_size")
         max_seq_len = _positive_config_int(model_config, "max_seq_len")
         type_vocab_size = _optional_nonnegative_config_int(
@@ -524,6 +543,25 @@ class _BertNewLoaderBase(GptModelBase):
             self._custom_checkpoint_to_runtime.values()
         )
         self._loaded_checkpoint_targets = set()
+
+    def checkpoint_weight_name_filter(self) -> Callable[[str], bool]:
+        def should_load(name: str) -> bool:
+            stripped = _strip_known_prefix(name, self.model_prefix)
+            if self._resolve_custom_weight_name(name, stripped) is not None:
+                return True
+            prefix = "encoder.layer."
+            if stripped.startswith(prefix):
+                layer, separator, suffix = stripped[len(prefix) :].partition(".")
+                if separator and layer.isdigit() and suffix in _LAYER_MAPPING:
+                    # Skip only known weights of deliberately truncated layers.
+                    # Invalid names and layers beyond config.json stay visible
+                    # to strict unexpected-weight validation.
+                    return (
+                        not len(self.layers) <= int(layer) < self._checkpoint_num_layers
+                    )
+            return True
+
+        return should_load
 
     def _resolve_custom_weight_name(self, name: str, stripped: str) -> Optional[str]:
         matches = []
@@ -606,9 +644,12 @@ class _BertNewLoaderBase(GptModelBase):
         custom_loaded = 0
         dropped = []
         assigned_targets: Dict[int, str] = {}
+        should_load = self.checkpoint_weight_name_filter()
         for name, tensor in _as_iter(weights):
             if not isinstance(name, str) or not isinstance(tensor, torch.Tensor):
                 raise TypeError("Weights must be (str, torch.Tensor) pairs")
+            if not should_load(name):
+                continue
             stripped = _strip_known_prefix(name, self.model_prefix)
             runtime_name = self._resolve_custom_weight_name(name, stripped)
             if runtime_name is not None:

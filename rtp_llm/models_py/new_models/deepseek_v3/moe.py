@@ -18,6 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.device.device_type import DeviceType, get_device_type
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules import FakeBalanceExpert, GroupTopK, SelectTopk
@@ -334,6 +335,7 @@ class DeepSeekV32MoEBlock(RtpModule):
             grouped=grouped,
         )
         self.top_k = top_k
+        self.tp_size = tp_size
         self.scoring_func = scoring_func
         self.routed_scaling_factor = routed_scaling_factor
         self.n_group = n_group
@@ -582,10 +584,29 @@ class DeepSeekV32MoEBlock(RtpModule):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
-        experts_output = self.experts(hidden_states, topk_weights, topk_ids)
+        router = getattr(getattr(self.experts, "fused_moe", None), "router", None)
+        defer_tp_allreduce = bool(
+            self.shared_experts is not None
+            and self.tp_size > 1
+            and getattr(router, "supports_skip_tp_allreduce", False)
+            and getattr(router, "tp_collective_size", None) == self.tp_size
+        )
+        if defer_tp_allreduce:
+            experts_output = self.experts(
+                hidden_states, topk_weights, topk_ids, skip_tp_allreduce=True
+            )
+        else:
+            experts_output = self.experts(hidden_states, topk_weights, topk_ids)
 
         if self.shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
+            shared_output = (
+                self.shared_experts(hidden_states, reduce_output=False)
+                if defer_tp_allreduce
+                else self.shared_experts(hidden_states)
+            )
             experts_output = experts_output + shared_output
+
+        if defer_tp_allreduce:
+            experts_output = all_reduce(experts_output, group=Group.TP)
 
         return experts_output

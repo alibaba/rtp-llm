@@ -1104,7 +1104,10 @@ class WatchLoggingTest(JitCacheTestBase):
         self.addCleanup(noisy.setLevel, saved)
         scope = self.make_scope()
         manager = self.make_manager(scope)
-        self.assertTrue(manager.bootstrap(timeout_s=30))
+        # This test covers logger configuration, not optional inotify I/O.
+        # Keep that branch executable on lanes without the watchdog wheel.
+        with mock.patch.object(jit, "Observer", return_value=mock.Mock()):
+            self.assertTrue(manager.bootstrap(timeout_s=30))
         self.assertEqual(noisy.level, logging.WARNING)
 
 
@@ -1140,7 +1143,8 @@ class ManagerTest(JitCacheTestBase):
         self.publish(store.RemoteSnapshotStore(remote), {rel: data})
 
     def test_missing_watchdog_uses_polling_worker(self):
-        manager = self.make_manager(mock.Mock(components=()))
+        scope = self.make_scope()
+        manager = self.make_manager(scope)
         with mock.patch.object(jit, "Observer", None), mock.patch.object(
             manager, "_sync_loop"
         ) as sync_loop, self.assertLogs(level="WARNING") as logs:
@@ -1148,6 +1152,8 @@ class ManagerTest(JitCacheTestBase):
             manager._worker.join(1)
         sync_loop.assert_called_once_with()
         self.assertIsNone(manager._observer)
+        for component in scope.components:
+            self.assertTrue(component.local_dir.is_dir())
         self.assertIn("polling fallback active", "\n".join(logs.output))
 
     def test_non_positive_setup_timeout_starts_cold(self):

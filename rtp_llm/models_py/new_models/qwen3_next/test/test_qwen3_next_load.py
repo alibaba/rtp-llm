@@ -3,6 +3,7 @@ import os
 import tempfile
 import types
 import unittest
+from dataclasses import replace
 from unittest import mock
 
 import torch
@@ -235,6 +236,114 @@ def _mtp_weights(embedding_prefix="model.language_model."):
 
 
 class Qwen3NextLoadTest(unittest.TestCase):
+    def test_cascade_runtime_configuration_reaches_qwen_next_and_qwen35(self):
+        for model_type, model_class in (
+            ("qwen3_next", Qwen3NextForCausalLM),
+            ("qwen35_moe", Qwen35MoeForCausalLM),
+        ):
+            for enabled in (False, True):
+                with self.subTest(model_type=model_type, enabled=enabled):
+                    config = _config()
+                    config.model_type = model_type
+                    hw_config = types.SimpleNamespace(
+                        enable_decode_cascade_attention=enabled
+                    )
+                    load_config = replace(
+                        _load_config(),
+                        max_generate_batch_size=32,
+                        quant_config=QuantizationConfig(
+                            "none", hw_kernel_config=hw_config
+                        ),
+                    )
+                    model = model_class(config, load_config)
+                    self.assertEqual(
+                        model.decode_cascade_max_requests, 32 if enabled else 0
+                    )
+                    self.assertIs(model.py_hw_kernel_config, hw_config)
+
+    def test_routed_only_qwen_next_and_qwen35_load_without_shared_parameters(self):
+        for model_type, model_class in (
+            ("qwen3_next", Qwen3NextForCausalLM),
+            ("qwen35_moe", Qwen35MoeForCausalLM),
+        ):
+            for ep_rank in (0, 1):
+                with self.subTest(model_type=model_type, ep_rank=ep_rank):
+                    config = _config()
+                    config.model_type = model_type
+                    config.moe_layer_index = [0]
+                    config.inter_size = 0
+                    config.moe_style = 1
+                    weights = {
+                        name: tensor
+                        for name, tensor in _moe_weights().items()
+                        if ".shared_expert" not in name
+                    }
+                    model = model_class(
+                        config, _load_config(ep_size=2, ep_rank=ep_rank)
+                    )
+                    model.load_weights(weights)
+                    NewModelLoader._validate_loaded_weights(model)
+                    self.assertIsNone(model.layers[0].mlp.shared_expert)
+                    self.assertIsNone(model.layers[0].mlp.shared_expert_gate)
+                    moe = model.layers[0].mlp
+                    output = torch.full((2, 4), 7.0)
+                    moe.experts.fused_moe = types.SimpleNamespace(
+                        topk_ids_dtype=torch.int32
+                    )
+                    with mock.patch.object(
+                        moe.experts, "forward", return_value=output
+                    ), mock.patch.object(moe.select_topk, "forward"), mock.patch(
+                        "rtp_llm.models_py.new_models.qwen3_next.language.all_reduce"
+                    ) as reduce:
+                        self.assertIs(moe(torch.ones(2, 4)), output)
+                        reduce.assert_not_called()
+
+    def test_zero_intermediate_size_still_rejects_dense_layers(self):
+        config = _config()
+        config.inter_size = 0
+        config.moe_style = 1
+        with self.assertRaisesRegex(ValueError, "Dense FFN"):
+            Qwen3NextForCausalLM(config, _load_config())
+
+    def test_shared_and_routed_experts_merge_before_matching_tp_reduction(self):
+        for collective_size in (1, 2):
+            with self.subTest(collective_size=collective_size):
+                config = _config()
+                config.moe_layer_index = [0]
+                block = (
+                    Qwen3NextForCausalLM(config, _load_config(tp_size=2)).layers[0].mlp
+                )
+                block.experts.fused_moe = types.SimpleNamespace(
+                    topk_ids_dtype=torch.int64,
+                    router=types.SimpleNamespace(
+                        supports_skip_tp_allreduce=True,
+                        tp_collective_size=collective_size,
+                    ),
+                )
+                hidden = torch.ones(2, 4)
+                block.gate.forward = mock.Mock(return_value=torch.zeros(2, 2))
+                block.select_topk.forward = mock.Mock()
+                block.experts.forward = mock.Mock(return_value=hidden * 2)
+                block.shared_expert.forward = mock.Mock(return_value=hidden * 3)
+                block.shared_expert_gate.forward = mock.Mock(
+                    return_value=torch.zeros(2, 1)
+                )
+                with mock.patch(
+                    "rtp_llm.models_py.new_models.qwen3_next.language.all_reduce",
+                    side_effect=lambda value, **_: value,
+                ) as reduce:
+                    actual = block(hidden)
+                defer = collective_size == 2
+                self.assertEqual(
+                    block.experts.forward.call_args.kwargs["skip_tp_allreduce"], defer
+                )
+                self.assertEqual(
+                    block.shared_expert.forward.call_args.kwargs["skip_allreduce"],
+                    defer,
+                )
+                self.assertEqual(reduce.call_count, int(defer))
+                torch.testing.assert_close(actual, hidden * 3.5)
+
     def test_qwen35_dense_main_and_eagle_draft_load_without_moe(self):
         from rtp_llm.models_py.new_models.qwen3_next.language import (
             Qwen35DenseForCausalLM,

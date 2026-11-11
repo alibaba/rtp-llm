@@ -990,7 +990,11 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
 
     def test_base_model_entry_loads_registered_qwen_runtime(self):
         config = _model_config()
-        base_model = _base_model(config)
+        hw_config = types.SimpleNamespace(
+            enable_cuda_graph=False, enable_decode_cascade_attention=True
+        )
+        base_model = _base_model(config, hw_config)
+        base_model.max_generate_batch_size = 64
 
         with self.assertLogs(level="WARNING") as captured_logs, patch(
             "rtp_llm.metrics.kmonitor.report"
@@ -1010,6 +1014,8 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         self.assertIsInstance(base_model.py_model, Qwen3ForCausalLM)
         self.assertIsInstance(base_model.py_model, GptModelBase)
         self.assertIsInstance(base_model.py_model, RtpModule)
+        self.assertEqual(base_model.py_model.decode_cascade_max_requests, 64)
+        self.assertIs(base_model.py_model.py_hw_kernel_config, hw_config)
         self.assertFalse(base_model.py_model.training)
         self.assertIs(base_model.py_model.weight, base_model.weight)
         self.assertIs(base_model.weight_manager, None)

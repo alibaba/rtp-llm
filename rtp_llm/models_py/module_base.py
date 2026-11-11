@@ -243,6 +243,36 @@ class RtpModule(nn.Module):
             )
         return matches[0] if matches else None
 
+    @staticmethod
+    def _claim_custom_loader_target(
+        module: nn.Module,
+        name: str,
+        checkpoint_name: str,
+        assigned_targets: Dict[int, str],
+    ) -> None:
+        # Simple custom leaves (norms, embeddings, state parameters) must not
+        # lose the root's duplicate detection at a load_weights boundary.
+        # Virtual shard names do not resolve to a registered tensor: their
+        # fused/quantized loader owns subrange completeness and overlap checks.
+        parts = name.split(".")
+        for part in parts[:-1]:
+            module = module._modules.get(part)
+            if not isinstance(module, nn.Module):
+                return
+        key = parts[-1]
+        target = module._parameters.get(key)
+        if target is None and key not in module._non_persistent_buffers_set:
+            target = module._buffers.get(key)
+        if not isinstance(target, torch.Tensor):
+            return
+        previous = assigned_targets.get(id(target))
+        if previous is not None:
+            raise RuntimeError(
+                "Multiple checkpoint tensors target the same runtime weight: "
+                f"{previous!r} and {checkpoint_name!r}"
+            )
+        assigned_targets[id(target)] = checkpoint_name
+
     def _dispatch_to_module_list(
         self,
         module_list: nn.ModuleList,
@@ -264,6 +294,9 @@ class RtpModule(nn.Module):
         child = module_list[index]
         child_loader = getattr(type(child), "load_weights", None)
         if child_loader is not None and child_loader is not RtpModule.load_weights:
+            self._claim_custom_loader_target(
+                child, rest, checkpoint_name, assigned_targets
+            )
             child.load_weights({rest: tensor})
             return True
         return self._dispatch(
@@ -310,6 +343,9 @@ class RtpModule(nn.Module):
             return False
         child_loader = getattr(type(child), "load_weights", None)
         if child_loader is not None and child_loader is not RtpModule.load_weights:
+            self._claim_custom_loader_target(
+                child, rest, checkpoint_name, assigned_targets
+            )
             child.load_weights({rest: tensor})
             return True
         return self._dispatch(

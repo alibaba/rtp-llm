@@ -399,6 +399,34 @@ class FoundationLoaderTest(unittest.TestCase):
         self.assertEqual(model.child.child_weight.dtype, torch.float64)
         self.assertIs(model.parent_weight, model.child.child_weight)
 
+    def test_custom_leaf_delegation_keeps_duplicate_target_guard(self):
+        from rtp_llm.models_py.layers.norm import RMSNorm, RMSResNorm
+        from rtp_llm.models_py.layers.embedding import (
+            VocabParallelEmbedding,
+            ParallelLMHead,
+        )
+
+        for leaf in (
+            RMSNorm(4),
+            RMSResNorm(4),
+            VocabParallelEmbedding(8, 4),
+            ParallelLMHead(4, 8),
+        ):
+            for in_list in (False, True):
+                with self.subTest(leaf=type(leaf).__name__, in_list=in_list):
+                    model = RtpModule()
+                    model.first = nn.ModuleList([leaf]) if in_list else leaf
+                    model.second = leaf
+                    first_name = "first.0.weight" if in_list else "first.weight"
+                    value = torch.ones_like(leaf.weight)
+                    with self.assertRaisesRegex(
+                        RuntimeError, "Multiple checkpoint tensors"
+                    ):
+                        model.load_weights(
+                            [(first_name, value), ("second.weight", value * 2)]
+                        )
+                    torch.testing.assert_close(leaf.weight, value)
+
     def test_recursive_apply_converts_shared_tensor_once(self):
         class TiedTree(RtpModule):
             def __init__(self):

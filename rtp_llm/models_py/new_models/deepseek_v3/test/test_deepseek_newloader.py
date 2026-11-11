@@ -1369,6 +1369,9 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             "renormalize": False,
         }
         self.assertTrue(group_topk_supported(**valid))
+        self.assertTrue(
+            group_topk_supported(**{**valid, "top_k": 1, "renormalize": True})
+        )
         invalid_overrides = (
             {"num_experts": 63},
             {"num_experts": 8, "n_group": 8},
@@ -1377,7 +1380,6 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             {"topk_group": 9},
             {"top_k": 0},
             {"top_k": 33},
-            {"top_k": 1, "renormalize": True},
             {"num_experts": 8, "n_group": 4, "topk_group": 1, "top_k": 3},
         )
         for overrides in invalid_overrides:
@@ -2475,7 +2477,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 self.assertEqual(block.group_topk is not None, expect_fast)
                 self.assertEqual(group_topk.call_count, int(expect_fast))
 
-    def test_noaux_top1_normalization_uses_reference_path_on_cuda(self):
+    def test_noaux_top1_normalization_uses_supported_group_kernel_on_cuda(self):
         with (
             mock.patch(
                 "rtp_llm.models_py.new_models.deepseek_v3.moe.get_device_type",
@@ -2515,9 +2517,9 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 has_moe_norm=True,
                 correction_bias=True,
             )
-        self.assertFalse(block._use_fast_group_topk)
-        self.assertIsNone(block.group_topk)
-        group_topk.assert_not_called()
+        self.assertTrue(block._use_fast_group_topk)
+        self.assertIs(block.group_topk, group_topk.return_value)
+        group_topk.assert_called_once_with()
 
     def test_noaux_router_exceeding_warp_capacity_uses_reference_path(self):
         with (
@@ -3569,6 +3571,61 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 )
                 self.assertLess(float(relative_rmse), 0.05)
                 self.assertGreater(float(cosine), 0.998)
+
+    def test_shared_and_routed_partials_use_one_matching_tp_collective(self):
+        for collective_size in (1, 2):
+            with self.subTest(collective_size=collective_size):
+                parallelism = _single_rank_parallelism_config()
+                parallelism.tp_size = parallelism.world_size = 2
+                block = DeepSeekV32MoEBlock(
+                    hidden_size=8,
+                    moe_intermediate_size=4,
+                    num_experts=4,
+                    top_k=2,
+                    layer_idx=0,
+                    tp_size=2,
+                    tp_rank=0,
+                    ep_size=1,
+                    ep_rank=0,
+                    model_config=_router_model_config(),
+                    parallelism_config=parallelism,
+                    moe_config=types.SimpleNamespace(fake_balance_expert=False),
+                    quant_config=None,
+                    params_dtype=torch.float32,
+                    has_shared_expert=True,
+                    shared_expert_intermediate_size=4,
+                )
+                block.experts.fused_moe = types.SimpleNamespace(
+                    topk_ids_dtype=torch.int64,
+                    router=types.SimpleNamespace(
+                        supports_skip_tp_allreduce=True,
+                        tp_collective_size=collective_size,
+                    ),
+                )
+                hidden = torch.ones(2, 8)
+                block.gate.forward = mock.Mock(return_value=torch.zeros(2, 4))
+                block.experts.forward = mock.Mock(return_value=hidden * 2)
+                block.shared_experts.forward = mock.Mock(return_value=hidden * 3)
+                with mock.patch(
+                    "rtp_llm.models_py.new_models.deepseek_v3.moe.all_reduce",
+                    side_effect=lambda value, **_: value,
+                ) as reduce:
+                    actual = block(hidden)
+                defer = collective_size == 2
+                self.assertEqual(
+                    block.experts.forward.call_args.kwargs.get(
+                        "skip_tp_allreduce", False
+                    ),
+                    defer,
+                )
+                self.assertEqual(
+                    block.shared_experts.forward.call_args.kwargs.get(
+                        "reduce_output", True
+                    ),
+                    not defer,
+                )
+                self.assertEqual(reduce.call_count, int(defer))
+                torch.testing.assert_close(actual, hidden * 5)
 
     def test_mlp_tp_reduction_is_owned_by_row_parallel_linear(self):
         dense = DeepSeekV32MLP(

@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -107,9 +108,14 @@ class BertNewloaderTest(unittest.TestCase):
         weights,
         *,
         compute_dtype=torch.float16,
+        checkpoint_layers=None,
         **load_kwargs,
     ):
         with tempfile.TemporaryDirectory() as model_path:
+            config.ckpt_path = model_path
+            if checkpoint_layers is not None:
+                with open(os.path.join(model_path, "config.json"), "w") as source:
+                    json.dump({"num_hidden_layers": checkpoint_layers}, source)
             save_file(weights, os.path.join(model_path, "model.safetensors"))
             model = NewModelLoader(
                 config,
@@ -119,6 +125,39 @@ class BertNewloaderTest(unittest.TestCase):
                 model_path=model_path,
             ).load()
         return model
+
+    def test_truncated_bert_and_roberta_load_only_retained_layers(self):
+        for prefix in ("bert", "roberta"):
+            with self.subTest(model_type=prefix):
+                weights = _weights(prefix)
+                weights.update(
+                    {
+                        name.replace(
+                            "encoder.layer.0.", "encoder.layer.1."
+                        ): tensor.clone()
+                        for name, tensor in list(weights.items())
+                        if "encoder.layer.0." in name
+                    }
+                )
+                model = self._load(_config(prefix), weights, checkpoint_layers=2)
+                self.assertEqual(len(model.layers), 1)
+                NewModelLoader._validate_loaded_weights(model)
+                torch.testing.assert_close(
+                    model.layers[0].self_attn.qkv_proj.weight[:4],
+                    torch.ones(4, 4, dtype=torch.float16),
+                )
+
+    def test_truncation_does_not_hide_unknown_checkpoint_tensors(self):
+        for prefix in ("bert", "roberta"):
+            for suffix in (
+                "1.attention.self.typo.weight",
+                "2.attention.self.query.weight",
+            ):
+                with self.subTest(model_type=prefix, suffix=suffix):
+                    weights = _weights(prefix)
+                    weights[f"{prefix}.encoder.layer.{suffix}"] = torch.ones(4, 4)
+                    with self.assertRaisesRegex(RuntimeError, "dropped unexpected"):
+                        self._load(_config(prefix), weights, checkpoint_layers=2)
 
     def test_registry_resolves_bert_and_roberta(self):
         self.assertIs(get_model_class("bert"), BertForEmbedding)

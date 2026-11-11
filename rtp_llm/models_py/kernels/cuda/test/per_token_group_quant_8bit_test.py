@@ -533,7 +533,21 @@ class DenseSiluGroupQuantTest(TestCase):
         for hidden in (513, 3073):
             with self.subTest(hidden=hidden):
                 x = torch.empty((128, 2 * hidden), device="cuda", dtype=torch.bfloat16)
-                q, scales = self._outputs(x)
+                # The public allocator rejects this shape too. Allocate a
+                # safe upper bound directly to exercise the raw C++ guard.
+                with self.assertRaisesRegex(ValueError, "divisible"):
+                    self._outputs(x)
+                q = torch.empty(
+                    (128, hidden), device=x.device, dtype=torch.float8_e4m3fn
+                )
+                scales = self.make_scales(
+                    (128, ((hidden + 511) // 512) * 512),
+                    x.device,
+                    128,
+                    True,
+                    True,
+                    True,
+                )
                 with self.assertRaisesRegex(RuntimeError, "hidden divisible by 512"):
                     self._fused(x, q, scales)
 

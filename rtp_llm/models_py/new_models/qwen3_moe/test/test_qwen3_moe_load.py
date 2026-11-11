@@ -1662,7 +1662,10 @@ class Qwen3MoeModelTest(unittest.TestCase):
         )
         self.assertEqual(model.layers[0].mlp.experts._quant_family, "fp8_per_block")
 
-    @unittest.skipUnless(torch.cuda.is_available(), "requires an accelerator")
+    @unittest.skipUnless(
+        torch.version.hip is None and torch.cuda.is_available(),
+        "CUDA online per-tensor FP8 fused-MoE factory test",
+    )
     def test_new_model_loader_online_fp8_builds_fused_moe(self):
         if torch.cuda.get_device_capability() < (8, 9):
             self.skipTest("online FP8 MoE requires compute capability 8.9+")

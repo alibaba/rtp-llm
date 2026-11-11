@@ -8,6 +8,7 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel.get_best_config import (
 from rtp_llm.models_py.kernels.cuda.fp8_quant import (
     _transform_scale_ue8m0,
     align,
+    block_quant_dequant,
     ceil_to_ue8m0,
     create_per_token_group_quant_fp8_output_scale,
     fp8_dtype,
@@ -29,6 +30,7 @@ else:
 logger = logging.getLogger(__name__)
 
 __all__ = (
+    "block_quant_dequant",
     "create_per_token_group_quant_fp8_output_scale",
     "fp8_dtype",
     "fp8_max",
@@ -177,6 +179,8 @@ def quant_weight_ue8m0_packed(
 
     out_s = torch.cat(scale_chunks, dim=0)
     return out_w, _transform_scale_ue8m0(out_s, mn=out_w.shape[-2])
+
+
 def per_token_cast_to_fp8(
     x: torch.Tensor, use_ue8m0: bool
 ) -> Tuple[torch.Tensor, torch.Tensor]:

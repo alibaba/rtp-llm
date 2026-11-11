@@ -367,6 +367,10 @@ class JitCacheManager(FileSystemEventHandler):
         return self._start_watch()
 
     def _start_watch(self) -> bool:
+        # Polling and inotify share the same directory contract. Optional
+        # watchdog availability must not decide whether JIT paths exist.
+        for item in self.scope.components:
+            item.local_dir.mkdir(parents=True, exist_ok=True)
         if Observer is None:
             logging.warning(
                 "JIT_CACHE_FAIL_OPEN: watchdog unavailable; polling fallback active"
@@ -378,7 +382,6 @@ class JitCacheManager(FileSystemEventHandler):
                         logging.getLogger(name).setLevel(logging.WARNING)
                 self._observer = Observer()
                 for item in self.scope.components:
-                    item.local_dir.mkdir(parents=True, exist_ok=True)
                     self._observer.schedule(self, str(item.local_dir), recursive=True)
                 self._observer.start()
             except Exception:

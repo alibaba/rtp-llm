@@ -154,7 +154,7 @@ class DeepSeekV32MTPForCausalLM(MlaRuntimeLayoutMixin, NewLoaderModelBase):
             config=model_config,
             parallelism_config=parallelism_config,
             weight=None,
-            max_generate_batch_size=0,
+            load_config=load_config,
             fmha_config=fmha_config,
         )
         self._keep_mla_checkpoint_weights = load_config.keep_mla_checkpoint_weights
