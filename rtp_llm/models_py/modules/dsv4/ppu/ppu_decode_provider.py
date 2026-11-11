@@ -40,12 +40,17 @@ class PpuDecodeProvider(PpuModuleProvider):
             strategy_type = PpuMegaMoEFP4Strategy
             strategy_kwargs["resources"] = self._mega_resources
             strategy_kwargs["module_name"] = self._mega_module_name
+            strategy_kwargs["streamed"] = self._mega_streamed
         precision = self.execution_options.get("DSV4_PPU_EXPERT_PRECISION", "a4")
         if precision not in ("a4", "a8"):
             raise ValueError("DSV4_PPU_EXPERT_PRECISION must be a4 or a8")
         if precision == "a8":
             if self._moe_backend != "megamoe":
                 raise ValueError("PPU A8 Decode requires MegaMoE")
+            if self._mega_streamed or self._shared_staged:
+                raise ValueError(
+                    "A8 MegaMoE supports neither streamed nor staged execution"
+                )
             from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_mega_moe import (
                 PpuMegaMoEA8Strategy,
             )
@@ -105,6 +110,14 @@ class PpuDecodeProvider(PpuModuleProvider):
         )
         if self._moe_backend not in ("deepep", "megamoe"):
             raise ValueError("DSV4_PPU_DECODE_MOE_BACKEND must be deepep or megamoe")
+        self._shared_staged = self._bool("DSV4_PPU_MEGAMOE_SHARED_STAGED", False)
+        self._mega_streamed = self._bool("DSV4_PPU_MEGAMOE_STREAMED", False)
+        if self._mega_streamed and self._moe_backend != "megamoe":
+            raise ValueError("Streamed execution requires the MegaMoE backend")
+        if self._mega_streamed and self._shared_staged:
+            raise ValueError("Streamed MegaMoE does not support staged shared experts")
+        if self._shared_staged and self._moe_backend != "megamoe":
+            raise ValueError("Staged shared execution requires the MegaMoE backend")
         self._mega_resources = None
         self._mega_module_name = "deep_gemm_mega"
         if self._moe_backend == "megamoe":
@@ -211,6 +224,7 @@ class PpuDecodeProvider(PpuModuleProvider):
         return PpuSharedExpertExecutor(
             stream_pool=self.stream_pool,
             start_before_routing=True,
+            staged=self._shared_staged,
         )
 
     def build_hc_unit(self, *args, **kwargs):
