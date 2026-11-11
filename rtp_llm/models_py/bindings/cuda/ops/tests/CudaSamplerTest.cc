@@ -24,6 +24,17 @@
 #include <string>
 #include <thread>
 #include <vector>
+namespace rtp_llm {
+template<typename T>
+void invokeBatchApplyTemperaturePenalty(T* logits,
+                                        const T* bias,
+                                        const float* temperatures,
+                                        int batch_size,
+                                        int vocab_size,
+                                        int vocab_size_padd,
+                                        cudaStream_t stream);
+}
+
 using namespace std;
 using namespace rtp_llm;
 
@@ -684,6 +695,198 @@ TEST_F(CudaSamplerTest, testCompactDeferredGumbelMatchesDense) {
             EXPECT_TRUE(torch::equal(params.output_accepted_token_num_d, shared_expected.second));
         }
     }
+}
+
+TEST_F(CudaSamplerTest, testCompactTemperatureFusionMatchesLegacy) {
+    initializeSamplerPython();
+    const auto* properties = at::cuda::getCurrentDeviceProperties();
+    if (properties->major != 10 || (properties->minor != 0 && properties->minor != 3))
+        GTEST_SKIP() << "DeepSelect requires SM100 or SM103";
+    constexpr int batch = 8, rows = 6, count = batch * rows, vocab = 129280;
+    const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto materialize = pybind11::module_::import("rtp_llm.models_py.sampling.rejection_compact").attr("materialize");
+    auto expand = [&](const GreedyOutput& output) {
+        return materialize(output.deferred_logits.reshape({batch, rows, 1024}),
+                           output.deferred_token_ids.reshape({batch, rows, 1024}),
+                           output.deferred_dense_fallback.reshape({batch, rows, vocab}),
+                           output.deferred_fallback_rows)
+            .cast<torch::Tensor>();
+    };
+    for (int variant = 0; variant < 10; ++variant) {
+        SCOPED_TRACE("temperature variant=" + std::to_string(variant));
+        const float temperature = variant == 0 ? 0.7f : variant == 2 ? 1.0f : variant == 9 ? 1e10f : 1.3f;
+        std::vector<float> temperatures(count, temperature);
+        if (variant == 3)
+            for (int row = 0; row < count; ++row)
+                temperatures[row] = row % 3 == 0 ? 0.7f : row % 3 == 1 ? 1.0f : 1.3f;
+        std::vector<float> values(vocab);
+        for (int i = 0; i < vocab; ++i)
+            values[i] = -static_cast<float>(i) / vocab;
+        values[0] = 6.0f;
+        auto original = torch::tensor(values).to(options).unsqueeze(0).repeat({count, 1});
+        if (variant == 4) {
+            original.select(0, 0).zero_();
+        } else if (variant == 5) {
+            const float inverse = 1.0f / (temperature + 1e-6f);
+            float lower = 1.5f, upper = lower;
+            for (int attempt = 0; attempt < 128; ++attempt) {
+                upper = std::nextafter(lower, INFINITY);
+                if (lower * inverse == upper * inverse)
+                    break;
+                lower = upper;
+            }
+            ASSERT_LT(lower, upper);
+            ASSERT_EQ(lower * inverse, upper * inverse);
+            auto row = original.select(0, 0);
+            row.fill_(-4.0f);
+            row.narrow(0, 0, 1023).fill_(4.0f);
+            row.index_put_({1023}, upper);
+            row.index_put_({1024}, lower);
+        } else if (variant == 6) {
+            original.select(0, 0).fill_(-INFINITY);
+            original.select(0, 0).index_put_({0}, 1.0f);
+            original.select(0, 1).index_put_({0}, INFINITY);
+            original.select(0, 2).index_put_({0}, std::numeric_limits<float>::quiet_NaN());
+            original.select(0, 3).index_put_({0}, -std::numeric_limits<float>::quiet_NaN());
+        } else if (variant == 8) {
+            for (int i = 0; i < vocab; ++i)
+                values[i] = (i % 2 ? -1.0f : 1.0f) * std::numeric_limits<float>::denorm_min() * (i % 127 + 1);
+            original = torch::tensor(values).to(options).unsqueeze(0).repeat({count, 1});
+        } else if (variant == 9) {
+            original.mul_(1e-30f);
+        }
+        auto sample = torch::ones({count}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
+        if (variant == 7)
+            sample.narrow(0, 0, rows).fill_(false);
+        auto scaled = original.clone();
+        if (variant != 2) {
+            auto temperature_device = pinnedFloatTensor(temperatures).to(torch::kCUDA);
+            invokeBatchApplyTemperaturePenalty<float>(scaled.data_ptr<float>(),
+                                                       nullptr,
+                                                       temperature_device.data_ptr<float>(),
+                                                       count,
+                                                       vocab,
+                                                       vocab,
+                                                       at::cuda::getCurrentCUDAStream().stream());
+            if (variant == 7)
+                scaled.narrow(0, 0, rows).copy_(original.narrow(0, 0, rows));
+        }
+        if (variant == 5) {
+            ASSERT_EQ(scaled.index({0, 1023}).item<float>(), scaled.index({0, 1024}).item<float>());
+        }
+        if (variant == 8 || variant == 9) {
+            ASSERT_TRUE(torch::equal(scaled, torch::zeros_like(scaled)));
+        }
+        for (bool shared : {false, true}) {
+            SCOPED_TRACE("shared generator=" + std::to_string(shared));
+            std::vector<at::Generator> generators;
+            for (int i = 0; i < batch; ++i) {
+                auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+                generator.set_current_seed(23456 + i);
+                generators.push_back(generator);
+            }
+            if (shared)
+                generators.assign(batch, generators.front());
+            auto reset = [&] {
+                for (auto& generator : generators)
+                    generator.set_offset(0);
+            };
+            auto produce = [&](bool fused) {
+                GreedyParams params;
+                params.logits = fused ? original.clone() : scaled.clone();
+                params.input_lengths = cudaIntTensor(std::vector<int32_t>(count, 1), {count});
+                params.sequence_lengths = params.input_lengths;
+                params.token_ids = torch::zeros({count, 2}, options.dtype(torch::kInt32));
+                params.step = 1;
+                params.top_k = pinnedIntTensor(std::vector<int32_t>(count, 1024));
+                params.top_p = pinnedFloatTensor(std::vector<float>(count, variant == 5 ? 1.0f : 0.9f));
+                params.temperature = pinnedFloatTensor(fused ? temperatures : std::vector<float>(count, 1.0f));
+                params.do_sample = sample;
+                params.defer_token_sampling = true;
+                params.allow_compact_deferred_output = true;
+                params.deferred_rejection_rows = rows;
+                params.deferred_rejection_generators = generators;
+                return execSampleGreedy(params);
+            };
+            auto reject = [&](const GreedyOutput& output) {
+                RejectionSamplingParams params;
+                params.target_logits_d = output.deferred_logits.reshape({batch, rows, 1024});
+                params.target_candidate_ids_d = output.deferred_token_ids.reshape({batch, rows, 1024});
+                params.target_dense_fallback_d = output.deferred_dense_fallback.reshape({batch, rows, vocab});
+                params.target_fallback_rows_d = output.deferred_fallback_rows;
+                params.draft_token_ids_d = torch::zeros({batch, rows - 1}, options.dtype(torch::kInt32));
+                params.do_sample_d = torch::ones({batch}, options.dtype(torch::kBool));
+                if (variant == 7)
+                    params.do_sample_d.select(0, 0).fill_(false);
+                params.output_token_ids_d = torch::empty({batch, rows}, options.dtype(torch::kInt32));
+                params.output_accepted_token_num_d = torch::empty({batch}, options.dtype(torch::kInt32));
+                params.generator = generators;
+                params.deferred_token_sampling = true;
+                params.draft_point_mass = true;
+                params.prepared_rejection_rng = output.prepared_rejection_rng;
+                execRejectionSampling(params);
+                for (const auto& generator : generators)
+                    EXPECT_EQ(generator.get_offset(), uint64_t(32 * (shared ? batch : 1)));
+                return std::make_pair(params.output_token_ids_d, params.output_accepted_token_num_d);
+            };
+            reset();
+            auto expected = produce(false);
+            ASSERT_TRUE(expected.deferred_logits.defined());
+            auto expected_dense = expand(expected);
+            reset();
+            auto actual = produce(true);
+            ASSERT_TRUE(actual.deferred_logits.defined());
+            auto actual_dense = expand(actual);
+            EXPECT_TRUE(torch::equal(torch::isnan(actual_dense), torch::isnan(expected_dense)));
+            EXPECT_TRUE(torch::equal(torch::where(torch::isnan(actual_dense), 0, actual_dense),
+                                     torch::where(torch::isnan(expected_dense), 0, expected_dense)));
+            EXPECT_TRUE(torch::equal(actual.deferred_fallback_rows, expected.deferred_fallback_rows));
+            if (variant == 0 || variant == 1) {
+                EXPECT_TRUE(torch::equal(actual.deferred_dense_fallback, original));
+            }
+            if (variant == 3 || variant == 7) {
+                EXPECT_TRUE(torch::equal(actual.deferred_dense_fallback, scaled));
+            }
+            if (variant == 4 || variant == 5 || variant == 8 || variant == 9) {
+                EXPECT_EQ(actual.deferred_fallback_rows[0].item<int32_t>(), 1);
+            }
+            // Non-finite rows validate filtering/fallback equivalence, not a categorical distribution.
+            if (variant == 6)
+                continue;
+            auto expected_output = reject(expected);
+            auto actual_output = reject(actual);
+            EXPECT_TRUE(torch::equal(actual_output.first, expected_output.first));
+            EXPECT_TRUE(torch::equal(actual_output.second, expected_output.second));
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, testCompactTemperatureFusionDeclinesGraphCapture) {
+    const auto* properties = at::cuda::getCurrentDeviceProperties();
+    if (properties->major != 10 || (properties->minor != 0 && properties->minor != 3)) {
+        GTEST_SKIP() << "DeepSelect requires SM100 or SM103";
+    }
+    auto                       stream = at::cuda::getStreamFromPool();
+    c10::cuda::CUDAStreamGuard guard(stream);
+    auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto input = torch::arange(129280, options).reshape({1, 129280});
+    auto original = input.clone();
+    auto dummy = torch::zeros({1}, options);
+    dummy.add_(1);
+    dummy.zero_();
+    ASSERT_EQ(cudaStreamSynchronize(stream.stream()), cudaSuccess);
+    at::cuda::CUDAGraph graph;
+    graph.capture_begin();
+    auto captured = torch_ext::deferred_compact_topk_topp(input, 1024, 0.9f, 0.7f);
+    dummy.add_(1);
+    graph.capture_end();
+    EXPECT_FALSE(std::get<0>(captured).defined());
+    EXPECT_FALSE(std::get<1>(captured).defined());
+    EXPECT_FALSE(std::get<2>(captured).defined());
+    graph.replay();
+    ASSERT_EQ(cudaStreamSynchronize(stream.stream()), cudaSuccess);
+    EXPECT_TRUE(torch::equal(input, original));
+    EXPECT_EQ(dummy.item<float>(), 1.0f);
 }
 
 TEST_F(CudaSamplerTest, testCompactPreparedRejectionRng) {

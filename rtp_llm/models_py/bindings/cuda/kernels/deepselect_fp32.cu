@@ -1,5 +1,6 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
 #include <cstdint>
+#include <cmath>
 #include <limits>
 
 #if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
@@ -113,6 +114,21 @@ __global__ void deferredTopKTopPThreshold(const float* logits,
     }
 }
 
+// Match the standalone temperature kernel's round-to-nearest and FTZ flags,
+// independently of DeepSelect's fast-math/ftz=false compilation settings.
+__device__ __forceinline__ float compactTemperatureScale(float temperature) {
+    float denominator, scale;
+    asm("add.rn.ftz.f32 %0, %1, %2;" : "=f"(denominator) : "f"(temperature), "f"(1e-6f));
+    asm("div.rn.ftz.f32 %0, %1, %2;" : "=f"(scale) : "f"(1.0f), "f"(denominator));
+    return scale;
+}
+
+__device__ __forceinline__ float compactApplyTemperature(float value, float scale) {
+    float result;
+    asm("mul.rn.ftz.f32 %0, %1, %2;" : "=f"(result) : "f"(value), "f"(scale));
+    return result;
+}
+
 struct CompactMinimum {
     float value;
     int slot;
@@ -130,7 +146,8 @@ struct CompactMinimumOp {
 template<int items>
 __device__ void compactTopKTopPBody(float* dense, const float* selected, const int32_t* selected_ids,
                                   float* compact, int32_t* ids, int32_t* fallback,
-                                  int vocab, float top_p, int removed_slot, float removed_value) {
+                                  int vocab, float top_p, int removed_slot, float removed_value,
+                                  float temperature_scale, bool scale_temperature) {
     constexpr int threads = 256;
     using Sort = cub::BlockRadixSort<float, threads, items, int32_t>;
     using Reduce = cub::BlockReduce<float, threads>;
@@ -149,7 +166,8 @@ __device__ void compactTopKTopPBody(float* dense, const float* selected, const i
     for (int i = 0; i < items; ++i) {
         const int slot = threadIdx.x * items + i;
         const int source = items == 4 && slot == removed_slot ? 1024 : slot;
-        values[i] = source < 1025 ? selected[row * 1025 + source] : -INFINITY;
+        const float raw = source < 1025 ? selected[row * 1025 + source] : -INFINITY;
+        values[i] = source < 1025 && scale_temperature ? compactApplyTemperature(raw, temperature_scale) : raw;
         keys[i] = source < 1025 ? selected_ids[row * 1025 + source] : -1;
     }
     Sort(temporary.sort).SortDescending(values, keys);
@@ -171,7 +189,8 @@ __device__ void compactTopKTopPBody(float* dense, const float* selected, const i
     float missing_ties = 0;
     if (overflow) {
         for (int token = threadIdx.x; token < vocab; token += threads) {
-            const float value = dense[static_cast<int64_t>(row) * vocab + token];
+            const float raw = dense[static_cast<int64_t>(row) * vocab + token];
+            const float value = scale_temperature ? compactApplyTemperature(raw, temperature_scale) : raw;
             missing_ties += isnan(value) ? nanf("") : static_cast<float>(value == boundary);
         }
     }
@@ -217,28 +236,34 @@ __device__ void compactTopKTopPBody(float* dense, const float* selected, const i
         const float threshold = isfinite(maximum) ? cutoff : nanf("");
         for (int token = threadIdx.x; token < vocab; token += threads) {
             const auto offset = static_cast<int64_t>(row) * vocab + token;
-            const float value = dense[offset];
+            const float raw = dense[offset];
+            const float value = scale_temperature ? compactApplyTemperature(raw, temperature_scale) : raw;
             dense[offset] = isnan(threshold) ? threshold : (value >= threshold ? value : -INFINITY);
         }
     }
 }
 
 __global__ void compactTopKTopP(float* dense, const float* selected, const int32_t* selected_ids,
-                               float* compact, int32_t* ids, int32_t* fallback, int vocab, float top_p) {
+                               float* compact, int32_t* ids, int32_t* fallback, int vocab, float top_p,
+                               float temperature) {
     using Reduce = cub::BlockReduce<CompactMinimum, 256>;
     __shared__ Reduce::TempStorage temporary;
     __shared__ CompactMinimum minimum;
     const int row = blockIdx.x;
+    const bool scale_temperature = temperature != 1.0f;
+    const float temperature_scale = scale_temperature ? compactTemperatureScale(temperature) : 1.0f;
     CompactMinimum local{INFINITY, -1, false};
     const CompactMinimumOp op;
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
         const int slot = threadIdx.x * 4 + i;
-        const float value = selected[row * 1025 + slot];
+        const float raw = selected[row * 1025 + slot];
+        const float value = scale_temperature ? compactApplyTemperature(raw, temperature_scale) : raw;
         local = op(local, CompactMinimum{value, slot, !isfinite(value)});
     }
     if (threadIdx.x == 0) {
-        const float value = selected[row * 1025 + 1024];
+        const float raw = selected[row * 1025 + 1024];
+        const float value = scale_temperature ? compactApplyTemperature(raw, temperature_scale) : raw;
         local = op(local, CompactMinimum{value, 1024, !isfinite(value)});
     }
     const auto result = Reduce(temporary).Reduce(local, op);
@@ -248,10 +273,10 @@ __global__ void compactTopKTopP(float* dense, const float* selected, const int32
         // Preserve the existing radix ordering and fallback behavior for NaN,
         // infinities and sparse rows rather than imposing a numeric min order.
         compactTopKTopPBody<8>(dense, selected, selected_ids, compact, ids, fallback,
-                              vocab, top_p, -1, 0.0f);
+                              vocab, top_p, -1, 0.0f, temperature_scale, scale_temperature);
     } else {
         compactTopKTopPBody<4>(dense, selected, selected_ids, compact, ids, fallback,
-                              vocab, top_p, minimum.slot, minimum.value);
+                              vocab, top_p, minimum.slot, minimum.value, temperature_scale, scale_temperature);
     }
 }
 
@@ -269,26 +294,34 @@ __global__ void deferredMaskLogits(float* logits, const float* thresholds, int v
 #endif
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-deferred_compact_topk_topp(const torch::Tensor& logits, int64_t k, float top_p) {
+deferred_compact_topk_topp(const torch::Tensor& logits, int64_t k, float top_p, float temperature) {
 #if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
     if (k != 1024 || !logits.is_cuda() || logits.scalar_type() != torch::kFloat32 || logits.dim() != 2
         || !logits.is_contiguous() || logits.size(1) <= k || logits.size(1) >= MAX_VOCAB_SIZE
         || logits.size(0) > 65535 || logits.stride(0) % 256 != 0
-        || reinterpret_cast<uintptr_t>(logits.data_ptr()) % 16 != 0 || !(top_p > 0 && top_p <= 1))
+        || reinterpret_cast<uintptr_t>(logits.data_ptr()) % 16 != 0 || !(top_p > 0 && top_p <= 1)
+        || !std::isfinite(temperature) || temperature <= 0.0f)
         return {};
     const auto* properties = at::cuda::getDeviceProperties(logits.get_device());
     if (properties->major != 10 || (properties->minor != 0 && properties->minor != 3)) return {};
     const c10::cuda::CUDAGuard guard(logits.device());
+    const auto stream = at::cuda::getCurrentCUDAStream(logits.get_device());
+    if (temperature != 1.0f) {
+        // A captured scalar would freeze temperature instead of replaying its tensor upload.
+        cudaStreamCaptureStatus capture_status;
+        C10_CUDA_CHECK(cudaStreamIsCapturing(stream.stream(), &capture_status));
+        if (capture_status != cudaStreamCaptureStatusNone)
+            return {};
+    }
     auto selected = deepselect_fp32_topk_impl(logits, 1025, nullptr, false);
     auto compact = torch::empty({logits.size(0), 1024}, logits.options());
     auto ids = torch::empty({logits.size(0), 1024}, logits.options().dtype(torch::kInt32));
     auto fallback = torch::empty({logits.size(0)}, logits.options().dtype(torch::kInt32));
-    const auto stream = at::cuda::getCurrentCUDAStream(logits.get_device());
     if (logits.size(0)) {
         compactTopKTopP<<<logits.size(0), 256, 0, stream>>>(
             logits.data_ptr<float>(), std::get<0>(selected).data_ptr<float>(),
             std::get<1>(selected).data_ptr<int32_t>(), compact.data_ptr<float>(), ids.data_ptr<int32_t>(),
-            fallback.data_ptr<int32_t>(), logits.size(1), top_p);
+            fallback.data_ptr<int32_t>(), logits.size(1), top_p, temperature);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
     return {compact, ids, fallback};
