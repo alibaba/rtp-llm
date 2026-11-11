@@ -394,10 +394,10 @@ public:
     // stream from the executor while the state machine keeps advancing it
     // wedges the engine loop (observed on native-n3).
     void setAwiBarrierHold(bool held) noexcept {
-        awi_barrier_hold_.store(held, std::memory_order_release);
+        awi_barrier_hold_->store(held, std::memory_order_release);
     }
     bool awiBarrierHeld() const noexcept {
-        return awi_barrier_hold_.load(std::memory_order_acquire);
+        return awi_barrier_hold_->load(std::memory_order_acquire);
     }
 
     // A response consumer may observe GenerateDone before the scheduler has
@@ -995,7 +995,10 @@ protected:
     int64_t                               load_done_to_running_us_     = 0;
     bool                                  running_started_             = false;
     int64_t                               running_started_time_us_     = 0;
-    std::atomic<bool>                     awi_barrier_hold_{false};
+    // shared_ptr-wrapped like is_context_stream_/logprobs_content_started_:
+    // a bare std::atomic member deletes the copy constructor that
+    // NormalGenerateStream's declaration requires.
+    std::shared_ptr<std::atomic<bool>>    awi_barrier_hold_ = std::make_shared<std::atomic<bool>>(false);
     bool                                  generation_done_             = false;
     int64_t                               generation_done_time_us_     = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
