@@ -87,6 +87,11 @@ public final class FlexlbConfigValidator {
         config.getDispatcher().validateFor(config.getScheduler());
         validateRequestLifecycle(config.getRequestLifecycle());
         validateRouting(config.getRouter());
+        require(
+                !config.getRouter().getRoles().getPrefill().isChunkBatchingEnabled()
+                        || !config.isBatchDispatch(),
+                "router.roles.prefill.chunkBatchingEnabled",
+                "requires NON_BATCH dispatch");
         validateWorkerRegistry(config.getWorkerRegistry());
         validateObservability(config.getObservability());
         validateServiceDiscovery(config.getServiceDiscovery());

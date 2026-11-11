@@ -65,6 +65,33 @@ ENCODER→`NO_ENCODER_WORKER`(8408)，均可重试。
 master forwarding 透传 protobuf 响应。物理地址字段与既有 service path 不变，旧客户端可忽略
 新增字段。此字段不改变 `EnqueueBatch` 的派发协议。
 
+### Prefill Chunk 装箱
+
+`router.roles.prefill.chunkBatchingEnabled` 默认 `false`。启用后，支持 Chunk 的
+Prefill engine 通过 WorkerStatus 上报原始输入 token 额度、请求槽位、分配截止时间，
+以及独立的 step token 预算。输入长度小于 step 预算的请求进入 Chunk 选址；等于或
+大于预算的请求走 NORMAL。PDFusion、Decode 和 Encoder 不携带 Prefill 预约。
+
+Chunk 的身份由逻辑 engine、P 启动 `engine_epoch` 和 `chunk_id` 共同确定。
+Master 在可容纳请求且未到分配截止时间的候选中选择剩余 token 额度最小者，
+同等条件优先截止更早者。在选中 worker 的 generation 锁内再次校验并原子扣减
+tokens 与一个槽位，防止并发超发和旧端点复用。重复上报同一 Chunk 保留已消费
+余额，失效或已清除的预约不能通过重报重新开放。
+
+成功响应在 `FlexlbServerStatusPB.prefill_chunk=11` 返回预约身份和截止时间，
+物理地址及 `engine_index` 仍沿用已有路由字段。Frontend 拿到预约后直接向 P
+发送请求，不调用 `EnqueueBatch`。无可用 Chunk 使用显式 fallback 状态 8600，
+由 SDK 沿用原请求 deadline 走 NORMAL；这不改变其他业务拒绝的终止语义。
+
+Master 的余额不持久化。主备切换后重新接收 P 的上报，可能对同一 Chunk 再次
+授予额度；P 必须用有界积压承接，并由 scheduler 的实际 step 硬预算限制计算。
+Master 只使用上报的 `dispatch_deadline_ms`，不推算 P 的冻结时间，也不再次
+扣除安全余量。取消或发送结果不明时不能直接退回已经发布的预约额度。
+
+请求截止时间必须晚于 Chunk 的分配截止时间才能预约。由于冻结时间不在协议中，
+该判断不保证极短 TTFT 请求一定能等到 P 冻结；如果 P 侧原始 deadline 先到，
+请求会取消而不会延长预算。上线时需实测等待窗口与业务 TTFT 的配合。
+
 ## 回滚机制
 
 `DefaultRouter.rollBackRoutingFailure()`：对 `RoutingResult` 中已成功的每个 `ServerStatus`，

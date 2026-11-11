@@ -21,6 +21,8 @@ import java.util.concurrent.locks.ReentrantLock;
 public class WorkerStatus {
     private static final AtomicLong NEXT_GENERATION_ID = new AtomicLong();
 
+    private final PrefillChunkCapacity prefillChunkCapacity = new PrefillChunkCapacity();
+
     /** Serializes lifecycle transitions for this generation. */
     public final transient ReentrantLock lock = new ReentrantLock();
 
@@ -252,6 +254,13 @@ public class WorkerStatus {
             throw new IllegalStateException(
                     "prepared status is stale or has already been published");
         }
+        prefillChunkCapacity.update(
+                prepared.observation.prefillChunk, prepared.observation.prefillStepTokenBudget);
+    }
+
+    public PrefillChunkCapacity prefillChunkCapacity() {
+        requireGenerationLock();
+        return prefillChunkCapacity;
     }
 
     /** Record one validated status response independently from Engine state. */
@@ -852,6 +861,8 @@ public class WorkerStatus {
         private final Long statusVersion;
         private final Long latestFinishedVersion;
         private final Map<String, TaskObservation> finishedTasks;
+        private final PrefillChunk prefillChunk;
+        private final long prefillStepTokenBudget;
 
         private StatusObservation(
                 WorkerStatus owner,
@@ -860,12 +871,46 @@ public class WorkerStatus {
                 Long statusVersion,
                 Long latestFinishedVersion,
                 Map<String, TaskObservation> finishedTasks) {
+            this(
+                    owner,
+                    engine,
+                    reportedAlive,
+                    statusVersion,
+                    latestFinishedVersion,
+                    finishedTasks,
+                    null,
+                    0L);
+        }
+
+        private StatusObservation(
+                WorkerStatus owner,
+                EngineObservation engine,
+                boolean reportedAlive,
+                Long statusVersion,
+                Long latestFinishedVersion,
+                Map<String, TaskObservation> finishedTasks,
+                PrefillChunk prefillChunk,
+                long prefillStepTokenBudget) {
             this.owner = owner;
             this.engine = engine;
             this.reportedAlive = reportedAlive;
             this.statusVersion = statusVersion;
             this.latestFinishedVersion = latestFinishedVersion;
             this.finishedTasks = finishedTasks;
+            this.prefillChunk = prefillChunk;
+            this.prefillStepTokenBudget = prefillStepTokenBudget;
+        }
+
+        public StatusObservation withPrefillChunk(PrefillChunk chunk, long stepTokenBudget) {
+            return new StatusObservation(
+                    owner,
+                    engine,
+                    reportedAlive,
+                    statusVersion,
+                    latestFinishedVersion,
+                    finishedTasks,
+                    chunk,
+                    stepTokenBudget);
         }
 
         /** Exact service-discovery generation which issued this observation. */

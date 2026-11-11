@@ -22,6 +22,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.PrefillChunk;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.pv.RoutingDecision;
 import org.flexlb.dao.route.RoleType;
@@ -67,6 +68,14 @@ public class CostBasedPrefillStrategy {
         String requestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
         FlexlbConfig config = balanceContext.getConfig();
+
+        if (roleType == RoleType.PREFILL
+                && config.getRouter().getRoles().getPrefill().isChunkBatchingEnabled()) {
+            PlacementResult<SelectedRole, RoleType> chunk = selectChunk(balanceContext, group);
+            if (chunk != null) {
+                return chunk;
+            }
+        }
 
         EndpointDiscovery discovery = discoverAvailableEndpoints(balanceContext, roleType, group);
         if (discovery.candidates().isEmpty()) {
@@ -619,6 +628,184 @@ public class CostBasedPrefillStrategy {
         return new CacheTokenMatch(effectiveHit, routingHit);
     }
 
+    private PlacementResult<SelectedRole, RoleType> selectChunk(
+            BalanceContext context, String group) {
+        long inputTokens = context.getRequest().getSeqLen();
+        Request request = context.getRequest();
+        long requestedAt =
+                request.getRequestTimeMs() > 0
+                        ? request.getRequestTimeMs()
+                        : context.getStartTime();
+        long timeout = Math.max(0L, request.getGenerateTimeout());
+        long deadline =
+                requestedAt > Long.MAX_VALUE - timeout ? Long.MAX_VALUE : requestedAt + timeout;
+        List<PrefillEndpoint> candidates = new ArrayList<>();
+        boolean chunkSizedRequest = false;
+        for (EndpointRegistry.PrefillRoutingEntry entry :
+                workerDirectory.prefillRoutingSnapshot(RoleType.PREFILL)) {
+            PrefillEndpoint endpoint = entry.endpoint();
+            WorkerStatus worker = endpoint.getStatus();
+            if (group != null && !group.equals(worker.getGroup())) {
+                continue;
+            }
+            worker.lock.lock();
+            try {
+                if (inputTokens > 0
+                        && inputTokens < worker.prefillChunkCapacity().stepTokenBudget()) {
+                    chunkSizedRequest = true;
+                    if (worker.isActiveGeneration() && endpoint.canAcceptRequest()) {
+                        candidates.add(endpoint);
+                    }
+                }
+            } finally {
+                worker.lock.unlock();
+            }
+        }
+        if (!chunkSizedRequest) {
+            return null;
+        }
+        while (!candidates.isEmpty()) {
+            PrefillEndpoint best = null;
+            long bestRemaining = Long.MAX_VALUE;
+            long bestDeadline = Long.MAX_VALUE;
+            for (PrefillEndpoint endpoint : candidates) {
+                WorkerStatus worker = endpoint.getStatus();
+                worker.lock.lock();
+                try {
+                    var capacity = worker.prefillChunkCapacity();
+                    long remaining =
+                            capacity.remainingTokens(
+                                    inputTokens, System.currentTimeMillis(), deadline);
+                    if (remaining < bestRemaining
+                            || remaining == bestRemaining
+                                    && remaining != Long.MAX_VALUE
+                                    && capacity.definition().dispatchDeadlineMs() < bestDeadline) {
+                        best = endpoint;
+                        bestRemaining = remaining;
+                        bestDeadline = capacity.definition().dispatchDeadlineMs();
+                    }
+                } finally {
+                    worker.lock.unlock();
+                }
+            }
+            if (best == null) {
+                break;
+            }
+            candidates.remove(best);
+            WorkerStatus worker = best.getStatus();
+            WorkerEndpoint.GenerationPin pin =
+                    workerDirectory.captureEndpoint(RoleType.PREFILL, best.ipPort());
+            if (pin == null) {
+                continue;
+            }
+            if (pin.endpoint() != best) {
+                pin.close();
+                continue;
+            }
+            PrefillChunk grant;
+            worker.lock.lock();
+            try {
+                grant =
+                        worker.isActiveGeneration()
+                                ? worker.prefillChunkCapacity()
+                                        .reserve(inputTokens, System.currentTimeMillis(), deadline)
+                                : null;
+            } finally {
+                worker.lock.unlock();
+            }
+            if (grant == null) {
+                pin.close();
+                continue;
+            }
+            try {
+                PrefillTimePredictor predictor = best.getPredictor();
+                long workMs =
+                        predictor == null
+                                ? 0L
+                                : Math.max(0L, predictor.evaluator().estimateMs(inputTokens, 0L));
+                SelectedRole selected =
+                        buildSelectedRole(
+                                best,
+                                RoleType.PREFILL,
+                                context.getRequestId(),
+                                workMs,
+                                workMs,
+                                0L,
+                                best.placementVersion(),
+                                pin);
+                selected.serverStatus().setPrefillChunk(grant);
+                selected.refundChunkOnClose(
+                        () -> {
+                            worker.lock.lock();
+                            try {
+                                worker.prefillChunkCapacity().refundUnpublished(grant, inputTokens);
+                            } finally {
+                                worker.lock.unlock();
+                            }
+                        });
+                context.recordSelectionReason(RoleType.PREFILL, "PREFILL_CHUNK_BEST_FIT");
+                return PlacementResult.success(selected);
+            } catch (RuntimeException | Error failure) {
+                pin.close();
+                worker.lock.lock();
+                try {
+                    worker.prefillChunkCapacity().refundUnpublished(grant, inputTokens);
+                } finally {
+                    worker.lock.unlock();
+                }
+                throw failure;
+            }
+        }
+        // The SDK interprets 8600 as an explicit request to use NORMAL fallback.
+        return PlacementResult.rejected(Response.error(StrategyErrorType.PREFILL_CHUNK_FALLBACK));
+    }
+
+    private SelectedRole buildSelectedRole(
+            PrefillEndpoint ep,
+            RoleType roleType,
+            String requestId,
+            long projectedTtftMs,
+            long selectedPrefillMs,
+            long bestCacheHit,
+            long placementVersion,
+            WorkerEndpoint.GenerationPin selectedPin) {
+        try {
+            // Populate DebugInfo so ScheduledRequest.hitCache() can read
+            // hitCacheLen for batch metrics.
+            DebugInfo debugInfo = new DebugInfo();
+            debugInfo.setHitCacheLen(bestCacheHit);
+
+            if (selectedPin == null || selectedPin.endpoint() != ep) {
+                throw new IllegalStateException(
+                        "selected Prefill endpoint generation changed before handoff");
+            }
+            WorkerStatus workerStatus = ep.getStatus();
+            WorkerStatus.TopologySnapshot topology = workerStatus.topologySnapshot();
+            WorkerStatus.EngineObservation status = workerStatus.committedEngineObservation();
+            ServerStatus result = new ServerStatus();
+            result.setRole(roleType);
+            result.setRequestId(requestId);
+            if (projectedTtftMs >= 0L) {
+                result.setPrefillTime(projectedTtftMs);
+            }
+            result.setGroup(topology.group());
+            result.setServerIp(topology.ip());
+            result.setHttpPort(topology.port());
+            result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
+            result.setDpRank(status.dpRank());
+            result.setDebugInfo(debugInfo);
+            result.setSuccess(true);
+            result.setSelectedEngineIndex(topology.engineIndex(), topology.multiEngineNum());
+            WorkerEndpoint.GenerationPin ownedPin = selectedPin;
+            selectedPin = null;
+            return SelectedRole.prefill(ownedPin, result, selectedPrefillMs, placementVersion);
+        } finally {
+            if (selectedPin != null) {
+                selectedPin.close();
+            }
+        }
+    }
+
     private EndpointDiscovery discoverAvailableEndpoints(
             BalanceContext context, RoleType roleType, String group) {
         List<EndpointRegistry.PrefillRoutingEntry> directory =
@@ -699,52 +886,6 @@ public class CostBasedPrefillStrategy {
         engineHealthReporter.reportRoutingSelectedCacheMatchMetrics(roleType, selectedHitTokens);
         engineHealthReporter.reportRoutingCandidateMaxCacheMatchMetrics(
                 roleType, candidateMaxHitTokens);
-    }
-
-    private SelectedRole buildSelectedRole(
-            PrefillEndpoint ep,
-            RoleType roleType,
-            String requestId,
-            long projectedTtftMs,
-            long selectedPrefillMs,
-            long bestCacheHit,
-            long placementVersion,
-            WorkerEndpoint.GenerationPin selectedPin) {
-        try {
-            // Populate DebugInfo so ScheduledRequest.hitCache() can read
-            // hitCacheLen for batch metrics.
-            DebugInfo debugInfo = new DebugInfo();
-            debugInfo.setHitCacheLen(bestCacheHit);
-
-            if (selectedPin == null || selectedPin.endpoint() != ep) {
-                throw new IllegalStateException(
-                        "selected Prefill endpoint generation changed before handoff");
-            }
-            WorkerStatus workerStatus = ep.getStatus();
-            WorkerStatus.TopologySnapshot topology = workerStatus.topologySnapshot();
-            WorkerStatus.EngineObservation status = workerStatus.committedEngineObservation();
-            ServerStatus result = new ServerStatus();
-            result.setRole(roleType);
-            result.setRequestId(requestId);
-            if (projectedTtftMs >= 0L) {
-                result.setPrefillTime(projectedTtftMs);
-            }
-            result.setGroup(topology.group());
-            result.setServerIp(topology.ip());
-            result.setHttpPort(topology.port());
-            result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
-            result.setDpRank(status.dpRank());
-            result.setDebugInfo(debugInfo);
-            result.setSuccess(true);
-            result.setSelectedEngineIndex(topology.engineIndex(), topology.multiEngineNum());
-            WorkerEndpoint.GenerationPin ownedPin = selectedPin;
-            selectedPin = null;
-            return SelectedRole.prefill(ownedPin, result, selectedPrefillMs, placementVersion);
-        } finally {
-            if (selectedPin != null) {
-                selectedPin.close();
-            }
-        }
     }
 
     private void reportCacheAffinityDecision(RoleType roleType, String engineIp, String decision) {

@@ -18,6 +18,7 @@ import java.util.Objects;
  */
 public final class SelectedRole implements AutoCloseable {
     private WorkerEndpoint.GenerationPin generationPin;
+    private Runnable refundUnpublishedChunk;
 
     private final ServerStatus serverStatus;
 
@@ -113,6 +114,16 @@ public final class SelectedRole implements AutoCloseable {
         return serverStatus;
     }
 
+    public void refundChunkOnClose(Runnable refund) {
+        refundUnpublishedChunk = refund;
+    }
+
+    public Runnable takeUnpublishedChunkRefund() {
+        Runnable refund = refundUnpublishedChunk;
+        refundUnpublishedChunk = null;
+        return refund;
+    }
+
     public long prefillWorkMs() {
         if (prefillWorkMs < 0L) {
             throw new IllegalStateException("selection does not carry Prefill work");
@@ -136,7 +147,14 @@ public final class SelectedRole implements AutoCloseable {
         WorkerEndpoint.GenerationPin owned = generationPin;
         generationPin = null;
         if (owned != null) {
-            owned.close();
+            try {
+                if (refundUnpublishedChunk != null) {
+                    refundUnpublishedChunk.run();
+                }
+            } finally {
+                refundUnpublishedChunk = null;
+                owned.close();
+            }
         }
     }
 

@@ -646,6 +646,14 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 if (ss.getEngineIndex() != null) {
                     status.setEngineIndex(ss.getEngineIndex());
                 }
+                if (ss.getPrefillChunk() != null) {
+                    var chunk = ss.getPrefillChunk();
+                    status.setPrefillChunk(
+                            FlexlbScheduleProtocol.PrefillChunkReservationPB.newBuilder()
+                                    .setEngineEpoch(chunk.engineEpoch())
+                                    .setChunkId(chunk.chunkId())
+                                    .setDispatchDeadlineMs(chunk.dispatchDeadlineMs()));
+                }
                 builder.addServerStatus(status.build());
             }
         }

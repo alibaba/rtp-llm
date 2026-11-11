@@ -74,6 +74,22 @@ UniConfig 和 Nacos 的内容直接使用同一种配置 JSON，不增加包装�
 `ENABLE_STDOUT_LOG`、`ENABLE_FALLBACK` 不再覆盖 JSON。行为配置只认
 所选来源的 `FLEXLB_CONFIG` 文档，避免嵌套字段到环境变量名的隐式转换。
 
+### Prefill Chunk 开关
+
+`router.roles.prefill.chunkBatchingEnabled` 默认 `false`，属于 FlexLB 行为配置，
+仅允许与 `NON_BATCH` dispatcher 组合；使用 Master 批量派发时开启会被配置校验拒绝。
+启用前需要 P 提供 WorkerStatus 的 `prefill_chunk=29`、
+`prefill_step_token_budget=30`，并配套支持预约透传的 SDK、Frontend 和 DashLLM。
+P 侧通过 `VLLM_PREFILL_CHUNK_ENABLED=1` 开启容量授予；攒批等待、安全余量、
+容量放大上限和积压限制由 P 管理，不在 Master 重复配置或扣减。
+
+Chunk 状态变化通过既有 WorkerStatus 同步链路进入路由容量状态。排查时同时检查
+上报可见延迟与 `dispatch_deadline_ms`：字段存在不代表 Master 在截止前看到了
+可用额度。既有 `workerRegistry.health.statusPollIntervalMs` 默认 20ms；P 默认
+50ms 等待减去 10ms 安全余量后只有约 40ms 分配窗口，还需要实测快照发布、RPC 和
+缓存处理的总延迟。预约 ID 用于事件日志关联，不能作为监控指标标签。配置关闭时使用既有
+普通选址；Chunk 预约、实际计算 step 和旧 lifecycle batch ID 是不同的身份。
+
 ### UniConfig 连接
 
 Spectrum 部署的扩展配置中启用 Turbo UniConfig：

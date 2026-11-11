@@ -103,6 +103,12 @@ message FlexlbScheduleRequestPB {
     string request_id_str = 21;
 }
 
+message PrefillChunkReservationPB {
+    string engine_epoch = 1;
+    uint64 chunk_id = 2;
+    int64 dispatch_deadline_ms = 3;
+}
+
 message FlexlbServerStatusPB {
     string role = 1;
     string server_ip = 2;
@@ -120,6 +126,7 @@ message FlexlbServerStatusPB {
     // Requests on this Decode engine that must finish cancellation and resource
     // release before the incoming request executes. Empty means no preemption.
     repeated string preempt_request_ids = 10;
+    PrefillChunkReservationPB prefill_chunk = 11;
 }
 
 // Why an incoming request was rejected by the admission decision.  This is

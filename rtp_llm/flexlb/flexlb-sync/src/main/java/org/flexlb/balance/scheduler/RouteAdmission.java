@@ -37,13 +37,19 @@ public final class RouteAdmission implements AutoCloseable {
     private DecodeBinding decodeBinding;
     private WorkerEndpoint blockedEndpoint;
     private Ownership ownership = Ownership.PROVISIONAL;
+    private Runnable refundUnpublishedChunk;
 
     private RouteAdmission(
-            String requestId, Response response, Selection selection, DecodeBinding decodeRequest) {
+            String requestId,
+            Response response,
+            Selection selection,
+            DecodeBinding decodeRequest,
+            Runnable refundUnpublishedChunk) {
         this.requestId = requestId;
         this.response = Objects.requireNonNull(response, "response");
         this.selection = Objects.requireNonNull(selection, "selection");
         this.decodeBinding = Objects.requireNonNull(decodeRequest, "decodeRequest");
+        this.refundUnpublishedChunk = refundUnpublishedChunk;
         if (!Objects.equals(decodeRequest.requestId(), requestId)) {
             throw new IllegalArgumentException("Decode admission belongs to another request");
         }
@@ -169,7 +175,14 @@ public final class RouteAdmission implements AutoCloseable {
                                 DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             }
         } finally {
-            closePins();
+            try {
+                if (refundUnpublishedChunk != null) {
+                    refundUnpublishedChunk.run();
+                    refundUnpublishedChunk = null;
+                }
+            } finally {
+                closePins();
+            }
         }
     }
 
@@ -189,6 +202,7 @@ public final class RouteAdmission implements AutoCloseable {
         WorkerEndpoint.GenerationPin decodePin = null;
         ServerStatus decodeStatus = null;
         long decodePlacementVersion = 0L;
+        Runnable refundChunk = null;
 
         try {
             for (SelectedRole selected : selectedRoles) {
@@ -197,6 +211,9 @@ public final class RouteAdmission implements AutoCloseable {
                     throw new IllegalStateException("selected role belongs to another request");
                 }
                 RoleType role = status.getRole();
+                if (role != null && role.supportsPrefill()) {
+                    refundChunk = selected.takeUnpublishedChunkRefund();
+                }
                 long placementVersion = selected.placementVersion();
                 WorkerEndpoint.GenerationPin pin = selected.takeGenerationPin();
                 WorkerEndpoint endpoint = pin.endpoint();
@@ -243,8 +260,12 @@ public final class RouteAdmission implements AutoCloseable {
                             prefillWorkMs,
                             decodePin,
                             decodePlacementVersion),
-                    decodeRequest.bind(decodeStatus, decodeEndpoint, null));
+                    decodeRequest.bind(decodeStatus, decodeEndpoint, null),
+                    refundChunk);
         } catch (RuntimeException | Error failure) {
+            if (refundChunk != null) {
+                refundChunk.run();
+            }
             WorkerEndpoint.GenerationPin ownedPrefillPin = prefillPin;
             WorkerEndpoint.GenerationPin ownedDecodePin = decodePin;
             try (ownedPrefillPin;
@@ -405,6 +426,7 @@ public final class RouteAdmission implements AutoCloseable {
     private void markCommitted() {
         requireProvisional();
         ownership = Ownership.COMMITTED;
+        refundUnpublishedChunk = null;
         closePins();
     }
 

@@ -122,12 +122,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return runtime.offer(exactItem);
     }
 
-    /** Publish a role/group-scoped edge after real queue or status progress. */
-    public void signalPlacementCapacityChanged() {
-        WorkerStatus.TopologySnapshot topology = getStatus().topologySnapshot();
-        placementAvailability.capacityChanged(getStatus().getRole(), topology.group(), ipPort());
-    }
-
     /** Read the last scheduling decision without traversing or locking the queue. */
     public Map<String, Object> queueWaitDiagnostics() {
         return runtime.waitDiagnostics();
@@ -258,6 +252,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public Runnable applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
         WorkerStatus.StatusObservation observation = prepared.observation();
+        var previousChunk = ws.prefillChunkCapacity().definition();
         PrefillState.StatusReconciliation reconciliation =
                 prefillState.reconcileWorkerStatus(
                         observation,
@@ -273,7 +268,19 @@ public class PrefillEndpoint extends WorkerEndpoint {
         reportBatchCompletionsNoFail(reconciliation.batchCompletions());
         rethrowPublicationFailure(reconciliation.publicationFailure());
         List<PrefillState.WorkerStatusFact> facts = reconciliation.schedulerFacts();
-        return () -> endpointEvents.onPrefillStatus(this, observation.role(), facts);
+        boolean chunkChanged = previousChunk != ws.prefillChunkCapacity().definition();
+        return () -> {
+            endpointEvents.onPrefillStatus(this, observation.role(), facts);
+            if (chunkChanged) {
+                signalPlacementCapacityChanged();
+            }
+        };
+    }
+
+    /** Publish a role/group-scoped edge after real queue or status progress. */
+    public void signalPlacementCapacityChanged() {
+        WorkerStatus.TopologySnapshot topology = getStatus().topologySnapshot();
+        placementAvailability.capacityChanged(getStatus().getRole(), topology.group(), ipPort());
     }
 
     @Override

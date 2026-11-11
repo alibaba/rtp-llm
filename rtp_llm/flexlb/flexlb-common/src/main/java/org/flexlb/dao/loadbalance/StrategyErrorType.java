@@ -56,7 +56,8 @@ public enum StrategyErrorType {
     // Auto-TPM admission is blocked by occupancy whose priority provenance is
     // unavailable, so the Master cannot truthfully attribute the rejection to
     // higher/same priority or to pure resource exhaustion.
-    ADMISSION_UNAVAILABLE(8432, false);
+    ADMISSION_UNAVAILABLE(8432, false),
+    PREFILL_CHUNK_FALLBACK(8600, false);
 
     private final int errorCode;
     private final String errorMsg;

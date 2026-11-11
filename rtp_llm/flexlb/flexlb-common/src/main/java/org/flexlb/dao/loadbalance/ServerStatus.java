@@ -10,6 +10,7 @@ import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.ToString;
+import org.flexlb.dao.master.PrefillChunk;
 import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.route.RoleType;
 
@@ -22,6 +23,10 @@ import java.util.List;
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class ServerStatus {
+    @JsonProperty("prefill_chunk")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private PrefillChunk prefillChunk;
+
     /** Exact ViT endpoint generation retained across routing and status copies. */
     @JsonProperty("worker_generation")
     @JsonInclude(JsonInclude.Include.NON_DEFAULT)
@@ -113,6 +118,7 @@ public class ServerStatus {
         copy.httpPort = source.httpPort;
         copy.grpcPort = source.grpcPort;
         copy.preemptRequestIds = List.copyOf(source.preemptRequestIds);
+        copy.prefillChunk = source.prefillChunk;
         copy.dpRank = source.dpRank;
         copy.engineIndex = source.engineIndex;
         copy.routingEngineIndex = source.routingEngineIndex;

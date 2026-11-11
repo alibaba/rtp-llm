@@ -1,6 +1,7 @@
 package org.flexlb.service.grpc;
 
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.PrefillChunk;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatus.EngineObservation;
 import org.flexlb.dao.master.WorkerStatus.StatusObservation;
@@ -54,11 +55,21 @@ public class EngineStatusConverter {
                         workerStatusPB.getWaitingQueryLen(),
                         convertStepMetrics(workerStatusPB));
         return owner.bindStatusObservation(
-                engine,
-                workerStatusPB.getAlive(),
-                workerStatusPB.getStatusVersion(),
-                workerStatusPB.getLatestFinishedVersion(),
-                finishedTasks);
+                        engine,
+                        workerStatusPB.getAlive(),
+                        workerStatusPB.getStatusVersion(),
+                        workerStatusPB.getLatestFinishedVersion(),
+                        finishedTasks)
+                .withPrefillChunk(
+                        workerStatusPB.hasPrefillChunk()
+                                ? new PrefillChunk(
+                                        workerStatusPB.getPrefillChunk().getEngineEpoch(),
+                                        workerStatusPB.getPrefillChunk().getChunkId(),
+                                        workerStatusPB.getPrefillChunk().getInputTokenCapacity(),
+                                        workerStatusPB.getPrefillChunk().getRequestCapacity(),
+                                        workerStatusPB.getPrefillChunk().getDispatchDeadlineMs())
+                                : null,
+                        workerStatusPB.getPrefillStepTokenBudget());
     }
 
     /**
