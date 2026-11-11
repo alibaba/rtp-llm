@@ -14,11 +14,15 @@ import time
 import unittest
 from types import SimpleNamespace
 
+from rtp_llm.config.generate_config import RoleType
+from rtp_llm.ops import PDSepConfig
 from rtp_llm.pipeline.pipeline import Pipeline
 
 
 def _pd_config():
-    return SimpleNamespace(role_type=SimpleNamespace(value=1))
+    config = PDSepConfig()
+    config.role_type = RoleType.FRONTEND
+    return config
 
 
 class _CountingTokenizer:
