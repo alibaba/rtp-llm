@@ -2775,9 +2775,9 @@ class AttentionV41FP8(AttentionFP8):
             INDEXER_KV, read_positions.reshape(-1), read_req.reshape(-1)
         ).view(B, capacity)
         slots = torch.where(ids < (ends // self.compress_ratio)[:, None], slots, -1)
-        keys = dequantize_indexer_k_fp4(index_pool, slots.reshape(-1)).view(
-            B, capacity, self.index_head_dim
-        )
+        keys = dequantize_indexer_k_fp4(
+            index_pool, slots.reshape(-1), out_dtype=torch.bfloat16
+        ).view(B, capacity, self.index_head_dim)
         self._shared_attention["global"] = {self.layer_id: keys}
 
     def _prepare_indexer_query_decode(
