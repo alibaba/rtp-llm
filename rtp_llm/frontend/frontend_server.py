@@ -836,14 +836,21 @@ class FrontendServer(object):
                 request_id = generate_request_id()
             pipeline = self._frontend_worker.pipeline
             final = None
-            async for response in pipeline.generate_stream(
+            stream = pipeline.generate_stream(
                 request_id,
                 token_ids,
                 [],
                 generate_config,
                 headers={"x-awi-request-id": awi_request_id or ""},
-            ):
-                final = response
+            )
+            try:
+                async for response in stream:
+                    final = response
+            finally:
+                # Client disconnects must tear the backend stream down; the
+                # handler task's cancellation alone left the engine decoding
+                # (observed: 8 orphaned streams after a probe timeout).
+                await stream.aclose()
             if final is None:
                 return ORJSONResponse(
                     {"error": "engine returned no response"}, status_code=500
