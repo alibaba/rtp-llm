@@ -22,6 +22,11 @@ from rtp_llm.models_py.modules.dsv41.hc.base import HCUnitBase
 from rtp_llm.models_py.modules.dsv41.hc.fallback_impl import _hc_split_sinkhorn
 from rtp_llm.models_py.modules.dsv41.hc.tilelang_impl import TileLangHCUnit
 
+# Row-slice the fp32-upcast delayed-HC post when >0: bounds its [rows, hc,
+# dim] fp32 temporaries on tight-HBM ranks (row-independent, bitwise
+# identical). Default 0 keeps the historical single-expression path.
+_HC_POST_ROW_CHUNK = int(os.environ.get("DSV41_HC_POST_ROW_CHUNK", "0"))
+
 
 @lru_cache(maxsize=1)
 def _tile_ops():
@@ -178,6 +183,27 @@ class DelayedHCUnit(HCUnitBase):
             and _tilelang_mhc_post_supported(residual.device)
         ):
             return TileLangHCUnit._post_impl(self, x, residual, post, comb)
+        if _HC_POST_ROW_CHUNK > 0 and x.shape[0] > _HC_POST_ROW_CHUNK:
+            # The fp32-upcast post materializes several [rows, hc, dim] fp32
+            # temporaries (42MB each at 512 rows; load52probe rank0 died on
+            # one of them with 39.88MiB free). Rows are independent (per-row
+            # scale plus a per-row [hc, hc] matmul), so row slicing is
+            # bitwise identical while bounding the transient for ranks whose
+            # post-weight headroom is tens of MiB. Default 0 keeps the
+            # single-expression path.
+            outs = []
+            for r0 in range(0, x.shape[0], _HC_POST_ROW_CHUNK):
+                r1 = min(r0 + _HC_POST_ROW_CHUNK, x.shape[0])
+                outs.append(
+                    (
+                        post[r0:r1].float() * x[r0:r1].float().unsqueeze(-2)
+                        + torch.matmul(
+                            comb[r0:r1].float().transpose(-1, -2),
+                            residual[r0:r1].float(),
+                        )
+                    ).to(residual.dtype)
+                )
+            return torch.cat(outs, 0)
         return (
             post.float() * x.float().unsqueeze(-2)
             + torch.matmul(comb.float().transpose(-1, -2), residual.float())
