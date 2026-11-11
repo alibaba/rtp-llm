@@ -82,6 +82,17 @@ from rtp_llm.models_py.utils.memory import dispose_tensor
 # Bound one source AllGather receive independently of total Prefill rows.
 _CP_SOURCE_RECEIVE_BYTES = 320 * 1024**2
 
+# The prefill indexer fallback materializes an fp32 score rectangle that must
+# stay bounded on both axes for long-context, tight-HBM devices: q rows per
+# pass (historically hardcoded 64) and — since the rectangle width is the
+# compressed key span — key columns. The key-chunk loop computes identical
+# per-column values (same fp32 einsum, relu, head-weight fold); only launch
+# counts change. Defaults preserve the historical single-einsum behavior.
+_PREFILL_INDEXER_Q_ROWS = int(os.environ.get("DSV41_PREFILL_INDEXER_Q_ROWS", "64"))
+_PREFILL_INDEXER_KEY_CHUNK = int(
+    os.environ.get("DSV41_PREFILL_INDEXER_KEY_CHUNK", "0")
+)
+
 
 def _prefill_x_cohort_plan(cp_ctx, projected_row_bytes):
     """Group zigzag rows by AG receive budget, independent of compressor tiles."""
@@ -1976,7 +1987,7 @@ class AttentionV41FP8(AttentionFP8):
                 elif fused_indexer:
                     chunk_rows = prefill_indexer.logits_chunk_rows(key_count)
                 else:
-                    chunk_rows = 64
+                    chunk_rows = _PREFILL_INDEXER_Q_ROWS
                 request_bounds = None
                 if contiguous and fused_indexer:
                     cache = shared.setdefault("prefill_score_bounds", {})
@@ -2065,6 +2076,32 @@ class AttentionV41FP8(AttentionFP8):
                                 return_bf16=return_bf16,
                                 **({"bounds": bounds} if bounds is not None else {}),
                             )
+                    elif (
+                        _PREFILL_INDEXER_KEY_CHUNK > 0
+                        and key_count > _PREFILL_INDEXER_KEY_CHUNK
+                    ):
+                        # Key-chunked scoring: the full-width einsum output
+                        # [q_rows, heads, key_count] fp32 (4.3GB at a 1M span)
+                        # and whole-tensor keys.float() (268MB) do not fit on
+                        # tight-HBM ranks. Fold heads per key chunk so the
+                        # transient is [q_rows, heads, key_chunk] and only the
+                        # final head-folded [q_rows, key_count] row survives.
+                        q_rows = q[chunk]
+                        logits = torch.empty(
+                            (q_rows.shape[0], key_count),
+                            dtype=torch.float32,
+                            device=q_rows.device,
+                        )
+                        w_slice = weights[chunk, :, None]
+                        for k0 in range(0, key_count, _PREFILL_INDEXER_KEY_CHUNK):
+                            k1 = min(k0 + _PREFILL_INDEXER_KEY_CHUNK, key_count)
+                            part = torch.einsum(
+                                "thd,kd->thk", q_rows, keys[k0:k1].float()
+                            ).relu_()
+                            logits[:, k0:k1] = (part * w_slice).sum(1)
+                            del part
+                        ids = torch.arange(key_count, device=x.device)
+                        logits.masked_fill_(ids[None] >= visible[:, None], -torch.inf)
                     else:
                         logits = torch.einsum(
                             "thd,kd->thk", q[chunk], keys.float()
