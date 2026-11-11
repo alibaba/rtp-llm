@@ -95,22 +95,31 @@ def _dequantize_rows_torch(payload: torch.Tensor, scales: torch.Tensor, dtype):
 def _insert_swa_torch(kv: torch.Tensor, pool_3d: torch.Tensor, slots: torch.Tensor) -> None:
     slots = slots.reshape(-1).to(torch.int64)
     valid = slots >= 0
-    # Quantize the full fixed-shape batch; no boolean-index allocation is
-    # allowed while a CUDA graph is capturing.
-    payload, scales = _quantize_rows_torch(kv)
+    # Quantize in fixed-size row chunks.  A long-context prefill can hand this
+    # helper >128K rows; materialising float32 groups for all of them at once
+    # costs several GiB on A100.  The loop bound is a host integer derived from
+    # the (static) capture shape, and every chunk is a fixed-shape CUDA op, so
+    # this remains graph-safe for decode and prefill capture alike.
     flat = pool_3d.reshape(-1)
-    s = slots.clamp_min(0)
-    block = s // pool_3d.shape[1]
-    position = s % pool_3d.shape[1]
-    base = block * pool_3d.stride(0) + position * (HEAD_DIM + SCALE_BYTES_PER_TOKEN)
     cols = torch.arange(HEAD_DIM, device=pool_3d.device)
-    idx = base[:, None] + cols[None, :]
-    old = flat[idx]
-    flat[idx] = torch.where(valid[:, None], payload, old)
     scols = torch.arange(SCALE_BYTES_PER_TOKEN, device=pool_3d.device)
-    sidx = base[:, None] + HEAD_DIM + scols[None, :]
-    sold = flat[sidx]
-    flat[sidx] = torch.where(valid[:, None], scales, sold)
+    chunk_rows = 4096
+    rows = int(slots.numel())
+    for start in range(0, rows, chunk_rows):
+        end = min(start + chunk_rows, rows)
+        payload, scales = _quantize_rows_torch(kv[start:end])
+        chunk_slots = slots[start:end]
+        chunk_valid = valid[start:end]
+        s = chunk_slots.clamp_min(0)
+        block = s // pool_3d.shape[1]
+        position = s % pool_3d.shape[1]
+        base = block * pool_3d.stride(0) + position * (HEAD_DIM + SCALE_BYTES_PER_TOKEN)
+        idx = base[:, None] + cols[None, :]
+        old = flat[idx]
+        flat[idx] = torch.where(chunk_valid[:, None], payload, old)
+        sidx = base[:, None] + HEAD_DIM + scols[None, :]
+        sold = flat[sidx]
+        flat[sidx] = torch.where(chunk_valid[:, None], scales, sold)
 
 
 def _dequantize_swa_torch(pool_3d, slots, out_dtype):
