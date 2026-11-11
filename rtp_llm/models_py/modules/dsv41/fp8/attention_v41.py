@@ -417,6 +417,25 @@ def fp4_roundtrip(x):
     return values.view(shape)
 
 
+class DenseIndexerGatherPlan:
+    """Lazy dense indexer-K gather for the non-paged decode fallback.
+
+    Holds the packed FP4 pool plus per-position slot ids instead of the
+    materialized [B, capacity, 128] keys rectangle. Consumers dequantize
+    column-slice by column-slice while scoring, so the capture-static
+    footprint drops from 128-256MiB (measured OOM inside graph capture at
+    21.88MiB physical free on a tight-HBM rank) to the ~8MiB slot table
+    plus bounded slice transients. The dequant kernel zero-fills slot < 0,
+    preserving masked-column semantics exactly.
+    """
+
+    __slots__ = ("pool", "slots")
+
+    def __init__(self, pool, slots):
+        self.pool = pool
+        self.slots = slots
+
+
 def select_candidate_blocks(logits, visible, block_size, topk_blocks):
     """V4.1 candidate max-pooling, including the newest visible block."""
     nblocks = (logits.shape[1] + block_size - 1) // block_size
@@ -2879,16 +2898,15 @@ class AttentionV41FP8(AttentionFP8):
         if isinstance(prior, dict):
             for stale in [k for k in prior if k != self.layer_id]:
                 del prior[stale]
-        # bf16 halves the capture-static pool-wide rectangle (256MiB instead of
-        # 512MiB at a 1M-token pool, ratio 2) so tight-HBM ranks can hold it
-        # beside the weights inside a CUDA graph pool. Value-exact: dequantized
-        # entries are FP4 payloads (3-bit mantissa) scaled by UE8M0 powers of
-        # two, and bf16 shares fp32's 8-bit exponent range. The dense scorer
-        # below matches q to this dtype; its einsum accumulates in fp32.
-        keys = dequantize_indexer_k_fp4(
-            index_pool, slots.reshape(-1), out_dtype=torch.bfloat16
-        ).view(B, width, self.index_head_dim)
-        self._shared_attention["global"] = {self.layer_id: keys}
+        # Publish a lazy gather plan instead of the materialized keys
+        # rectangle: dense consumers dequantize column-slice by column-slice
+        # while scoring (bf16 out, value-exact for FP4 payloads x UE8M0
+        # scales). On tight-HBM ranks the capture-static rectangle (128MiB
+        # bf16 at ratio-2 width, 256MiB at ratio 1) does not fit the graph
+        # pool beside the weights; slice buffers are ~8MiB each.
+        self._shared_attention["global"] = {
+            self.layer_id: DenseIndexerGatherPlan(index_pool, slots)
+        }
 
     def _prepare_indexer_query_decode(
         self,
@@ -3019,7 +3037,13 @@ class AttentionV41FP8(AttentionFP8):
         from rtp_llm.models_py.modules.dsv41.fp8.indexer import _run_topk_v3
 
         paged = isinstance(keys, decode_indexer.DecodeIndexerKeys)
-        capacity = keys.capacity if paged else keys.shape[1]
+        dense_plan = keys if isinstance(keys, DenseIndexerGatherPlan) else None
+        if paged:
+            capacity = keys.capacity
+        elif dense_plan is not None:
+            capacity = dense_plan.slots.shape[1]
+        else:
+            capacity = keys.shape[1]
         if prepared_query is None:
             prepared_query = AttentionV41FP8._prepare_indexer_query_decode(
                 self,
@@ -3273,7 +3297,7 @@ class AttentionV41FP8(AttentionFP8):
                     -torch.inf,
                 )
         score_capacity = capacity
-        keys_dense = keys
+        keys_dense = None if dense_plan is not None else keys
         if not paged and T > 0 and not torch.cuda.is_current_stream_capturing():
             # The dense fallback scores a [slice, heads, capacity] fp32
             # rectangle whose capacity is the pool-wide compressed slot count
@@ -3301,19 +3325,23 @@ class AttentionV41FP8(AttentionFP8):
             if candidate_size > 0 and candidate_blocks > 0:
                 floor = max(floor, candidate_size * candidate_blocks)
             score_capacity = min(max(span, floor), capacity)
-            keys_dense = keys.narrow(1, 0, score_capacity)
+            if dense_plan is None:
+                keys_dense = keys.narrow(1, 0, score_capacity)
         output = torch.full(
             (T, self.index_topk), -1, dtype=torch.int32, device=x.device
         )
         columns = None if paged else torch.arange(score_capacity, device=x.device)
         if not paged:
-            if q is not None and q.dtype != keys_dense.dtype:
-                # Decode keys are bf16 (see _produce_global_decode). q is
-                # fp4_roundtrip output -- FP4-representable values -- so
-                # matching its dtype is value-exact; einsum accumulates in
-                # fp32 either way.
-                q = q.to(keys_dense.dtype)
-            if weights is not None and weights.dtype != keys_dense.dtype:
+            keys_dtype = (
+                torch.bfloat16 if dense_plan is not None else keys_dense.dtype
+            )
+            if q is not None and q.dtype != keys_dtype:
+                # Dense keys dequantize to bf16 (value-exact for FP4
+                # payloads x UE8M0 scales). q is fp4_roundtrip output --
+                # FP4-representable values -- so matching the dtype is
+                # value-exact; einsum accumulates in fp32 either way.
+                q = q.to(keys_dtype)
+            if weights is not None and weights.dtype != keys_dtype:
                 # Keep the weighted score rectangle in the keys dtype: an
                 # fp32 head-weight promotion of bf16 logits would materialize
                 # [t, heads, capacity] fp32 (128MiB at 1M columns), which does
@@ -3321,7 +3349,7 @@ class AttentionV41FP8(AttentionFP8):
                 # to bf16 (~2^-9 relative), far below the keys' own FP4
                 # quantization noise; the head sum below still accumulates
                 # in fp32.
-                weights = weights.to(keys_dense.dtype)
+                weights = weights.to(keys_dtype)
         for b in range(B):
             for start in range(b * S, (b + 1) * S, 16):
                 end = min(start + 16, (b + 1) * S)
@@ -3329,7 +3357,7 @@ class AttentionV41FP8(AttentionFP8):
                     logits = all_logits[start:end]
                 else:
                     request_ids = shared.get("decode_packed_request_ids")
-                    if request_ids is not None:
+                    if request_ids is not None and dense_plan is None:
                         query_keys = keys_dense.index_select(
                             0, request_ids[start:end].long()
                         )
@@ -3351,7 +3379,38 @@ class AttentionV41FP8(AttentionFP8):
                     slice_cols = 32768
                     for k0 in range(0, score_capacity, slice_cols):
                         k1 = min(k0 + slice_cols, score_capacity)
-                        if request_ids is None:
+                        if dense_plan is not None:
+                            # Fused gather: materialize only this slice's
+                            # keys (~8MiB at 32K columns) straight from the
+                            # packed FP4 pool; slot < 0 zero-fills, matching
+                            # the masked-column semantics of the materialized
+                            # path exactly.
+                            from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
+                                dequantize_indexer_k_fp4,
+                            )
+
+                            if request_ids is None:
+                                ks = dequantize_indexer_k_fp4(
+                                    dense_plan.pool,
+                                    dense_plan.slots[b, k0:k1],
+                                    out_dtype=torch.bfloat16,
+                                )
+                                part = torch.einsum(
+                                    "thd,kd->thk", q[start:end], ks
+                                ).relu_()
+                            else:
+                                slot_rows = dense_plan.slots.index_select(
+                                    0, request_ids[start:end].long()
+                                )[:, k0:k1]
+                                ks = dequantize_indexer_k_fp4(
+                                    dense_plan.pool,
+                                    slot_rows.reshape(-1),
+                                    out_dtype=torch.bfloat16,
+                                ).view(end - start, k1 - k0, self.index_head_dim)
+                                part = torch.einsum(
+                                    "thd,tkd->thk", q[start:end], ks
+                                ).relu_()
+                        elif request_ids is None:
                             part = torch.einsum(
                                 "thd,kd->thk", q[start:end], keys_dense[b][k0:k1]
                             ).relu_()
