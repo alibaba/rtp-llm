@@ -281,6 +281,111 @@ TEST(KVCMCompletionQueryTest, QueryNamespacesStaySeparateAndObserveReadCompletio
     }
 }
 
+TEST(KVCMCompletionQueryTest, RpcBatchForgetKeepsRunningReadsAndSeparatesTraceNamespaces) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    auto worker = std::make_shared<QueryWorker>();
+    ASSERT_TRUE(worker->init());
+    auto gate = std::make_shared<QuerySdkGate>();
+    EXPECT_CALL(*worker->client, loadKvCachesForTag(_, _, _, _)).WillOnce(Invoke(
+        [gate](const auto&, const auto&, auto&, const auto&) {
+            const bool released = gate->enterAndWait();
+            EXPECT_TRUE(released);
+            return released;
+        }));
+    EXPECT_CALL(*worker->client, saveKvCachesForTag(_, _, _, _)).Times(0);
+    EXPECT_CALL(*worker->client, match(_, _, _, _, _, _)).Times(0);
+    EXPECT_CALL(*worker->client, getWriteLocation(_, _, _, _, _, _, _)).Times(0);
+    EXPECT_CALL(*worker->client, finishWrite(_, _, _, _, _)).Times(0);
+    auto& ordinary = *worker->manager->block_tree_cache_->transfer_dispatcher_->task_registry_;
+    ASSERT_TRUE(ordinary.begin(uint64_t{71}));
+    ASSERT_TRUE(ordinary.finish(uint64_t{71}, true));
+    const auto references = worker->environment->device_pool->refCount(worker->environment->block_id);
+
+    QueryWorkerServer server(worker, gate);
+    ASSERT_TRUE(server.start());
+    auto channel = grpc::CreateChannel(server.address(), grpc::InsecureChannelCredentials());
+    ASSERT_TRUE(channel->WaitForConnected(std::chrono::system_clock::now() + 5s));
+    const auto read = payloadRequest(*worker->environment, "71");
+    BoundedThread<std::pair<grpc::Status, FunctionResponsePB>> running([channel, read] {
+        auto stub = RpcService::NewStub(channel);
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + 8s);
+        FunctionResponsePB response;
+        auto status = stub->ExecuteFunction(&context, read, &response);
+        return std::make_pair(std::move(status), std::move(response));
+    });
+    ASSERT_TRUE(gate->waitEntered());
+    auto rpc = [&](const FunctionRequestPB& request, FunctionResponsePB& response) {
+        auto stub = RpcService::NewStub(channel);
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + 2s);
+        return stub->ExecuteFunction(&context, request, &response);
+    };
+
+    FunctionRequestPB oversized;
+    oversized.mutable_completion_forget()->add_keys()->set_transfer_trace_id(71);
+    for (size_t index = 0; index < kTransferCompletionForgetBatchSize; ++index) {
+        oversized.mutable_completion_forget()->add_keys()->set_kvcm_trace_id("missing");
+    }
+    FunctionResponsePB oversized_response;
+    EXPECT_EQ(rpc(oversized, oversized_response).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(ordinary.queryLocal(std::vector<uint64_t>{71}).front(), RegistryState::BUFFER_SAFE);
+    EXPECT_EQ(worker->backend->forgetReadCompletion(""), TransferTaskRegistry::ForgetResult::INVALID);
+    EXPECT_EQ(worker->backend->taskRegistry().queryLocal(std::vector<std::string>{"71"}).front(),
+              RegistryState::RUNNING);
+
+    FunctionRequestPB request;
+    auto* forget = request.mutable_completion_forget();
+    forget->add_keys()->set_kvcm_trace_id("71");
+    forget->add_keys()->set_transfer_trace_id(71);
+    forget->add_keys()->set_kvcm_trace_id("missing");
+    forget->add_keys()->set_transfer_trace_id(999);
+    forget->add_keys()->set_transfer_trace_id(0);
+    forget->add_keys()->set_kvcm_trace_id("");
+    forget->add_keys();
+    for (const bool completed : {false, true}) {
+        if (completed) {
+            gate->release();
+            ASSERT_EQ(running.waitFor(5s), std::future_status::ready);
+            const auto result = running.get();
+            ASSERT_TRUE(result.first.ok());
+            EXPECT_EQ(result.second.remote_response().transfer_status(), REMOTE_TRANSFER_STATUS_SUCCESS);
+            EXPECT_TRUE(result.second.remote_response().payload_buffer_safe());
+        }
+        FunctionResponsePB response;
+        ASSERT_TRUE(rpc(request, response).ok());
+        ASSERT_TRUE(response.has_completion_forget());
+        const auto& observed = response.completion_forget();
+        ASSERT_EQ(observed.entries_size(), 7);
+        EXPECT_EQ(observed.rank(), 0u);
+        EXPECT_EQ(observed.entries(0).key().kvcm_trace_id(), "71");
+        EXPECT_EQ(observed.entries(0).status(), completed ? TRANSFER_FORGET_DONE : TRANSFER_FORGET_RUNNING);
+        EXPECT_EQ(observed.entries(1).key().transfer_trace_id(), 71u);
+        for (int index = 1; index < 4; ++index) {
+            EXPECT_EQ(observed.entries(index).status(), TRANSFER_FORGET_DONE);
+        }
+        for (int index = 4; index < 7; ++index) {
+            EXPECT_EQ(observed.entries(index).status(), TRANSFER_FORGET_INVALID);
+        }
+
+        FunctionRequestPB query;
+        query.mutable_completion_query()->add_keys()->set_kvcm_trace_id("71");
+        query.mutable_completion_query()->add_keys()->set_transfer_trace_id(71);
+        FunctionResponsePB query_response;
+        ASSERT_TRUE(rpc(query, query_response).ok());
+        ASSERT_EQ(query_response.completion_query().entries_size(), 2);
+        EXPECT_EQ(query_response.completion_query().entries(0).state(),
+                  completed ? TRANSFER_COMPLETION_UNKNOWN : TRANSFER_COMPLETION_RUNNING);
+        EXPECT_EQ(query_response.completion_query().entries(1).state(), TRANSFER_COMPLETION_UNKNOWN);
+        EXPECT_EQ(worker->backend->taskRegistry().size(), completed ? 0u : 1u);
+        EXPECT_EQ(ordinary.size(), 0u);
+        EXPECT_TRUE(worker->backend->frozenTasks().empty());
+        EXPECT_FALSE(worker->environment->device_pool->isFrozen(worker->environment->block_id));
+        EXPECT_EQ(worker->environment->device_pool->refCount(worker->environment->block_id), references);
+    }
+}
+
 TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcParticipants) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
@@ -343,6 +448,24 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
     ASSERT_NE(failure_diagnostics, nullptr);
     const auto original_ranks = failure_diagnostics->ranks;
     const auto references = environment.device_pool->refCount(environment.block_id);
+    auto forget_rank_zero = [&] {
+        auto stub = RpcService::NewStub(grpc::CreateChannel(addresses.front(), grpc::InsecureChannelCredentials()));
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + 2s);
+        FunctionRequestPB forget;
+        forget.mutable_completion_forget()->add_keys()->set_kvcm_trace_id(
+            std::get<std::string>(record->execution().trace_id));
+        FunctionResponsePB response;
+        const auto status = stub->ExecuteFunction(&context, forget, &response);
+        EXPECT_TRUE(status.ok());
+        return response;
+    };
+    const auto running_forget = forget_rank_zero();
+    ASSERT_EQ(running_forget.completion_forget().entries_size(), 1);
+    EXPECT_EQ(running_forget.completion_forget().entries(0).status(), TRANSFER_FORGET_RUNNING);
+    EXPECT_EQ(record->snapshot().state, FrozenTask::State::FROZEN);
+    EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references);
     FrozenTaskRecovery recovery([coordinator] { return coordinator->frozenTasks(); },
                                 [coordinator](const auto& execution, int timeout_ms) {
                                     return coordinator->queryTransferCompletion(execution, timeout_ms);
@@ -400,6 +523,45 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
         EXPECT_FALSE(response.remote_response().sdk_failed());
         EXPECT_EQ(worker->backend->taskRegistry().queryLocal(std::vector<std::string>{trace}).front(),
                   RegistryState::BUFFER_SAFE);
+    }
+    const auto released_debug = record->debugString();
+    const auto first_forget = forget_rank_zero();
+    ASSERT_EQ(first_forget.completion_forget().entries_size(), 1);
+    EXPECT_EQ(first_forget.completion_forget().entries(0).status(), TRANSFER_FORGET_DONE);
+    const auto partial = coordinator->queryTransferCompletion(record->execution(), 2000);
+    ASSERT_EQ(partial.ranks.size(), 2u);
+    EXPECT_EQ(partial.ranks[0].state, RegistryState::UNKNOWN);
+    EXPECT_EQ(partial.ranks[1].state, RegistryState::BUFFER_SAFE);
+    EXPECT_FALSE(partial.all_safe);
+
+    TransferCompletionTarget target;
+    target.remote = true;
+    for (size_t rank = 0; rank < addresses.size(); ++rank) {
+        target.peers.push_back({rank, addresses[rank]});
+    }
+    for (int retry = 0; retry < 2; ++retry) {
+        const auto forgotten = coordinator->forgetTransferCompletion(target, {record->execution().trace_id}, 2000);
+        EXPECT_TRUE(forgotten.error.empty()) << forgotten.error;
+        ASSERT_EQ(forgotten.entries.size(), 1u);
+        EXPECT_TRUE(forgotten.entries.front().all_done);
+        ASSERT_EQ(forgotten.entries.front().ranks.size(), 2u);
+        for (const auto& rank : forgotten.entries.front().ranks) {
+            EXPECT_EQ(rank.result, TransferTaskRegistry::ForgetResult::DONE);
+        }
+        const auto queried = coordinator->queryTransferCompletion(record->execution(), 2000);
+        ASSERT_EQ(queried.ranks.size(), 2u);
+        for (const auto& rank : queried.ranks) {
+            EXPECT_EQ(rank.state, RegistryState::UNKNOWN);
+        }
+        EXPECT_FALSE(queried.all_safe);
+        EXPECT_EQ(worker0->backend->taskRegistry().size(), 0u);
+        EXPECT_EQ(worker1->backend->taskRegistry().size(), 0u);
+        EXPECT_EQ(record->snapshot().state, FrozenTask::State::RELEASED);
+        EXPECT_EQ(record->debugString(), released_debug);
+        EXPECT_EQ(record->failure().status.ToString(), failure_message);
+        EXPECT_EQ(record->failure().execution_diagnostics, failure_diagnostics);
+        EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references - 1);
     }
 }
 

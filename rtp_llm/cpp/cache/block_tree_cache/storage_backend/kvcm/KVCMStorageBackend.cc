@@ -1576,6 +1576,15 @@ public:
         return *read_registry_;
     }
 
+    TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string& trace_id) {
+        const auto result = read_registry_->forget(trace_id);
+        if (result == TransferTaskRegistry::ForgetResult::INVALID) {
+            RTP_LLM_LOG_WARNING("KVCM READ completion forget rejected rank=%ld trace=%s reason=empty_trace",
+                                static_cast<long>(parallelism_config_.world_rank), trace_id.c_str());
+        }
+        return result;
+    }
+
     ReadExecutionPtr beginReadExecution(const RemoteOperationRequestPB& request,
                                         RemoteOperationResponsePB& response) {
         response.set_sdk_failed(false);
@@ -3025,6 +3034,10 @@ bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, Remote
 
 const TransferTaskRegistry& KVCMStorageBackend::taskRegistry() const {
     return impl_->taskRegistry();
+}
+
+TransferTaskRegistry::ForgetResult KVCMStorageBackend::forgetReadCompletion(const std::string& trace_id) {
+    return impl_->forgetReadCompletion(trace_id);
 }
 
 std::vector<std::shared_ptr<FrozenTask>> KVCMStorageBackend::frozenTasks() const {

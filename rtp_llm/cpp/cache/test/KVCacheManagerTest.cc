@@ -2556,6 +2556,72 @@ TEST_F(KVCacheManagerTest, CompletionQueryClearsReusedResponseAndAcceptsEmptyKey
     EXPECT_EQ(registry.size(), 0u);
 }
 
+TEST_F(KVCacheManagerTest, CompletionForgetDeletesOnlySafeLocalEvidenceAndPreservesNamespaces) {
+    const auto config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    auto manager = std::make_shared<KVCacheManager>(config);
+    ASSERT_TRUE(manager->init());
+    auto& registry = *manager->block_tree_cache_->transfer_dispatcher_->task_registry_;
+    ASSERT_TRUE(registry.begin(uint64_t{41}));
+    ASSERT_TRUE(registry.finish(uint64_t{41}, true));
+    ASSERT_TRUE(registry.begin(uint64_t{42}));
+    FunctionRequestPB request;
+    auto* forget = request.mutable_completion_forget();
+    forget->add_keys()->set_transfer_trace_id(41);
+    forget->add_keys()->set_transfer_trace_id(42);
+    forget->add_keys()->set_transfer_trace_id(43);
+    forget->add_keys()->set_kvcm_trace_id("41");
+    forget->add_keys()->set_transfer_trace_id(0);
+    forget->add_keys();
+    FunctionResponsePB response;
+    response.mutable_mem_response()->set_buffer_safe(true);
+    ASSERT_TRUE(manager->executeFunction(request, response));
+    EXPECT_FALSE(response.has_mem_response());
+    ASSERT_TRUE(response.has_completion_forget());
+    const auto& result = response.completion_forget();
+    EXPECT_EQ(result.worker_case(), TransferCompletionForgetResponsePB::kRank);
+    EXPECT_EQ(result.rank(), 0u);
+    ASSERT_EQ(result.entries_size(), 6);
+    const std::vector<TransferCompletionForgetStatusPB> expected{
+        TRANSFER_FORGET_DONE, TRANSFER_FORGET_RUNNING, TRANSFER_FORGET_DONE,
+        TRANSFER_FORGET_FAILED, TRANSFER_FORGET_INVALID, TRANSFER_FORGET_INVALID};
+    for (int i = 0; i < result.entries_size(); ++i) {
+        EXPECT_EQ(result.entries(i).key().SerializeAsString(), forget->keys(i).SerializeAsString());
+        EXPECT_EQ(result.entries(i).status(), expected[i]);
+    }
+    EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{41, 42}),
+              (std::vector<TransferTaskRegistry::State>{TransferTaskRegistry::State::UNKNOWN,
+                                                      TransferTaskRegistry::State::RUNNING}));
+    ASSERT_TRUE(registry.finish(uint64_t{42}, true));
+    const TransferCompletionTarget target{false, {{0, "local"}}};
+    const auto retry = manager->forgetTransferCompletion(target, {uint64_t{41}, uint64_t{42}}, 1000);
+    ASSERT_EQ(retry.entries.size(), 2u);
+    EXPECT_TRUE(retry.entries[0].all_done);
+    EXPECT_TRUE(retry.entries[1].all_done);
+    EXPECT_EQ(registry.size(), 0u);
+    EXPECT_FALSE(registry.finish(uint64_t{41}, true));
+}
+
+TEST_F(KVCacheManagerTest, CompletionForgetRejectsOversizedBatchBeforeDeletingAnyRecord) {
+    const auto config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    auto manager = std::make_shared<KVCacheManager>(config);
+    ASSERT_TRUE(manager->init());
+    auto& registry = *manager->block_tree_cache_->transfer_dispatcher_->task_registry_;
+    ASSERT_TRUE(registry.begin(uint64_t{51}));
+    ASSERT_TRUE(registry.finish(uint64_t{51}, true));
+    FunctionRequestPB request;
+    auto* forget = request.mutable_completion_forget();
+    for (size_t i = 0; i <= kTransferCompletionForgetBatchSize; ++i)
+        forget->add_keys()->set_transfer_trace_id(51);
+    FunctionResponsePB response;
+    ASSERT_FALSE(manager->executeFunction(request, response));
+    EXPECT_EQ(registry.size(), 1u);
+    EXPECT_EQ(response.completion_forget().entries_size(), 0);
+    forget->clear_keys();
+    ASSERT_TRUE(manager->executeFunction(request, response));
+    EXPECT_EQ(response.completion_forget().entries_size(), 0);
+    EXPECT_EQ(registry.size(), 1u);
+}
+
 TEST_F(KVCacheManagerTest, ExecuteFunctionReportsMissingExecutionIdentityBeforeBufferAccess) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;

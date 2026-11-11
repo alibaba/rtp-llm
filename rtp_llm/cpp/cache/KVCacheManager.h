@@ -141,6 +141,10 @@ public:
     TransferCompletionQueryResult queryTransferCompletion(const FrozenTask::ExecutionInfo& execution,
                                                          int timeout_ms) const;
 
+    TransferCompletionForgetResult forgetTransferCompletion(const TransferCompletionTarget& target,
+                                                            const std::vector<TransferExecutionTrace>& traces,
+                                                            int timeout_ms) const;
+
     // Snapshot both existing owners; taking a snapshot does not transfer custody.
     std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
 
@@ -165,6 +169,7 @@ private:
     void                              reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
     TransferTaskRegistry::State localTransferCompletion(const TransferExecutionTrace& trace_id) const;
+    TransferTaskRegistry::ForgetResult localForgetTransferCompletion(const TransferExecutionTrace& trace_id) const;
     bool startFrozenTaskRecovery();
     void stopFrozenTaskRecovery() noexcept;
 

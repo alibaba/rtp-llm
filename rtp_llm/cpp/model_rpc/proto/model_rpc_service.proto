@@ -941,6 +941,29 @@ message TransferCompletionQueryResponsePB {
     repeated TransferCompletionEntryPB entries = 2;
 }
 
+enum TransferCompletionForgetStatusPB {
+    TRANSFER_FORGET_FAILED = 0;
+    TRANSFER_FORGET_DONE = 1;
+    TRANSFER_FORGET_RUNNING = 2;
+    TRANSFER_FORGET_INVALID = 3;
+}
+
+message TransferCompletionForgetRequestPB {
+    repeated TransferCompletionKeyPB keys = 1;
+}
+
+message TransferCompletionForgetEntryPB {
+    TransferCompletionKeyPB key = 1;
+    TransferCompletionForgetStatusPB status = 2;
+}
+
+message TransferCompletionForgetResponsePB {
+    oneof worker {
+        uint32 rank = 1;
+    }
+    repeated TransferCompletionForgetEntryPB entries = 2;
+}
+
 message FunctionRequestPB {
     oneof request {
         MemoryOperationRequestPB mem_request = 1;
@@ -948,6 +971,7 @@ message FunctionRequestPB {
         P2PConnectorBroadcastTpRequestPB p2p_request = 3;
         ShutdownRequestPB shutdown_request = 4;
         TransferCompletionQueryRequestPB completion_query = 5;
+        TransferCompletionForgetRequestPB completion_forget = 6;
     }
 }
 
@@ -1049,6 +1073,7 @@ message FunctionResponsePB {
         P2PConnectorBroadcastTpResponsePB p2p_response = 3;
         ShutdownResponsePB shutdown_response = 4;
         TransferCompletionQueryResponsePB completion_query = 5;
+        TransferCompletionForgetResponsePB completion_forget = 6;
     }
 }
 

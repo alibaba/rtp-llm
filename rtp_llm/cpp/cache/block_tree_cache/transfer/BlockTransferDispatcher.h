@@ -60,6 +60,10 @@ public:
         return *task_registry_;
     }
 
+    TransferTaskRegistry::ForgetResult forgetLocalCompletion(uint64_t trace_id) const {
+        return task_registry_->forget(trace_id);
+    }
+
 private:
     struct CompletionTicket;
     struct CoordinatedExecution;

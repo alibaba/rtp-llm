@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskRecovery.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionForget.h"
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
 #include <algorithm>
@@ -817,6 +818,34 @@ TransferTaskRegistry::State KVCacheManager::localTransferCompletion(const Transf
     return TransferTaskRegistry::State::UNKNOWN;
 }
 
+TransferTaskRegistry::ForgetResult
+KVCacheManager::localForgetTransferCompletion(const TransferExecutionTrace& trace_id) const {
+    using Result = TransferTaskRegistry::ForgetResult;
+    if (!validTransferExecutionTrace(trace_id)) {
+        RTP_LLM_LOG_WARNING("completion forget requires a nonempty execution trace");
+        return Result::INVALID;
+    }
+    if (!block_tree_cache_)
+        return Result::FAILED;
+    if (const auto* trace = std::get_if<uint64_t>(&trace_id))
+        return block_tree_cache_->forgetLocalTransferCompletion(*trace);
+#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
+    auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
+    if (backend)
+        return backend->forgetReadCompletion(std::get<std::string>(trace_id));
+#endif
+    return Result::FAILED;
+}
+
+TransferCompletionForgetResult
+KVCacheManager::forgetTransferCompletion(const TransferCompletionTarget& target,
+                                        const std::vector<TransferExecutionTrace>& traces, int timeout_ms) const {
+    return TransferCompletionForget(transfer_broadcast_manager_,
+                                    [this](const TransferExecutionTrace& trace) {
+                                        return localForgetTransferCompletion(trace);
+                                    }).forget(target, traces, timeout_ms);
+}
+
 TransferCompletionQueryResult KVCacheManager::queryTransferCompletion(const FrozenTask::ExecutionInfo& execution,
                                                                     int timeout_ms) const {
     return TransferCompletionQuery(transfer_broadcast_manager_,
@@ -827,6 +856,47 @@ TransferCompletionQueryResult KVCacheManager::queryTransferCompletion(const Froz
 }
 
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
+    if (request.has_completion_forget()) {
+        auto* forget_response = response.mutable_completion_forget();
+        forget_response->Clear();
+        forget_response->set_rank(static_cast<uint32_t>(parallelism_config_.tp_rank));
+        const auto& keys = request.completion_forget().keys();
+        if (static_cast<size_t>(keys.size()) > kTransferCompletionForgetBatchSize) {
+            RTP_LLM_LOG_WARNING("completion forget batch exceeds limit: %d", keys.size());
+            return false;
+        }
+        for (const auto& key : keys) {
+            auto* entry = forget_response->add_entries();
+            entry->mutable_key()->CopyFrom(key);
+            auto result = TransferTaskRegistry::ForgetResult::INVALID;
+            switch (key.trace_case()) {
+                case TransferCompletionKeyPB::kTransferTraceId:
+                    result = localForgetTransferCompletion(TransferExecutionTrace{key.transfer_trace_id()});
+                    break;
+                case TransferCompletionKeyPB::kKvcmTraceId:
+                    result = localForgetTransferCompletion(TransferExecutionTrace{key.kvcm_trace_id()});
+                    break;
+                default:
+                    RTP_LLM_LOG_WARNING("completion forget key has no trace namespace");
+                    break;
+            }
+            switch (result) {
+                case TransferTaskRegistry::ForgetResult::DONE:
+                    entry->set_status(TRANSFER_FORGET_DONE);
+                    break;
+                case TransferTaskRegistry::ForgetResult::RUNNING:
+                    entry->set_status(TRANSFER_FORGET_RUNNING);
+                    break;
+                case TransferTaskRegistry::ForgetResult::INVALID:
+                    entry->set_status(TRANSFER_FORGET_INVALID);
+                    break;
+                default:
+                    entry->set_status(TRANSFER_FORGET_FAILED);
+                    break;
+            }
+        }
+        return true;
+    }
     if (request.has_completion_query()) {
         auto* query_response = response.mutable_completion_query();
         query_response->Clear();

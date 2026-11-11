@@ -181,6 +181,7 @@ public:
 
     TransferResult executeTransfer(TransferTask task);
     TransferTaskRegistry::State localTransferCompletion(uint64_t trace_id) const;
+    TransferTaskRegistry::ForgetResult forgetLocalTransferCompletion(uint64_t trace_id) const;
     std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
 
     // Accessors

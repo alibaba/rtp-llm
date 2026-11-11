@@ -11,13 +11,15 @@
 namespace rtp_llm {
 
 // Local completion evidence keyed by the caller's unique execution trace.
-// Completed entries currently remain queryable until this registry is destroyed.
+// Completed entries remain queryable until explicitly forgotten or this registry is destroyed.
 // Ordinary transfer reuses its numeric trace ID; KVCM can reuse its existing string
 // identity in a separate registry instance. No per-task identity is generated here.
 // The worker group shares one lifetime; records are not reused across instances.
 class TransferTaskRegistry {
 public:
     enum class State { UNKNOWN, RUNNING, BUFFER_SAFE };
+    // FAILED is reserved for routing or protocol failures outside this registry.
+    enum class ForgetResult { FAILED, DONE, RUNNING, INVALID };
 
     TransferTaskRegistry(): epoch_(makeEpoch()) {}
 
@@ -25,7 +27,7 @@ public:
         return epoch_;
     }
 
-    // Includes both pending and completed executions; records are never evicted.
+    // Includes pending and completed executions that have not been explicitly forgotten.
     size_t size() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return records_.size();
@@ -62,6 +64,28 @@ public:
 
     bool finish(uint64_t trace_id, bool buffer_safe) {
         return trace_id != 0 && finish(std::to_string(trace_id), buffer_safe);
+    }
+
+    // Only explicit safety proof permits deletion. Missing records are already
+    // forgotten; a later finish never recreates them.
+    ForgetResult forget(const std::string& trace_id) {
+        if (trace_id.empty()) {
+            return ForgetResult::INVALID;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto                  it = records_.find(trace_id);
+        if (it == records_.end()) {
+            return ForgetResult::DONE;
+        }
+        if (it->second != State::BUFFER_SAFE) {
+            return ForgetResult::RUNNING;
+        }
+        records_.erase(it);
+        return ForgetResult::DONE;
+    }
+
+    ForgetResult forget(uint64_t trace_id) {
+        return trace_id == 0 ? ForgetResult::INVALID : forget(std::to_string(trace_id));
     }
 
     // The worker group has one shared lifetime. Read-only queries of this

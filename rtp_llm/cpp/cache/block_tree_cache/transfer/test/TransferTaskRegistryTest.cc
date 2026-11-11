@@ -10,8 +10,9 @@
 namespace rtp_llm {
 namespace {
 
-using Registry = TransferTaskRegistry;
-using State    = Registry::State;
+using Registry     = TransferTaskRegistry;
+using State        = Registry::State;
+using ForgetResult = Registry::ForgetResult;
 
 TEST(TransferTaskRegistryTest, RejectsEmptyAndDuplicateExecutionIds) {
     Registry registry;
@@ -60,6 +61,97 @@ TEST(TransferTaskRegistryTest, MissingEvidenceDoesNotCreateOrCompleteAnExecution
                   (std::vector<State>{State::UNKNOWN, State::RUNNING, State::UNKNOWN}));
     }
     EXPECT_TRUE(registry.begin("missing"));
+}
+
+TEST(TransferTaskRegistryTest, ForgetRemovesOnlySafeRecordsAndIsIdempotent) {
+    Registry registry;
+    const auto epoch = registry.epoch();
+    ASSERT_TRUE(registry.begin("safe"));
+    ASSERT_TRUE(registry.finish("safe", true));
+    ASSERT_TRUE(registry.begin("running"));
+
+    EXPECT_EQ(registry.forget("missing"), ForgetResult::DONE);
+    EXPECT_EQ(registry.size(), 2u);
+    EXPECT_EQ(registry.forget("safe"), ForgetResult::DONE);
+    EXPECT_EQ(registry.size(), 1u);
+    EXPECT_EQ(registry.queryLocal(std::vector<std::string>{"safe", "running", "missing"}),
+              (std::vector<State>{State::UNKNOWN, State::RUNNING, State::UNKNOWN}));
+    EXPECT_EQ(registry.forget("safe"), ForgetResult::DONE);
+    EXPECT_FALSE(registry.finish("safe", true));
+    EXPECT_FALSE(registry.finish("safe", false));
+    EXPECT_EQ(registry.size(), 1u);
+    EXPECT_EQ(registry.queryLocal(std::vector<std::string>{"safe"}), (std::vector<State>{State::UNKNOWN}));
+    EXPECT_EQ(registry.epoch(), epoch);
+}
+
+TEST(TransferTaskRegistryTest, ForgetPreservesRunningExecutionUntilProofArrives) {
+    Registry registry;
+    ASSERT_TRUE(registry.begin("execution"));
+    EXPECT_EQ(registry.forget("execution"), ForgetResult::RUNNING);
+    ASSERT_TRUE(registry.finish("execution", false));
+    EXPECT_EQ(registry.forget("execution"), ForgetResult::RUNNING);
+    EXPECT_EQ(registry.size(), 1u);
+    EXPECT_EQ(registry.queryLocal(std::vector<std::string>{"execution"}), (std::vector<State>{State::RUNNING}));
+    EXPECT_FALSE(registry.begin("execution"));
+
+    ASSERT_TRUE(registry.finish("execution", true));
+    EXPECT_EQ(registry.forget("execution"), ForgetResult::DONE);
+    EXPECT_EQ(registry.size(), 0u);
+}
+
+TEST(TransferTaskRegistryTest, ForgetRejectsInvalidIdsWithoutTouchingStringZero) {
+    Registry registry;
+    ASSERT_TRUE(registry.begin("0"));
+    ASSERT_TRUE(registry.finish("0", true));
+    EXPECT_EQ(registry.forget(""), ForgetResult::INVALID);
+    EXPECT_EQ(registry.forget(uint64_t{0}), ForgetResult::INVALID);
+    EXPECT_EQ(registry.size(), 1u);
+    EXPECT_EQ(registry.queryLocal(std::vector<std::string>{"0"}), (std::vector<State>{State::BUFFER_SAFE}));
+    EXPECT_EQ(registry.forget("0"), ForgetResult::DONE);
+    EXPECT_EQ(registry.size(), 0u);
+}
+
+TEST(TransferTaskRegistryTest, NumericForgetUsesTheExistingIdentityWithoutRetainingTombstones) {
+    Registry registry;
+    const uint64_t trace_id = std::numeric_limits<uint64_t>::max();
+    EXPECT_EQ(registry.forget(trace_id), ForgetResult::DONE);
+    ASSERT_TRUE(registry.begin(trace_id));
+    EXPECT_EQ(registry.forget(trace_id), ForgetResult::RUNNING);
+    ASSERT_TRUE(registry.finish(trace_id, true));
+    EXPECT_EQ(registry.forget(trace_id), ForgetResult::DONE);
+    EXPECT_EQ(registry.forget(trace_id), ForgetResult::DONE);
+    EXPECT_FALSE(registry.finish(trace_id, true));
+    EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{trace_id}), (std::vector<State>{State::UNKNOWN}));
+    EXPECT_EQ(registry.size(), 0u);
+    ASSERT_TRUE(registry.begin(std::to_string(trace_id)));
+    EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{trace_id}), (std::vector<State>{State::RUNNING}));
+}
+
+TEST(TransferTaskRegistryTest, ConcurrentFinishAndForgetPreserveTheSafetyBoundary) {
+    Registry registry;
+    for (uint64_t trace_id = 1; trace_id <= 32; ++trace_id) {
+        SCOPED_TRACE(trace_id);
+        ASSERT_TRUE(registry.begin(trace_id));
+        std::promise<void> start;
+        const auto ready = start.get_future().share();
+        auto completion = std::async(std::launch::async, [&] {
+            ready.wait();
+            return registry.finish(trace_id, true);
+        });
+        auto removal = std::async(std::launch::async, [&] {
+            ready.wait();
+            return registry.forget(trace_id);
+        });
+        start.set_value();
+        EXPECT_TRUE(completion.get());
+        const auto result = removal.get();
+        ASSERT_TRUE(result == ForgetResult::RUNNING || result == ForgetResult::DONE);
+        EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{trace_id}),
+                  (std::vector<State>{result == ForgetResult::DONE ? State::UNKNOWN : State::BUFFER_SAFE}));
+        EXPECT_EQ(registry.forget(trace_id), ForgetResult::DONE);
+        EXPECT_FALSE(registry.finish(trace_id, true));
+        EXPECT_EQ(registry.size(), 0u);
+    }
 }
 
 TEST(TransferTaskRegistryTest, QueryRequiresCurrentWorkerEpochAndPreservesOrder) {
