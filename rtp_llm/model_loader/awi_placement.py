@@ -397,12 +397,26 @@ def register_from_model(
         except Exception:
             pass
 
-        record_engram(py_model)
-        if checkpoint_dir and os.environ.get("AWI_BALLAST_UNUSED_WEIGHTS", "1") != "0":
-            device = f"cuda:{torch.cuda.current_device()}"
-            load_ballast(checkpoint_dir, rank, world_size, device)
-        elif not checkpoint_dir:
-            logging.warning("AWI census: checkpoint dir unknown; ballast skipped")
+        # Phases are individually guarded: every rank MUST reach the
+        # all_gather_object below (a collective) even if an earlier phase
+        # failed on this rank, or the healthy ranks would hang on it.
+        try:
+            record_engram(py_model)
+        except Exception:
+            logging.error("AWI census: engram walk failed", exc_info=True)
+        try:
+            if (
+                checkpoint_dir
+                and os.environ.get("AWI_BALLAST_UNUSED_WEIGHTS", "1") != "0"
+            ):
+                device = f"cuda:{torch.cuda.current_device()}"
+                load_ballast(checkpoint_dir, rank, world_size, device)
+            elif not checkpoint_dir:
+                logging.warning(
+                    "AWI census: checkpoint dir unknown; ballast skipped"
+                )
+        except Exception:
+            logging.error("AWI census: ballast failed", exc_info=True)
 
         # The evaluator requires the row-name set to EQUAL the checkpoint
         # manifest: filter out module-level alias names (e.g. stacked MoE
