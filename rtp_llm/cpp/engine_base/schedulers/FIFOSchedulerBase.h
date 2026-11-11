@@ -83,6 +83,7 @@ protected:
     PDSepConfig                     pd_sep_config_;
     std::list<GenerateStreamPtr>    waiting_streams_;
     std::list<GenerateStreamPtr>    loading_cache_streams_;
+    std::list<GenerateStreamPtr>    cache_ready_streams_;
     std::list<GenerateStreamPtr>    running_streams_;
     std::list<GenerateStreamPtr>    new_streams_;
     std::shared_ptr<KVCacheManager> cache_manager_;

@@ -195,8 +195,8 @@ bool PDFusionRatioScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>
 }
 
 bool PDFusionRatioScheduler::waitPredicate() {
-    return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !loading_cache_streams_.empty()
-           || !running_streams_.empty() || !pending_decode_streams_.empty() || !new_streams_.empty();
+    return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !cache_ready_streams_.empty()
+           || !loading_cache_streams_.empty() || !running_streams_.empty() || !pending_decode_streams_.empty() || !new_streams_.empty();
 }
 
 absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
@@ -211,6 +211,7 @@ absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
 
     bool made_progress = false;
     made_progress |= evaluateAndUpdateStreams(loading_cache_streams_) > 0;
+    made_progress |= refreshAndReapTerminalStreams(cache_ready_streams_);
     made_progress |= refreshAndReapTerminalStreams(waiting_streams_);
     if (has_unclassified_prefill_batch_) {
         made_progress |= classifyActivePrefillBatch();
@@ -224,13 +225,14 @@ absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
 
     if (round == RoundType::PREFILL) {
         if (new_streams_.empty()) {
-            const size_t prev_waiting_size = waiting_streams_.size();
+            const size_t prev_waiting_size = cache_ready_streams_.size() + waiting_streams_.size();
             // Build once for this in-flight snapshot, then update for accepted candidates.
             admission_peak_state_.reset();
             const auto admitted_streams = evaluateWaitingStreams(waiting_streams_, /*include_running_mode=*/false);
             admission_peak_state_.reset();
+            made_progress |= evaluateAndUpdateStreams(cache_ready_streams_, &admitted_streams) > 0;
             made_progress |= evaluateAndUpdateStreams(waiting_streams_, &admitted_streams) > 0;
-            if (waiting_streams_.size() < prev_waiting_size) {
+            if (cache_ready_streams_.size() + waiting_streams_.size() < prev_waiting_size) {
                 schedule_trigger_ = true;
             }
         }
@@ -244,7 +246,7 @@ absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
                 prefill_since_decode_ += 1;
                 reportMetrics();
                 last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
-                return ScheduleOutput{std::move(prefill_batch)};
+                return ScheduleOutput{std::move(prefill_batch), {}};
             }
         }
     }
@@ -256,10 +258,10 @@ absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
         prefill_since_decode_ = 0;
     }
     if (!pending_decode_streams_.empty() || !new_streams_.empty()
-        || (made_progress && !waiting_streams_.empty())) {
+        || (made_progress && (!cache_ready_streams_.empty() || !waiting_streams_.empty()))) {
         schedule_trigger_ = true;
     }
-    if (running_streams_.empty() && !made_progress && !waiting_streams_.empty()) {
+    if (running_streams_.empty() && !made_progress && (!cache_ready_streams_.empty() || !waiting_streams_.empty())) {
         cond_.wait_for(lock, kNoProgressScheduleGap, [this] {
             return stop_ || schedule_trigger_ || !loading_cache_streams_.empty() || !running_streams_.empty()
                    || !pending_decode_streams_.empty() || !new_streams_.empty();
@@ -268,11 +270,11 @@ absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
 
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
-    return ScheduleOutput{running_streams_};
+    return ScheduleOutput{running_streams_, {}};
 }
 
 PDFusionRatioScheduler::RoundType PDFusionRatioScheduler::chooseRound() {
-    if (new_streams_.empty() && waiting_streams_.empty()) {
+    if (new_streams_.empty() && cache_ready_streams_.empty() && waiting_streams_.empty()) {
         return RoundType::DECODE;
     }
     if (running_streams_.empty() && pending_decode_streams_.empty()) {
@@ -291,7 +293,7 @@ PDFusionRatioScheduler::RoundType PDFusionRatioScheduler::chooseRound() {
 void PDFusionRatioScheduler::buildAdmissionPeakState() {
     auto state = std::make_unique<AdmissionPeakState>();
     state->streams.reserve(loading_cache_streams_.size() + running_streams_.size() + pending_decode_streams_.size()
-                           + waiting_streams_.size());
+                           + cache_ready_streams_.size() + waiting_streams_.size());
     auto append_stream = [&](const GenerateStreamPtr& s) {
         state->streams.push_back({s, remainingKVAllocationSteps(s)});
         state->initial_need_blocks += estimateInitialNeedBlocks(s);
@@ -305,9 +307,11 @@ void PDFusionRatioScheduler::buildAdmissionPeakState() {
     for (const auto& s : pending_decode_streams_) {
         append_stream(s);
     }
-    for (const auto& s : waiting_streams_) {
-        if (isAdmittedWaitingStream(s)) {
-            append_stream(s);
+    for (const auto* candidates : {&cache_ready_streams_, &waiting_streams_}) {
+        for (const auto& stream : *candidates) {
+            if (isAdmittedWaitingStream(stream)) {
+                append_stream(stream);
+            }
         }
     }
     std::sort(state->streams.begin(), state->streams.end(), longerLifetimeFirst);

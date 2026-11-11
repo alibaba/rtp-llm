@@ -189,6 +189,12 @@ void PPScheduler::initializeDecodeCandidates(const GenerateStreamPtr& stream) co
 }
 
 void PPScheduler::addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state) {
+    // PP rechecks completed loads through its single waiting queue so every
+    // request passes the current round's admission and execution-mode limits.
+    if (new_state == StreamState::WAITING) {
+        waiting_streams_.push_back(stream);
+        return;
+    }
     if (new_state == StreamState::FINISHED) {
         finished_request_ids_.push_back(stream->streamId());
     }
