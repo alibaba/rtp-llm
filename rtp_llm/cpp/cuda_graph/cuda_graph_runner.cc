@@ -2278,6 +2278,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         && cudaGraphBackendFlag(graph_instances_[key].mem_hold_.attn_pyobj_, "cuda_graph_uses_device_metadata");
 
     size_t pre_capture_reserved = cuda_graph::graphReservedBytes();
+    logCudaGraphPoolMemory("capture_start");
 
     // Attention preparation and input initialization run on the caller's
     // stream. Order the capture stream after them before warming stream-local
@@ -2404,7 +2405,12 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             // headroom is tens of MiB while several hundred MiB is cached.
             // Release only cached (not live/pool) segments first.
             cuda_graph::graphEmptyCache();
+            logCudaGraphPoolMemory("before_instantiate");
+            RTP_LLM_LOG_INFO(
+                "[CudaGraph Memory] pre_instantiate capture_pool_delta=%zu MiB",
+                (cuda_graph::graphReservedBytes() - pre_capture_reserved) / 1024 / 1024);
             graph.instantiate();
+            logCudaGraphPoolMemory("after_instantiate");
             instance.prepare_replay_.exec = instance.metadata_replay_.exec = graph.raw_cuda_graph_exec();
             disableCudaGraphPrepareReplay(instance.prepare_replay_);
             disableCudaGraphPrepareReplay(instance.metadata_replay_);
