@@ -153,6 +153,7 @@ def commit_component(device="cpu"):
     model.shared_runtime = SimpleNamespace(current=state)
     model.shared_weight_views = SimpleNamespace(geometry=SimpleNamespace())
     result = SimpleNamespace(outputs=[], pairs=[], fail_layer=None, foreign_rows=False)
+    row_maps = {}
 
     def write_rows(owner, current, layer, main_x, requests, positions, ends, *, quantized_input=None):
         result.pairs.append(quantized_input)
@@ -173,11 +174,17 @@ def commit_component(device="cpu"):
     def run(features, *, reuse=True):
         result.outputs = []
         result.pairs = []
-        main_x = model.combine_hidden_states(features)
         rows = features.shape[0]
-        requests = torch.zeros(rows, dtype=torch.int64, device=features.device)
-        positions = torch.arange(rows, device=features.device)
-        ends = torch.tensor([rows], dtype=torch.int32, device=features.device)
+        if rows not in row_maps:
+            # Warmup prepares static row maps, as the production graph batch
+            # does. Capture must not copy a temporary pageable CPU tensor.
+            row_maps[rows] = (
+                torch.zeros(rows, dtype=torch.int64, device=features.device),
+                torch.arange(rows, device=features.device),
+                torch.full((1,), rows, dtype=torch.int32, device=features.device),
+            )
+        requests, positions, ends = row_maps[rows]
+        main_x = model.combine_hidden_states(features)
         call = model.commit_feature_rows if reuse else lambda *a, **k: public_loop(model, *a, **k)
         call(main_x, requests, positions, ends, SimpleNamespace())
         return (main_x, *result.outputs)
