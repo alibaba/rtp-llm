@@ -20,11 +20,20 @@ def main():
     def local_command(node, action, config):
         if node.get("transport") != "local-container":
             raise ValueError("local reference entry requires local-container transport")
+        profile = bool(node.get("profile_last_wave"))
+        if profile:
+            config["case"]["profiled"] = True
         remote = shlex.split(ssh_command(node, action, config)[-1])
         if remote[:6] != ["pouch", "exec", "-i", "--user", "0", node["container"]]:
             raise ValueError("unexpected reference command transport")
         if remote[6:8] != ["bash", "-c"] or len(remote) != 9:
             raise ValueError("unexpected reference container command")
+        if profile and action == "load":
+            original = " -m rtp_llm.test.perf_test.dsv41_ppu_reference "
+            replacement = " -m rtp_llm.test.perf_test.dsv41_ppu_reference_profile "
+            if remote[8].count(original) != 1:
+                raise ValueError("unexpected reference load module")
+            remote[8] = remote[8].replace(original, replacement, 1)
         return remote[6:]
 
     def local_ready(process, config, timeout):

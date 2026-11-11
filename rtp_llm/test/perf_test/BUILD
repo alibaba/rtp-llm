@@ -53,6 +53,7 @@ py_library(
         "dsv41_ppu_perf.py",
         "dsv41_ppu_reference.py",
         "dsv41_ppu_reference_local.py",
+        "dsv41_ppu_reference_profile.py",
         "dsv41_ppu_reference_results.py",
     ],
     deps = ["//rtp_llm/tools/v41:tooling"],
