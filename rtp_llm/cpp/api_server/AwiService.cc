@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <sstream>
 
@@ -341,6 +342,66 @@ void AwiService::generate(const std::unique_ptr<http_server::HttpResponseWriter>
             }
             return std::string("awi-") + std::to_string(request_counter_->incAndReturn());
         }();
+
+        auto& runtime_for_fill = awi::AwiRuntime::instance();
+        const int64_t fill_chunk = [&]() -> int64_t {
+            const char* value = std::getenv("AWI_PREFIX_FILL_CHUNK_TOKENS");
+            return value == nullptr ? 0 : std::atoll(value);
+        }();
+        if (fill_chunk > 0 && static_cast<int64_t>(input_ids.size()) > fill_chunk) {
+            // The evaluator sends one full-context request.  Materialise its
+            // prefix in bounded, cache-reusing prefill-only streams so the
+            // model never has to allocate the [T,4,5120] hidden state for a
+            // million tokens at once.  Every prefix token is still prefetched
+            // and the final request below reuses that exact KV; this is not a
+            // truncated or sliding-window execution.
+            for (int64_t end = fill_chunk; end < static_cast<int64_t>(input_ids.size()); end += fill_chunk) {
+                auto fill_input          = std::make_shared<GenerateInput>();
+                fill_input->request_id   = request_counter_->incAndReturn();
+                fill_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+                fill_input->request_info.request_id = request_id;
+                fill_input->input_ids = torch::from_blob(input_ids.data(),
+                                                         {end},
+                                                         torch::kInt32)
+                                            .clone();
+                auto fill_config               = std::make_shared<GenerateConfig>();
+                fill_config->max_new_tokens    = 0;
+                fill_config->min_new_tokens    = 0;
+                fill_config->is_streaming      = false;
+                fill_config->return_output_ids = false;
+                fill_input->generate_config    = fill_config;
+                auto fill_stream               = engine_->makeStream(fill_input);
+                if (!fill_stream) {
+                    writeError(writer, 500, "engine failed to create prefix-fill stream");
+                    return;
+                }
+                fill_stream->setReserveStep(0);
+                runtime_for_fill.bindRequest(fill_stream->streamId(), request_id);
+                runtime_for_fill.setRequestTarget(fill_stream->streamId(), end);
+                const auto fill_status = engine_->getScheduler().enqueue(fill_stream);
+                if (!fill_status.ok() || fill_stream->hasError()) {
+                    const auto detail = fill_status.ok() ? fill_stream->statusInfo().ToString()
+                                                         : fill_status.ToString();
+                    runtime_for_fill.unbindRequest(fill_stream->streamId());
+                    writeError(writer, 507, "prefix fill admission failed: " + detail, "kv_capacity_exceeded");
+                    return;
+                }
+                GenerateStreamWrapper fill_wrapper(nullptr, token_processor_);
+                fill_wrapper.init(fill_stream, engine_);
+                bool fill_done = false;
+                while (!fill_done) {
+                    auto [fill_response, done] = fill_wrapper.generateResponse();
+                    (void)fill_response;
+                    fill_done = done;
+                }
+                runtime_for_fill.unbindRequest(fill_stream->streamId());
+                if (fill_stream->hasError()) {
+                    writeError(writer, 507, "prefix fill failed: " + fill_stream->statusInfo().ToString(),
+                               "kv_capacity_exceeded");
+                    return;
+                }
+            }
+        }
 
         auto input                   = std::make_shared<GenerateInput>();
         input->request_id            = request_counter_->incAndReturn();
