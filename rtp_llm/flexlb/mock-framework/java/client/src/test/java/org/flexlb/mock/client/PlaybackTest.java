@@ -73,6 +73,20 @@ class PlaybackTest {
         }
     }
 
+    @Test void stateRemainsReadableWhileDispatchOwnsItsMonitor() throws Exception {
+        try (var h = new BackendRpcClientTest.Harness();
+             var load = worker(clientReplayPlan(master(h), 3, 10, 1, 2), new ClientMetrics(), h)) {
+            synchronized (load) {
+                var state = new FutureTask<>(load::state);
+                Thread.ofVirtual().start(state);
+                assertFalse(state.get(1, TimeUnit.SECONDS).done());
+            }
+            load.halt();
+            var result = load.await(5000);
+            assertEquals(result, new ObjectMapper().readValue(directory.resolve("result.json").toFile(), State.class));
+        }
+    }
+
     @Test void stopClosesAdmissionAndDrainTimeoutCancelsInflight() throws Exception {
         try (var h = new BackendRpcClientTest.Harness()) {
             h.tokenDelay = 5000;
@@ -131,6 +145,45 @@ class PlaybackTest {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
         while (!condition.getAsBoolean() && System.nanoTime() < deadline) Thread.sleep(10);
         assertTrue(condition.getAsBoolean(), "Condition did not become true");
+    }
+
+    @Test void transientWorkerStateTimeoutDoesNotStopPlayback() throws Exception {
+        var peer = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        var timeouts = new java.util.concurrent.atomic.AtomicInteger();
+        var halted = new java.util.concurrent.atomic.AtomicBoolean();
+        var json = new ObjectMapper();
+        peer.createContext("/invoke", exchange -> {
+            try (exchange) {
+                String operation = json.readTree(exchange.getRequestBody()).get("interface").asText();
+                if (operation.equals("worker/halt")) halted.set(true);
+                if (operation.equals("worker/state") && timeouts.getAndIncrement() == 0) {
+                    exchange.sendResponseHeaders(504, -1);
+                    return;
+                }
+                Object result = operation.equals("worker/state")
+                    ? new State(true, false, 1, 1, 1, 0, 0, 0, Map.of("success", 1L), List.of())
+                    : new Ack(true);
+                byte[] body = json.writeValueAsBytes(Map.of("result", result));
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+            }
+        });
+        peer.start();
+        Path topology = directory.resolve("topology.json");
+        try (var h = new BackendRpcClientTest.Harness();
+             var zero = new ReplayControlServer("client-0", topology, directory.resolve("zero"))) {
+            json.writeValue(topology.toFile(), List.of(h.endpoint(),
+                Map.of("role", "client", "control", zero.url()),
+                Map.of("role", "client", "control", "http://127.0.0.1:" + peer.getAddress().getPort())));
+            zero.start(InputFixture.plan(directory, null, 2, 10, 2, 4, 3000, 1000));
+            var report = directory.resolve("zero/coordinator/1/result.json");
+            eventually(() -> Files.exists(report));
+            var summary = zero.stop(new Empty());
+            assertTrue(summary.errors().isEmpty(), summary.toString());
+            assertFalse(halted.get());
+            assertEquals(2, timeouts.get());
+            assertEquals(1, h.schedules.get());
+        } finally { peer.stop(0); }
     }
 
     @Test void replayCoordinatesWorkersAndEarlyStopInterruptsLongArrivalWaits() throws Exception {

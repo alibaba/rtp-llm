@@ -33,7 +33,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
     private final ControlServer api;
 
-    private Session session;
+    private volatile Session session;
 
     private long sequence, nextRequestId = 1;
 
@@ -75,10 +75,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
     @Override public Ack halt(Sequence args) { session(args.sequence()).halt(); return new Ack(true); }
 
     @Override public State state(Sequence args) {
-        var result = session(args.sequence()).state();
-        if (result.done()) try { save(directory.resolve("playback/" + args.sequence() + "/result.json"), result); }
-        catch (IOException error) { throw new UncheckedIOException(error); }
-        return result;
+        return session(args.sequence()).state();
     }
 
     @Override public Ack start(Start args) throws Exception {
@@ -215,15 +212,18 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
         var request = HttpRequest.newBuilder(URI.create(url + "/invoke")).timeout(Duration.ofMillis(timeoutMillis + 1_000L))
             .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofByteArray(JSON.writeValueAsBytes(body))).build();
         var response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() == 504 && operation.equals("worker/state"))
+            throw new HttpTimeoutException(operation + " at " + url + ": HTTP 504");
         if (response.statusCode() != 200) throw new IOException(operation + " at " + url + ": HTTP " + response.statusCode());
         var result = JSON.readTree(response.body());
         if (!result.isObject() || result.size() != 1 || !result.has("result")) throw new IOException("Invalid Client response");
         return result.get("result");
     }
 
-    private synchronized Session session(long expected) {
-        if (session == null || expected != session.plan.sequence()) throw new IllegalStateException("Stale/unknown worker command");
-        return session;
+    private Session session(long expected) {
+        var current = session;
+        if (current == null || expected != current.plan.sequence()) throw new IllegalStateException("Stale/unknown worker command");
+        return current;
     }
 
     private static String required(String name) {
@@ -252,6 +252,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
         void supervise() {
             var states = new LinkedHashMap<String, State>();
             var unavailable = new HashSet<String>();
+            var stateTimeouts = new HashMap<String, Integer>();
             boolean halted = false;
             long stoppingDeadline = Long.MAX_VALUE;
             try {
@@ -275,8 +276,13 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                         try {
                             var state = JSON.treeToValue(call(peer, "worker/state", new Sequence(number), 5_000), State.class);
                             states.put(peer, state);
+                            stateTimeouts.remove(peer);
                             if (!state.errors().isEmpty()) error(peer + ": " + state.errors().getFirst());
-                        } catch (Exception failure) { error(peer + ": " + failure); unavailable.add(peer); }
+                        } catch (Exception failure) {
+                            if (failure instanceof HttpTimeoutException && stateTimeouts.merge(peer, 1, Integer::sum) < 3) continue;
+                            error(peer + ": " + failure);
+                            unavailable.add(peer);
+                        }
                     }
                     if (states.size() == peers.size() && states.values().stream().allMatch(State::done) && unavailable.isEmpty()) break;
                     if (halted && (System.nanoTime() >= stoppingDeadline
@@ -305,10 +311,13 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
         private final ClientReplayPlan plan;
         private final BackendRpcClient client;
         private final RequestJournal journal;
+        private final Path resultFile;
         private final MasterDiscovery discovery;
         private final ClientMetrics metrics;
         private final ArrayBlockingQueue<Item> queue;
         private final Map<Long, BackendRpcClient.Call> active = new HashMap<>();
+        // Status readers never need the monitor used for dispatch and RPC registration.
+        private final Object stateLock = new Object();
         private final Map<String, Long> outcomes = new TreeMap<>();
         private final List<String> errors = new ArrayList<>();
         private final CompletableFuture<State> completion = new CompletableFuture<>();
@@ -329,6 +338,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                      int imageToken, int blockSize, long seed, int prefillCpSize) throws Exception {
             this.imageToken = imageToken; this.blockSize = blockSize;
             this.plan = plan; this.metrics = metrics;
+            resultFile = evidence.resolveSibling("result.json");
             queue = new ArrayBlockingQueue<>(plan.queue_capacity());
             for (var outcome : BackendRpcClient.Outcome.values()) outcomes.put(outcome.name(), 0L);
             discovery = new MasterDiscovery(topology, plan.masters());
@@ -356,8 +366,8 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
             long start = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(delay);
             player = Thread.ofVirtual().name("client-player").start(() -> {
                 try { play(plan, start, imageToken, this::offer); }
-                catch (InterruptedException interrupted) { if (!isStopped()) fail("Player interrupted unexpectedly"); }
-                catch (java.io.InterruptedIOException interrupted) { if (!isStopped()) fail(interrupted.toString()); }
+                catch (InterruptedException interrupted) { if (!stopped) fail("Player interrupted unexpectedly"); }
+                catch (java.io.InterruptedIOException interrupted) { if (!stopped) fail(interrupted.toString()); }
                 catch (java.io.IOException | RuntimeException error) { fail(error.toString()); }
                 finally { synchronized (Session.this) { finishInput(); } }
             });
@@ -412,7 +422,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
         }
 
         synchronized void fail(String error) {
-            if (errors.isEmpty()) errors.add(error);
+            synchronized (stateLock) { if (errors.isEmpty()) errors.add(error); }
             halt();
         }
 
@@ -423,11 +433,12 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
             finishInput();
         }
 
-        synchronized State state() { return completion.isDone() ? completion.join() : snapshot(false); }
+        State state() {
+            var done = completion.getNow(null);
+            return done == null ? snapshot(false) : done;
+        }
 
         State await(long timeoutMillis) throws Exception { return completion.get(timeoutMillis, TimeUnit.MILLISECONDS); }
-
-        private synchronized boolean isStopped() { return stopped; }
 
         private void offer(Item item) {
             if (stopped) return;
@@ -475,12 +486,18 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                                 .setMaxNewTokens(input.getGenerateConfig().getMaxNewTokens()).setPriority(entry.priority())
                                 .setGenerateInput(generateInput.toByteString()).build();
                             var call = client.send(request, generateInput, Duration.ofMillis(plan.request_timeout_ms()), entry.expectedImageTokens());
-                            active.put(item.requestId(), call); issued++; metrics.issued();
+                            active.put(item.requestId(), call);
+                            synchronized (stateLock) { issued++; }
+                            metrics.issued();
                             call.completion().whenComplete((result, error) -> {
                                 synchronized (Session.this) {
-                                    active.remove(item.requestId()); finished++;
+                                    active.remove(item.requestId());
+                                    synchronized (stateLock) {
+                                        finished++;
+                                        if (error == null) outcomes.merge(result.outcome().name(), 1L, Long::sum);
+                                    }
                                     if (error != null) fail("Request execution failed: " + error);
-                                    else { metrics.finished(result); outcomes.merge(result.outcome().name(), 1L, Long::sum); }
+                                    else metrics.finished(result);
                                     LockSupport.unpark(dispatcher);
                                 }
                             });
@@ -501,13 +518,21 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                 client.close(); discovery.close();
                 try { journal.finish(issued, finished); }
                 catch (java.io.IOException error) { fail(error.getMessage()); }
-                synchronized (this) { completion.complete(snapshot(true)); LockSupport.unpark(dispatcher); }
+                var result = snapshot(true);
+                try { save(resultFile, result); }
+                catch (IOException error) {
+                    fail("Cannot save Client result: " + error);
+                    result = snapshot(true);
+                }
+                completion.complete(result);
             }
         }
 
         private State snapshot(boolean done) {
-            return new State(done, stopped, produced.get(), issued, finished, plan.count() - issued,
-                queue.size(), active.size(), Map.copyOf(outcomes), List.copyOf(errors));
+            synchronized (stateLock) {
+                return new State(done, stopped, produced.get(), issued, finished, plan.count() - issued,
+                    queue.size(), Math.toIntExact(issued - finished), Map.copyOf(outcomes), List.copyOf(errors));
+            }
         }
 
         record Item(long requestId, IndexedTrafficReader.Entry entry, int outputLimit) {}
