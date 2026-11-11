@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from typing import Dict, Optional
 
@@ -52,12 +53,23 @@ class LanguageCppEngine(BaseEngine):
                 or engine_config.pd_sep_config.role_type == RoleType.PDFUSION
             )
         ):
+            # Opt-in device override: on tight-HBM ranks the vision tower
+            # (several hundred MiB) may not coexist with the language weights,
+            # KV cache and CUDA graph pool on the tp_rank-0 GPU. Setting
+            # MULTIMODAL_ENGINE_DEVICE pins the in-backend multimodal engine
+            # (and thus the vision weights, which stay device-resident) to
+            # another local CUDA device. Text-only serving never invokes the
+            # vision forward; image serving would additionally require the
+            # embedding handoff to tolerate the cross-device placement.
             self.mm_process_engine = (
                 MultimodalMixinFactory.create_multimodal_process_engine(
                     model_config=self.model.model_config,
                     engine_config=engine_config,
                     vit_config=self.model.vit_config,
-                    device=f"cuda:{engine_config.parallelism_config.local_rank}",
+                    device=os.environ.get(
+                        "MULTIMODAL_ENGINE_DEVICE",
+                        f"cuda:{engine_config.parallelism_config.local_rank}",
+                    ),
                 )
             )
         self.rtp_llm_op_ = RtpLLMOp(
