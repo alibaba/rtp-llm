@@ -469,6 +469,14 @@ def combine_kv(shared, globals_by_req, swa):
     # reserve.  The copy also converts any FP32 fallback rows correctly.
     g_rows = g.shape[0]
     total_rows = g_rows + sw.shape[0]
+    # Drop dead scratch before carving the one large contiguous KV block.
+    import gc
+
+    gc.collect()
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
     output = torch.empty(
         (total_rows, *g.shape[1:]), dtype=torch.bfloat16, device=g.device
     )
