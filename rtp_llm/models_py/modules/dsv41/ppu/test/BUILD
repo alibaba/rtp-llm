@@ -9,6 +9,7 @@ filegroup(
         "test_ptpc_norm_quant.py",
         "test_ptpc_prefill_out.py",
         "test_ptpc_prefill_reuse.py",
+        "test_ptpc_woa_direct.py",
         "test_ptpc_prepared.py",
         "test_ptpc_input_reuse.py",
         "ptpc_microbench.py",

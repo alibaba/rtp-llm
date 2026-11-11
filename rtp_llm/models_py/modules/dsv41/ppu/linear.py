@@ -25,6 +25,8 @@ cleanly on a CPU host with no accelerator wheels installed.
 
 from __future__ import annotations
 
+import importlib
+import os
 from typing import Optional
 
 import torch
@@ -46,6 +48,28 @@ __all__ = [
 ]
 
 FP8_BLOCK_SIZE = 32  # UE8M0 scale block for dense V4.1 weights (32 x 32)
+PTPC_WOA_DIRECT_ENV = "RTP_V41_PPU_PTPC_WOA_DIRECT"
+
+
+def ptpc_woa_direct_enabled():
+    """Opt in to the prepacked provider while its device gate is qualified."""
+    return os.environ.get(PTPC_WOA_DIRECT_ENV, "0") == "1"
+
+
+def _load_direct_woa_gemm():
+    """Resolve the existing Python JIT consumer before any activation work."""
+    try:
+        module = importlib.import_module("deep_gemm.jit_kernels.einsum")
+    except ImportError:
+        return None
+    operation = getattr(module, "fp8_bmm", None)
+    if not callable(operation):
+        return None
+    from rtp_llm.models_py.kernels.ppu.runtime import install_deep_gemm_build_lock
+
+    # This also patches tuner.build, imported by value by the Python JIT.
+    install_deep_gemm_build_lock()
+    return operation
 
 
 class PPUPTPCLinear:
@@ -64,6 +88,7 @@ class PPUPTPCLinear:
         self._groups = None
         self._gemm = None
         self._group_gemm = None
+        self._group_direct_gemm = None
         if weight.is_cuda:
             from rtp_llm.models_py.kernels.ppu.runtime import install_deep_gemm_build_lock, require_symbol
 
@@ -74,6 +99,7 @@ class PPUPTPCLinear:
         if groups <= 0 or rank <= 0 or self.weight.shape[0] != groups * rank:
             raise ValueError("grouped PTPC wo_a rows disagree with model geometry")
         self._group_gemm = None
+        self._group_direct_gemm = None
         self._groups = tuple(
             PPUPTPCLinear(self.weight[i * rank:(i + 1) * rank], self.scale[i * rank:(i + 1) * rank])
             for i in range(groups)
@@ -85,10 +111,11 @@ class PPUPTPCLinear:
             # These are views of the existing resident weight and scale.
             if (groups, rank, self.weight.shape[1]) == (8, 1024, 4096):
                 self._group_gemm = getattr(deep_gemm, "fp8_einsum", None)
+                self._group_direct_gemm = _load_direct_woa_gemm()
             self._group_weight = self.weight.view(groups, rank, self.weight.shape[1])
             self._group_scale = self.scale.view(groups, rank, 1)
 
-    def forward_grouped(self, x):
+    def forward_grouped(self, x, *, prefill=False):
         if self._groups is None or x.ndim != 3 or x.shape[1] != len(self._groups):
             raise ValueError("PTPC grouped projection must be prepared before forward")
         if x.shape[-1] != self.weight.shape[1] or x.device != self.weight.device:
@@ -98,6 +125,15 @@ class PPUPTPCLinear:
             rank = self._groups[0].weight.shape[0]
             if rows == 0:
                 return torch.empty((0, groups, rank), dtype=torch.bfloat16, device=x.device)
+            if prefill and ptpc_woa_direct_enabled() and self._group_direct_gemm is not None:
+                # Quantize straight into HBR/HB1. The existing per-channel BMM
+                # writes BHD directly, so neither input nor output is permuted.
+                payload, scale = quantize_ptpc_grouped_activation(x)
+                output = torch.empty((rows, groups, rank), dtype=torch.bfloat16, device=x.device)
+                self._group_direct_gemm(
+                    payload, scale, self._group_weight, self._group_scale, output,
+                )
+                return output
             if self._group_gemm is not None:
                 payload, scale = quantize_ptpc_activation(x)
                 output = torch.empty((rows, groups, rank), dtype=torch.bfloat16, device=x.device)
