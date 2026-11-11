@@ -4,6 +4,8 @@
 #include <thread>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionForget.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
 
 namespace rtp_llm {
@@ -34,6 +36,15 @@ BackendHandle makeRegistryBackend(const BackendEnvironment& environment,
 RegistryState registryState(const KVCMStorageBackend& backend, const std::string& trace_id) {
     const auto& registry = backend.taskRegistry();
     return registry.query(registry.epoch(), std::vector<std::string>{trace_id}).front();
+}
+
+TransferCompletionCleanup::Summary drainLocalCleanup(TransferCompletionCleanup& cleanup, KVCMStorageBackend& backend) {
+    TransferCompletionForget forget(nullptr, [&](const TransferExecutionTrace& trace) {
+        return backend.forgetReadCompletion(std::get<std::string>(trace));
+    });
+    return cleanup.drain([&](const auto& target, const auto& traces, int timeout_ms) {
+        return forget.forget(target, traces, timeout_ms);
+    }, 2000);
 }
 
 RemoteOperationRequestPB readRequest(const BackendEnvironment& environment, const std::string& trace_id) {
@@ -142,6 +153,8 @@ TEST(KVCMWorkerRegistryTest, LocalAdmissionRejectionDoesNotFreezeOrCompleteOrigi
         EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _)).WillOnce(Return(false));
         auto backend = makeBackend(environment, singleRankConfig(), client);
         ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+        auto cleanup = std::make_shared<TransferCompletionCleanup>();
+        backend->setCompletionCleanup(cleanup);
         // Occupy the identity that the first coordinated READ will generate.
         const auto original = readRequest(environment, "block_tree_read_1");
         RemoteOperationResponsePB response;
@@ -166,6 +179,18 @@ TEST(KVCMWorkerRegistryTest, LocalAdmissionRejectionDoesNotFreezeOrCompleteOrigi
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references);
         EXPECT_EQ(backend->taskRegistry().size(), 1u);
         EXPECT_EQ(registryState(*backend.backend, original.trace_id()), RegistryState::RUNNING);
+        ASSERT_EQ(cleanup->size(), 1u);
+        EXPECT_EQ(drainLocalCleanup(*cleanup, *backend.backend).forgotten, 0u);
+        EXPECT_EQ(cleanup->size(), 1u);
+        EXPECT_EQ(registryState(*backend.backend, original.trace_id()), RegistryState::RUNNING);
+        // Inject a later safety proof for the original execution; the rejected
+        // duplicate itself must never publish that proof or remove RUNNING.
+        auto& registry = const_cast<TransferTaskRegistry&>(backend->taskRegistry());
+        ASSERT_TRUE(registry.finish(original.trace_id(), true));
+        EXPECT_EQ(drainLocalCleanup(*cleanup, *backend.backend).forgotten, 1u);
+        EXPECT_EQ(cleanup->size(), 0u);
+        EXPECT_EQ(backend->taskRegistry().size(), 0u);
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references);
     }
 }
 
@@ -240,6 +265,8 @@ TEST(KVCMWorkerRegistryTest, LocalAsyncQueuePreservesReadOwnersForRejectionAndEx
     EXPECT_CALL(*client, shutdown()).Times(1);
     auto backend = makeRegistryBackend(environment, client);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+    auto cleanup = std::make_shared<TransferCompletionCleanup>();
+    backend->setCompletionCleanup(cleanup);
     const kv_cache_manager::Locations locations{{{"tp0_Fdefault", "pace://registry"}}};
     EXPECT_CALL(*client, match(_, _, _, _, _, _)).Times(3).WillRepeatedly(Return(std::make_pair(true, locations)));
     std::vector<std::shared_ptr<StorageBackendMatchMeta>> matches;
@@ -282,6 +309,7 @@ TEST(KVCMWorkerRegistryTest, LocalAsyncQueuePreservesReadOwnersForRejectionAndEx
     EXPECT_EQ(registryState(*backend.backend, "block_tree_read_2"), RegistryState::RUNNING);
     auto rejected = start_read(2, std::chrono::seconds(30));
     EXPECT_FALSE(await(rejected).ok());
+    EXPECT_EQ(cleanup->size(), 1u);
     EXPECT_EQ(registryState(*backend.backend, "block_tree_read_1"), RegistryState::RUNNING);
     EXPECT_EQ(registryState(*backend.backend, "block_tree_read_2"), RegistryState::RUNNING);
     EXPECT_EQ(registryState(*backend.backend, "block_tree_read_3"), RegistryState::BUFFER_SAFE);
@@ -294,6 +322,10 @@ TEST(KVCMWorkerRegistryTest, LocalAsyncQueuePreservesReadOwnersForRejectionAndEx
     EXPECT_EQ(registryState(*backend.backend, "block_tree_read_2"), RegistryState::BUFFER_SAFE);
     EXPECT_EQ(backend->taskRegistry().size(), 3u);
     EXPECT_TRUE(backend->frozenTasks().empty());
+    EXPECT_EQ(cleanup->size(), 3u);
+    EXPECT_EQ(drainLocalCleanup(*cleanup, *backend.backend).forgotten, 3u);
+    EXPECT_EQ(cleanup->size(), 0u);
+    EXPECT_EQ(backend->taskRegistry().size(), 0u);
 }
 
 TEST(KVCMWorkerRegistryTest, WarningThresholdNeverCapsReadAdmissionOrDeletesEvidence) {

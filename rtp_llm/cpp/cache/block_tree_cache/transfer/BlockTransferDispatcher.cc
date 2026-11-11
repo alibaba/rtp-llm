@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -43,6 +44,14 @@ struct BlockTransferDispatcher::CoordinatedExecution {
                          TransferDoneCallback           done):
         owner(owner), execution(std::move(execution)), done(std::move(done)) {
         prepared_slot.emplace_back();
+        if (this->execution.operation != "store" && owner->completion_cleanup_) {
+            TransferCompletionTarget target;
+            target.remote = this->execution.remote;
+            target.peers.reserve(this->execution.expected_peers.size());
+            for (const auto& peer : this->execution.expected_peers)
+                target.peers.push_back({peer.rank, peer.address});
+            cleanup = owner->completion_cleanup_->prepare(std::move(target), this->execution.trace_id);
+        }
     }
 
     void complete(TransferResult result) {
@@ -75,7 +84,8 @@ struct BlockTransferDispatcher::CoordinatedExecution {
                 // All allocation/validation precedes the first frozen hold. If
                 // preparation fails, never turn an unprotected UNKNOWN into a
                 // business failure that would release the ordinary references.
-                auto frozen = std::make_shared<FrozenTask>(FrozenTask::prepare(std::move(execution)), result);
+                auto frozen = std::make_shared<FrozenTask>(
+                    FrozenTask::prepare(std::move(execution)), result, std::move(cleanup));
                 prepared_slot.front() = frozen;
                 frozen->freeze();
                 owner->retainFrozenTask(prepared_slot);
@@ -84,6 +94,10 @@ struct BlockTransferDispatcher::CoordinatedExecution {
                 } catch (...) {
                     // Diagnostics are best-effort after protection is established.
                 }
+            } else {
+                // A known failure can receive its physical proof later. Queue
+                // its identity now; worker forget retains RUNNING evidence.
+                cleanup.submit();
             }
         } catch (...) {
             std::terminate();
@@ -97,6 +111,7 @@ struct BlockTransferDispatcher::CoordinatedExecution {
     const BlockTransferDispatcher*                owner;
     FrozenTask::ExecutionInfo                      execution;
     TransferDoneCallback                          done;
+    TransferCompletionCleanup::Prepared           cleanup;
     std::list<std::shared_ptr<FrozenTask>>         prepared_slot;
     std::atomic<bool>                             claimed{false};
 };
@@ -293,8 +308,12 @@ void BlockTransferDispatcher::submitCoordinated(TransferTask task,
     } catch (...) {
         if (execution->claimed.load(std::memory_order_acquire))
             return;
-        if (!context)
+        if (!context) {
+            // The outer batch still owns error classification and settlement.
+            // Preserve this B's cleanup candidate even without a returned context.
+            execution->cleanup.submit();
             throw;
+        }
         try {
             if (context && context->done()) {
                 execution->complete(context->result());

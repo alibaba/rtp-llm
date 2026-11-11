@@ -121,12 +121,14 @@ FrozenTask::PreparedExecution FrozenTask::prepare(ExecutionInfo execution) {
     return PreparedExecution(std::move(execution), std::move(targets), target_block_count);
 }
 
-FrozenTask::FrozenTask(PreparedExecution&& prepared, TransferResult failure):
+FrozenTask::FrozenTask(PreparedExecution&& prepared, TransferResult failure,
+                       TransferCompletionCleanup::Prepared cleanup):
     execution_(std::move(prepared.execution_)),
     targets_(std::move(prepared.targets_)),
     failure_(std::move(failure)),
     target_block_count_(prepared.target_block_count_),
-    created_at_us_(wallTimeUs()) {
+    created_at_us_(wallTimeUs()),
+    cleanup_(std::move(cleanup)) {
     RTP_LLM_CHECK_WITH_INFO(failure_.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN,
                             "only completion-unknown executions can create a frozen task");
     RTP_LLM_CHECK_WITH_INFO(!failure_.execution_diagnostics
@@ -169,6 +171,9 @@ bool FrozenTask::unfreeze() noexcept {
     for (const auto& target : targets_) {
         target.release();
     }
+    // Cleanup can forget only worker evidence. Transfer its preallocated node
+    // after every physical release, without holding task or pool locks.
+    cleanup_.submit();
     {
         std::lock_guard<std::mutex> lock(mutex_);
         released_at_us_ = wallTimeUs();

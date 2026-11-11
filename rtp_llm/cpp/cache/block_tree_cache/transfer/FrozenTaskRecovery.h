@@ -15,12 +15,13 @@
 
 namespace rtp_llm {
 
-// Explicit recovery passes, with an optional background worker. Recovery never
-// removes records or changes the original business failure.
+// Explicit recovery passes, with an optional background worker and completion
+// cleanup phase. Neither phase changes the original business failure.
 class FrozenTaskRecovery {
 public:
     using TaskSource = std::function<std::vector<std::shared_ptr<FrozenTask>>()>;
     using Query = std::function<TransferCompletionQueryResult(const FrozenTask::ExecutionInfo&, int)>;
+    using Cleanup = std::function<void(int, const std::function<bool()>&)>;
 
     struct Summary {
         size_t inspected{0};
@@ -32,9 +33,10 @@ public:
         bool   stopped{false};
         bool   invalid_timeout{false};
         bool   source_failed{false};
+        bool   cleanup_failed{false};
     };
 
-    FrozenTaskRecovery(TaskSource source, Query query);
+    FrozenTaskRecovery(TaskSource source, Query query, Cleanup cleanup = {});
     ~FrozenTaskRecovery();
 
     // The owner serializes start/stop/destruction outside the recovery thread.
@@ -60,6 +62,7 @@ private:
 
     TaskSource source_;
     Query      query_;
+    Cleanup    cleanup_;
     std::atomic<bool> running_{false};
     // Accessed only by the successful running_ claimant.
     std::chrono::steady_clock::time_point next_pending_log_{};

@@ -7,10 +7,12 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskRecovery.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionQuery.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
 
 namespace rtp_llm {
 namespace {
@@ -176,6 +178,71 @@ FunctionRequestPB payloadRequest(const BackendEnvironment& environment, const st
     payload->add_block_ids(environment.block_id);
     payload->add_uris("pace://query-payload");
     return request;
+}
+
+template<typename Code>
+std::vector<Code> safeReadCompletionCodes() {
+    std::vector<Code> codes{Code::ER_OK};
+    if constexpr (kvcm::detail::HasExplicitBufferSafeCodes<Code>::value) {
+        codes.push_back(Code::ER_SDK_ERROR_BUFFER_SAFE);
+    }
+    return codes;
+}
+
+TEST(KVCMCompletionQueryTest, LocalReadSettlementQueuesCleanupForSuccessAndSafeFailure) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    for (const bool asynchronous : {false, true}) {
+        for (const auto code : safeReadCompletionCodes<kv_cache_manager::ClientErrorCode>()) {
+            SCOPED_TRACE(::testing::PrintToString(std::make_pair(asynchronous, code)));
+            auto worker = std::make_shared<QueryWorker>();
+            ASSERT_TRUE(worker->init());
+            auto cleanup = std::make_shared<TransferCompletionCleanup>();
+            worker->backend->setCompletionCleanup(cleanup);
+            worker->client->load_status = code;
+            EXPECT_CALL(*worker->client, loadKvCachesForTag(_, _, _, _)).Times(0);
+            const kv_cache_manager::Locations locations{{{"tp0_Fdefault", "pace://cleanup-local"}}};
+            EXPECT_CALL(*worker->client, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
+            const auto& environment = *worker->environment;
+            const auto references = environment.device_pool->refCount(environment.block_id);
+            auto matched = match(*worker->backend, makeStorageRequest(environment));
+            ASSERT_TRUE(matched.success);
+            EXPECT_EQ(cleanup->size(), 0u);
+            EXPECT_EQ(worker->backend->taskRegistry().size(), 0u);
+            auto request = makeStorageRequest(environment);
+            const bool success = code == kv_cache_manager::ClientErrorCode::ER_OK;
+            if (asynchronous) {
+                EXPECT_EQ(readResult(*worker->backend, std::move(request), std::move(matched.match_meta)).ok(), success);
+                ASSERT_TRUE(waitForBackendOperationsForTest(*worker->backend));
+            } else {
+                request.transfer_task.emplace(std::vector<TransferDescriptor>{}, 30s);
+                if (success) {
+                    EXPECT_NO_THROW(worker->backend->readImpl(request, matched.match_meta));
+                } else {
+                    EXPECT_THROW(worker->backend->readImpl(request, matched.match_meta), StorageOperationBufferSafeFailure);
+                }
+            }
+            EXPECT_TRUE(worker->manager->frozenTasks().empty());
+            EXPECT_EQ(worker->backend->taskRegistry().queryLocal(std::vector<std::string>{"block_tree_read_1"}).front(),
+                      RegistryState::BUFFER_SAFE);
+            ASSERT_EQ(cleanup->size(), 1u);
+            size_t forget_calls = 0;
+            auto forget = [&](const auto& target, const auto& traces, int timeout_ms) {
+                ++forget_calls;
+                EXPECT_FALSE(target.remote);
+                EXPECT_EQ(target.peers.size(), 1u);
+                EXPECT_EQ(traces.size(), 1u);
+                return worker->manager->forgetTransferCompletion(target, traces, timeout_ms);
+            };
+            EXPECT_EQ(cleanup->drain(forget, 2000).forgotten, 1u);
+            EXPECT_EQ(cleanup->size(), 0u);
+            EXPECT_EQ(worker->backend->taskRegistry().size(), 0u);
+            EXPECT_EQ(cleanup->drain(forget, 2000).attempted, 0u);
+            EXPECT_EQ(forget_calls, 1u);
+            EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+            EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references);
+        }
+    }
 }
 
 TEST(KVCMCompletionQueryTest, QueryNamespacesStaySeparateAndObserveReadCompletionWithoutSdkCalls) {
@@ -408,8 +475,8 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
             const bool released = gate->enterAndWait();
             EXPECT_TRUE(released);
             return released;
-        }));
-    EXPECT_CALL(*worker1->client, loadKvCachesForTag(_, _, _, _)).WillOnce(Return(true));
+        })).WillOnce(Return(true));
+    EXPECT_CALL(*worker1->client, loadKvCachesForTag(_, _, _, _)).Times(2).WillRepeatedly(Return(true));
 
     auto environment = makeBackendEnvironment("kvcm_query_coordinator");
     auto client = std::make_shared<MockClientWrapper>();
@@ -423,9 +490,14 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
     ASSERT_TRUE(initSingleRank(*backend, environment));
     auto coordinator = makeQueryManager(environment, backend, parallel, broadcast);
     ASSERT_NE(coordinator, nullptr);
+    auto cleanup = std::make_shared<TransferCompletionCleanup>();
+    backend->setCompletionCleanup(cleanup);
+    auto forget = [coordinator](const auto& target, const auto& traces, int timeout_ms) {
+        return coordinator->forgetTransferCompletion(target, traces, timeout_ms);
+    };
     const kv_cache_manager::Locations locations{{{"tp0_Fdefault", "pace://rank-0"},
                                                  {"tp1_Fdefault", "pace://rank-1"}}};
-    EXPECT_CALL(*client, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
+    EXPECT_CALL(*client, match(_, _, _, _, _, _)).Times(2).WillRepeatedly(Return(std::make_pair(true, locations)));
     auto matched = match(*backend, makeStorageRequest(environment));
     ASSERT_TRUE(matched.success);
     auto request = makeStorageRequest(environment);
@@ -463,6 +535,8 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
     const auto running_forget = forget_rank_zero();
     ASSERT_EQ(running_forget.completion_forget().entries_size(), 1);
     EXPECT_EQ(running_forget.completion_forget().entries(0).status(), TRANSFER_FORGET_RUNNING);
+    EXPECT_EQ(cleanup->size(), 0u);
+    EXPECT_EQ(cleanup->drain(forget, 2000).attempted, 0u);
     EXPECT_EQ(record->snapshot().state, FrozenTask::State::FROZEN);
     EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references);
@@ -492,12 +566,14 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references);
         EXPECT_EQ(record->debugString(), before_query);
         EXPECT_EQ(coordinator->frozenTasks().size(), 1u);
+        EXPECT_EQ(cleanup->size(), 0u);
         const auto recovered = recovery.runOnce(2000);
         EXPECT_EQ(recovered.queried, 1u);
         EXPECT_EQ(recovered.released, completed ? 1u : 0u);
         EXPECT_EQ(record->snapshot().state, completed ? FrozenTask::State::RELEASED : FrozenTask::State::FROZEN);
         EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), !completed);
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references - (completed ? 1u : 0u));
+        EXPECT_EQ(cleanup->size(), completed ? 1u : 0u);
     }
     EXPECT_EQ(record->failure().status.ToString(), failure_message);
     EXPECT_FALSE(record->failure().buffer_safe);
@@ -533,6 +609,10 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
     EXPECT_EQ(partial.ranks[0].state, RegistryState::UNKNOWN);
     EXPECT_EQ(partial.ranks[1].state, RegistryState::BUFFER_SAFE);
     EXPECT_FALSE(partial.all_safe);
+    // The preallocated token moved through FrozenTask. One rank already
+    // deleted its record; the queued retry still confirms the full target.
+    EXPECT_EQ(cleanup->drain(forget, 2000).forgotten, 1u);
+    EXPECT_EQ(cleanup->size(), 0u);
 
     TransferCompletionTarget target;
     target.remote = true;
@@ -563,6 +643,22 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
         EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references - 1);
     }
+    auto normal_match = match(*backend, makeStorageRequest(environment));
+    ASSERT_TRUE(normal_match.success);
+    EXPECT_TRUE(readResult(*backend, makeStorageRequest(environment), std::move(normal_match.match_meta)).ok());
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend));
+    EXPECT_TRUE(coordinator->frozenTasks().empty());
+    EXPECT_EQ(cleanup->size(), 1u);
+    for (const auto& worker : {worker0, worker1}) {
+        EXPECT_EQ(worker->backend->taskRegistry().queryLocal(std::vector<std::string>{"block_tree_read_2"}).front(),
+                  RegistryState::BUFFER_SAFE);
+    }
+    EXPECT_EQ(cleanup->drain(forget, 2000).forgotten, 1u);
+    EXPECT_EQ(cleanup->size(), 0u);
+    EXPECT_EQ(worker0->backend->taskRegistry().size(), 0u);
+    EXPECT_EQ(worker1->backend->taskRegistry().size(), 0u);
+    EXPECT_EQ(record->debugString(), released_debug);
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references - 1);
 }
 
 TEST(KVCMCompletionQueryTest, LocalSdkFailuresRecoverOnlyProvenHoldsOnSharedTargets) {
@@ -669,6 +765,8 @@ TEST(KVCMCompletionQueryTest, BackgroundRecoveryWaitsForProofAndStopKeepsLatePro
         recovery_config.block_tree_frozen_recovery_query_timeout_ms = 1000;
         auto coordinator = makeQueryManager(environment, backend, parallel, broadcast, recovery_config);
         ASSERT_NE(coordinator, nullptr);
+        coordinator->completion_cleanup_ = std::make_shared<TransferCompletionCleanup>();
+        backend->setCompletionCleanup(coordinator->completion_cleanup_);
         ASSERT_TRUE(coordinator->startFrozenTaskRecovery());
         block_tree_cache_detail::ScopeRollback stop([coordinator] { coordinator->stopFrozenTaskRecovery(); });
 
@@ -706,6 +804,7 @@ TEST(KVCMCompletionQueryTest, BackgroundRecoveryWaitsForProofAndStopKeepsLatePro
         EXPECT_EQ(pending.last_query->ranks[1].state, RegistryState::BUFFER_SAFE);
         EXPECT_EQ(record->snapshot().state, FrozenTask::State::FROZEN);
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), original_references + 1);
+        EXPECT_EQ(coordinator->completion_cleanup_->size(), 0u);
 
         if (stop_before_safe)
             coordinator->stopFrozenTaskRecovery();
@@ -720,6 +819,11 @@ TEST(KVCMCompletionQueryTest, BackgroundRecoveryWaitsForProofAndStopKeepsLatePro
             EXPECT_EQ(environment.device_pool->refCount(environment.block_id), original_references + 1);
         } else {
             ASSERT_TRUE(waitUntil([record] { return record->snapshot().state == FrozenTask::State::RELEASED; }));
+            ASSERT_TRUE(waitUntil([worker0, worker1, coordinator] {
+                return worker0->backend->taskRegistry().size() == 0
+                       && worker1->backend->taskRegistry().size() == 0
+                       && coordinator->completion_cleanup_->size() == 0;
+            }));
             coordinator->stopFrozenTaskRecovery();
             EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
             EXPECT_EQ(environment.device_pool->refCount(environment.block_id), original_references);
@@ -735,10 +839,10 @@ TEST(KVCMCompletionQueryTest, BackgroundRecoveryWaitsForProofAndStopKeepsLatePro
             EXPECT_EQ(diagnostics->ranks[rank].buffer_safe, failed_ranks[rank].buffer_safe);
         }
         for (const auto& worker : {worker0, worker1}) {
-            EXPECT_EQ(worker->backend->taskRegistry().size(), 1u);
+            EXPECT_EQ(worker->backend->taskRegistry().size(), stop_before_safe ? 1u : 0u);
             EXPECT_EQ(worker->backend->taskRegistry().queryLocal(
                           std::vector<std::string>{std::get<std::string>(record->execution().trace_id)}).front(),
-                      RegistryState::BUFFER_SAFE);
+                      stop_before_safe ? RegistryState::BUFFER_SAFE : RegistryState::UNKNOWN);
         }
     }
 }

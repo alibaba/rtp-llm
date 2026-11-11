@@ -21,6 +21,7 @@ class MetricsReporter;
 namespace rtp_llm {
 
 class BroadcastManager;
+class TransferCompletionCleanup;
 namespace kvcm {
 class ClientWrapper;
 }
@@ -60,6 +61,8 @@ public:
     const TransferTaskRegistry& taskRegistry() const;
     // Removes only completed READ evidence. Running executions remain queryable.
     TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string& trace_id);
+    // Configure before serving READ requests; cleanup does not own their buffers.
+    void setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup);
     // Retained non-protected READ targets; enumeration removes only RELEASED
     // records. It never queries completion or releases frozen references.
     std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;

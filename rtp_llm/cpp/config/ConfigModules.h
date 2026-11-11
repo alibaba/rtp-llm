@@ -196,8 +196,8 @@ struct KVCacheConfig {
     int64_t block_tree_transfer_worker_count             = 1;
     int64_t block_tree_business_queue_max_size           = 10000;
     int64_t block_tree_transfer_queue_max_size           = 10000;
-    // Coordinator recovery polling; interval zero disables the thread.
-    // Query timeout is positive, and both durations must fit int milliseconds.
+    // Coordinator recovery and completion cleanup; interval zero pauses both.
+    // Query/forget timeout is positive; both durations must fit int milliseconds.
     int64_t block_tree_frozen_recovery_interval_ms       = 1000;
     int64_t block_tree_frozen_recovery_query_timeout_ms  = 1000;
     double  block_pool_frozen_abort_lower_ratio          = kDefaultBlockPoolFrozenAbortLowerRatio;

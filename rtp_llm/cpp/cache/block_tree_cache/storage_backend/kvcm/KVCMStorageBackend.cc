@@ -44,6 +44,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DtopOriginMetadata.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/WorkerPayloadProof.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBufferSafety.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -130,8 +131,10 @@ public:
     }
 
     struct CoordinatedRead {
-        CoordinatedRead(Impl* owner, FrozenTask::ExecutionInfo execution):
-            owner(owner), execution(std::move(execution)), diagnostics(std::make_shared<TransferExecutionDiagnostics>()) {
+        CoordinatedRead(Impl* owner, FrozenTask::ExecutionInfo execution,
+                        TransferCompletionCleanup::Prepared cleanup):
+            owner(owner), execution(std::move(execution)), diagnostics(std::make_shared<TransferExecutionDiagnostics>()),
+            cleanup(std::move(cleanup)) {
             prepared_slot.emplace_back();
             diagnostics->trace_id = this->execution.trace_id;
             for (const auto& peer : this->execution.expected_peers) {
@@ -141,6 +144,18 @@ public:
                 rank.remote = this->execution.remote;
                 diagnostics->ranks.push_back(std::move(rank));
             }
+        }
+
+        void finalizeForForget() noexcept {
+            TransferCompletionCleanup::Prepared ready;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (marked_failure) {
+                    return;
+                }
+                ready = std::move(cleanup);
+            }
+            ready.submit();
         }
 
         static void observeResponse(TransferRankSnapshot& rank, const RemoteOperationResponsePB& response) noexcept {
@@ -197,7 +212,8 @@ public:
                     rtp_llm::TransferResult result(
                         ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, error.what()));
                     result.execution_diagnostics = diagnostics;
-                    auto frozen = std::make_shared<FrozenTask>(FrozenTask::prepare(std::move(execution)), std::move(result));
+                    auto frozen = std::make_shared<FrozenTask>(FrozenTask::prepare(std::move(execution)),
+                                                               std::move(result), std::move(cleanup));
                     prepared_slot.front() = frozen;
                     // All ownership nodes, snapshots and the propagated exception
                     // are ready before acquiring the first frozen reference.
@@ -222,6 +238,7 @@ public:
         std::list<std::shared_ptr<FrozenTask>> prepared_slot;
         std::mutex mutex;
         std::exception_ptr marked_failure;
+        TransferCompletionCleanup::Prepared cleanup;
     };
     using CoordinatedReadPtr = std::shared_ptr<CoordinatedRead>;
 
@@ -268,7 +285,16 @@ public:
             }
             RTP_LLM_CHECK(block_index == static_cast<size_t>(remote.block_ids_size()));
         }
-        return std::make_shared<CoordinatedRead>(this, std::move(execution));
+        TransferCompletionCleanup::Prepared cleanup;
+        if (completion_cleanup_) {
+            TransferCompletionTarget target;
+            target.remote = execution.remote;
+            for (const auto& peer : execution.expected_peers) {
+                target.peers.push_back({peer.rank, peer.address});
+            }
+            cleanup = completion_cleanup_->prepare(std::move(target), execution.trace_id);
+        }
+        return std::make_shared<CoordinatedRead>(this, std::move(execution), std::move(cleanup));
     }
 
     void retainFrozenTask(std::list<std::shared_ptr<FrozenTask>>& prepared_slot) noexcept {
@@ -947,6 +973,8 @@ public:
                         meta->decode_sources.reset();
                         collector.remote_read_token_num = static_cast<int64_t>(tokens);
                         collector.remote_read_fail_qps  = false;
+                        if (coordinated)
+                            coordinated->finalizeForForget();
                     } catch (...) {
                         rethrowReadPayloadFailure(unknown, coordinated);
                     }
@@ -1031,6 +1059,8 @@ public:
             static_cast<int64_t>(remote_blocks * topology_->groups().front().cacheKeyTokenStride());
         collector.remote_read_fail_qps = false;
         read_outcome                   = "read_complete";
+        if (coordinated)
+            coordinated->finalizeForForget();
     }
 
     struct WritePublication {
@@ -1073,6 +1103,10 @@ public:
 
     [[noreturn]] void rethrowReadPayloadFailure(bool source_may_be_touched,
                                                const CoordinatedReadPtr& coordinated) const {
+        block_tree_cache_detail::ScopeRollback finalize([&] {
+            if (coordinated)
+                coordinated->finalizeForForget();
+        });
         try {
             rethrowPayloadFailure(source_may_be_touched);
         } catch (const StorageOperationCompletionUnknown&) {
@@ -1574,6 +1608,10 @@ public:
 
     const TransferTaskRegistry& taskRegistry() const {
         return *read_registry_;
+    }
+
+    void setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup) {
+        completion_cleanup_ = std::move(cleanup);
     }
 
     TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string& trace_id) {
@@ -2850,6 +2888,7 @@ private:
     SpeculativeExecutionConfig           sp_config_;
     std::shared_ptr<BroadcastManager>                    broadcast_manager_;
     std::shared_ptr<TransferTaskRegistry>                 read_registry_{std::make_shared<TransferTaskRegistry>()};
+    std::shared_ptr<TransferCompletionCleanup>            completion_cleanup_;
     mutable std::atomic<size_t>                           next_registry_warning_{4096};
     mutable std::mutex                                   frozen_mutex_;
     mutable std::list<std::shared_ptr<FrozenTask>>        frozen_tasks_;
@@ -3038,6 +3077,10 @@ const TransferTaskRegistry& KVCMStorageBackend::taskRegistry() const {
 
 TransferTaskRegistry::ForgetResult KVCMStorageBackend::forgetReadCompletion(const std::string& trace_id) {
     return impl_->forgetReadCompletion(trace_id);
+}
+
+void KVCMStorageBackend::setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup) {
+    impl_->setCompletionCleanup(std::move(cleanup));
 }
 
 std::vector<std::shared_ptr<FrozenTask>> KVCMStorageBackend::frozenTasks() const {

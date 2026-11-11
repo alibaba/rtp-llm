@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
@@ -105,7 +106,8 @@ public:
     // The caller retains ordinary ownership until freeze and retention finish.
     static PreparedExecution prepare(ExecutionInfo execution);
 
-    FrozenTask(PreparedExecution&& prepared, TransferResult failure);
+    FrozenTask(PreparedExecution&& prepared, TransferResult failure,
+               TransferCompletionCleanup::Prepared cleanup = {});
     ~FrozenTask() = default;
     FrozenTask(const FrozenTask&)            = delete;
     FrozenTask& operator=(const FrozenTask&) = delete;
@@ -138,6 +140,7 @@ private:
     const TransferResult          failure_;
     const size_t                  target_block_count_;
     const int64_t                 created_at_us_;
+    TransferCompletionCleanup::Prepared cleanup_;
     mutable std::mutex            mutex_;
     State                         state_{State::PREPARED};
     int64_t                       frozen_at_us_{0};

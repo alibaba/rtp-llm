@@ -108,8 +108,8 @@ void logReleased(const FrozenTask& task) noexcept {
 
 }  // namespace
 
-FrozenTaskRecovery::FrozenTaskRecovery(TaskSource source, Query query):
-    source_(std::move(source)), query_(std::move(query)) {}
+FrozenTaskRecovery::FrozenTaskRecovery(TaskSource source, Query query, Cleanup cleanup):
+    source_(std::move(source)), query_(std::move(query)), cleanup_(std::move(cleanup)) {}
 
 FrozenTaskRecovery::~FrozenTaskRecovery() {
     stop();
@@ -189,6 +189,17 @@ FrozenTaskRecovery::runOnce(int query_timeout_ms, const std::function<bool()>& s
     };
     if (stop())
         return summary;
+    // Cleanup owns only previously settled identities. A task released in this
+    // recovery pass becomes eligible for cleanup on a later pass.
+    if (cleanup_) {
+        try {
+            cleanup_(query_timeout_ms, should_stop);
+        } catch (...) {
+            summary.cleanup_failed = true;
+        }
+        if (stop())
+            return summary;
+    }
     std::vector<std::shared_ptr<FrozenTask>> tasks;
     try {
         tasks = source_();
@@ -246,7 +257,7 @@ FrozenTaskRecovery::runOnce(int query_timeout_ms, const std::function<bool()>& s
 }
 
 void FrozenTaskRecovery::logPending(const Summary& summary) noexcept {
-    if (summary.pending == 0 && summary.query_failed == 0 && !summary.source_failed)
+    if (summary.pending == 0 && summary.query_failed == 0 && !summary.source_failed && !summary.cleanup_failed)
         return;
     const auto now = std::chrono::steady_clock::now();
     if (now < next_pending_log_)
@@ -254,9 +265,10 @@ void FrozenTaskRecovery::logPending(const Summary& summary) noexcept {
     next_pending_log_ = now + std::chrono::seconds(60);
     try {
         RTP_LLM_LOG_INFO("FrozenTask recovery pending inspected=%zu queried=%zu released=%zu pending=%zu "
-                         "query_failed=%zu source_failed=%d",
+                         "query_failed=%zu source_failed=%d cleanup_failed=%d",
                          summary.inspected, summary.queried, summary.released, summary.pending,
-                         summary.query_failed, static_cast<int>(summary.source_failed));
+                         summary.query_failed, static_cast<int>(summary.source_failed),
+                         static_cast<int>(summary.cleanup_failed));
     } catch (...) {
     }
 }

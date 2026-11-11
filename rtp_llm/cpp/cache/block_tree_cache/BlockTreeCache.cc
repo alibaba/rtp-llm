@@ -144,6 +144,11 @@ TransferTaskRegistry::ForgetResult BlockTreeCache::forgetLocalTransferCompletion
                                   TransferTaskRegistry::ForgetResult::FAILED;
 }
 
+void BlockTreeCache::setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup) {
+    if (transfer_dispatcher_)
+        transfer_dispatcher_->setCompletionCleanup(std::move(cleanup));
+}
+
 TransferTaskRegistry::State BlockTreeCache::localTransferCompletion(uint64_t trace_id) const {
     if (!transfer_dispatcher_) {
         return TransferTaskRegistry::State::UNKNOWN;

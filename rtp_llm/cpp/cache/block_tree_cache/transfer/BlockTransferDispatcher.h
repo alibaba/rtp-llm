@@ -17,6 +17,7 @@ namespace rtp_llm {
 
 class MultiRankBlockTransferEngine;
 class PerRankBlockTransferEngine;
+class TransferCompletionCleanup;
 struct BlockTreeQueueSizes;
 
 class BlockTransferDispatcher {
@@ -64,6 +65,11 @@ public:
         return task_registry_->forget(trace_id);
     }
 
+    // Initialization only, before any coordinator execution can be submitted.
+    void setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup) {
+        completion_cleanup_ = std::move(cleanup);
+    }
+
 private:
     struct CompletionTicket;
     struct CoordinatedExecution;
@@ -95,6 +101,7 @@ private:
     mutable std::mutex                            frozen_mutex_;
     mutable std::list<std::shared_ptr<FrozenTask>> frozen_tasks_;
     std::shared_ptr<TransferTaskRegistry>          task_registry_{std::make_shared<TransferTaskRegistry>()};
+    std::shared_ptr<TransferCompletionCleanup>     completion_cleanup_;
     mutable std::atomic<size_t>                   next_registry_warning_{4096};
 };
 

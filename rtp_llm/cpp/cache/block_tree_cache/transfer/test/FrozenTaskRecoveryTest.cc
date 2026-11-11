@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskRecovery.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
 
 #include <algorithm>
 #include <atomic>
@@ -488,6 +489,84 @@ TEST(FrozenTaskRecoveryTest, DestructionJoinsSleepingWorkerBeforeReleasingCallba
     destroyed.get();
     EXPECT_TRUE(weak_dependency.expired());
     EXPECT_EQ(calls->load(), 1u);
+}
+
+TEST(FrozenTaskRecoveryTest, CleanupRunsBeforeRecoveryAndEitherPhaseMayFailIndependently) {
+    auto pool = makePool();
+    const auto block = hold(pool);
+    auto task = makeTask(uint64_t{81}, pool, block);
+    task->freeze();
+    std::vector<std::string> order;
+    bool source_fails = true;
+    bool cleanup_fails = false;
+    FrozenTaskRecovery recovery(
+        [&] {
+            order.push_back("source");
+            if (source_fails)
+                throw std::runtime_error("snapshot unavailable");
+            return std::vector<std::shared_ptr<FrozenTask>>{task};
+        },
+        [&](const auto& execution, int timeout) {
+            order.push_back("query");
+            EXPECT_EQ(timeout, 75);
+            return proof(execution);
+        },
+        [&](int timeout, const auto&) {
+            order.push_back("cleanup");
+            EXPECT_EQ(timeout, 75);
+            if (cleanup_fails)
+                throw std::runtime_error("cleanup unavailable");
+        });
+    auto first = recovery.runOnce(75);
+    EXPECT_TRUE(first.source_failed);
+    EXPECT_EQ(first.released, 0u);
+    EXPECT_EQ(order, (std::vector<std::string>{"cleanup", "source"}));
+    order.clear();
+    source_fails = false;
+    cleanup_fails = true;
+    auto second = recovery.runOnce(75);
+    EXPECT_TRUE(second.cleanup_failed);
+    EXPECT_EQ(second.released, 1u);
+    EXPECT_EQ(order, (std::vector<std::string>{"cleanup", "source", "query"}));
+    EXPECT_FALSE(pool->isFrozen(block));
+}
+
+TEST(FrozenTaskRecoveryTest, StopDuringForgetJoinsCurrentCallWithoutWaitingForPendingCleanup) {
+    auto cleanup = std::make_shared<TransferCompletionCleanup>();
+    cleanup->prepare({false, {{0, "local"}}}, uint64_t{82}).submit();
+    auto entered = std::make_shared<std::promise<void>>();
+    auto in_forget = entered->get_future();
+    auto release = std::make_shared<std::promise<void>>();
+    auto released = release->get_future().share();
+    auto calls = std::make_shared<std::atomic<size_t>>(0);
+    auto sources = std::make_shared<std::atomic<size_t>>(0);
+    auto recovery = std::make_shared<FrozenTaskRecovery>(
+        [sources] {
+            ++*sources;
+            return std::vector<std::shared_ptr<FrozenTask>>{};
+        }, FrozenTaskRecovery::Query{},
+        [cleanup, entered, released, calls](int timeout, const auto& stopped) {
+            cleanup->drain([entered, released, calls](const auto&, const auto&, int) {
+                ++*calls;
+                entered->set_value();
+                if (released.wait_for(5s) != std::future_status::ready)
+                    throw std::runtime_error("test forget gate timed out");
+                return TransferCompletionForgetResult{};
+            }, timeout, stopped);
+        });
+    ASSERT_TRUE(recovery->start(10, 1000));
+    ASSERT_EQ(in_forget.wait_for(2s), std::future_status::ready);
+    BoundedThread<void> stopped([recovery] { recovery->stop(); });
+    ASSERT_TRUE(waitForRecoveryCondition([&] { return recovery->stop_requested_.load(); }));
+    EXPECT_EQ(stopped.waitFor(20ms), std::future_status::timeout);
+    release->set_value();
+    ASSERT_EQ(stopped.waitFor(2s), std::future_status::ready);
+    stopped.get();
+    EXPECT_EQ(cleanup->size(), 1u);
+    EXPECT_EQ(calls->load(), 1u);
+    EXPECT_EQ(sources->load(), 0u);
+    recovery.reset();
+    EXPECT_EQ(cleanup->size(), 1u);
 }
 
 }  // namespace

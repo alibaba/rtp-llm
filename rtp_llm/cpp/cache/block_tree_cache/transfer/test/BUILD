@@ -46,7 +46,11 @@ cc_test(
         "//rtp_llm/cpp/cache/block_tree_cache/transfer/legacy:TransferExecutorTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils"],
+    deps = test_deps + [
+        ":block_transfer_engine_test_utils",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
+        "@grpc//:grpc++",
+    ],
     tags = ["L20_CU13"],
 )
 
@@ -199,6 +203,18 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         "//rtp_llm/cpp/cache/block_tree_cache:transfer_task_registry",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
+    ],
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "transfer_completion_cleanup_test",
+    testonly = True,
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = ["TransferCompletionCleanupTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
         "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
     ],
     tags = ["L20_CU13"],

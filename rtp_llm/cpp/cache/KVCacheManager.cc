@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskRecovery.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionForget.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
 #include <algorithm>
@@ -279,7 +280,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
 }
 
 KVCacheManager::~KVCacheManager() {
-    // Queries and capacity notifications must finish while the cache, RPC
+    // Queries, cleanup and capacity notifications must finish while the cache, RPC
     // manager and allocation wait state are still alive. Never join under a lock.
     stopFrozenTaskRecovery();
     {
@@ -377,6 +378,14 @@ bool KVCacheManager::init() {
         return false;
     }
     transfer_broadcast_manager_ = std::move(broadcast_manager);
+    if (parallelism_config_.tp_rank == 0) {
+        completion_cleanup_ = std::make_shared<TransferCompletionCleanup>();
+        block_tree_cache_->setCompletionCleanup(completion_cleanup_);
+#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
+        if (auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend()))
+            backend->setCompletionCleanup(completion_cleanup_);
+#endif
+    }
     coordinator_manager_->attachBlockTreeCache(block_tree_cache_);
     initCacheEventPublisher();
 
@@ -403,6 +412,14 @@ bool KVCacheManager::startFrozenTaskRecovery() {
             [this] { return frozenTasks(); },
             [this](const FrozenTask::ExecutionInfo& execution, int timeout_ms) {
                 return queryTransferCompletion(execution, timeout_ms);
+            },
+            [this](int timeout_ms, const std::function<bool()>& stopped) {
+                if (completion_cleanup_) {
+                    completion_cleanup_->drain(
+                        [this](const auto& target, const auto& traces, int timeout) {
+                            return forgetTransferCompletion(target, traces, timeout);
+                        }, timeout_ms, stopped);
+                }
             });
         if (!recovery->start(static_cast<int>(kv_cache_config_.block_tree_frozen_recovery_interval_ms),
                              static_cast<int>(kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms))) {
