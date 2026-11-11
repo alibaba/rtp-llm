@@ -164,6 +164,14 @@ class DelayedHCUnit(HCUnitBase):
         return y, post, comb
 
     def _post_impl(self, x, residual, post, comb):
+        # Diagnostic checkpoint: this frame is where the sticky capture error
+        # surfaces (first error-checked torch op); probe at entry to tell
+        # whether the illegal recording predates the HC post itself.
+        from rtp_llm.models_py.modules.dsv41._awi_capture_probe import (
+            probe as _awi_probe,
+        )
+
+        _awi_probe("hc_post")
         # TileLang mHC post kernel is CUDA-only; the torch path below is the
         # reference equivalent.
         if (

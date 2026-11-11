@@ -392,6 +392,9 @@ class Block(nn.Module):
         fixed-block attention this way instead of copying the block body.
         """
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+        from rtp_llm.models_py.modules.dsv41._awi_capture_probe import (
+            probe as _awi_probe,
+        )
 
         _dbg_layer = _rt.should_record_layer(self.layer_id)
         # Attention path
@@ -431,6 +434,7 @@ class Block(nn.Module):
             )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_out", attn_out)
+        _awi_probe(f"attn{self.layer_id}")
         moe_inputs = (
             self.ffn.prepare_mhc_inputs(attn_out)
             if not _dbg_layer and routing_metadata is None and type(self.ffn) is MoE
@@ -492,6 +496,7 @@ class Block(nn.Module):
             )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
+        _awi_probe(f"ffn{self.layer_id}")
         if _defer_ffn_post:
             from rtp_llm.models_py.modules.dsv41.hc.decode_transition import (
                 PendingDecodePost,

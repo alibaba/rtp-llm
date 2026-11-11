@@ -363,6 +363,11 @@ def forward_layers(
         h = prepare_hidden_fn(input_ids=input_ids, meta=attn_metadata)
     if _rt_on:
         _rt.record("decode_embed_hc_expanded", h)
+    from rtp_llm.models_py.modules.dsv41._awi_capture_probe import (
+        probe as _awi_probe,
+    )
+
+    _awi_probe("embed")
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     routing_metadata = prepare_model_gate_routing_metadata(v4, input_ids)
     layer_forward_range = _profiler.make_layer_forward_range()
@@ -397,6 +402,7 @@ def forward_layers(
                 )
                 if _rt_on:
                     _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
+                _awi_probe(f"lyr{layer.layer_id}")
     finally:
         prefetch.close()
     if v4._mtp_hidden_buffer is not None:

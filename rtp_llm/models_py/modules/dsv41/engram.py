@@ -1204,6 +1204,9 @@ class HostEngramEmbedding:
             and torch.cuda.is_current_stream_capturing()
         ):
             from rtp_llm.models_py.modules.dsv41 import _engram_triton
+            from rtp_llm.models_py.modules.dsv41._awi_capture_probe import (
+                probe as _awi_probe,
+            )
 
             dim = self.weight.shape[1]
             out = torch.zeros(
@@ -1215,6 +1218,7 @@ class HostEngramEmbedding:
                         self._uva[0], self._uva[1], indices, self._num_sms
                     )
                 )
+                _awi_probe("engram_lu")
             _, tp_world = _hip_engram_tp_layout()
             if tp_world > 1:
                 # Raw RCCL on the bootstrapped hipgraph comm - deliberately
@@ -1225,6 +1229,7 @@ class HostEngramEmbedding:
                 from rtp_llm.models_py.distributed import rocm_rccl
 
                 rocm_rccl.hipgraph_capture_all_reduce_rccl(out, None)
+                _awi_probe("engram_ar")
             return out
         # UVA device-side gather (CUDA): _PinnedSharedTable via
         # cuda.bindings. Without it, fall through to the host gather, which
