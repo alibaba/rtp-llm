@@ -49,7 +49,6 @@ sympy
 thrift
 tiktoken==0.7.0
 timm==0.9.12
-transformers==5.2.0
 typing-extensions
 uvicorn==0.30.0
 watchdog==6.0.0
