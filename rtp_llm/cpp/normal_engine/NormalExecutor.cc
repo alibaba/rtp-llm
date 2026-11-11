@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
+#include "rtp_llm/cpp/awi/AwiCollector.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -335,6 +336,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                 const auto role = is_propose_ ? ModelInputsModelRole::DRAFT : ModelInputsModelRole::NORMAL;
                 model_inputs_logger_->log(model_input, role, model_->model_id_);
             }
+            // AWI: count the real collective forward (tpSync makes the count
+            // identical on every rank) so the engine step hook can tell
+            // work-carrying steps from idle scheduler polls.
+            AwiCollector::instance().noteCollectiveForward();
             model_output = std::move(model_->forward(model_input));
             executor_collector.model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         }

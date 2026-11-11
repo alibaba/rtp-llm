@@ -55,11 +55,13 @@ public:
 private:
     // AWI adaptation-evaluator observations: emits per-request prefill/reuse/
     // decode events (rank 0, which owns the scheduled streams) and a per-step
-    // aggregate on every rank, measured on the synchronized step window.
+    // aggregate on every rank that carried collective work, measured on the
+    // synchronized step window. Idle scheduler polls emit nothing.
     void recordAwiStepObservations(const std::list<GenerateStreamPtr>& streams,
                                    int64_t                             step_begin_time_us,
                                    int64_t                             decode_epoch_before,
-                                   int64_t                             prefill_epoch_before);
+                                   int64_t                             prefill_epoch_before,
+                                   int64_t                             forward_epoch_before);
 
     // AWI barrier (POST /awi/arm via AwiCollector): armed benchmark streams
     // reserve their full input+output span at admission, hold at the prefill/

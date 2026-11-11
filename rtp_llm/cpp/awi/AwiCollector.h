@@ -120,6 +120,19 @@ public:
             .load(std::memory_order_relaxed);
     }
 
+    // Executor collective-forward epoch: incremented on every real model
+    // forward, which the tpSync contract makes identical on all TP ranks.
+    // The engine step hook brackets process() with epoch reads to tell steps
+    // that ran collective work from idle scheduler polls, so idle steps no
+    // longer flood the observations payload with per-rank step events
+    // (measured: 3.2M idle events => 432MB JSON on a 25-minute server).
+    void noteCollectiveForward() {
+        collective_forward_epoch_.fetch_add(1, std::memory_order_relaxed);
+    }
+    int64_t collectiveForwardEpoch() const {
+        return collective_forward_epoch_.load(std::memory_order_relaxed);
+    }
+
     // One-shot prefill/reuse event emission guard keyed by internal request id.
     bool markPrefillEmitted(int64_t request_id);
 
@@ -128,7 +141,11 @@ private:
     AwiCollector(const AwiCollector&)                    = delete;
     AwiCollector& operator=(const AwiCollector&)         = delete;
 
-    static constexpr size_t kMaxEvents = 400000;
+    // Ring cap per rank. Idle step events are gated at the engine, so what
+    // remains is real execution evidence: a full 1M-token validation pass
+    // emits a few thousand events per rank. 50k leaves an order of magnitude
+    // of headroom while bounding /awi/observations to a few MB per rank.
+    static constexpr size_t kMaxEvents = 50000;
 
     mutable std::mutex       mu_;
     std::deque<AwiEvent>     events_;
@@ -143,6 +160,7 @@ private:
     std::unordered_set<int64_t> prefill_emitted_;
     std::atomic<int64_t>        decode_replay_epoch_{0};
     std::atomic<int64_t>        prefill_replay_epoch_{0};
+    std::atomic<int64_t>        collective_forward_epoch_{0};
 };
 
 }  // namespace rtp_llm

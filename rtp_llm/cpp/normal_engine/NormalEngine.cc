@@ -924,6 +924,7 @@ absl::Status NormalEngine::step() try {
     // decode observations report real replay vs eager fallback per step.
     const int64_t awi_decode_epoch_before  = AwiCollector::instance().graphReplayEpoch(true);
     const int64_t awi_prefill_epoch_before = AwiCollector::instance().graphReplayEpoch(false);
+    const int64_t awi_forward_epoch_before = AwiCollector::instance().collectiveForwardEpoch();
 
     // Per-request timeline: if any stream requested gen_timeline and no session is
     // active yet, configure the profiler so the executor-driven step window
@@ -964,7 +965,8 @@ absl::Status NormalEngine::step() try {
         reportMetrics({step_latency});
     }
 
-    recordAwiStepObservations(streams, step_begin_time_us, awi_decode_epoch_before, awi_prefill_epoch_before);
+    recordAwiStepObservations(
+        streams, step_begin_time_us, awi_decode_epoch_before, awi_prefill_epoch_before, awi_forward_epoch_before);
 
     return status;
 } catch (const std::exception& exception) {
@@ -982,7 +984,8 @@ void NormalEngine::startTimelineProfiling(const std::string& trace_name, int sta
 void NormalEngine::recordAwiStepObservations(const std::list<GenerateStreamPtr>& streams,
                                              int64_t                             step_begin_time_us,
                                              int64_t                             decode_epoch_before,
-                                             int64_t                             prefill_epoch_before) {
+                                             int64_t                             prefill_epoch_before,
+                                             int64_t                             forward_epoch_before) {
     static constexpr const char* kAwiGraphBackend = awiGraphBackendName();
     auto&         awi              = AwiCollector::instance();
     const int64_t step_end_us      = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -1045,14 +1048,20 @@ void NormalEngine::recordAwiStepObservations(const std::list<GenerateStreamPtr>&
     // Every rank records the synchronized step window; non-zero TP ranks have
     // no scheduled stream list but still execute the collective step, so the
     // aggregate proves per-rank participation and surfaces eager fallbacks.
-    AwiEvent step_event;
-    step_event.type         = "decode";
-    step_event.request_id   = -1;
-    step_event.step         = execute_step_;
-    step_event.backend      = kAwiGraphBackend;
-    step_event.graph_replay = decode_replayed ? 1 : (had_decode_stream ? 0 : (prefill_replayed ? -1 : 0));
-    step_event.elapsed_ms   = elapsed_ms;
-    awi.recordEvent(std::move(step_event));
+    // Idle scheduler polls (no collective forward, no streams, no replay)
+    // carry no evidence and are dropped: they spun the ring at ~3ms x 8 ranks
+    // and evicted the real events they were supposed to attest.
+    const bool did_work = awi.collectiveForwardEpoch() > forward_epoch_before;
+    if (did_work || !streams.empty() || decode_replayed || prefill_replayed) {
+        AwiEvent step_event;
+        step_event.type         = "decode";
+        step_event.request_id   = -1;
+        step_event.step         = execute_step_;
+        step_event.backend      = kAwiGraphBackend;
+        step_event.graph_replay = decode_replayed ? 1 : (had_decode_stream ? 0 : (prefill_replayed ? -1 : 0));
+        step_event.elapsed_ms   = elapsed_ms;
+        awi.recordEvent(std::move(step_event));
+    }
 }
 
 namespace {
