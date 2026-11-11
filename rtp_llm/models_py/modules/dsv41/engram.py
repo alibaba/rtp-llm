@@ -199,10 +199,14 @@ class NgramHashState:
             if tokenizer is None:
                 from transformers import AutoTokenizer
 
+                logger.info("[V41 Engram init] tokenizer load begin")
                 tokenizer = AutoTokenizer.from_pretrained(
                     tokenizer_path, trust_remote_code=True
                 )
+                logger.info("[V41 Engram init] tokenizer load complete")
+            logger.info("[V41 Engram init] compressed token map begin")
             token_map, size = build_compressed_token_map(tokenizer)
+            logger.info("[V41 Engram init] compressed token map complete")
         else:
             size = max(token_map) + 1
         if size != layout.compressed_vocab_size:
@@ -370,7 +374,9 @@ class _PinnedSharedTable:
         if weight.element_size() != 1 or scales.element_size() != 1:
             raise ValueError("Pinned Engram tables require native FP8/E8M0 bytes")
         with open(lock_path, "a+b") as lock:
+            logger.info("[V41 Engram init] shared table lock wait begin")
             fcntl.flock(lock, fcntl.LOCK_EX)
+            logger.info("[V41 Engram init] shared table lock acquired")
             _live_leases(data_path)
             for partial in data_path.parent.glob(data_path.name + ".partial.*"):
                 try:
@@ -392,6 +398,7 @@ class _PinnedSharedTable:
                         mapping = mmap.mmap(file.fileno(), total_bytes)
                         try:
                             destination = np.frombuffer(mapping, dtype=np.uint8)
+                            logger.info("[V41 Engram init] shared table byte copy begin")
                             offset = 0
                             for tensor in (weight, scales):
                                 source = tensor.view(torch.uint8).reshape(-1).numpy()
@@ -402,6 +409,7 @@ class _PinnedSharedTable:
                                     ]
                                 offset += source.size
                             del destination, source
+                            logger.info("[V41 Engram init] shared table byte copy complete")
                         finally:
                             mapping.close()
                     os.replace(partial, data_path)
@@ -679,7 +687,9 @@ class Engram(nn.Module):
             ) as file:
                 return file.get_tensor(name)
 
+        logger.info("[V41 Engram init] checkpoint tensor views begin layer=%d", layer_id)
         table, scales = load("embed.weight"), load("embed.scale")
+        logger.info("[V41 Engram init] checkpoint tensor views complete layer=%d", layer_id)
         expected = (layout.num_embeddings[layer_hash_index], layout.head_dim)
         if tuple(table.shape) != expected:
             raise ValueError(
