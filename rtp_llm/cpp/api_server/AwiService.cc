@@ -560,8 +560,12 @@ void AwiService::barrier(const std::unique_ptr<http_server::HttpResponseWriter>&
         if (cache_manager) {
             const auto& cache_config = cache_manager->cacheConfig();
             const auto  seq_size     = std::max<size_t>(1, cache_config.seq_size_per_block);
+            // Every admitted sequence needs the full context resident at the
+            // same instant; the barrier is an admission decision, not a
+            // per-sequence estimate.
             required_blocks  = static_cast<int64_t>((context_tokens + static_cast<int64_t>(seq_size) - 1)
-                                                   / static_cast<int64_t>(seq_size));
+                                                   / static_cast<int64_t>(seq_size))
+                              * static_cast<int64_t>(std::max<size_t>(1, request_ids.size()));
             available_blocks = static_cast<int64_t>(cache_manager->availableBlocksNum());
             total_blocks     = static_cast<int64_t>(cache_manager->totalBlocksNum());
 
