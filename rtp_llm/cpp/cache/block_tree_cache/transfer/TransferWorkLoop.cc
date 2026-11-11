@@ -132,6 +132,9 @@ void TransferWorkLoop::start() {
 
 std::shared_ptr<TransferAsyncContext> TransferWorkLoop::execute(TransferTask           task,
                                                                 BeforeCompleteCallback before_complete) {
+    block_tree_cache_detail::ScopeRollback unsubmitted([proof = task.completionProof()] {
+        if (proof) proof->report(true);
+    });
     return abortOnOom([&]() -> std::shared_ptr<TransferAsyncContext> {
         const auto count = task.descriptors().size();
         // Reuse task-level observations for both direct and combined routes.
@@ -175,6 +178,7 @@ std::shared_ptr<TransferAsyncContext> TransferWorkLoop::execute(TransferTask    
             std::lock_guard<std::mutex> lock(mutex_);
             rejected = !accepting_ || entry_count_ == capacity_;
             if (!rejected) {
+                unsubmitted.dismiss();
                 incoming_.splice(incoming_.end(), incoming);
                 ++entry_count_;
                 cv_.notify_all();

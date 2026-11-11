@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 
 #include <memory>
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/LegacyTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferEngineSelection.h"
 #include <algorithm>
@@ -355,6 +356,9 @@ BlockTreeQueueSizes PerRankBlockTransferEngine::queueSizes() const {
 }
 
 std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(TransferTask task) {
+    block_tree_cache_detail::ScopeRollback unsubmitted([proof = task.completionProof()] {
+        if (proof) proof->report(true);
+    });
     const auto& descriptors = task.descriptors();
     if (descriptors.empty()) {
         return invalidTransferContext(task);
@@ -401,9 +405,13 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(Transf
         auto&      loops  = isLoadTransfer(source, target) ? load_loops_ : offload_loops_;
         auto&      next   = isLoadTransfer(source, target) ? next_load_ : next_offload_;
         const auto worker = loops.size() == 1 ? 0 : next.fetch_add(1, std::memory_order_relaxed) % loops.size();
+        unsubmitted.dismiss();
         return loops[worker]->execute(std::move(task), std::move(before_complete));
     }
-    const auto submit = [&] { return legacy_->execute(std::move(task), group_sets); };
+    const auto submit = [&] {
+        unsubmitted.dismiss();
+        return legacy_->execute(std::move(task), std::move(group_sets));
+    };
     if (!track_decode_origins_)
         return submit();
     auto origins = prepareOriginTransfers(descriptors, group_sets);

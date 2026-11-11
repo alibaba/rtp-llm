@@ -183,6 +183,20 @@ struct TransferResult {
         return status.ok();
     }
 
+    // Completion evidence must survive failure to allocate the diagnostic itself.
+    static TransferResult executionException(bool safe, const char* message = nullptr) noexcept {
+        TransferResult result;
+        result.status.setErrorCode(ErrorCode::EXECUTION_EXCEPTION);
+        result.copy_error = CacheCopyError::COPY_FAILED;
+        result.buffer_safe = safe;
+        if (message) {
+            try {
+                result.status = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, message);
+            } catch (...) {}
+        }
+        return result;
+    }
+
     // Append every failure message; keep unknown completion ahead of known failures
     // without losing higher-priority copy diagnostics such as confirmed CRC errors.
     void merge(TransferResult other) {
@@ -202,7 +216,11 @@ struct TransferResult {
             || other.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
             code = ErrorCode::TRANSFER_COMPLETION_UNKNOWN;
         }
-        status          = ErrorInfo(code, status.ToString() + "; " + other.status.ToString());
+        try {
+            status = ErrorInfo(code, status.ToString() + "; " + other.status.ToString());
+        } catch (...) {
+            status.setErrorCode(code);
+        }
         copy_error      = std::max(copy_error, other.copy_error);
     }
 

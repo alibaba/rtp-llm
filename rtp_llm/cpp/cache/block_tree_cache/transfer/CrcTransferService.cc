@@ -131,24 +131,36 @@ TransferResult CrcTransferService::mapResult(CrcCopyState                       
                                              CrcCopyDirection                       direction,
                                              const std::vector<TransferDescriptor>& descriptors,
                                              const std::vector<CrcCopyFailure>&     failures) {
-    TransferResult transfer_result(statusFor(result));
-    transfer_result.expandBlockErrors(descriptors.size());
-    if (result == CrcCopyState::CRC_MISMATCH) {
-        // A failed load may have scattered every item. Keep the whole batch
-        // uncommitted so callers discard its targets, including healthy items.
-        std::fill(transfer_result.block_errors.begin(),
-                  transfer_result.block_errors.end(),
-                  direction == CrcCopyDirection::STORE ? CacheCopyError::NONE : CacheCopyError::NOT_EXECUTED);
-    }
-    for (const auto& failure : failures) {
-        const auto& descriptor                           = descriptors[failure.item_index];
-        const auto  failure_status                       = statusFor(failure.status);
-        transfer_result.block_errors[failure.item_index] = cacheCopyErrorFor(failure_status);
-        const auto failure_error                         = transferStatusToErrorInfo(failure_status);
-        transfer_result.merge({ErrorInfo(failure_error.code(),
-                                         failure_error.ToString() + ", descriptor_index="
-                                             + std::to_string(failure.item_index) + ", " + descriptor.debugString()),
-                               cacheCopyErrorFor(failure_status)});
+    const auto status = statusFor(result);
+    TransferResult transfer_result;
+    transfer_result.status.setErrorCode(status == TransferStatus::OK ? ErrorCode::NONE_ERROR :
+                                       status == TransferStatus::INVALID_ARGS ? ErrorCode::INVALID_PARAMS :
+                                                                                ErrorCode::EXECUTION_EXCEPTION);
+    transfer_result.copy_error = cacheCopyErrorFor(status);
+    try {
+        transfer_result.status = transferStatusToErrorInfo(status);
+        transfer_result.expandBlockErrors(descriptors.size());
+        if (result == CrcCopyState::CRC_MISMATCH) {
+            // A failed load may have scattered every item. Keep the whole batch
+            // uncommitted so callers discard its targets, including healthy items.
+            std::fill(transfer_result.block_errors.begin(),
+                      transfer_result.block_errors.end(),
+                      direction == CrcCopyDirection::STORE ? CacheCopyError::NONE : CacheCopyError::NOT_EXECUTED);
+        }
+        for (const auto& failure : failures) {
+            const auto& descriptor                           = descriptors[failure.item_index];
+            const auto  failure_status                       = statusFor(failure.status);
+            transfer_result.block_errors[failure.item_index] = cacheCopyErrorFor(failure_status);
+            const auto failure_error                         = transferStatusToErrorInfo(failure_status);
+            transfer_result.merge({ErrorInfo(failure_error.code(),
+                                             failure_error.ToString() + ", descriptor_index="
+                                                 + std::to_string(failure.item_index) + ", " + descriptor.debugString()),
+                                   cacheCopyErrorFor(failure_status)});
+        }
+    } catch (...) {
+        // Terminal CUDA evidence survives allocation/formatting failures. A
+        // uniform result is valid when per-block diagnostics cannot be built.
+        transfer_result.block_errors.clear();
     }
     // These states either rejected before CUDA submission or returned after
     // the workspace completed diagnostics and drained all submitted accesses.
@@ -242,8 +254,8 @@ void CrcTransferService::advance(Slot& slot, bool deliver) {
         const auto state = slot.copy->poll();
         if (state == CrcCopyState::PENDING)
             return;
-        // Construct the result before retiring the terminal workspace.
-        // Allocation failures propagate to the caller.
+        // Construct the result before retiring the terminal workspace. Mapping
+        // preserves terminal safety even if diagnostic allocation fails.
         const auto direction = operation.descriptors.front().source_tier == Tier::DEVICE ? CrcCopyDirection::STORE :
                                                                                            CrcCopyDirection::LOAD;
         operation.result     = mapResult(state, direction, operation.descriptors, slot.copy->failures());

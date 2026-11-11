@@ -432,55 +432,68 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams&    
     cudaMemcpyAttributes attr{};
     attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
     size_t attr_idx     = 0;
+    bool buffer_safe = true;
+    try {
 #if CUDART_VERSION >= 13000
-    auto submit_error =
-        cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, stream);
+        buffer_safe = false;
+        auto submit_error =
+            cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, stream);
 #else
-    std::vector<void*> mutable_srcs;
-    mutable_srcs.reserve(srcs.size());
-    for (auto* src : srcs) {
-        mutable_srcs.push_back(const_cast<void*>(src));
-    }
-    size_t     fail_idx     = 0;
-    auto submit_error = cudaMemcpyBatchAsync(
-        dsts.data(), mutable_srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, &fail_idx, stream);
-#endif
-    submit_error = copyCudaResult("batch_submit", submit_error);
-    if (submit_error != cudaSuccess) {
-        RTP_LLM_LOG_WARNING("execBatchedMemoryCopy failed phase=submit device=%d stream=%p tiles=%zu error_code=%d "
-                            "error=%s",
-                            params.device_index,
-                            static_cast<void*>(stream),
-                            dsts.size(),
-                            static_cast<int>(submit_error),
-                            cudaGetErrorString(submit_error));
-        const auto drain_error = copyCudaResult("batch_submit_drain", cudaStreamSynchronize(stream));
-        if (drain_error != cudaSuccess) {
-            failCopyStreams(context, "batch_submit_drain", dsts.size(), drain_error);
+        std::vector<void*> mutable_srcs;
+        mutable_srcs.reserve(srcs.size());
+        for (auto* src : srcs) {
+            mutable_srcs.push_back(const_cast<void*>(src));
         }
-        return BatchedMemoryCopyStatus::EXECUTION_FAILED;
-    }
+        size_t     fail_idx     = 0;
+        buffer_safe = false;
+        auto submit_error = cudaMemcpyBatchAsync(
+            dsts.data(), mutable_srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, &fail_idx, stream);
+#endif
+        submit_error = copyCudaResult("batch_submit", submit_error);
+        if (submit_error != cudaSuccess) {
+            RTP_LLM_LOG_WARNING("execBatchedMemoryCopy failed phase=submit device=%d stream=%p tiles=%zu error_code=%d "
+                                "error=%s",
+                                params.device_index,
+                                static_cast<void*>(stream),
+                                dsts.size(),
+                                static_cast<int>(submit_error),
+                                cudaGetErrorString(submit_error));
+            const auto drain_error = copyCudaResult("batch_submit_drain", cudaStreamSynchronize(stream));
+            if (drain_error != cudaSuccess) {
+                failCopyStreams(context, "batch_submit_drain", dsts.size(), drain_error);
+            }
+            return BatchedMemoryCopyStatus::EXECUTION_FAILED;
+        }
 
-    RTP_LLM_LOG_DEBUG("execBatchedMemoryCopy phase=submitted device=%d stream=%p tiles=%zu",
-                      params.device_index,
-                      static_cast<void*>(stream),
-                      dsts.size());
+        RTP_LLM_LOG_DEBUG("execBatchedMemoryCopy phase=submitted device=%d stream=%p tiles=%zu",
+                          params.device_index,
+                          static_cast<void*>(stream),
+                          dsts.size());
 
-    const auto completion_error = copyCudaResult("batch_completion", cudaStreamSynchronize(stream));
-    if (completion_error != cudaSuccess) {
-        failCopyStreams(context, "batch_completion", dsts.size(), completion_error);
+        const auto completion_error = copyCudaResult("batch_completion", cudaStreamSynchronize(stream));
+        if (completion_error != cudaSuccess) {
+            failCopyStreams(context, "batch_completion", dsts.size(), completion_error);
+        }
+        buffer_safe = true;
+        RTP_LLM_LOG_DEBUG("execBatchedMemoryCopy phase=completed device=%d stream=%p tiles=%zu",
+                          params.device_index,
+                          static_cast<void*>(stream),
+                          dsts.size());
+        // cudaStreamSynchronize already reports deferred errors from this batch.
+        // Do not call check_cuda_error() here: in DEBUG mode it performs a
+        // device-wide synchronize and can wait on unrelated TP/NCCL work.
+        if (Logger::getEngineLogger().isDebugMode()) {
+            check_cuda_value(cudaGetLastError());
+        }
+        return BatchedMemoryCopyStatus::SUCCESS;
+    } catch (...) {
+        if (!buffer_safe) {
+            const auto error = cudaStreamSynchronize(stream);
+            if (error != cudaSuccess)
+                failCopyStreams(context, "batch_exception_drain", dsts.size(), error);
+        }
+        throw;
     }
-    RTP_LLM_LOG_DEBUG("execBatchedMemoryCopy phase=completed device=%d stream=%p tiles=%zu",
-                      params.device_index,
-                      static_cast<void*>(stream),
-                      dsts.size());
-    // cudaStreamSynchronize already reports deferred errors from this batch.
-    // Do not call check_cuda_error() here: in DEBUG mode it performs a
-    // device-wide synchronize and can wait on unrelated TP/NCCL work.
-    if (Logger::getEngineLogger().isDebugMode()) {
-        check_cuda_value(cudaGetLastError());
-    }
-    return BatchedMemoryCopyStatus::SUCCESS;
 #else
     RTP_LLM_LOG_DEBUG("execBatchedMemoryCopy unavailable: CUDART_VERSION=%d", CUDART_VERSION);
     return BatchedMemoryCopyStatus::NOT_SUPPORTED;

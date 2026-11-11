@@ -59,7 +59,7 @@ TransferResult CrcTransferService::execute(int                                  
 
 TransferResult CrcTransferService::copy(const std::vector<HostBufferView>&     hosts,
                                         const std::vector<TransferDescriptor>& descriptors,
-                                        const std::vector<const GroupSet*>&    groups) {
+                                        const std::vector<const GroupSet*>&    groups) try {
     if (async_ || hosts.empty() || hosts.size() != descriptors.size() || hosts.size() != groups.size())
         return rejectedWithoutIo();
     const bool               store = descriptors.front().source_tier == Tier::DEVICE;
@@ -74,6 +74,12 @@ TransferResult CrcTransferService::copy(const std::vector<HostBufferView>&     h
     }
     return execute(
         deviceFor(*groups.front()), items, store ? CrcCopyDirection::STORE : CrcCopyDirection::LOAD, descriptors);
+} catch (const std::exception& error) {
+    // Preparation throws before submission; the synchronous CUDA primitive
+    // drains all attempted work or terminates, and result mapping cannot throw.
+    return TransferResult::executionException(true, error.what());
+} catch (...) {
+    return TransferResult::executionException(true);
 }
 
 }  // namespace rtp_llm

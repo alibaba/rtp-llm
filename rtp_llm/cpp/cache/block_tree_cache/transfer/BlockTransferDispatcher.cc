@@ -181,6 +181,9 @@ std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(Tr
         return std::make_shared<CompletedTransferAsyncContext>(
             std::move(result), task.descriptors().size());
     }
+    block_tree_cache_detail::ScopeRollback close_submission([safety] {
+        if (safety) safety->finishSubmitting();
+    });
     warnRegistrySize();
     if (task.expired()) {
         TransferResult result(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before TE submission"),

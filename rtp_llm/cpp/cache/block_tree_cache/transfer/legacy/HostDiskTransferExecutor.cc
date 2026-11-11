@@ -18,9 +18,9 @@ HostDiskTransferExecutor::HostDiskTransferExecutor(BlockTreeTaskPool& transfer_t
 
 TransferResult HostDiskTransferExecutor::executeBatch(const std::vector<HostBufferView>&     hosts,
                                                       const std::vector<TransferDescriptor>& descriptors,
-                                                      const std::vector<const GroupSet*>&    group_sets) {
+                                                      const std::vector<const GroupSet*>&    group_sets) try {
     // Normal returns either reject before I/O or follow synchronous disk I/O,
-    // including partial failures. Exceptions propagate without granting proof.
+    // including partial failures. Synchronous disk calls retain no access on unwind.
     const auto completed = [](TransferStatus status) {
         TransferResult result(status);
         result.buffer_safe = true;
@@ -71,6 +71,10 @@ TransferResult HostDiskTransferExecutor::executeBatch(const std::vector<HostBuff
         return completed(blockIOStatusToTransferStatus(status));
     }
     return completed(TransferStatus::OK);
+} catch (const std::exception& error) {
+    return TransferResult::executionException(true, error.what());
+} catch (...) {
+    return TransferResult::executionException(true);
 }
 
 }  // namespace rtp_llm

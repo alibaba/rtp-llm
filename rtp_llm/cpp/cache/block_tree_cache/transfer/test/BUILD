@@ -312,6 +312,15 @@ cc_test(
 )
 
 cc_test(
+    name = "local_buffer_safety_failure_test",
+    srcs = ["LocalBufferSafetyFailureTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+)
+
+cc_test(
     name = "worker_transfer_registry_test",
     srcs = ["WorkerTransferRegistryTest.cc"],
     copts = test_copts,

@@ -16,7 +16,7 @@ namespace rtp_llm {
 
 StrategyResult GenericMultiCopyDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan& plan,
                                                                   const DeviceHostCopyOptions& /*options*/,
-                                                                  const DeviceHostCopyExecutionContext& context) {
+                                                                  const DeviceHostCopyExecutionContext& context) try {
     std::vector<torch::Tensor> dst_buffers;
     std::vector<torch::Tensor> src_buffers;
 
@@ -58,11 +58,18 @@ StrategyResult GenericMultiCopyDeviceHostCopyStrategy::tryExecute(const DeviceHo
     }
     // Normal return follows completion of the copy stream.
     return StrategyResult::done(true);
+} catch (...) {
+#if USING_CUDA
+    // Every concrete CUDA helper drains an attempted operation before throwing.
+    return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR, true);
+#else
+    return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
+#endif
 }
 
 StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan&             plan,
                                                            const DeviceHostCopyOptions&          options,
-                                                           const DeviceHostCopyExecutionContext& context) {
+                                                           const DeviceHostCopyExecutionContext& context) try {
     if (!options.cuda_batch_copy_enabled) {
         return StrategyResult::notApplicable(true);
     }
@@ -104,6 +111,13 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
         return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR, true);
     }
     return StrategyResult::done(true);
+} catch (...) {
+#if USING_CUDA
+    // Every concrete CUDA helper drains an attempted operation before throwing.
+    return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR, true);
+#else
+    return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
+#endif
 }
 
 static constexpr size_t kStagedAlignment = 16;
@@ -122,7 +136,7 @@ StagedSmDeviceHostCopyStrategy::~StagedSmDeviceHostCopyStrategy() {
 
 StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan&    plan,
                                                           const DeviceHostCopyOptions& options,
-                                                          const DeviceHostCopyExecutionContext& /*context*/) {
+                                                          const DeviceHostCopyExecutionContext& /*context*/) try {
     if (!options.staged_sm_copy_enabled) {
         return StrategyResult::notApplicable(true);
     }
@@ -199,6 +213,13 @@ StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPl
         return StrategyResult::notApplicable(true);
     }
     return StrategyResult::done(true);
+} catch (...) {
+#if USING_CUDA
+    // Every concrete CUDA helper drains an attempted operation before throwing.
+    return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR, true);
+#else
+    return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
+#endif
 }
 
 }  // namespace rtp_llm

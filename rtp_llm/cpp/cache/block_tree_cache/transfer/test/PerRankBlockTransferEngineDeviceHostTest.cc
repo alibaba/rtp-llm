@@ -675,13 +675,16 @@ TEST_F(CopyCompletionFailureTest, StagedUnconfirmedCompletionNeverReturnsFallbac
     }
 }
 
-TEST_F(CopyCompletionFailureTest, StagedExceptionAfterSubmissionDrainsBeforeUnwinding) {
+TEST_F(CopyCompletionFailureTest, StagedExceptionAfterSubmissionDrainsBeforeReturningSafeFailure) {
     auto copy_plan = plan(false);
     StagedSmDeviceHostCopyStrategy staged;
     {
         CopyFailureInjection failure{"staged_payload_submit", nullptr, true};
         ScopedCopyFailure injection(failure);
-        EXPECT_THROW(staged.tryExecute(copy_plan, stagedOptions(), context()), std::runtime_error);
+        const auto result = staged.tryExecute(copy_plan, stagedOptions(), context());
+        EXPECT_EQ(result.status, StrategyStatus::FAILED);
+        EXPECT_EQ(result.copy_status, TransferStatus::DEVICE_IO_ERROR);
+        EXPECT_TRUE(result.buffer_safe);
         EXPECT_EQ(failure.completions, 1u);
     }
     // Reusing the same scratch is allowed after the exceptional call drained.

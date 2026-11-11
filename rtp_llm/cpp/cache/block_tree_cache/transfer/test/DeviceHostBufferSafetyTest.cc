@@ -35,6 +35,7 @@ struct CopyProofInjection {
     bool fail_generic{false};
     size_t drains{0};
     size_t generic_submits{0};
+    size_t injected_errors{0};
 };
 
 thread_local CopyProofInjection* proof_injection = nullptr;
@@ -47,6 +48,7 @@ int injectCopyProofFailure(const char* phase, int actual) {
         ++proof_injection->generic_submits;
     if (actual == cudaSuccess
         && (std::strcmp(phase, proof_injection->phase) == 0 || (generic && proof_injection->fail_generic))) {
+        ++proof_injection->injected_errors;
         if (proof_injection->throw_after_submit)
             throw std::runtime_error("injected copy failure after real submission");
         return cudaErrorInvalidValue;
@@ -212,6 +214,26 @@ TEST_F(DeviceHostBufferSafetyTest, SafeFailureStillFailsBusinessOperation) {
         EXPECT_FALSE(result.ok());
         EXPECT_EQ(result.copy_error, CacheCopyError::COPY_FAILED);
         EXPECT_EQ(result.buffer_safe, failed_safe);
+    }
+}
+
+TEST_F(DeviceHostBufferSafetyTest, BatchAndStagedExceptionsKeepDrainedProof) {
+    for (const char* phase : {"batch_submit", "staged_payload_submit"}) {
+        SCOPED_TRACE(phase);
+        DeviceHostCopyOptions options;
+        options.cuda_batch_copy_enabled = std::strcmp(phase, "batch_submit") == 0;
+        options.staged_sm_copy_enabled = !options.cuda_batch_copy_enabled;
+        options.staged_sm_min_tile_count = 1;
+        options.staged_sm_min_bytes = 1;
+        DeviceHostTransferExecutor executor(pool_, 8, options);
+        CopyProofInjection injection{phase, true};
+        ScopedCopyProofInjection scope(injection);
+        auto result = execute(executor);
+        // Older drivers can skip the batch strategy entirely.
+        if (options.cuda_batch_copy_enabled && injection.injected_errors == 0) continue;
+        EXPECT_GT(injection.injected_errors, 0u);
+        EXPECT_FALSE(result.ok());
+        EXPECT_TRUE(result.buffer_safe);
     }
 }
 

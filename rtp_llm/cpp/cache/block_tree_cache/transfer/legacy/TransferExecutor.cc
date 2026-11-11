@@ -7,6 +7,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -31,6 +32,10 @@ TransferExecutor::TransferExecutor(BlockTreeTaskPool&                           
 std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask                 task,
                                                                 std::vector<HostBufferView>  hosts,
                                                                 std::vector<const GroupSet*> group_sets) {
+    const auto proof = task.completionProof();
+    block_tree_cache_detail::ScopeRollback unsubmitted([proof] {
+        if (proof) proof->report(true);
+    });
     const auto&   descriptors = task.descriptors();
     const Tier    source      = descriptors.front().source_tier;
     const Tier    target      = descriptors.front().target_tier;
@@ -60,17 +65,26 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
                                                            transfer_id,
                                                            identity,
                                                            AsyncProfileKind::Wait);
-    auto          on_timeout  = [this, context, source, target, queue_begin, queue_timer, total_timer]() {
-        queue_timer.finish(false);
-        total_timer.finish(false);
-        if (metrics_reporter_ != nullptr) {
-            metrics_reporter_->reportQueueWaitMetric(
-                false, "transfer", nullptr, source, target, currentTimeUs() - queue_begin);
+    auto          on_timeout  = [this, context, proof, source, target, queue_begin, queue_timer, total_timer]() {
+        block_tree_cache_detail::ScopeRollback publish([proof] {
+            if (proof) proof->report(true);
+        });
+        try {
+            queue_timer.finish(false);
+            total_timer.finish(false);
+            if (metrics_reporter_ != nullptr) {
+                metrics_reporter_->reportQueueWaitMetric(
+                    false, "transfer", nullptr, source, target, currentTimeUs() - queue_begin);
+            }
+            TransferResult result(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired in TE worker queue"),
+                                  CacheCopyError::NOT_EXECUTED);
+            result.buffer_safe = true;
+            context->complete(std::move(result));
+        } catch (const std::exception& error) {
+            context->complete(TransferResult::executionException(true, error.what()));
+        } catch (...) {
+            context->complete(TransferResult::executionException(true));
         }
-        TransferResult result(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired in TE worker queue"),
-                              CacheCopyError::NOT_EXECUTED);
-        result.buffer_safe = true;
-        context->complete(std::move(result));
     };
     const auto task_class = isLoadTransfer(source, target) ? BlockTreeTaskClass::LOAD : BlockTreeTaskClass::BACKGROUND;
     auto&      task_pool  = task_class == BlockTreeTaskClass::LOAD ? *load_task_pool_ : transfer_task_pool_;
@@ -81,6 +95,7 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
          hosts      = std::move(hosts),
          group_sets = std::move(group_sets),
          context,
+         proof,
          source,
          target,
          identity,
@@ -89,13 +104,12 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
          queue_timer,
          total_timer,
          queue_begin]() {
-            queue_timer.finish(true);
+            bool buffer_safe = true;  // No operation has started yet.
+            block_tree_cache_detail::ScopeRollback publish([&] {
+                if (proof) proof->report(buffer_safe);
+            });
             const auto& descriptors = task.descriptors();
-            if (metrics_reporter_ != nullptr) {
-                metrics_reporter_->reportQueueWaitMetric(
-                    false, "transfer", nullptr, source, target, currentTimeUs() - queue_begin);
-            }
-            TransferResult result = TransferResult::emptyAggregate(descriptors.size());
+            TransferResult result;
             size_t         active_begin = 0;
             size_t         active_end   = 0;
             const auto     record_batch = [&](TransferResult batch) {
@@ -105,6 +119,12 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
                 result.merge(std::move(batch));
             };
             try {
+                queue_timer.finish(true);
+                if (metrics_reporter_ != nullptr) {
+                    metrics_reporter_->reportQueueWaitMetric(
+                        false, "transfer", nullptr, source, target, currentTimeUs() - queue_begin);
+                }
+                result = TransferResult::emptyAggregate(descriptors.size());
                 for (size_t begin = 0; begin < descriptors.size(); begin += max_descriptors_per_batch_) {
                     const size_t end = std::min(begin + max_descriptors_per_batch_, descriptors.size());
                     active_begin     = begin;
@@ -127,7 +147,10 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
                                                                       "worker_batch",
                                                                       transfer_id,
                                                                       identity);
+                    const bool previous_safe = buffer_safe;
+                    buffer_safe = false;  // An arbitrary producer exception is not proof.
                     auto batch = executeBatch(sub_hosts, sub_descriptors, sub_group_sets);
+                    buffer_safe = previous_safe && batch.buffer_safe;
                     batch_timer.finish(batch.ok());
                     if (!batch.ok()) {
                         for (size_t index = begin; index < end; ++index) {
@@ -144,15 +167,19 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
                     record_batch(std::move(batch));
                 }
             } catch (const std::exception& error) {
-                record_batch(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+                result.buffer_safe = buffer_safe;
+                record_batch(TransferResult::executionException(buffer_safe, error.what()));
             } catch (...) {
-                record_batch(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer executor exception"));
+                result.buffer_safe = buffer_safe;
+                record_batch(TransferResult::executionException(buffer_safe, "unknown transfer executor exception"));
             }
             total_timer.finish(result.ok());
             context->complete(std::move(result));
         },
         deadline,
         std::move(on_timeout));
+    if (accepted)
+        unsubmitted.dismiss();
     if (!accepted) {
         queue_timer.finish(false);
         total_timer.finish(false);
