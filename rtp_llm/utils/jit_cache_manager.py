@@ -263,7 +263,10 @@ class JitCacheManager(FileSystemEventHandler):
                 with suppress(OSError, ValueError):
                     rel = path.relative_to(item.local_dir).as_posix()
                     if item.name == "deep_gemm":
-                        if not rel.startswith("cache/"):
+                        if (
+                            event.event_type not in CREATED
+                            or not rel.startswith("cache/")
+                        ):
                             return
                         entry = item.local_dir / "cache" / rel.split("/")[1]
                         deepjit_entry_files(entry)
