@@ -456,7 +456,7 @@ class HybridKVCacheSpecTest(TestCase):
 
         KimiLinear._post_build_model_config(config)
 
-        self.assertEqual(config.kv_cache_spec_descs[0][0].tag, "mtp_full")
+        self.assertEqual(config.kv_cache_spec_descs[0][0].tag, "full")
         self.assertEqual(
             config.kv_cache_spec_descs[0][0].cache_type, KVCacheSpecType.MLA
         )
