@@ -750,6 +750,13 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
                return stream->hasEvent(StreamEvents::CanRun) && stream->hasEvent(StreamEvents::LoadInitiated)
                       && stream->chunkedPrefillEnabled() && stream->isContextStream();
            });
+    if (has_requeued_prefill_stream && waiting_size_before_cache_update > 0) {
+        // A cache-loaded chunked prefill must regain the scheduling boundary ahead of
+        // streams that were already waiting; otherwise it can be starved by newcomers.
+        auto first_requeued = waiting_streams_.begin();
+        std::advance(first_requeued, waiting_size_before_cache_update);
+        waiting_streams_.splice(waiting_streams_.begin(), waiting_streams_, first_requeued, waiting_streams_.end());
+    }
     // Release terminal deferred streams before any decode KV growth in this round.
     refreshAndReapTerminalStreams(pending_decode_streams_);
     if (has_requeued_prefill_stream) {
