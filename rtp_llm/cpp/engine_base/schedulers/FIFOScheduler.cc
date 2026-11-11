@@ -546,7 +546,7 @@ void FIFOScheduler::evaluateLoadingCacheGroupQueue() {
         })) {
         return;
     }
-    if (!running_streams_.empty()) {
+    if (hasExecutableRunningStreams()) {
         return;
     }
 
@@ -554,6 +554,20 @@ void FIFOScheduler::evaluateLoadingCacheGroupQueue() {
     if (group.empty()) {
         loading_cache_group_queue_.pop_front();
     }
+}
+
+bool FIFOScheduler::hasExecutableRunningStreams() const {
+    // AWI barrier-held streams idle in running_streams_ without executing;
+    // lane boundaries (notably the empty-batch group dispatch above) must not
+    // be blocked by them, otherwise one held decode stream starves every
+    // later admission until the hold releases (observed on native-n5b: with
+    // reuse-cache group admission, a held r0 froze all subsequent requests).
+    for (const auto& stream : running_streams_) {
+        if (stream && !stream->awiBarrierHeld()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool FIFOScheduler::loadingGroupReady() const {
@@ -564,7 +578,9 @@ bool FIFOScheduler::loadingGroupReady() const {
 }
 
 void FIFOScheduler::evaluateWaitingGroupQueue() {
-    if (!running_streams_.empty() || !new_streams_.empty() || !loading_cache_group_queue_.empty()
+    // AWI-held running streams do not execute; they must not block the
+    // empty-batch group boundary (see hasExecutableRunningStreams).
+    if (hasExecutableRunningStreams() || !new_streams_.empty() || !loading_cache_group_queue_.empty()
         || waiting_group_queue_.empty()) {
         return;
     }
@@ -663,7 +679,8 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
 
     evaluateAndUpdateStreams(running_streams_);
 
-    if (running_streams_.empty()) {
+    const bool has_executable_running = hasExecutableRunningStreams();
+    if (!has_executable_running) {
         active_admission_lane_ = AdmissionLane::NONE;
     }
 
@@ -674,7 +691,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     if (!new_streams_.empty()) {
         active_admission_lane_ = AdmissionLane::GROUP;
         prefer_group_next_     = false;
-    } else if (!running_streams_.empty()) {
+    } else if (has_executable_running) {
         if (active_admission_lane_ == AdmissionLane::NONE) {
             // Defensive fallback for schedulers restored with an already
             // populated running list.

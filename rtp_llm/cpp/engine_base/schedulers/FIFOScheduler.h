@@ -103,6 +103,12 @@ private:
     void evaluateWaitingGroupQueue();
     void evaluateLoadingCacheGroupQueue();
     bool loadingGroupReady() const;
+    // True when at least one RUNNING stream will actually execute this round.
+    // AWI barrier-held streams stay in running_streams_ but are skipped by the
+    // engine; lane-boundary decisions must look through them or a single held
+    // stream starves every later admission (empty-batch group dispatch would
+    // never trigger while the hold lasts).
+    bool hasExecutableRunningStreams() const;
     void advanceLoadingGroup(StreamGroup& group);
     void moveGroupToNewStreams(StreamGroup& group);
     void moveGroupToAllocatingGroup(StreamGroup& group);
