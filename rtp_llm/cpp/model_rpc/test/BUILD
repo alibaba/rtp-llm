@@ -165,10 +165,14 @@ cc_test(
 cc_test(
     name = "rpc_writer_cancellation_test",
     srcs = [
+        "GenerateContextTest.cc",
         "RpcWriterCancellationTest.cc",
     ],
     copts = test_copts,
+    linkopts = ["-Wl,--wrap=usleep"],
     deps = test_deps + [
+        "//rtp_llm/cpp/cache",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
     ],
     env = {
