@@ -2768,15 +2768,34 @@ class AttentionV41FP8(AttentionFP8):
         # Materialize it only for the dense-key fallback below.
         if ends is None:
             ends = starts + (S if input_lengths is None else input_lengths)
-        ids = torch.arange(capacity, device=x.device, dtype=torch.long).expand(B, -1)
+        width = capacity
+        if not torch.cuda.is_current_stream_capturing():
+            # The fixed-capacity gather dequantizes EVERY pool slot (256MiB of
+            # fp32 intermediates at the 1M pool) even when the live requests
+            # span a few hundred tokens; on tight-HBM ranks that allocation
+            # OOMs the first decode step. Bound the gather to the used
+            # compressed span with the same 256-rounding and candidate floor
+            # that _select_indices_decode applies, so the published keys width
+            # matches the clamped scoring width (capacity = keys.shape[1]
+            # downstream). Rows beyond ends//ratio stay masked to slot -1.
+            # Graph capture keeps the static capacity shape.
+            used = int((ends // self.compress_ratio).max().item())
+            used = ((min(max(used, 1), capacity) + 255) // 256) * 256
+            floor = 256
+            cand_blocks = int(self.v41_config.get("candidate_topk_blocks", 0))
+            cand_size = int(self.v41_config.get("candidate_block_size", 0))
+            if cand_size > 0 and cand_blocks > 0:
+                floor = max(floor, cand_size * cand_blocks)
+            width = min(max(used, floor), capacity)
+        ids = torch.arange(width, device=x.device, dtype=torch.long).expand(B, -1)
         read_positions = (ids + 1) * self.compress_ratio - 1
         read_req = torch.arange(B, device=x.device)[:, None].expand_as(ids)
         slots = self._slots(
             INDEXER_KV, read_positions.reshape(-1), read_req.reshape(-1)
-        ).view(B, capacity)
+        ).view(B, width)
         slots = torch.where(ids < (ends // self.compress_ratio)[:, None], slots, -1)
         keys = dequantize_indexer_k_fp4(index_pool, slots.reshape(-1)).view(
-            B, capacity, self.index_head_dim
+            B, width, self.index_head_dim
         )
         self._shared_attention["global"] = {self.layer_id: keys}
 
