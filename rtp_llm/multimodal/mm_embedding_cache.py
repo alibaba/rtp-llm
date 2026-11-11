@@ -696,24 +696,32 @@ class MMEmbeddingCacheEntry:
     def set_greennet_verdict(
         self, verdict: GreenNetVerdict, *, checked: bool = True
     ) -> None:
-        self._greennet_verdict = verdict
-        self._greennet_checked = checked
-        self._greennet_event.set()
+        with self._state_lock:
+            # A request that skips GreenNet may publish an unchecked embedding
+            # while another request independently inspects the same URL. Do not
+            # let the unchecked publisher downgrade that approved cache entry.
+            if self._greennet_checked and not checked:
+                return
+            self._greennet_verdict = verdict
+            self._greennet_checked = checked
+            self._greennet_event.set()
 
     def set_greennet_error(self, error: Exception) -> None:
         """Wake inspection waiters without losing a typed preprocessing error."""
-        self._greennet_error = error
-        self._greennet_event.set()
+        with self._state_lock:
+            self._greennet_error = error
+            self._greennet_event.set()
 
     @property
     def greennet_passed(self) -> bool:
-        return (
-            self.is_greennet_decided
-            and self._greennet_error is None
-            and self._greennet_checked
-            and self._greennet_verdict is not None
-            and self._greennet_verdict.passed
-        )
+        with self._state_lock:
+            return (
+                self._greennet_event.is_set()
+                and self._greennet_error is None
+                and self._greennet_checked
+                and self._greennet_verdict is not None
+                and self._greennet_verdict.passed
+            )
 
     def wait_greennet(
         self,
@@ -723,9 +731,10 @@ class MMEmbeddingCacheEntry:
     ) -> GreenNetVerdict:
         if not _wait_event(self._greennet_event, timeout, cancellation_event):
             raise TimeoutError("Waiting for greennet verdict timed out")
-        if self._greennet_error is not None:
-            raise self._greennet_error
-        return self._greennet_verdict
+        with self._state_lock:
+            if self._greennet_error is not None:
+                raise self._greennet_error
+            return self._greennet_verdict
 
     @property
     def is_greennet_decided(self) -> bool:
@@ -983,6 +992,15 @@ class MMHashKeyCache:
         with self._lock:
             value = self._entries.get(cache_key)
             return value is not None and value.greennet_passed
+
+    def mark_greennet_passed(self, cache_key: str, generation: str) -> bool:
+        """Attach a fresh GreenNet approval to the matching hash-cache entry."""
+        with self._lock:
+            value = self._entries.get(cache_key)
+            if value is None or value.generation != generation:
+                return False
+            value.greennet_passed = True
+            return True
 
     def contains(self, cache_key: str) -> bool:
         with self._lock:
