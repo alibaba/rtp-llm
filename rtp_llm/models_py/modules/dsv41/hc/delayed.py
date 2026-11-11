@@ -24,6 +24,46 @@ from rtp_llm.models_py.modules.dsv41.hc.tilelang_impl import TileLangHCUnit
 
 
 @lru_cache(maxsize=1)
+def _hc_post_chunk_rows() -> int:
+    """Token-row chunk for the reference HC post mix (0 disables chunking).
+
+    The pure-torch fallback materializes fp32 ``[rows, hc_mult, dim]``
+    temporaries; a whole-stream 65K-token prefill alone tried to allocate
+    5 GiB at once (boot-34 OOM), and the expression is strictly row-local,
+    so it is evaluated in row chunks with identical results.
+    """
+    try:
+        return max(0, int(os.environ.get("DSV4_HC_POST_CHUNK_ROWS", "4096")))
+    except ValueError:
+        return 4096
+
+
+def _hc_post_reference_chunked(x, residual, post, comb, chunk_rows: int):
+    n = residual.shape[:-2].numel()
+    if chunk_rows <= 0 or n <= chunk_rows:
+        return (
+            post.float() * x.float().unsqueeze(-2)
+            + torch.matmul(comb.float().transpose(-1, -2), residual.float())
+        ).to(residual.dtype)
+    xf = x.reshape(n, x.shape[-1])
+    rf = residual.reshape(n, *residual.shape[-2:])
+    pf = post.reshape(n, *post.shape[-2:])
+    cf = comb.reshape(n, *comb.shape[-2:])
+    outs = []
+    for i in range(0, n, chunk_rows):
+        j = min(i + chunk_rows, n)
+        outs.append(
+            (
+                pf[i:j].float() * xf[i:j].float().unsqueeze(-2)
+                + torch.matmul(
+                    cf[i:j].float().transpose(-1, -2), rf[i:j].float()
+                )
+            ).to(residual.dtype)
+        )
+    return torch.cat(outs, dim=0).reshape(residual.shape)
+
+
+@lru_cache(maxsize=1)
 def _tile_ops():
     # Set up libz3/TVM before importing the vendored TileLang kernels.
     from rtp_llm.models_py.modules.dsv4 import tilelang_kernels  # noqa: F401
@@ -185,10 +225,9 @@ class DelayedHCUnit(HCUnitBase):
             and not use_reference_gemm_paths()
         ):
             return TileLangHCUnit._post_impl(self, x, residual, post, comb)
-        return (
-            post.float() * x.float().unsqueeze(-2)
-            + torch.matmul(comb.float().transpose(-1, -2), residual.float())
-        ).to(residual.dtype)
+        return _hc_post_reference_chunked(
+            x, residual, post, comb, _hc_post_chunk_rows()
+        )
 
 
 class DelayedHCHead(nn.Module):
