@@ -444,9 +444,12 @@ void AwiService::generate(const std::unique_ptr<http_server::HttpResponseWriter>
             writeError(writer, 500, "engine failed to create stream");
             return;
         }
-        // Reserve the full input+output horizon so the resident snapshot is
-        // backed by allocator blocks rather than a requested configuration.
-        stream->setReserveStep(static_cast<size_t>(max_tokens));
+        // ReserveStep is deducted from max_seq_len by GenerateStream::maxTokenNum
+        // in addition to max_new_tokens.  Reserving the full output horizon here
+        // would therefore require input + 2*output <= max_seq_len and makes the
+        // exact 1,048,576-token benchmark stop after prefill with zero outputs.
+        // The generated tokens themselves already occupy the output horizon.
+        stream->setReserveStep(0);
         auto& runtime = awi::AwiRuntime::instance();
         runtime.bindRequest(stream->streamId(), request_id);
         runtime.setRequestTarget(stream->streamId(), static_cast<int64_t>(input_ids.size()) + max_tokens);
