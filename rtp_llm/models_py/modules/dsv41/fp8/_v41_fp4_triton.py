@@ -382,8 +382,11 @@ def _dequantize_fp4_rows_torch(raw: torch.Tensor, out_dtype: torch.dtype) -> tor
     codes = torch.stack((payload & 0x0F, payload >> 4), dim=-1).reshape(
         rows, FP4_GLOBAL_HEAD_DIM
     )
-    table = torch.tensor(_E2M1_VALUES, dtype=torch.float32, device=raw.device)
-    values = table[codes.to(torch.int64)]
+    mag = codes & 7
+    normal = torch.exp2((mag >> 1).to(torch.float32) - 1.0)
+    normal = normal * (1.0 + (mag & 1).to(torch.float32) * 0.5)
+    values = torch.where(mag < 2, mag.to(torch.float32) * 0.5, normal)
+    values = torch.where((codes & 8) != 0, -values, values)
     scales = scale_bytes.contiguous().view(torch.float8_e4m3fn).to(torch.float32)
     values = values * scales.repeat_interleave(FP4_GLOBAL_GROUP, dim=1)
     return values.to(out_dtype)

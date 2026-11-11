@@ -155,8 +155,13 @@ def _decode_pool_keys(
         codes = torch.stack((payload & 0x0F, payload >> 4), dim=-1).reshape(
             raw.shape[0], 512
         )
-        table = torch.tensor(_E2M1_VALUES, dtype=torch.float32, device=raw.device)
-        values = table[codes.to(torch.int64)]
+        # Arithmetic E2M1 decode: a CPU->CUDA table copy is illegal while a
+        # graph is capturing, and this is also cheaper than a 16-entry gather.
+        mag = codes & 7
+        normal = torch.exp2((mag >> 1).to(torch.float32) - 1.0)
+        normal = normal * (1.0 + (mag & 1).to(torch.float32) * 0.5)
+        values = torch.where(mag < 2, mag.to(torch.float32) * 0.5, normal)
+        values = torch.where((codes & 8) != 0, -values, values)
         values = values * scales.to(torch.float32).repeat_interleave(16, dim=1)
     else:
         if width != 528:
