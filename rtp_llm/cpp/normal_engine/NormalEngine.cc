@@ -52,10 +52,11 @@ namespace {
 // requests only. Data comes from the live step loop: synchronized step
 // latency (host+comm inclusive), the real graph-replay counter delta, stream
 // prefill/decode state, reuse length and KV residency at barrier release.
-void recordAwiStepObservations(const std::list<GenerateStreamPtr>& streams,
-                               int64_t                             step_begin_us,
-                               int64_t                             step_latency_us,
-                               uint64_t                            replays_before) {
+void recordAwiStepObservations(const std::list<GenerateStreamPtr>&    streams,
+                               const std::unordered_set<std::string>& context_rids,
+                               int64_t                                step_begin_us,
+                               int64_t                                step_latency_us,
+                               uint64_t                               replays_before) {
     auto& registry = AwiObservationRegistry::instance();
     if (streams.empty()) {
         return;
@@ -97,7 +98,11 @@ void recordAwiStepObservations(const std::list<GenerateStreamPtr>& streams,
         if (request_id.empty() || !registry.isTracked(request_id)) {
             continue;
         }
-        if (stream->isContextStream()) {
+        // Classification comes from the PRE-execution snapshot: by the time
+        // this tap runs (after process()/sampler), a context stream has
+        // already flipped to the decode phase, and the first output token
+        // belongs to the prefill window.
+        if (context_rids.count(request_id) != 0) {
             registry.prefillStep(request_id, stream->inputLength(), start_ns, end_ns);
         } else {
             registry.finalizePrefill(request_id);
@@ -1016,6 +1021,15 @@ absl::Status NormalEngine::step() try {
     // AWI instrumentation: sample the real graph-replay counter around the
     // executor call so the per-step graph_replay flag reflects this step.
     const uint64_t awi_replays_before = AwiObservationRegistry::instance().graphReplayCount();
+    // Snapshot which streams ENTER this step as context (prefill) streams:
+    // process()/sampler flip them to the decode phase, and the post-step
+    // observation tap must attribute this step to the prefill window.
+    std::unordered_set<std::string> awi_context_rids;
+    for (const auto& stream : streams) {
+        if (stream && stream->isContextStream()) {
+            awi_context_rids.insert(stream->generateInput()->request_info.request_id);
+        }
+    }
     {
         // NormalExecutor drives startStep/finishStep via callbacks; MtpExecutor
         // has no callbacks yet, so bracket the propose path here on the engine
@@ -1041,7 +1055,7 @@ absl::Status NormalEngine::step() try {
         RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
         reportMetrics({awi_step_latency_us});
     }
-    recordAwiStepObservations(streams, step_begin_time_us, awi_step_latency_us, awi_replays_before);
+    recordAwiStepObservations(streams, awi_context_rids, step_begin_time_us, awi_step_latency_us, awi_replays_before);
 
     return status;
 } catch (const std::exception& exception) {
