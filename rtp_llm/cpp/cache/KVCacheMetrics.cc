@@ -35,8 +35,7 @@ mergeCachePoolMetricsSnapshots(const std::vector<KVCachePoolMetricsSnapshot>&   
         report_snapshot.pd_connector_ref_blocks     = snapshot.pd_connector_ref_blocks;
         report_snapshot.block_cache_ref_blocks     = snapshot.block_cache_ref_blocks;
         report_snapshot.load_ref_blocks            = snapshot.load_ref_blocks;
-        report_snapshot.eviction_target_ref_blocks = snapshot.eviction_target_ref_blocks;
-        report_snapshot.store_ref_blocks           = snapshot.store_ref_blocks;
+        report_snapshot.eviction_target_ref_blocks  = snapshot.eviction_target_ref_blocks;
         report_snapshot.frozen_ref_blocks          = snapshot.frozen_ref_blocks;
         report_snapshot.used_ratio                 = snapshot.used_ratio;
         report_snapshots.push_back(std::move(report_snapshot));
@@ -60,7 +59,6 @@ mergeCachePoolMetricsSnapshots(const std::vector<KVCachePoolMetricsSnapshot>&   
         report_snapshot.block_cache_ref_blocks        = snapshot.block_cache_ref_blocks;
         report_snapshot.load_ref_blocks               = snapshot.load_ref_blocks;
         report_snapshot.eviction_target_ref_blocks    = snapshot.eviction_target_ref_blocks;
-        report_snapshot.store_ref_blocks              = snapshot.store_ref_blocks;
         report_snapshot.frozen_ref_blocks             = snapshot.frozen_ref_blocks;
         report_snapshot.active_blocks              = snapshot.active_blocks;
         report_snapshot.read_bytes                    = snapshot.read_bytes;

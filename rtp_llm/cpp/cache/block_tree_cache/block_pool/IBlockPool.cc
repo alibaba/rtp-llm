@@ -75,7 +75,6 @@ std::string IBlockPool::debugString() const {
         << ", load_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::LOAD)]
         << ", eviction_target_ref_blocks="
         << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::EVICTION)]
-        << ", store_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::STORE)]
         << ", frozen_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::FROZEN)]
         << ", configured_frozen_abort_lower_ratio=" << config_->frozen_block_abort_lower_ratio
         << ", configured_frozen_abort_upper_ratio=" << config_->frozen_block_abort_upper_ratio

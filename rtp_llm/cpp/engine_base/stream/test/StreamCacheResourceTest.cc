@@ -484,7 +484,7 @@ TEST_F(StreamCacheResourceTest, PrefillIncrementAfterHostLoadPreservesLinearReus
         auto config                    = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
         config.reuse_cache_tail_blocks = tail_blocks;
         KVCacheConfig tiered_config;
-        tiered_config.enable_device_cache  = false;
+        tiered_config.enable_device_cache  = true;
         tiered_config.enable_memory_cache  = true;
         tiered_config.memory_cache_size_mb = 1;
         prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6, 7, 8, 9}, true, RoleType::PDFUSION, tiered_config);
@@ -818,7 +818,7 @@ TEST_F(StreamCacheResourceTest, testPrefillOnlyDisablesPrefixAndDeviceCacheReuse
         EXPECT_TRUE(resource.waitForAllocatorLoad().ok());
         EXPECT_EQ(resource.allocator_load_context_, nullptr);
         EXPECT_EQ(stream_->reuseLength(), 0);
-        EXPECT_EQ(resource.storeTarget(), Tier::NONE);
+        EXPECT_EQ(resource.insertTarget(), Tier::NONE);
         EXPECT_TRUE(stream_->generateConfig()->reuse_cache);
         cache_manager_->coordinator_manager_ = real_allocator;
         stream_->releaseResource();
@@ -874,7 +874,7 @@ TEST_F(StreamCacheResourceTest, testCacheLookupIgnoresPerRequestTierSwitches) {
     EXPECT_TRUE(resource.enableCacheLookup());
 }
 
-TEST_F(StreamCacheResourceTest, testStoreTargetUsesDeploymentLocalTiers) {
+TEST_F(StreamCacheResourceTest, testInsertTargetUsesDeploymentLocalTiers) {
     prepareResource(true);
     auto& resource   = stream_->streamCacheResource();
     auto& request    = *stream_->generate_input_->generate_config;
@@ -887,9 +887,9 @@ TEST_F(StreamCacheResourceTest, testStoreTargetUsesDeploymentLocalTiers) {
         Tier target;
     };
     const DeploymentCase cases[] = {{false, false, false, Tier::NONE},
-                                    {false, false, true, Tier::DISK},
-                                    {false, true, false, Tier::HOST},
-                                    {false, true, true, Tier::HOST},
+                                    {false, false, true, Tier::NONE},
+                                    {false, true, false, Tier::NONE},
+                                    {false, true, true, Tier::NONE},
                                     {true, false, false, Tier::DEVICE},
                                     {true, false, true, Tier::DEVICE},
                                     {true, true, false, Tier::DEVICE},
@@ -913,20 +913,20 @@ TEST_F(StreamCacheResourceTest, testStoreTargetUsesDeploymentLocalTiers) {
                                  + " target=" + std::to_string(static_cast<int>(test_case.target)));
                     deployment.ignore_request_cache_switches = ignore_request_switches;
                     request.reuse_cache                      = true;
-                    EXPECT_EQ(resource.storeTarget(), test_case.target);
+                    EXPECT_EQ(resource.insertTarget(), test_case.target);
                     EXPECT_EQ(resource.enableDeviceCache(), test_case.device);
                     EXPECT_EQ(resource.enableMemoryCache(), test_case.host);
                     EXPECT_EQ(resource.enableDiskCache(), test_case.disk);
 
                     request.reuse_cache = false;
-                    EXPECT_EQ(resource.storeTarget(), ignore_request_switches ? test_case.target : Tier::NONE);
+                    EXPECT_EQ(resource.insertTarget(), ignore_request_switches ? test_case.target : Tier::NONE);
                 }
             }
         }
     }
 }
 
-TEST_F(StreamCacheResourceTest, testStoreTargetPreservesReuseCacheOverride) {
+TEST_F(StreamCacheResourceTest, testInsertTargetPreservesReuseCacheOverride) {
     prepareResource(true);
     auto& resource   = stream_->streamCacheResource();
     auto& request    = *stream_->generate_input_->generate_config;
@@ -940,20 +940,20 @@ TEST_F(StreamCacheResourceTest, testStoreTargetPreservesReuseCacheOverride) {
     deployment.enable_device_cache           = true;
     deployment.enable_memory_cache           = true;
     deployment.enable_disk_cache             = true;
-    EXPECT_EQ(resource.storeTarget(), Tier::DEVICE);
+    EXPECT_EQ(resource.insertTarget(), Tier::DEVICE);
 
     deployment.enable_device_cache = false;
-    EXPECT_EQ(resource.storeTarget(), Tier::HOST);
+    EXPECT_EQ(resource.insertTarget(), Tier::NONE);
 
     deployment.enable_memory_cache = false;
-    EXPECT_EQ(resource.storeTarget(), Tier::DISK);
+    EXPECT_EQ(resource.insertTarget(), Tier::NONE);
 
     deployment.enable_disk_cache   = false;
     deployment.enable_remote_cache = true;
-    EXPECT_EQ(resource.storeTarget(), Tier::NONE);
+    EXPECT_EQ(resource.insertTarget(), Tier::NONE);
 
     deployment.enable_remote_cache = false;
-    EXPECT_EQ(resource.storeTarget(), Tier::NONE);
+    EXPECT_EQ(resource.insertTarget(), Tier::NONE);
 }
 
 TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {

@@ -19,7 +19,7 @@ cc_library(
         "DeviceHostCopyStrategy.cc",
         "Cuda3DBatchDeviceHostCopyStrategy.cc",
         "LegacyTransferEngine.cc",
-        "CrcTransferServiceSync.cc",
+        "CrcCopyExecutorSync.cc",
     ],
     hdrs = [
         "TransferExecutor.h",

@@ -96,7 +96,7 @@ public:
     explicit RecordingPerRankEngine(std::deque<bool> results):
         PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}), results_(std::move(results)) {}
 
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         const auto& descriptors = task.descriptors();
         batches_.push_back(descriptors);
         const TransferDescriptor& first     = descriptors.front();
@@ -121,7 +121,7 @@ class PendingPerRankEngine final: public PerRankBlockTransferEngine {
 public:
     PendingPerRankEngine(): PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}) {}
 
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         auto context  = std::make_shared<TransferBatchAsyncContext>();
         bool released = false;
         {
@@ -621,7 +621,7 @@ TEST(LoadTaskRunnerTest, SplitsEachDirectionByGroupSetId) {
     const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet(0), makeTaskRunnerTestGroupSet(1)};
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
     auto                    engine = std::make_shared<RecordingPerRankEngine>(std::deque<bool>{true, true, true, true});
-    BlockTransferDispatcher dispatcher(engine, nullptr, 8);
+    BlockTransferDispatcher dispatcher(engine, nullptr);
     BlockTreeCacheMetricsReporter metrics_reporter{nullptr};
     auto                          task = makeLoadTask({TransferDescriptor::hostToDevice(0, 1, {1}),
                                                        TransferDescriptor::hostToDevice(0, 2, {2}),

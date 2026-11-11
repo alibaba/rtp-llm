@@ -173,7 +173,7 @@ TEST(DiskIOExecutorTest, ReadBatchFansOutAndWriteBatchUsesOneWorkerInOffsetOrder
                 EXPECT_EQ(std::vector<unsigned char>(buffer.begin(), buffer.begin() + 36),
                           std::vector<unsigned char>(36, 0xa5));
                 EXPECT_EQ(std::vector<unsigned char>(buffer.begin() + 36, buffer.end()),
-                          std::vector<unsigned char>(28, 0));
+                          std::vector<unsigned char>(28, 0xa5));
             }
             {
                 std::lock_guard<std::mutex> lock(mutex);
@@ -184,12 +184,9 @@ TEST(DiskIOExecutorTest, ReadBatchFansOutAndWriteBatchUsesOneWorkerInOffsetOrder
             return DiskBlockIOStatus::OK;
         };
         ASSERT_EQ(io.openAndPreallocate("", 0, true), DiskBlockIOStatus::OK);
-        const auto status = write ?
-                                executor.asyncWrite(io,
-                                                    {{1, buffer.data(), 64, buffer.data() + 36, 28},
-                                                     {0, buffer.data(), 64, buffer.data() + 36, 28}},
-                                                    done.callback()) :
-                                executor.asyncRead(io, {{0, buffer.data(), 1}, {1, buffer.data(), 1}}, done.callback());
+        const auto status =
+            write ? executor.asyncWrite(io, {{1, buffer.data(), 64}, {0, buffer.data(), 64}}, done.callback()) :
+                    executor.asyncRead(io, {{0, buffer.data(), 1}, {1, buffer.data(), 1}}, done.callback());
         EXPECT_EQ(status, DiskBlockIOStatus::OK);
         EXPECT_TRUE(started.wait(write ? 1 : 2));
         if (write) {

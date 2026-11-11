@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcTransferService.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
 
 #include <algorithm>
 #include <cassert>
@@ -14,6 +14,15 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+std::vector<GroupSetPtr> crcTransferGroups(const std::vector<GroupSetPtr>& groups, bool enable_disk_cache) {
+    std::vector<GroupSetPtr> result;
+    for (const auto& group : groups) {
+        if (group && group->crcEnabled() && !group->devicePools().empty()
+            && (group->hostPool() || (enable_disk_cache && group->diskPool())))
+            result.push_back(group);
+    }
+    return result;
+}
 namespace {
 size_t checkedMultiply(size_t a, size_t b) {
     if (a && b > std::numeric_limits<size_t>::max() / a)
@@ -21,37 +30,19 @@ size_t checkedMultiply(size_t a, size_t b) {
     return a * b;
 }
 
-bool validCopyBuffers(const HostBufferView& host, const TransferDescriptor& descriptor, const GroupSet& group) {
-    const auto& blocks = descriptor.blocksAt(Tier::DEVICE);
-    if (!isValidHostBufferView(host, group.payloadBytes(), group.storageBytes())
-        || blocks.size() != group.devicePools().size())
-        return false;
-    for (size_t member = 0; member < blocks.size(); ++member)
-        if (!group.devicePools()[member]->validBlock(blocks[member]))
-            return false;
-    return true;
-}
 }  // namespace
 
-int CrcTransferService::deviceFor(const GroupSet& group) {
+int CrcCopyExecutor::deviceFor(const GroupSet& group) {
     return group.devicePools().front()->deviceIndex();
 }
 
-CrcTransferService::CrcTransferService(const std::vector<GroupSetPtr>& groups,
-                                       size_t                          max_batch,
-                                       size_t                          slots_per_device,
-                                       int64_t                         world_rank,
-                                       std::shared_ptr<CrcDumpWriter>  dump_writer,
-                                       bool                            async):
+CrcCopyExecutor::CrcCopyExecutor(const std::vector<GroupSetPtr>& groups,
+                                 size_t                          max_batch,
+                                 size_t                          slots_per_device,
+                                 int64_t                         world_rank,
+                                 std::shared_ptr<CrcDumpWriter>  dump_writer,
+                                 bool                            async):
     async_(async) {
-    initialize(groups, max_batch, slots_per_device, world_rank, std::move(dump_writer));
-}
-
-void CrcTransferService::initialize(const std::vector<GroupSetPtr>& groups,
-                                    size_t                          max_batch,
-                                    size_t                          slots_per_device,
-                                    int64_t                         world_rank,
-                                    std::shared_ptr<CrcDumpWriter>  dump_writer) {
     if (!CrcCopyWorkspace::available() || !max_batch || !slots_per_device)
         throw std::invalid_argument("CRC requires CUDA 13 and positive workspace limits");
     if (!dump_writer)
@@ -110,12 +101,12 @@ void CrcTransferService::initialize(const std::vector<GroupSetPtr>& groups,
     }
 }
 
-CrcTransferService::~CrcTransferService() {
+CrcCopyExecutor::~CrcCopyExecutor() {
     stopAndWaitForIo();
 }
 
-TransferStatus CrcTransferService::statusFor(CrcCopyState status) {
-    switch (status) {
+TransferStatus CrcCopyExecutor::statusFor(CrcCopyState state) {
+    switch (state) {
         case CrcCopyState::OK:
             return TransferStatus::OK;
         case CrcCopyState::INVALID_ARGS:
@@ -127,10 +118,10 @@ TransferStatus CrcTransferService::statusFor(CrcCopyState status) {
     }
 }
 
-TransferResult CrcTransferService::mapResult(CrcCopyState                           result,
-                                             CrcCopyDirection                       direction,
-                                             const std::vector<TransferDescriptor>& descriptors,
-                                             const std::vector<CrcCopyFailure>&     failures) {
+TransferResult CrcCopyExecutor::mapResult(CrcCopyState                           result,
+                                          CrcCopyDirection                       direction,
+                                          const std::vector<TransferDescriptor>& descriptors,
+                                          const std::vector<CrcCopyFailure>&     failures) {
     TransferResult transfer_result(statusFor(result));
     transfer_result.expandBlockErrors(descriptors.size());
     if (result == CrcCopyState::CRC_MISMATCH) {
@@ -138,7 +129,7 @@ TransferResult CrcTransferService::mapResult(CrcCopyState                       
         // uncommitted so callers discard its targets, including healthy items.
         std::fill(transfer_result.block_errors.begin(),
                   transfer_result.block_errors.end(),
-                  direction == CrcCopyDirection::STORE ? CacheCopyError::NONE : CacheCopyError::NOT_EXECUTED);
+                  direction == CrcCopyDirection::EVICT ? CacheCopyError::NONE : CacheCopyError::NOT_EXECUTED);
     }
     for (const auto& failure : failures) {
         const auto& descriptor                           = descriptors[failure.item_index];
@@ -153,41 +144,39 @@ TransferResult CrcTransferService::mapResult(CrcCopyState                       
     return transfer_result;
 }
 
-CrcCopyItem CrcTransferService::makeItem(const HostBufferView&     host,
-                                         const TransferDescriptor& descriptor,
-                                         const GroupSetPtr&        group) {
+CrcCopyItem CrcCopyExecutor::makeItem(const HostBufferView&     host,
+                                      const TransferDescriptor& descriptor,
+                                      const GroupSetPtr&        group,
+                                      bool                      borrow_descriptor) {
     CrcCopyItem item{host.base, group->payloadBytes(), host.capacity_bytes, {}};
     for (const auto& tile : getDeviceHostCopyTiles(*group, descriptor.blocksAt(Tier::DEVICE)))
         item.tiles.push_back({tile.buffer.addr, tile.host_offset, tile.buffer.size_bytes});
-    // Capture both inputs by value so diagnostics outlive the caller's vectors.
-    item.dump_metadata = [descriptor, group_owner = group] {
-        return CrcDumpWriter::dumpMetadata(descriptor, *group_owner);
-    };
+    if (borrow_descriptor) {
+        // Async descriptors live in the stable slot until finish() clears the
+        // workspace's item captures, including after deferred diagnostics.
+        item.dump_metadata = [descriptor_ptr = &descriptor, group_owner = group] {
+            return CrcDumpWriter::dumpMetadata(*descriptor_ptr, *group_owner);
+        };
+    } else {
+        // The legacy synchronous path keeps independent item ownership.
+        item.dump_metadata = [descriptor, group_owner = group] {
+            return CrcDumpWriter::dumpMetadata(descriptor, *group_owner);
+        };
+    }
     return item;
 }
 
-bool CrcTransferService::trySubmit(const std::vector<HostBufferView>&     hosts,
-                                   const std::vector<TransferDescriptor>& descriptors,
-                                   const GroupSetPtr&                     group,
-                                   DoneCallback                           done) {
-    if (!done)
-        throw std::invalid_argument("CRC stage callback is required");
-    const auto reject = [&] {
+bool CrcCopyExecutor::trySubmit(const std::vector<HostBufferView>&     hosts,
+                                const std::vector<TransferDescriptor>& descriptors,
+                                const GroupSetPtr&                     group,
+                                DoneCallback                           done) {
+    if (!accepting_) {
         done(TransferStatus::INVALID_ARGS);
         return true;
-    };
-    if (unlikely(!async_) || !group || !groups_.count(group.get()) || !group->crcEnabled()
-        || group->devicePools().empty() || hosts.empty() || hosts.size() != descriptors.size())
-        return reject();
-    const bool store     = descriptors.front().source_tier == Tier::DEVICE;
-    const auto direction = store ? CrcCopyDirection::STORE : CrcCopyDirection::LOAD;
-    const auto host_tier = store ? descriptors.front().target_tier : descriptors.front().source_tier;
-    if (host_tier != Tier::HOST && host_tier != Tier::DISK)
-        return reject();
-
-    if (!accepting_)
-        return reject();
-    Slot* slot = nullptr;
+    }
+    const bool evict     = descriptors.front().source_tier == Tier::DEVICE;
+    const auto direction = evict ? CrcCopyDirection::EVICT : CrcCopyDirection::LOAD;
+    Slot*      slot      = nullptr;
     for (auto& candidate : slots_.at(deviceFor(*group)))
         if (!candidate.operation) {
             slot = &candidate;
@@ -197,35 +186,34 @@ bool CrcTransferService::trySubmit(const std::vector<HostBufferView>&     hosts,
         return false;
 
     // Every allocation and capture precedes the first possible CUDA enqueue.
-    auto operation         = std::make_unique<Operation>();
-    operation->group       = group;
-    operation->descriptors = descriptors;
-    std::vector<CrcCopyItem> items;
-    items.reserve(hosts.size());
-    for (size_t i = 0; i < descriptors.size(); ++i) {
-        const auto& descriptor = descriptors[i];
-        if (descriptor.group_set_id != group->groupSetId() || descriptor.source_tier != descriptors.front().source_tier
-            || descriptor.target_tier != descriptors.front().target_tier
-            || !validCopyBuffers(hosts[i], descriptor, *group))
-            return reject();
-        items.push_back(makeItem(hosts[i], descriptor, group));
+    auto& operation = slot->operation.emplace();
+    try {
+        operation.group       = group;
+        operation.descriptors = descriptors;
+        std::vector<CrcCopyItem> items;
+        items.reserve(hosts.size());
+        for (size_t i = 0; i < descriptors.size(); ++i) {
+            const auto& descriptor = operation.descriptors[i];
+            items.push_back(makeItem(hosts[i], descriptor, group, true));
+        }
+        operation.done = std::move(done);
+        // The primitive returns only after draining any partial submission error.
+        const auto state = slot->copy->trySubmit(items, direction);
+        if (state == CrcCopyState::PENDING)
+            return true;
+        auto callback = std::move(operation.done);
+        slot->operation.reset();
+        if (state != CrcCopyState::BUSY)
+            callback(state == CrcCopyState::INVALID_ARGS ? TransferStatus::INVALID_ARGS :
+                                                           TransferStatus::DEVICE_IO_ERROR);
+        return state != CrcCopyState::BUSY;
+    } catch (...) {
+        slot->operation.reset();
+        throw;
     }
-    TransferResult invalid(TransferStatus::INVALID_ARGS);
-    TransferResult failed(TransferStatus::DEVICE_IO_ERROR);
-    slot->operation       = std::move(operation);
-    slot->operation->done = std::move(done);
-
-    // The primitive returns only after draining any partial submission error.
-    const auto                 submitted = slot->copy->trySubmit(items, direction);
-    std::unique_ptr<Operation> immediate;
-    if (submitted != CrcCopyState::PENDING)
-        immediate = std::move(slot->operation);
-    if (immediate && submitted != CrcCopyState::BUSY)
-        immediate->done(submitted == CrcCopyState::INVALID_ARGS ? std::move(invalid) : std::move(failed));
-    return submitted != CrcCopyState::BUSY;
 }
 
-void CrcTransferService::advance(Slot& slot, bool deliver) {
+void CrcCopyExecutor::advance(Slot& slot, bool deliver) {
     if (!slot.operation)
         return;
     auto& operation = *slot.operation;
@@ -235,31 +223,30 @@ void CrcTransferService::advance(Slot& slot, bool deliver) {
             return;
         // Construct the result before retiring the terminal workspace.
         // Allocation failures propagate to the caller.
-        const auto direction = operation.descriptors.front().source_tier == Tier::DEVICE ? CrcCopyDirection::STORE :
+        const auto direction = operation.descriptors.front().source_tier == Tier::DEVICE ? CrcCopyDirection::EVICT :
                                                                                            CrcCopyDirection::LOAD;
         operation.result     = mapResult(state, direction, operation.descriptors, slot.copy->failures());
         slot.copy->finish();
     }
     if (!deliver)
         return;
-    auto completed = std::move(slot.operation);
-    completed->done(std::move(*completed->result));
+    auto callback = std::move(operation.done);
+    auto result   = std::move(*operation.result);
+    slot.operation.reset();
+    callback(std::move(result));
 }
 
-bool CrcTransferService::poll() {
-    if (unlikely(!async_))
-        throw std::logic_error("poll requires an async CRC service");
+bool CrcCopyExecutor::poll() {
+    bool pending = false;
     for (auto& [device, slots] : slots_)
-        for (auto& slot : slots)
+        for (auto& slot : slots) {
             advance(slot, true);
-    for (const auto& [device, slots] : slots_)
-        for (const auto& slot : slots)
-            if (slot.operation)
-                return true;
-    return false;
+            pending = pending || slot.operation.has_value();
+        }
+    return pending;
 }
 
-void CrcTransferService::stopAdmission() {
+void CrcCopyExecutor::stopAdmission() {
     if (async_) {
         accepting_ = false;
         return;
@@ -270,7 +257,7 @@ void CrcTransferService::stopAdmission() {
     cv_.notify_all();
 }
 
-void CrcTransferService::stopAndWaitForIo() {
+void CrcCopyExecutor::stopAndWaitForIo() {
     stopAdmission();
     // TODO(legacy removal): remove this synchronous wait branch.
     if (unlikely(!async_)) {

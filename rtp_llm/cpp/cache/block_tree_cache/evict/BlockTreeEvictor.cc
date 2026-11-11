@@ -299,7 +299,7 @@ void BlockTreeEvictor::logZeroDeviceReclaimLocked(size_t group_set_id,
         "BTC on-demand DEVICE reclaim returned zero: pool=%s group_set=%zu group_type=%s required_blocks=%zu "
         "total_blocks=%zu free_blocks=%zu active_blocks=%zu cache_only_blocks=%zu cache_only_outside_heap_min=%zu "
         "device_candidate_nodes=%zu has_unfrozen_candidate=%d rejected_candidate_nodes=%zu pending_eviction_releases=%zu "
-        "cache_ref_blocks=%zu load_ref_blocks=%zu eviction_target_ref_blocks=%zu store_ref_blocks=%zu "
+        "cache_ref_blocks=%zu load_ref_blocks=%zu eviction_target_ref_blocks=%zu "
         "frozen_ref_blocks=%zu request_ref_blocks=%zu remote_connector_ref_blocks=%zu pd_connector_ref_blocks=%zu",
         pool->poolName().c_str(),
         group_set_id,
@@ -317,7 +317,6 @@ void BlockTreeEvictor::logZeroDeviceReclaimLocked(size_t group_set_id,
         stats.tree.blocksWithRef(BlockTreeRefType::CACHE),
         stats.tree.blocksWithRef(BlockTreeRefType::LOAD),
         stats.tree.blocksWithRef(BlockTreeRefType::EVICTION),
-        stats.tree.blocksWithRef(BlockTreeRefType::STORE),
         stats.tree.blocksWithRef(BlockTreeRefType::FROZEN),
         stats.request_ref_blocks,
         stats.remote_connector_ref_blocks,
@@ -551,8 +550,8 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
                 metrics_reporter_->reportQueueWaitMetric(
                     true, "business", "evict", Tier::NONE, Tier::NONE, currentTimeUs() - queue_begin);
             }
-            bool                 any_not_detached = false;
-            EvictionTransferTask settled_task(task->transfer_task.subtask({}));
+            bool                any_not_detached = false;
+            std::vector<size_t> settled_indices;
             {
                 std::unique_lock<std::mutex> lock(*mutex_, std::defer_lock);
                 {
@@ -586,10 +585,8 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
                 const auto& descriptor = task->descriptors().front();
 
                 for (size_t desc_index = 0; desc_index < task->descriptors().size(); ++desc_index) {
-                    const TransferDescriptor& desc = task->descriptors()[desc_index];
                     if (success && !detached[desc_index]) {
-                        settled_task.mutableDescriptorsForPreparation().push_back(desc);
-                        settled_task.timings.push_back(task->timings[desc_index]);
+                        settled_indices.push_back(desc_index);
                     }
                 }
                 {
@@ -598,9 +595,12 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
                     finishWatermarkRoundLocked(descriptor.group_set_id, descriptor.source_tier);
                 }
             }
-            if (!settled_task.descriptors().empty()) {
+            if (!settled_indices.empty()) {
                 CompletionStageScope metrics(observation, "completion_metrics", "business_completion");
-                metrics_reporter_->reportEvictionFinished(settled_task, tree_->groupSets());
+                for (const size_t index : settled_indices) {
+                    metrics_reporter_->reportEvictedDescriptor(
+                        task->descriptors()[index], task->timings[index], tree_->groupSets(), "watermark");
+                }
             }
         };
 
@@ -746,7 +746,7 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t         
     if (!force_drop) {
         if (tier == Tier::DEVICE && is_tier_enabled_(Tier::HOST)) {
             target_tier = Tier::HOST;
-        } else if ((tier == Tier::DEVICE || tier == Tier::HOST) && is_tier_enabled_(Tier::DISK)) {
+        } else if (tier == Tier::HOST && is_tier_enabled_(Tier::DISK)) {
             target_tier = Tier::DISK;
         }
     }
@@ -764,14 +764,14 @@ Tier BlockTreeEvictor::watermarkTargetTier(Tier source_tier) const {
     if (source_tier == Tier::DEVICE && is_tier_enabled_(Tier::HOST)) {
         return Tier::HOST;
     }
-    if ((source_tier == Tier::DEVICE || source_tier == Tier::HOST) && is_tier_enabled_(Tier::DISK)) {
+    if (source_tier == Tier::HOST && is_tier_enabled_(Tier::DISK)) {
         return Tier::DISK;
     }
     return Tier::NONE;
 }
 
 size_t BlockTreeEvictor::watermarkLogicalBatchLimit(Tier source_tier, Tier target_tier) const {
-    if ((source_tier == Tier::DEVICE && (target_tier == Tier::HOST || target_tier == Tier::DISK))
+    if ((source_tier == Tier::DEVICE && target_tier == Tier::HOST)
         || (source_tier == Tier::HOST && target_tier == Tier::DISK)) {
         return max_descriptors_per_batch_;
     }

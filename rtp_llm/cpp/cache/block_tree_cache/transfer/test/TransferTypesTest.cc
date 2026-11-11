@@ -2,12 +2,26 @@
 
 #include <chrono>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
 namespace {
+
+TransferDescriptor removedDiskToHost(size_t group, BlockIdxType disk, BlockIdxType host) {
+    auto desc = TransferDescriptor::hostToDisk(group, host, disk);
+    std::swap(desc.source_tier, desc.target_tier);
+    std::swap(desc.source_blocks, desc.target_blocks);
+    return desc;
+}
+
+TransferDescriptor removedDeviceToDisk(size_t group, std::vector<BlockIdxType> device, BlockIdxType disk) {
+    auto desc        = TransferDescriptor::deviceToHost(group, std::move(device), disk);
+    desc.target_tier = Tier::DISK;
+    return desc;
+}
 
 TEST(TransferTaskTest, SubtasksPreserveQueryIdAndDeadline) {
     TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10), 73);
@@ -48,8 +62,8 @@ TEST(TransferDescriptorTest, FactoriesBuildExecutableDescriptors) {
     EXPECT_TRUE(TransferDescriptor::deviceToHost(0, {1, 2}, 3).isExecutable());
     EXPECT_TRUE(TransferDescriptor::hostToDevice(0, 3, {1, 2}).isExecutable());
     EXPECT_TRUE(TransferDescriptor::hostToDisk(0, 1, 2).isExecutable());
-    EXPECT_TRUE(TransferDescriptor::diskToHost(0, 1, 2).isExecutable());
-    EXPECT_TRUE(TransferDescriptor::deviceToDisk(0, {1, 2}, 3).isExecutable());
+    EXPECT_FALSE(removedDiskToHost(0, 1, 2).isExecutable());
+    EXPECT_FALSE(removedDeviceToDisk(0, {1, 2}, 3).isExecutable());
     EXPECT_TRUE(TransferDescriptor::diskToDevice(0, 3, {1, 2}).isExecutable());
 }
 

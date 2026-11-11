@@ -61,11 +61,11 @@ TransferWorkLoop::Entry::Entry(TransferTask task, BeforeCompleteCallback before_
     before_complete(std::move(before_complete)) {}
 
 bool TransferWorkLoop::isCrc(Step step) {
-    return step == Step::CRC_LOAD || step == Step::CRC_STORE;
+    return step == Step::CRC_LOAD || step == Step::CRC_EVICT;
 }
 
 TransferWorkLoop::TransferWorkLoop(std::vector<GroupSetPtr>                       groups,
-                                   std::unique_ptr<CrcTransferService>            crc,
+                                   std::unique_ptr<CrcCopyExecutor>               crc,
                                    DiskIOExecutor*                                disk_io_executor,
                                    TransferDirection                              direction,
                                    size_t                                         batch_limit,
@@ -82,7 +82,7 @@ TransferWorkLoop::TransferWorkLoop(std::vector<GroupSetPtr>                     
     capacity_(queue_capacity),
     metrics_reporter_(std::move(metrics_reporter)),
     world_rank_(world_rank),
-    thread_name_((direction == TransferDirection::LOAD ? "btc_load_" : "btc_offload_") + std::to_string(worker_index)) {
+    thread_name_((direction == TransferDirection::LOAD ? "btc_load_" : "btc_evict_") + std::to_string(worker_index)) {
     abortOnOom([&] {
         if (!batch_limit_ || !capacity_)
             throw std::invalid_argument("async transfer requires positive M/Q");
@@ -118,58 +118,51 @@ void TransferWorkLoop::start() {
     });
 }
 
-std::shared_ptr<TransferAsyncContext> TransferWorkLoop::execute(TransferTask           task,
-                                                                BeforeCompleteCallback before_complete) {
+std::shared_ptr<TransferAsyncContext>
+TransferWorkLoop::reject(const TransferTask& task, const char* message, ErrorCode code) {
+    const auto count = task.descriptors().size();
+    auto       total = timer(task, "worker_task_total", 0, count, AsyncProfileKind::Lifecycle, "worker_task");
+    auto       queue = timer(task, "transfer_queue_wait", 0, count, AsyncProfileKind::Wait, "worker_task");
+    queue.finish(false);
+    total.finish(false);
+    return std::make_shared<CompletedTransferAsyncContext>(
+        TransferResult(ErrorInfo(code, message), CacheCopyError::NOT_EXECUTED), count);
+}
+
+std::shared_ptr<TransferAsyncContext>
+TransferWorkLoop::execute(TransferTask&& task, BeforeCompleteCallback&& before_complete, bool* retryable) {
+    if (retryable) {
+        *retryable = false;
+    }
     return abortOnOom([&]() -> std::shared_ptr<TransferAsyncContext> {
         const auto count = task.descriptors().size();
-        // Reuse task-level observations for both direct and combined routes.
-        auto       total_timer = timer(task, "worker_task_total", 0, count, AsyncProfileKind::Lifecycle, "worker_task");
-        auto       queue_timer = timer(task, "transfer_queue_wait", 0, count, AsyncProfileKind::Wait, "worker_task");
-        const auto reject      = [&](const char* message,
-                                ErrorCode   code =
-                                    ErrorCode::EXECUTION_EXCEPTION) -> std::shared_ptr<TransferAsyncContext> {
-            queue_timer.finish(false);
-            total_timer.finish(false);
-            return std::make_shared<CompletedTransferAsyncContext>(
-                TransferResult(ErrorInfo(code, message), CacheCopyError::NOT_EXECUTED), count);
-        };
-        if (!count)
-            return reject("empty WorkLoop transfer", ErrorCode::INVALID_PARAMS);
         if (task.expired())
-            return reject("transfer expired before WorkLoop admission", ErrorCode::DEADLINE_EXCEEDED);
-        if (count > batch_limit_)
-            return reject("WorkLoop batch exceeds configured limit", ErrorCode::INVALID_PARAMS);
-        bool rejected;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            rejected = !accepting_ || entry_count_ == capacity_;
+            return reject(task, "transfer expired before WorkLoop admission", ErrorCode::DEADLINE_EXCEEDED);
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!accepting_) {
+            lock.unlock();
+            return reject(task, "async transfer owner stopped", ErrorCode::EXECUTION_EXCEPTION);
         }
-        if (rejected)
-            return reject("RESOURCE_EXHAUSTED: async transfer full or stopped");
-        // Copy logical sizes, including nested block vectors. Do not retain a
-        // caller's arbitrary excess vector capacity inside the resident budget.
-        auto    owned_task = task.subtask(std::vector<TransferDescriptor>(task.descriptors()));
+        if (entry_count_ == capacity_) {
+            if (retryable) {
+                *retryable = true;
+                return nullptr;
+            }
+            lock.unlock();
+            return reject(task, "RESOURCE_EXHAUSTED: async transfer queue full", ErrorCode::EXECUTION_EXCEPTION);
+        }
+        // Admission and the move are atomic with respect to competing submitters
+        // and shutdown. The resident budget counts unfinished batches.
+        auto    total_timer = timer(task, "worker_task_total", 0, count, AsyncProfileKind::Lifecycle, "worker_task");
+        auto    queue_timer = timer(task, "transfer_queue_wait", 0, count, AsyncProfileKind::Wait, "worker_task");
         Entries incoming;
-        incoming.push_back(std::make_unique<Entry>(std::move(owned_task), std::move(before_complete)));
+        incoming.push_back(std::make_unique<Entry>(std::move(task), std::move(before_complete)));
         incoming.front()->task_timer  = std::move(total_timer);
         incoming.front()->queue_timer = std::move(queue_timer);
         auto context                  = incoming.front()->context;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            rejected = !accepting_ || entry_count_ == capacity_;
-            if (!rejected) {
-                incoming_.splice(incoming_.end(), incoming);
-                ++entry_count_;
-                cv_.notify_all();
-            }
-        }
-        if (rejected) {
-            // The second admission check races with other submitters/stop. The
-            // local Entry owns the observers and is destroyed before returning.
-            incoming.front()->queue_timer.finish(false);
-            incoming.front()->task_timer.finish(false);
-            return reject("RESOURCE_EXHAUSTED: async transfer full or stopped");
-        }
+        incoming_.splice(incoming_.end(), incoming);
+        ++entry_count_;
+        cv_.notify_all();
         return context;
     });
 }
@@ -251,12 +244,11 @@ bool TransferWorkLoop::plan(Entry& entry) {
     }
     const auto& descriptors = entry.task.descriptors();
     const auto& first       = descriptors.front();
-    const bool  combined    = (first.source_tier == Tier::DEVICE && first.target_tier == Tier::DISK)
-                          || (first.source_tier == Tier::DISK && first.target_tier == Tier::DEVICE);
+    const bool  combined    = first.source_tier == Tier::DISK && first.target_tier == Tier::DEVICE;
     entry.hosts.clear();
     entry.hosts.reserve(descriptors.size());
     entry.step = first.source_tier == Tier::DISK   ? Step::DISK_READ :
-                 first.source_tier == Tier::DEVICE ? Step::CRC_STORE :
+                 first.source_tier == Tier::DEVICE ? Step::CRC_EVICT :
                  first.target_tier == Tier::DISK   ? Step::DISK_WRITE :
                                                      Step::CRC_LOAD;
     if (combined) {
@@ -358,7 +350,7 @@ void TransferWorkLoop::submitCrc(Entry& entry) {
     const auto& owner   = group(entry);
     auto&       waiting = crc_waiting_.at(owner->devicePools().front()->deviceIndex());
     // The callback only fills a stable Entry and preallocated intrusive indexes.
-    CrcTransferService::DoneCallback done = [this, &entry, &waiting](TransferResult result) noexcept {
+    CrcCopyExecutor::DoneCallback done = [this, &entry, &waiting](TransferResult result) noexcept {
         assert(isCrc(entry.step));
         recordResult(entry, std::move(result));
         completed_.push(entry);
@@ -384,9 +376,11 @@ void TransferWorkLoop::submitDisk(Entry& entry) {
     const auto               stride = pool->strideBytes();
     BlockIdList              blocks;
     std::vector<void*>       buffers;
+    std::vector<const void*> write_buffers;
     const auto&              descriptors = entry.task.descriptors();
     blocks.reserve(descriptors.size());
     buffers.reserve(descriptors.size());
+    write_buffers.reserve(descriptors.size());
     for (size_t i = 0; i < descriptors.size(); ++i) {
         const auto& host  = entry.hosts[i];
         const auto& owner = *group(entry);
@@ -395,16 +389,17 @@ void TransferWorkLoop::submitDisk(Entry& entry) {
             return;
         }
         blocks.push_back(descriptors[i].singleBlockAt(Tier::DISK));
-        buffers.push_back(host.base);
+        if (write)
+            write_buffers.push_back(host.base);
+        else
+            buffers.push_back(host.base);
     }
-    BlockTreeDiskBlockPool::Callback done = [this, &entry](BlockIOStatus status) { publishDisk(entry, status); };
+    DiskBlockPool::Callback done = [this, &entry](BlockIOStatus status) { publishDisk(entry, status); };
     // Ordinary rejection has no I/O/callback. Accepted workers own completion.
     // Submission exceptions propagate to withEntry; it handles OOM locally.
     assert(disk_io_executor_ != nullptr);
-    const auto status =
-        write ? pool->asyncWrite(
-                    *disk_io_executor_, blocks, buffers, stride, group(entry)->storageBytes(), std::move(done)) :
-                pool->asyncRead(*disk_io_executor_, blocks, buffers, stride, std::move(done));
+    const auto status = write ? pool->asyncWrite(*disk_io_executor_, blocks, write_buffers, stride, std::move(done)) :
+                                pool->asyncRead(*disk_io_executor_, blocks, buffers, stride, std::move(done));
     if (status != BlockIOStatus::OK) {
         recordDiskResult(entry, status);
         completed_.push(entry);
@@ -463,9 +458,7 @@ void TransferWorkLoop::recordDiskResult(Entry& entry, BlockIOStatus status) noex
 void TransferWorkLoop::recordResult(Entry& entry, TransferResult result) noexcept {
     assert(entry.result.ok());  // The first failure ends this Entry.
     const bool intermediate =
-        result.ok()
-        && ((entry.step == Step::DISK_READ && entry.task.descriptors().front().target_tier == Tier::DEVICE)
-            || (entry.step == Step::CRC_STORE && entry.task.descriptors().front().target_tier == Tier::DISK));
+        result.ok() && entry.step == Step::DISK_READ && entry.task.descriptors().front().target_tier == Tier::DEVICE;
     if (!intermediate)
         for (size_t i = 0; i < entry.task.descriptors().size(); ++i)
             entry.result.block_errors[i] = result.blockError(i);
@@ -494,11 +487,6 @@ void TransferWorkLoop::consumeStage(Entry& entry) {
                 ErrorInfo(terminal.status.code(),
                           std::string("disk-to-device transfer failed, stage=") + stage + ", descriptor_range=[0,"
                               + std::to_string(entry.task.descriptors().size()) + "): " + terminal.status.ToString());
-        } else if (descriptor.source_tier == Tier::DEVICE && descriptor.target_tier == Tier::DISK) {
-            const char* stage = entry.step == Step::CRC_STORE ? "device-to-staging" : "staging-to-disk";
-            terminal.status =
-                ErrorInfo(terminal.status.code(),
-                          std::string("device-to-disk ") + stage + " failed: " + terminal.status.ToString());
         }
     }
     if (!terminal.ok()) {
@@ -509,9 +497,6 @@ void TransferWorkLoop::consumeStage(Entry& entry) {
     const auto& descriptor = entry.task.descriptors().front();
     if (entry.step == Step::DISK_READ && descriptor.target_tier == Tier::DEVICE) {
         entry.step = Step::CRC_LOAD;
-        tryStep(entry);
-    } else if (entry.step == Step::CRC_STORE && descriptor.target_tier == Tier::DISK) {
-        entry.step = Step::DISK_WRITE;
         tryStep(entry);
     } else {
         entry.batch_timer.finish(true);
