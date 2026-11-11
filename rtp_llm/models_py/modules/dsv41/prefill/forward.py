@@ -95,6 +95,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
@@ -113,6 +114,7 @@ from rtp_llm.models_py.modules.dsv41.fp8.prefill_meta import (
     release_v41_prefill_shared,
 )
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
+    TaggedAttentionInputs,
     as_tagged_attention_inputs,
     build_block_tables_batched,
     create_tagged_cache_store_writer,
@@ -974,6 +976,167 @@ def forward_layers(
     return h  # [T, dim]
 
 
+_PREFILL_CHUNK_ROWS_CACHE: Optional[int] = None
+
+
+def _prefill_chunk_rows() -> int:
+    """Token rows per chunk for single-stream chunked prefill (0 disables).
+
+    A whole-stream 1M-token prefill needs tens of GiB of stream-sized
+    transients (activations, per-layer Q workspace, delayed-HC mixes) that
+    do not fit beside the weights on 80 GiB cards; 16384-row chunks keep
+    every stream-sized buffer ~0.2-1.4 GiB while the KV pools accumulate
+    the prefix exactly like the memory-reuse path does.
+    """
+    global _PREFILL_CHUNK_ROWS_CACHE
+    if _PREFILL_CHUNK_ROWS_CACHE is None:
+        try:
+            _PREFILL_CHUNK_ROWS_CACHE = max(
+                0, int(os.environ.get("DSV41_PREFILL_CHUNK_ROWS", "16384"))
+            )
+        except ValueError:
+            _PREFILL_CHUNK_ROWS_CACHE = 16384
+    return _PREFILL_CHUNK_ROWS_CACHE
+
+
+class _PrefillChunkInputs:
+    """Attribute proxy over framework attention inputs with chunk-adjusted
+    lengths. Everything else (block tables, sequence lengths, cache-store
+    inputs) passes through untouched: block tables span the full stream and
+    per-token slot mapping is derived from positions, so they are already
+    chunk-correct."""
+
+    __slots__ = ("_primary", "_overrides")
+
+    def __init__(self, primary: Any, overrides: Dict[str, Any]):
+        object.__setattr__(self, "_primary", primary)
+        object.__setattr__(self, "_overrides", overrides)
+
+    def __getattr__(self, name: str) -> Any:
+        overrides = object.__getattribute__(self, "_overrides")
+        if name in overrides:
+            return overrides[name]
+        return getattr(object.__getattribute__(self, "_primary"), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__getattribute__(self, "_overrides")[name] = value
+
+
+def _chunk_len_like(orig: Optional[torch.Tensor], value: int) -> Optional[torch.Tensor]:
+    if isinstance(orig, torch.Tensor) and orig.numel() > 0:
+        return torch.full((1,), int(value), dtype=orig.dtype, device=orig.device)
+    return None
+
+
+def _chunk_cu_like(orig: Optional[torch.Tensor], n: int) -> Optional[torch.Tensor]:
+    if isinstance(orig, torch.Tensor) and orig.numel() >= 2:
+        return torch.tensor([0, n], dtype=orig.dtype, device=orig.device)
+    return None
+
+
+def _chunked_attn_inputs(attn: Any, overrides: Dict[str, Any]) -> Any:
+    if isinstance(attn, TaggedAttentionInputs):
+        return TaggedAttentionInputs(
+            {tag: _PrefillChunkInputs(value, overrides) for tag, value in attn.items()}
+        )
+    if isinstance(attn, Mapping):
+        return TaggedAttentionInputs(
+            {tag: _PrefillChunkInputs(value, overrides) for tag, value in attn.items()}
+        )
+    return _PrefillChunkInputs(attn, overrides)
+
+
+def _forward_prefill_chunked(
+    v4: V4Transformer,
+    kv_cache: Optional[KVCache],
+    attn: Any,
+    input_ids: torch.Tensor,
+    positions: torch.Tensor,
+    cu_seqlens: Optional[torch.Tensor],
+    prepare_hidden_fn: Optional[Any],
+    chunk_rows: int,
+) -> PyModelOutputs:
+    """Single-stream prefill as consecutive prefix-extend chunks.
+
+    Chunk ``c`` covers rows ``[c0, c1)`` and presents itself to the layer
+    stack as ``input_length = c1 - c0`` with ``prefix_length = base + c0``;
+    earlier chunks' KV is already in the pools (same-stream ordering makes
+    their writes visible), so attention/indexer/SWA consume it through the
+    existing prefix paths. Hidden rows of non-final chunks are dropped: a
+    context step consumes only the final token's row, while PyWrappedModel
+    still requires ``hidden.size(0) == combo_tokens.size(0)``, so the
+    returned tensor is allocated at full height and only the last chunk's
+    rows are materialized (earlier rows are never read; ``need_all_logits``
+    is false for generation steps).
+    """
+    total = int(input_ids.numel())
+    pl_host = getattr(attn, "prefix_lengths", None)
+    pl_dev = getattr(attn, "prefix_lengths_device", None)
+    base_prefix = 0
+    if isinstance(pl_host, torch.Tensor) and pl_host.numel() > 0:
+        base_prefix = int(pl_host.flatten()[0])
+    elif isinstance(pl_dev, torch.Tensor) and pl_dev.numel() > 0:
+        base_prefix = int(pl_dev.flatten()[0].item())
+    orig_il = getattr(attn, "input_lengths", None)
+    orig_il_dev = getattr(attn, "input_lengths_device", None)
+    orig_pl_dev = pl_dev
+    orig_cu = getattr(attn, "cu_seqlens", None)
+    orig_cu_dev = getattr(attn, "cu_seqlens_device", None)
+
+    last_h: Optional[torch.Tensor] = None
+    last_c0 = 0
+    num_chunks = (total + chunk_rows - 1) // chunk_rows
+    for idx, c0 in enumerate(range(0, total, chunk_rows)):
+        c1 = min(c0 + chunk_rows, total)
+        n = c1 - c0
+        overrides: Dict[str, Any] = {}
+        for key, value in (
+            ("input_lengths", _chunk_len_like(orig_il, n)),
+            ("prefix_lengths", _chunk_len_like(pl_host, base_prefix + c0)),
+            ("input_lengths_device", _chunk_len_like(orig_il_dev, n)),
+            ("prefix_lengths_device", _chunk_len_like(orig_pl_dev, base_prefix + c0)),
+            ("cu_seqlens", _chunk_cu_like(orig_cu, n)),
+            ("cu_seqlens_device", _chunk_cu_like(orig_cu_dev, n)),
+        ):
+            if value is not None:
+                overrides[key] = value
+        attn_chunk = _chunked_attn_inputs(attn, overrides)
+        block_tables = build_block_tables_batched(kv_cache, attn_chunk)
+        cu_chunk = (
+            torch.tensor([0, n], dtype=cu_seqlens.dtype, device=cu_seqlens.device)
+            if cu_seqlens is not None
+            else None
+        )
+        if idx == 0 or idx == num_chunks - 1 or idx % 8 == 0:
+            logging.info(
+                "[dsv41] chunked prefill chunk %d/%d rows=[%d,%d) prefix=%d",
+                idx + 1,
+                num_chunks,
+                c0,
+                c1,
+                base_prefix + c0,
+            )
+        h = forward_layers(
+            v4,
+            kv_cache,
+            input_ids[c0:c1],
+            positions[c0:c1],
+            cu_chunk,
+            block_tables,
+            attn_inputs=attn_chunk,
+            prepare_hidden_fn=prepare_hidden_fn,
+            allow_ced=False,
+            expert_token_counts=None,
+        )
+        last_h, last_c0 = h, c0
+    assert last_h is not None
+    hidden = torch.empty(
+        (total, last_h.shape[-1]), dtype=last_h.dtype, device=last_h.device
+    )
+    hidden[last_c0:] = last_h
+    return PyModelOutputs(hidden)
+
+
 def forward_prefill(
     v4: V4Transformer,
     kv_cache: Optional[KVCache],
@@ -1065,6 +1228,41 @@ def forward_prefill(
                     input_ids.device,
                     total_tokens=int(input_ids.numel()),
                 )
+
+    # Whole-stream prefill cannot fit long contexts on pre-Blackwell cards
+    # (stream-sized activations and per-layer workspaces scale with T; a 1M
+    # token stream alone needs tens of GiB of transient device memory). Run
+    # such streams as a sequence of prefix-extend chunks: chunk c presents
+    # input_length=chunk_rows and prefix_length=original_prefix+c0, exactly
+    # the shape the memory-KV-reuse path already exercises, and every chunk
+    # but the last discards its hidden rows (a context step consumes only
+    # the final token's row). Single-stream steps only — the deployment
+    # admits one context stream at a time (max_context_batch_size=1).
+    chunk_rows = _prefill_chunk_rows()
+    total_rows = int(input_ids.numel())
+    batch_rows = (
+        int(cu_seqlens.numel()) - 1
+        if cu_seqlens is not None and cu_seqlens.numel() >= 2
+        else 1
+    )
+    if (
+        chunk_rows > 0
+        and total_rows > chunk_rows
+        and batch_rows == 1
+        and getattr(inputs, "expert_token_counts", None) is None
+        and not permits_ced(inputs)
+        and int(getattr(v4, "_cp_size", 1) or 1) == 1
+    ):
+        return _forward_prefill_chunked(
+            v4,
+            kv_cache,
+            attn,
+            input_ids,
+            positions,
+            cu_seqlens,
+            prepare_hidden_fn,
+            chunk_rows,
+        )
 
     block_tables_by_type = build_block_tables_batched(kv_cache, attn)
 
