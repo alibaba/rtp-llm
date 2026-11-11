@@ -80,12 +80,13 @@ class _ShapeOnlyCudaPostprocessing:
 
 
 class MetadataBootstrapLoader(ModelLoader):
-    def __init__(self, *args, bootstrap_contract, **kwargs):
+    def __init__(self, *args, bootstrap_contract, parameter_storage_bound=96_000_000_000, **kwargs):
         super().__init__(*args, **kwargs)
         self.bootstrap_contract = bootstrap_contract
         self.bootstrap_source_shapes = bootstrap_contract.source_shapes
         self.bootstrap_source_dtypes = MappingProxyType({name: getattr(torch, dtype) for name, dtype in bootstrap_contract.refit_dtypes.items()})
         self.bootstrap_initialized = False
+        self.parameter_storage_bound = parameter_storage_bound
 
     def load_weights(self, device, global_weight_aliases=None):
         if global_weight_aliases or self._load_config.merge_lora or self._load_config.is_ft_style_weight:
@@ -118,8 +119,8 @@ class MetadataBootstrapLoader(ModelLoader):
             raise ValueError('Metadata bootstrap produced no internal targets')
         storage_bytes = sum((1 + sum((dim-1)*stride for dim, stride in zip(shape, strides))) * torch.empty((),dtype=dtype,device='meta').element_size()
                             for shape, strides, dtype in specs.values())
-        if storage_bytes > 96_000_000_000:
-            raise ValueError(f'Qwen3.8 target allocation exceeds its explicit 96GB parameter bound: {storage_bytes}')
+        if storage_bytes > self.parameter_storage_bound:
+            raise ValueError(f'Qwen3.8 target allocation {storage_bytes} exceeds {self.parameter_storage_bound} bytes')
         weights = self._create_model_weights(device)
         for (layer, name), (shape, strides, dtype) in specs.items():
             value = torch.empty_strided(shape, strides, dtype=dtype, device=device)
@@ -143,11 +144,13 @@ def create_metadata_bootstrap_loader(model):
     from rtp_llm.ops import ensure_engine_ops_loaded
     ensure_engine_ops_loaded()
     native = importlib.import_module('libth_transformer')
-    validate_bootstrap_profile(model.model_config, model.parallelism_config,
+    parallel = model.parallelism_config
+    world = 32 if os.environ.get('RTP_LLM_RL_WORLD32') == '1' else 72
+    validate_bootstrap_profile(model.model_config, parallel,
         model.hw_kernel_config, model.moe_config, os.environ,
-        native_capability=getattr(native, '_rl_world72_initial_pause_version', 0))
-    native_proof = loaded_native_library_proof(native, os.environ.get('RTP_RL_NATIVE_LIBRARY_SHA256', ''))
-    validate_native_fixed_profile(model.model_config, model.parallelism_config, model.moe_config, quantized=False)
+        native_capability=getattr(native, f'_rl_world{world}_initial_pause_version', 0))
+    native_proof = loaded_native_library_proof(native, os.environ.get('RTP_RL_NATIVE_LIBRARY_SHA256', ''), world=world)
+    validate_native_fixed_profile(model.model_config, parallel, model.moe_config, quantized=False)
     if model.merge_lora or model.model_config.lora_infos or model.model_config.ptuning_path or model._weight_alias_names:
         raise ValueError('Metadata bootstrap forbids LoRA, prompt tuning and non-owned weights')
     contract = load_bootstrap_contract(model.model_config.ckpt_path, os.environ['RTP_RL_BOOTSTRAP_POLICY_MANIFEST'])
@@ -159,9 +162,10 @@ def create_metadata_bootstrap_loader(model):
     if misc: raise ValueError('Metadata bootstrap requires the plain text language model')
     loader = MetadataBootstrapLoader(model.model_config, weights_info, misc, database,
         load_method=model.load_method, force_cpu_load_weights=False,
-        moe_pure_tp_preshard=False, bootstrap_contract=contract)
-    loader.bootstrap_native_library_proof = dict(native_proof, world_rank=model.parallelism_config.world_rank,
-        world_size=72, tp_size=8, dp_size=9, ep_size=72)
+        moe_pure_tp_preshard=False, bootstrap_contract=contract,
+        parameter_storage_bound=176_000_000_000 if world == 32 else 96_000_000_000)
+    loader.bootstrap_native_library_proof = dict(native_proof, world_rank=parallel.world_rank,
+        world_size=parallel.world_size, tp_size=parallel.tp_size, dp_size=parallel.dp_size, ep_size=parallel.ep_size)
     directory = os.environ.get('RTP_WEIGHT_MANIFEST_DIR')
     if directory:
         target = Path(directory)/f'native-library-rank-{model.parallelism_config.world_rank:05d}.json'

@@ -38,9 +38,13 @@ grpc::Status LocalRpcServer::RlControl(grpc::ServerContext*      context,
     // any state. A TP-group endpoint accidentally routed to this world must
     // never acknowledge a partial pause or a partial weight transaction.
     if (world_control) {
-        if (parallel.world_size != 72 || parallel.tp_size != 8 || parallel.dp_size != 9
-            || parallel.ep_size != 72 || parallel.pp_size != 1 || parallel.ffn_sp_size != 8
-            || parallel.get_ffn_tp_size() != 1 || parallel.world_rank < 0 || parallel.world_rank >= 72
+        const char* world32_env = std::getenv("RTP_LLM_RL_WORLD32");
+        const bool world32 = world32_env && std::strcmp(world32_env, "1") == 0;
+        const int world = world32 ? 32 : 72;
+        if (parallel.world_size != world || parallel.tp_size != 8 || parallel.dp_size != world / 8
+            || parallel.ep_size != world || parallel.pp_size != 1 || parallel.ffn_sp_size != 8
+            || (world32 && parallel.local_world_size != 4)
+            || parallel.get_ffn_tp_size() != 1 || parallel.world_rank < 0 || parallel.world_rank >= world
             || parallel.tp_rank != parallel.world_rank % 8 || parallel.dp_rank != parallel.world_rank / 8
             || parallel.ep_rank != parallel.world_rank || request->protocol_version() != 3
             || request->expected_world_rank() != parallel.world_rank

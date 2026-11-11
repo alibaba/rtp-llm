@@ -28,8 +28,8 @@ class ReplicaRpcClient:
         self._failed = False
         self._lock = asyncio.Lock()
         # The default remains the protocol-2 pure-TP contract. World control is
-        # explicitly opt-in and limited to the one native profile qualified by
-        # the matching C++ implementation; arithmetic alone proves no support.
+        # explicitly opt-in and limited to native profiles with corresponding
+        # C++ guards; arithmetic alone proves no support.
         self._topology = None
         if topology is not None:
             expected = dict(world_size=72, tp_size=8, dp_size=9, ep_size=72)
@@ -37,9 +37,10 @@ class ReplicaRpcClient:
                 raise ValueError("world control requires explicit world/TP/DP/EP sizes")
             if any(type(topology[key]) is not int for key in expected):
                 raise ValueError("world topology sizes must be integers")
-            if topology != expected or len(self.addresses) != expected["world_size"]:
-                raise ValueError("only the 72-world TP8/DP9/EP72 profile is qualified")
-            self._topology = expected
+            if (topology not in (expected, dict(world_size=32, tp_size=8, dp_size=4, ep_size=32))
+                    or len(self.addresses) != topology["world_size"]):
+                raise ValueError("unsupported Qwen3.8 world topology or incomplete rank endpoints")
+            self._topology = dict(topology)
         self._observed_state = None
         self._pending_global_step = None
 

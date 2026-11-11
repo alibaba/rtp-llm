@@ -151,7 +151,12 @@ def _get_cuda_device_list() -> List[str]:
 def _validate_dp_configuration(py_env_configs: PyEnvConfigs):
     """Validate data parallelism configuration"""
     pc = py_env_configs.parallelism_config
-    if os.environ.get("RTP_LLM_RL_WORLD72") == "1":
+    world72 = os.environ.get("RTP_LLM_RL_WORLD72") == "1"
+    world32 = os.environ.get("RTP_LLM_RL_WORLD32") == "1"
+    if world72 and world32:
+        raise ValueError("Qwen3.8 world32 and world72 are mutually exclusive")
+    if world72 or world32:
+        world = 32 if world32 else 72
         # This opt-in deployment spans each attention-TP group across two
         # four-GPU nodes. The parent owns four consecutive global ranks, so
         # its TP rank may be 0 or 4. Children derive DP/TP/EP ranks from their
@@ -164,22 +169,22 @@ def _validate_dp_configuration(py_env_configs: PyEnvConfigs):
             "RTP_RL_BORROW_SINGLETON_HF_SOURCES": "1",
         }
         if any(os.environ.get(name) != value for name, value in required_env.items()):
-            raise ValueError("RL world72 rank spawning requires the guarded metadata bootstrap profile")
+            raise ValueError(f"RL world{world} rank spawning requires the guarded metadata bootstrap profile")
         sizes = {
-            "world_size": 72,
+            "world_size": world,
             "tp_size": 8,
-            "dp_size": 9,
-            "ep_size": 72,
+            "dp_size": world // 8,
+            "ep_size": world,
             "pp_size": 1,
             "local_world_size": 4,
             "ffn_sp_size": 8,
             "ffn_tp_size": 1,
         }
         if any(getattr(pc, name, None) != value for name, value in sizes.items()):
-            raise ValueError("RL world72 rank spawning requires TP8/DP9/EP72/PP1 with four local ranks")
+            raise ValueError(f"RL world{world} rank spawning requires TP8/DP{world // 8}/EP{world}/PP1 with four local ranks")
         parent_rank = pc.world_rank
-        if not 0 <= parent_rank < 72 or parent_rank % 4 != 0:
-            raise ValueError("RL world72 backend parent must own an aligned four-rank span in [0, 72)")
+        if not 0 <= parent_rank < world or parent_rank % 4 != 0:
+            raise ValueError(f"RL world{world} backend parent must own an aligned four-rank span in [0, {world})")
         if (
             pc.local_rank != 0
             or pc.tp_rank != parent_rank % 8
@@ -187,7 +192,7 @@ def _validate_dp_configuration(py_env_configs: PyEnvConfigs):
             or pc.ep_rank != parent_rank
             or pc.ffn_tp_rank != 0
         ):
-            raise ValueError("RL world72 backend parent has inconsistent derived ranks")
+            raise ValueError(f"RL world{world} backend parent has inconsistent derived ranks")
         return
     if pc.dp_size > 1:
         # tp must on one device when dp

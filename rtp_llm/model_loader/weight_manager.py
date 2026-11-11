@@ -224,6 +224,8 @@ class WeightManager:
             borrow_singleton_sources=os.environ.get("RTP_RL_BORROW_SINGLETON_HF_SOURCES", "0") == "1",
             fixed_expert_map=(
                 config.model_type == "qwen38_moe_text"
+                # The no-padding EP32 layout allocates no redundant routing
+                # maps; only the padded EP72 transaction has static targets.
                 and os.environ.get("RTP_LLM_RL_WORLD72", "0") == "1"
                 and os.environ.get("RTP_FIXED_PHYSICAL_EP_LAYOUT", "") == "balanced_v1"
             ),

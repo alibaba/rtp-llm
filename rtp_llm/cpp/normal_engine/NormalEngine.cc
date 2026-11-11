@@ -126,27 +126,35 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                              && parallelism_config.pp_size == 1
                              && parallelism_config.world_size == parallelism_config.tp_size;
         const char* world72 = std::getenv("RTP_LLM_RL_WORLD72");
-        rl_world72_        = world72 && std::strcmp(world72, "1") == 0;
+        const char* world32 = std::getenv("RTP_LLM_RL_WORLD32");
+        const bool q38_world72 = world72 && std::strcmp(world72, "1") == 0;
+        const bool q38_world32 = world32 && std::strcmp(world32, "1") == 0;
+        rl_qwen38_world_ = q38_world72 || q38_world32;
         const char* q36_ep4_env = std::getenv("RTP_LLM_RL_Q36_EP4");
         const bool q36_ep4 = q36_ep4_env && std::strcmp(q36_ep4_env, "1") == 0;
-        RTP_LLM_CHECK_WITH_INFO(!(q36_ep4 && rl_world72_), "Q36 EP4 and world72 profiles are exclusive");
-        if (rl_world72_) {
+        RTP_LLM_CHECK_WITH_INFO(!(q38_world72 && q38_world32) && !(q36_ep4 && rl_qwen38_world_),
+                                "Qwen RL world profiles are exclusive");
+        if (rl_qwen38_world_) {
             const char* layout = std::getenv("RTP_FIXED_PHYSICAL_EP_LAYOUT");
+            const int world = q38_world32 ? 32 : 72;
+            const int physical_experts = q38_world32 ? 512 : 576;
             RTP_LLM_CHECK_WITH_INFO(
-                model_config_.model_type == "qwen38_moe_text" && parallelism_config.world_size == 72
-                    && parallelism_config.tp_size == 8 && parallelism_config.dp_size == 9
-                    && parallelism_config.ep_size == 72 && parallelism_config.pp_size == 1
+                model_config_.model_type == "qwen38_moe_text" && parallelism_config.world_size == world
+                    && parallelism_config.tp_size == 8 && parallelism_config.dp_size == world / 8
+                    && parallelism_config.ep_size == world && parallelism_config.pp_size == 1
                     && parallelism_config.ffn_sp_size == 8 && parallelism_config.get_ffn_tp_size() == 1
-                    && parallelism_config.world_rank >= 0 && parallelism_config.world_rank < 72
+                    && (!q38_world32 || parallelism_config.local_world_size == 4)
+                    && parallelism_config.world_rank >= 0 && parallelism_config.world_rank < world
                     && parallelism_config.tp_rank == parallelism_config.world_rank % 8
                     && parallelism_config.dp_rank == parallelism_config.world_rank / 8
                     && parallelism_config.ep_rank == parallelism_config.world_rank,
-                "RL world control requires the explicit TP8/DP9/EP72 rank layout");
+                "RL world control requires the exact opted-in Qwen3.8 TP8/global EP layout");
             RTP_LLM_CHECK_WITH_INFO(
                 model_config_.expert_num == 512 && model_config_.moe_k == 10
-                    && eplb_config.phy_exp_num(model_config_.expert_num) == 576 && !eplb_config.enable_eplb()
+                    && eplb_config.phy_exp_num(model_config_.expert_num) == physical_experts
+                    && !eplb_config.enable_eplb()
                     && layout && std::strcmp(layout, "balanced_v1") == 0,
-                "RL world control requires the validated fixed 512-logical/576-physical expert map");
+                "RL world control requires the validated fixed physical expert map");
             RTP_LLM_CHECK_WITH_INFO(
                 params.moe_config.moe_strategy == "nccl_bf16_reference" && !params.moe_config.fake_balance_expert
                     && !params.moe_config.hack_moe_expert && !parallelism_config.prefill_cp_config.is_enabled()
@@ -176,11 +184,11 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                     && params.device_resource_config.enable_layer_micro_batch == 0,
                 "Q36 EP4 requires the eager BF16 NCCL reference router");
         } else {
-            RTP_LLM_CHECK_WITH_INFO(pure_tp, "RL mode requires pure TP or the explicit RL world72 profile");
+            RTP_LLM_CHECK_WITH_INFO(pure_tp, "RL mode requires pure TP or an explicit RL world profile");
         }
         const char* bootstrap = std::getenv("RTP_LLM_RL_START_PAUSED");
         if (bootstrap && std::strcmp(bootstrap, "1") == 0) {
-            RTP_LLM_CHECK_WITH_INFO(rl_world72_, "RL bootstrap is restricted to the world72 profile");
+            RTP_LLM_CHECK_WITH_INFO(rl_qwen38_world_, "RL bootstrap is restricted to the opted-in Qwen3.8 profiles");
             // The model buffers may have been allocated from pinned metadata.
             // The first loop checkpoint pauses every EP rank before process().
             // Neither admission nor RESUME can expose them until a complete
@@ -1167,11 +1175,11 @@ absl::Status NormalEngine::rlCheckpoint() {
     if (parallelism_config.tp_size > 1) {
         execBroadcastCpu({{decision}, 0});
     }
-    if (rl_world72_) {
+    if (rl_qwen38_world_) {
         // Every DP group keeps entering the engine loop, including idle groups
         // (the FIFO scheduler's DP idle wait is bounded). A TP-local pause could
         // strand the other groups inside an EP collective. Pause only after all
-        // nine leaders have closed admission and drained their real streams.
+        // attention-DP leaders have closed admission and drained their real streams.
         auto vote = decision.to(getTorchCudaDevice());
         vote = execAllReduce({vote, ReduceOp::Min, false, ParallelMode::DP_AND_TP}).buffer;
         decision = vote.to(torch::kCPU);

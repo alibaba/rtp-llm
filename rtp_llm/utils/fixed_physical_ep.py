@@ -6,6 +6,7 @@ Padding slots carry existing expert weights but are never selected by routing.
 from dataclasses import dataclass
 from pathlib import Path
 import json
+import os
 
 
 @dataclass(frozen=True)
@@ -70,14 +71,19 @@ def validate_native_fixed_profile(model, parallel, moe, *, quantized):
         raise ValueError("The fixed EP layout is restricted to the Qwen3.8 profile")
     actual = (parallel.world_size, parallel.tp_size, parallel.dp_size,
               parallel.ep_size, parallel.ffn_sp_size, parallel.get_ffn_tp_size())
-    if actual != (72, 8, 9, 72, 8, 1):
-        raise ValueError("Expected one DP9/TP8/EP72, FFN-TP1 logical model")
+    world32 = os.environ.get("RTP_LLM_RL_WORLD32") == "1"
+    if world32 and os.environ.get("RTP_LLM_RL_WORLD72") == "1":
+        raise ValueError("Qwen3.8 world32 and world72 are mutually exclusive")
+    world = 32 if world32 else 72
+    physical = 512 if world32 else 576
+    if actual != (world, 8, world // 8, world, 8, 1):
+        raise ValueError(f"Expected the explicit Qwen3.8 world{world} logical model")
     if quantized or moe.fake_balance_expert or model.eplb_config.enable_eplb():
         raise ValueError("Fixed BF16 routing forbids quantization, fake routing and dynamic EPLB")
     layout = balanced_expert_layout(model.expert_num, parallel.ep_size)
-    if (model.expert_num != 512 or layout.physical_experts != 576
-            or model.eplb_config.phy_exp_num(model.expert_num) != 576):
-        raise ValueError("Expected 512 logical experts and 576 fixed physical slots")
+    if (model.expert_num != 512 or layout.physical_experts != physical
+            or model.eplb_config.phy_exp_num(model.expert_num) != physical):
+        raise ValueError(f"Expected 512 logical experts and {physical} fixed physical slots")
     source = Path(model.phy2log_path)
     actual_map = json.loads(source.read_text())
     if actual_map != layout.layer_source_map(model.num_layers):

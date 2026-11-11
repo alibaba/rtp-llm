@@ -42,6 +42,7 @@ PYBIND11_MODULE(libth_transformer, m) {
     // pause and pre-COMMIT admission/RESUME guards. Python checks this before
     // allocating a bootstrap model; an environment flag alone proves nothing.
     m.attr("_rl_world72_initial_pause_version") = 1;
+    m.attr("_rl_world32_initial_pause_version") = 1;
     registerRtpLLMOp(m);
     registerRtpEmbeddingOp(m);
     registerEmbeddingOutput(m);

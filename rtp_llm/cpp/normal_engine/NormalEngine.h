@@ -109,7 +109,7 @@ private:
     int64_t                 trace_model_step_id_ = 0;
     bool                    rl_enabled_          = false;
     bool                    rl_uses_cuda_graph_  = false;
-    bool                    rl_world72_          = false;
+    bool                    rl_qwen38_world_     = false;
     bool                    rl_weights_initialized_ = true;
     mutable std::mutex      rl_mutex_;
     std::condition_variable rl_cv_;

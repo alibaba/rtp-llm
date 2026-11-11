@@ -111,7 +111,7 @@ class GenericMoeLayer(nn.Module):
             max_generate_batch_size=max_generate_batch_size,
         )
         # This opt-in layout keeps logical softmax/top-k at 512 experts. Only
-        # dispatched IDs and the backend physical expert partition use 576 slots.
+        # dispatched IDs follow the fixed physical partition of the opted-in world.
         self._fixed_physical_ep_lut = None
         if os.environ.get("RTP_FIXED_PHYSICAL_EP_LAYOUT", "") == "balanced_v1":
             from rtp_llm.utils.fixed_physical_ep import validate_native_fixed_profile

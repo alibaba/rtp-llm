@@ -65,8 +65,12 @@ def load_bootstrap_contract(model_root, policy_manifest):
 
 
 def validate_bootstrap_profile(model, parallel, hardware, moe, env, *, native_capability):
+    world32 = env.get('RTP_LLM_RL_WORLD32') == '1'
+    if world32 and env.get('RTP_LLM_RL_WORLD72') == '1':
+        raise ValueError('Qwen3.8 world32 and world72 are mutually exclusive')
+    world = 32 if world32 else 72
     flags = {
-        'RTP_LLM_RL_MODE':'1', 'RTP_LLM_RL_WORLD72':'1',
+        'RTP_LLM_RL_MODE':'1', f'RTP_LLM_RL_WORLD{world}':'1',
         'RTP_LLM_RL_START_PAUSED':'1', 'RTP_LLM_RL_METADATA_BOOTSTRAP':'1',
         'RTP_FIXED_PHYSICAL_EP_LAYOUT':'balanced_v1',
         'RTP_RL_BORROW_SINGLETON_HF_SOURCES':'1',
@@ -75,8 +79,8 @@ def validate_bootstrap_profile(model, parallel, hardware, moe, env, *, native_ca
         raise ValueError('Metadata allocation requires the matching native initial-pause capability and all explicit bootstrap flags')
     layout = (parallel.world_size, parallel.tp_size, parallel.dp_size, parallel.ep_size,
               parallel.pp_size, parallel.ffn_sp_size, parallel.get_ffn_tp_size())
-    if layout != (72, 8, 9, 72, 1, 8, 1):
-        raise ValueError('Metadata allocation requires the exact world72 TP8/DP9/EP72 layout')
+    if layout != (world, 8, world//8, world, 1, 8, 1):
+        raise ValueError(f'Metadata allocation requires the exact world{world} TP8/DP{world//8}/EP{world} layout')
     if (model.model_type != 'qwen38_moe_text' or model.num_layers != 92 or model.hidden_size != 8192
             or model.expert_num != 512 or model.moe_k != 10 or model.quant_algo.isQuant()
             or str(model.compute_dtype) not in ('torch.bfloat16', 'bfloat16')
@@ -87,9 +91,11 @@ def validate_bootstrap_profile(model, parallel, hardware, moe, env, *, native_ca
         raise ValueError('Metadata allocation requires the strict unquantized Qwen3.8 BF16 eager profile')
 
 
-def loaded_native_library_proof(native, expected_sha256):
+def loaded_native_library_proof(native, expected_sha256, *, world=72):
     """Verify the exact extension mapped in this process, before allocation."""
-    version = getattr(native, '_rl_world72_initial_pause_version', 0)
+    if world not in (32, 72):
+        raise ValueError('Unknown Qwen3.8 native world')
+    version = getattr(native, f'_rl_world{world}_initial_pause_version', 0)
     if version != 1 or len(expected_sha256) != 64 or any(c not in '0123456789abcdef' for c in expected_sha256):
         raise ValueError('Bootstrap requires the accepted native library digest and initial-pause marker')
     path = Path(native.__file__).resolve(strict=True)

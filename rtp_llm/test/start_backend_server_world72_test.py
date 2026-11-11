@@ -56,9 +56,9 @@ else:
         ["set_parallelism_config"], {"torch": torch, "logging": logging})["set_parallelism_config"]
     make_pc = lambda: SimpleNamespace(to_string=lambda: "CPU ParallelismConfig fixture")
 
-def config(rank):
+def config(rank, world=72):
     pc = make_pc()
-    for key, value in {"world_size":72,"tp_size":8,"dp_size":9,"ep_size":72,
+    for key, value in {"world_size":world,"tp_size":8,"dp_size":world//8,"ep_size":world,
         "pp_size":1,"local_world_size":4,"ffn_sp_size":8}.items():
         setattr(pc, key, value)
     set_parallelism_config(pc, rank)
@@ -156,6 +156,20 @@ class World72BackendRanks(unittest.TestCase):
             cfg = config(4)
             cfg.parallelism_config.dp_size = 1
             calls["_validate_dp_configuration"](cfg)
+
+    def test_split_world32_spawns_all_eight_parents_without_relaxing_world72(self):
+        with patch.dict(os.environ, {"RTP_LLM_RL_WORLD72": "0", "RTP_LLM_RL_WORLD32": "1"}):
+            spawned = []
+            with patch.object(torch.cuda, "device_count", return_value=4):
+                for parent in range(0, 32, 4):
+                    ctx, processes, readers = Context(), [], []
+                    calls["_create_rank_processes"](object(), config(parent, 32), ctx, processes, readers)
+                    spawned.extend(p.args[2] for p in processes)
+            self.assertEqual(spawned, list(range(32)))
+            with self.assertRaises(ValueError):
+                calls["_validate_dp_configuration"](config(4, 72))
+        with patch.dict(os.environ, {"RTP_LLM_RL_WORLD32": "1"}), self.assertRaises(ValueError):
+            calls["_validate_dp_configuration"](config(4, 32))
 
 if __name__ == "__main__":
     unittest.main()
