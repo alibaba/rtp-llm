@@ -245,10 +245,15 @@ def register_awi_routes(app: Any, frontend_app: Any) -> None:
             frontend_app, "collect", operation_id=operation_id
         )
         events = []
+        barriers = []
         for rank_result in events_result.get("results", []):
             payload = rank_result.get("payload") or {}
             for event in payload.get("events", []):
                 events.append(event)
+            for barrier in payload.get("barriers", []):
+                barriers.append(
+                    {"rank": rank_result.get("rank"), **barrier}
+                )
         events.sort(key=lambda e: (e.get("host_ns") or e.get("end_ns") or 0))
         census = _weights_census()
         # Publish this (frontend) process's own count so the aggregate
@@ -265,6 +270,7 @@ def register_awi_routes(app: Any, frontend_app: Any) -> None:
                     "per_rank": census["coverage"],
                 },
                 "events": events,
+                "barriers": barriers,
                 "event_collection": {
                     "status": events_result.get("status"),
                     "errors": events_result.get("errors", []),
