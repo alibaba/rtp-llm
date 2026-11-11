@@ -40,7 +40,13 @@ bool HttpApiServer::start(const std::string& address) {
         return false;
     }
 
-    if (!http_server_->Start(address)) {
+    // A full 1,048,576-token prefill/decode request legitimately runs for tens
+    // of minutes.  The library defaults (5s packet/response timeout and the
+    // short idle timeout) close the connection mid-request, which makes the
+    // evaluator see RemoteDisconnected even though the engine is healthy.
+    // Give the long-context AWI/runtime requests an explicit multi-hour budget.
+    constexpr int kLongRequestTimeoutMs = 24 * 60 * 60 * 1000;
+    if (!http_server_->Start(address, kLongRequestTimeoutMs, kLongRequestTimeoutMs)) {
         RTP_LLM_LOG_ERROR("HttpApiServer start failed, start http server failed, address is %s.", address.c_str());
         return false;
     }
