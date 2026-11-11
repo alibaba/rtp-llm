@@ -511,6 +511,7 @@ class MMProcessEngine:
         service_name,
         cancellation_event=None,
         external_request_id: str = "",
+        cache_entries=None,
     ) -> GreenNetVerdict:
         """Gate shared embeddings with this caller's request-scoped inspection."""
         if not mm_inputs:
@@ -537,11 +538,16 @@ class MMProcessEngine:
                     self._raise_if_async_request_cancelled(
                         request_id, cancellation_event
                     )
+                    self._inspection._approve_cached_entries(
+                        cache_entries or [], verdict
+                    )
                     return verdict
                 except concurrent.futures.TimeoutError:
                     if future.done():
                         raise
-            return GreenNetVerdict(passed=True)
+            verdict = GreenNetVerdict(passed=True)
+            self._inspection._approve_cached_entries(cache_entries or [], verdict)
+            return verdict
         finally:
             self._cancel_greennet(handle)
 
@@ -683,9 +689,20 @@ class MMProcessEngine:
                     deadline=deadline,
                     worker_sources=True,
                 )
+            elif not entry.greennet_passed:
+                # An unchecked cache hit needs its own GreenNet verdict before
+                # the cached tensor can be returned.
+                rewritten, verdict_future, handle = self._begin_greennet(
+                    mm_inputs,
+                    entry,
+                    request_id=request_id,
+                    user_id=user_id,
+                    service_name=service_name,
+                    external_request_id=external_request_id,
+                    deadline=deadline,
+                    worker_sources=True,
+                )
             else:
-                # The owner already ran GreenNet and owns any URL rewrite. A
-                # waiter consumes the canonical raw embedding from the entry.
                 rewritten, verdict_future = mm_inputs, None
 
             result, work_items = self._mm_embedding_impl(
@@ -797,6 +814,7 @@ class MMProcessEngine:
     ) -> GreenNetVerdict:
         claims: List[Tuple[str, MMEmbeddingCacheEntry]] = []
         cached_inspection_inputs: List[MultimodalInput] = []
+        cached_inspection_entries: List[Tuple[str, MMEmbeddingCacheEntry]] = []
         current_entry: Optional[MMEmbeddingCacheEntry] = None
         deadline = time.monotonic() + timeout_ms / 1000.0
         try:
@@ -826,9 +844,10 @@ class MMProcessEngine:
                 region=region,
                 input_inspection_enabled=input_inspection_enabled,
                 cached_inspection_inputs=(
-                    cached_inspection_inputs
-                    if self._request_scoped_inspection()
-                    else None
+                    cached_inspection_inputs if self._greennet_enabled() else None
+                ),
+                cached_inspection_entries=(
+                    cached_inspection_entries if self._greennet_enabled() else None
                 ),
             )
             verdict = self._inspect_cached_inputs(
@@ -839,12 +858,16 @@ class MMProcessEngine:
                 service_name=service_name,
                 external_request_id=external_request_id,
                 cancellation_event=cancellation_event,
+                cache_entries=cached_inspection_entries,
             )
             if not verdict.passed:
                 self.report_vit_error(verdict)
                 return verdict
+            inspected_entry_ids = {id(entry) for _, entry in cached_inspection_entries}
             for _, entry in claims:
                 current_entry = entry
+                if not entry.greennet_passed and id(entry) in inspected_entry_ids:
+                    continue
                 remaining = max(0.0, deadline - time.monotonic())
                 verdict = entry.wait_greennet(
                     timeout=remaining, cancellation_event=cancellation_event
@@ -856,6 +879,10 @@ class MMProcessEngine:
                     # though this API returns it instead of raising.
                     self.report_vit_error(verdict, current_entry)
                     return verdict
+                if not entry.greennet_passed:
+                    raise RuntimeError(
+                        "ViT embedding has no completed GreenNet inspection"
+                    )
             return GreenNetVerdict(passed=True)
         except Exception as error:
             self.cancel_queued_request(
@@ -1339,6 +1366,7 @@ class MMProcessEngine:
     ) -> List[MMEmbeddingRes]:
         claims: List[Tuple[str, MMEmbeddingCacheEntry]] = []
         cached_inspection_inputs: List[MultimodalInput] = []
+        cached_inspection_entries: List[Tuple[str, MMEmbeddingCacheEntry]] = []
         current_entry: Optional[MMEmbeddingCacheEntry] = None
         deadline = time.monotonic() + timeout_ms / 1000.0
         try:
@@ -1358,9 +1386,10 @@ class MMProcessEngine:
                 region=region,
                 input_inspection_enabled=input_inspection_enabled,
                 cached_inspection_inputs=(
-                    cached_inspection_inputs
-                    if self._request_scoped_inspection()
-                    else None
+                    cached_inspection_inputs if self._greennet_enabled() else None
+                ),
+                cached_inspection_entries=(
+                    cached_inspection_entries if self._greennet_enabled() else None
                 ),
             )
             verdict = self._inspect_cached_inputs(
@@ -1371,6 +1400,7 @@ class MMProcessEngine:
                 service_name=service_name,
                 external_request_id=external_request_id,
                 cancellation_event=cancellation_event,
+                cache_entries=cached_inspection_entries,
             )
             if not verdict.passed:
                 raise FtRuntimeException(
@@ -1381,6 +1411,7 @@ class MMProcessEngine:
                     ),
                     verdict.message or "data inspection failed",
                 )
+            inspected_entry_ids = {id(entry) for _, entry in cached_inspection_entries}
             results = []
             for input_index, (cache_key, entry) in enumerate(claims):
                 current_entry = entry
@@ -1391,7 +1422,11 @@ class MMProcessEngine:
                     entry.wait_ready(
                         timeout=remaining, cancellation_event=cancellation_event
                     )
-                if self._greennet_enabled() and not entry.greennet_passed:
+                if (
+                    self._greennet_enabled()
+                    and not entry.greennet_passed
+                    and id(entry) not in inspected_entry_ids
+                ):
                     raise FtRuntimeException(
                         ExceptionType.MM_PROCESS_ERROR,
                         "ViT embedding has no completed GreenNet inspection",
@@ -1476,6 +1511,9 @@ class MMProcessEngine:
         user_id: str = "",
         service_name: str = "",
         cached_inspection_inputs: Optional[List[MultimodalInput]] = None,
+        cached_inspection_entries: Optional[
+            List[Tuple[str, MMEmbeddingCacheEntry]]
+        ] = None,
         external_request_id: str = "",
         region: Optional[str] = None,
         input_inspection_enabled: Optional[bool] = None,
@@ -1502,7 +1540,13 @@ class MMProcessEngine:
                     vit_media.claim(media_inputs[input_index], entry, state)
                     claims.append((cache_key, entry))
                     if state != "miss" and cached_inspection_inputs is not None:
-                        cached_inspection_inputs.append(mm_input)
+                        if (
+                            self._request_scoped_inspection()
+                            or not entry.greennet_passed
+                        ):
+                            cached_inspection_inputs.append(mm_input)
+                            if cached_inspection_entries is not None:
+                                cached_inspection_entries.append((cache_key, entry))
                     if state == "miss":
                         self._async_tasks[entry] = _AsyncComputeTask(cache_key, entry)
                         pending.append((mm_input, cache_key, entry))

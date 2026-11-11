@@ -93,7 +93,14 @@ class SourceInspection:
                 source_inputs.extend(item.mm_inputs)
                 sources.extend(producer.inspection_sources)
             elif item.cache_entry is not None:
-                cached_entries.append(item.cache_entry)
+                cached_entries.append(
+                    (
+                        item.cache_key,
+                        item.cache_entry,
+                        list(item.mm_inputs),
+                        item.inspection_request or self.request,
+                    )
+                )
             else:
                 raise RuntimeError("Missing CPU inspection sources")
         self.supply(source_inputs, sources, cached_entries, worker_futures)
@@ -142,6 +149,13 @@ class MMInspectionCoordinator:
         return self._greennet_enabled() and getattr(
             self.mm_part, "inspection_verdict_is_request_scoped", False
         )
+
+    def _approve_cached_entries(self, entries, verdict: GreenNetVerdict) -> None:
+        if not verdict.passed or self._request_scoped_inspection():
+            return
+        for cache_key, entry in entries:
+            entry.set_greennet_verdict(verdict, checked=True)
+            self._hash_key_cache.mark_greennet_passed(cache_key, entry.generation)
 
     def _ensure_greennet_loop(self) -> asyncio.AbstractEventLoop:
         """Lazily start the dedicated asyncio loop that hosts greennet inspect
@@ -352,21 +366,39 @@ class MMInspectionCoordinator:
                     )
                     with handoff._lock:
                         handoff.sources = None
-                    # Never approve a cached tensor using a fresh download of
-                    # a mutable URL. Its owner must supply the matching verdict.
-                    for cached in cached_entries:
-                        verdict = await asyncio.to_thread(
-                            cached.wait_greennet,
-                            timeout=max(0.0, deadline - time.monotonic()),
-                        )
-                        if verdict is None:
+                    for (
+                        cache_key,
+                        cached,
+                        cached_inputs,
+                        cached_request,
+                    ) in cached_entries:
+                        if cached.greennet_passed:
+                            continue
+                        if not cached_inputs:
                             raise RuntimeError(
-                                "Cached embedding has no inspection verdict"
+                                "Cached embedding has no inspection input"
                             )
+                        # This cache key identifies an immutable URL, so a hit
+                        # without an approval can be audited independently.
+                        request_for_cache = cached_request or request
+                        if getattr(request_for_cache, "greennet_passed", False):
+                            request_attrs = vars(request_for_cache).copy()
+                            request_attrs["greennet_passed"] = False
+                            request_for_cache = SimpleNamespace(**request_attrs)
+                        cached_handle = (
+                            await self._greennet_provider.preprocess_and_submit(
+                                request_for_cache, cached_inputs
+                            )
+                        )
+                        try:
+                            with vit_media.stage("greennet"):
+                                verdict = await cached_handle.wait_result()
+                                vit_media.record_verdict(verdict)
+                        finally:
+                            cached_handle.cancel()
                         if not verdict.passed:
                             return verdict
-                        if not cached.greennet_passed:
-                            raise RuntimeError("Cached embedding was not inspected")
+                        self._approve_cached_entries([(cache_key, cached)], verdict)
                     for worker_future in worker_futures:
                         verdict = await asyncio.wrap_future(worker_future)
                         if not isinstance(verdict, GreenNetVerdict):
