@@ -2236,6 +2236,17 @@ void CudaGraphRunner::initCapture() {
             captureDecode();
         }
         logCudaGraphPoolMemory("after_capture");
+        // Final post-capture release. Probe/warmup/capture transients are
+        // fully dead once every graph is instantiated, but under expandable
+        // segments the freed blocks stay pinned inside partially-mapped
+        // segments and cannot serve runtime requests arriving on other
+        // streams (measured on a tight-HBM rank: 353.63MiB reserved but
+        // unallocated and only 1.88MiB physically free after capture, while
+        // the graph private pools held just 83.96MiB — the first 2.00MiB
+        // request OOMed). Returning the debris here restores the real free
+        // headroom for serving; memory owned by instantiated graphs is not
+        // released by emptyCache.
+        cuda_graph::graphEmptyCache();
     } else {
         initKernelInternalMemory();
         RTP_LLM_LOG_INFO("CUDA graph capture is not enabled, skipping initialization");
