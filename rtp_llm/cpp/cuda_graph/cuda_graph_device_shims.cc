@@ -1,6 +1,9 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #if USING_ROCM
 #include <hip/hip_runtime.h>
+// torch's ROCm builds ship the c10/cuda allocator headers (HIP-mapped);
+// required for emptyCache/getDeviceStats on MI308X.
+#include <c10/cuda/CUDACachingAllocator.h>
 #else
 #include <c10/cuda/CUDACachingAllocator.h>
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
@@ -171,7 +174,7 @@ void graphMemGetInfo(size_t* free_bytes, size_t* total_bytes) {
 }
 
 size_t graphReservedBytes() {
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
     return c10::cuda::CUDACachingAllocator::getDeviceStats(at::cuda::current_device()).reserved_bytes[0].current;
 #else
     return 0;
@@ -179,7 +182,7 @@ size_t graphReservedBytes() {
 }
 
 size_t graphAllocatedBytes() {
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
     return c10::cuda::CUDACachingAllocator::getDeviceStats(at::cuda::current_device()).allocated_bytes[0].current;
 #else
     return 0;
