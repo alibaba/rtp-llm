@@ -149,7 +149,7 @@ void BlockTransferDispatcher::retireTransfer() const noexcept {
 std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(TransferTask task) const {
     const auto numeric_trace_id = task.traceId();
     const auto trace_id = std::to_string(numeric_trace_id);
-    // Allocate the owner and its completion path before recording admission.
+    // Allocate the owner and its completion path before registering execution.
     // The safety callback owns the registry, not the dispatcher's business lifetime.
     const auto ticket = std::make_shared<CompletionTicket>(this);
     auto context = std::make_shared<TransferBatchAsyncContext>(task.descriptors().size());
@@ -157,11 +157,14 @@ std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(Tr
         registry->finish(trace_id, true);
     });
     if (numeric_trace_id == 0 || !task_registry_->begin(trace_id)) {
-        // Do not execute again or lend the original execution's proof to this
-        // rejected submission. Its buffers may still be in use by the owner.
+        const auto* reason = numeric_trace_id == 0 ? "empty transfer trace" : "duplicate transfer trace";
+        RTP_LLM_LOG_WARNING("%s: trace=%s", reason, trace_id.c_str());
+        TransferResult result(ErrorInfo(ErrorCode::INVALID_PARAMS, std::string(reason) + ": " + trace_id),
+                              CacheCopyError::NOT_EXECUTED);
+        // This input never reaches I/O. Do not finish or overwrite the existing trace.
+        result.buffer_safe = true;
         return std::make_shared<CompletedTransferAsyncContext>(
-            ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "duplicate transfer trace: " + trace_id),
-            task.descriptors().size());
+            std::move(result), task.descriptors().size());
     }
     warnRegistrySize();
     if (task.expired()) {

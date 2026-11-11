@@ -161,7 +161,7 @@ TEST(WorkerTransferRegistryTest, MissingProofStaysRunningUntilExplicitLateConfir
     EXPECT_FALSE(context->result().buffer_safe);
 }
 
-TEST(WorkerTransferRegistryTest, DuplicateEvenWhenExpiredCannotCompleteOriginalOrExecuteAgain) {
+TEST(WorkerTransferRegistryTest, DuplicateEvenWhenExpiredFailsSafelyWithoutChangingOriginalProof) {
     auto engine = std::make_shared<ControlledProducer>();
     BlockTransferDispatcher dispatcher(engine);
     auto execution = task();
@@ -171,14 +171,21 @@ TEST(WorkerTransferRegistryTest, DuplicateEvenWhenExpiredCannotCompleteOriginalO
     auto duplicate = dispatcher.executePerRank(execution);
     EXPECT_TRUE(duplicate->done());
     EXPECT_FALSE(duplicate->success());
-    EXPECT_FALSE(duplicate->result().buffer_safe);
+    EXPECT_EQ(duplicate->errorInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_TRUE(duplicate->result().buffer_safe);
+    EXPECT_EQ(duplicate->result().copy_error, CacheCopyError::NOT_EXECUTED);
+    EXPECT_EQ(duplicate->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED}));
     EXPECT_EQ(engine->submissions, 1u);
+    EXPECT_FALSE(original->done());
     EXPECT_EQ(state(dispatcher, trace), State::RUNNING);
     engine->producers.front()->complete(result(true));
     EXPECT_TRUE(original->success());
     duplicate = dispatcher.executePerRank(execution);
     EXPECT_FALSE(duplicate->success());
-    EXPECT_FALSE(duplicate->result().buffer_safe);
+    EXPECT_EQ(duplicate->errorInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_TRUE(duplicate->result().buffer_safe);
+    EXPECT_EQ(duplicate->result().copy_error, CacheCopyError::NOT_EXECUTED);
+    EXPECT_EQ(duplicate->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED}));
     EXPECT_EQ(engine->submissions, 1u);
     EXPECT_EQ(state(dispatcher, trace), State::BUFFER_SAFE);
     EXPECT_EQ(dispatcher.taskRegistry().size(), 1u);
@@ -202,6 +209,11 @@ TEST(WorkerTransferRegistryTest, ConcurrentDuplicateSubmissionsHaveOneExecutionO
     for (const auto& context : contexts) {
         ASSERT_TRUE(context->done());
         successes += context->success();
+        if (!context->success()) {
+            EXPECT_EQ(context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_TRUE(context->result().buffer_safe);
+            EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
+        }
     }
     EXPECT_EQ(successes, 1u);
     EXPECT_EQ(state(dispatcher, execution.traceId()), State::BUFFER_SAFE);

@@ -2556,7 +2556,7 @@ TEST_F(KVCacheManagerTest, CompletionQueryClearsReusedResponseAndAcceptsEmptyKey
     EXPECT_EQ(registry.size(), 0u);
 }
 
-TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsMissingExecutionIdentityAndClearsOldSafetyProof) {
+TEST_F(KVCacheManagerTest, ExecuteFunctionReportsMissingExecutionIdentityBeforeBufferAccess) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache  = true;
@@ -2575,11 +2575,12 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsMissingExecutionIdentityAndClea
     ASSERT_TRUE(manager->executeFunction(request, response));
     EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::INVALID_REQUEST);
     EXPECT_EQ(response.mem_response().error_info().error_code(), static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
-    EXPECT_FALSE(response.mem_response().buffer_safe());
+    EXPECT_TRUE(response.mem_response().buffer_safe());
     EXPECT_EQ(engine->submitted_batch_count, 0u);
+    EXPECT_EQ(manager->block_tree_cache_->transfer_dispatcher_->taskRegistry().size(), 0u);
 }
 
-TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsDuplicateExecutionWithoutReplayingSuccessOrSafety) {
+TEST_F(KVCacheManagerTest, ExecuteFunctionReportsDuplicateTraceWithoutChangingOriginalProof) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache  = true;
@@ -2601,9 +2602,13 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsDuplicateExecutionWithoutReplay
         EXPECT_EQ(engine->submitted_batch_count, ++submitted);
 
         ASSERT_TRUE(manager->executeFunction(request, response));
-        EXPECT_NE(response.mem_response().code(), MemoryOperationResponsePB::OK);
-        EXPECT_FALSE(response.mem_response().buffer_safe());
+        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::NOT_EXECUTED);
+        EXPECT_EQ(response.mem_response().error_info().error_code(), static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+        EXPECT_TRUE(response.mem_response().buffer_safe());
         EXPECT_EQ(engine->submitted_batch_count, submitted);
+        const auto& registry = manager->block_tree_cache_->transfer_dispatcher_->taskRegistry();
+        EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{request.mem_request().transfer_trace_id()}).front(),
+                  buffer_safe ? TransferTaskRegistry::State::BUFFER_SAFE : TransferTaskRegistry::State::RUNNING);
     }
 }
 

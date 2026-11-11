@@ -56,7 +56,7 @@ std::vector<Code> completionCodes() {
     return codes;
 }
 
-TEST(KVCMWorkerRegistryTest, RpcReadUsesExplicitCompletionProofAndRejectsReplays) {
+TEST(KVCMWorkerRegistryTest, RpcReadUsesExplicitCompletionProofAndRejectsDuplicateTrace) {
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
     for (const bool protected_payload : {false, true}) {
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", protected_payload ? "1" : "0");
@@ -80,21 +80,27 @@ TEST(KVCMWorkerRegistryTest, RpcReadUsesExplicitCompletionProofAndRejectsReplays
                       safe ? RegistryState::BUFFER_SAFE : RegistryState::RUNNING);
             EXPECT_EQ(backend->taskRegistry().size(), 1u);
 
-            // Reusing a successful response must not turn duplicate or missing
-            // identities into fresh completion evidence, even after owner stop.
-            response.set_payload_buffer_safe(true);
+            // Rejected requests are safe because they start no I/O; their
+            // responses must not replace the original execution's evidence.
+            response.set_payload_buffer_safe(false);
+            response.set_sdk_failed(true);
             response.add_actual_uris("stale");
             EXPECT_FALSE(backend->execute(request, response));
-            EXPECT_FALSE(response.payload_buffer_safe());
+            EXPECT_TRUE(response.payload_buffer_safe());
+            EXPECT_FALSE(response.sdk_failed());
             EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
             EXPECT_EQ(response.actual_uris_size(), 0);
             EXPECT_EQ(registryState(*backend.backend, request.trace_id()),
                       safe ? RegistryState::BUFFER_SAFE : RegistryState::RUNNING);
             request.clear_trace_id();
-            response.set_payload_buffer_safe(true);
+            response.set_payload_buffer_safe(false);
             EXPECT_FALSE(backend->execute(request, response));
-            EXPECT_FALSE(response.payload_buffer_safe());
+            EXPECT_TRUE(response.payload_buffer_safe());
+            EXPECT_FALSE(response.sdk_failed());
+            EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
             EXPECT_EQ(registryState(*backend.backend, ""), RegistryState::UNKNOWN);
+            EXPECT_EQ(registryState(*backend.backend, "rpc-read"),
+                      safe ? RegistryState::BUFFER_SAFE : RegistryState::RUNNING);
             EXPECT_EQ(backend->taskRegistry().size(), 1u);
         }
     }
@@ -124,7 +130,46 @@ TEST(KVCMWorkerRegistryTest, ThrowingSdkCannotPublishSafeFromReusedResponse) {
     }
 }
 
-TEST(KVCMWorkerRegistryTest, QueueRejectionAndExpiryAreSafeWhileRunningReplayIsNot) {
+TEST(KVCMWorkerRegistryTest, LocalAdmissionRejectionDoesNotFreezeOrCompleteOriginalExecution) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    for (const bool asynchronous : {false, true}) {
+        SCOPED_TRACE(asynchronous);
+        auto environment = makeBackendEnvironment("kvcm_duplicate_local_admission");
+        auto client = std::make_shared<MockClientWrapper>();
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _)).WillOnce(Return(false));
+        auto backend = makeBackend(environment, singleRankConfig(), client);
+        ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+        // Occupy the identity that the first coordinated READ will generate.
+        const auto original = readRequest(environment, "block_tree_read_1");
+        RemoteOperationResponsePB response;
+        EXPECT_FALSE(backend->execute(original, response));
+        EXPECT_FALSE(response.payload_buffer_safe());
+        ASSERT_EQ(registryState(*backend.backend, original.trace_id()), RegistryState::RUNNING);
+        const kv_cache_manager::Locations locations{{{"tp0_Fdefault", "pace://duplicate-local"}}};
+        EXPECT_CALL(*client, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
+        auto matched = match(*backend.backend, makeStorageRequest(environment));
+        ASSERT_TRUE(matched.success);
+        auto request = makeStorageRequest(environment);
+        const auto references = environment.device_pool->refCount(environment.block_id);
+        if (asynchronous) {
+            EXPECT_FALSE(readResult(*backend.backend, std::move(request), std::move(matched.match_meta)).ok());
+            ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+        } else {
+            request.transfer_task.emplace(std::vector<TransferDescriptor>{}, std::chrono::seconds(30));
+            EXPECT_THROW(backend->readImpl(request, matched.match_meta), StorageOperationBufferSafeFailure);
+        }
+        EXPECT_TRUE(backend->frozenTasks().empty());
+        EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references);
+        EXPECT_EQ(backend->taskRegistry().size(), 1u);
+        EXPECT_EQ(registryState(*backend.backend, original.trace_id()), RegistryState::RUNNING);
+    }
+}
+
+TEST(KVCMWorkerRegistryTest, RejectedDuplicateIsSafeWithoutChangingTheRunningOwner) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
     auto environment = makeBackendEnvironment("kvcm_registry_queue");
@@ -152,10 +197,12 @@ TEST(KVCMWorkerRegistryTest, QueueRejectionAndExpiryAreSafeWhileRunningReplayIsN
     RemoteOperationResponsePB running_response;
     auto running_result = std::async(std::launch::async, [&] { return backend->execute(running, running_response); });
     ASSERT_EQ(entered_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    RemoteOperationResponsePB replay;
-    replay.set_payload_buffer_safe(true);
-    EXPECT_FALSE(backend->execute(running, replay));
-    EXPECT_FALSE(replay.payload_buffer_safe());
+    RemoteOperationResponsePB duplicate_response;
+    duplicate_response.set_payload_buffer_safe(false);
+    EXPECT_FALSE(backend->execute(running, duplicate_response));
+    EXPECT_TRUE(duplicate_response.payload_buffer_safe());
+    EXPECT_FALSE(duplicate_response.sdk_failed());
+    EXPECT_EQ(duplicate_response.transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
     EXPECT_EQ(registryState(*backend.backend, "running"), RegistryState::RUNNING);
 
     auto queued = readRequest(environment, "expired-in-queue");
@@ -272,7 +319,7 @@ TEST(KVCMWorkerRegistryTest, WarningThresholdNeverCapsReadAdmissionOrDeletesEvid
     EXPECT_EQ(registryState(*backend.backend, "empty-read-4096"), RegistryState::BUFFER_SAFE);
     request.set_trace_id("empty-read-0");
     EXPECT_FALSE(backend->execute(request, response));
-    EXPECT_FALSE(response.payload_buffer_safe());
+    EXPECT_TRUE(response.payload_buffer_safe());
     EXPECT_EQ(backend->taskRegistry().size(), 4097u);
 }
 
@@ -343,7 +390,7 @@ TEST(KVCMWorkerRegistryTest, LocalAsyncAndCommonReadsPublishProofBeforeBusinessC
     }
 }
 
-TEST(KVCMWorkerRegistryTest, ShutdownKeepsReplayRejectionDistinctFromUnsubmittedRead) {
+TEST(KVCMWorkerRegistryTest, ShutdownRejectsUnsubmittedReadsWithoutReplacingRetainedEvidence) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
     auto environment = makeBackendEnvironment("kvcm_registry_shutdown");
@@ -358,17 +405,17 @@ TEST(KVCMWorkerRegistryTest, ShutdownKeepsReplayRejectionDistinctFromUnsubmitted
     ASSERT_TRUE(backend->execute(request, response));
     backend->shutdown();
     EXPECT_FALSE(backend->execute(request, response));
-    EXPECT_FALSE(response.payload_buffer_safe());
+    EXPECT_TRUE(response.payload_buffer_safe());
     EXPECT_EQ(registryState(*backend.backend, "completed"), RegistryState::BUFFER_SAFE);
     request.set_trace_id("after-shutdown");
     EXPECT_FALSE(backend->execute(request, response));
     EXPECT_TRUE(response.payload_buffer_safe());
     EXPECT_EQ(registryState(*backend.backend, "after-shutdown"), RegistryState::BUFFER_SAFE);
     EXPECT_FALSE(backend->execute(request, response));
-    EXPECT_FALSE(response.payload_buffer_safe());
+    EXPECT_TRUE(response.payload_buffer_safe());
     request.clear_trace_id();
     EXPECT_FALSE(backend->execute(request, response));
-    EXPECT_FALSE(response.payload_buffer_safe());
+    EXPECT_TRUE(response.payload_buffer_safe());
     request.set_op(REMOTE_OPERATION_WRITE);
     EXPECT_FALSE(backend->execute(request, response));
     EXPECT_EQ(backend->taskRegistry().size(), 2u);

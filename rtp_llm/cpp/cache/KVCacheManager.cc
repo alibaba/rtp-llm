@@ -903,6 +903,7 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
         memory_response->add_block_errors(MemoryOperationResponsePB::INVALID_REQUEST);
     }
     if (request.mem_request().transfer_trace_id() == 0) {
+        memory_response->set_buffer_safe(true);
         memory_response->mutable_error_info()->set_error_message("transfer execution trace ID is required");
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: missing transfer execution trace ID");
         return true;

@@ -1585,6 +1585,9 @@ public:
         const auto reject = [&](const char* reason) {
             RTP_LLM_LOG_WARNING("KVCM payload admission rejected op=READ rank=%ld trace=%s reason=%s",
                                 static_cast<long>(parallelism_config_.world_rank), request.trace_id().c_str(), reason);
+            // This rejected request never starts I/O. Its response does not
+            // supply completion evidence for the already registered execution.
+            response.set_payload_buffer_safe(true);
         };
         if (request.trace_id().empty()) {
             reject("empty_trace");
@@ -1690,7 +1693,7 @@ public:
             execution = beginReadExecution(request, response);
             if (!execution) {
                 if (source_may_be_touched)
-                    *source_may_be_touched = true;
+                    *source_may_be_touched = false;
                 return false;
             }
         }
@@ -2600,8 +2603,8 @@ private:
             RemoteOperationResponsePB admission_response;
             execution = beginReadExecution(requests.front().remote_request(), admission_response);
             if (!execution) {
-                source_may_be_touched = true;
-                std::rethrow_exception(completion_unknown_failure_);
+                source_may_be_touched = false;
+                std::rethrow_exception(buffer_safe_failure_);
             }
         }
         block_tree_cache_detail::ScopeRollback unsubmitted([execution] {
@@ -2764,7 +2767,6 @@ private:
             if (requests.front().remote_request().op() == REMOTE_OPERATION_READ && !execution) {
                 execution = beginReadExecution(requests.front().remote_request(), local_response);
                 if (!execution) {
-                    source_may_be_touched = true;
                     return validateResponses(std::move(responses), 1, source_may_be_touched);
                 }
             }

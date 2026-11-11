@@ -128,6 +128,28 @@ TEST(BlockTransferDispatcherTest, ExpiredTaskFailsBeforePerRankExecution) {
     EXPECT_EQ(engine->submittedBatchCount(), 0u);
 }
 
+TEST(BlockTransferDispatcherTest, MissingTraceFailsSafelyWithoutExecutingOrRegistering) {
+    auto                    engine = std::make_shared<ScriptedPerRankEngine>();
+    BlockTransferDispatcher dispatcher(engine);
+    TransferTask            task({descriptor(0), descriptor(0)}, std::chrono::seconds(30));
+    task.trace_id_ = 0;
+
+    const auto context = dispatcher.executePerRank(std::move(task));
+
+    ASSERT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_TRUE(context->result().buffer_safe);
+    EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
+    EXPECT_EQ(context->result().block_errors,
+              (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED, CacheCopyError::NOT_EXECUTED}));
+    EXPECT_EQ(engine->submittedBatchCount(), 0u);
+    EXPECT_EQ(dispatcher.taskRegistry().size(), 0u);
+    EXPECT_EQ(dispatcher.taskRegistry().queryLocal(std::vector<uint64_t>{0}).front(),
+              TransferTaskRegistry::State::UNKNOWN);
+    EXPECT_TRUE(dispatcher.frozenTasks().empty());
+}
+
 class DispatcherBackendTest: public ::testing::TestWithParam<bool> {};
 
 TEST_P(DispatcherBackendTest, LocalRequestSplitsBeforeEngineAndPreservesDeadlineAndIdentity) {

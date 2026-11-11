@@ -214,6 +214,25 @@ TEST(KVCMCompletionQueryTest, QueryNamespacesStaySeparateAndObserveReadCompletio
     });
     ASSERT_TRUE(gate->waitEntered());
 
+    for (const bool missing_trace : {false, true}) {
+        auto rejected = read;
+        if (missing_trace)
+            rejected.mutable_remote_request()->clear_trace_id();
+        auto stub = RpcService::NewStub(channel);
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + 2s);
+        FunctionResponsePB response;
+        ASSERT_TRUE(stub->ExecuteFunction(&context, rejected, &response).ok());
+        ASSERT_TRUE(response.has_remote_response());
+        EXPECT_EQ(response.remote_response().transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
+        EXPECT_TRUE(response.remote_response().payload_buffer_safe());
+        EXPECT_FALSE(response.remote_response().sdk_failed());
+        EXPECT_EQ(worker->backend->taskRegistry().queryLocal(std::vector<std::string>{"71"}).front(),
+                  RegistryState::RUNNING);
+        EXPECT_EQ(worker->backend->taskRegistry().size(), 1u);
+        EXPECT_TRUE(worker->backend->frozenTasks().empty());
+    }
+
     auto write = payloadRequest(*worker->environment, "write-71");
     write.mutable_remote_request()->set_op(REMOTE_OPERATION_WRITE);
     FunctionResponsePB write_response;
@@ -377,7 +396,8 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
         FunctionResponsePB response;
         ASSERT_TRUE(worker->manager->executeFunction(duplicate, response));
         EXPECT_EQ(response.remote_response().transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
-        EXPECT_FALSE(response.remote_response().payload_buffer_safe());
+        EXPECT_TRUE(response.remote_response().payload_buffer_safe());
+        EXPECT_FALSE(response.remote_response().sdk_failed());
         EXPECT_EQ(worker->backend->taskRegistry().queryLocal(std::vector<std::string>{trace}).front(),
                   RegistryState::BUFFER_SAFE);
     }

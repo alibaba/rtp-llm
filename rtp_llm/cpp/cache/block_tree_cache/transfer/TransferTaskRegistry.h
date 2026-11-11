@@ -10,8 +10,8 @@
 
 namespace rtp_llm {
 
-// Local completion evidence for worker executions. Entries, including safe ones, survive until destruction:
-// deleting an entry would otherwise allow a delayed duplicate to execute again.
+// Local completion evidence keyed by the caller's unique execution trace.
+// Completed entries currently remain queryable until this registry is destroyed.
 // Ordinary transfer reuses its numeric trace ID; KVCM can reuse its existing string
 // identity in a separate registry instance. No per-task identity is generated here.
 // The worker group shares one lifetime; records are not reused across instances.
@@ -31,7 +31,8 @@ public:
         return records_.size();
     }
 
-    // The caller must obtain admission before starting any buffer access.
+    // Insert RUNNING without replacing an existing execution's evidence.
+    // False reports an empty or already registered trace to the caller.
     bool begin(const std::string& trace_id) {
         if (trace_id.empty()) {
             return false;
