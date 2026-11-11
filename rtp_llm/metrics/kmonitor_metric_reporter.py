@@ -202,6 +202,12 @@ class GaugeMetrics(Enum):
     VIT_EMBEDDING_QUEUE_WAIT_RT_METRIC = "py_rtp_vit_embedding_queue_wait_rt"
     VIT_EMBEDDING_CACHE_TOKENS_METRIC = "py_rtp_vit_embedding_cache_tokens"
     VIT_EMBEDDING_CACHE_BYTES_METRIC = "py_rtp_vit_embedding_cache_bytes"
+    # Configured GPU + CPU capacity / successful new admission bytes per second.
+    # All shards share one activity-driven window of at least 60s. Idle periods
+    # emit no samples. This is an estimated turnover time, not a per-entry TTL.
+    VIT_EMBEDDING_CACHE_ESTIMATED_LIFETIME_SECONDS_METRIC = (
+        "py_rtp_vit_embedding_cache_estimated_lifetime_seconds"
+    )
 
 
 class MetricReporter(object):

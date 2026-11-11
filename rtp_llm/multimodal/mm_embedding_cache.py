@@ -1107,6 +1107,49 @@ class MMHashKeyCache:
         }
 
 
+class _CacheLifetimeMetrics:
+    """Estimate cache turnover from admissions, with O(1) shared state.
+
+    Start at the first admission, then emit on the first admission at least
+    60s after the window start. Use the actual elapsed time, including idle
+    gaps; no timer or per-entry history is needed. No ingress means no sample.
+    """
+
+    def __init__(self, capacity_bytes: int):
+        self._lock = threading.Lock()
+        self._capacity_bytes = capacity_bytes
+        self._window_start: Optional[float] = None
+        self._admitted_bytes = 0
+
+    def resize(self, capacity_bytes: int) -> None:
+        with self._lock:
+            self._capacity_bytes = capacity_bytes
+            self._window_start = None
+            self._admitted_bytes = 0
+
+    def record_admission(self, size_bytes: int) -> None:
+        if size_bytes <= 0:
+            return
+        with self._lock:
+            if self._capacity_bytes <= 0:
+                return
+            now = time.monotonic()
+            self._admitted_bytes += size_bytes
+            if self._window_start is None:
+                self._window_start = now
+                return
+            elapsed = now - self._window_start
+            if elapsed < 60.0:
+                return
+            lifetime_seconds = self._capacity_bytes * elapsed / self._admitted_bytes
+            self._window_start = now
+            self._admitted_bytes = 0
+        kmonitor.report(
+            GaugeMetrics.VIT_EMBEDDING_CACHE_ESTIMATED_LIFETIME_SECONDS_METRIC,
+            lifetime_seconds,
+        )
+
+
 class MMEmbeddingCache:
     """Two-tier fixed-pool LRU shared by sync and async embedding paths.
 
@@ -1124,6 +1167,7 @@ class MMEmbeddingCache:
         on_cpu_evict: Optional[Callable[[str, MMEmbeddingCacheEntry], None]] = None,
         async_publication: bool = False,
         publish_queue_size: int = 1024,
+        lifetime_metrics: Optional[_CacheLifetimeMetrics] = None,
     ):
         self._on_cpu_evict = on_cpu_evict
         self._validate_limits(gpu_max_bytes, cpu_max_bytes)
@@ -1144,6 +1188,12 @@ class MMEmbeddingCache:
         self._gpu_pool = _TensorMemoryPool(gpu_max_bytes, gpu_device)
         self._cpu_pool = _TensorMemoryPool(cpu_max_bytes, torch.device("cpu"))
         self._report_metrics_enabled = report_metrics
+        self._owns_lifetime_metrics = lifetime_metrics is None
+        self._lifetime_metrics = lifetime_metrics or (
+            _CacheLifetimeMetrics(gpu_max_bytes + cpu_max_bytes)
+            if report_metrics
+            else None
+        )
         self._resident_tokens = 0
         self._gpu_bytes = 0
         self._cpu_bytes = 0
@@ -1633,6 +1683,11 @@ class MMEmbeddingCache:
                     False,
                     entry.ready_events,
                 )
+            # Completion runs once per generation, unlike _store_pooled which
+            # also handles tier moves. Snapshot before releasing the transfer
+            # lock: a concurrent eviction must not erase this admission.
+            admitted_bytes = entry.charge_bytes
+        self._report_admission(admitted_bytes)
         self._report_current_residency()
 
     def _materialize_entry(self, entry: MMEmbeddingCacheEntry, devices: Any) -> Any:
@@ -1856,6 +1911,8 @@ class MMEmbeddingCache:
                 )
             for removal in removals:
                 self._finish_removal(removal)
+        if self._owns_lifetime_metrics and self._lifetime_metrics is not None:
+            self._lifetime_metrics.resize(gpu_max_bytes + cpu_max_bytes)
         self._report_current_residency()
 
     def clear(self, error: Optional[Exception] = None) -> None:
@@ -1902,6 +1959,14 @@ class MMEmbeddingCache:
             size_bytes = self._gpu_bytes + self._cpu_bytes
         self._report_resident_metrics(tokens, size_bytes)
 
+    def _report_admission(self, size_bytes: int) -> None:
+        if not self._report_metrics_enabled or self._lifetime_metrics is None:
+            return
+        try:
+            self._lifetime_metrics.record_admission(size_bytes)
+        except Exception:
+            logging.exception("Failed to report ViT cache estimated lifetime")
+
     def _report_access_metric(self, state: str) -> None:
         if not self._report_metrics_enabled:
             return
@@ -1945,6 +2010,11 @@ class ShardedMMEmbeddingCache:
     ):
         if shards < 1:
             raise ValueError("embedding cache shards must be positive")
+        self._lifetime_metrics = (
+            _CacheLifetimeMetrics(gpu_max_bytes + cpu_max_bytes)
+            if report_metrics
+            else None
+        )
         self._shards = [
             MMEmbeddingCache(
                 gpu_bytes,
@@ -1952,6 +2022,7 @@ class ShardedMMEmbeddingCache:
                 report_metrics=report_metrics,
                 on_cpu_evict=on_cpu_evict,
                 async_publication=async_publication,
+                lifetime_metrics=self._lifetime_metrics,
             )
             for gpu_bytes, cpu_bytes in zip(
                 _split_budget(gpu_max_bytes, shards),
@@ -2043,12 +2114,15 @@ class ShardedMMEmbeddingCache:
             shard.close()
 
     def resize(self, gpu_max_bytes: int, cpu_max_bytes: int) -> None:
+        MMEmbeddingCache._validate_limits(gpu_max_bytes, cpu_max_bytes)
         for shard, gpu_bytes, cpu_bytes in zip(
             self._shards,
             _split_budget(gpu_max_bytes, len(self._shards)),
             _split_budget(cpu_max_bytes, len(self._shards)),
         ):
             shard.resize(gpu_bytes, cpu_bytes)
+        if self._lifetime_metrics is not None:
+            self._lifetime_metrics.resize(gpu_max_bytes + cpu_max_bytes)
 
     def stats(self) -> Dict[str, int]:
         per_shard = [shard.stats() for shard in self._shards]
