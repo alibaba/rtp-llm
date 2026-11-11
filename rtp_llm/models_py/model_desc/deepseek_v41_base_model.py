@@ -428,7 +428,21 @@ class DeepSeekV4Model(GptModelBase):
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         try:
-            return self._initialize_impl(init_resource)
+            result = self._initialize_impl(init_resource)
+            # Release allocator transients from model construction before the
+            # C++ engine sizes and raw-allocates the KV pools: torch's
+            # reserved-but-unallocated cache (observed ~18 GiB at a 1M
+            # context) is invisible to the driver-level pool malloc and
+            # starves both the budget estimate and the allocation itself.
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                logging.warning(
+                    "[DeepSeekV4Model] post-initialize empty_cache failed",
+                    exc_info=True,
+                )
+            return result
         except BaseException as e:
             import traceback
 
