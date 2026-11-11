@@ -224,12 +224,21 @@ def record_weight_placement(name: str, tensor: Any) -> None:
     except Exception:
         return
     os.makedirs(_WEIGHT_DIR, exist_ok=True)
-    rank = (
-        os.environ.get("AWI_RANK")
-        or os.environ.get("LOCAL_RANK")
-        or os.environ.get("RANK")
-        or "0"
-    )
+    rank = None
+    try:
+        import torch.distributed as _dist
+
+        if _dist.is_available() and _dist.is_initialized():
+            rank = str(_dist.get_rank())
+    except Exception:
+        rank = None
+    if rank is None:
+        rank = (
+            os.environ.get("AWI_RANK")
+            or os.environ.get("LOCAL_RANK")
+            or os.environ.get("RANK")
+            or "0"
+        )
     path = os.path.join(_WEIGHT_DIR, "weights-%s.jsonl" % rank)
     with _WEIGHT_LOCK:
         with open(path, "a", encoding="utf-8") as handle:
