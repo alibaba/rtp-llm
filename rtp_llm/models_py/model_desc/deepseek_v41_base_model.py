@@ -746,11 +746,19 @@ class DeepSeekV4Model(GptModelBase):
             set_model_root,
         )
 
+        inert_ranks_raw = os.environ.get("DSV41_INERT_MTP_RANKS", "").strip()
+        inert_ranks = (
+            [int(item) for item in inert_ranks_raw.split(",") if item.strip()]
+            if inert_ranks_raw
+            else None
+        )
         ensure_inert_resident(
             self._ckpt_path,
             device=device_str,
-            rank=getattr(self._v4_args, "tp_rank", None),
-            world_size=getattr(self._v4_args, "tp_size", None),
+            rank=getattr(self._v4_args, "world_rank", None),
+            world_size=getattr(self._v4_args, "world_size", None)
+            or getattr(self._v4_args, "tp_size", None),
+            ranks=inert_ranks,
         )
         set_model_root(self.v4, self._ckpt_path)
         publish_weights_placement(self.v4, self._ckpt_path)

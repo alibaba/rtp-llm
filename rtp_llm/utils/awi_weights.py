@@ -104,6 +104,22 @@ def recorded_names() -> List[str]:
         return sorted(_fetched)
 
 
+def _balanced_owner_map(
+    sizes: Dict[str, int], ranks: List[int]
+) -> Dict[str, int]:
+    """Assign names to ranks so each rank owns roughly equal element counts."""
+    import heapq
+
+    heap = [(0, int(rank)) for rank in ranks]
+    heapq.heapify(heap)
+    owners: Dict[str, int] = {}
+    for name in sorted(sizes, key=lambda item: (-sizes[item], item)):
+        used, owner = heapq.heappop(heap)
+        owners[name] = owner
+        heapq.heappush(heap, (used + int(sizes[name]), owner))
+    return owners
+
+
 def ensure_inert_resident(
     checkpoint_path: str,
     *,
@@ -111,6 +127,7 @@ def ensure_inert_resident(
     device: Optional[str] = None,
     rank: Optional[int] = None,
     world_size: Optional[int] = None,
+    ranks: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """Give never-executed checkpoint keys a genuine device allocation.
 
@@ -146,20 +163,41 @@ def ensure_inert_resident(
         world_size if world_size is not None else os.environ.get("WORLD_SIZE", "1")
     )
     world_size = max(1, world_size)
+    if ranks is None:
+        target_ranks = list(range(world_size))
+    else:
+        target_ranks = sorted({int(item) for item in ranks})
+        if not target_ranks:
+            raise ValueError("inert residency ranks must not be empty")
+        invalid = [item for item in target_ranks if item < 0 or item >= world_size]
+        if invalid:
+            raise ValueError(
+                f"inert residency ranks {invalid} outside world_size {world_size}"
+            )
     already = set(recorded_names())
-    owned = [
-        name
-        for position, name in enumerate(names)
-        if position % world_size == rank and name not in already
-    ]
+    # Balance only the keys this process still has to materialize.  Balancing
+    # all names would let already-fetched tensors consume a rank's share and
+    # leave the real inert bytes clustered on one GPU.
+    pending = [name for name in names if name not in already]
+    sizes: Dict[str, int] = {}
+    from safetensors import safe_open
+
+    for name in pending:
+        shard = os.path.join(checkpoint_path, weight_map[name])
+        with safe_open(shard, framework="pt", device="cpu") as file:
+            shape = file.get_slice(name).get_shape()
+        size = 1
+        for dim in shape:
+            size *= int(dim)
+        sizes[name] = size
+    owners = _balanced_owner_map(sizes, target_ranks)
+    owned = [name for name in pending if owners[name] == rank]
     if device is None:
         device = (
             f"cuda:{torch.cuda.current_device()}"
             if torch.cuda.is_available()
             else "cpu"
         )
-    from safetensors import safe_open
-
     total = 0
     for name in owned:
         shard = os.path.join(checkpoint_path, weight_map[name])
@@ -170,12 +208,14 @@ def ensure_inert_resident(
         _inert_resident.append((name, resident))
         total += resident.numel() * resident.element_size()
     logger.info(
-        "AWI inert residency: rank=%d loaded %d '%s*' keys (%.2f MiB) on %s",
+        "AWI inert residency: rank=%d loaded %d '%s*' keys (%.2f MiB) on %s "
+        "(owners=%s)",
         rank,
         len(owned),
         prefix,
         total / 1024**2,
         device,
+        target_ranks,
     )
     return {"owned": len(owned), "bytes": total, "device": str(device)}
 
