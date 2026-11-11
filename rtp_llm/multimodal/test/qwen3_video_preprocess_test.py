@@ -209,6 +209,24 @@ class Qwen3VideoPreprocessTest(unittest.TestCase):
             for key in ("pixel_values_videos", "video_grid_thw"):
                 torch.testing.assert_close(actual[key], reference[key], atol=0, rtol=0)
 
+    def test_service_frame_cap_and_total_budget(self):
+        vp = Qwen3VLVideoProcessor(patch_size=16, merge_size=2, temporal_patch_size=2)
+        size = resolve_video_size(vp, 2500000, 73728000, 786432)
+        config = SimpleNamespace()
+        for frames in (2, 17, 40, 60):
+            with self.subTest(frames=frames):
+                self.assertEqual(
+                    video_resize_shape(config, frames, 1080, 1920, vp, size),
+                    (640, 1152),
+                )
+        # For longer clips, the total budget sets the tighter limit.
+        h, w = video_resize_shape(config, 180, 1080, 1920, vp, size)
+        self.assertLess(h * w, 786432)
+        self.assertLessEqual(180 * h * w, 73728000)
+        # A large model minimum can upscale a short clip past its frame budget.
+        h, w = video_resize_shape(config, 2, 256, 256, vp, size)
+        self.assertLessEqual(h * w, 786432)
+
     def test_total_budget_overrides_do_not_mutate_model_defaults(self):
         vp = self.processor()
         original = dict(vp.size)

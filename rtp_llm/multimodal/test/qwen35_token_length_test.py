@@ -117,6 +117,7 @@ class Qwen35TokenLengthTest(unittest.TestCase):
         payload = encoded.getvalue()
         self.vit.mm_video_fps = 6.0
         self.vit.mm_video_max_frames = 8
+        self.vit.mm_video_max_pixels_per_frame = 4096
         # The same serialized VitConfig is passed to preprocessing workers.
         service = pickle.loads(pickle.dumps(self.vit))
         modules = (
@@ -133,6 +134,18 @@ class Qwen35TokenLengthTest(unittest.TestCase):
                         module + ".get_bytes_io_from_url",
                         side_effect=lambda *a, **k: io.BytesIO(payload),
                     )
+                )
+            auto = MultimodalInput(
+                "fixture.mp4", MMUrlType.VIDEO, torch.empty(0), MMPreprocessConfig()
+            )
+            for backend in ("cpu", "nvdec"):
+                _, grid, timestamps = Qwen3_5MoeImageEmbedding.preprocess_input(
+                    [auto], service, self.processor, 32, video_backend=backend
+                )
+                self.assertEqual(grid.tolist(), [[4, 2, 4]])
+                self.assertEqual(
+                    token_length(auto, service, self.processor, 32, video_backend=backend),
+                    int(grid.prod()) // 4 + sum(len(t) + 2 for t in timestamps),
                 )
             for fps, maximum, expected_frames in (
                 (-1, -1, 8),

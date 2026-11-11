@@ -132,6 +132,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
                 processor.video_processor,
                 vit_config.mm_video_total_min_pixels,
                 vit_config.mm_video_total_max_pixels,
+                vit_config.mm_video_max_pixels_per_frame,
             )
             with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC, tags):
                 video, metadata = decode_video(

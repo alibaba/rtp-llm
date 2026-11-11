@@ -14,6 +14,10 @@ Sampling, resize and timestamp rules share qwen3_vl_video.py:
 - Request min_pixels/max_pixels are per-frame limits. Service options
   mm_video_total_min_pixels/mm_video_total_max_pixels override total-video
   budgets without changing processor defaults.
+- Set `MM_VIDEO_MAX_PIXELS_PER_FRAME` to bound the area of each automatically
+  resized frame as well as the total video area. For example, 786432 is the
+  Qwen-VL video cap for 16-pixel patches and a 2×2 spatial merge. Defaults to 0
+  (disabled). Explicit resized height/width take precedence.
 - Explicit height/width must both be positive and align to patch size × merge size.
 - Each temporal patch's timestamp is the mean of its first and last frame time.
 

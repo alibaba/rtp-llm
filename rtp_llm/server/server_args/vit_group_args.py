@@ -192,6 +192,14 @@ def init_vit_group_args(parser, vit_config):
         help="Qwen3-VL/Qwen3.5 total video pixel max budget (frames*height*width); 0 inherits the model",
     )
     vit_group.add_argument(
+        "--mm_video_max_pixels_per_frame",
+        env_name="MM_VIDEO_MAX_PIXELS_PER_FRAME",
+        bind_to=(vit_config, "mm_video_max_pixels_per_frame"),
+        type=_non_negative_int,
+        default=0,
+        help="Qwen3-VL/Qwen3.5 maximum pixels per automatically resized video frame (0 disables the limit)",
+    )
+    vit_group.add_argument(
         "--mm_video_fps",
         env_name="MM_VIDEO_FPS",
         bind_to=(vit_config, "mm_video_fps"),

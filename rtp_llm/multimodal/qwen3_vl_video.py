@@ -53,17 +53,22 @@ def sample_frame_indices(
 
 
 def resolve_video_size(
-    processor: Any, total_min_pixels: int = 0, total_max_pixels: int = 0
+    processor: Any,
+    total_min_pixels: int = 0,
+    total_max_pixels: int = 0,
+    max_pixels_per_frame: int = 0,
 ) -> Dict[str, int]:
     """Resolve service overrides without mutating the shared HF processor."""
-    if total_min_pixels < 0 or total_max_pixels < 0:
-        raise ValueError("video total pixel overrides must be non-negative")
+    if min(total_min_pixels, total_max_pixels, max_pixels_per_frame) < 0:
+        raise ValueError("video pixel overrides must be non-negative")
     size = {
         "shortest_edge": total_min_pixels or processor.size["shortest_edge"],
         "longest_edge": total_max_pixels or processor.size["longest_edge"],
     }
     if not 0 < size["shortest_edge"] <= size["longest_edge"]:
         raise ValueError("video total pixel limits must satisfy 0 < min <= max")
+    if max_pixels_per_frame:
+        size["max_pixels_per_frame"] = max_pixels_per_frame
     return size
 
 
@@ -112,7 +117,7 @@ def video_resize_shape(
         max_pixels = per_frame_max * num_frames
     if not 0 < min_pixels <= max_pixels:
         raise ValueError("video pixel limits must satisfy 0 < min <= max")
-    return smart_resize(
+    out_h, out_w = smart_resize(
         num_frames=num_frames,
         height=height,
         width=width,
@@ -121,6 +126,18 @@ def video_resize_shape(
         min_pixels=min_pixels,
         max_pixels=max_pixels,
     )
+    if frame_limit := size.get("max_pixels_per_frame"):
+        frame_limit = min(frame_limit, size["longest_edge"] // num_frames)
+        if out_h * out_w > frame_limit:
+            # Fit the original aspect ratio to the patch grid. A short video can
+            # hit this limit even when HF upscales it to meet its total minimum.
+            cells = frame_limit // (factor * factor)
+            if not cells:
+                raise ValueError("video frame pixel budget cannot fit one merged patch")
+            grid_h = min(cells, max(1, math.isqrt(cells * height // width)))
+            grid_w = min(cells // grid_h, max(1, math.isqrt(cells * width // height)))
+            return grid_h * factor, grid_w * factor
+    return out_h, out_w
 
 
 def _rewind_video(video_data):

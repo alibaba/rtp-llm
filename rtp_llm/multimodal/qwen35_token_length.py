@@ -71,6 +71,7 @@ def token_length(mm_input, vit_config, processor, factor, video_backend="nvdec")
             vp,
             vit_config.mm_video_total_min_pixels,
             vit_config.mm_video_total_max_pixels,
+            vit_config.mm_video_max_pixels_per_frame,
         )
         if video_backend == "nvdec":
             from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.gpu_video import (

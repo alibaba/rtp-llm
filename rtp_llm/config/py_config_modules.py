@@ -344,6 +344,7 @@ class VitConfig:
         # Qwen3-VL/Qwen3.5 total-video pixel budgets; 0 inherits the model.
         self.mm_video_total_min_pixels: int = 0
         self.mm_video_total_max_pixels: int = 0
+        self.mm_video_max_pixels_per_frame: int = 0
         # Sampling defaults; explicit per-request values take precedence.
         self.mm_video_fps: float = 2.0
         self.mm_video_max_frames: int = 768
@@ -431,6 +432,7 @@ class VitConfig:
             f"mm_video_max_file_size_kb: {self.mm_video_max_file_size_kb}\n"
             f"mm_video_total_min_pixels: {self.mm_video_total_min_pixels}\n"
             f"mm_video_total_max_pixels: {self.mm_video_total_max_pixels}\n"
+            f"mm_video_max_pixels_per_frame: {self.mm_video_max_pixels_per_frame}\n"
             f"mm_cache_item_num: {self.mm_cache_item_num}\n"
             f"url_cache_item_num: {self.url_cache_item_num}\n"
             f"use_igraph_cache: {self.use_igraph_cache}\n"

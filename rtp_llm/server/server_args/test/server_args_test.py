@@ -88,6 +88,7 @@ class ServerArgsPyEnvConfigsTest(TestCase):
             defaults = server_args.setup_args([]).vit_config
             self.assertEqual(defaults.mm_video_total_min_pixels, 0)
             self.assertEqual(defaults.mm_video_total_max_pixels, 0)
+            self.assertEqual(defaults.mm_video_max_pixels_per_frame, 0)
             configured = server_args.setup_args(
                 [
                     "--mm_video_total_min_pixels",
@@ -99,12 +100,16 @@ class ServerArgsPyEnvConfigsTest(TestCase):
             self.assertEqual(configured.mm_video_total_min_pixels, 2500000)
             self.assertEqual(configured.mm_video_total_max_pixels, 73728000)
         with patch.dict(
-            os.environ, {"MM_VIDEO_TOTAL_MAX_PIXELS": "73728000"}, clear=True
+            os.environ,
+            {
+                "MM_VIDEO_TOTAL_MAX_PIXELS": "73728000",
+                "MM_VIDEO_MAX_PIXELS_PER_FRAME": "786432",
+            },
+            clear=True,
         ):
-            self.assertEqual(
-                server_args.setup_args([]).vit_config.mm_video_total_max_pixels,
-                73728000,
-            )
+            configured = server_args.setup_args([]).vit_config
+            self.assertEqual(configured.mm_video_total_max_pixels, 73728000)
+            self.assertEqual(configured.mm_video_max_pixels_per_frame, 786432)
 
     def test_video_sampling_service_defaults_and_cli_override(self):
         from rtp_llm.config.py_config_modules import VitConfig

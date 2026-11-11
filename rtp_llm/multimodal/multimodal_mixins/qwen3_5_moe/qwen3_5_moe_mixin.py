@@ -123,6 +123,7 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
                 processor.video_processor,
                 vit_config.mm_video_total_min_pixels,
                 vit_config.mm_video_total_max_pixels,
+                vit_config.mm_video_max_pixels_per_frame,
             )
             if video_backend == "nvdec":
                 data, grid = prepare_gpu_video(

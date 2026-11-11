@@ -43,6 +43,7 @@ class VitMetricsTest(TestCase):
             mm_video_max_file_size_kb=2048,
             mm_video_total_min_pixels=0,
             mm_video_total_max_pixels=0,
+            mm_video_max_pixels_per_frame=0,
         )
         video = torch.zeros((3, 3, 10, 12))
         processor = SimpleNamespace(
