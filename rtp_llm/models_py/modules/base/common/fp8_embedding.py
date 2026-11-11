@@ -3,7 +3,8 @@
 import torch
 from torch import nn
 
-from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+from rtp_llm.models_py.distributed.collective_torch import Group, _get_group, all_gather
+from rtp_llm.models_py.distributed.collective_utils import exchange_group_state
 
 
 class Fp8VocabEmbedding(nn.Module):
@@ -56,10 +57,16 @@ class Fp8VocabEmbedding(nn.Module):
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("prepare vocabulary column scales before capture")
         if not (
-            self.tp_size == 2
-            and self.hidden_size == 1280
-            and torch.version.hip is None
-            and torch.cuda.get_device_capability(self.device) == (12, 0)
+            self.tp_size == 2 and self.hidden_size == 1280 and torch.version.hip is None
+        ):
+            return
+        # Device capability can differ across TP ranks. Agree before any rank
+        # enters the optional scale gather, retaining BF16 transport otherwise.
+        eligible = torch.cuda.get_device_capability(self.device) == (12, 0)
+        if not all(
+            exchange_group_state(
+                _get_group(Group.TP), eligible, "vocabulary_byte_gather"
+            )
         ):
             return
         scales = all_gather(self.weight_scale, group=Group.TP)

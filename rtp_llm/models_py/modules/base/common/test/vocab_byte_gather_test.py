@@ -16,6 +16,38 @@ MODULE = "rtp_llm.models_py.modules.base.common.fp8_embedding"
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class VocabByteGatherTest(VocabByteGatherTestFixture, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.tp_group = object()
+        for name, options in (
+            ("_get_group", {"return_value": self.tp_group}),
+            (
+                "exchange_group_state",
+                {"side_effect": lambda _, state, tag: [state] * 2},
+            ),
+        ):
+            patcher = patch(MODULE + "." + name, **options)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_heterogeneous_tp_agrees_before_optional_scale_gather(self):
+        for capability in ((9, 0), (12, 0)):
+            module = Fp8VocabEmbedding(
+                self.weights[0], 2, self.weights[0].device, self.scales[:1]
+            )
+            with (
+                patch("torch.cuda.get_device_capability", return_value=capability),
+                patch(
+                    MODULE + ".exchange_group_state", return_value=[True, False]
+                ) as agree,
+                patch(MODULE + ".all_gather") as gather,
+            ):
+                module.prepare_byte_gather()
+            agree.assert_called_once_with(
+                self.tp_group, capability == (12, 0), "vocabulary_byte_gather"
+            )
+            gather.assert_not_called()
+            self.assertIsNone(module.column_scales)
 
     def test_module_collects_scales_once_and_uses_byte_tp_consumer(self):
         module = Fp8VocabEmbedding(
