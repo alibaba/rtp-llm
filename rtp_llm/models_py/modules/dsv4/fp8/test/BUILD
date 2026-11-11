@@ -66,6 +66,7 @@ _CONTRACT_TESTS = [
     "test_mega_support",
     "test_prefill_mixed_layer_cache_store",
     "test_fp8_sparse_attn_decode_op",
+    "test_sparse_decode_backend",
     "test_compressor_cp_merged_gather",
 ]
 
@@ -157,6 +158,8 @@ test_suite(
     name = "dsv4_fp8_cuda13_unit",
     tests = [":" + name for name in _GPU_TESTS + _CONTRACT_TESTS] + [
         ":test_indexer_cp_padded_gather_distributed",
+        ":test_dspark_sparse_backend",
+        ":test_grouped_output_weights",
     ],
 )
 
@@ -202,4 +205,19 @@ dsv4_sm100_py_test(
         deps = _DSV4_FP8_TEST_DEPS,
     )
     for name in ["test_mega_csa_adapter", "test_mega_hca_adapter"]
+]
+
+[
+    py_test(
+        name = name,
+        srcs = [name + ".py"],
+        deps = ["//rtp_llm:torch"],
+        data = [
+            "//rtp_llm/models_py:prefill_optimization_source_data",
+            "//rtp_llm/models_py:dspark_model_source",
+            "//rtp_llm:device_type_source",
+        ],
+        env = {"CUDA_VISIBLE_DEVICES": ""},
+    )
+    for name in ["test_dspark_sparse_backend", "test_grouped_output_weights"]
 ]
