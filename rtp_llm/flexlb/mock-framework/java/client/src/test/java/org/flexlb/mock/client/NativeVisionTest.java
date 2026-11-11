@@ -86,7 +86,7 @@ class NativeVisionTest {
                     var cache = RpcServiceGrpc.newBlockingStub(pChannel).getCacheStatus(CacheVersionPB.newBuilder()
                         .setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
                     assertEquals(4, cache.getBlockSize());
-                    assertTrue(cache.getCacheKeysMap().keySet().containsAll(routeKeys.get(id)));
+                    assertTrue(cache.getCacheKeyListList().containsAll(routeKeys.get(id)));
                 }
                 assertEquals(9,stages.get());
             } finally { master.shutdownNow().awaitTermination(2,TimeUnit.SECONDS);pChannel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }

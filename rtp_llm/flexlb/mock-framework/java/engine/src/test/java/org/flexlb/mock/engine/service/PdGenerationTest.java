@@ -40,8 +40,8 @@ class PdGenerationTest {
             var ps=rpc.getCacheStatus(query);
             var ds=RpcServiceGrpc.newBlockingStub(d.channel).withDeadlineAfter(2,TimeUnit.SECONDS).getCacheStatus(query);
             var base=org.flexlb.mock.protocol.MediaInput.sequence(org.flexlb.mock.protocol.MediaInput.text(request), 2, 0, 1).keys();
-            assertEquals(Set.of(base.get(3),base.get(7)),ps.getCacheKeysMap().keySet());
-            assertTrue(ds.getCacheKeysMap().keySet().containsAll(base));
+            assertEquals(Set.of(base.get(3),base.get(7)),Set.copyOf(ps.getCacheKeyListList()));
+            assertTrue(ds.getCacheKeyListList().containsAll(base));
             assertEquals(8,ps.getBlockSize());assertEquals(128,ps.getTotalKvCache());
             assertEquals(2,ds.getBlockSize());assertEquals(64,ds.getTotalKvCache());
         }
@@ -88,7 +88,7 @@ class PdGenerationTest {
             var keys = org.flexlb.mock.protocol.MediaInput.sequence(new org.flexlb.mock.protocol.MediaInput.Prepared(prepared,
                 List.of(MultimodalCacheSpanPB.newBuilder().setOffset(1).addRowHashes(777).build())), 2, 0, 1).keys();
             var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
-            assertTrue(keys.stream().allMatch(cached.getCacheKeysMap()::containsKey));
+            assertTrue(cached.getCacheKeyListList().containsAll(keys));
             assertEquals(6, calls.size());
             for(var item:List.of(Map.entry(p,6),Map.entry(d,5))) {
                 try(var stream=java.net.URI.create((String)item.getKey().node.endpoints().get("metrics")).toURL().openStream()) {

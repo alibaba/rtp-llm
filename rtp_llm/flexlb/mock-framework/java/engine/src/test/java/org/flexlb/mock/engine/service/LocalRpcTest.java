@@ -75,7 +75,7 @@ class LocalRpcTest {
                 var first=rpc.generateStreamCall(input);while(first.hasNext()) first.next();
                 var cache=rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
                 var base=org.flexlb.mock.protocol.MediaInput.sequence(org.flexlb.mock.protocol.MediaInput.text(input), 2, 0, 1).keys();
-                assertEquals(Set.of(base.get(3),base.get(7)),cache.getCacheKeysMap().keySet());
+                assertEquals(Set.of(base.get(3),base.get(7)),Set.copyOf(cache.getCacheKeyListList()));
                 assertEquals(8,cache.getBlockSize());assertEquals(64,cache.getTotalKvCache());
                 var worker = rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance());
                 assertEquals(64, worker.getTotalKvCache());
@@ -99,8 +99,9 @@ class LocalRpcTest {
                 var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS);
                 var query = CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build();
                 var first = rpc.getCacheStatus(query);
-                assertEquals(Map.of(Long.MIN_VALUE, true, Long.MAX_VALUE, true), first.getCacheKeysMap());
-                assertEquals(first.getCacheKeysMap(), rpc.getCacheStatus(query).getCacheKeysMap());
+                assertEquals(Set.of(Long.MIN_VALUE, Long.MAX_VALUE), Set.copyOf(first.getCacheKeyListList()));
+                assertEquals(0, first.getCacheKeysCount());
+                assertEquals(first.getCacheKeyListList(), rpc.getCacheStatus(query).getCacheKeyListList());
                 assertEquals(2, first.getBlockSize());
                 assertEquals(16, first.getTotalKvCache());
                 assertEquals(16, first.getAvailableKvCache());
@@ -108,11 +109,11 @@ class LocalRpcTest {
                     assertNotNull(held);
                     var unchanged = rpc.getCacheStatus(query.toBuilder().setLatestCacheVersion(first.getVersion()).build());
                     assertEquals(first.getVersion(), unchanged.getVersion());
-                    assertEquals(0, unchanged.getCacheKeysCount());
+                    assertEquals(0, unchanged.getCacheKeyListCount());
                     assertEquals(14, unchanged.getAvailableKvCache());
                     var capacityOnly = rpc.getCacheStatus(query.toBuilder().setNeedCacheKeys(false).setLatestCacheVersion(12345).build());
                     assertEquals(12345, capacityOnly.getVersion());
-                    assertEquals(0, capacityOnly.getCacheKeysCount());
+                    assertEquals(0, capacityOnly.getCacheKeyListCount());
                     assertEquals(14, capacityOnly.getAvailableKvCache());
                 }
                 assertEquals(16, rpc.getCacheStatus(query).getAvailableKvCache());
@@ -170,7 +171,7 @@ class LocalRpcTest {
                 Thread.sleep(350);
                 assertEquals(0, frames.get());
                 assertEquals(16, read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
-                assertEquals(0, read.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build()).getCacheKeysCount());
+                assertEquals(0, read.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build()).getCacheKeyListCount());
                 var text = metrics(node);
                 assertEquals(1, sample(text, "rtp_llm_framework_requests_total", "outcome=\"cancelled\""));
                 assertEquals(2,sample(text,"rtp_llm_rpc_onflight_request_count",""));

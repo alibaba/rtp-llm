@@ -23,7 +23,7 @@ public final class NativeProbe {
             var health = rpc.checkHealth(EmptyPB.getDefaultInstance());
             var result = new java.util.HashMap<String, Object>(Map.of("health", health.getHealth(), "role", worker.getRole(), "role_type", worker.getRoleType().name(),
                 "alive", worker.getAlive(), "total_tokens", worker.getTotalKvCache(), "available_tokens", cache.getAvailableKvCache(),
-                "block_size", cache.getBlockSize(), "cache_keys", cache.getCacheKeysCount()));
+                "block_size", cache.getBlockSize(), "cache_keys", cache.getCacheKeyListCount()));
             if (worker.getRoleType() == RoleTypePB.ROLE_TYPE_PREFILL) {
                 var input = GenerateInputPB.newBuilder().setRequestId(42).addAllTokenIds(List.of(1, 2, 3, 4))
                     .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(1)).build();
