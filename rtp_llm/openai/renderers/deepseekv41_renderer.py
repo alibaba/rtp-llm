@@ -150,9 +150,24 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
             else ThinkingMode.DISABLED
         )
 
+    def _recipe_default_thinking(self) -> bool:
+        # ``GenerateEnvConfig.think_mode`` is a normalized string
+        # ("disabled"/"adaptive"/"enabled") while the recipe takes a bool
+        # default; passing the string made every value truthy, so the
+        # THINK_MODE=disabled server default silently rendered thinking
+        # prompts. Follow the three-state enum every other renderer resolves
+        # through ``thinking_mode_from_value``: only ENABLED defaults the
+        # recipe into thinking, ADAPTIVE stays tag-driven like the base
+        # renderer, and requests keep their explicit overrides.
+        from rtp_llm.config.generate_config import ThinkingMode
+
+        return self.default_thinking_mode == ThinkingMode.ENABLED
+
     def in_think_mode(self, request):
         try:
-            return resolve_thinking(self._request_dict(request), self.think_mode)[0]
+            return resolve_thinking(
+                self._request_dict(request), self._recipe_default_thinking()
+            )[0]
         except (TypeError, ValueError) as error:
             raise FtRuntimeException(
                 ExceptionType.INVALID_PARAMS, str(error)
@@ -161,7 +176,8 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
     def _recipe_request(self, request):
         try:
             return convert_request(
-                self._request_dict(request), default_thinking=self.think_mode
+                self._request_dict(request),
+                default_thinking=self._recipe_default_thinking(),
             )
         except (TypeError, ValueError) as error:
             raise FtRuntimeException(
