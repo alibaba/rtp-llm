@@ -13,7 +13,7 @@ public final class EvidenceCrashProbe {
         Path root = Path.of(args[0]), topology = root.resolve("topology.json");
         Files.createDirectories(root);
         try (var master = new BackendRpcClientTest.Harness();
-             var client = new ReplayClient("client-0", topology, root.resolve("components/client-0"))) {
+             var client = new ClientNode("client-0", topology, root.resolve("components/client-0"))) {
             master.output = (id, response) -> response.onNext(BackendRpcClientTest.token(id, 1, false));
             new ObjectMapper().writeValue(topology.toFile(), List.of(master.endpoint(),
                 Map.of("id", "client-0", "role", "client", "control", client.url(), "rpc", "client:1")));

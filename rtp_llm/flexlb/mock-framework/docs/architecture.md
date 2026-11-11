@@ -34,11 +34,22 @@ Case YAML 描述角色、流量、步骤和断言。启动配方提供本机可�
 
 Runner 按 Phase 推进。Step 解析前置结果或全局发现引用，校验实参，在预算内执行动作，校验返回值，再判断可选的 `expect`，最后执行 `wait_after`。例如，HA Case 查询实际的主备 Master，把地址留给后续的停止与重启步骤使用。后台 Step 属于当前 Phase，结束前须等待或回收，其结果不可供其他 Step 引用。
 
-动作负责选目标、扩缩容、回放控制和跨实例查询。Java 实例端点只处理自身的 RPC 或控制请求。新增 Case 操作时，在 `execution/step/` 定义参数和异步函数，用 `@register_step` 声明，再加入 `standard_actions()`。新增实例生命周期行为放进对应的 Role。字段、引用和断言示例见 [Case 指南](case-guide.md)。
+动作负责选目标、扩缩容、回放控制和跨实例查询。Client-0 收到回放控制请求后负责协调这一轮的所有 Client，其他 Client 各自执行分到的请求。新增 Case 操作时，在 `execution/step/` 定义参数和异步函数，用 `@register_step` 声明，再加入 `standard_actions()`。字段、引用和断言示例见 [Case 指南](case-guide.md)。
 
 ### 进程、发现与收尾
 
 `RunEnvironment` 先启动 Prometheus 和 ZooKeeper，再启动 Engine、Master、Client 并完成采集基线。`ProcessSupervisor` 监视子进程并负责回收。每个实例发布有效配置和端点，`EndpointRegistry` 维护活动拓扑，供 Master 发现文件和 Prometheus 采集目标使用。Master 的主备身份以实际选举结果为准。
+
+Python 的 `*Role` 管理 Case 中对应角色的子进程、就绪检查和收尾。Java 的 `*Main` 读取启动配置，启动本 JVM 的服务并发布就绪信息。JVM 内的组件实例负责关闭自己持有的服务和资源。Client 的 HTTP 监听和路由由 `ControlServer` 提供，`ClientNode` 同时管理控制端点和回放会话。
+
+| 组件             | Python 编排      | Java 进程入口         | JVM 内服务                                      |
+| ---------------- | ---------------- | --------------------- | ----------------------------------------------- |
+| Client           | `ClientRole`     | `ClientMain`          | `ClientNode` 管理控制端点和回放会话             |
+| Prefill / Decode | `EngineRole`     | `EngineMain`          | `LLMMockEngine` 按 P/D 角色装配 RPC、调度和缓存 |
+| ViT              | `EngineRole`     | `EngineMain`          | `VitNode` 管理 ViT 服务和本地资源               |
+| Master           | `MasterRole`     | `MasterMain`          | Spring 应用上下文和本地控制端点                 |
+| ZooKeeper        | `ZooKeeperRole`  | `ZooKeeperMain`       | 原生 `ZooKeeperServer` 和连接工厂               |
+| Prometheus       | `PrometheusRole` | Prometheus 可执行文件 | Prometheus 自身管理                             |
 
 缩容时，角色先保存末次采样，等待目标 JVM 停止，再撤销端点。显式引用旧地址仍指向原实例。一次运行内分配 Engine 端口时避开已选定的 Master 端口及本次已用过的 Engine 端口。
 
@@ -48,7 +59,7 @@ Runner 按 Phase 推进。Step 解析前置结果或全局发现引用，校验�
 
 ### 一份计划，各自发送
 
-Python 把 `client/start` 交给 Java client0。`ReplayClient` 固定参与者、分配并发槽和索引范围，在所有 Client 准备后下发同一开始时刻。client0 也发送自己的请求。每个 JVM 独立读取和计算发送时刻，再由 `BackendRpcClient` 调用真实 Master 和原生 Engine RPC。
+Python 把 `client/start` 交给 Java client0。`ClientNode` 固定参与者、分配并发槽和索引范围，在所有 Client 准备后下发同一开始时刻。client0 也发送自己的请求。每个 JVM 独立读取和计算发送时刻，再由 `BackendRpcClient` 调用真实 Master 和原生 Engine RPC。
 
 | 回放方式       | 全局序号为 `k` 的请求计划发送时刻                |
 | -------------- | ------------------------------------------------ |
@@ -181,7 +192,7 @@ args:
 | ------------------------- | ----------------------------------------------------------------------------------------- |
 | YAML、类型校验与引用      | `python/mock_framework/config/`、`python/mock_framework/execution/step/`                  |
 | Case 编排、发现、进程管理 | `python/mock_framework/execution/runner.py`、`environment.py`、`processes.py` 与 `roles/` |
-| 流量读取、节奏和原生请求  | `java/client/` 中的 `IndexedTrafficReader`、`ReplayClient` 和 `BackendRpcClient`          |
+| 流量读取、节奏和原生请求  | `java/client/` 中的 `IndexedTrafficReader`、`ClientNode` 和 `BackendRpcClient`            |
 | RTP/ViT、计算与缓存       | `java/engine/` 的 `service`、`execution`、`scheduler`、`cache` 和 `vit`                   |
 | 协议、指标导出及实例入口  | `java/protocol/`、`java/metrics/`、`java/master/` 和 `java/zookeeper/`                    |
 

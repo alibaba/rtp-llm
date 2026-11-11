@@ -89,14 +89,14 @@ class RequestJournalTest {
     @Test void writerFailureStopsAllClientsAndKeepsPlaybackFailed() throws Exception {
         Path topology = directory.resolve("topology.json");
         try (var master = new BackendRpcClientTest.Harness();
-             var zero = new ReplayClient("client-0", topology, directory.resolve("client-0"));
-             var one = new ReplayClient("client-1", topology, directory.resolve("client-1"))) {
+             var zero = new ClientNode("client-0", topology, directory.resolve("client-0"));
+             var one = new ClientNode("client-1", topology, directory.resolve("client-1"))) {
             new com.fasterxml.jackson.databind.ObjectMapper().writeValue(topology.toFile(), List.of(master.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
             zero.start(InputFixture.plan(directory, null, 100, 10, 4, 16, 3000, 1000));
             PlaybackTest.eventually(() -> one.state(new ClientProtocol.Sequence(1)).issued() > 0);
-            var sessionField = ReplayClient.class.getDeclaredField("session"); sessionField.setAccessible(true);
-            var journalField = ReplayClient.Session.class.getDeclaredField("journal"); journalField.setAccessible(true);
+            var sessionField = ClientNode.class.getDeclaredField("session"); sessionField.setAccessible(true);
+            var journalField = ClientNode.Session.class.getDeclaredField("journal"); journalField.setAccessible(true);
             var channelField = RequestJournal.class.getDeclaredField("file"); channelField.setAccessible(true);
             var journal = (RequestJournal) journalField.get(sessionField.get(one));
             ((FileChannel) channelField.get(journal)).close();

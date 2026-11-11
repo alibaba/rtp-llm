@@ -50,7 +50,7 @@ public final class ClientMain {
         Path directory = Path.of(required("MOCK_OUTPUT_DIR"));
         String id = required("MOCK_NODE_ID");
         Path topology = Path.of(required("MOCK_TOPOLOGY_FILE"));
-        try (var client = new ReplayClient(id, topology, directory, imageToken, physicalBlockSize, seed, prefillCpSize)) {
+        try (var client = new ClientNode(id, topology, directory, imageToken, physicalBlockSize, seed, prefillCpSize)) {
             var hook = new Thread(client::close, "client-shutdown");
             Runtime.getRuntime().addShutdownHook(hook);
             var effective = JSON.createObjectNode().put("id", id)

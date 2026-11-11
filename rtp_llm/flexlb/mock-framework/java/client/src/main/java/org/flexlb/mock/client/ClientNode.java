@@ -20,7 +20,7 @@ import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
  * Runs one replay worker per JVM. Client-0 partitions the plan and coordinates the workers,
  * and each worker paces and drains its own requests.
  */
-public final class ReplayClient implements ClientProtocol, AutoCloseable {
+public final class ClientNode implements ClientProtocol, AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private final String id;
@@ -44,11 +44,11 @@ public final class ReplayClient implements ClientProtocol, AutoCloseable {
     private boolean collected = true;
     private volatile boolean closed;
 
-    public ReplayClient(String id, Path topology, Path directory) throws IOException {
+    public ClientNode(String id, Path topology, Path directory) throws IOException {
         this(id, topology, directory, org.flexlb.mock.protocol.MultimodalProtocol.IMAGE_TOKEN, 0, 0L, 1);
     }
 
-    ReplayClient(String id, Path topology, Path directory, int imageToken, int physicalBlockSize, long seed, int prefillCpSize) throws IOException {
+    ClientNode(String id, Path topology, Path directory, int imageToken, int physicalBlockSize, long seed, int prefillCpSize) throws IOException {
         this.imageToken = imageToken; this.physicalBlockSize = physicalBlockSize; this.cacheKeySeed = seed;
         this.prefillCpSize = prefillCpSize;
         this.id = id; this.topology = topology; this.directory = directory;

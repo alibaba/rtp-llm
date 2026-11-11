@@ -11,7 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.flexlb.mock.client.ClientProtocol.*;
-import org.flexlb.mock.client.ReplayClient.Session;
+import org.flexlb.mock.client.ClientNode.Session;
 import org.flexlb.mock.protocol.MultimodalProtocol;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -124,7 +124,7 @@ class IndexedTrafficReaderTest {
             assertEquals(0, zero.observedOutputTokens());
             assertThrows(IOException.class, () -> Session.playbackLimit(zero, 6));
         }
-        try (var client = new ReplayClient("client-0", directory.resolve("topology.json"), directory.resolve("worker"))) {
+        try (var client = new ClientNode("client-0", directory.resolve("topology.json"), directory.resolve("worker"))) {
             new ObjectMapper().writeValue(directory.resolve("topology.json").toFile(),
                 List.of(Map.of("role", "client", "control", client.url())));
             var error = assertThrows(IOException.class, () ->
@@ -142,8 +142,8 @@ class IndexedTrafficReaderTest {
         var oneDirectory = directory.resolve("one");
         var json = new ObjectMapper();
         try (var backend = new BackendRpcClientTest.Harness();
-             var zero = new ReplayClient("client-0", topology, zeroDirectory);
-             var one = new ReplayClient("client-1", topology, oneDirectory)) {
+             var zero = new ClientNode("client-0", topology, zeroDirectory);
+             var one = new ClientNode("client-1", topology, oneDirectory)) {
             json.writeValue(topology.toFile(), List.of(backend.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
             zero.start(new Start(List.of(PlaybackTest.master(backend)), source.toString(), null, 2.0, 4, 8, 3000, 1000, false, null, new Warmup(20, 0.25)));
