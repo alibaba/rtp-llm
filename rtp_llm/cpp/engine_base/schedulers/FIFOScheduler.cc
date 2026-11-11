@@ -149,8 +149,12 @@ bool FIFOScheduler::evaluateRunningBatch(const ScheduleRuntime&   schedule_runti
             return true;
         }
     }
-    // prefill and decode not mixed together
-    if (!running_streams_.empty()) {
+    // prefill and decode not mixed together. AWI barrier-held streams are
+    // excluded from the execution batch by the engine, so they cannot mix
+    // with this round's prefill and must not veto its admission — otherwise
+    // one held decode stream starves every later request, including the
+    // barrier's own remaining sequences (observed on native-n5b/n6/n7).
+    if (hasExecutableRunningStreams()) {
         return false;
     }
     // Conservative CP prefill mode: cap at one stream per round unless
@@ -180,7 +184,9 @@ bool FIFOScheduler::evaluateRunningBatch(const std::list<GenerateStreamPtr>& str
             return true;
         }
     }
-    if (!running_streams_.empty()) {
+    // See the ScheduleRuntime overload: AWI-held streams never execute, so
+    // they must not block the empty-batch prefill boundary.
+    if (hasExecutableRunningStreams()) {
         return false;
     }
     if (cp_force_single_prefill_ && admitted_count > 0) {
