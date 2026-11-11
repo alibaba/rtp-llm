@@ -2,6 +2,7 @@ import copy
 import hashlib
 import logging
 import time
+from collections.abc import Mapping
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
@@ -215,6 +216,8 @@ class GenerateConfig(BaseModel):
     return_incremental: bool = False
     return_hidden_states: bool = False
     return_all_hidden_states: bool = False
+    # Best-effort prompt capture requires reuse_cache=False; bare zero-token prefill stays eligible.
+    capture_hidden_states: bool = False
     hidden_states_cut_dim: int = 0
     normalized_hidden_states: bool = False
     select_tokens_str: List[str] = []
@@ -282,6 +285,15 @@ class GenerateConfig(BaseModel):
     unique_key: str = ""
 
     # --- validators（统一放在所有 field 声明之后） ---
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_export_hidden_states(cls, values: Any) -> Any:
+        if isinstance(values, Mapping) and "export_hidden_states" in values:
+            raise ValueError(
+                "export_hidden_states is not supported; use capture_hidden_states"
+            )
+        return values
 
     @staticmethod
     def _sanitize_diverge_start_combo(v: "int | str | None") -> int:
@@ -605,6 +617,12 @@ class GenerateConfig(BaseModel):
     def _validated_update(
         self, new: Dict[str, Any]
     ) -> tuple["GenerateConfig", set[str]]:
+        try:
+            self._reject_export_hidden_states(new)
+        except ValueError as e:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e)
+            ) from e
         candidate = self.model_copy(deep=True)
         updated_fields = candidate._apply_update(new)
         return candidate, updated_fields

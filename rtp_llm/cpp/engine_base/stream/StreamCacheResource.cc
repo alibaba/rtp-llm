@@ -635,10 +635,13 @@ void StreamCacheResource::reportMallocRetry() const {
 }
 
 bool StreamCacheResource::reuseCache() const {
-    // AND logic: global REUSE_CACHE=1 AND per-request reuse_cache both must be true.
-    // Per-request field flows frontend → FlexLB → engine via protobuf.
-    return !stream_->generateConfig()->isPrefillOnly() && resource_context_.reuse_cache
-           && (resource_context_.ignore_request_cache_switches || stream_->reuseCache());
+    // Allocator lookup/load must not skip prompt positions for eligible capture,
+    // even when deployment policy ignores request cache switches. A request that
+    // explicitly keeps reuse enabled skips capture, not ordinary cache reuse.
+    if (stream_->generateConfig()->isPrefillOnly() || stream_->requiresFullContextForHiddenStateCapture()) {
+        return false;
+    }
+    return resource_context_.reuse_cache && (resource_context_.ignore_request_cache_switches || stream_->reuseCache());
 }
 
 bool StreamCacheResource::enableMemoryCache() const {

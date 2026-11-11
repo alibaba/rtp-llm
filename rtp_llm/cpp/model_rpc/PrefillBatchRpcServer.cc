@@ -1400,7 +1400,13 @@ grpc::Status PrefillBatchRpcServer::enqueueGroupStreams(std::vector<ReadySlot>& 
             // the same terminal-cause CAS. Whichever wins determines the
             // outward error; processing order below cannot rewrite it.
             ready_slot.deferred->context->tryMarkOtherTerminal();
-            auto status = statusFromErrorInfo(stream->statusInfo());
+            const auto error = stream->statusInfo();
+            if (error.code() == ErrorCode::SERVICE_UNHEALTHY && stream->getStatus() != StreamState::FINISHED) {
+                // Core has released the rejected new stream, but no scheduler owns its terminal transition.
+                // Commit it before context teardown; leave admitted streams and other rejection policies alone.
+                stream->moveToNext();
+            }
+            auto status = statusFromErrorInfo(error);
             if (status.ok()) {
                 status = grpc::Status(grpc::StatusCode::INTERNAL, "scheduler rejected request");
             }

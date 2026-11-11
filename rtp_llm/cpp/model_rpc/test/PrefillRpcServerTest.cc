@@ -33,6 +33,12 @@ public:
             return grpc::Status(grpc::StatusCode::INTERNAL, "missing allocate request");
         }
         ++allocate_count_;
+        struct Completion {
+            std::atomic<int>& count;
+            ~Completion() {
+                ++count;
+            }
+        } completion{completed_count_};
         if (first_allocate_failure_.has_value() && allocate_count_ == 1) {
             return *first_allocate_failure_;
         }
@@ -50,9 +56,14 @@ public:
         return allocate_count_.load();
     }
 
+    int completedCount() const {
+        return completed_count_.load();
+    }
+
 private:
     std::optional<grpc::Status> first_allocate_failure_;
     std::atomic<int>            allocate_count_{0};
+    std::atomic<int>            completed_count_{0};
     bool                        supports_completion_ = false;
 };
 
@@ -84,6 +95,10 @@ public:
         return service_.allocateCount();
     }
 
+    int completedCount() const {
+        return service_.completedCount();
+    }
+
 private:
     TestDecodeRpcService          service_;
     std::unique_ptr<grpc::Server> server_;
@@ -103,6 +118,8 @@ public:
         return call_count_;
     }
 
+    std::function<void()> on_embedding;
+
 private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput> mm_inputs,
                                                       std::string                        ip_port = "",
@@ -110,6 +127,9 @@ private:
                                                       grpc::ServerContext*                       = nullptr) override {
         const auto result_code = result_codes_[std::min<size_t>(call_count_, result_codes_.size() - 1)];
         ++call_count_;
+        if (on_embedding) {
+            on_embedding();
+        }
         if (result_code != ErrorCode::NONE_ERROR) {
             return ErrorInfo(result_code, "multimodal test error");
         }
@@ -134,8 +154,15 @@ public:
     }
 
     std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
-        return nullptr;
+        return enqueue_result;
     }
+    ErrorInfo checkHealth() const override {
+        ++health_checks;
+        return health;
+    }
+    ErrorInfo         health;
+    mutable int       health_checks{0};
+    GenerateStreamPtr enqueue_result;
     void         enqueue(std::shared_ptr<GenerateStream>&) override {}
     absl::Status stop() override {
         return absl::OkStatus();
@@ -175,6 +202,10 @@ public:
 
     void setEngineForTest(bool is_mtp_eagle) {
         engine_ = std::make_shared<TestEngineBase>(is_mtp_eagle);
+    }
+
+    std::shared_ptr<TestEngineBase> testEngine() {
+        return std::static_pointer_cast<TestEngineBase>(engine_);
     }
 
     void prepareGenerateInputForTest(PrefillGenerateContext& context) {
@@ -509,6 +540,96 @@ TEST_F(PrefillRpcServerTest, flaggedWireZeroRoutesToLocalPrefillOnly) {
     EXPECT_NE(error_details.error_message().find("multimodal test error"), std::string::npos);
 }
 
+TEST_F(PrefillRpcServerTest, DeviceFaultDuringMultimodalPreparationSkipsRemoteAllocation) {
+    TestDecodeRpcServer decode_server(/*fail_first_allocate=*/false);
+    ASSERT_TRUE(decode_server.start());
+    GenerateInputPB request;
+    request.set_request_id(1);
+    request.add_token_ids(1);
+    auto context            = makeContext(&request);
+    context->generate_input = makeMultimodalInput();
+    context->generate_input->generate_config->role_addrs.emplace_back(
+        RoleType::DECODE, "127.0.0.1", 0, decode_server.listenPort());
+    TestPrefillRpcServer server;
+    auto                 engine    = server.testEngine();
+    auto                 processor = std::make_shared<TestMultimodalProcessor>(ErrorCode::NONE_ERROR);
+    processor->on_embedding        = [engine] {
+        engine->health = ErrorInfo(ErrorCode::SERVICE_UNHEALTHY, "device failed during prepare");
+    };
+    server.mm_processor_ = processor;
+    auto operation    = [&](PrefillGenerateContext& retry_context) { server.prepareAllocateResource(retry_context); };
+    const auto status = server.runWithRetry(*context, operation, 3);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
+    EXPECT_EQ(context->error_info.code(), ErrorCode::SERVICE_UNHEALTHY);
+    EXPECT_FALSE(context->shouldRetry());
+    EXPECT_EQ(context->retry_times, 1);
+    EXPECT_EQ(processor->callCount(), 1);
+    EXPECT_EQ(engine->health_checks, 2);
+    EXPECT_EQ(decode_server.allocateCount(), 0);
+    context->markRpcHandlingCompleted();
+}
+
+TEST_F(PrefillRpcServerTest, UnhealthyPrepareDoesNotProcessMultimodalAllocateOrRetry) {
+    TestDecodeRpcServer decode_server(/*fail_first_allocate=*/false);
+    ASSERT_TRUE(decode_server.start());
+    GenerateInputPB request;
+    request.set_request_id(1);
+    request.add_token_ids(1);
+    auto context            = makeContext(&request);
+    context->generate_input = makeMultimodalInput();
+    context->generate_input->generate_config->role_addrs.emplace_back(
+        RoleType::DECODE, "127.0.0.1", 0, decode_server.listenPort());
+    TestPrefillRpcServer server;
+    server.testEngine()->health = ErrorInfo(ErrorCode::SERVICE_UNHEALTHY, "serving device unavailable");
+    auto processor              = std::make_shared<TestMultimodalProcessor>(ErrorCode::NONE_ERROR);
+    server.mm_processor_        = processor;
+    auto operation    = [&](PrefillGenerateContext& retry_context) { server.prepareAllocateResource(retry_context); };
+    const auto status = server.runWithRetry(*context, operation, 3);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
+    EXPECT_EQ(context->error_info.code(), ErrorCode::SERVICE_UNHEALTHY);
+    EXPECT_FALSE(context->shouldRetry());
+    EXPECT_EQ(context->retry_times, 1);
+    EXPECT_EQ(server.testEngine()->health_checks, 1);
+    EXPECT_EQ(processor->callCount(), 0);
+    EXPECT_EQ(decode_server.allocateCount(), 0);
+    EXPECT_EQ(context->getStream(), nullptr);
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(status.error_details()));
+    EXPECT_EQ(details.error_code(), static_cast<int>(ErrorCode::SERVICE_UNHEALTHY));
+    context->markRpcHandlingCompleted();
+}
+
+TEST_F(PrefillRpcServerTest, HealthRejectionAfterRemotePrepareFinishesUnscheduledStream) {
+    TestDecodeRpcServer decode_server(/*fail_first_allocate=*/false);
+    ASSERT_TRUE(decode_server.start());
+    GenerateInputPB request;
+    request.set_request_id(1);
+    request.add_token_ids(1);
+    auto context            = makeContext(&request);
+    context->meta           = std::make_shared<RpcServerRuntimeMeta>();
+    context->generate_input = makeMultimodalInput();
+    context->generate_input->generate_config->role_addrs.emplace_back(
+        RoleType::DECODE, "127.0.0.1", 0, decode_server.listenPort());
+    TestPrefillRpcServer server;
+    server.mm_processor_ = std::make_shared<TestMultimodalProcessor>(ErrorCode::NONE_ERROR);
+    ASSERT_TRUE(server.prepareAllocateResource(*context).ok());
+    ASSERT_EQ(decode_server.allocateCount(), 1);
+    auto stream = makeWaitingStream();
+    stream->reportError(ErrorCode::SERVICE_UNHEALTHY, "serving device unavailable after prepare");
+    server.testEngine()->enqueue_result = stream;
+    server.enqueueRequest(*context);
+    EXPECT_EQ(context->error_status.error_code(), grpc::StatusCode::UNAVAILABLE);
+    EXPECT_EQ(context->error_info.code(), ErrorCode::SERVICE_UNHEALTHY);
+    EXPECT_FALSE(context->shouldRetry());
+    EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::SERVICE_UNHEALTHY);
+    // With no local CacheStore, use the existing TP cleanup path with no remote ranks.
+    resource_.workers = {"rank0", "rank1"};
+    context->markRpcHandlingCompleted();
+    context.reset();  // Real destructor closes the prepared P/D RPC without a scheduler tick.
+    EXPECT_EQ(decode_server.allocateCount(), 1);
+}
+
 TEST_F(PrefillRpcServerTest, prepareAllocateResourceRetriesDecodeWithoutRepeatingMultimodalProcessing) {
     TestDecodeRpcServer decode_server(/*fail_first_allocate=*/true);
     ASSERT_TRUE(decode_server.start());
@@ -708,6 +829,56 @@ TEST_F(PrefillRpcServerTest, downstreamClientContextIgnoresAllocationRetryDeadli
     EXPECT_TRUE(context->closeGrpcStream().ok());
 }
 
+TEST_F(PrefillRpcServerTest, StructuredDownstreamHealthRejectStopsSinglePrepareRetry) {
+    ErrorDetailsPB health;
+    health.set_error_code(static_cast<int64_t>(ErrorCode::SERVICE_UNHEALTHY));
+    health.set_error_message("decode serving device unavailable");
+    const grpc::Status failures[] = {
+        grpc::Status(grpc::StatusCode::UNAVAILABLE, "transport unavailable", health.SerializeAsString()),
+        grpc::Status(grpc::StatusCode::UNAVAILABLE, "transient unavailable"),
+        grpc::Status(grpc::StatusCode::UNAVAILABLE, "transient unavailable", "invalid-proto"),
+    };
+    for (size_t i = 0; i < 3; ++i) {
+        SCOPED_TRACE(i);
+        TestDecodeRpcServer decode_server(failures[i]);
+        ASSERT_TRUE(decode_server.start());
+        GenerateInputPB request;
+        request.set_request_id(91);
+        request.add_token_ids(1);
+        auto context            = makeContext(&request, 10000);
+        context->generate_input = makeMultimodalInput();
+        context->generate_input->multimodal_inputs.reset();
+        context->generate_input->generate_config->role_addrs.emplace_back(
+            RoleType::DECODE, "127.0.0.1", 0, decode_server.listenPort());
+        TestPrefillRpcServer server;
+        ASSERT_TRUE(server.testEngine()->checkHealth().ok());
+        auto operation = [&](PrefillGenerateContext& retry_context) { server.prepareAllocateResource(retry_context); };
+        const auto status = server.runWithRetry(*context, operation, 3);
+        EXPECT_TRUE(server.testEngine()->checkHealth().ok());
+        if (i == 0) {
+            EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
+            EXPECT_EQ(context->error_info.code(), ErrorCode::SERVICE_UNHEALTHY);
+            EXPECT_EQ(context->error_info.ToString(), "decode serving device unavailable");
+            EXPECT_FALSE(context->shouldRetry());
+            EXPECT_EQ(context->retry_times, 1);
+            ErrorDetailsPB details;
+            ASSERT_TRUE(details.ParseFromString(status.error_details()));
+            EXPECT_EQ(details.error_code(), 8215);
+        } else {
+            EXPECT_TRUE(status.ok());
+            EXPECT_TRUE(context->shouldRetry());
+            EXPECT_EQ(context->retry_times, 2);
+        }
+        EXPECT_EQ(context->getStream(), nullptr);
+        context->closeGrpcStream();
+        EXPECT_TRUE(context->grpc_stream_closed);
+        EXPECT_EQ(decode_server.allocateCount(), i == 0 ? 1 : 2);
+        EXPECT_EQ(decode_server.completedCount(), decode_server.allocateCount());
+        context->markRpcHandlingCompleted();
+        context.reset();
+    }
+}
+
 TEST_F(PrefillRpcServerTest, downstreamDomainErrorOverridesTransportFallback) {
     ErrorDetailsPB details;
     details.set_error_code(static_cast<int64_t>(ErrorCode::GRAMMAR_COMPILE_OVERLOADED));
@@ -733,6 +904,7 @@ TEST_F(PrefillRpcServerTest, downstreamDomainErrorOverridesTransportFallback) {
     ASSERT_TRUE(context->hasError());
     EXPECT_EQ(context->error_info.code(), ErrorCode::GRAMMAR_COMPILE_OVERLOADED);
     EXPECT_EQ(context->error_status.error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+    EXPECT_TRUE(context->shouldRetry());
     EXPECT_NE(context->error_info.ToString().find("grammar compilation capacity exhausted"), std::string::npos);
     EXPECT_EQ(context->error_info.ToString().find("decode addr"), std::string::npos);
 }

@@ -92,6 +92,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/utils:serving_device_health",
         ":mock_engine",
         "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/engine_base/schedulers",

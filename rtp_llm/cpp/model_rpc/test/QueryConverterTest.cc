@@ -21,6 +21,183 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
+TEST(GenerateConfigCaptureTest, DefaultsAndJsonCopyRoundTrip) {
+    EXPECT_FALSE(GenerateConfig().capture_hidden_states);
+    GenerateConfig legacy;
+    autil::legacy::FromJsonString(legacy, "{}");
+    EXPECT_FALSE(legacy.capture_hidden_states);
+    EXPECT_TRUE(legacy.reuse_cache);
+
+    for (const bool capture : {false, true}) {
+        SCOPED_TRACE(capture);
+        GenerateConfig config;
+        config.max_new_tokens           = 7;
+        config.capture_hidden_states    = capture;
+        config.reuse_cache              = false;
+        config.return_hidden_states     = true;
+        config.return_all_hidden_states = true;
+
+        GenerateConfig restored;
+        autil::legacy::FromJsonString(restored, autil::legacy::ToJsonString(config));
+        restored.validatePrefillOnly();
+        EXPECT_EQ(restored.capture_hidden_states, capture);
+        EXPECT_TRUE(restored.return_hidden_states);
+        EXPECT_TRUE(restored.return_all_hidden_states);
+        EXPECT_EQ(restored.max_new_tokens, 7);
+        EXPECT_FALSE(restored.isPrefillOnly());
+        EXPECT_FALSE(restored.reuse_cache);
+        EXPECT_NE(restored.debugString().find(std::string("capture_hidden_states:") + (capture ? "1" : "0")),
+                  std::string::npos);
+
+        auto copied = restored;
+        EXPECT_EQ(copied.capture_hidden_states, capture);
+        copied.capture_hidden_states = !capture;
+        EXPECT_EQ(restored.capture_hidden_states, capture);
+    }
+}
+
+TEST(GenerateConfigCaptureTest, CaptureEligibilityDoesNotChangeServingValidation) {
+    struct InvalidConfigCase {
+        const char* name;
+        void (*configure)(GenerateConfig&);
+    };
+    const std::array<InvalidConfigCase, 4> cases{{
+        {"num_beams", [](GenerateConfig& config) { config.num_beams = 2; }},
+        {"variable_num_beams", [](GenerateConfig& config) { config.variable_num_beams = {1}; }},
+        {"num_return_sequences", [](GenerateConfig& config) { config.num_return_sequences = 2; }},
+        {"reuse_cache", [](GenerateConfig& config) { config.reuse_cache = true; }},
+    }};
+    for (const int max_new_tokens : {0, 7}) {
+        for (const auto& test_case : cases) {
+            SCOPED_TRACE(max_new_tokens);
+            SCOPED_TRACE(test_case.name);
+            GenerateConfig config;
+            config.max_new_tokens        = max_new_tokens;
+            config.capture_hidden_states = true;
+            config.reuse_cache           = false;
+            test_case.configure(config);
+            const auto before = config.debugString();
+            if (max_new_tokens > 0 || std::string(test_case.name) == "reuse_cache") {
+                EXPECT_NO_THROW(config.validatePrefillOnly());
+            } else {
+                try {
+                    config.validatePrefillOnly();
+                    FAIL() << test_case.name << " should be rejected for zero-token prefill";
+                } catch (const std::invalid_argument& error) {
+                    EXPECT_NE(std::string(error.what()).find("max_new_tokens == 0"), std::string::npos);
+                    EXPECT_NE(std::string(error.what()).find(test_case.name), std::string::npos);
+                }
+            }
+            EXPECT_EQ(config.debugString(), before);
+        }
+    }
+}
+
+TEST_F(QueryConverterTest, CaptureFieldRoundTripsIndependentlyOfLegacyHiddenStateFlags) {
+    EXPECT_EQ(GenerateConfigPB::kPrefillOnlyFieldNumber, 76);
+    EXPECT_EQ(GenerateConfigPB::kCaptureHiddenStatesFieldNumber, 77);
+    GenerateConfigPB absent;
+    EXPECT_TRUE(absent.ParseFromString(""));
+    EXPECT_FALSE(absent.capture_hidden_states());
+
+    for (const bool capture : {false, true}) {
+        for (const bool return_hidden : {false, true}) {
+            for (const bool return_all : {false, true}) {
+                SCOPED_TRACE(capture);
+                SCOPED_TRACE(return_hidden);
+                SCOPED_TRACE(return_all);
+                GenerateConfigPB source;
+                source.set_max_new_tokens(7);
+                source.set_capture_hidden_states(capture);
+                source.set_reuse_cache(!capture);
+                source.set_return_hidden_states(return_hidden);
+                source.set_return_all_hidden_states(return_all);
+                source.set_is_streaming(true);
+                GenerateConfigPB received;
+                ASSERT_TRUE(received.ParseFromString(source.SerializeAsString()));
+
+                const auto config = QueryConverter::transGenerateConfig(&received);
+                EXPECT_EQ(config->capture_hidden_states, capture);
+                EXPECT_EQ(config->return_hidden_states, return_hidden);
+                EXPECT_EQ(config->return_all_hidden_states, return_all);
+                EXPECT_EQ(config->reuse_cache, !capture);
+                EXPECT_EQ(config->max_new_tokens, 7);
+                EXPECT_TRUE(config->is_streaming);
+                EXPECT_FALSE(config->isPrefillOnly());
+                EXPECT_FALSE(received.prefill_only());
+            }
+        }
+    }
+}
+
+TEST_F(QueryConverterTest, ZeroTokenCapturePreservesLegacyRequestsWithoutNewFlag) {
+    for (const bool prefill_only : {false, true}) {
+        for (const bool capture : {false, true}) {
+            SCOPED_TRACE(prefill_only);
+            SCOPED_TRACE(capture);
+            GenerateConfigPB source;
+            source.set_max_new_tokens(0);
+            source.set_prefill_only(prefill_only);
+            if (capture) {
+                source.set_capture_hidden_states(true);
+            }
+            source.set_reuse_cache(!capture);
+            GenerateConfigPB received;
+            ASSERT_TRUE(received.ParseFromString(source.SerializeAsString()));
+
+            const auto config = QueryConverter::transGenerateConfig(&received);
+            EXPECT_EQ(config->capture_hidden_states, capture);
+            EXPECT_EQ(config->reuse_cache, !capture);
+            EXPECT_TRUE(config->isPrefillOnly());
+            EXPECT_FALSE(config->return_hidden_states);
+            EXPECT_FALSE(config->return_all_hidden_states);
+        }
+    }
+}
+
+TEST_F(QueryConverterTest, CaptureEligibilityDoesNotRejectValidConversion) {
+    struct InvalidConfigCase {
+        const char* name;
+        void (*configure)(GenerateConfigPB*);
+    };
+    const std::array<InvalidConfigCase, 4> cases{{
+        {"num_beams", [](GenerateConfigPB* config) { config->set_num_beams(2); }},
+        {"variable_num_beams", [](GenerateConfigPB* config) { config->add_variable_num_beams(1); }},
+        {"num_return_sequences", [](GenerateConfigPB* config) { config->set_num_return_sequences(2); }},
+        {"reuse_cache", [](GenerateConfigPB* config) { config->set_reuse_cache(true); }},
+    }};
+    for (const int max_new_tokens : {0, 7}) {
+        for (const auto& test_case : cases) {
+            SCOPED_TRACE(max_new_tokens);
+            SCOPED_TRACE(test_case.name);
+            GenerateConfigPB source;
+            source.set_max_new_tokens(max_new_tokens);
+            source.set_capture_hidden_states(true);
+            source.set_reuse_cache(false);
+            test_case.configure(&source);
+            const auto before = source.SerializeAsString();
+            if (max_new_tokens > 0 || std::string(test_case.name) == "reuse_cache") {
+                const auto config = QueryConverter::transGenerateConfig(&source);
+                EXPECT_TRUE(config->capture_hidden_states);
+                EXPECT_EQ(config->max_new_tokens, max_new_tokens);
+                EXPECT_EQ(config->reuse_cache, source.reuse_cache());
+                EXPECT_EQ(config->num_beams, source.num_beams());
+                EXPECT_EQ(config->num_return_sequences, source.num_return_sequences());
+                EXPECT_EQ(config->variable_num_beams.size(), source.variable_num_beams_size());
+            } else {
+                try {
+                    QueryConverter::transGenerateConfig(&source);
+                    FAIL() << test_case.name << " should be rejected for zero-token prefill";
+                } catch (const std::invalid_argument& error) {
+                    EXPECT_NE(std::string(error.what()).find("max_new_tokens == 0"), std::string::npos);
+                    EXPECT_NE(std::string(error.what()).find(test_case.name), std::string::npos);
+                }
+            }
+            EXPECT_EQ(source.SerializeAsString(), before);
+        }
+    }
+}
+
 TEST_F(QueryConverterTest, PrefillOnlyFlagWithZeroMaxNewTokensMeansPrefillOnly) {
     for (const bool enable_disk_cache : {false, true}) {
         SCOPED_TRACE(enable_disk_cache);

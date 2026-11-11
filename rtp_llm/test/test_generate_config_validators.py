@@ -19,6 +19,8 @@
 策略：Python 侧硬编码期望值 + C++ 侧 static_assert，无需解析源码。
 """
 
+import copy
+import json
 import logging
 import unittest
 from types import SimpleNamespace
@@ -41,6 +43,7 @@ from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.config.response_format import ResponseFormat
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
+from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.structure.request_extractor import RequestExtractor
 
 
@@ -313,6 +316,254 @@ class TestPrefillOnlyGenerateConfig(unittest.TestCase):
         )
 
 
+class TestCaptureHiddenStatesGenerateConfig(unittest.TestCase):
+    CAPTURE_INELIGIBLE_COMBINATIONS = (
+        ({"num_beams": 2}, "num_beams"),
+        ({"variable_num_beams": [1]}, "variable_num_beams"),
+        ({"variable_num_beams": [1, 2]}, "variable_num_beams"),
+        ({"num_return_sequences": 2}, "num_return_sequences"),
+        ({"reuse_cache": True}, "reuse_cache=false"),
+    )
+
+    def test_export_hidden_states_is_rejected_at_config_entry_points(self):
+        for entry in (
+            "constructor",
+            "model_validate",
+            "model_validate_json",
+            "update",
+            "update_and_pop",
+            "create_generate_config",
+            "create_generate_config_kwargs",
+        ):
+            for legacy_value in (True, False, None):
+                for max_new_tokens in (0, 7):
+                    with self.subTest(
+                        entry=entry,
+                        legacy_value=legacy_value,
+                        max_new_tokens=max_new_tokens,
+                    ):
+                        values = {
+                            "max_new_tokens": max_new_tokens,
+                            "reuse_cache": False,
+                            "capture_hidden_states": True,
+                            "export_hidden_states": legacy_value,
+                        }
+                        original = values.copy()
+                        config = GenerateConfig()
+                        before = config.model_copy(deep=True)
+                        calls = {
+                            "constructor": lambda: GenerateConfig(**values),
+                            "model_validate": lambda: GenerateConfig.model_validate(
+                                values
+                            ),
+                            "model_validate_json": lambda: GenerateConfig.model_validate_json(
+                                json.dumps(values)
+                            ),
+                            "update": lambda: config.update(values),
+                            "update_and_pop": lambda: config.update_and_pop(values),
+                            "create_generate_config": lambda: GenerateConfig.create_generate_config(
+                                values
+                            ),
+                            "create_generate_config_kwargs": lambda: GenerateConfig.create_generate_config(
+                                {}, **values
+                            ),
+                        }
+                        wrapped = entry.startswith(("create_generate_config", "update"))
+                        with self.assertRaisesRegex(
+                            FtRuntimeException if wrapped else ValidationError,
+                            "export_hidden_states is not supported; use capture_hidden_states",
+                        ) as ctx:
+                            calls[entry]()
+                        if wrapped:
+                            self.assertEqual(
+                                ctx.exception.exception_type,
+                                (
+                                    ExceptionType.ERROR_GENERATE_CONFIG_FORMAT
+                                    if entry.startswith("create_generate_config")
+                                    else ExceptionType.ERROR_INPUT_FORMAT_ERROR
+                                ),
+                            )
+                        self.assertEqual(config, before)
+                        self.assertEqual(
+                            config.model_fields_set, before.model_fields_set
+                        )
+                        self.assertEqual(values, original)
+
+    def test_capture_is_a_declared_boolean_defaulting_to_false(self):
+        self.assertNotIn("export_hidden_states", GenerateConfig.model_fields)
+        field = GenerateConfig.model_fields["capture_hidden_states"]
+        self.assertIs(field.annotation, bool)
+        self.assertIs(field.default, False)
+        self.assertIs(GenerateConfig().capture_hidden_states, False)
+        self.assertIs(
+            GenerateConfig(max_new_tokens=0, reuse_cache=True).capture_hidden_states,
+            False,
+        )
+
+    def test_capture_survives_json_and_copies(self):
+        for enabled in (False, True):
+            with self.subTest(capture_hidden_states=enabled):
+                config = GenerateConfig(
+                    max_new_tokens=7,
+                    capture_hidden_states=enabled,
+                    reuse_cache=False,
+                    return_hidden_states=True,
+                    return_all_hidden_states=True,
+                )
+                self.assertIs(config.model_dump()["capture_hidden_states"], enabled)
+                restored = GenerateConfig.model_validate_json(config.model_dump_json())
+                self.assertEqual(restored, config)
+                self.assertIn("capture_hidden_states", restored.model_fields_set)
+                for copied in (
+                    copy.copy(config),
+                    copy.deepcopy(config),
+                    config.model_copy(),
+                    config.model_copy(deep=True),
+                ):
+                    self.assertEqual(copied, config)
+                    copied.capture_hidden_states = not enabled
+                    self.assertIs(config.capture_hidden_states, enabled)
+
+    def test_capture_updates_coerce_and_preserve_request_parameters(self):
+        for method in ("update", "update_and_pop"):
+            with self.subTest(method=method):
+                config = GenerateConfig(max_new_tokens=7, is_streaming=True)
+                update = {
+                    "capture_hidden_states": "true",
+                    "reuse_cache": "false",
+                    "unknown": "keep",
+                }
+                result = getattr(config, method)(update)
+                if method == "update_and_pop":
+                    self.assertEqual(result, {"unknown": "keep"})
+                self.assertEqual(update["capture_hidden_states"], "true")
+                self.assertIs(config.capture_hidden_states, True)
+                self.assertIs(config.reuse_cache, False)
+                config.validate()
+                self.assertEqual(config.max_new_tokens, 7)
+                self.assertTrue(config.is_streaming)
+                self.assertFalse(config.return_hidden_states)
+                self.assertFalse(config.return_all_hidden_states)
+                self.assertFalse(config.is_prefill_only())
+                getattr(config, method)(
+                    {"capture_hidden_states": "false", "reuse_cache": "true"}
+                )
+                self.assertIs(config.capture_hidden_states, False)
+                self.assertIs(config.reuse_cache, True)
+
+    def test_positive_capture_accepts_ineligible_combinations_without_rewriting(self):
+        for values, _ in self.CAPTURE_INELIGIBLE_COMBINATIONS:
+            for method in ("construct", "mutate", "update", "update_and_pop"):
+                with self.subTest(values=values, method=method):
+                    initial = dict(
+                        max_new_tokens=7, capture_hidden_states=True, reuse_cache=False
+                    )
+                    if method == "construct":
+                        config = GenerateConfig(**{**initial, **values})
+                    else:
+                        config = GenerateConfig(**initial)
+                        if method == "mutate":
+                            for field, value in values.items():
+                                setattr(config, field, value)
+                        else:
+                            update = {**values, "unknown": "keep"}
+                            result = getattr(config, method)(update)
+                            self.assertEqual(update, {**values, "unknown": "keep"})
+                            if method == "update_and_pop":
+                                self.assertEqual(result, {"unknown": "keep"})
+                    before = config.model_dump()
+                    config.validate()
+                    self.assertEqual(config.model_dump(), before)
+                    self.assertTrue(config.capture_hidden_states)
+                    self.assertFalse(config.is_prefill_only())
+                    self.assertEqual(config.max_new_tokens, 7)
+                    for field, value in values.items():
+                        self.assertEqual(getattr(config, field), value)
+
+    def test_zero_token_capture_keeps_original_validation_and_atomic_updates(self):
+        for values, message in self.CAPTURE_INELIGIBLE_COMBINATIONS:
+            if "reuse_cache" in values:
+                continue
+            with self.subTest(values=values):
+                with self.assertRaisesRegex(
+                    ValidationError, "max_new_tokens == 0.*" + message
+                ):
+                    GenerateConfig(
+                        max_new_tokens=0, capture_hidden_states=True, **values
+                    )
+                for method in ("update", "update_and_pop"):
+                    config = GenerateConfig(
+                        max_new_tokens=0, capture_hidden_states=True
+                    )
+                    before = config.model_copy(deep=True)
+                    with self.assertRaisesRegex(
+                        FtRuntimeException, "max_new_tokens == 0.*" + message
+                    ):
+                        getattr(config, method)(values)
+                    self.assertEqual(config, before)
+                    self.assertEqual(config.model_fields_set, before.model_fields_set)
+
+    def test_enabling_capture_preserves_default_cache_policy(self):
+        for tokens in (0, 7):
+            for method in ("construct", "update", "update_and_pop"):
+                with self.subTest(tokens=tokens, method=method):
+                    config = GenerateConfig(
+                        max_new_tokens=tokens,
+                        capture_hidden_states=method == "construct",
+                    )
+                    if method != "construct":
+                        getattr(config, method)({"capture_hidden_states": True})
+                    config.validate()
+                    self.assertTrue(config.capture_hidden_states)
+                    self.assertTrue(config.reuse_cache)
+                    self.assertEqual(config.max_new_tokens, tokens)
+
+    def test_invalid_capture_boolean_is_rejected(self):
+        with self.assertRaisesRegex(ValidationError, "capture_hidden_states") as ctx:
+            GenerateConfig(capture_hidden_states=object(), reuse_cache=False)
+        self.assertEqual(ctx.exception.errors()[0]["loc"], ("capture_hidden_states",))
+        for method in ("update", "update_and_pop"):
+            with self.subTest(method=method):
+                config = GenerateConfig()
+                before = config.model_copy(deep=True)
+                with self.assertRaisesRegex(
+                    FtRuntimeException, "capture_hidden_states"
+                ):
+                    getattr(config, method)(
+                        {"capture_hidden_states": object(), "reuse_cache": False}
+                    )
+                self.assertEqual(config, before)
+
+    def test_positive_capture_preserves_legacy_hidden_state_flags(self):
+        for capture in (False, True):
+            for return_hidden in (False, True):
+                for return_all in (False, True):
+                    with self.subTest(
+                        capture=capture, hidden=return_hidden, all=return_all
+                    ):
+                        config = GenerateConfig(
+                            max_new_tokens=7,
+                            capture_hidden_states=capture,
+                            reuse_cache=not capture,
+                            return_hidden_states=return_hidden,
+                            return_all_hidden_states=return_all,
+                            is_streaming=True,
+                        )
+                        before = config.model_dump()
+                        config.validate()
+                        self.assertEqual(config.model_dump(), before)
+                        self.assertFalse(config.is_prefill_only())
+
+    def test_explicit_zero_token_capture_does_not_require_legacy_response_flags(self):
+        config = GenerateConfig(
+            max_new_tokens=0, capture_hidden_states=True, reuse_cache=False
+        )
+        config.validate()
+        self.assertTrue(config.is_prefill_only())
+        self.assertFalse(config.return_hidden_states)
+        self.assertFalse(config.return_all_hidden_states)
+
+
 class TestGenerateConfigUpdates(unittest.TestCase):
     def test_internal_value_error_propagates_without_committing(self):
         for update_method in ("update", "update_and_pop"):
@@ -458,6 +709,87 @@ class TestGenerateConfigUpdates(unittest.TestCase):
 
 
 class TestRawGenerateConfigParsing(unittest.TestCase):
+    def test_extract_request_rejects_export_hidden_states(self):
+        extractor = RequestExtractor(GenerateConfig())
+        for legacy_value in (True, False, None):
+            for values in (
+                {"export_hidden_states": legacy_value},
+                {"generate_config": {"export_hidden_states": legacy_value}},
+                {"generation_config": {"export_hidden_states": legacy_value}},
+                {
+                    "generate_config": {
+                        "capture_hidden_states": True,
+                        "reuse_cache": False,
+                    },
+                    "generation_config": {"export_hidden_states": legacy_value},
+                },
+                {
+                    "generation_config": {"capture_hidden_states": True},
+                    "generate_config": {"export_hidden_states": legacy_value},
+                },
+                {
+                    "export_hidden_states": legacy_value,
+                    "generate_config": {"capture_hidden_states": True},
+                },
+                {
+                    "export_hidden_states": legacy_value,
+                    "generation_config": {"capture_hidden_states": True},
+                },
+                {
+                    "capture_hidden_states": True,
+                    "generate_config": {"export_hidden_states": legacy_value},
+                },
+            ):
+                with self.subTest(values=values):
+                    with self.assertRaisesRegex(
+                        FtRuntimeException,
+                        "export_hidden_states.*capture_hidden_states",
+                    ) as ctx:
+                        extractor.extract_request(
+                            {request_id_field_name: 1, "prompt": "hello", **values}
+                        )
+                    self.assertEqual(
+                        ctx.exception.exception_type,
+                        ExceptionType.ERROR_GENERATE_CONFIG_FORMAT,
+                    )
+                    self.assertIsInstance(ctx.exception.__cause__, ValueError)
+
+    def test_extract_request_preserves_capture_and_bare_zero(self):
+        extractor = RequestExtractor(GenerateConfig())
+        for source in (None, "generate_config", "generation_config"):
+            for values in (
+                {
+                    "capture_hidden_states": True,
+                    "max_new_tokens": 7,
+                    "reuse_cache": False,
+                },
+                {"max_new_tokens": 0},
+            ):
+                with self.subTest(source=source, values=values):
+                    kwargs = {
+                        request_id_field_name: 1,
+                        "prompt": "hello",
+                        "unknown_top": "keep",
+                    }
+                    if source is None:
+                        kwargs.update(values)
+                    else:
+                        kwargs[source] = {**values, "unknown_nested": "discarded"}
+                    request, remain = extractor.extract_request(kwargs)
+                    config = request.generate_configs[0]
+                    self.assertEqual(
+                        config.capture_hidden_states,
+                        values.get("capture_hidden_states", False),
+                    )
+                    self.assertEqual(config.max_new_tokens, values["max_new_tokens"])
+                    self.assertEqual(
+                        config.reuse_cache, values.get("reuse_cache", True)
+                    )
+                    self.assertEqual(
+                        remain, {request_id_field_name: 1, "unknown_top": "keep"}
+                    )
+                    config.validate()
+
     def test_memory_cache_is_canonical_request_field(self):
         config = GenerateConfig(enable_memory_cache=False)
         self.assertFalse(config.enable_memory_cache)

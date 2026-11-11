@@ -14,16 +14,28 @@ inline bool isPrefillOnly(const GenerateStreamPtr& stream) {
     return stream->generateConfig()->isPrefillOnly();
 }
 
+struct StreamExecutionMode {
+    bool prefill_only = false;
+
+    bool operator!=(const StreamExecutionMode& other) const {
+        return prefill_only != other.prefill_only;
+    }
+};
+
+inline StreamExecutionMode streamExecutionMode(const GenerateStreamPtr& stream) {
+    return {isPrefillOnly(stream)};
+}
+
 template<typename StreamRange>
 bool hasMixedExecutionModes(const StreamRange& streams) {
-    bool has_execution_mode = false;
-    bool prefill_only       = false;
+    bool                has_execution_mode = false;
+    StreamExecutionMode execution_mode;
     for (const auto& stream : streams) {
-        const bool stream_prefill_only = isPrefillOnly(stream);
+        const auto mode = streamExecutionMode(stream);
         if (!has_execution_mode) {
             has_execution_mode = true;
-            prefill_only       = stream_prefill_only;
-        } else if (prefill_only != stream_prefill_only) {
+            execution_mode     = mode;
+        } else if (execution_mode != mode) {
             return true;
         }
     }

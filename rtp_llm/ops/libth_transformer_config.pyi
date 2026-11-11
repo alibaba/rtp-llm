@@ -1115,6 +1115,11 @@ class ModelConfig:
     hidden_size: int
     hidden_state_capture_dtype: HiddenStateCaptureDtype
     hidden_state_capture_layer_ids: list[int]
+    hidden_state_capture_max_inflight_samples: int
+    hidden_state_capture_max_inflight_bytes: int
+    hidden_state_capture_max_inflight_tokens: int
+    hidden_state_capture_max_pending_batches: int
+    hidden_state_capture_poll_interval_ms: int
     hybrid_attention_config: HybridAttentionConfig
     input_embedding_scalar: float
     input_vocab_size: int

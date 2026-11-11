@@ -14,16 +14,17 @@
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <atomic>
-#include <condition_variable>
-#include <iterator>
+#include <cstddef>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -142,14 +143,41 @@ public:
                    size_t                                extra_reserve_token_num = 0,
                    bool                                  pert_test               = false);
     virtual ~GenerateStream() {
-        reportMetricOnce();
-        releaseResource();
+        if (ownsResourceRelease()) {
+            reportMetricOnce();
+            releaseResource();
+        }
         stream_magic_ = 0;
+    }
+
+    enum class SchedulerAdmission : uint8_t {
+        AVAILABLE,
+        CLAIMED,
+        HANDED_OFF,
+        REJECTED
+    };
+    // Shared across stream copies. Claim before any admission-time mutation;
+    // publish HANDED_OFF before the scheduler can expose WAITING/RUNNING work.
+    bool               tryClaimSchedulerAdmission() noexcept;
+    SchedulerAdmission schedulerAdmission() const noexcept;
+    void               finishSchedulerAdmission(bool handed_off) noexcept;
+    // Only the successful claimant (or an explicitly refusing scheduler) may
+    // invoke these. Ambiguous scheduler exceptions must keep HANDED_OFF.
+    void rejectSchedulerAdmission(bool after_handoff = false) noexcept;
+    bool ownsResourceRelease() const noexcept {
+        return resource_release_authority_.owns;
     }
 
     bool isStreamAlive() const {
         return stream_magic_ == STREAM_MAGIC;
     }
+
+    // Request-level P-side cache policy, independent of best-effort capture admission.
+    bool requiresFullContextForHiddenStateCapture() const;
+    bool isHiddenStateCaptureCandidate() const;
+    bool hasHiddenStateCaptureReservation() const;
+    void setHiddenStateCaptureReservation(HiddenStateCaptureReservationPtr reservation);
+    void cancelHiddenStateCapture() const;
 
 public:
     void setIsFakeStream(bool is_fake) {
@@ -193,6 +221,7 @@ public:
     int                  nextNeedBlockNums(int reserve_step) const;
     int                  estimateInitialNeedBlocks() const;
     int                  estimatePeakNeedBlocks(int remaining_tokens) const;
+    // Changes shared resource policy; borrowed wrappers throw std::logic_error.
     void                 setNeedReleaseResource(bool need_release_resource);
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id = 0) const;
@@ -623,6 +652,10 @@ public:
     // Count worker claims on this stream's KV resource.
     // releaseResource waits for zero so worker-side update/specUpdate cannot
     // write into blocks already returned to the pool.
+    // Only the original resource-owning wrapper may inc/dec or mark deferred
+    // release. Borrowed wrapper copies throw std::logic_error before touching
+    // shared state; async workers must retain the owner's shared_ptr instead.
+    // Read-only queries and waiting remain available to borrowed snapshots.
     void incPendingAsyncBookkeeping();
     void decPendingAsyncBookkeepingAndMaybeRelease();
     bool hasPendingAsyncBookkeeping() const;
@@ -840,9 +873,15 @@ public:
         score_stream_ = stream;
     }
 
+    // Preserve the zero-token full-prompt contract and explicit no-reuse capture policy.
+    bool requiresFullContextForCapture() const {
+        return generateConfig()->isPrefillOnly() || requiresFullContextForHiddenStateCapture();
+    }
+
+    bool shouldCaptureHiddenStates() const;
+
     bool reuseCache() const {
-        const auto& config = *generate_input_->generate_config;
-        return config.reuse_cache && !config.isPrefillOnly();
+        return generate_input_->generate_config->reuse_cache && !requiresFullContextForCapture();
     }
 
     bool enableDeviceCache() const {
@@ -924,6 +963,8 @@ protected:
     void reportMetricOnce();
 
 protected:
+    HiddenStateCaptureReservationPtr hidden_state_capture_reservation_;
+
     uint64_t                              stream_magic_ = STREAM_MAGIC;
     std::shared_ptr<GenerateInput>        generate_input_;
     std::shared_ptr<GenerateStateMachine> generate_status_;
@@ -1022,9 +1063,28 @@ protected:
     int                                mtp_token_index_       = 0;
     SpeculativeExecutorStreamOutputPtr sp_output_buffer_      = nullptr;
     // Separate lock/cv avoids deadlocking releaseResource with worker updates
-    // that need mutex_. Shared ownership preserves the coordinator across
-    // GenerateStream copies captured by async workers.
+    // that need mutex_. Production async workers retain the owner's shared_ptr;
+    // independent wrapper snapshots only borrow its resource/coordinator.
+    // StreamCacheResource retains its original stream pointer. Independent
+    // wrapper copies borrow that resource; neither copying nor CopyOnWrite
+    // transfers its release authority or the right to enter the scheduler.
+    struct ResourceReleaseAuthority {
+        bool owns                  = true;
+        ResourceReleaseAuthority() = default;
+        ResourceReleaseAuthority(const ResourceReleaseAuthority&) noexcept: owns(false) {}
+        ResourceReleaseAuthority& operator=(const ResourceReleaseAuthority& other) noexcept {
+            if (this != &other) {
+                owns = false;
+            }
+            return *this;
+        }
+    } resource_release_authority_;
+
     struct AsyncBookkeepingCoordinator {
+        // Reuse this copy-shared coordinator instead of allocating another
+        // per-request ownership object. Scheduler state is independent of GPU
+        // bookkeeping completion; only the admission claimant writes it.
+        std::atomic<SchedulerAdmission> scheduler_admission{SchedulerAdmission::AVAILABLE};
         std::atomic<int>        count{0};
         std::atomic<bool>       defer_release{false};
         std::mutex              mu;

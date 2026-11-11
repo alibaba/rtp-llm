@@ -15,6 +15,7 @@ py_library(
         "result_check.py",
         "server_launcher.py",
         "text_smoke.py",
+        "two_host_launcher.py",
     ],
     # Preserve the scripts' sibling imports as well as their package imports.
     imports = ["."],

@@ -1,5 +1,14 @@
 load("@arch_config//:arch_select.bzl", "requirement")
 
+filegroup(
+    name = "hidden_state_capture_sources",
+    srcs = [
+        "model_desc/hidden_state_capture.py",
+        "utils/profiler.py",
+    ],
+    visibility = ["//rtp_llm/cpp/models/test:__pkg__"],
+)
+
 py_library(
     name = "utils",
     srcs = glob([
@@ -71,6 +80,12 @@ filegroup(
     name = "flash_mla_prefill_api_test_sources",
     srcs = ["modules/kimi_k3/mla.py"],
     visibility = ["//rtp_llm/models_py/modules/kimi_k3/test:__pkg__"],
+)
+
+filegroup(
+    name = "kimi_k3_capture_control_flow_test_sources",
+    srcs = ["model_desc/kimi_k3.py"],
+    visibility = ["//rtp_llm/models_py/model_desc/test:__pkg__"],
 )
 
 

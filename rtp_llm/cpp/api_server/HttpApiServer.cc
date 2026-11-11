@@ -131,7 +131,14 @@ bool HttpApiServer::registerHealthService() {
         return false;
     }
 
-    health_service_.reset(new HealthService());
+    std::function<bool()> check_health;
+    if (engine_) {
+        check_health = [engine = std::weak_ptr<EngineBase>(engine_)] {
+            const auto owner = engine.lock();
+            return owner && owner->checkHealth().ok();
+        };
+    }
+    health_service_ = std::make_shared<HealthService>(std::move(check_health));
     return registerHealthServiceStatic(*http_server_, health_service_);
 }
 

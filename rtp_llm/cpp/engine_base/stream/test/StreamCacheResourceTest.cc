@@ -815,6 +815,92 @@ TEST_F(StreamCacheResourceTest, testPrefillOnlyDisablesPrefixAndDeviceCacheReuse
     }
 }
 
+TEST_F(StreamCacheResourceTest, testExplicitCaptureRespectsReuseConflictWithCachedPrompt) {
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        for (const bool request_reuse : {false, true}) {
+            SCOPED_TRACE(testing::Message() << "role=" << static_cast<int>(role) << " reuse=" << request_reuse);
+            prepareResource(/*reuse_cache=*/true, role);
+            auto& seed_resource = stream_->streamCacheResource();
+            ASSERT_TRUE(seed_resource.initKVBlock().ok());
+            stream_->generate_status_->status = StreamState::FINISHED;
+            stream_->releaseResource();
+            ASSERT_LT(cache_manager_->freeBlocksNum(), 8u);
+
+            auto context                                  = seed_resource.resource_context_;
+            context.ignore_request_cache_switches         = true;
+            context.enable_device_cache                   = true;
+            context.enable_memory_cache                   = true;
+            context.enable_disk_cache                     = true;
+            context.enable_remote_cache                   = true;
+            auto query                                    = std::make_shared<GenerateInput>(*stream_->generateInput());
+            query->generate_config                        = std::make_shared<GenerateConfig>();
+            query->generate_config->max_new_tokens        = 4;
+            query->generate_config->reuse_cache           = request_reuse;
+            query->generate_config->capture_hidden_states = true;
+            ModelConfig model_config;
+            model_config.max_seq_len                    = 2048;
+            model_config.attn_config.tokens_per_block   = 2;
+            model_config.hidden_state_capture_layer_ids = {0};
+            auto captured =
+                std::make_shared<NormalGenerateStream>(query, model_config, RuntimeConfig{}, context, nullptr);
+            ASSERT_FALSE(captured->hasError());
+            captured->generate_status_->status = StreamState::RUNNING;
+            auto& resource                     = captured->streamCacheResource();
+            EXPECT_EQ(captured->reuseCache(), request_reuse);
+            EXPECT_EQ(resource.reuseCache(), request_reuse);
+            EXPECT_EQ(resource.enableCacheLookup(), request_reuse);
+            EXPECT_EQ(resource.storeTarget(), request_reuse ? Tier::DEVICE : Tier::NONE);
+            EXPECT_TRUE(resource.enableDeviceCache());
+            EXPECT_TRUE(resource.enableMemoryCache());
+            EXPECT_TRUE(resource.enableDiskCache());
+
+            const auto real_allocator = cache_manager_->coordinator_manager_;
+            auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+            cache_manager_->coordinator_manager_ = allocator;
+            EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
+                .WillOnce(testing::Invoke([real_allocator, request_reuse](const MallocInfo& info) {
+                    EXPECT_EQ(info.reuse_cache, request_reuse);
+                    EXPECT_EQ(info.enable_cache_lookup, request_reuse);
+                    return real_allocator->initMallocForCommonLen(info);
+                }));
+            EXPECT_CALL(*allocator, incrMalloc(testing::_))
+                .Times(2)
+                .WillRepeatedly(testing::Invoke([real_allocator, request_reuse](const MallocInfo& info) {
+                    EXPECT_EQ(info.reuse_cache, request_reuse);
+                    EXPECT_EQ(info.enable_cache_lookup, request_reuse);
+                    return real_allocator->incrMalloc(info);
+                }));
+            ASSERT_TRUE(resource.initKVBlock().ok());
+            ASSERT_TRUE(resource.incrKVBlock().ok());
+            EXPECT_FALSE(resource.asyncLoadCache());
+            if (request_reuse) {
+                EXPECT_GT(captured->reuseLength(), 0);
+                EXPECT_LT(captured->contextLength(), captured->inputLength());
+            } else {
+                EXPECT_EQ(captured->reuseLength(), 0);
+                EXPECT_EQ(captured->contextLength(), captured->inputLength());
+            }
+            EXPECT_EQ(captured->isHiddenStateCaptureCandidate(), !request_reuse);
+            EXPECT_EQ(captured->generateConfig()->reuse_cache, request_reuse);
+            cache_manager_->coordinator_manager_ = real_allocator;
+            captured->releaseResource();
+
+            auto normal_query                          = std::make_shared<GenerateInput>(*query);
+            normal_query->generate_config              = std::make_shared<GenerateConfig>();
+            normal_query->generate_config->reuse_cache = false;
+            auto normal =
+                std::make_shared<NormalGenerateStream>(normal_query, model_config, RuntimeConfig{}, context, nullptr);
+            normal->generate_status_->status = StreamState::RUNNING;
+            EXPECT_TRUE(normal->streamCacheResource().reuseCache());
+            ASSERT_TRUE(normal->initKVBlock().ok());
+            // The seed remains reusable for ordinary requests, despite their request switch.
+            EXPECT_GT(normal->reuseLength(), 0);
+            EXPECT_FALSE(normal->shouldCaptureHiddenStates());
+            normal->releaseResource();
+        }
+    }
+}
+
 TEST_F(StreamCacheResourceTest, testLateChunkEnableKeepsFullPromptLinearMapping) {
     prepareHybridResource(/*reuse_cache=*/false);
     auto& resource = stream_->streamCacheResource();

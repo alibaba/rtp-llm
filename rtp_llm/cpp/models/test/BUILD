@@ -76,6 +76,7 @@ cc_library(
     alwayslink = True,
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/utils:serving_device_health",
         "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/config:static_config",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
@@ -103,6 +104,11 @@ cc_binary(
     linkshared = 1,
 )
 
+pywrapped_model_test_data = [
+    ":th_pywrapped_model_cache_store_integration_test",
+    "//rtp_llm/models_py:hidden_state_capture_sources",
+]
+
 pywrapped_model_test_deps = [
     "//rtp_llm:config",
     "//rtp_llm:torch",
@@ -111,7 +117,7 @@ pywrapped_model_test_deps = [
 py_test(
     name = "pywrapped_model_cache_store_integration_test",
     srcs = ["pywrapped_model_cache_store_integration_test.py"],
-    data = [":th_pywrapped_model_cache_store_integration_test"],
+    data = pywrapped_model_test_data,
     deps = pywrapped_model_test_deps,
     env = {"TEST_USING_DEVICE": "CUDA"},
     exec_properties = {"gpu": "L20_CU13"},
@@ -122,7 +128,7 @@ py_test(
     name = "pywrapped_model_cache_store_integration_test_rocm",
     main = "pywrapped_model_cache_store_integration_test.py",
     srcs = ["pywrapped_model_cache_store_integration_test.py"],
-    data = [":th_pywrapped_model_cache_store_integration_test"],
+    data = pywrapped_model_test_data,
     deps = pywrapped_model_test_deps,
     env = {"TEST_USING_DEVICE": "ROCM"},
     tags = ["rocm"],
@@ -136,7 +142,7 @@ py_test(
     args = [
         "PyWrappedModelCacheStoreIntegrationTest.test_dirty_generation_prefill_capture_does_not_retain_cache_manager",
     ],
-    data = [":th_pywrapped_model_cache_store_integration_test"],
+    data = pywrapped_model_test_data,
     deps = pywrapped_model_test_deps + [
         "//rtp_llm/models_py:modules",
     ],
@@ -157,7 +163,7 @@ py_test(
     args = [
         "PyWrappedModelCacheStoreIntegrationTest.test_dirty_generation_prefill_capture_does_not_retain_cache_manager",
     ],
-    data = [":th_pywrapped_model_cache_store_integration_test"],
+    data = pywrapped_model_test_data,
     deps = pywrapped_model_test_deps + [
         "//rtp_llm/models_py:modules",
     ],

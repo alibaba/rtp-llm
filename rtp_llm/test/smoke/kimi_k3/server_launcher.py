@@ -55,6 +55,14 @@ def launch_config(args):
         or not 1024 <= prefill_capacity <= 65536 or prefill_capacity % 1024
     ):
         raise ValueError("K3.1 Prefill fixture token capacity must be page-aligned in [1024,65536]")
+    prefill_chunk_size = getattr(args, "prefill_chunk_size", None)
+    if prefill_chunk_size is not None and (
+        model_type != "kimi_k31"
+        or args.role != "PREFILL"
+        or type(prefill_chunk_size) is not int
+        or prefill_chunk_size < 0
+    ):
+        raise ValueError("K3.1 Prefill chunk size must be a nonnegative integer")
     source_tp_size = int(getattr(args, "prefill_source_tp_size", 8))
     if tp_size < 1 or dp_size < 1 or ep_size != world_size or source_tp_size < 1:
         raise ValueError("PD topology requires positive TP/DP and EP=TP×DP")
@@ -241,6 +249,8 @@ def launch_config(args):
         "ep_size": ep_size,
         "dp_size": dp_size,
         "ffn_sp_size": tp_size,
+        # Kimi FFN sequence parallelism is not attention/FFN disaggregation.
+        "enable_ffn_disaggregate": 0,
         "world_size": world_size,
         "local_world_size": world_size,
         "world_rank": 0,
@@ -315,6 +325,9 @@ def launch_config(args):
         environment["PREFILL_CHUNK_SIZE"] = str(prefill_capacity)
         options["max_batch_tokens_without_cache"] = prefill_capacity
         options["max_batch_tokens_size"] = prefill_capacity
+    if prefill_chunk_size is not None:
+        # Disable chunking for full-prompt capture without changing admission budgets.
+        environment["PREFILL_CHUNK_SIZE"] = str(prefill_chunk_size)
     max_seq_len = getattr(args, "max_seq_len", None)
     if max_seq_len is not None:
         if max_seq_len < 1024:
@@ -674,6 +687,11 @@ def main():
                         help="Explicit bounded cache-pool size for reproducible tier-pressure smoke")
     parser.add_argument("--prefill-token-capacity", type=int,
                         help="K3.1 fixture-only page-aligned token/workspace capacity;default65536 unchanged")
+    parser.add_argument(
+        "--prefill-chunk-size",
+        type=int,
+        help="K3.1 Prefill-only chunk override; 0 disables chunking without changing token capacity",
+    )
     args = parser.parse_args()
     if not args.target_only and not args.draft_checkpoint:
         parser.error("MTP requires --draft-checkpoint; synthetic fallback is disabled")

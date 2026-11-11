@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/utils/ServingDeviceHealth.h"
 #include <cstdint>
 #include <memory>
 #include <cstdlib>
@@ -15,7 +16,15 @@ namespace rtp_llm {
 class Executor {
 public:
     Executor() {};
+    // Called during engine construction, never by concurrent health readers.
+    virtual ServingDeviceHealthPtr servingDeviceHealth() const {
+        return {};
+    }
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) = 0;
+    virtual HiddenStateCaptureReservationPtr tryReserveHiddenStateCapture(int64_t /*request_id*/,
+                                                                          int64_t /*valid_tokens*/) {
+        return {};
+    }
 
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,

@@ -29,6 +29,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <thread>
 #include <random>
 #include <stdexcept>
@@ -48,6 +49,30 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+// Construct only after a successful claim. Streams outlive their guards; batch
+// storage is reserved before claiming so guard installation cannot allocate.
+class SchedulerAdmissionGuard {
+public:
+    explicit SchedulerAdmissionGuard(GenerateStream& stream) noexcept: stream_(&stream) {}
+    SchedulerAdmissionGuard(const SchedulerAdmissionGuard&)            = delete;
+    SchedulerAdmissionGuard& operator=(const SchedulerAdmissionGuard&) = delete;
+    SchedulerAdmissionGuard(SchedulerAdmissionGuard&& other) noexcept: stream_(other.stream_) {
+        other.stream_ = nullptr;
+    }
+    ~SchedulerAdmissionGuard() noexcept {
+        if (stream_) {
+            stream_->rejectSchedulerAdmission();
+        }
+    }
+    void handoff() noexcept {
+        stream_->finishSchedulerAdmission(true);
+        stream_ = nullptr;
+    }
+
+private:
+    GenerateStream* stream_;
+};
+
 // 释放glibc缓存的host内存，将其归还给操作系统
 // 在模型加载完成后调用，可以显著减少常驻内存占用
 void releaseHostMemoryCache() {
@@ -282,6 +307,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     RTP_LLM_LOG_INFO("create cache manager done");
 
     initExecutor(params, propose_params_);
+    serving_device_health_ = executor_ ? executor_->servingDeviceHealth() : nullptr;
 
     RTP_LLM_LOG_INFO("create normal executor done");
 
@@ -722,7 +748,12 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     auto fake_input                             = makeFakeInput(1);
     fake_input->generate_config->max_new_tokens = max_new_tokens;
     fake_input->fake_query                      = true;
-    auto stream                                 = makeStream(fake_input);
+    // Internal DP alignment work is not a new external admission. Do not route
+    // it through makeStream/createStream's health gate, and do not authorize
+    // external callers to bypass that gate merely by setting fake_query.
+    auto stream = std::make_shared<NormalGenerateStream>(
+        fake_input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
     stream->setIsFakeStream(true);
     stream->setMetricsReporter(nullptr);
     stream->fakeInitKVBlock();
@@ -851,8 +882,14 @@ absl::Status NormalEngine::stop() {
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
-    // Join the async dispatch runner and release the dispatcher-owned worker pool.
-    executor_.reset();
+    std::unique_ptr<Executor> executor;
+    {
+        std::lock_guard<std::mutex> lock(capture_admission_mutex_);
+        executor = std::move(executor_);
+    }
+    // Destruction joins async workers and may acquire the GIL. Keep it on the
+    // stop thread, outside the admission lock, with subsequent admissions disabled.
+    executor.reset();
     resource_context_.cache_manager->stopMetricsReporter();
     return absl::OkStatus();
 }
@@ -880,6 +917,42 @@ absl::Status NormalEngine::trySaveStepError() const {
     return absl::UnimplementedError("can not save yet!");
 }
 
+ErrorInfo NormalEngine::checkHealth() const {
+    if (!serving_device_health_ || serving_device_health_->healthy()) {
+        return ErrorInfo::OkStatus();
+    }
+    return ErrorInfo(ErrorCode::SERVICE_UNHEALTHY, "local serving device context is unavailable");
+}
+
+bool NormalEngine::rejectUnhealthyStream(const GenerateStreamPtr& stream) const {
+    if (stream->schedulerAdmission() != GenerateStream::SchedulerAdmission::CLAIMED) {
+        return false;
+    }
+    const auto health = checkHealth();
+    if (health.ok()) {
+        return false;
+    }
+    if (!stream->hasError()) {
+        stream->reportError(health.code(), health.ToString());
+    }
+    // This is still a new admission, not a queued/inflight stream. Return any
+    // externally allocated KV and reservation without replacing prior errors.
+    stream->rejectSchedulerAdmission();
+    return true;
+}
+
+std::shared_ptr<GenerateStream> NormalEngine::createErrorStream(const std::shared_ptr<GenerateInput>& input,
+                                                                const ErrorInfo&                      error) {
+    auto safe_input             = std::make_shared<GenerateInput>(*input);
+    auto safe_config            = std::make_shared<GenerateConfig>();
+    safe_config->max_new_tokens = 1;
+    safe_input->generate_config = std::move(safe_config);
+    auto stream                 = std::make_shared<NormalGenerateStream>(
+        safe_input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    stream->reportError(error.code(), error.ToString());
+    return stream;
+}
+
 bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) const {
     if (stream->hasError()) {
         return false;
@@ -893,19 +966,19 @@ bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) 
 
 std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr<GenerateInput>& input) {
     try {
-        input->generate_config->validatePrefillOnly();
+        // Invalid parameters retain priority over health. Validation may
+        // normalize scoring options, so this precheck must not mutate input.
+        auto config = *input->generate_config;
+        config.validatePrefillOnly();
     } catch (const std::invalid_argument& error) {
-        // Keep invalid request handling on the stream error path instead of exposing
-        // validation exceptions to direct engine callers or RPC adapters.
-        auto safe_input             = std::make_shared<GenerateInput>(*input);
-        auto safe_config            = std::make_shared<GenerateConfig>(*input->generate_config);
-        safe_config->max_new_tokens = 1;
-        safe_input->generate_config = std::move(safe_config);
-        auto stream                 = std::make_shared<NormalGenerateStream>(
-            safe_input, model_config_, runtime_config, resource_context_, metrics_reporter_);
-        stream->reportError(ErrorCode::INVALID_PARAMS, error.what());
-        return stream;
+        return createErrorStream(input, ErrorInfo(ErrorCode::INVALID_PARAMS, error.what()));
     }
+    const auto health = checkHealth();
+    if (!health.ok()) {
+        return createErrorStream(input, health);
+    }
+    // Keep the original healthy-path object identity and normalization contract.
+    input->generate_config->validatePrefillOnly();
 
     ErrorInfo selection_error;
     // Target-only prefill does not request generation custom output or its prompt constraints.
@@ -934,6 +1007,44 @@ std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr
     if (selection_error.hasError()) {
         stream->reportError(selection_error.code(), selection_error.ToString());
     }
+
+    // Capture admission is request-level and deliberately best-effort. Only
+    // TP0 owns the Mooncake publisher; every other rank follows the later
+    // model-input capability consensus. A quota miss must not reject serving.
+    const auto& config = *stream->generateConfig();
+    if (model_config_.hidden_state_capture_layer_ids.empty() || pd_sep_config.role_type == RoleType::DECODE
+        || stream->hasError() || (!config.capture_hidden_states && !config.isPrefillOnly())) {
+        return stream;
+    }
+    if (config.capture_hidden_states && config.reuse_cache) {
+        RTP_LLM_LOG_WARNING(
+            "skip hidden-state capture for request %ld: capture_hidden_states conflicts with reuse_cache",
+            stream->streamId());
+        return stream;
+    }
+    if (!stream->isHiddenStateCaptureCandidate()) {
+        return stream;
+    }
+    const int64_t request_id = stream->streamId();
+    // TP0 owns the publisher quota. Other TP ranks install a logical marker so
+    // the gather gate has identical request semantics on every rank; the
+    // synchronized model-input capture bit still follows TP0's real admission.
+    HiddenStateCaptureReservationPtr reservation;
+    try {
+        if (parallelism_config.tp_rank != 0) {
+            reservation = std::make_shared<HiddenStateCaptureReservation>([]() noexcept {});
+        } else {
+            std::lock_guard<std::mutex> lock(capture_admission_mutex_);
+            if (executor_) {
+                reservation = executor_->tryReserveHiddenStateCapture(request_id, stream->inputLength());
+            }
+        }
+    } catch (const std::bad_alloc&) {
+        throw;
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_WARNING("skip hidden-state capture admission for request %ld: %s", request_id, error.what());
+    }
+    stream->setHiddenStateCaptureReservation(std::move(reservation));
     return stream;
 }
 
@@ -941,16 +1052,52 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
     auto stream = createStream(input);
     // DecodeRpcServer allocates the destination KV table before enqueue/P-D handoff.
     stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
-    (void)validateStreamForScheduling(stream);
+    if (!validateStreamForScheduling(stream)) {
+        stream->cancelHiddenStateCapture();
+    }
     return stream;
 }
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
-    stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
-    if (!validateStreamForScheduling(stream)) {
+    if (!stream->tryClaimSchedulerAdmission()) {
+        if (stream->schedulerAdmission() == GenerateStream::SchedulerAdmission::REJECTED && stream->hasError()) {
+            return;  // This admission already reported its original error/cleanup.
+        }
+        // The void API returns a distinct error stream through its reference.
+        // Never reportError/cancel/release on the object another admission or
+        // scheduler owns (including WAITING, not just RUNNING).
+        auto error = stream->statusInfo();
+        if (error.ok()) {
+            error = checkHealth();
+        }
+        if (error.ok()) {
+            error = ErrorInfo(ErrorCode::INVALID_PARAMS, "stream has already entered scheduler admission");
+        }
+        stream = createErrorStream(stream->generateInput(), error);
+        stream->tryClaimSchedulerAdmission();
+        stream->finishSchedulerAdmission(false);
         return;
     }
-    (void)scheduler_->enqueue(stream);
+    SchedulerAdmissionGuard admission(*stream);
+    if (rejectUnhealthyStream(stream)) {
+        return;
+    }
+    stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
+    if (!validateStreamForScheduling(stream)) {
+        stream->rejectSchedulerAdmission();
+        return;
+    }
+    // A latch after this final check races an already admitted request. Do not
+    // cancel queued work or alter the engine's TP/DP execution schedule.
+    if (rejectUnhealthyStream(stream)) {
+        return;
+    }
+    admission.handoff();
+    if (!scheduler_->enqueue(stream).ok()) {
+        stream->rejectSchedulerAdmission(/*after_handoff=*/true);
+    }
+    // If enqueue throws with ambiguous acceptance, keep HANDED_OFF: a later
+    // resubmission must not reclaim resources the scheduler may already own.
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
@@ -964,13 +1111,18 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
     std::vector<GenerateStreamPtr> streams;
     std::vector<GenerateStreamPtr> schedulable_streams;
     std::vector<size_t>            schedulable_indexes;
+    // Declared after streams: rollback runs while every claimed object is alive.
+    std::vector<SchedulerAdmissionGuard> admissions;
+    admissions.reserve(inputs.size());
     streams.reserve(inputs.size());
     schedulable_streams.reserve(inputs.size());
     schedulable_indexes.reserve(inputs.size());
     for (auto& inp : inputs) {
         auto stream = createStream(inp);
-        stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
         streams.push_back(stream);
+        RTP_LLM_CHECK(stream->tryClaimSchedulerAdmission());
+        admissions.emplace_back(*stream);
+        stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
     }
 
     std::vector<GenerateStreamPtr> streams_for_mode_check;
@@ -986,6 +1138,7 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
             if (!stream->hasError()) {
                 stream->reportError(ErrorCode::INVALID_PARAMS, kMixedForceBatchGroupError);
             }
+            stream->rejectSchedulerAdmission();
         }
         return {std::vector<bool>(streams.size(), false), std::move(streams)};
     }
@@ -994,13 +1147,32 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
         if (validateStreamForScheduling(streams[i])) {
             schedulable_indexes.push_back(i);
             schedulable_streams.push_back(streams[i]);
+        } else {
+            streams[i]->rejectSchedulerAdmission();
         }
     }
 
-    auto              schedulable_result = scheduler_->enqueueGroup(schedulable_streams);
     std::vector<bool> enqueue_successes(streams.size(), false);
+    // One final batch admission gate; no scheduler call for an empty/rejected
+    // group. As for enqueue(), a subsequent latch does not revoke admission.
+    if (!checkHealth().ok()) {
+        for (const auto& stream : streams) {
+            rejectUnhealthyStream(stream);
+        }
+        return {std::move(enqueue_successes), std::move(streams)};
+    }
+    if (schedulable_streams.empty()) {
+        return {std::move(enqueue_successes), std::move(streams)};
+    }
+    for (const auto index : schedulable_indexes) {
+        admissions[index].handoff();
+    }
+    auto schedulable_result = scheduler_->enqueueGroup(schedulable_streams);
     for (size_t i = 0; i < schedulable_indexes.size(); ++i) {
         enqueue_successes[schedulable_indexes[i]] = schedulable_result.first[i];
+        if (!schedulable_result.first[i]) {
+            schedulable_streams[i]->rejectSchedulerAdmission(/*after_handoff=*/true);
+        }
     }
     return {std::move(enqueue_successes), std::move(streams)};
 }

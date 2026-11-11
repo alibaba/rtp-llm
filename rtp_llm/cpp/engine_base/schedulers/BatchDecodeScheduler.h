@@ -170,15 +170,15 @@ public:
         // mode-homogeneous batch and drain its remaining tail in subsequent rounds.
         std::list<GenerateStreamPtr> selected_streams;
         bool                         has_execution_mode = false;
-        bool                         prefill_only       = false;
+        StreamExecutionMode          execution_mode;
         bool                         has_other_mode     = false;
         for (const auto& stream : waiting_streams_) {
-            const bool stream_prefill_only = isPrefillOnly(stream);
+            const auto mode = streamExecutionMode(stream);
             if (!has_execution_mode) {
                 has_execution_mode = true;
-                prefill_only       = stream_prefill_only;
+                execution_mode     = mode;
             }
-            if (stream_prefill_only != prefill_only) {
+            if (execution_mode != mode) {
                 has_other_mode = true;
                 continue;
             }

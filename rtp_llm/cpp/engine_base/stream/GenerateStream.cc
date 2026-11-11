@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <typeinfo>
 #include <ATen/Generator.h>
 #if defined(USING_CUDA) || defined(USING_ROCM)
@@ -53,6 +54,87 @@ bool useStreamAsyncReserveTokens() {
 }
 
 }  // namespace
+
+bool GenerateStream::requiresFullContextForHiddenStateCapture() const {
+    const auto  role   = stream_cache_resource_->resourceContext().role_type;
+    const auto& config = *generateConfig();
+    return (role == RoleType::PREFILL || role == RoleType::PDFUSION)
+           && (config.isPrefillOnly() || (config.capture_hidden_states && !config.reuse_cache));
+}
+
+bool GenerateStream::isHiddenStateCaptureCandidate() const {
+    const auto& config = *generateConfig();
+    return requiresFullContextForHiddenStateCapture() && !(config.capture_hidden_states && config.reuse_cache)
+           && !chunkedPrefillEnabled() && !hasError() && !isFakeStream() && !generate_input_->fake_query
+           && isContextStream() && !hasNumBeams() && maxBatchSize() == 1 && currentBatchSize() == 1 && iterCount() == 0
+           && config.variable_num_beams.empty() && config.num_return_sequences == 1 && inputLength() > 0
+           && seqLength() == inputLength() && prefixLength() == 0 && reuseLength() == 0
+           && contextLength() == inputLength() && config.num_validate_token == 0 && score_len_ == 0
+           && !contain_propose_token_;
+}
+
+bool GenerateStream::tryClaimSchedulerAdmission() noexcept {
+    if (!ownsResourceRelease()) {
+        return false;
+    }
+    auto expected = SchedulerAdmission::AVAILABLE;
+    return async_bookkeeping_->scheduler_admission.compare_exchange_strong(
+        expected, SchedulerAdmission::CLAIMED, std::memory_order_acq_rel, std::memory_order_acquire);
+}
+
+GenerateStream::SchedulerAdmission GenerateStream::schedulerAdmission() const noexcept {
+    return async_bookkeeping_->scheduler_admission.load(std::memory_order_acquire);
+}
+
+void GenerateStream::finishSchedulerAdmission(bool handed_off) noexcept {
+    if (!ownsResourceRelease()) {
+        return;
+    }
+    // Only the successful claimant may finish. Once handed off, rejection is
+    // allowed only when the scheduler explicitly reports it never accepted it.
+    async_bookkeeping_->scheduler_admission.store(
+        handed_off ? SchedulerAdmission::HANDED_OFF : SchedulerAdmission::REJECTED, std::memory_order_release);
+}
+
+void GenerateStream::rejectSchedulerAdmission(bool after_handoff) noexcept {
+    if (!ownsResourceRelease()) {
+        return;
+    }
+    auto expected = after_handoff ? SchedulerAdmission::HANDED_OFF : SchedulerAdmission::CLAIMED;
+    if (!async_bookkeeping_->scheduler_admission.compare_exchange_strong(
+            expected, SchedulerAdmission::REJECTED, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        return;
+    }
+    // Fail closed before diagnostics, which may allocate/throw. Cleanup is
+    // independent of error reporting and never replaces the original exception.
+    try {
+        if (!hasError()) {
+            reportError(ErrorCode::EXECUTION_EXCEPTION, "");
+        }
+    } catch (...) {}
+    try {
+        cancelHiddenStateCapture();
+    } catch (...) {}
+    try {
+        releaseResource();
+    } catch (...) {
+        // The original wrapper retains release authority for a destructor retry.
+    }
+}
+
+bool GenerateStream::hasHiddenStateCaptureReservation() const {
+    return hidden_state_capture_reservation_ && hidden_state_capture_reservation_->active();
+}
+
+void GenerateStream::setHiddenStateCaptureReservation(HiddenStateCaptureReservationPtr reservation) {
+    hidden_state_capture_reservation_ = std::move(reservation);
+}
+
+void GenerateStream::cancelHiddenStateCapture() const {
+    if (ownsResourceRelease() && hidden_state_capture_reservation_) {
+        hidden_state_capture_reservation_->cancel();
+    }
+}
 
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                const ModelConfig&               model_config,
@@ -119,16 +201,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
-    // TorchSpec target hidden-state capture publishes one result per request and cannot be split across chunks.
+    // Chunked requests remain valid serving work, but are not capture candidates.
     const auto chunk_size = runtime_config.fifo_scheduler_config.prefill_chunk_size;
-    if (!input->fake_query && chunk_size > 0 && input->generate_config->isPrefillOnly()
-        && !model_config.hidden_state_capture_layer_ids.empty()
-        && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
-        reportEvent(StreamEvents::Error,
-                    ErrorCode::INVALID_PARAMS,
-                    "chunked prefill incompatible: hidden_state_capture");
-        return;
-    }
     // A short multimodal context needs no slicing; retain the normal prefill path
     // rather than rejecting it just because text chunking is configured.
     const bool short_multimodal_context = multimodalFeaturesLength() != 0 && seqLength() <= chunk_size;
@@ -253,10 +327,14 @@ absl::Status GenerateStream::incrKVBlock() {
 }
 
 void GenerateStream::releaseResource() {
+    if (!ownsResourceRelease()) {
+        return;
+    }
     RTP_LLM_PROFILE_FUNCTION();
     // Return KV blocks only after all workers that captured this stream finish.
     // Earlier release could let a worker write into blocks owned by another stream.
     waitPendingAsyncBookkeeping();
+    cancelHiddenStateCapture();
     std::lock_guard<std::mutex> lock(*mutex_);
     if (!stream_cache_resource_->isResourceReleased()) {
         stream_cache_resource_->releaseResource();
@@ -264,10 +342,16 @@ void GenerateStream::releaseResource() {
 }
 
 void GenerateStream::incPendingAsyncBookkeeping() {
+    if (!ownsResourceRelease()) {
+        throw std::logic_error("borrowed stream wrapper cannot claim async bookkeeping");
+    }
     async_bookkeeping_->count.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void GenerateStream::decPendingAsyncBookkeepingAndMaybeRelease() {
+    if (!ownsResourceRelease()) {
+        throw std::logic_error("borrowed stream wrapper cannot complete async bookkeeping");
+    }
     int prev = async_bookkeeping_->count.fetch_sub(1, std::memory_order_acq_rel);
     RTP_LLM_CHECK(prev >= 1);
     if (prev == 1) {
@@ -293,6 +377,9 @@ void GenerateStream::waitPendingAsyncBookkeeping() {
 }
 
 void GenerateStream::markDeferredRelease() {
+    if (!ownsResourceRelease()) {
+        throw std::logic_error("borrowed stream wrapper cannot defer resource release");
+    }
     async_bookkeeping_->defer_release.store(true, std::memory_order_release);
 }
 
@@ -300,6 +387,9 @@ bool GenerateStream::isDeferredReleasePending() const {
     return async_bookkeeping_->defer_release.load(std::memory_order_acquire);
 }
 void GenerateStream::setNeedReleaseResource(bool need_release_resource) {
+    if (!ownsResourceRelease()) {
+        throw std::logic_error("borrowed stream wrapper cannot change resource release policy");
+    }
     need_release_resource_ = need_release_resource;
     stream_cache_resource_->setNeedReleaseResource(need_release_resource);
 }
@@ -643,6 +733,10 @@ int64_t GenerateStream::prefillMemoryReuseLen() const {
 
 void GenerateStream::incLastOutputPos() {
     last_output_pos_++;
+}
+
+bool GenerateStream::shouldCaptureHiddenStates() const {
+    return isHiddenStateCaptureCandidate();
 }
 
 bool GenerateStream::isContextStream() const {
@@ -1828,6 +1922,7 @@ StreamCacheResource& GenerateStream::streamCacheResource() {
 
 void GenerateStream::CopyOnWrite(const GenerateStream& other_stream, bool copy_loss, bool share) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("GenerateStream::CopyOnWrite(copy_loss=%d, share=%d)", copy_loss, share);
+    hidden_state_capture_reservation_.reset();
     complete_token_ids_ = make_shared<CompleteTokenIds>(*other_stream.complete_token_ids_, share);
     grpc_normal_device_state_pending_ =
         std::make_shared<std::atomic<bool>>(other_stream.hasGrpcNormalDeviceStatePending());

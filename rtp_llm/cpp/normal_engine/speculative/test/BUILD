@@ -73,6 +73,7 @@ cc_test(
 )
 
 mtp_executor_test_deps = [
+    "//rtp_llm/cpp/utils:serving_device_health",
     "//rtp_llm/cpp/engine_base/schedulers",
     "//rtp_llm/cpp/cache",
     "//rtp_llm/cpp/cache/test:cache_config_test_utils",

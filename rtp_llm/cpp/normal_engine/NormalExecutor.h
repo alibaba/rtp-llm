@@ -33,6 +33,8 @@ public:
                             std::function<void()>                  profile_step_finish = nullptr);
     ~NormalExecutor();
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
+    ServingDeviceHealthPtr servingDeviceHealth() const override;
+    HiddenStateCaptureReservationPtr tryReserveHiddenStateCapture(int64_t request_id, int64_t valid_tokens) override;
     void         reportMetrics(const StreamGroups&                        stream_groups,
                                RtpLLMExecutorMetricsCollector&            executor_collector,
                                RtpLLMTokenPSMetricsCollector&             tps_collector,

@@ -1,3 +1,4 @@
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <memory>
@@ -51,6 +52,9 @@ public:
         polling_(polling) {}
 
     ErrorResult<GenerateOutputs> nextOutput(int64_t wait_timeout_ms = 0) override {
+        if (hasError() && statusInfo().code() == ErrorCode::SERVICE_UNHEALTHY) {
+            return NormalGenerateStream::nextOutput(wait_timeout_ms);
+        }
         std::call_once(polling_once_, [this] { polling_.set_value(); });
         switch (action_) {
             case OutputAction::COMPLETE:
@@ -105,6 +109,9 @@ public:
 
     GenerateStreamPtr makeStream(const std::shared_ptr<GenerateInput>& input) override {
         stream = std::make_shared<HandlerTestStream>(input, parameters(), resource_context_, action_, polling);
+        if (make_stream_error != ErrorCode::NONE_ERROR) {
+            stream->reportError(make_stream_error, "makeStream admission rejected");
+        }
         return stream;
     }
     GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>& input) override {
@@ -113,6 +120,10 @@ public:
         return result;
     }
     void enqueue(GenerateStreamPtr& value) override {
+        if (reject_enqueue) {
+            value->reportError(ErrorCode::SERVICE_UNHEALTHY, "serving device unavailable");
+            return;
+        }
         const auto status = scheduler_->enqueue(value);
         if (!status.ok()) {
             throw std::runtime_error(status.ToString());
@@ -136,6 +147,13 @@ public:
         return static_cast<FIFOScheduler&>(*scheduler_);
     }
 
+    ErrorInfo checkHealth() const override {
+        return unhealthy.load() ? ErrorInfo(ErrorCode::SERVICE_UNHEALTHY, "serving device unavailable") :
+                                  EngineBase::checkHealth();
+    }
+    std::atomic<bool>  unhealthy{false};
+    ErrorCode          make_stream_error{ErrorCode::NONE_ERROR};
+    bool               reject_enqueue{false};
     std::promise<void> polling;
     GenerateStreamPtr  stream;
 
@@ -464,6 +482,101 @@ TEST_F(RpcHandlerLifecycleTest, PrefillEarlyFailurePreservesPriorityPreemption) 
 TEST_F(RpcHandlerLifecycleTest, PrefillCaughtExceptionCompletesHandlingWithoutUnexpectedExit) {
     runSynchronousHandler(Handler::PREFILL, OutputAction::THROW);
 }
+TEST_F(RpcHandlerLifecycleTest, DecodeRejectedMakeStreamSkipsKvAndCompletesLocally) {
+    for (const auto error : {ErrorCode::SERVICE_UNHEALTHY, ErrorCode::INVALID_PARAMS}) {
+        SCOPED_TRACE(static_cast<int>(error));
+        TestLogCapture capture("decode_admission_rejection");
+        auto           engine       = std::make_shared<SteppedEngine>(OutputAction::COMPLETE);
+        engine->make_stream_error   = error;
+        const auto      free_before = engine->getCacheManager()->freeBlocksNum();
+        auto            meta        = std::make_shared<RpcServerRuntimeMeta>();
+        DecodeRpcServer server;
+        server.engine_ = engine;
+        server.meta_   = meta;
+        {
+            DecodeRpcContext             rpc_context{nullptr};
+            kmonitor::MetricsReporterPtr reporter;
+            DecodeGenerateContext        context(rpc_context, 0, nullptr, reporter, meta);
+            context.request_id                        = kRequestId;
+            context.request_key                       = "health-rejection";
+            *context.allocate_request.mutable_input() = lifecycleRequest();
+            server.allocateResource(context);
+            ASSERT_NE(engine->stream, nullptr);
+            EXPECT_EQ(context.error_info.code(), error);
+            EXPECT_EQ(context.error_status.error_code(),
+                      error == ErrorCode::SERVICE_UNHEALTHY ? grpc::StatusCode::UNAVAILABLE :
+                                                              grpc::StatusCode::INVALID_ARGUMENT);
+            ErrorDetailsPB details;
+            ASSERT_TRUE(details.ParseFromString(context.error_status.error_details()));
+            EXPECT_EQ(details.error_code(), static_cast<int>(error));
+            EXPECT_FALSE(context.shouldRetry());
+            EXPECT_EQ(context.retry_times, 0);
+            EXPECT_EQ(engine->stream->getStatus(), StreamState::FINISHED);
+            EXPECT_EQ(engine->stream->curBlocksNum(), 0);
+            EXPECT_EQ(engine->scheduler().onflightStreams(), 0);
+            EXPECT_EQ(engine->getCacheManager()->freeBlocksNum(), free_before);
+            context.markRpcHandlingCompleted();
+        }
+        expectFinishedOnce(meta, error);
+        EXPECT_EQ(capture.content().find(kUnexpectedExit), std::string::npos);
+    }
+}
+
+TEST_F(RpcHandlerLifecycleTest, DecodeFinalHealthRejectionReclaimsPreparedKvWithoutSchedulerTick) {
+    for (const bool reject_before_device_init : {false, true}) {
+        SCOPED_TRACE(reject_before_device_init);
+        auto engine                        = std::make_shared<SteppedEngine>(OutputAction::COMPLETE);
+        engine->reject_enqueue             = !reject_before_device_init;
+        const auto             free_before = engine->getCacheManager()->freeBlocksNum();
+        auto                   meta        = std::make_shared<RpcServerRuntimeMeta>();
+        LifecyclePeer          peer;
+        ScopedRpcServer        peer_server(&peer);
+        LifecycleDecodeService service;
+        service.handler.engine_                   = engine;
+        service.handler.meta_                     = meta;
+        service.handler.propose_maga_init_params_ = nullptr;
+        service.handler.resource().workers        = {"rank0", "rank1"};
+        service.handler.resource().grpc_workers   = {peer_server.address(), peer_server.address()};
+        ScopedRpcServer server(&service);
+        auto stub = RpcService::NewStub(grpc::CreateChannel(server.address(), grpc::InsecureChannelCredentials()));
+        grpc::ClientContext client;
+        client.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
+        auto              returned = service.returned.get_future();
+        auto              rpc      = stub->RemoteGenerate(&client);
+        GenerateRequestPB request;
+        request.set_stage(RemoteStage::ALLOCATE);
+        request.set_request_id(kRequestId);
+        request.set_client_id("health-rejection");
+        *request.mutable_input() = lifecycleRequest();
+        request.add_peer_addrs("prefill:1:2");
+        ASSERT_TRUE(rpc->Write(request));
+        GenerateOutputsPB response;
+        ASSERT_TRUE(rpc->Read(&response));
+        EXPECT_LT(engine->getCacheManager()->freeBlocksNum(), free_before);
+        request.set_stage(RemoteStage::LOAD);
+        ASSERT_TRUE(rpc->Write(request));
+        ASSERT_TRUE(rpc->Read(&response));
+        engine->unhealthy.store(reject_before_device_init);
+        request.set_stage(RemoteStage::GENERATE);
+        request.set_first_generate_token_id(3);
+        ASSERT_TRUE(rpc->Write(request));
+        rpc->WritesDone();
+        EXPECT_FALSE(rpc->Read(&response));
+        const auto status = rpc->Finish();
+        EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
+        ASSERT_EQ(returned.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        EXPECT_EQ(returned.get().error_code(), grpc::StatusCode::UNAVAILABLE);
+        EXPECT_EQ(engine->stream->statusInfo().code(), ErrorCode::SERVICE_UNHEALTHY);
+        EXPECT_EQ(engine->stream->getStatus(), StreamState::FINISHED);
+        EXPECT_EQ(engine->scheduler().onflightStreams(), 0);
+        EXPECT_EQ(engine->getCacheManager()->freeBlocksNum(), free_before);
+        if (reject_before_device_init) {
+            EXPECT_EQ(engine->stream->outputTokenLen(), 0);
+        }
+        expectFinishedOnce(meta, ErrorCode::SERVICE_UNHEALTHY);
+    }
+}
+
 TEST_F(RpcHandlerLifecycleTest, DecodeSuccessReturnsBeforeSchedulerWithoutCanceling) {
     runDecodeHandler(OutputAction::COMPLETE);
 }

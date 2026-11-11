@@ -33,7 +33,7 @@ void WorkerStatusService::workerStatus(const std::unique_ptr<http_server::HttpRe
     }
     WorkerStatusResponse worker_status_response;
     worker_status_response.cache_status = std::move(cache_status);
-    worker_status_response.alive        = true;
+    worker_status_response.alive        = !engine_ || engine_->checkHealth().ok();
     auto response_json_str              = ToJsonString(worker_status_response, /*isCompact=*/true);
     writer->Write(response_json_str);
 }

@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -16,6 +18,8 @@
 #include "opentelemetry/sdk/trace/span_data.h"
 #include "rtp_llm/cpp/model_rpc/PrefillBatchRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 
@@ -74,6 +78,13 @@ public:
     KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
         return KVCacheInfo();
     }
+
+    ErrorInfo checkHealth() const override {
+        ++health_checks;
+        return health;
+    }
+    ErrorInfo   health;
+    mutable int health_checks{0};
 
     std::vector<bool>              enqueue_successes;
     std::vector<GenerateStreamPtr> streams;
@@ -141,6 +152,9 @@ private:
 
 class TracingDecodeRpcService final: public RpcService::Service {
 public:
+    explicit TracingDecodeRpcService(grpc::Status first_allocate_failure = grpc::Status::OK):
+        first_allocate_failure_(std::move(first_allocate_failure)) {}
+
     grpc::Status RemoteGenerate(grpc::ServerContext*                                            server_context,
                                 grpc::ServerReaderWriter<GenerateOutputsPB, GenerateRequestPB>* stream) override {
         grpc::Status status = grpc::Status::OK;
@@ -154,6 +168,22 @@ public:
             return status;
         }
         span_guard.setAttribute(telemetry::kAttrRequestId, std::to_string(request.request_id()));
+        int allocation;
+        {
+            std::lock_guard<std::mutex> lock(leases_mutex_);
+            allocation = ++allocated_;
+            ++active_;
+        }
+        // Stand in for a Decode allocation held until the real bidi handler exits.
+        struct Lease {
+            TracingDecodeRpcService& service;
+            ~Lease() {
+                service.releaseLease();
+            }
+        } lease{*this};
+        if (allocation == 1 && !first_allocate_failure_.ok()) {
+            return first_allocate_failure_;
+        }
         GenerateOutputsPB response;
         if (!stream->Write(response)) {
             status = grpc::Status(grpc::StatusCode::INTERNAL, "write allocate response failed");
@@ -162,10 +192,42 @@ public:
         while (stream->Read(&request)) {}
         return status;
     }
+
+    int allocatedCount() {
+        std::lock_guard<std::mutex> lock(leases_mutex_);
+        return allocated_;
+    }
+    int releasedCount() {
+        std::lock_guard<std::mutex> lock(leases_mutex_);
+        return released_;
+    }
+    bool waitForNoActiveLeases() {
+        std::unique_lock<std::mutex> lock(leases_mutex_);
+        return leases_changed_.wait_for(lock, std::chrono::seconds(5), [&] { return active_ == 0; });
+    }
+    void releaseLease() {
+        {
+            std::lock_guard<std::mutex> lock(leases_mutex_);
+            --active_;
+            ++released_;
+        }
+        leases_changed_.notify_all();
+    }
+
+private:
+    const grpc::Status      first_allocate_failure_;
+    std::mutex              leases_mutex_;
+    std::condition_variable leases_changed_;
+    int                     allocated_{0};
+    int                     active_{0};
+    int                     released_{0};
 };
 
 class TracingDecodeRpcServer {
 public:
+    explicit TracingDecodeRpcServer(grpc::Status first_allocate_failure = grpc::Status::OK):
+        service_(std::move(first_allocate_failure)) {}
+
     ~TracingDecodeRpcServer() {
         if (server_) {
             server_->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(5));
@@ -183,6 +245,15 @@ public:
 
     int port() const {
         return port_;
+    }
+    int allocatedCount() {
+        return service_.allocatedCount();
+    }
+    int releasedCount() {
+        return service_.releasedCount();
+    }
+    bool waitForNoActiveLeases() {
+        return service_.waitForNoActiveLeases();
     }
 
 private:
@@ -221,6 +292,28 @@ std::shared_ptr<DeferredPrefillContext> makeDeferred(PrefillBatchRpcServer& serv
     deferred->context   = std::move(context);
     deferred->input     = std::move(input);
     return deferred;
+}
+
+TEST(PrefillBatchRpcServerTest, UnhealthyPrepareStopsBeforeRemoteAllocationOrRetry) {
+    PrefillBatchRpcServer server;
+    auto                  engine = std::make_shared<PartialEnqueueEngine>();
+    engine->health               = ErrorInfo(ErrorCode::SERVICE_UNHEALTHY, "serving device unavailable");
+    server.engine_               = engine;
+    auto deferred                = makeDeferred(server, 42);
+    // No downstream address/client or prepare pool is supplied: rejection must precede all of them.
+    const auto result = server.prepareSlotWithRetry(*deferred->context, 3, 0, 0);
+    EXPECT_FALSE(result.prepared);
+    EXPECT_EQ(result.stage_status.error_code(), grpc::StatusCode::UNAVAILABLE);
+    EXPECT_EQ(deferred->context->error_info.code(), ErrorCode::SERVICE_UNHEALTHY);
+    EXPECT_FALSE(deferred->context->shouldRetry());
+    EXPECT_EQ(deferred->context->retry_times, 1);
+    EXPECT_EQ(engine->health_checks, 1);
+    EXPECT_EQ(engine->enqueue_multiple_calls, 0);
+    EXPECT_EQ(deferred->context->getStream(), nullptr);
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(result.stage_status.error_details()));
+    EXPECT_EQ(details.error_code(), static_cast<int>(ErrorCode::SERVICE_UNHEALTHY));
+    deferred->context->markRpcHandlingCompleted();
 }
 
 std::shared_ptr<GenerateInput> makeGenerateInput(int64_t request_id) {
@@ -551,6 +644,189 @@ TEST(PrefillBatchRpcServerTest, PrepareRetryStartsNoAttemptForExpiredRequest) {
     EXPECT_FALSE(result.stage_status.ok());
     EXPECT_EQ(deferred->context->error_info.code(), ErrorCode::GENERATE_TIMEOUT);
     EXPECT_EQ(deferred->context->retry_times, 0);
+}
+
+TEST(PrefillBatchRpcServerTest, StructuredDownstreamHealthRejectStopsBatchPrepareRetry) {
+    ErrorDetailsPB health;
+    health.set_error_code(static_cast<int64_t>(ErrorCode::SERVICE_UNHEALTHY));
+    health.set_error_message("decode serving device unavailable");
+    const grpc::Status failures[] = {
+        grpc::Status(grpc::StatusCode::UNAVAILABLE, "transport unavailable", health.SerializeAsString()),
+        grpc::Status(grpc::StatusCode::UNAVAILABLE, "transient unavailable"),
+        grpc::Status(grpc::StatusCode::UNAVAILABLE, "transient unavailable", "invalid-proto"),
+    };
+    for (size_t i = 0; i < 3; ++i) {
+        SCOPED_TRACE(i);
+        TracingDecodeRpcServer decode_server(failures[i]);
+        ASSERT_TRUE(decode_server.start());
+        PrefillBatchRpcServer server;
+        server.meta_   = std::make_shared<RpcServerRuntimeMeta>();
+        auto engine    = std::make_shared<PartialEnqueueEngine>();
+        server.engine_ = engine;
+        std::vector<PrefillBatchRpcServer::BatchSlot> slots;
+        std::vector<PrefillBatchRpcServer::ReadySlot> ready_slots;
+        buildReadySlots(server, {6301}, slots, ready_slots);
+        auto& context = *ready_slots[0].deferred->context;
+        context.setRequestTimeoutMs(10000);
+        context.generate_input->generate_config->role_addrs.emplace_back(
+            RoleType::DECODE, "127.0.0.1", 0, decode_server.port());
+        ASSERT_TRUE(engine->checkHealth().ok());
+        const auto result = server.prepareSlotWithRetry(context, 3, 0, 0);
+        EXPECT_TRUE(engine->checkHealth().ok());
+        if (i == 0) {
+            EXPECT_FALSE(result.prepared);
+            EXPECT_EQ(result.stage_status.error_code(), grpc::StatusCode::UNAVAILABLE);
+            EXPECT_EQ(context.error_info.code(), ErrorCode::SERVICE_UNHEALTHY);
+            EXPECT_EQ(context.error_info.ToString(), "decode serving device unavailable");
+            EXPECT_FALSE(context.shouldRetry());
+            EXPECT_EQ(context.retry_times, 1);
+            ErrorDetailsPB details;
+            ASSERT_TRUE(details.ParseFromString(result.stage_status.error_details()));
+            EXPECT_EQ(details.error_code(), 8215);
+        } else {
+            EXPECT_TRUE(result.prepared);
+            EXPECT_TRUE(result.stage_status.ok());
+            EXPECT_TRUE(context.shouldRetry());
+            EXPECT_EQ(context.retry_times, 2);
+        }
+        EXPECT_EQ(engine->enqueue_multiple_calls, 0);
+        EXPECT_EQ(context.getStream(), nullptr);
+        context.closeGrpcStream();
+        EXPECT_TRUE(context.grpc_stream_closed);
+        context.markRpcHandlingCompleted();
+        ready_slots.clear();
+        slots.clear();
+        EXPECT_TRUE(decode_server.waitForNoActiveLeases());
+        EXPECT_EQ(decode_server.allocatedCount(), i == 0 ? 1 : 2);
+        EXPECT_EQ(decode_server.releasedCount(), decode_server.allocatedCount());
+    }
+}
+
+TEST(PrefillBatchRpcServerTest, HealthLatchAfterRemoteAllocateFinishesRejectedBatchAndClosesRemoteLeases) {
+    class HealthLatchEngine: public PartialEnqueueEngine {
+    public:
+        explicit HealthLatchEngine(std::vector<int>& cancellations): cancellations_(cancellations) {}
+        std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+        enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) override {
+            ++enqueue_multiple_calls;
+            EXPECT_EQ(checkHealth().code(), ErrorCode::SERVICE_UNHEALTHY);
+            for (size_t i = 0; i < inputs.size(); ++i) {
+                auto stream = makeGenerateStream(inputs[i]);
+                stream->setHiddenStateCaptureReservation(std::make_shared<HiddenStateCaptureReservation>(
+                    [counter = &cancellations_[i]]() noexcept { ++*counter; }));
+                stream->reportError(ErrorCode::SERVICE_UNHEALTHY,
+                                    "health reject request " + std::to_string(inputs[i]->request_id));
+                // Match core admission: resource release is complete, lifecycle is not scheduler-owned.
+                stream->releaseResource();
+                EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
+                streams.push_back(stream);
+            }
+            return {std::vector<bool>(inputs.size(), false), streams};
+        }
+
+    private:
+        std::vector<int>& cancellations_;
+    };
+
+    test::TestLogCapture   capture("batch_health_teardown");
+    TracingDecodeRpcServer decode_server;
+    ASSERT_TRUE(decode_server.start());
+    PrefillBatchRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    std::vector<int> cancellations(3, 0);
+    auto             engine = std::make_shared<HealthLatchEngine>(cancellations);
+    server.engine_          = engine;
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots;
+    std::vector<PrefillBatchRpcServer::ReadySlot> ready_slots;
+    const std::vector<int64_t>                    request_ids{6101, 6102, 6103};
+    buildReadySlots(server, request_ids, slots, ready_slots);
+    std::vector<std::weak_ptr<DeferredPrefillContext>> rejected_contexts;
+    for (auto& ready : ready_slots) {
+        auto& context = *ready.deferred->context;
+        context.setRequestTimeoutMs(10000);
+        context.generate_input->generate_config->role_addrs.emplace_back(
+            RoleType::DECODE, "127.0.0.1", 0, decode_server.port());
+        ASSERT_TRUE(server.deferred_contexts_->registerActive(context.request_id, ready.deferred).ok());
+        ASSERT_TRUE(server.prepareAllocateResource(context).ok());
+        ASSERT_TRUE(context.client_stream);
+        rejected_contexts.push_back(ready.deferred);
+    }
+    ASSERT_EQ(decode_server.allocatedCount(), 3);
+    ASSERT_EQ(decode_server.releasedCount(), 0);
+    ASSERT_TRUE(engine->checkHealth().ok());
+    engine->health = ErrorInfo(ErrorCode::SERVICE_UNHEALTHY, "device failed after remote prepare");
+    EnqueueBatchResponsePB response;
+    ASSERT_TRUE(server.enqueueGroupStreams(ready_slots, &response).ok());
+    EXPECT_TRUE(ready_slots.empty());
+    EXPECT_EQ(engine->enqueue_multiple_calls, 1);
+    ASSERT_EQ(engine->streams.size(), request_ids.size());
+    EXPECT_EQ(response.successes_size(), 0);
+    ASSERT_EQ(response.errors_size(), 3);
+    for (size_t i = 0; i < request_ids.size(); ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_EQ(response.errors(i).request_id(), request_ids[i]);
+        EXPECT_EQ(response.errors(i).error_info().error_code(), 8215);
+        EXPECT_EQ(response.errors(i).error_info().error_message(),
+                  "health reject request " + std::to_string(request_ids[i]));
+        EXPECT_EQ(engine->streams[i]->streamId(), request_ids[i]);
+        EXPECT_EQ(engine->streams[i]->statusInfo().code(), ErrorCode::SERVICE_UNHEALTHY);
+        EXPECT_EQ(engine->streams[i]->getStatus(), StreamState::FINISHED);
+        EXPECT_EQ(cancellations[i], 1);
+        EXPECT_TRUE(rejected_contexts[i].expired()) << "rejected context must finish teardown without a scheduler";
+        const auto wire_code = transErrorCodeToRPC(engine->streams[i]->statusInfo().code());
+        EXPECT_EQ(wire_code, ErrorCodePB::SERVICE_UNHEALTHY);
+        EXPECT_EQ(static_cast<int>(wire_code), 28);
+    }
+    EXPECT_EQ(server.deferred_contexts_->size(), 0);
+    EXPECT_TRUE(decode_server.waitForNoActiveLeases());
+    EXPECT_EQ(decode_server.releasedCount(), 3);
+    EXPECT_EQ(capture.content().find("stopStream timeout"), std::string::npos);
+    EXPECT_EQ(capture.content().find("GenerateContext destroyed before RPC handling completed"), std::string::npos);
+}
+
+TEST(PrefillBatchRpcServerTest, BatchHealthFinishDoesNotTouchSuccessfulOrOtherErrorStreams) {
+    PrefillBatchRpcServer server;
+    server.meta_   = std::make_shared<RpcServerRuntimeMeta>();
+    auto engine    = std::make_shared<PartialEnqueueEngine>();
+    server.engine_ = engine;
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots;
+    std::vector<PrefillBatchRpcServer::ReadySlot> ready_slots;
+    buildReadySlots(server, {6201, 6202, 6203, 6204}, slots, ready_slots);
+    for (auto& ready : ready_slots) {
+        engine->streams.push_back(makeGenerateStream(ready.deferred->context->generate_input));
+    }
+    // A successful transfer remains scheduler-owned even if its stream already reports a health code.
+    engine->streams[1]->reportError(ErrorCode::SERVICE_UNHEALTHY, "already admitted");
+    engine->streams[2]->reportError(ErrorCode::INVALID_PARAMS, "existing rejection policy");
+    engine->streams[3]->reportError(ErrorCode::SERVICE_UNHEALTHY, "new admission rejected");
+    engine->streams[3]->releaseResource();  // Core already returned this rejected admission.
+    engine->enqueue_successes                 = {true, true, false, false};
+    auto                   non_health_context = ready_slots[2].deferred;
+    EnqueueBatchResponsePB response;
+    ASSERT_TRUE(server.enqueueGroupStreams(ready_slots, &response).ok());
+    ASSERT_EQ(ready_slots.size(), 2);
+    EXPECT_EQ(ready_slots[0].slot->input->request_id(), 6201);
+    EXPECT_EQ(ready_slots[1].slot->input->request_id(), 6202);
+    EXPECT_EQ(engine->streams[0]->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(engine->streams[1]->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(engine->streams[2]->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(engine->streams[3]->getStatus(), StreamState::FINISHED);
+    ASSERT_EQ(response.errors_size(), 2);
+    EXPECT_EQ(response.errors(0).request_id(), 6203);
+    EXPECT_EQ(response.errors(0).error_info().error_code(), static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+    EXPECT_EQ(response.errors(1).request_id(), 6204);
+    EXPECT_EQ(response.errors(1).error_info().error_code(), static_cast<int64_t>(ErrorCode::SERVICE_UNHEALTHY));
+    // End the deliberately retained non-health/scheduler-owned fixtures only after checking production behavior.
+    for (auto& stream : engine->streams) {
+        if (!stream->hasError()) {
+            stream->reportError(ErrorCode::CANCELLED, "test teardown");
+        }
+        stream->moveToNext();
+    }
+    non_health_context.reset();
+    for (auto& ready : ready_slots) {
+        server.rejectSlot(ready, grpc::Status(grpc::StatusCode::CANCELLED, "test teardown"), &response);
+    }
 }
 
 TEST(PrefillBatchRpcServerTest, PartialSchedulerRejectionCleansRejectedPrefillResources) {
@@ -1660,6 +1936,7 @@ TEST_F(PrefillBatchTraceTest, PerRequestCarriersCreateIsolatedLogicalParentsAndP
     first_context.generate_input = makeGenerateInput(4001);
     first_context.generate_input->generate_config->role_addrs.emplace_back(
         RoleType::DECODE, "127.0.0.1", /*http_port=*/0, decode_server.port());
+    server.engine_ = std::make_shared<PartialEnqueueEngine>();
     server.prepareAllocateResource(first_context);
     ASSERT_TRUE(first_context.error_status.ok()) << first_context.error_status.error_message();
     ASSERT_TRUE(first_context.closeGrpcStream().ok());

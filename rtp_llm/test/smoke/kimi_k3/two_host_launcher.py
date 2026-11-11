@@ -25,6 +25,52 @@ import urllib.request
 
 ROLES = ("prefill", "decode")
 SCRIPT = "rtp_llm/test/smoke/kimi_k3/two_host_launcher.py"
+# Deployment inputs read by TorchSpec's MooncakeConfig.from_env(), not arbitrary env.
+TORCHSPEC_ENV_KEYS = frozenset(
+    {
+        "JSON_MODEL_OVERRIDE_ARGS",
+        "MOONCAKE_MASTER_SERVER",
+        "MOONCAKE_METADATA_SERVER",
+        "MOONCAKE_LOCAL_HOSTNAME",
+        "MOONCAKE_STORE_KEY_NAMESPACE",
+        "MOONCAKE_PROTOCOL",
+        "MOONCAKE_DEVICE_NAME",
+        "MOONCAKE_GLOBAL_SEGMENT_SIZE",
+        "MOONCAKE_LOCAL_BUFFER_SIZE",
+        "MOONCAKE_HOST_BUFFER_SIZE",
+        "MOONCAKE_ASYNC_PUT_POOL_SIZE",
+        "MOONCAKE_GPU_BUFFER_SIZE",
+        "MOONCAKE_MAX_SEQ_LEN",
+        "MOONCAKE_HIDDEN_DIM",
+        "MOONCAKE_NUM_AUX_LAYERS",
+        "MOONCAKE_ENABLE_GPU_DIRECT",
+    }
+)
+
+
+def torchspec_environment(host, role):
+    if "torchspec_env" in host and role != "prefill":
+        raise ValueError("torchspec_env is supported only on K3.1 Prefill")
+    environment = host.get("torchspec_env", {})
+    if not isinstance(environment, dict):
+        raise ValueError("torchspec_env must be an environment map")
+    for key, value in environment.items():
+        if key not in TORCHSPEC_ENV_KEYS:
+            raise ValueError(f"Unsupported torchspec_env key: {key}")
+        if not isinstance(value, str) or "\0" in value:
+            raise ValueError(f"torchspec_env.{key} must be a NUL-free string")
+    if "JSON_MODEL_OVERRIDE_ARGS" in environment:
+        try:
+            overrides = json.loads(environment["JSON_MODEL_OVERRIDE_ARGS"])
+        except ValueError:
+            raise ValueError(
+                "torchspec_env.JSON_MODEL_OVERRIDE_ARGS must be a JSON object"
+            ) from None
+        if not isinstance(overrides, dict):
+            raise ValueError(
+                "torchspec_env.JSON_MODEL_OVERRIDE_ARGS must be a JSON object"
+            )
+    return environment
 
 
 def validate(config):
@@ -48,6 +94,15 @@ def validate(config):
         for key in ("repo_root", "artifact_root", "checkpoint", "draft_checkpoint"):
             if not Path(host[key]).is_absolute():
                 raise ValueError(f"{role}.{key} must be absolute")
+        torchspec_environment(host, role)
+        if "prefill_chunk_size" in host and (
+            role != "prefill"
+            or type(host["prefill_chunk_size"]) is not int
+            or host["prefill_chunk_size"] < 0
+        ):
+            raise ValueError(
+                "prefill_chunk_size requires a nonnegative integer on Prefill"
+            )
         if type(host["port"]) is not int or not 1024 <= host["port"] <= 65535 - 72:
             raise ValueError("Invalid eight-rank port block")
     if config["prefill"]["ip"] == config["decode"]["ip"]:
@@ -169,6 +224,7 @@ def usable_rdma_hcas(names):
 
 
 def serve(config, role):
+    torchspec_env = torchspec_environment(config[role], role)
     source = owned_data(Path(config[role]["repo_root"]))
     sys.path.insert(0, str(source))
     sys.path.insert(0, str(source / Path(SCRIPT).parent))
@@ -253,6 +309,7 @@ def serve(config, role):
         kv_cache_mem_mb=host.get("kv_cache_mem_mb"), memory_cache_size_mb=host.get("memory_cache_size_mb",32768),
         test_block_num=host.get("test_block_num"),
         prefill_token_capacity=host.get("prefill_token_capacity"),
+        prefill_chunk_size=host.get("prefill_chunk_size"),
         max_seq_len=host.get("max_seq_len"), request_capacity=host.get("request_capacity"),
         decode_capture_batches=host.get("decode_capture_batches"))
     explicit, command = launch_config(args)
@@ -275,6 +332,9 @@ def serve(config, role):
     (directory / "logs").mkdir()
     explicit["LOG_PATH"] = str(directory / "logs")
     env = runtime_environment(source, binary); env.update(explicit)
+    # This is env precedence only; an explicit --json_model_override_args wins in RTP.
+    # Keep capture values out of the environment receipt below.
+    env.update(torchspec_env)
     stop = False
     def on_signal(_signum, _frame):
         nonlocal stop
@@ -289,6 +349,7 @@ def serve(config, role):
             server_start_ticks=start_ticks(process.pid), pgid=process.pid,
             command=command, environment={**explicit, "SPT_NOENV": env["SPT_NOENV"],
                 "K31_PD_SMOKE_ENV_ANCHOR": env["K31_PD_SMOKE_ENV_ANCHOR"]}, run_id=config["run_id"],
+            torchspec_env_keys=sorted(torchspec_env),
             source_files=actual_hashes, binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
             performance_validated=False, smoke_passed=None)
         atomic(directory / "instance.json", identity)

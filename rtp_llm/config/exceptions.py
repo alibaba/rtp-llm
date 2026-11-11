@@ -90,6 +90,7 @@ class ExceptionType(IntEnum):
     LOAD_KV_CACHE_FAILED = 8212
     WAIT_TO_RUN_TIMEOUT = 8213, ExceptionCategory.TIMEOUT
     KEEP_ALIVE_TIMEOUT = 8214, ExceptionCategory.TIMEOUT
+    SERVICE_UNHEALTHY = 8215
 
     # load cache error
     LOAD_CACHE_TIMEOUT = 8300, ExceptionCategory.TIMEOUT

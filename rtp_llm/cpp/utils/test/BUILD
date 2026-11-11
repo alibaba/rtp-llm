@@ -113,3 +113,15 @@ cc_test(
     deps = google_test_deps + ["//rtp_llm/cpp/utils:core_utils"],
     copts = copts(),
 )
+
+# No GPU, Torch, Python interpreter, or test framework initialization.
+cc_test(
+    name = "serving_device_health_test",
+    srcs = ["ServingDeviceHealthTest.cc"],
+    copts = ["-std=c++17", "-pthread"],
+    linkopts = ["-pthread"],
+    deps = [
+        "//rtp_llm/cpp/utils:serving_device_health",
+        "//rtp_llm/cpp/utils:error_code",
+    ],
+)

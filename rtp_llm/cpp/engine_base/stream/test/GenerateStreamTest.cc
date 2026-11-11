@@ -17,6 +17,7 @@
 #include <future>
 #include <mutex>
 #include <numeric>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -312,6 +313,121 @@ void updateOneToken(const GenerateStreamPtr& stream, int token_id) {
                     torch::Tensor(),
                     torch::Tensor(),
                     torch::Tensor()});
+}
+
+TEST_F(GenerateStreamTest, SchedulerAdmissionClaimIsSingleWinnerAcrossCopies) {
+    GenerateStreamBuilder builder;
+    auto                  stream = builder.createContextStream({1, 2});
+    auto                  copy   = std::make_shared<NormalGenerateStream>(*stream);
+    EXPECT_TRUE(stream->ownsResourceRelease());
+    EXPECT_FALSE(copy->ownsResourceRelease());
+    EXPECT_FALSE(copy->tryClaimSchedulerAdmission());
+    std::atomic<int>         winners{0};
+    std::vector<std::thread> contenders;
+    for (int i = 0; i < 8; ++i) {
+        contenders.emplace_back([&, i] {
+            if ((i % 2 ? stream : copy)->tryClaimSchedulerAdmission())
+                ++winners;
+        });
+    }
+    for (auto& contender : contenders)
+        contender.join();
+    EXPECT_EQ(winners.load(), 1);
+    EXPECT_EQ(stream->schedulerAdmission(), GenerateStream::SchedulerAdmission::CLAIMED);
+    stream->finishSchedulerAdmission(true);
+    EXPECT_EQ(copy->schedulerAdmission(), GenerateStream::SchedulerAdmission::HANDED_OFF);
+    EXPECT_FALSE(copy->tryClaimSchedulerAdmission());
+    EXPECT_FALSE(stream->hasError());
+}
+
+TEST_F(GenerateStreamTest, BorrowedWrappersRejectBookkeepingAndOwnerCompletionReleases) {
+    auto       spec   = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 2, 4);
+    auto       config = test::makeSingleGroupCacheConfig(spec, CacheGroupType::FULL, 1, 32);
+    auto       owner  = createMtpCacheStream(config, 5, 2);
+    const auto blocks = owner->curBlocksNum();
+    ASSERT_GT(blocks, 0u);
+    auto       manager       = owner->streamCacheResource().resourceContext().cache_manager;
+    const auto free_blocks   = manager->freeBlocksNum();
+    auto       cancellations = std::make_shared<int>(0);
+    owner->setHiddenStateCaptureReservation(
+        std::make_shared<HiddenStateCaptureReservation>([cancellations]() noexcept { ++*cancellations; }));
+    auto cow     = std::make_shared<NormalGenerateStream>(*owner);
+    auto shallow = std::make_shared<NormalGenerateStream>(*std::static_pointer_cast<NormalGenerateStream>(owner));
+    EXPECT_NE(cow->complete_token_ids_, owner->complete_token_ids_);
+    EXPECT_EQ(shallow->complete_token_ids_, owner->complete_token_ids_);
+    EXPECT_EQ(&cow->streamCacheResource(), &owner->streamCacheResource());
+    EXPECT_FALSE(cow->hasHiddenStateCaptureReservation());
+    EXPECT_TRUE(shallow->hasHiddenStateCaptureReservation());
+    owner->incPendingAsyncBookkeeping();
+    for (bool deferred : {false, true}) {
+        if (deferred) {
+            owner->markDeferredRelease();
+        }
+        for (const auto& borrowed : {cow, shallow}) {
+            EXPECT_THROW(borrowed->incPendingAsyncBookkeeping(), std::logic_error);
+            EXPECT_THROW(borrowed->decPendingAsyncBookkeepingAndMaybeRelease(), std::logic_error);
+            EXPECT_THROW(borrowed->markDeferredRelease(), std::logic_error);
+            EXPECT_THROW(borrowed->setNeedReleaseResource(false), std::logic_error);
+            borrowed->releaseResource();
+            borrowed->cancelHiddenStateCapture();
+            EXPECT_EQ(owner->async_bookkeeping_->count.load(), 1);
+            EXPECT_EQ(owner->isDeferredReleasePending(), deferred);
+            EXPECT_TRUE(owner->hasHiddenStateCaptureReservation());
+            EXPECT_EQ(*cancellations, 0);
+            EXPECT_EQ(owner->curBlocksNum(), blocks);
+            EXPECT_EQ(manager->freeBlocksNum(), free_blocks);
+        }
+    }
+    shallow.reset();
+    cow.reset();
+    EXPECT_EQ(owner->curBlocksNum(), blocks);
+    EXPECT_EQ(manager->freeBlocksNum(), free_blocks);
+    EXPECT_EQ(*cancellations, 0);
+    // No waiter and no synthetic extra task: completion of the one original
+    // owner task must release automatically while the owner remains alive.
+    owner->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_FALSE(owner->hasPendingAsyncBookkeeping());
+    EXPECT_FALSE(owner->isDeferredReleasePending());
+    EXPECT_EQ(owner->curBlocksNum(), 0u);
+    EXPECT_GT(manager->freeBlocksNum(), free_blocks);
+    EXPECT_EQ(*cancellations, 1);
+    owner->releaseResource();
+    EXPECT_EQ(*cancellations, 1);
+}
+
+TEST_F(GenerateStreamTest, OnlyOwnerCompletionUnblocksPendingBookkeepingWaiter) {
+    GenerateStreamBuilder builder;
+    auto                  owner    = builder.createContextStream({1, 2});
+    auto                  borrowed = std::make_shared<NormalGenerateStream>(*owner);
+    owner->incPendingAsyncBookkeeping();
+    std::promise<void> waiter_started;
+    auto               started = waiter_started.get_future();
+    auto               waiter  = std::async(std::launch::async, [owner, &waiter_started] {
+        waiter_started.set_value();
+        owner->waitPendingAsyncBookkeeping();
+    });
+    EXPECT_EQ(started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    EXPECT_THROW(borrowed->decPendingAsyncBookkeepingAndMaybeRelease(), std::logic_error);
+    borrowed.reset();
+    EXPECT_EQ(owner->async_bookkeeping_->count.load(), 1);
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    std::thread worker([owner] { owner->decPendingAsyncBookkeepingAndMaybeRelease(); });
+    worker.join();
+    EXPECT_EQ(waiter.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    waiter.get();
+    EXPECT_FALSE(owner->hasPendingAsyncBookkeeping());
+}
+
+TEST_F(GenerateStreamTest, RejectedAdmissionCannotBeReadmittedOrMistakenForSchedulerOwnership) {
+    GenerateStreamBuilder builder;
+    auto                  stream = builder.createContextStream({1, 2});
+    ASSERT_TRUE(stream->tryClaimSchedulerAdmission());
+    stream->reportError(ErrorCode::INVALID_PARAMS, "original invalid request");
+    stream->finishSchedulerAdmission(false);
+    EXPECT_EQ(stream->schedulerAdmission(), GenerateStream::SchedulerAdmission::REJECTED);
+    EXPECT_FALSE(stream->tryClaimSchedulerAdmission());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
 }
 
 TEST_F(GenerateStreamTest, testConstruct) {
@@ -1777,24 +1893,30 @@ TEST_F(GenerateStreamTest, timeInfoSnapshotIsCoherentDuringLifecyclePublication)
 }
 
 TEST_F(GenerateStreamTest, testChunkedPrefillWindowAndUpdate) {
-    auto builder = GenerateStreamBuilder();
-    auto stream  = builder.createChunkedContextStream(makeInputIds(10));
+    for (const bool capture : {false, true}) {
+        SCOPED_TRACE(capture);
+        auto builder                                    = GenerateStreamBuilder();
+        auto stream                                     = builder.createChunkedContextStream(makeInputIds(10));
+        stream->generateConfig()->capture_hidden_states = capture;
+        stream->generateConfig()->reuse_cache           = false;
 
-    ASSERT_FALSE(stream->useChunkWindow());
-    ASSERT_EQ(stream->contextLength(), 10);
-
-    markRunning(stream);
-    expectChunkWindow(stream, /*prefix=*/0, /*length=*/8, /*is_last=*/false);
-
-    const int original_seq_len = stream->seqLength();
-    updateOneToken(stream, 101);
-    ASSERT_TRUE(stream->isContextStream());
-    ASSERT_EQ(stream->seqLength(), original_seq_len);
-    expectChunkWindow(stream, /*prefix=*/8, /*length=*/2, /*is_last=*/true);
-
-    updateOneToken(stream, 101);
-    ASSERT_FALSE(stream->isContextStream());
-    ASSERT_EQ(stream->seqLength(), original_seq_len + 1);
+        ASSERT_FALSE(stream->hasError());
+        EXPECT_FALSE(stream->isHiddenStateCaptureCandidate());
+        ASSERT_FALSE(stream->useChunkWindow());
+        ASSERT_EQ(stream->contextLength(), 10);
+        markRunning(stream);
+        expectChunkWindow(stream, /*prefix=*/0, /*length=*/8, /*is_last=*/false);
+        const int original_seq_len = stream->seqLength();
+        updateOneToken(stream, 101);
+        ASSERT_TRUE(stream->isContextStream());
+        ASSERT_EQ(stream->seqLength(), original_seq_len);
+        expectChunkWindow(stream, /*prefix=*/8, /*length=*/2, /*is_last=*/true);
+        updateOneToken(stream, 101);
+        ASSERT_FALSE(stream->isContextStream());
+        ASSERT_EQ(stream->seqLength(), original_seq_len + 1);
+        EXPECT_FALSE(stream->hasError());
+        EXPECT_FALSE(stream->isHiddenStateCaptureCandidate());
+    }
 }
 
 TEST_F(GenerateStreamTest, testChunkedPrefillMiddleChunkPropagatesWorkerError) {
@@ -1968,6 +2090,268 @@ TEST_F(GenerateStreamTest, testChunkedPrefillReturnsOnlyCommittedTokenProbabilit
     }
 }
 
+TEST_F(GenerateStreamTest, testCaptureIneligibleGenerationKeepsRequestAndCachePolicy) {
+    GenerateStreamBuilder builder;
+    struct TestCase {
+        const char*            name;
+        ChunkedInputConfigurer configure;
+    };
+    const TestCase cases[] = {
+        {"beams", [](GenerateInput&, GenerateConfig& c) { c.num_beams = 2; }},
+        {"variable-single-beam", [](GenerateInput&, GenerateConfig& c) { c.variable_num_beams = {1}; }},
+        {"variable-beams",
+         [](GenerateInput&, GenerateConfig& c) {
+             c.variable_num_beams = {1, 2};
+         }},
+        {"multi-return", [](GenerateInput&, GenerateConfig& c) { c.num_return_sequences = 2; }},
+        {"verify", [](GenerateInput&, GenerateConfig& c) { c.num_validate_token = 1; }},
+        {"fake-query", [](GenerateInput& i, GenerateConfig&) { i.fake_query = true; }},
+    };
+    for (const auto& test_case : cases) {
+        for (const bool reuse : {false, true}) {
+            SCOPED_TRACE(testing::Message() << test_case.name << " reuse=" << reuse);
+            auto stream = builder.createChunkedContextStream({1, 2, 3}, RoleType::PREFILL, 0, test_case.configure);
+            stream->generateConfig()->capture_hidden_states = true;
+            stream->generateConfig()->reuse_cache           = reuse;
+            const auto before                               = stream->generateConfig()->debugString();
+            EXPECT_NO_THROW(stream->generateConfig()->validatePrefillOnly());
+            ASSERT_FALSE(stream->hasError());
+            EXPECT_FALSE(stream->isHiddenStateCaptureCandidate());
+            EXPECT_EQ(stream->reuseCache(), reuse);
+            auto& resource                                           = stream->streamCacheResource();
+            resource.resource_context_.reuse_cache                   = true;
+            resource.resource_context_.ignore_request_cache_switches = false;
+            EXPECT_EQ(resource.reuseCache(), reuse);
+            EXPECT_EQ(stream->generateConfig()->debugString(), before);
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, testCaptureReservationIsNotCopiedAndCancelsOnceOnRelease) {
+    GenerateStreamBuilder builder;
+    auto                  stream        = builder.createContextStream({1, 2});
+    int                   cancellations = 0;
+    auto reservation = std::make_shared<HiddenStateCaptureReservation>([&]() noexcept { ++cancellations; });
+    stream->setHiddenStateCaptureReservation(reservation);
+    auto copied = std::make_shared<NormalGenerateStream>(*stream);
+    EXPECT_FALSE(copied->hasHiddenStateCaptureReservation());
+    EXPECT_TRUE(stream->hasHiddenStateCaptureReservation());
+    copied->releaseResource();
+    EXPECT_EQ(cancellations, 0);
+    stream->releaseResource();
+    stream->cancelHiddenStateCapture();
+    EXPECT_EQ(cancellations, 1);
+    EXPECT_FALSE(reservation->active());
+}
+
+TEST_F(GenerateStreamTest, testExplicitCaptureRequiresFirstFullPrompt) {
+    GenerateStreamBuilder builder;
+    builder.enableHiddenStateCapture();
+    const auto make_capture = [&](RoleType role) {
+        return builder.createChunkedContextStream({1, 2, 3}, role, 0, [](GenerateInput&, GenerateConfig& config) {
+            config.max_new_tokens        = 4;
+            config.capture_hidden_states = true;
+            config.reuse_cache           = false;
+        });
+    };
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        SCOPED_TRACE(static_cast<int>(role));
+        auto stream = make_capture(role);
+        ASSERT_FALSE(stream->hasError());
+        EXPECT_TRUE(stream->shouldCaptureHiddenStates());
+        EXPECT_TRUE(stream->requiresFullContextForCapture());
+        EXPECT_FALSE(stream->reuseCache());
+        EXPECT_EQ(stream->contextLength(), stream->inputLength());
+        EXPECT_EQ(stream->generateConfig()->max_new_tokens, 4);
+        markRunning(stream);
+        stream->step();
+        stream->setIsContextStream(false);
+        EXPECT_FALSE(stream->shouldCaptureHiddenStates());
+        // Even a later context fallback for the same request must not republish it.
+        stream->setIsContextStream(true);
+        EXPECT_FALSE(stream->shouldCaptureHiddenStates());
+    }
+    EXPECT_FALSE(make_capture(RoleType::DECODE)->shouldCaptureHiddenStates());
+
+    auto reused = make_capture(RoleType::PREFILL);
+    reused->setReuseLength(1);
+    EXPECT_FALSE(reused->shouldCaptureHiddenStates());
+    auto chunked = make_capture(RoleType::PREFILL);
+    chunked->setChunkSize(2);
+    EXPECT_FALSE(chunked->shouldCaptureHiddenStates());
+    auto fake = make_capture(RoleType::PREFILL);
+    fake->setIsFakeStream(true);
+    EXPECT_FALSE(fake->shouldCaptureHiddenStates());
+    auto fake_query                         = make_capture(RoleType::PREFILL);
+    fake_query->generateInput()->fake_query = true;
+    EXPECT_FALSE(fake_query->shouldCaptureHiddenStates());
+    auto failed = make_capture(RoleType::PREFILL);
+    failed->reportError(ErrorCode::EXECUTION_EXCEPTION, "existing error");
+    EXPECT_FALSE(failed->shouldCaptureHiddenStates());
+    auto verify = make_capture(RoleType::PREFILL);
+    verify->setScoreLen(2);
+    EXPECT_FALSE(verify->shouldCaptureHiddenStates());
+    auto validation                                  = make_capture(RoleType::PREFILL);
+    validation->generateConfig()->num_validate_token = 1;
+    EXPECT_FALSE(validation->shouldCaptureHiddenStates());
+    auto extended = make_capture(RoleType::PREFILL);
+    extended->setSeqLength(4);
+    EXPECT_FALSE(extended->shouldCaptureHiddenStates());
+}
+
+TEST_F(GenerateStreamTest, testExplicitCaptureSkipsConfiguredChunksWithoutRejectingServing) {
+    GenerateStreamBuilder builder;
+    builder.enableHiddenStateCapture();
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        for (const int64_t chunk_size : {2, 8}) {
+            SCOPED_TRACE(testing::Message() << "role=" << static_cast<int>(role) << " chunk=" << chunk_size);
+            auto stream = builder.createChunkedContextStream(
+                {1, 2, 3}, role, chunk_size, [](GenerateInput&, GenerateConfig& config) {
+                    config.max_new_tokens        = 4;
+                    config.capture_hidden_states = true;
+                    config.reuse_cache           = false;
+                });
+            ASSERT_FALSE(stream->hasError());
+            EXPECT_TRUE(stream->chunkedPrefillEnabled());
+            EXPECT_EQ(stream->curBlocksNum(), 0);
+            EXPECT_FALSE(stream->isHiddenStateCaptureCandidate());
+
+            auto fake = builder.createChunkedContextStream(
+                {1, 2, 3}, role, chunk_size, [](GenerateInput& input, GenerateConfig& config) {
+                    input.fake_query             = true;
+                    config.max_new_tokens        = 4;
+                    config.capture_hidden_states = true;
+                    config.reuse_cache           = false;
+                });
+            EXPECT_FALSE(fake->hasError());
+            EXPECT_FALSE(fake->chunkedPrefillEnabled());
+            EXPECT_FALSE(fake->shouldCaptureHiddenStates());
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, testHiddenStateCaptureRequiresFullPromptWithoutCacheReuse) {
+    GenerateStreamBuilder builder;
+    builder.enableHiddenStateCapture();
+    struct TestCase {
+        const char* name;
+        RoleType    role;
+        int         max_new_tokens;
+        bool        capture_hidden_states;
+        bool        reuse_cache;
+        bool        expected_full_context;
+        bool        expected_candidate;
+    };
+    const TestCase cases[] = {
+        {"generation-default", RoleType::PDFUSION, 1, false, true, false, false},
+        {"generation-no-reuse-without-capture", RoleType::PREFILL, 1, false, false, false, false},
+        {"generation-opt-in", RoleType::PDFUSION, 1, true, false, true, true},
+        {"prefill-generation-opt-in", RoleType::PREFILL, 1, true, false, true, true},
+        {"generation-reuse-conflict", RoleType::PREFILL, 1, true, true, false, false},
+        {"zero-token-legacy", RoleType::PREFILL, 0, false, true, true, true},
+        {"pdfusion-zero-token-legacy", RoleType::PDFUSION, 0, false, true, true, true},
+        {"zero-token-explicit-capture", RoleType::PREFILL, 0, true, false, true, true},
+        {"zero-token-explicit-reuse-conflict", RoleType::PREFILL, 0, true, true, true, false},
+        {"decode-opt-in", RoleType::DECODE, 1, true, false, false, false},
+        {"vit-opt-in", RoleType::VIT, 1, true, false, false, false},
+        {"frontend-opt-in", RoleType::FRONTEND, 1, true, false, false, false},
+    };
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        auto stream = builder.createChunkedContextStream({1, 2}, test_case.role, /*chunk_size=*/0);
+        ASSERT_FALSE(stream->generateConfig()->capture_hidden_states);
+        stream->generateConfig()->max_new_tokens        = test_case.max_new_tokens;
+        stream->generateConfig()->capture_hidden_states = test_case.capture_hidden_states;
+        stream->generateConfig()->reuse_cache           = test_case.reuse_cache;
+        ASSERT_FALSE(stream->hasError());
+        EXPECT_EQ(stream->requiresFullContextForHiddenStateCapture(), test_case.expected_full_context);
+        EXPECT_EQ(stream->isHiddenStateCaptureCandidate(), test_case.expected_candidate);
+        auto& resource                 = stream->streamCacheResource();
+        auto& deployment               = resource.resource_context_;
+        deployment.reuse_cache         = true;
+        deployment.enable_device_cache = true;
+        deployment.enable_memory_cache = true;
+        deployment.enable_disk_cache   = true;
+        deployment.enable_remote_cache = true;
+        for (const bool ignore_request_switches : {false, true}) {
+            SCOPED_TRACE(ignore_request_switches);
+            deployment.ignore_request_cache_switches = ignore_request_switches;
+            const bool expected_reuse                = test_case.max_new_tokens != 0 && !test_case.expected_full_context
+                                        && (ignore_request_switches || test_case.reuse_cache);
+            EXPECT_EQ(resource.reuseCache(), expected_reuse);
+            EXPECT_EQ(resource.enableCacheLookup(), expected_reuse);
+            EXPECT_EQ(resource.storeTarget(), expected_reuse ? Tier::DEVICE : Tier::NONE);
+        }
+        EXPECT_EQ(stream->generateConfig()->isPrefillOnly(), test_case.max_new_tokens == 0);
+        if (test_case.expected_candidate) {
+            stream->setReuseLength(1);
+            EXPECT_FALSE(stream->isHiddenStateCaptureCandidate());
+            stream->setReuseLength(0);
+            EXPECT_TRUE(stream->isHiddenStateCaptureCandidate());
+            stream->setIsContextStream(false);
+            EXPECT_FALSE(stream->isHiddenStateCaptureCandidate());
+            stream->setIsContextStream(true);
+            EXPECT_TRUE(stream->isHiddenStateCaptureCandidate());
+            stream->step();
+            EXPECT_FALSE(stream->isHiddenStateCaptureCandidate());
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, testLastWorkerReleaseCancelsCaptureAfterCallerDropsStream) {
+    GenerateStreamBuilder         builder;
+    auto                          stream      = builder.createContextStream({1, 2});
+    std::weak_ptr<GenerateStream> weak_stream = stream;
+    std::promise<void>            worker_ready;
+    std::promise<void>            release_worker;
+    std::promise<void>            callback_entered;
+    std::promise<void>            release_callback;
+    auto                          worker_ready_future     = worker_ready.get_future();
+    auto                          callback_entered_future = callback_entered.get_future();
+    auto                          release_callback_future = release_callback.get_future();
+    std::atomic<int>              cancellation_count{0};
+    std::atomic<bool>             callback_resumed{false};
+    std::thread::id               cancellation_thread;
+    auto                          reservation = std::make_shared<HiddenStateCaptureReservation>([&]() noexcept {
+        ++cancellation_count;
+        cancellation_thread = std::this_thread::get_id();
+        callback_entered.set_value();
+        callback_resumed = release_callback_future.wait_for(std::chrono::seconds(30)) == std::future_status::ready;
+    });
+    stream->setHiddenStateCaptureReservation(reservation);
+    stream->incPendingAsyncBookkeeping();
+    stream->markDeferredRelease();
+    std::thread worker([stream, &worker_ready, ready = release_worker.get_future()]() mutable {
+        worker_ready.set_value();
+        ready.wait();
+        stream->decPendingAsyncBookkeepingAndMaybeRelease();
+        EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+        EXPECT_FALSE(stream->isDeferredReleasePending());
+    });
+    const auto  worker_id = worker.get_id();
+    EXPECT_EQ(worker_ready_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    stream.reset();
+    EXPECT_FALSE(weak_stream.expired());
+    release_worker.set_value();
+    const auto entered = callback_entered_future.wait_for(std::chrono::seconds(5));
+    EXPECT_EQ(entered, std::future_status::ready);
+
+    // cancel() must release the token lock before invoking the callback: a
+    // second caller can finish while the worker callback is still blocked.
+    auto repeated_cancel = std::async(std::launch::async, [reservation] { reservation->cancel(); });
+    EXPECT_EQ(repeated_cancel.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    release_callback.set_value();
+    worker.join();
+    repeated_cancel.get();
+    EXPECT_TRUE(callback_resumed.load());
+    EXPECT_EQ(cancellation_count.load(), 1);
+    EXPECT_EQ(cancellation_thread, worker_id);
+    EXPECT_FALSE(reservation->active());
+    EXPECT_TRUE(weak_stream.expired());
+    reservation.reset();
+    EXPECT_EQ(cancellation_count.load(), 1);
+}
+
 TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
     GenerateStreamBuilder builder;
     const auto            input_ids = makeInputIds(9);
@@ -1996,24 +2380,36 @@ TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
     capture_builder.enableHiddenStateCapture();
     for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
         auto capture_prefill_only = capture_builder.createChunkedContextStream(
-            input_ids, role, /*chunk_size=*/8,
-            [](GenerateInput&, GenerateConfig& config) { config.max_new_tokens = 0; });
-        EXPECT_TRUE(capture_prefill_only->hasError());
-        EXPECT_EQ(capture_prefill_only->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+            input_ids, role, /*chunk_size=*/8, [](GenerateInput&, GenerateConfig& config) {
+                config.max_new_tokens = 0;
+            });
+        EXPECT_FALSE(capture_prefill_only->hasError());
         EXPECT_EQ(capture_prefill_only->curBlocksNum(), 0);
-        EXPECT_FALSE(capture_prefill_only->chunkedPrefillEnabled());
-        EXPECT_EQ(capture_prefill_only->stopReason(), "chunked prefill incompatible: hidden_state_capture");
+        EXPECT_TRUE(capture_prefill_only->chunkedPrefillEnabled());
+        EXPECT_FALSE(capture_prefill_only->isHiddenStateCaptureCandidate());
+
+        auto capture_generation = capture_builder.createChunkedContextStream(
+            input_ids, role, /*chunk_size=*/8, [](GenerateInput&, GenerateConfig& config) {
+                config.max_new_tokens        = 1;
+                config.capture_hidden_states = true;
+                config.reuse_cache           = false;
+            });
+        EXPECT_FALSE(capture_generation->hasError());
+        EXPECT_EQ(capture_generation->curBlocksNum(), 0);
+        EXPECT_TRUE(capture_generation->chunkedPrefillEnabled());
+        EXPECT_FALSE(capture_generation->isHiddenStateCaptureCandidate());
     }
 
     auto non_chunked_prefill_only = capture_builder.createChunkedContextStream(
-        input_ids, RoleType::PREFILL, /*chunk_size=*/0,
-        [](GenerateInput&, GenerateConfig& config) { config.max_new_tokens = 0; });
+        input_ids, RoleType::PREFILL, /*chunk_size=*/0, [](GenerateInput&, GenerateConfig& config) {
+            config.max_new_tokens = 0;
+        });
     EXPECT_FALSE(non_chunked_prefill_only->hasError());
     EXPECT_FALSE(non_chunked_prefill_only->chunkedPrefillEnabled());
+    EXPECT_TRUE(non_chunked_prefill_only->isHiddenStateCaptureCandidate());
 
     auto fake_prefill_only = capture_builder.createChunkedContextStream(
-        input_ids, RoleType::PREFILL, /*chunk_size=*/8,
-        [](GenerateInput& input, GenerateConfig& config) {
+        input_ids, RoleType::PREFILL, /*chunk_size=*/8, [](GenerateInput& input, GenerateConfig& config) {
             input.fake_query      = true;
             config.max_new_tokens = 0;
         });

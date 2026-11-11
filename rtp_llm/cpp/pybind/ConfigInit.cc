@@ -2081,6 +2081,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("hidden_size", &ModelConfig::hidden_size)
         .def_readwrite("hidden_state_capture_layer_ids", &ModelConfig::hidden_state_capture_layer_ids)
         .def_readwrite("hidden_state_capture_dtype", &ModelConfig::hidden_state_capture_dtype)
+        .def_readwrite("hidden_state_capture_max_inflight_samples",
+                       &ModelConfig::hidden_state_capture_max_inflight_samples)
+        .def_readwrite("hidden_state_capture_max_inflight_bytes", &ModelConfig::hidden_state_capture_max_inflight_bytes)
+        .def_readwrite("hidden_state_capture_max_inflight_tokens",
+                       &ModelConfig::hidden_state_capture_max_inflight_tokens)
+        .def_readwrite("hidden_state_capture_max_pending_batches",
+                       &ModelConfig::hidden_state_capture_max_pending_batches)
+        .def_readwrite("hidden_state_capture_poll_interval_ms", &ModelConfig::hidden_state_capture_poll_interval_ms)
         .def_readwrite("attn_config", &ModelConfig::attn_config)
         .def_readwrite("linear_attention_config", &ModelConfig::linear_attention_config)
         .def_readwrite("hybrid_attention_config", &ModelConfig::hybrid_attention_config)

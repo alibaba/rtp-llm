@@ -97,6 +97,13 @@ public:
         engine_ = engine;
     }
 
+    EngineScheduleInfo getEngineScheduleInfo(int64_t version) override {
+        requested_finished_version = version;
+        return schedule_info;
+    }
+
+    EngineScheduleInfo schedule_info{};
+    int64_t            requested_finished_version{-1};
     std::atomic<bool> cancelled{false};
 
 protected:
@@ -192,6 +199,107 @@ public:
 private:
     EngineFailureMode mode_;
 };
+
+class HealthTestEngine: public FailingEngine {
+public:
+    HealthTestEngine(): FailingEngine(EngineFailureMode::REJECT_ALL) {}
+
+    ErrorInfo checkHealth() const override {
+        return health;
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t version, bool need_keys) override {
+        EXPECT_EQ(version, -1);
+        EXPECT_FALSE(need_keys);
+        KVCacheInfo info;
+        info.available_kv_cache = 123;
+        info.total_kv_cache     = 456;
+        return info;
+    }
+    ErrorInfo health;
+};
+
+TEST(LocalRpcServerTest, DefaultEngineHealthKeepsSuccessfulCheckHealthProtocol) {
+    TestLocalRpcServer server;
+    auto               engine = std::make_shared<FailingEngine>(EngineFailureMode::REJECT_ALL);
+    ASSERT_TRUE(engine->checkHealth().ok());
+    server.setEngineForTest(engine);
+    grpc::ServerContext   context;
+    EmptyPB               request;
+    CheckHealthResponsePB response;
+    EXPECT_TRUE(server.CheckHealth(&context, &request, &response).ok());
+    EXPECT_EQ(response.health(), "OK");
+}
+
+TEST(LocalRpcServerTest, UnhealthyCheckHealthReturnsUnavailableWithDomainDetails) {
+    TestLocalRpcServer server;
+    auto               engine = std::make_shared<HealthTestEngine>();
+    engine->health            = ErrorInfo(ErrorCode::SERVICE_UNHEALTHY, "serving device unavailable");
+    server.setEngineForTest(engine);
+    grpc::ServerContext   context;
+    EmptyPB               request;
+    CheckHealthResponsePB response;
+    const auto            status = server.CheckHealth(&context, &request, &response);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
+    EXPECT_NE(response.health(), "OK");
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(status.error_details()));
+    EXPECT_EQ(details.error_code(), static_cast<int>(ErrorCode::SERVICE_UNHEALTHY));
+    EXPECT_EQ(details.error_message(), "serving device unavailable");
+}
+
+TEST(LocalRpcServerTest, UnhealthyWorkerStatusPreservesTasksVersionsAndCapacity) {
+    TestLocalRpcServer server;
+    auto               engine = std::make_shared<HealthTestEngine>();
+    server.setEngineForTest(engine);
+    EngineScheduleInfo::TaskInfo task{};
+    task.request_id   = 101;
+    task.batch_id     = 77;
+    task.input_length = 31;
+    task.phase        = rtp_llm::TaskPhase::RUNNING;
+    server.schedule_info.running_task_info_list.push_back(task);
+    task.request_id    = 102;
+    task.error_code    = static_cast<int>(ErrorCode::SERVICE_UNHEALTHY);
+    task.error_message = "admission rejected";
+    server.schedule_info.finished_task_info_list.push_back(task);
+    server.schedule_info.latest_finished_version = 91;
+    StatusVersionPB request;
+    request.set_latest_finished_version(90);
+    grpc::ServerContext context;
+    WorkerStatusPB      healthy;
+    ASSERT_TRUE(server.GetWorkerStatus(&context, &request, &healthy).ok());
+    ASSERT_TRUE(healthy.alive());
+    ASSERT_EQ(healthy.running_task_info_size(), 1);
+    ASSERT_EQ(healthy.finished_task_list_size(), 1);
+    EXPECT_EQ(healthy.running_task_info(0).request_id(), 101);
+    EXPECT_EQ(healthy.finished_task_list(0).request_id(), 102);
+    EXPECT_EQ(healthy.latest_finished_version(), 91);
+    EXPECT_EQ(healthy.available_kv_cache(), 123);
+    EXPECT_EQ(healthy.total_kv_cache(), 456);
+    EXPECT_GT(healthy.status_version(), 0);
+    engine->health = ErrorInfo(ErrorCode::SERVICE_UNHEALTHY, "serving device unavailable");
+    WorkerStatusPB unhealthy;
+    ASSERT_TRUE(server.GetWorkerStatus(&context, &request, &unhealthy).ok());
+    EXPECT_FALSE(unhealthy.alive());
+    EXPECT_EQ(server.requested_finished_version, 90);
+    EXPECT_GE(unhealthy.status_version(), healthy.status_version());
+    // Normalize only the two fields allowed to change; all other wire fields must survive.
+    unhealthy.set_alive(true);
+    unhealthy.set_status_version(healthy.status_version());
+    EXPECT_EQ(unhealthy.SerializeAsString(), healthy.SerializeAsString());
+}
+
+TEST(LocalRpcServerTest, ServiceUnhealthyErrorCodeRoundTripsWithoutExecutionException) {
+    const auto wire = transErrorCodeToRPC(ErrorCode::SERVICE_UNHEALTHY);
+    EXPECT_EQ(wire, ErrorCodePB::SERVICE_UNHEALTHY);
+    EXPECT_EQ(static_cast<int>(wire), 28);
+    RpcErrorPB error;
+    error.set_error_code(wire);
+    error.set_error_message("health admission rejection");
+    RpcErrorPB decoded;
+    ASSERT_TRUE(decoded.ParseFromString(error.SerializeAsString()));
+    EXPECT_EQ(transRPCErrorCode(decoded.error_code()), ErrorCode::SERVICE_UNHEALTHY);
+    EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::SERVICE_UNHEALTHY), grpc::StatusCode::UNAVAILABLE);
+}
 
 class RecordingWriter: public LocalRpcServer::WriterInterface {
 public:
@@ -726,6 +834,30 @@ TEST(LocalRpcServerTest, BatchGenerateCallReturnsTerminalErrorForRejectedEnqueue
         ASSERT_TRUE(result.has_error_info());
         EXPECT_EQ(result.error_info().error_code(), ErrorCodePB::EXECUTION_EXCEPTION);
         EXPECT_THAT(result.error_info().error_message(), HasSubstr("rejected input at index " + std::to_string(i)));
+    }
+}
+
+TEST(LocalRpcServerTest, BatchHealthRejectionPreservesCardinalityOrderAndWireCode) {
+    TestLocalRpcServer   server;
+    auto                 engine = std::make_shared<FailingEngine>(EngineFailureMode::REJECT_ALL);
+    BatchGenerateInputPB request;
+    for (int i = 0; i < 3; ++i) {
+        request.add_inputs()->add_token_ids(i);
+        auto stream = createMockStream();
+        stream->reportError(ErrorCode::SERVICE_UNHEALTHY, "health reject item " + std::to_string(i));
+        EXPECT_CALL(*stream, nextOutput(_)).Times(0);
+        engine->streams.push_back(stream);
+    }
+    server.setEngineForTest(engine);
+    BatchGenerateOutputsPB response;
+    grpc::ServerContext    context;
+    ASSERT_TRUE(server.BatchGenerateCall(&context, &request, &response).ok());
+    ASSERT_EQ(response.results_size(), 3);
+    for (int i = 0; i < response.results_size(); ++i) {
+        ASSERT_TRUE(response.results(i).has_error_info());
+        EXPECT_EQ(response.results(i).error_info().error_code(), ErrorCodePB::SERVICE_UNHEALTHY);
+        EXPECT_EQ(response.results(i).error_info().error_message(), "health reject item " + std::to_string(i));
+        EXPECT_FALSE(response.results(i).has_final_output());
     }
 }
 

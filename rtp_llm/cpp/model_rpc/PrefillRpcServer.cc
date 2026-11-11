@@ -247,9 +247,9 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
 }
 
 void PrefillRpcServer::setContextError(PrefillGenerateContext& prefill_context, const ErrorInfo& error_info) {
-    prefill_context.error_info = error_info;
-    prefill_context.error_status =
-        serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, error_info);
+    setContextError(prefill_context,
+                    error_info,
+                    serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, error_info));
 }
 
 void PrefillRpcServer::setContextError(PrefillGenerateContext& prefill_context,
@@ -257,6 +257,11 @@ void PrefillRpcServer::setContextError(PrefillGenerateContext& prefill_context,
                                        const grpc::Status&     error_status) {
     prefill_context.error_info   = error_info;
     prefill_context.error_status = error_status;
+    // A structured local or downstream health rejection cannot recover by reallocating on this attempt.
+    // Transport UNAVAILABLE without this domain code keeps its existing retry policy.
+    if (error_info.code() == ErrorCode::SERVICE_UNHEALTHY) {
+        prefill_context.setRetryable(false);
+    }
 }
 
 void PrefillRpcServer::prepareGenerateInput(PrefillGenerateContext& prefill_context) {
@@ -516,6 +521,15 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", prefill_context.request_id);
     auto stream = engine_->enqueue(prefill_context.generate_input);
     prefill_context.setStream(stream);
+    if (stream && stream->hasError() && stream->statusInfo().code() == ErrorCode::SERVICE_UNHEALTHY) {
+        // Health rejection happens before scheduler ownership, including after remote prepare.
+        prefill_context.setLocalStreamSchedulerOwned(false);
+        stream->moveToNext();
+        stream->releaseResource();
+        setContextError(prefill_context, stream->statusInfo());
+        prefill_context.setRetryable(false);
+        return;
+    }
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", prefill_context.request_id);
 }
 
@@ -776,8 +790,24 @@ void PrefillRpcServer::mergeMultimodalLengths(GenerateOutputsPB&        response
 }
 
 grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& prefill_context) {
+    const auto reject_unhealthy = [&] {
+        const auto health = engine_->checkHealth();
+        if (health.ok()) {
+            return false;
+        }
+        setContextError(prefill_context, health);
+        prefill_context.setRetryable(false);
+        return true;
+    };
+    if (reject_unhealthy()) {
+        return prefill_context.error_status;
+    }
     EXECUTE_STAGE_FUNC(getRpcConnection, prefill_context);
     EXECUTE_STAGE_FUNC(multimodalProcess, prefill_context);
+    // Connection readiness and multimodal preparation can outlive the initial health check.
+    if (reject_unhealthy()) {
+        return prefill_context.error_status;
+    }
     EXECUTE_STAGE_FUNC(remoteAllocateResource, prefill_context);
     return grpc::Status::OK;
 }

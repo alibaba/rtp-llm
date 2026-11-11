@@ -43,6 +43,14 @@
 
 namespace rtp_llm {
 
+ServingDeviceHealthPtr MtpExecutor::servingDeviceHealth() const {
+    return model_ ? model_->servingDeviceHealth() : nullptr;
+}
+
+HiddenStateCaptureReservationPtr MtpExecutor::tryReserveHiddenStateCapture(int64_t request_id, int64_t valid_tokens) {
+    return model_ ? model_->tryReserveHiddenStateCapture(request_id, valid_tokens) : nullptr;
+}
+
 void MtpExecutor::recordSmokeForward(const char* event, const GptModelInputs& inputs,
                                      const StreamGroups* streams, bool prefill) {
     static const bool enabled = [] {
@@ -912,7 +920,17 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     model_init_params.metrics_reporter = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         HiddenStateCaptureModelRole::TARGET, role_type_, warm_up_, params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_max_inflight_samples =
+        params.model_config_.hidden_state_capture_max_inflight_samples;
+    model_init_params.hidden_state_capture_max_inflight_bytes =
+        params.model_config_.hidden_state_capture_max_inflight_bytes;
+    model_init_params.hidden_state_capture_max_inflight_tokens =
+        params.model_config_.hidden_state_capture_max_inflight_tokens;
+    model_init_params.hidden_state_capture_max_pending_batches =
+        params.model_config_.hidden_state_capture_max_pending_batches;
+    model_init_params.hidden_state_capture_poll_interval_ms =
+        params.model_config_.hidden_state_capture_poll_interval_ms;
 #if USING_CUDA || USING_ROCM
     const size_t max_reserved_step = params.sp_config.speculativeReserveStep();
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
@@ -992,7 +1010,17 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                              role_type_,
                                              warm_up_,
                                              mtp_params->model_config_.hidden_state_capture_layer_ids);
-        model_params.hidden_state_capture_dtype     = mtp_params->model_config_.hidden_state_capture_dtype;
+        model_params.hidden_state_capture_dtype = mtp_params->model_config_.hidden_state_capture_dtype;
+        model_params.hidden_state_capture_max_inflight_samples =
+            mtp_params->model_config_.hidden_state_capture_max_inflight_samples;
+        model_params.hidden_state_capture_max_inflight_bytes =
+            mtp_params->model_config_.hidden_state_capture_max_inflight_bytes;
+        model_params.hidden_state_capture_max_inflight_tokens =
+            mtp_params->model_config_.hidden_state_capture_max_inflight_tokens;
+        model_params.hidden_state_capture_max_pending_batches =
+            mtp_params->model_config_.hidden_state_capture_max_pending_batches;
+        model_params.hidden_state_capture_poll_interval_ms =
+            mtp_params->model_config_.hidden_state_capture_poll_interval_ms;
 #if USING_CUDA || USING_ROCM
         if (params.hw_kernel_config.enable_cuda_graph && model_params.kv_cache_layer_layout.has_value()) {
             const auto& topology = model_params.kv_cache_layer_layout->topology();
@@ -1305,15 +1333,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         }
         cudaSyncAndCheck();
         releaseAllModelBuffers();
-        if (auto deferred_capture_error = model_->takeDeferredHiddenStateCaptureError();
-            deferred_capture_error.has_value()) {
-            for (const auto& stream : streams) {
-                if (!stream->hasError()) {
-                    stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *deferred_capture_error);
-                }
-            }
-            return absl::OkStatus();
-        }
+
         if (isTpRank0()) {
             return batch_stream_processor_->dispatchPrefillOnly(stream_groups);
         }
@@ -1413,24 +1433,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (!dspark_cache_store_ok || alignment_only) {
         cudaSyncAndCheck();
         releaseAllModelBuffers();
-        return absl::OkStatus();
-    }
-
-    // Do not consume the target publisher error until every required draft/FFN/DP
-    // alignment forward has completed. If alignment itself fails, the publisher's
-    // sticky fail-closed state preserves the capture error for the next request.
-    if (auto deferred_capture_error = model_->takeDeferredHiddenStateCaptureError();
-        deferred_capture_error.has_value()) {
-        if (metrics_reporter_) {
-            collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
-        }
-        cudaSyncAndCheck();
-        releaseAllModelBuffers();
-        for (const auto& stream : streams) {
-            if (!stream->hasError()) {
-                stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *deferred_capture_error);
-            }
-        }
         return absl::OkStatus();
     }
 

@@ -477,6 +477,17 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     auto generate_stream        = engine_->makeStream(input);
     decode_context.setRequestTimeoutMs(generate_stream->getTimeoutMs());
     decode_context.setStream(generate_stream);
+    if (generate_stream->hasError()) {
+        // makeStream rejected before KV allocation or scheduler ownership.
+        // Finish locally so teardown never waits for an engine tick that cannot arrive.
+        decode_context.error_info = generate_stream->statusInfo();
+        generate_stream->moveToNext();
+        generate_stream->releaseResource();
+        decode_context.error_status =
+            serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
+        decode_context.setRetryable(false);
+        return;
+    }
 
     auto cache_manager = engine_->getCacheManager();
     RTP_LLM_CHECK_WITH_INFO(cache_manager != nullptr, "decode cache manager is null");
@@ -707,6 +718,20 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
             serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
         return;
     }
+    const auto health = engine_->checkHealth();
+    if (!health.ok()) {
+        // P/D handoff is not scheduler admission. Reject before MTP device-state initialization.
+        if (!generate_stream->hasError()) {
+            generate_stream->reportError(health.code(), health.ToString());
+        }
+        decode_context.error_info = generate_stream->statusInfo();
+        generate_stream->moveToNext();
+        generate_stream->releaseResource();
+        decode_context.setRetryable(false);
+        decode_context.error_status =
+            serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
+        return;
+    }
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);
     generate_stream->step();
@@ -817,7 +842,15 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     RTP_LLM_LOG_DEBUG(
         "decode init stream[%s]: %s", generate_stream->streamLogTag().c_str(), generate_stream->debugString().c_str());
     engine_->enqueue(generate_stream);
-    RTP_LLM_LOG_DEBUG("request [%s] enqueue success", decode_context.request_key.c_str());
+    if (generate_stream->hasError() && generate_stream->statusInfo().code() == ErrorCode::SERVICE_UNHEALTHY) {
+        // Final admission can reject after P/D has already allocated/loaded KV.
+        // This stream was never scheduled; finish locally and retain the health cause.
+        decode_context.error_info = generate_stream->statusInfo();
+        generate_stream->moveToNext();
+        generate_stream->releaseResource();
+        decode_context.setRetryable(false);
+    }
+    RTP_LLM_LOG_DEBUG("request [%s] enqueue completed", decode_context.request_key.c_str());
     decode_context.error_status =
         pollStreamOutput(decode_context.server_context,
                          decode_context.request_key,

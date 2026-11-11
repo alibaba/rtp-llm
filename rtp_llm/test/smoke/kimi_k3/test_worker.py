@@ -230,6 +230,110 @@ class NativePdSmokeTest(unittest.TestCase):
             self.assertTrue(evidence["allow_shared_accuracy"])
             self.assertFalse(evidence["performance_validated"])
 
+    def test_native_prepare_rejects_endpoint_overrides_before_runtime_ipc_gpu_or_launch(
+        self,
+    ):
+        for endpoint in ("prefill", "decode"):
+            for key, value in (
+                ("prefill_chunk_size", 0),
+                ("prefill_chunk_size", None),
+                ("torchspec_env", {}),
+                ("torchspec_env", {"MOONCAKE_PROTOCOL": "tcp"}),
+            ):
+                for local_role in ("prefill", "decode"):
+                    with self.subTest(
+                        endpoint=endpoint, key=key, value=value, local_role=local_role
+                    ):
+                        item = config()
+                        item[endpoint][key] = value
+                        role = worker.Worker(threading.Event())
+                        with contextlib.ExitStack() as stack:
+                            stack.enter_context(
+                                patch.object(worker.os, "geteuid", return_value=1001)
+                            )
+                            checks = [
+                                stack.enter_context(patch.object(owner, name))
+                                for owner, name in (
+                                    (role, "_prepare_runtime"),
+                                    (role, "_create_socket_directory"),
+                                    (role, "_create_runtime_tmp_directory"),
+                                    (role, "_lock_gpus"),
+                                    (worker.subprocess, "Popen"),
+                                )
+                            ]
+                            with self.assertRaisesRegex(
+                                ValueError, "only by server_launcher / SSH two-host"
+                            ) as error:
+                                role.prepare_native(item, local_role, "k3-pd-test001")
+                            self.assertIn(f"{endpoint}.{key}", str(error.exception))
+                            for check in checks:
+                                check.assert_not_called()
+                        self.assertIsNone(role.config)
+                        self.assertIsNone(role.task)
+                        self.assertIsNone(role.socket_dir)
+                        self.assertIsNone(role.runtime_tmp_dir)
+                        self.assertIsNone(role.service)
+                        role.close()
+
+    def test_native_prepare_default_flow_delegates_unchanged(self):
+        for local_role in ("prefill", "decode"):
+            with self.subTest(local_role=local_role):
+                item = config()
+                role = worker.Worker(threading.Event())
+                result = object()
+                with patch.object(
+                    worker.os, "geteuid", return_value=1001
+                ), patch.object(
+                    role, "_prepare_runtime", return_value=result
+                ) as prepare:
+                    self.assertIs(
+                        role.prepare_native(item, local_role, "k3-pd-test001"), result
+                    )
+                prepare.assert_called_once_with(item, local_role, "k3-pd-test001")
+                role.close()
+
+    def test_native_start_rejects_endpoint_overrides_before_ipc_gpu_or_launch(self):
+        for endpoint in ("prefill", "decode"):
+            for key, value in (
+                ("prefill_chunk_size", 0),
+                ("prefill_chunk_size", None),
+                ("torchspec_env", {}),
+                ("torchspec_env", {"MOONCAKE_PROTOCOL": "tcp"}),
+            ):
+                for local_role in ("prefill", "decode"):
+                    with self.subTest(
+                        endpoint=endpoint, key=key, value=value, local_role=local_role
+                    ):
+                        item = config()
+                        item[endpoint][key] = value
+                        role = worker.Worker(threading.Event())
+                        role.config, role.role, role.host = (
+                            item,
+                            local_role,
+                            item[local_role],
+                        )
+                        with contextlib.ExitStack() as stack:
+                            checks = [
+                                stack.enter_context(patch.object(owner, name))
+                                for owner, name in (
+                                    (worker, "cpu_tp_socket_environment"),
+                                    (worker, "runtime_tmp_environment"),
+                                    (role, "_capture_gpu_baseline"),
+                                    (role, "_lock_gpus"),
+                                    (worker.subprocess, "Popen"),
+                                )
+                            ]
+                            with self.assertRaisesRegex(
+                                ValueError, "only by server_launcher / SSH two-host"
+                            ) as error:
+                                role.start()
+                            self.assertIn(f"{endpoint}.{key}", str(error.exception))
+                            for check in checks:
+                                check.assert_not_called()
+                        self.assertIsNone(role.console)
+                        self.assertIsNone(role.service)
+                        role.close()
+
     def test_role_launch_preserves_optimized_profile_and_eight_gpu_environment(self):
         item = config()
         item.update(fp8_gemm=True, fp8_kv_cache=True, moe_strategy="mega_moe_se")

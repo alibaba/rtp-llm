@@ -342,7 +342,7 @@ def forward_layers(
     attention_inputs: Any = None,
     prepare_hidden_fn: Optional[Any] = None,
     capture_context: Optional[Any] = None,
-) -> torch.Tensor:
+) -> torch.Tensor | PyModelOutputs:
     """Flat per-layer loop — vLLM-aligned layout.
 
     Shapes:
@@ -351,6 +351,7 @@ def forward_layers(
       * ``cu_seqlens``  ``[B+1]``        — per-request cumulative-token prefix sum
       * ``hidden``      ``[T_total, hc, dim]`` — internal, flat in the token axis
       * returns         ``[T_total, dim]`` — pre-lm-head, engine applies lm_head
+        (capture-enabled forwards return PyModelOutputs with separate side fields)
 
     The ``B`` axis is collapsed out of ``input_ids`` / ``hidden`` entirely,
     matching vLLM's ``DeepseekV4`` (``deepseek_v4.py:1310-1317``). Per-request
@@ -807,7 +808,7 @@ def forward_layers(
     # borrow it. No explicit reset needed — the per-layer ``common.workspace``
     # references were cleared by ``clear_prefill_meta_shared_fp8`` above.
     if capture_context is not None and capture_context.enabled:
-        return capture_context.finalize(h).hidden_states
+        return capture_context.finalize(h)
     return h  # [T, dim]
 
 
@@ -942,5 +943,7 @@ def forward_prefill(
         attention_inputs=attn_inputs,
         prepare_hidden_fn=prepare_hidden_fn,
         capture_context=capture_context,
-    )  # [T_total, dim] or [T_total, (num_capture_layers + 1) * dim]
+    )
+    if isinstance(hidden, PyModelOutputs):
+        return hidden
     return PyModelOutputs(hidden)
