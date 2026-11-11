@@ -115,6 +115,11 @@ def _fp4_group_dequant_bf16(
     whole group at once: the decode graph then contains one gather /
     scale / multiply per linear instead of a Python per-expert loop.
     """
+    if weight.dim() != 2:
+        # The strategy passes a group slice [G, out, in/2]; flatten experts
+        # into rows for the row-wise FP4 unpack and reshape back by shape.
+        weight = weight.reshape(-1, weight.shape[-1])
+        scale = scale.reshape(-1, scale.shape[-1])
     rows, packed = weight.shape
     in_dim = packed * 2
     wb = weight.view(torch.uint8)
