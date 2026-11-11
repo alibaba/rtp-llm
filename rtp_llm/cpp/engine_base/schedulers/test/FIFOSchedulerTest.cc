@@ -1453,6 +1453,7 @@ TEST_F(FIFOSchedulerTest, testFIFOAsyncLoadAdmissionStillSelectsExecutionMode) {
     generation->generateConfig()->reuse_cache         = true;
     generation->generateConfig()->enable_memory_cache = true;
     auto prefill_only = makeStream({3, 4}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+    prefill_only->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds() - 1);
     ASSERT_TRUE(enqueueIndividually(scheduler, {generation, prefill_only}));
     auto loading = scheduler.schedule();
     ASSERT_TRUE(loading.ok());
@@ -1463,7 +1464,7 @@ TEST_F(FIFOSchedulerTest, testFIFOAsyncLoadAdmissionStillSelectsExecutionMode) {
     EXPECT_FALSE(prefill_only->hasEvent(StreamEvents::CanRun));
     EXPECT_EQ(prefill_only->curBlocksNum(), 0);
 
-    // Successful load admission owns the first round's mode, not the next round's queue order.
+    // After requeue, the earlier-timestamped waiter selects the next round's mode.
     ASSERT_TRUE(load_context->settle(true));
     auto prefill = scheduler.schedule();
     ASSERT_TRUE(prefill.ok());
@@ -1551,6 +1552,7 @@ TEST_F(FIFOSchedulerTest, testFIFORetryableKVShortageDoesNotBlockLoadedOppositeM
 
     // A fits alone but cannot allocate its three blocks until B releases its two blocks.
     auto prefill_only = makeStream({3, 4, 5}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+    prefill_only->recordSchedulerEnqueueTime(generation->schedulerEnqueueTimeUs() - 1);
     ASSERT_TRUE(scheduler.enqueue(prefill_only).ok());
     auto blocked = scheduler.schedule();
     ASSERT_TRUE(blocked.ok());
@@ -1564,7 +1566,7 @@ TEST_F(FIFOSchedulerTest, testFIFORetryableKVShortageDoesNotBlockLoadedOppositeM
     ASSERT_EQ(scheduler.waiting_streams_.size(), 1);
     ASSERT_EQ(scheduler.waiting_streams_.front(), prefill_only);
 
-    // The real loading transition appends B to waiting [A, B]. A's retryable failure must not lock the mode.
+    // The real loading transition returns B to waiting [A, B]. A's retryable failure must not lock the mode.
     ASSERT_TRUE(load_context->settle(true));
     auto ready = scheduler.schedule();
     ASSERT_TRUE(ready.ok());
@@ -1615,6 +1617,7 @@ TEST_F(FIFOSchedulerTest, testPDFusionLoadedOppositeModeWaitsForItsOwnPrefillRou
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
 
     auto prefill_only = makeStream({3, 4}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+    prefill_only->recordSchedulerEnqueueTime(generation->schedulerEnqueueTimeUs() - 1);
     ASSERT_TRUE(scheduler.enqueue(prefill_only).ok());
     ASSERT_EQ(scheduler.waiting_streams_.size(), 1);
     ASSERT_EQ(scheduler.waiting_streams_.front(), prefill_only);
@@ -1733,6 +1736,7 @@ TEST_F(FIFOSchedulerTest, testPDFusionCompletedLoadRespectsTokenAdmission) {
 
         auto first                           = makeStream({3, 4}, model_config, runtime_config, resource_context);
         first->generateConfig()->reuse_cache = false;
+        first->recordSchedulerEnqueueTime(loaded->schedulerEnqueueTimeUs() - 1);
         ASSERT_TRUE(scheduler.enqueue(first).ok());
         ASSERT_TRUE(load_context->settle(true));
         auto result = scheduler.schedule();
@@ -1793,6 +1797,8 @@ TEST_F(FIFOSchedulerTest, testPDFusionReapsTimedOutLoadedWaiterRejectedByAdmissi
         auto      second = makeStream({5, 6}, model_config, runtime_config, resource_context, waiter_max_new_tokens);
         first->generateConfig()->reuse_cache  = false;
         second->generateConfig()->reuse_cache = false;
+        first->recordSchedulerEnqueueTime(loaded->schedulerEnqueueTimeUs() - 2);
+        second->recordSchedulerEnqueueTime(loaded->schedulerEnqueueTimeUs() - 1);
         ASSERT_TRUE(enqueueIndividually(scheduler, {first, second}));
         ASSERT_TRUE(load_context->settle(true));
         auto selected = scheduler.schedule();

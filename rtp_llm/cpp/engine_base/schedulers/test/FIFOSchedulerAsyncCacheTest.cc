@@ -512,13 +512,15 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorPending_St
     EXPECT_EQ(free_calls_, 0);
 }
 
-TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleOrdering_LoadDoneRejoinsWaitingTail) {
+TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleOrdering_LoadDoneRestoresEnqueueOrder) {
     auto scheduler        = createScheduler(/*max_generate_batch_size=*/1);
     auto completed_stream = createStream({1, 2}, /*reuse_cache=*/true);
-    auto older_waiter     = createStream({3, 4}, /*reuse_cache=*/false);
+    auto later_waiter     = createStream({3, 4}, /*reuse_cache=*/false);
     auto context          = makeControlledAllocatorContext();
+    completed_stream->recordSchedulerEnqueueTime(1);
+    later_waiter->recordSchedulerEnqueueTime(2);
     ASSERT_TRUE(scheduler->enqueue(completed_stream).ok());
-    ASSERT_TRUE(scheduler->enqueue(older_waiter).ok());
+    ASSERT_TRUE(scheduler->enqueue(later_waiter).ok());
     installReadinessAllocator([context, completed_stream](const MallocInfo& info) {
         return info.request_id == completed_stream->streamId() ? context : nullptr;
     });
@@ -531,12 +533,13 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleOrdering_LoadDoneRejoinsWaitingT
     auto second = scheduler->schedule();
     ASSERT_TRUE(second.ok());
     ASSERT_EQ(second.value().size(), 1);
-    EXPECT_EQ(second.value().front(), older_waiter);
-    EXPECT_EQ(older_waiter->getStatus(), StreamState::RUNNING);
-    EXPECT_EQ(completed_stream->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(second.value().front(), completed_stream);
+    EXPECT_EQ(completed_stream->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(later_waiter->getStatus(), StreamState::WAITING);
+    EXPECT_FALSE(later_waiter->hasEvent(StreamEvents::CanRun));
     EXPECT_EQ(completed_stream->streamCacheResource().allocator_load_context_, nullptr);
     ASSERT_EQ(scheduler->waiting_streams_.size(), 1);
-    EXPECT_EQ(scheduler->waiting_streams_.front(), completed_stream);
+    EXPECT_EQ(scheduler->waiting_streams_.front(), later_waiter);
     EXPECT_EQ(scheduler->loading_cache_streams_.size(), 0);
     EXPECT_EQ(scheduler->runningStreamsSize(), 1);
 }

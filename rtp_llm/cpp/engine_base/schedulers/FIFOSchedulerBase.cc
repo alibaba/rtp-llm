@@ -261,7 +261,11 @@ size_t FIFOSchedulerBase::countInitedKVCacheStreams() const {
 void FIFOSchedulerBase::addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state) {
     switch (new_state) {
         case StreamState::WAITING:
-            waiting_streams_.push_back(stream);
+            waiting_streams_.insert(
+                std::find_if(waiting_streams_.begin(), waiting_streams_.end(), [&](const auto& waiting_stream) {
+                    return waiting_stream->schedulerEnqueueTimeUs() > stream->schedulerEnqueueTimeUs();
+                }),
+                stream);
             break;
         case StreamState::LOADING_CACHE:
             loading_cache_streams_.push_back(stream);
