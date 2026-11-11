@@ -65,10 +65,10 @@ public final class MultimodalProtocol {
         return ByteString.copyFrom(output.array());
     }
 
-    public static CacheSequence sequence(Prepared prepared, int blockSize, long seed, int keyStride) {
+    public static PromptCacheKeys computePromptKeys(Prepared prepared, int blockSize, long seed, int keyStride) {
         validateSpans(prepared.input(), prepared.spans());
-        return new CacheSequence(blockSize, prepared.input().getTokenIdsList(),
-            prepared.spans().stream().map(span -> new CacheSequence.Span(
+        return new PromptCacheKeys(blockSize, prepared.input().getTokenIdsList(),
+            prepared.spans().stream().map(span -> new PromptCacheKeys.Span(
                 span.getOffset(), span.getRowHashesList())).toList(), seed, keyStride);
     }
 

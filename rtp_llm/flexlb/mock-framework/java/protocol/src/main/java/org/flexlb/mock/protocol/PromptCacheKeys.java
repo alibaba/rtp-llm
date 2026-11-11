@@ -7,18 +7,18 @@ import org.flexlb.engine.grpc.EngineRpcService.MockDecodePromptPB;
 /**
  * Immutable prompt length and complete cache block keys.
  */
-public final class CacheSequence {
+public final class PromptCacheKeys {
     private final int blockSize, keyStride, inputLength;
 
     private final List<Long> promptKeys;
 
-    public CacheSequence(int blockSize, List<Integer> tokens, List<Span> spans) { this(blockSize, tokens, spans, 0); }
+    public PromptCacheKeys(int blockSize, List<Integer> tokens, List<Span> spans) { this(blockSize, tokens, spans, 0); }
 
-    public CacheSequence(int blockSize, List<Integer> tokens, List<Span> spans, long seed) {
+    public PromptCacheKeys(int blockSize, List<Integer> tokens, List<Span> spans, long seed) {
         this(blockSize,tokens,spans,seed,1);
     }
 
-    public CacheSequence(int blockSize, List<Integer> tokens, List<Span> spans, long seed, int keyStride) {
+    public PromptCacheKeys(int blockSize, List<Integer> tokens, List<Span> spans, long seed, int keyStride) {
         if (blockSize < 1 || keyStride < 1) throw new IllegalArgumentException("Invalid cache block size");
         long previous = 0;
         for (var span : spans) {
@@ -30,10 +30,10 @@ public final class CacheSequence {
         this.blockSize = Math.multiplyExact(blockSize, keyStride);
         this.keyStride = keyStride;
         inputLength = tokens.size();
-        promptKeys = hashPrompt(tokens, spans, seed, blockSize);
+        promptKeys = computePromptKeys(tokens, spans, seed, blockSize);
     }
 
-    private CacheSequence(CacheSequence physical, int stride) {
+    private PromptCacheKeys(PromptCacheKeys physical, int stride) {
         keyStride = stride;
         blockSize = Math.multiplyExact(physical.blockSize, stride);
         inputLength = physical.inputLength;
@@ -43,7 +43,7 @@ public final class CacheSequence {
         promptKeys = List.copyOf(keys);
     }
 
-    private CacheSequence(MockDecodePromptPB prompt, int expectedBlockSize) {
+    private PromptCacheKeys(MockDecodePromptPB prompt, int expectedBlockSize) {
         if (expectedBlockSize < 1 || prompt.getBlockSize() != expectedBlockSize || prompt.getInputLength() < 1
                 || prompt.getBlockKeysCount() != prompt.getInputLength() / expectedBlockSize)
             throw new IllegalArgumentException("Invalid Decode prompt cache identity");
@@ -54,14 +54,14 @@ public final class CacheSequence {
     }
 
     /** Projects an already hashed physical sequence into Prefill's logical blocks. */
-    public CacheSequence withStride(int stride) {
+    public PromptCacheKeys withStride(int stride) {
         if (stride < 1 || keyStride != 1)
             throw new IllegalArgumentException("Expected physical prompt keys");
-        return stride == 1 ? this : new CacheSequence(this, stride);
+        return stride == 1 ? this : new PromptCacheKeys(this, stride);
     }
 
-    public static CacheSequence fromDecodePrompt(MockDecodePromptPB prompt, int blockSize) {
-        return new CacheSequence(prompt, blockSize);
+    public static PromptCacheKeys fromDecodePrompt(MockDecodePromptPB prompt, int blockSize) {
+        return new PromptCacheKeys(prompt, blockSize);
     }
 
     public MockDecodePromptPB decodePrompt() {
@@ -77,13 +77,13 @@ public final class CacheSequence {
     public int inputLength() { return inputLength; }
 
     @Override public boolean equals(Object other) {
-        return other instanceof CacheSequence sequence && blockSize == sequence.blockSize && keyStride == sequence.keyStride
+        return other instanceof PromptCacheKeys sequence && blockSize == sequence.blockSize && keyStride == sequence.keyStride
             && inputLength == sequence.inputLength && promptKeys.equals(sequence.promptKeys);
     }
 
     @Override public int hashCode() { return Objects.hash(blockSize, keyStride, inputLength, promptKeys); }
 
-    private List<Long> hashPrompt(List<Integer> tokens, List<Span> spans, long seed, int hashBlockSize) {
+    private List<Long> computePromptKeys(List<Integer> tokens, List<Span> spans, long seed, int hashBlockSize) {
         int completeTokens = inputLength - inputLength % blockSize;
         var keys = new ArrayList<Long>(completeTokens / blockSize);
         long hash = seed;

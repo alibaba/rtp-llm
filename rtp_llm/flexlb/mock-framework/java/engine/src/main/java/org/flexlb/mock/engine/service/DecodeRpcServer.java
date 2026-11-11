@@ -14,7 +14,7 @@ import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.RtpTransferResult;
 import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.flexlb.mock.engine.scheduler.RequestState;
-import org.flexlb.mock.protocol.CacheSequence;
+import org.flexlb.mock.protocol.PromptCacheKeys;
 import org.flexlb.mock.protocol.MultimodalProtocol;
 
 /**
@@ -67,7 +67,7 @@ final class DecodeRpcServer implements AutoCloseable {
             if (frame.getStage() == RemoteStage.ALLOCATE) {
                 validate(frame);
                 var input = frame.getInput();
-                var sequence = CacheSequence.fromDecodePrompt(frame.getMockDecodePrompt(), config.blockSize());
+                var sequence = PromptCacheKeys.fromDecodePrompt(frame.getMockDecodePrompt(), config.blockSize());
                 prepared = RpcMessages.toSchedulerInput(input, frame.getClientId() + "/" + input.getRequestId(), call.started,
                     RpcMessages.deadline(input, call.started, call.rpcDeadline), false, sequence);
             }

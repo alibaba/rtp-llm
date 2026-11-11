@@ -39,7 +39,7 @@ class PdGenerationTest {
             var query=CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build();
             var ps=rpc.getCacheStatus(query);
             var ds=RpcServiceGrpc.newBlockingStub(d.channel).withDeadlineAfter(2,TimeUnit.SECONDS).getCacheStatus(query);
-            var base=org.flexlb.mock.protocol.MultimodalProtocol.sequence(org.flexlb.mock.protocol.MultimodalProtocol.text(request), 2, 0, 1).keys();
+            var base=org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(org.flexlb.mock.protocol.MultimodalProtocol.text(request), 2, 0, 1).keys();
             assertEquals(Set.of(base.get(3),base.get(7)),Set.copyOf(ps.getCacheKeyListList()));
             assertTrue(ds.getCacheKeyListList().containsAll(base));
             assertEquals(8,ps.getBlockSize());assertEquals(128,ps.getTotalKvCache());
@@ -87,7 +87,7 @@ class PdGenerationTest {
             var prepared = image(input(d, 0, 4, 1, 3000, true), vision.getPort()).toBuilder().clearMultimodalInputs().build();
             int rowHash = org.flexlb.mock.protocol.MultimodalProtocol.expandFeatureHashes(featureSeed, 1)
                 .asReadOnlyByteBuffer().order(ByteOrder.LITTLE_ENDIAN).getInt();
-            var keys = org.flexlb.mock.protocol.MultimodalProtocol.sequence(new org.flexlb.mock.protocol.MultimodalProtocol.Prepared(prepared,
+            var keys = org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(new org.flexlb.mock.protocol.MultimodalProtocol.Prepared(prepared,
                 List.of(MultimodalCacheSpanPB.newBuilder().setOffset(1).addRowHashes(rowHash).build())), 2, 0, 1).keys();
             var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
             assertTrue(cached.getCacheKeyListList().containsAll(keys));

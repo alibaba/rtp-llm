@@ -16,7 +16,7 @@ import org.flexlb.mock.engine.scheduler.RequestState;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 import java.util.concurrent.locks.ReentrantLock;
-import org.flexlb.mock.protocol.CacheSequence;
+import org.flexlb.mock.protocol.PromptCacheKeys;
 import org.flexlb.mock.protocol.MultimodalProtocol;
 
 /**
@@ -282,10 +282,10 @@ final class PrefillRpcServer implements AutoCloseable {
     }
 
     private EngineScheduler.Input schedulerInput(Session session, MultimodalProtocol.Prepared prepared) {
-        var sequence = session.prefillSequence;
-        session.prefillSequence = null;
+        var sequence = session.prefillCacheKeys;
+        session.prefillCacheKeys = null;
         if (sequence == null)
-            sequence = MultimodalProtocol.sequence(prepared, config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
+            sequence = MultimodalProtocol.computePromptKeys(prepared, config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
         return RpcMessages.toSchedulerInput(prepared.input(), Long.toString(session.id), session.started,
             session.deadline, session.retained, sequence);
     }
@@ -425,7 +425,7 @@ final class PrefillRpcServer implements AutoCloseable {
         final CompletableFuture<Result> termination = new CompletableFuture<>();
 
         EngineScheduler.Request request;
-        CacheSequence prefillSequence;
+        PromptCacheKeys prefillCacheKeys;
 
         Session(GenerateInputPB input, boolean retained, long started, long deadline) {
             this.input = input; this.retained = retained; this.started = started; this.deadline = deadline;
@@ -589,10 +589,10 @@ final class PrefillRpcServer implements AutoCloseable {
                 var stream = stub.remoteGenerate(inbox);
                 var allocation = frame(RemoteStage.ALLOCATE).toBuilder();
                 var allocationInput = input.toBuilder().clearGroupId().clearGroupSize().clearTokenIds();
-                var sequence = MultimodalProtocol.sequence(media, Math.toIntExact(layout.getBlockSize()), layout.getMockDecodeCacheSeed(), 1);
+                var sequence = MultimodalProtocol.computePromptKeys(media, Math.toIntExact(layout.getBlockSize()), layout.getMockDecodeCacheSeed(), 1);
                 allocation.setMockDecodePrompt(sequence.decodePrompt());
                 if (layout.getBlockSize() == config.blockSize() && layout.getMockDecodeCacheSeed() == config.cacheKeySeed())
-                    source.prefillSequence = sequence.withStride(config.cacheKeyStride());
+                    source.prefillCacheKeys = sequence.withStride(config.cacheKeyStride());
                 allocationInput.getGenerateConfigBuilder().clearGroupTimeout();
                 if (deadline != Long.MAX_VALUE) allocationInput.getGenerateConfigBuilder().setTimeoutMs((int) Math.min(Integer.MAX_VALUE,
                     Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()))));

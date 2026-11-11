@@ -335,7 +335,7 @@ class BackendRpcClientTest {
         long seed = 0x4453563431494631L;
         var tokens = java.util.stream.IntStream.rangeClosed(1, 1025).boxed().toList();
         var input = input(987).toBuilder().clearTokenIds().addAllTokenIds(tokens).build();
-        var baseKeys = new org.flexlb.mock.protocol.CacheSequence(128, tokens, List.of(), seed).keys();
+        var baseKeys = new org.flexlb.mock.protocol.PromptCacheKeys(128, tokens, List.of(), seed).keys();
         try {
             for (int cpSize : List.of(1, 4)) {
                 try (var client = new BackendRpcClient(() -> List.of("127.0.0.1:" + server.getPort()), e -> {}, -200, seed, cpSize)) {

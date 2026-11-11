@@ -128,8 +128,8 @@ class DecodeAdmissionTest {
                 }
                 var prompt = promptBuilder.build();
                 var prepared = new org.flexlb.mock.protocol.MultimodalProtocol.Prepared(prompt, spans);
-                var promptSequence = org.flexlb.mock.protocol.MultimodalProtocol.sequence(prepared, 2, 0, 1);
-                call.request.onNext(allocate("p", prompt, promptSequence.decodePrompt())); call.ack();
+                var promptCacheKeys = org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(prepared, 2, 0, 1);
+                call.request.onNext(allocate("p", prompt, promptCacheKeys.decodePrompt())); call.ack();
                 call.request.onNext(GenerateRequestPB.newBuilder().setRequestId(71).setStage(RemoteStage.LOAD).build());
                 assertInstanceOf(GenerateOutputsPB.class, call.replies.poll(3, TimeUnit.SECONDS));
                 call.request.onNext(GenerateRequestPB.newBuilder().setRequestId(71).setClientId("p")
@@ -142,8 +142,8 @@ class DecodeAdmissionTest {
                 } while (!"completed".equals(reply));
                 var all = prompt.toBuilder().addAllTokenIds(Collections.nCopies(5, 7)).build();
                 var full = new org.flexlb.mock.protocol.MultimodalProtocol.Prepared(all, spans);
-                var allKeys = org.flexlb.mock.protocol.MultimodalProtocol.sequence(full, 2, 0, 1).keys();
-                await(() -> cacheKeys(node.node).equals(Set.copyOf(promptSequence.keys())));
+                var allKeys = org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(full, 2, 0, 1).keys();
+                await(() -> cacheKeys(node.node).equals(Set.copyOf(promptCacheKeys.keys())));
                 try (var lease = node.node.cacheManager().acquire(8, allKeys).lease()) {
                     assertNotNull(lease);
                     assertEquals(2, lease.reusedTokens());
@@ -153,7 +153,7 @@ class DecodeAdmissionTest {
     }
 
     static GenerateRequestPB allocate(String client, GenerateInputPB input) {
-        var sequence = org.flexlb.mock.protocol.MultimodalProtocol.sequence(
+        var sequence = org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(
             org.flexlb.mock.protocol.MultimodalProtocol.text(input), 2, 0, 1);
         return allocate(client, input, sequence.decodePrompt());
     }

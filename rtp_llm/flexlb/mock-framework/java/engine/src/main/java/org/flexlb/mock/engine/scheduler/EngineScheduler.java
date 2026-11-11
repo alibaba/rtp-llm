@@ -6,7 +6,7 @@ import org.flexlb.mock.engine.cache.KvCacheManager;
 import org.flexlb.mock.engine.execution.EngineLoop;
 import org.flexlb.mock.engine.forward.ForwardBatch;
 import org.flexlb.mock.engine.forward.SimulatedCompute;
-import org.flexlb.mock.protocol.CacheSequence;
+import org.flexlb.mock.protocol.PromptCacheKeys;
 
 /**
  * Called under the EngineLoop lock. Queues, reservations and result commits belong to the implementation.
@@ -65,21 +65,21 @@ public interface EngineScheduler extends AutoCloseable {
      * Describes a request at scheduler admission, including limits and cache identities.
      */
     record Input(String identity, long requestId, long groupId, int tokens, int maxNewTokens, int priority,
-                 long started, long deadline, CacheSequence cacheSequence, boolean reuse, boolean retained, int minNewTokens, boolean ignoreEos,
+                 long started, long deadline, PromptCacheKeys promptCacheKeys, boolean reuse, boolean retained, int minNewTokens, boolean ignoreEos,
                  boolean streaming) {
         public Input(String identity, long requestId, long groupId, int tokens, int maxNewTokens, int priority,
-                     long started, long deadline, CacheSequence cacheSequence, boolean reuse, boolean retained,
+                     long started, long deadline, PromptCacheKeys promptCacheKeys, boolean reuse, boolean retained,
                      int minNewTokens, boolean ignoreEos) {
-            this(identity, requestId, groupId, tokens, maxNewTokens, priority, started, deadline, cacheSequence,
+            this(identity, requestId, groupId, tokens, maxNewTokens, priority, started, deadline, promptCacheKeys,
                 reuse, retained, minNewTokens, ignoreEos, false);
         }
         public Input {
             if (identity == null || identity.isBlank() || tokens < 1 || maxNewTokens < 1 || minNewTokens < 0 || minNewTokens > maxNewTokens)
                 throw new IllegalArgumentException("Invalid scheduling input");
-            Objects.requireNonNull(cacheSequence);
-            if (cacheSequence.inputLength() != tokens) throw new IllegalArgumentException("Cache identity length differs from input");
+            Objects.requireNonNull(promptCacheKeys);
+            if (promptCacheKeys.inputLength() != tokens) throw new IllegalArgumentException("Cache identity length differs from input");
         }
-        public List<Long> keys() { return cacheSequence.keys(); }
+        public List<Long> keys() { return promptCacheKeys.keys(); }
     }
 
     /**

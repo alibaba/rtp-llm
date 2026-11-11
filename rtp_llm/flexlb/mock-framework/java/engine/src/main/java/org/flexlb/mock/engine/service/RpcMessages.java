@@ -6,7 +6,7 @@ import java.nio.*;
 import java.util.concurrent.TimeUnit;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
-import org.flexlb.mock.protocol.CacheSequence;
+import org.flexlb.mock.protocol.PromptCacheKeys;
 
 /**
  * Translation at the native RTP boundary; scheduling state contains no protobuf objects.
@@ -15,7 +15,7 @@ final class RpcMessages {
     private RpcMessages() {}
 
     static EngineScheduler.Input toSchedulerInput(GenerateInputPB input, String identity, long started, long rpcDeadline,
-                                                   boolean retained, CacheSequence sequence) {
+                                                   boolean retained, PromptCacheKeys sequence) {
         return new EngineScheduler.Input(identity, input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
             sequence.inputLength(), input.getGenerateConfig().getMaxNewTokens(), input.getPriority(), started, rpcDeadline,
             sequence, input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos(),

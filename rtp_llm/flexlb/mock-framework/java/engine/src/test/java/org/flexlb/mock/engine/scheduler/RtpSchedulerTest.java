@@ -14,7 +14,7 @@ import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.RtpControl;
 import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.RtpTransferResult;
 import org.flexlb.mock.engine.scheduler.EngineScheduler.QueueSnapshot;
 import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
-import org.flexlb.mock.protocol.CacheSequence;
+import org.flexlb.mock.protocol.PromptCacheKeys;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -257,7 +257,7 @@ class RtpSchedulerTest {
             complete(scheduler, work, config); drain(scheduler);
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
             assertEquals(12, cache.snapshot(0, false).availableBlocks());
-            var oversized = new EngineScheduler.Input("large", 3, 0, 6, 1, 0, System.nanoTime(), Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(6, 0), List.of()), false, false, 0, false);
+            var oversized = new EngineScheduler.Input("large", 3, 0, 6, 1, 0, System.nanoTime(), Long.MAX_VALUE, new PromptCacheKeys(2, Collections.nCopies(6, 0), List.of()), false, false, 0, false);
             scheduler.enqueue(oversized, new Listener());
             var singleton = scheduler.schedule(); assertNotNull(singleton);
             assertEquals(1, singleton.batch().requests().size());
@@ -408,7 +408,7 @@ class RtpSchedulerTest {
                 var scheduler = new RtpFifoScheduler(new Object(), config, cache); var listener = new Listener();
                 try {
                     var request = scheduler.enqueue(new EngineScheduler.Input("r", 1, 0, 123, 10, 0, System.nanoTime(),
-                        Long.MAX_VALUE, new CacheSequence(128, Collections.nCopies(123, 0), List.of()), false, false, 0, true), listener);
+                        Long.MAX_VALUE, new PromptCacheKeys(128, Collections.nCopies(123, 0), List.of()), false, false, 0, true), listener);
                     scheduler.prepareKvAndCheckTimeouts(); drain(scheduler); generate(scheduler, request);
                     var work = scheduler.schedule();
                     if (capacity == 1) {
@@ -497,7 +497,7 @@ class RtpSchedulerTest {
             var expired = new Listener(); var cancelled = new Listener();
             long now = System.nanoTime();
             engine.enqueue(new EngineScheduler.Input("1", 1, 0, 5, 3, 0, now,
-                now + TimeUnit.MILLISECONDS.toNanos(100), new CacheSequence(2, Collections.nCopies(5, 0), List.of()), false, false, 0, false), expired);
+                now + TimeUnit.MILLISECONDS.toNanos(100), new PromptCacheKeys(2, Collections.nCopies(5, 0), List.of()), false, false, 0, false), expired);
             var request = engine.enqueue(input(2, false), cancelled);
             engine.abortRequest(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "test"));
             assertEquals(RequestFailure.Reason.CANCELLED, cancelled.terminal.get(2, TimeUnit.SECONDS).reason());
@@ -522,7 +522,7 @@ class RtpSchedulerTest {
             assertEquals(RequestFailure.Reason.CAPACITY,
                 assertThrows(RequestFailure.class, () -> scheduler.enqueue(input(1, false), oversized)).reason());
             scheduler.enqueue(new EngineScheduler.Input("2", 2, 0, 1, 3, 0, System.nanoTime(),
-                Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(1, 0), List.of()), false, false, 0, false), small);
+                Long.MAX_VALUE, new PromptCacheKeys(2, Collections.nCopies(1, 0), List.of()), false, false, 0, false), small);
             var work = scheduler.schedule(); drain(scheduler);
             assertFalse(oversized.terminal.isDone(), "Rejected requests were never admitted");
             assertNotNull(work); assertEquals(1, work.batch().requests().size());
@@ -660,7 +660,7 @@ class RtpSchedulerTest {
         try (var cache = new KvCacheManager(2, 20, 0);
              var scheduler = new RtpPrefillGroupScheduler(new Object(), config, cache)) {
             var one = new EngineScheduler.Input("1", 1, 81, 5, 1, 0, System.nanoTime(),
-                Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(5, 0), List.of()), false, false, 0, false);
+                Long.MAX_VALUE, new PromptCacheKeys(2, Collections.nCopies(5, 0), List.of()), false, false, 0, false);
             scheduler.enqueue(batch(one, sized(2, 5)));
             var work = scheduler.schedule(); assertEquals(List.of(1L, 2L), ids(work));
             complete(scheduler, work, config); drain(scheduler);
@@ -712,7 +712,7 @@ class RtpSchedulerTest {
             try (var cache = new KvCacheManager(2, 16, 0);
                  var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
                 var request = scheduler.enqueue(new EngineScheduler.Input("r", 1, 0, 4, 100, 0, System.nanoTime(), Long.MAX_VALUE,
-                    new CacheSequence(2, Collections.nCopies(4, 0), List.of()), false, false, 20, true), listener);
+                    new PromptCacheKeys(2, Collections.nCopies(4, 0), List.of()), false, false, 20, true), listener);
                 scheduler.prepareKvAndCheckTimeouts(); drain(scheduler); generate(scheduler, request);
                 int rounds = 0;
                 while (!listener.terminal.isDone()) {
@@ -736,12 +736,12 @@ class RtpSchedulerTest {
         try (var cache = new KvCacheManager(2, 16, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
             var invalid = new EngineScheduler.Input("invalid", 1, 0, 10, 1, 0, System.nanoTime(), Long.MAX_VALUE,
-                new CacheSequence(2, Collections.nCopies(10, 0), List.of()), false, false, 0, true);
+                new PromptCacheKeys(2, Collections.nCopies(10, 0), List.of()), false, false, 0, true);
             assertEquals(RequestFailure.Reason.INVALID,
                 assertThrows(RequestFailure.class, () -> scheduler.enqueue(invalid, new Listener())).reason());
             assertTrue(scheduler.requests().isEmpty()); assertEquals(16, cache.snapshot(0, false).freeBlocks());
             var boundary = new EngineScheduler.Input("boundary", 2, 0, 9, 100, 0, System.nanoTime(), Long.MAX_VALUE,
-                new CacheSequence(2, Collections.nCopies(9, 0), List.of()), false, false, 0, true);
+                new PromptCacheKeys(2, Collections.nCopies(9, 0), List.of()), false, false, 0, true);
             var request = scheduler.enqueue(boundary, listener);
             scheduler.prepareKvAndCheckTimeouts(); drain(scheduler); generate(scheduler, request); drain(scheduler);
             assertNull(scheduler.schedule()); assertNull(listener.terminal.get(1, TimeUnit.SECONDS));
@@ -854,11 +854,11 @@ class RtpSchedulerTest {
     private static EngineScheduler.Input metricInput(long id, int maxNewTokens, int priority) {
         var base = input(id, false);
         return new EngineScheduler.Input(base.identity(), id, 0, 5, maxNewTokens, priority, base.started(), base.deadline(),
-            base.cacheSequence(), false, false, 0, false);
+            base.promptCacheKeys(), false, false, 0, false);
     }
 
     private static EngineScheduler.Input input(long id, boolean retained) {
-        return new EngineScheduler.Input(Long.toString(id), id, 0, 5, 3, 0, System.nanoTime(), Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(5, 0), List.of()), false, retained, 0, false);
+        return new EngineScheduler.Input(Long.toString(id), id, 0, 5, 3, 0, System.nanoTime(), Long.MAX_VALUE, new PromptCacheKeys(2, Collections.nCopies(5, 0), List.of()), false, retained, 0, false);
     }
 
     private static String completeAndCheckTpot(RtpFifoScheduler scheduler, EngineScheduler.Work work, RtpConfig config,
@@ -906,7 +906,7 @@ class RtpSchedulerTest {
 
     private static EngineScheduler.Input sized(long id, int tokens) {
         return new EngineScheduler.Input(Long.toString(id), id, 81, tokens, 3, 0, System.nanoTime(),
-            Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(tokens, 0), List.of()), false, false, 0, false);
+            Long.MAX_VALUE, new PromptCacheKeys(2, Collections.nCopies(tokens, 0), List.of()), false, false, 0, false);
     }
 
     private static List<EngineScheduler.InputItem> batch(EngineScheduler.Input... inputs) {

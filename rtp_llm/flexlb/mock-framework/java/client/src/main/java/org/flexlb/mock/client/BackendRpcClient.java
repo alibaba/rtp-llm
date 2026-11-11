@@ -142,7 +142,7 @@ public final class BackendRpcClient implements AutoCloseable {
 
     private List<Long> routingKeys(MultimodalProtocol.Prepared input, long baseBlockSize) {
         if (baseBlockSize <= 0) return List.of();
-        return MultimodalProtocol.sequence(input, Math.toIntExact(baseBlockSize), cacheKeySeed, prefillCpSize).keys();
+        return MultimodalProtocol.computePromptKeys(input, Math.toIntExact(baseBlockSize), cacheKeySeed, prefillCpSize).keys();
     }
 
     private static String message(Status status) {
