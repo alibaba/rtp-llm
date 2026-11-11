@@ -3,6 +3,7 @@
 #include <numeric>
 
 #if USING_CUDA
+#include <c10/cuda/CUDACachingAllocator.h>
 #include <cuda_runtime.h>
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
@@ -86,6 +87,13 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
                                                     const std::optional<WarmUpResult>&               warm_up_result,
                                                     const std::optional<SpeculativeExecutionConfig>& sp_config,
                                                     size_t transfer_memory_bytes) {
+#if USING_CUDA
+    // Release the caching allocator's unused segments before sampling free
+    // memory: model construction and warmup transients can leave many GiB
+    // reserved-but-unallocated (observed ~18 GiB at a 1M context), invisible
+    // to cudaMemGetInfo and to the raw KV pool allocation that follows.
+    c10::cuda::CUDACachingAllocator::emptyCache();
+#endif
     size_t device_reserved_memory_bytes = getGpuExecStatus().device_memory_status.available_bytes;
     size_t runtime_required_bytes       = 0;
 
