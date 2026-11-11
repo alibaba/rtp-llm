@@ -25,7 +25,7 @@ import static com.google.common.base.Preconditions.checkState;
  * <ul>
  *   <li>{@link TopologySnapshot}: discovery-owned address and placement data;</li>
  *   <li>{@link CommittedWorkerStatus}: stable Engine fields and both cursors
- *       from one successfully reduced, strictly newer status response;</li>
+ *       from one successfully reduced status response;</li>
  *   <li>{@link PollHealth}: health reported by status polling, independent
  *       from local status application;</li>
  *   <li>cache status and poll coordination, which have independent writers.</li>
@@ -220,8 +220,10 @@ public class WorkerStatus {
                         : Map.copyOf(finishedTasks));
     }
 
-    /** Bind a strictly newer frozen observation to the current commit holder. */
-    public PreparedStatus prepareNewStatus(StatusObservation observation) {
+    /**
+     * Binds a frozen observation to the current commit holder without allowing version regression.
+     */
+    public PreparedStatus prepareStatus(StatusObservation observation) {
         requireActiveGeneration();
         checkArgument(
                 observation.owner == this,
@@ -230,9 +232,9 @@ public class WorkerStatus {
         Long responseVersion = observation.statusVersion();
         if (responseVersion == null
                 || responseVersion <= 0L
-                || responseVersion <= current.cursor().statusVersion()) {
+                || responseVersion < current.cursor().statusVersion()) {
             throw new IllegalArgumentException(
-                    "new status version must strictly advance committed version: committed="
+                    "status version must not regress: committed="
                             + current.cursor().statusVersion()
                             + ", response="
                             + responseVersion);
@@ -268,7 +270,7 @@ public class WorkerStatus {
     /**
      * Commit a prepared observation after its Endpoint has reduced the request records.
      * The Endpoint serializes this commit with retirement; the source cursor CAS
-     * rejects stale and duplicate observations.
+     * rejects a prepared update whose base has already been replaced.
      */
     public void publishReducedStatus(PreparedStatus prepared) {
         checkState(!retiring, "WorkerStatus generation is retiring: %s", generationId);
@@ -278,7 +280,7 @@ public class WorkerStatus {
         Long responseVersion = prepared.observation.statusVersion();
         if (responseVersion == null
                 || responseVersion <= 0L
-                || responseVersion <= prepared.baseCommitted.cursor().statusVersion()) {
+                || responseVersion < prepared.baseCommitted.cursor().statusVersion()) {
             throw new IllegalStateException(
                     "invalid prepared status version: committed="
                             + prepared.baseCommitted.cursor().statusVersion()

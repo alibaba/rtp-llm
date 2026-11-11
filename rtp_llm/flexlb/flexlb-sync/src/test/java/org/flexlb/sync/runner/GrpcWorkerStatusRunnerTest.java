@@ -113,23 +113,13 @@ class GrpcWorkerStatusRunnerTest {
                         invocation -> {
                             publicationHeldLock.set(status.lock.isHeldByCurrentThread());
                             status.publishPreparedStatus(invocation.getArgument(2));
-                            return endpoint;
+                            return new EndpointRegistry.EndpointUpdate(endpoint, expectedChange);
                         })
                 .when(registry)
-                .publishPreparedEndpoint(
+                .updateEndpoint(
                         org.mockito.Mockito.eq(ipPort),
                         org.mockito.Mockito.eq(status),
                         any(WorkerStatus.PreparedStatus.class));
-        when(registry.get(RoleType.DECODE, ipPort, status)).thenReturn(null, endpoint);
-        when(endpoint.applyPreparedStatus(any(), any()))
-                .thenAnswer(
-                        invocation -> {
-                            assertTrue(
-                                    status.lock.isHeldByCurrentThread(),
-                                    "existing endpoint reduction must hold the generation lock");
-                            status.publishPreparedStatus(invocation.getArgument(1));
-                            return expectedChange;
-                        });
         org.mockito.Mockito.doAnswer(
                         invocation -> {
                             assertFalse(
@@ -173,9 +163,10 @@ class GrpcWorkerStatusRunnerTest {
                 .run();
 
         assertTrue(publicationHeldLock.get(), "publication must commit under the generation lock");
-        assertFalse(
+        assertTrue(
                 projectionReleasedLock.get(),
-                "a new generation has no local request facts to project");
+                "new endpoint notifications must publish after releasing the lock");
+        projectionReleasedLock.set(false);
         WorkerStatus.PollLease nextPoll = status.tryBeginStatusPoll();
         assertNotNull(nextPoll);
         new GrpcWorkerStatusRunner(
@@ -216,7 +207,7 @@ class GrpcWorkerStatusRunnerTest {
                 new java.util.concurrent.atomic.AtomicBoolean();
         WorkerEndpoint.StatusChange activity =
                 new WorkerEndpoint.StatusChange.Decode(List.of(), false, false);
-        when(endpoint.applyStatusHeartbeat(any(), any()))
+        when(endpoint.applyWorkerStatus(any(), any()))
                 .thenAnswer(
                         invocation -> {
                             assertTrue(
@@ -264,15 +255,13 @@ class GrpcWorkerStatusRunnerTest {
                         Runnable::run)
                 .run();
 
-        ArgumentCaptor<WorkerStatus.StatusObservation> observation =
-                ArgumentCaptor.forClass(WorkerStatus.StatusObservation.class);
-        verify(endpoint)
-                .applyStatusHeartbeat(org.mockito.Mockito.eq(status), observation.capture());
+        ArgumentCaptor<WorkerStatus.PreparedStatus> observation =
+                ArgumentCaptor.forClass(WorkerStatus.PreparedStatus.class);
+        verify(endpoint).applyWorkerStatus(org.mockito.Mockito.eq(status), observation.capture());
         assertTrue(
-                observation.getValue().activeTasks().values().stream()
+                observation.getValue().observation().activeTasks().values().stream()
                         .anyMatch(active -> active.requestId().equals("123")));
         assertTrue(projected.get());
-        verify(endpoint, org.mockito.Mockito.never()).applyPreparedStatus(any(), any());
         WorkerStatus.PollLease nextPoll = status.tryBeginStatusPoll();
         assertNotNull(nextPoll, "the asynchronous owner must close the exact poll lease");
         nextPoll.close();
@@ -326,11 +315,6 @@ class GrpcWorkerStatusRunnerTest {
                 status.tryBeginStatusPoll(),
                 "a missing committed endpoint retires its status generation");
         assertNull(registry.get(role, status.getLogicalIpPort()));
-        verify(registry, org.mockito.Mockito.never())
-                .publishPreparedEndpoint(
-                        anyString(),
-                        org.mockito.Mockito.same(status),
-                        any(WorkerStatus.PreparedStatus.class));
     }
 
     @ParameterizedTest

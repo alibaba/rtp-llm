@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.PrefillRequestQueue;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.preemption.DecodePreemption;
 import org.flexlb.balance.preemption.DecodePreemptionPolicy;
@@ -23,7 +22,6 @@ class SchedulingComponentsContractTest {
         when(config.loadBalanceConfig()).thenReturn(SchedulingTestConfig.batchConfig());
         var scheduler = mock(RequestScheduler.class);
         var queue = new ListSchedulingQueue();
-        var workers = mock(PrefillRequestQueue.Factory.class);
         var grouping = mock(GroupPlanner.class);
         org.flexlb.balance.strategy.PrefillSelectionStrategy prefill =
                 mock(
@@ -53,7 +51,6 @@ class SchedulingComponentsContractTest {
                 .withBean(ConfigService.class, () -> config)
                 .withBean(RequestScheduler.class, () -> scheduler)
                 .withBean(SchedulingQueue.class, () -> queue)
-                .withBean(PrefillRequestQueue.Factory.class, () -> workers)
                 .withBean(GroupPlanner.class, () -> grouping)
                 .withBean(org.flexlb.balance.strategy.PrefillSelectionStrategy.class, () -> prefill)
                 .withBean(org.flexlb.balance.strategy.DecodeSelectionStrategy.class, () -> decode)
@@ -67,11 +64,6 @@ class SchedulingComponentsContractTest {
                                     .containsExactly(scheduler);
                             assertThat(context.getBeansOfType(SchedulingQueue.class).values())
                                     .containsExactly(queue);
-                            assertThat(
-                                            context.getBeansOfType(
-                                                            PrefillRequestQueue.Factory.class)
-                                                    .values())
-                                    .containsExactly(workers);
                             assertThat(context.getBeansOfType(GroupPlanner.class).values())
                                     .containsExactly(grouping);
                             assertThat(

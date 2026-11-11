@@ -112,7 +112,7 @@ class WorkerStatusTest {
 
     /**
      * Run one whole status transaction exactly as the production reducers do:
-     * freeze the RPC response, prepare a strictly-newer committed holder under
+     * freeze the RPC response, prepare a committed holder under
      * the generation lock, then publish it.
      */
     private static void publish(WorkerStatus status, WorkerStatusResponse response) {
@@ -120,7 +120,7 @@ class WorkerStatusTest {
         try {
             WorkerStatus.StatusObservation observation =
                     WorkerStatusTestSupport.freezeStatusResponse(status, response);
-            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(observation);
+            WorkerStatus.PreparedStatus prepared = status.prepareStatus(observation);
             status.publishPreparedStatus(prepared);
         } finally {
             status.lock.unlock();
@@ -130,8 +130,7 @@ class WorkerStatusTest {
     /**
      * Build a response whose every Engine field is a deterministic function of
      * {@code marker}, so a torn read is detectable by any field disagreeing.
-     * {@code statusVersion} equals the marker and must strictly increase across
-     * publishes.
+     * {@code statusVersion} equals the marker by default.
      */
     private static WorkerStatusResponse responseWithMarker(long marker) {
         WorkerStatusResponse response = new WorkerStatusResponse();
@@ -253,35 +252,50 @@ class WorkerStatusTest {
         }
     }
 
+    /**
+     * Verifies status preparation and publication preserve transaction invariants.
+     */
     @Nested
     @DisplayName("Prepare/publish transaction invariants")
     class TransactionInvariants {
 
         @Test
-        @DisplayName("prepareNewStatus rejects a non-advancing status version")
-        void prepareRejectsNonStrictlyNewerVersion() {
+        void sameVersionPublishesFreshCapacityAndFinishedCursor() {
+            WorkerStatus status = discovered();
+            publish(status, responseWithMarker(5L));
+            var response = responseWithMarker(6L);
+            response.setStatusVersion(5L);
+            publish(status, response);
+            assertEquals(5L, status.appliedStatusCursor().statusVersion());
+            assertEquals(6L, status.appliedStatusCursor().latestFinishedTaskVersion());
+            assertEquals(106L, status.committedEngineObservation().availableKvCacheTokens());
+        }
+
+        @Test
+        @DisplayName("prepareStatus rejects a regressing status version")
+        void prepareRejectsRegressingVersion() {
             WorkerStatus status = discovered();
             publish(status, responseWithMarker(5L));
 
-            WorkerStatusResponse stale = responseWithMarker(5L); // equal version
+            WorkerStatusResponse stale = responseWithMarker(4L); // older version
             status.lock.lock();
             try {
                 WorkerStatus.StatusObservation observation =
                         WorkerStatusTestSupport.freezeStatusResponse(status, stale);
                 assertThrows(
-                        IllegalArgumentException.class, () -> status.prepareNewStatus(observation));
+                        IllegalArgumentException.class, () -> status.prepareStatus(observation));
             } finally {
                 status.lock.unlock();
             }
         }
 
         @Test
-        @DisplayName("prepareNewStatus requires the generation lock")
+        @DisplayName("prepareStatus requires the generation lock")
         void prepareRequiresGenerationLock() {
             WorkerStatus status = discovered();
             WorkerStatus.StatusObservation observation =
                     WorkerStatusTestSupport.freezeStatusResponse(status, responseWithMarker(1L));
-            assertThrows(IllegalStateException.class, () -> status.prepareNewStatus(observation));
+            assertThrows(IllegalStateException.class, () -> status.prepareStatus(observation));
         }
 
         @Test
@@ -292,7 +306,7 @@ class WorkerStatusTest {
             status.lock.lock();
             try {
                 prepared =
-                        status.prepareNewStatus(
+                        status.prepareStatus(
                                 WorkerStatusTestSupport.freezeStatusResponse(
                                         status, responseWithMarker(1L)));
             } finally {
@@ -314,11 +328,11 @@ class WorkerStatusTest {
             status.lock.lock();
             try {
                 first =
-                        status.prepareNewStatus(
+                        status.prepareStatus(
                                 WorkerStatusTestSupport.freezeStatusResponse(
                                         status, responseWithMarker(2L)));
                 second =
-                        status.prepareNewStatus(
+                        status.prepareStatus(
                                 WorkerStatusTestSupport.freezeStatusResponse(
                                         status, responseWithMarker(3L)));
             } finally {
@@ -348,8 +362,7 @@ class WorkerStatusTest {
                 WorkerStatus.StatusObservation observation =
                         WorkerStatusTestSupport.freezeStatusResponse(
                                 status, responseWithMarker(2L));
-                assertThrows(
-                        IllegalStateException.class, () -> status.prepareNewStatus(observation));
+                assertThrows(IllegalStateException.class, () -> status.prepareStatus(observation));
             } finally {
                 status.lock.unlock();
             }
@@ -357,6 +370,9 @@ class WorkerStatusTest {
         }
     }
 
+    /**
+     * Verifies published status cursors advance monotonically across observations.
+     */
     @Nested
     @DisplayName("Cursor merge")
     class CursorMerge {
@@ -402,7 +418,7 @@ class WorkerStatusTest {
                                                     WorkerStatusTestSupport.freezeStatusResponse(
                                                             status, responseWithMarker(next));
                                             status.publishPreparedStatus(
-                                                    status.prepareNewStatus(observation));
+                                                    status.prepareStatus(observation));
                                         } finally {
                                             status.lock.unlock();
                                         }

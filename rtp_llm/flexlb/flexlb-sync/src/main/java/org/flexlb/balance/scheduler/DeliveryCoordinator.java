@@ -361,8 +361,8 @@ public class DeliveryCoordinator {
         prepared.predictedMs = prediction;
         if (prepared.endpoint.queueStopped())
             return CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST);
-        return prepared.endpoint.dequeueForDelivery(
-                new PrefillEndpoint.DeliverySelection(
+        return prepared.endpoint.tryStartQueuedDelivery(
+                new Delivery.Selection(
                         prepared.members.stream().map(Member::route).toList(),
                         prepared.batch,
                         prepared.batchId,

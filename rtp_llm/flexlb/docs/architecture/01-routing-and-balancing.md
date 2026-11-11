@@ -70,6 +70,8 @@ DIRECT 模式同时检查该 Prefill 的请求容量。DecodeSelector 只检查�
 排序保留配置的 TTFT/cache affinity 规则。最优候选容量不足时返回该节点的 `BLOCKED`，
 不因为登记失败直接退到次优节点。下次因资源变化调度时重新比较允许候选；不永久绑定上次节点。
 若版本冲突后重算表明另一个候选更好，可以改选另一个候选；这与容量不足时绕过原策略不同。
+容量拒绝后，由所选 `PrefillEndpoint.explainAdmissionRejection(priority)` 持锁统计当前请求并解释原因；
+策略只将原因转换为错误码和响应文案。解释不登记资源，实际容量检查仍由请求登记入口负责。
 
 ## Decode 策略
 

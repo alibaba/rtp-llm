@@ -62,7 +62,7 @@ public final class WorkerStatusTestSupport {
             WorkerStatus.StatusObservation observation =
                     org.flexlb.dao.master.WorkerStatusTestSupport.freezeStatusResponse(
                             workerStatus, response);
-            WorkerStatus.PreparedStatus prepared = workerStatus.prepareNewStatus(observation);
+            WorkerStatus.PreparedStatus prepared = workerStatus.prepareStatus(observation);
             workerStatus.publishPreparedStatus(prepared);
             workerStatus.recordSuccessfulPoll(alive);
         } finally {

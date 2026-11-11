@@ -169,7 +169,7 @@ public final class RequestTimeEstimation {
     }
 
     private CandidateView projectWithPredictions(
-            ProjectionQueueSnapshot queue, WorkSnapshot committed, long projectionAtMs) {
+            EstimationSnapshot queue, WorkSnapshot committed, long projectionAtMs) {
         var constraints = rankingConstraints(queue.constraints());
         if (committed.containsRequest(requestId)) {
             return unavailable("INCOMING_ALREADY_COMMITTED");
@@ -245,7 +245,7 @@ public final class RequestTimeEstimation {
     }
 
     private CandidateView projectQueue(
-            ProjectionQueueSnapshot queue,
+            EstimationSnapshot queue,
             GroupPlanner.Constraints constraints,
             long projectionAtMs,
             long committedMs,
@@ -478,7 +478,7 @@ public final class RequestTimeEstimation {
      * Queue/work captured under one ownership lock, with an immutable model and source revisions.
      */
     public record Inputs(
-            ProjectionQueueSnapshot queue,
+            EstimationSnapshot queue,
             WorkSnapshot work,
             SelectionVersion selectionVersion,
             PrefillTimePredictor.Evaluator evaluator,
@@ -488,7 +488,7 @@ public final class RequestTimeEstimation {
          * Builds projection-only inputs without an Endpoint registration identity.
          */
         public Inputs(
-                ProjectionQueueSnapshot queue,
+                EstimationSnapshot queue,
                 WorkSnapshot work,
                 long ownershipVersion,
                 PrefillTimePredictor.Evaluator evaluator,
@@ -888,39 +888,188 @@ public final class RequestTimeEstimation {
             }
         }
 
-        /** One shared EnqueueBatch work unit and its live request identities. */
+        /**
+         * Frozen batch members and execution time. Resolves its shared estimate only when read.
+         */
         public record BatchWork(
-                List<String> requestIds, Phase phase, OptionalLong remainingWorkMs) {
-
+                List<String> requestIds,
+                Phase phase,
+                BatchEstimate estimate,
+                long elapsedRunningMs) {
             public BatchWork {
                 requestIds = List.copyOf(requestIds);
-                checkArgument(
-                        !remainingWorkMs.isPresent() || remainingWorkMs.getAsLong() >= 0L,
-                        "remaining batch work must be non-negative");
+                checkArgument(elapsedRunningMs >= 0L, "elapsed running time must be non-negative");
+            }
+
+            public BatchWork(List<String> requestIds, Phase phase, OptionalLong remainingWorkMs) {
+                this(
+                        requestIds,
+                        phase,
+                        remainingWorkMs.isPresent()
+                                ? new BatchEstimate(remainingWorkMs.getAsLong())
+                                : null,
+                        0L);
+            }
+
+            public OptionalLong remainingWorkMs() {
+                return estimate == null
+                        ? OptionalLong.empty()
+                        : OptionalLong.of(Math.max(0L, estimate.durationMs() - elapsedRunningMs));
+            }
+        }
+
+        /**
+         * One frozen batch's prediction inputs and lazily cached duration, shared by work snapshots.
+         * Replacing members before execution creates a new estimate; reads never change Endpoint records.
+         */
+        public static final class BatchEstimate {
+            private static final PrefillTimePredictor.Evaluator FALLBACK =
+                    new org.flexlb.balance.prediction.FormulaPredictor(
+                            new org.flexlb.config.RoutingConfig.ExecutionTimeEstimatorConfig()
+                                    .getExpression());
+            private List<GroupPlanner.Item> members;
+            private PrefillTimePredictor predictor;
+            private volatile long durationMs = -1L;
+
+            public BatchEstimate(long durationMs) {
+                checkArgument(durationMs >= 0L, "batch duration must be non-negative");
+                this.durationMs = durationMs;
+            }
+
+            public BatchEstimate(List<GroupPlanner.Item> members, PrefillTimePredictor predictor) {
+                this.members = List.copyOf(members);
+                this.predictor = predictor;
+            }
+
+            public long durationMs() {
+                if (durationMs >= 0L) return durationMs;
+                synchronized (this) {
+                    if (durationMs >= 0L) return durationMs;
+                    var ordered = new java.util.ArrayList<>(members);
+                    ordered.sort(
+                            Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
+                                    .thenComparing(GroupPlanner.Item::requestId));
+                    var features =
+                            new PrefillBatchFeatures(
+                                    ordered.stream().map(GroupPlanner.Item::features).toList());
+                    long predicted;
+                    try {
+                        predicted =
+                                PrefillTimePredictor.predictCommittedBatchMs(
+                                        predictor.evaluator(), features);
+                    } catch (RuntimeException failure) {
+                        try {
+                            org.slf4j.LoggerFactory.getLogger("syncLogger")
+                                    .warn(
+                                            "Prefill remaining batch prediction failed; using default formula",
+                                            failure);
+                        } catch (RuntimeException ignoredLoggingFailure) {
+                            // Logging must not prevent the fallback estimate.
+                        }
+                        predicted =
+                                PrefillTimePredictor.predictCommittedBatchMs(FALLBACK, features);
+                    }
+                    members = null;
+                    predictor = null;
+                    durationMs = predicted;
+                    return predicted;
+                }
             }
         }
     }
 
     /**
-     * Immutable scheduling inputs captured for a route-time what-if projection.
-     *
-     * <p>The active items are already in production queue order. This object is
-     * materialized from the endpoint's PrefillEndpoint at one linearization
-     * point together with committed work and pending count.
+     * Freezes queue rules and membership for request-time estimation.
+     * Converts waiting routes to planning inputs once on first read, then releases route references.
      */
-    public record ProjectionQueueSnapshot(
-            long capturedAtMs,
-            boolean queueScheduling,
-            GroupPlanner grouping,
-            Comparator<? super GroupPlanner.Item> ordering,
-            GroupPlanner.Constraints constraints,
-            List<GroupPlanner.Item> activeItems) {
+    public static final class EstimationSnapshot {
+        private final long capturedAtMs;
+        private final boolean queueScheduling;
 
-        public ProjectionQueueSnapshot {
+        private final GroupPlanner grouping;
+        private final Comparator<? super GroupPlanner.Item> ordering;
+        private final GroupPlanner.Constraints constraints;
+
+        private List<RouteResult> waitingRequests;
+        private List<GroupPlanner.Item> selectedRequests;
+        private volatile List<GroupPlanner.Item> activeItems;
+
+        public EstimationSnapshot(
+                long capturedAtMs,
+                boolean queueScheduling,
+                GroupPlanner grouping,
+                Comparator<? super GroupPlanner.Item> ordering,
+                GroupPlanner.Constraints constraints,
+                List<GroupPlanner.Item> activeItems) {
+            this(
+                    capturedAtMs,
+                    queueScheduling,
+                    grouping,
+                    ordering,
+                    constraints,
+                    List.of(),
+                    List.of());
+            this.activeItems = List.copyOf(activeItems);
+        }
+
+        public EstimationSnapshot(
+                long capturedAtMs,
+                boolean queueScheduling,
+                GroupPlanner grouping,
+                Comparator<? super GroupPlanner.Item> ordering,
+                GroupPlanner.Constraints constraints,
+                List<RouteResult> waitingRequests,
+                List<GroupPlanner.Item> selectedRequests) {
             if (queueScheduling) {
                 Objects.requireNonNull(grouping, "grouping");
             }
-            activeItems = List.copyOf(activeItems);
+            this.capturedAtMs = capturedAtMs;
+            this.queueScheduling = queueScheduling;
+            this.grouping = grouping;
+            this.ordering = ordering;
+            this.constraints = constraints;
+            this.waitingRequests = List.copyOf(waitingRequests);
+            this.selectedRequests = List.copyOf(selectedRequests);
+        }
+
+        public long capturedAtMs() {
+            return capturedAtMs;
+        }
+
+        public boolean queueScheduling() {
+            return queueScheduling;
+        }
+
+        public GroupPlanner grouping() {
+            return grouping;
+        }
+
+        public Comparator<? super GroupPlanner.Item> ordering() {
+            return ordering;
+        }
+
+        public GroupPlanner.Constraints constraints() {
+            return constraints;
+        }
+
+        public List<GroupPlanner.Item> activeItems() {
+            var items = activeItems;
+            if (items != null) return items;
+            synchronized (this) {
+                if (activeItems == null) {
+                    var converted =
+                            new java.util.ArrayList<GroupPlanner.Item>(
+                                    waitingRequests.size() + selectedRequests.size());
+                    for (var route : waitingRequests) {
+                        converted.add(route.planningInput());
+                    }
+                    converted.addAll(selectedRequests);
+                    activeItems = List.copyOf(converted);
+                    waitingRequests = null;
+                    selectedRequests = null;
+                }
+                return activeItems;
+            }
         }
     }
 }

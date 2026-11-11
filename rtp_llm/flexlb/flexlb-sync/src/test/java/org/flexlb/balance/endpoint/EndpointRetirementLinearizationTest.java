@@ -44,8 +44,7 @@ class EndpointRetirementLinearizationTest {
                         EndpointTestSupport.routeStrategy(requestRuntime),
                         new CapacityNotifier(),
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                                configService.loadBalanceConfig()),
-                        () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
+                                configService.loadBalanceConfig()));
         String prefillAddress = "127.0.0.1:8100@0";
         String decodeAddress = "127.0.0.1:8200@0";
         WorkerStatus prefillStatus = status(RoleType.PREFILL, 8100);
@@ -80,13 +79,15 @@ class EndpointRetirementLinearizationTest {
                                 var lateRoute = mock(RouteResult.class);
                                 org.mockito.Mockito.when(lateRoute.prefillEndpoint())
                                         .thenReturn(prefill);
-                                boolean queueOfferAccepted = prefill.tryEnqueueRoute(lateRoute);
+                                boolean queueOfferAccepted =
+                                        org.flexlb.balance.endpoint.EndpointTestSupport
+                                                .tryEnqueueRoute(prefill, lateRoute);
                                 boolean prefillAdmissionAvailable;
                                 {
                                     WorkerEndpoint selectedEndpoint = prefill;
 
                                     prefillAdmissionAvailable =
-                                            prefill.dequeueForDelivery(
+                                            prefill.tryStartQueuedDelivery(
                                                                     org.flexlb.balance.scheduler
                                                                             .DeliveryTestSupport
                                                                             .queued(

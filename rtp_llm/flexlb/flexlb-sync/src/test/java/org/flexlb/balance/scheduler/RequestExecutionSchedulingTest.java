@@ -89,7 +89,8 @@ class RequestExecutionSchedulingTest {
                                 SchedulerTestSupport.repository(
                                         SchedulerTestServices.lifecycle(scheduler)),
                                 mock(DeliveryMetricsReporter.class)));
-        endpoint.enableQueue(
+        org.flexlb.balance.endpoint.EndpointTestSupport.enableQueue(
+                endpoint,
                 QueueExecutionSettings.capture(
                         config, org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)));
         var guard = org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(endpoint);
@@ -952,7 +953,9 @@ class RequestExecutionSchedulingTest {
             verify(events).cancel(request.ctx(), 0L, CancelReason.DEADLINE_EXCEEDED);
             verify(events, org.mockito.Mockito.never()).recordPreparationFailure(any());
             assertEquals(0, state.queueDepth());
-            assertEquals(0L, state.admissionSummary(0, 0L).occupiedRequests());
+            assertEquals(
+                    0L,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state));
             assertFalse(state.releaseRequest(request));
         } finally {
             assertNull(RequestExecutionTestSupport.stopAndAwait(runtime));

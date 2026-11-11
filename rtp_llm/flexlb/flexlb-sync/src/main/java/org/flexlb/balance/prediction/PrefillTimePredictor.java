@@ -119,7 +119,7 @@ public interface PrefillTimePredictor {
     /**
      * Immutable, payload-free features retained for prediction and learning.
      */
-    public record PrefillBatchFeatures(List<Item> items) {
+    record PrefillBatchFeatures(List<Item> items) {
 
         public PrefillBatchFeatures {
             items = List.copyOf(items);

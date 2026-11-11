@@ -4,7 +4,7 @@ import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.EstimationSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport;
 import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.Candidate;
@@ -142,7 +142,7 @@ class IncrementalPredictionTest {
             }
             items.sort(order);
             var queue =
-                    new ProjectionQueueSnapshot(
+                    new EstimationSnapshot(
                             1000,
                             true,
                             org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
@@ -297,7 +297,7 @@ class IncrementalPredictionTest {
             if (id != probeId) active.add(item(id, 100, 0, 100_000));
         }
         var queue =
-                new ProjectionQueueSnapshot(
+                new EstimationSnapshot(
                         1000,
                         true,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,

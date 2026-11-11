@@ -45,8 +45,7 @@ public final class RunnerTestSupport {
                 new CapacityNotifier(),
                 config == null
                         ? org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE
-                        : org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
-                () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
+                        : org.flexlb.balance.planner.BuiltinGroupPlanner.from(config));
     }
 
     public static WorkerStatus alive(
@@ -65,7 +64,7 @@ public final class RunnerTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(
+                    status.prepareStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, response));
             status.publishPreparedStatus(prepared);
             status.recordSuccessfulPoll(response.isAlive());
@@ -106,9 +105,9 @@ public final class RunnerTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(
+                    status.prepareStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, response));
-            WorkerEndpoint endpoint = registry.publishPreparedEndpoint(address, status, prepared);
+            WorkerEndpoint endpoint = registry.updateEndpoint(address, status, prepared).endpoint();
             status.recordSuccessfulPoll(true);
             return endpoint;
         } finally {

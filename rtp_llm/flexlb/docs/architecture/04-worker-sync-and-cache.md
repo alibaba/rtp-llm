@@ -9,6 +9,20 @@ KVCM（外部 KV Cache Manager）、LOCAL_STANDBY（KVCM 的本地兜底）。
 
 ## Worker 状态同步
 
+每份有效响应统一通过 Endpoint 的 `applyWorkerStatus` 完整校准请求和资源，随后发布
+Worker 快照及游标；同版本响应也执行完整更新，版本倒退仍被拒绝。
+Runner 统一调用 Registry 的 `updateEndpoint`：查找 Endpoint，不存在则创建，随后统一更新；
+新建 Endpoint 更新成功后再注册为可路由节点。返回的请求通知在 WorkerStatus 锁外发布。
+完成任务按本地请求记录去重，`latestFinishedTaskVersion` 保留为后续 RPC 获取增量完成记录的游标。
+请求通知与批次反馈在锁外执行，Step 指标和完成指标分别按原有标识及游标去重。
+Prefill 上报在一次 Endpoint 持锁期间更新请求、批次和容量事实，不调用预测器。
+请求层逐个处理完成结果和更新执行阶段，同时按批次收集本次上报涉及的成员引用。
+批次层只汇总这些成员的状态和完成结果，判断批次执行阶段、整批完成与学习资格，
+再准备剩余成员的估算输入；汇总结束后统一清理完成请求、释放容量。
+批次开始执行前收到部分成员结束上报时，保存剩余成员的不可变预测输入并使工作快照失效；
+WorkSnapshot 读取者在锁外计算并缓存耗时。未变化的批次复用估算，运行时间根据累计执行时间扣减。
+旧快照的计算结果只保存在原快照及其批次估算缓存中，不回写请求记录或覆盖新状态的投影视图。
+
 ### 请求 ID 协议
 
 Worker Status 的共享 PB 协议使用 `int64 TaskInfoPB.request_id = 1` 与

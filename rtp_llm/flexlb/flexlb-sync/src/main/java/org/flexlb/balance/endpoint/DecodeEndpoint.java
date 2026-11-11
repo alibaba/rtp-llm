@@ -241,7 +241,7 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
 
     // Calibration: publish facts only after the resource transaction returns.
 
-    public StatusChange applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
+    public StatusChange applyWorkerStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
         stateLock().lock();
         try {
@@ -271,13 +271,6 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
 
     public DecodeRoutingView routingView() {
         return routingView(ipPort());
-    }
-
-    public StatusChange applyStatusHeartbeat(
-            WorkerStatus ws, WorkerStatus.StatusObservation observation) {
-        requireStatusGeneration(ws);
-        List<DecodeRequestStatus> requestStatuses = collectHeartbeatRequestStatuses(observation);
-        return new StatusChange.Decode(requestStatuses, false, false);
     }
 
     public int evictExpiredRequests(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
@@ -623,22 +616,6 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         }
     }
 
-    /**
-     * A private candidate has no local owners and therefore cannot emit request evidence.
-     */
-    public void initializeFromPreparedStatus(
-            WorkerStatus ws, WorkerStatus.StatusObservation observation) {
-        requireStatusGeneration(ws);
-        stateLock().lock();
-        try {
-            checkState(
-                    calibrateLocked(observation).isEmpty(),
-                    "Private Decode candidate produced locally-owned request statuses");
-        } finally {
-            stateLock().unlock();
-        }
-    }
-
     @Override
     public OptionalLong tryGetLoadMetric() {
         if (!stateLock().tryLock()) return OptionalLong.empty();
@@ -964,37 +941,6 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         } finally {
             stateLock().unlock();
         }
-    }
-
-    List<DecodeRequestStatus> collectHeartbeatRequestStatuses(
-            WorkerStatus.StatusObservation observation) {
-        checkArgument(
-                observation.owner() == getStatus(),
-                "Status observation belongs to another Decode generation");
-        List<DecodeRequestStatus> captured;
-        stateLock().lock();
-        try {
-            List<DecodeRequestStatus> evidence = new ArrayList<>(observation.activeTasks().size());
-            for (WorkerStatus.TaskObservation task : observation.activeTasks().values()) {
-                RequestRecord request = decodeRequests.get(task.requestId());
-                PreemptionClaim claim = preemptionRegistrations.get(task.requestId());
-                RequestReservation exact =
-                        request != null && request.reservationToken > 0L
-                                ? request.reservation()
-                                : request == null && claim != null ? claim.reservation : null;
-                if (exact != null) {
-                    evidence.add(
-                            task.phase() == TaskPhase.KV_ALLOCATED
-                                            || task.phase() == TaskPhase.RUNNING
-                                    ? DecodeRequestStatus.allocated(exact)
-                                    : DecodeRequestStatus.active(exact));
-                }
-            }
-            captured = evidence;
-        } finally {
-            stateLock().unlock();
-        }
-        return List.copyOf(captured);
     }
 
     List<RequestReservation> retire() {

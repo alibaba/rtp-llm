@@ -5,7 +5,7 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.LearningPredictor;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
-import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.EstimationSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.Candidate;
 import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.Probe;
@@ -29,6 +29,48 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Contract tests for the canonical route-projection value boundary.
  */
 class RequestTimeEstimationTest {
+    @Test
+    void queueInputsAreFrozenAndConvertedOnceAcrossConcurrentReaders() throws Exception {
+        var route = org.mockito.Mockito.mock(org.flexlb.balance.scheduler.RouteResult.class);
+        var waitingItem = new GroupPlanner.Item("waiting", 1, 1L, 0L, 100L, 10L, 0L);
+        var selectedItem = new GroupPlanner.Item("selected", 1, 2L, 0L, 100L, 20L, 0L);
+        org.mockito.Mockito.when(route.planningInput()).thenReturn(waitingItem);
+        var waiting = new ArrayList<>(List.of(route));
+        var selected = new ArrayList<>(List.of(selectedItem));
+        var snapshot =
+                new EstimationSnapshot(
+                        0L,
+                        false,
+                        null,
+                        Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
+                        new GroupPlanner.Constraints(1, Long.MAX_VALUE, Long.MAX_VALUE, 0L, 0L),
+                        waiting,
+                        selected);
+        waiting.clear();
+        selected.clear();
+        org.mockito.Mockito.verifyNoInteractions(route);
+        try (var readers = java.util.concurrent.Executors.newFixedThreadPool(8)) {
+            var start = new java.util.concurrent.CountDownLatch(1);
+            var futures = new ArrayList<java.util.concurrent.Future<List<GroupPlanner.Item>>>();
+            for (int i = 0; i < 32; i++) {
+                futures.add(
+                        readers.submit(
+                                () -> {
+                                    start.await();
+                                    return snapshot.activeItems();
+                                }));
+            }
+            start.countDown();
+            var items = futures.getFirst().get(5, java.util.concurrent.TimeUnit.SECONDS);
+            assertEquals(List.of(waitingItem, selectedItem), items);
+            for (var future : futures) {
+                assertSame(items, future.get(5, java.util.concurrent.TimeUnit.SECONDS));
+            }
+            assertThrows(UnsupportedOperationException.class, () -> items.add(waitingItem));
+        }
+        org.mockito.Mockito.verify(route).planningInput();
+    }
+
     @Test
     void frozenWorkCanBeReadConcurrentlyWithoutAnExtraCaptureObject() throws Exception {
         var requests = new java.util.ArrayList<WorkSnapshot.RequestWork>();
@@ -67,7 +109,7 @@ class RequestTimeEstimationTest {
     void customPlannerIsUsedForEveryProjectedPrefix() {
         var planner = new org.flexlb.balance.planner.FirstRequestPlanner();
         var queue =
-                new ProjectionQueueSnapshot(
+                new EstimationSnapshot(
                         31,
                         true,
                         planner,
@@ -92,7 +134,7 @@ class RequestTimeEstimationTest {
     @Test
     void reusedProjectionReadsEveryIncomingSchedulingAndPredictionField() {
         var queue =
-                new ProjectionQueueSnapshot(
+                new EstimationSnapshot(
                         31L,
                         true,
                         BuiltinGroupPlanner.SINGLE,
@@ -129,7 +171,7 @@ class RequestTimeEstimationTest {
         assertEquals(
                 30L, project(inputs, new Probe(100, 0, 13, 100, 20, 0, 0)).projectedTtftMsValue());
         var laterQueue =
-                new ProjectionQueueSnapshot(
+                new EstimationSnapshot(
                         150,
                         true,
                         BuiltinGroupPlanner.SINGLE,
@@ -146,7 +188,7 @@ class RequestTimeEstimationTest {
     @Test
     void recursiveBatchPredictionCannotOverwriteTheOuterQueueCursor() {
         var queue =
-                new ProjectionQueueSnapshot(
+                new EstimationSnapshot(
                         31L,
                         true,
                         BuiltinGroupPlanner.FIXED_WINDOW,
@@ -240,7 +282,7 @@ class RequestTimeEstimationTest {
                     }
                 };
         var queue =
-                new ProjectionQueueSnapshot(
+                new EstimationSnapshot(
                         31L,
                         true,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
@@ -498,7 +540,7 @@ class RequestTimeEstimationTest {
             var fast =
                     project(
                             new RequestTimeEstimation.Inputs(
-                                    new ProjectionQueueSnapshot(
+                                    new EstimationSnapshot(
                                             100L,
                                             true,
                                             org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE,
@@ -514,7 +556,7 @@ class RequestTimeEstimationTest {
             var generic =
                     project(
                             new RequestTimeEstimation.Inputs(
-                                    new ProjectionQueueSnapshot(
+                                    new EstimationSnapshot(
                                             100L,
                                             true,
                                             org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE,
@@ -540,7 +582,7 @@ class RequestTimeEstimationTest {
             assertEquals(genericEvaluator.invocations(), fastEvaluator.invocations());
         }
         var invalid =
-                new ProjectionQueueSnapshot(
+                new EstimationSnapshot(
                         100L,
                         true,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE,
@@ -577,7 +619,7 @@ class RequestTimeEstimationTest {
         }
         Comparator<GroupPlanner.Item> order = Comparator.comparingInt(GroupPlanner.Item::priority);
         var queue =
-                new ProjectionQueueSnapshot(
+                new EstimationSnapshot(
                         13L,
                         true,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
@@ -608,7 +650,7 @@ class RequestTimeEstimationTest {
                             new GroupPlanner.Item(String.valueOf(99L), 0, 1L, 0L, 13L, 1L, 0L),
                             new GroupPlanner.Item(String.valueOf(99L), 0, 2L, 0L, expiry, 1L, 0L));
             var queue =
-                    new ProjectionQueueSnapshot(
+                    new EstimationSnapshot(
                             13L,
                             true,
                             org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
@@ -646,7 +688,7 @@ class RequestTimeEstimationTest {
         var items = new java.util.ArrayList<GroupPlanner.Item>();
         items.add(new GroupPlanner.Item(String.valueOf(99L), 0, 1L, 0L, 14L, 1L, 0L));
         var queue =
-                new ProjectionQueueSnapshot(
+                new EstimationSnapshot(
                         13L,
                         true,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
@@ -745,9 +787,9 @@ class RequestTimeEstimationTest {
                 "a projection-owned evaluator cannot change mid-call");
     }
 
-    private static ProjectionQueueSnapshot fixedWindow(
+    private static EstimationSnapshot fixedWindow(
             GroupPlanner.Constraints constraints, List<GroupPlanner.Item> active) {
-        return new ProjectionQueueSnapshot(
+        return new EstimationSnapshot(
                 100L,
                 true,
                 org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
@@ -794,8 +836,8 @@ class RequestTimeEstimationTest {
                 routeProjection());
     }
 
-    private static ProjectionQueueSnapshot emptyQueue(long capturedAtMs) {
-        return new ProjectionQueueSnapshot(
+    private static EstimationSnapshot emptyQueue(long capturedAtMs) {
+        return new EstimationSnapshot(
                 capturedAtMs,
                 true,
                 org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,

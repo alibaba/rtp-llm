@@ -1,7 +1,6 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
-import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -11,8 +10,6 @@ import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.MethodType;
 import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.List;
@@ -28,16 +25,6 @@ import static org.mockito.Mockito.mock;
 class PrefillAdmissionFailurePerformanceTest {
     @Test
     void unchangedFleetDoesNotAllocatePerWorker() throws Throwable {
-        var classify =
-                MethodHandles.privateLookupIn(
-                                CostBasedPrefillStrategy.class, MethodHandles.lookup())
-                        .findStatic(
-                                CostBasedPrefillStrategy.class,
-                                "classifyWorkerCapacity",
-                                MethodType.methodType(
-                                        AdmissionRejectReason.class,
-                                        org.flexlb.balance.strategy.PrefillSelectionStrategy
-                                                .AdmissionSummary.class));
         var bean = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
         assertTrue(bean.isThreadAllocatedMemorySupported());
         bean.setThreadAllocatedMemoryEnabled(true);
@@ -67,28 +54,21 @@ class PrefillAdmissionFailurePerformanceTest {
                 observation.setAlive(true);
                 observation.setRunningQueryLen(1L);
                 EndpointTestSupport.applyStatus(endpoint, observation).run();
-                var summary = endpoint.admissionSummary(50, endpoint.requestLimit);
-                assertEquals(1L, summary.occupiedRequests());
-                assertEquals(1L, summary.unknownPriorityRequests());
+                assertEquals(
+                        AdmissionRejectReason.UNSPECIFIED, endpoint.explainAdmissionRejection(50));
                 directory.add(endpoint);
             }
             directory = List.copyOf(directory);
             AdmissionRejectReason result = null;
             for (int i = 0; i < 10_000; i++) {
                 var selected = directory.get(i % workerCount);
-                result =
-                        (AdmissionRejectReason)
-                                classify.invokeExact(
-                                        selected.admissionSummary(50, selected.requestLimit));
+                result = selected.explainAdmissionRejection(50);
             }
             long before = bean.getThreadAllocatedBytes(threadId);
             long started = System.nanoTime();
             for (int i = 0; i < 10_000; i++) {
                 var selected = directory.get(i % workerCount);
-                result =
-                        (AdmissionRejectReason)
-                                classify.invokeExact(
-                                        selected.admissionSummary(50, selected.requestLimit));
+                result = selected.explainAdmissionRejection(50);
             }
             long nsPerFailure = (System.nanoTime() - started) / 10_000;
             long bytesPerFailure = (bean.getThreadAllocatedBytes(threadId) - before) / 10_000;
@@ -102,28 +82,30 @@ class PrefillAdmissionFailurePerformanceTest {
             }
             assertTrue(
                     bytesPerFailure <= singleWorkerAllocation + 128,
-                    "stable endpoint summaries must not allocate one response per worker");
+                    "rejection explanations must not allocate one response per worker");
         }
     }
 
     @Test
-    void mixedPrioritiesAllocateOnlyTheReturnedSnapshot() {
+    void repeatedExplanationsDoNotAllocateSnapshots() {
         var bean = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
         assertTrue(bean.isThreadAllocatedMemorySupported());
         bean.setThreadAllocatedMemoryEnabled(true);
         var state =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                         new java.util.concurrent.locks.ReentrantLock(),
-                        OrderedPrefillRequestQueue.fifo(4),
+                        PrefillRequestQueue.fifo(4),
                         System::currentTimeMillis);
         long threadId = Thread.currentThread().threadId();
         for (int round = 0; round < 20_000; round++) {
-            state.admissionSummary(round % 100 + 1, 1L);
+            state.explainAdmissionRejection(round % 100 + 1);
         }
         long before = bean.getThreadAllocatedBytes(threadId);
         long started = System.nanoTime();
         for (int round = 0; round < 20_000; round++) {
-            assertEquals(0L, state.admissionSummary(round % 100 + 1, 1L).occupiedRequests());
+            assertEquals(
+                    AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                    state.explainAdmissionRejection(round % 100 + 1));
         }
         long elapsed = System.nanoTime() - started;
         long bytesPerQuery = (bean.getThreadAllocatedBytes(threadId) - before) / 20_000;
@@ -131,7 +113,6 @@ class PrefillAdmissionFailurePerformanceTest {
                 "Prefill mixed priority: ns_per_query=%d bytes_per_query=%d%n",
                 elapsed / 20_000, bytesPerQuery);
         assertTrue(
-                bytesPerQuery <= 80L,
-                "mixed priorities may allocate their immutable result, but no extra cache envelope");
+                bytesPerQuery <= 80L, "rejection explanations do not need a statistics snapshot");
     }
 }

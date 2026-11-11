@@ -672,9 +672,9 @@ class CostBasedPrefillSelectionMetricTest {
         status.lock.lock();
         try {
             leader.publishStatus(
-                    leader.applyPreparedStatus(
+                    leader.applyWorkerStatus(
                             status,
-                            status.prepareNewStatus(
+                            status.prepareStatus(
                                     WorkerStatusTestSupport.freezeStatusResponse(
                                             status, response))));
         } finally {
@@ -721,9 +721,9 @@ class CostBasedPrefillSelectionMetricTest {
         status.lock.lock();
         try {
             leader.publishStatus(
-                    leader.applyPreparedStatus(
+                    leader.applyWorkerStatus(
                             status,
-                            status.prepareNewStatus(
+                            status.prepareStatus(
                                     WorkerStatusTestSupport.freezeStatusResponse(
                                             status, response))));
         } finally {
@@ -873,9 +873,9 @@ class CostBasedPrefillSelectionMetricTest {
         status.lock.lock();
         try {
             endpoint.publishStatus(
-                    endpoint.applyPreparedStatus(
+                    endpoint.applyWorkerStatus(
                             status,
-                            status.prepareNewStatus(
+                            status.prepareStatus(
                                     WorkerStatusTestSupport.freezeStatusResponse(
                                             status, response))));
         } finally {

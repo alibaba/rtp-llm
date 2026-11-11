@@ -2,8 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.OrderedPrefillRequestQueue;
-import org.flexlb.balance.endpoint.PrefillRequestQueue;
 import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.preemption.DecodePreemption;
@@ -116,12 +114,6 @@ public class SchedulerConfiguration {
     @ConditionalOnMissingBean(GroupPlanner.class)
     public GroupPlanner groupPlanner(ConfigService config) {
         return BuiltinGroupPlanner.from(config.loadBalanceConfig());
-    }
-
-    @Bean
-    @ConditionalOnMissingBean(PrefillRequestQueue.Factory.class)
-    public PrefillRequestQueue.Factory workerQueues() {
-        return () -> OrderedPrefillRequestQueue.fifo(16);
     }
 
     @Bean

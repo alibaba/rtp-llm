@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.OrderedPrefillRequestQueue;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillRequestQueue;
 import org.flexlb.config.FlexlbConfig;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -150,7 +150,7 @@ public final class RequestExecutionTestSupport {
             java.util.function.Function<PrefillQueueScheduler, PrefillQueueScheduler.Decision>
                     scheduling) {
         var dependencies = SchedulerTestSupport.queueDependencies(scheduler, config);
-        var index = OrderedPrefillRequestQueue.fifo(16);
+        var index = PrefillRequestQueue.fifo(16);
         var state =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                         new ReentrantLock(), index, System::currentTimeMillis);
@@ -224,13 +224,18 @@ public final class RequestExecutionTestSupport {
                         route.prefillWorkMs(),
                         true)
                 .accepted()) return false;
-        if (controller == null) return worker.prefillEndpoint().tryEnqueueRoute(route);
+        if (controller == null)
+            return org.flexlb.balance.endpoint.EndpointTestSupport.tryEnqueueRoute(
+                    worker.prefillEndpoint(), route);
         if (route.ctx().data().getRequestScheduler() == null) {
             if (controller.owner == null)
                 SchedulerTestSupport.bindEndpointOwner(worker.prefillEndpoint(), route);
             else SchedulerTestSupport.bindOwner(route.ctx(), controller.owner);
         }
-        boolean accepted = controller.active && worker.prefillEndpoint().tryEnqueueRoute(route);
+        boolean accepted =
+                controller.active
+                        && org.flexlb.balance.endpoint.EndpointTestSupport.tryEnqueueRoute(
+                                worker.prefillEndpoint(), route);
         controller.wake();
         return accepted;
     }

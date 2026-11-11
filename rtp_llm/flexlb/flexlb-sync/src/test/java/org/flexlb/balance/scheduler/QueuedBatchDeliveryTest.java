@@ -273,7 +273,10 @@ class QueuedBatchDeliveryTest {
             assertEquals(prefillBeforeOldTask, ledger.prefill.stats());
             assertEquals(queueBeforeOldTask, ledger.prefill.captureQueue(10).items());
             assertEquals(decodeBeforeOldTask, decode.resourceSnapshot());
-            assertEquals(1L, ledger.prefill.admissionSummary(0, 0).occupiedRequests());
+            assertEquals(
+                    1L,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                            ledger.prefill));
             assertEquals(List.of(replacement), ledger.prefill.captureQueue(10).items());
             assertEquals(1, requeues.get());
         } finally {
@@ -383,8 +386,7 @@ class QueuedBatchDeliveryTest {
                 .when(prefill)
                 .releaseRequest(any());
 
-        when(prefill.dequeueForDelivery(
-                        any(org.flexlb.balance.endpoint.PrefillEndpoint.DeliverySelection.class)))
+        when(prefill.tryStartQueuedDelivery(any(Delivery.Selection.class)))
                 .thenAnswer(call -> ledger.commit(call.getArgument(0)));
         decode =
                 EndpointTestSupport.decode(
@@ -741,7 +743,7 @@ class QueuedBatchDeliveryTest {
                             return CapacityBoundary.Attempt.accepted(capture);
                         })
                 .when(prefill)
-                .dequeueForDelivery(any());
+                .tryStartQueuedDelivery(any());
         org.junit.jupiter.api.Assertions.assertDoesNotThrow(() -> submit(List.of(item)));
         verify(registry)
                 .recordPreparationFailure(
@@ -1156,7 +1158,7 @@ class QueuedBatchDeliveryTest {
                 "non_prefix_selection",
                 prefill.predictor.evaluator(),
                 OptionalLong.of(1L));
-        verify(prefill).dequeueForDelivery(any());
+        verify(prefill).tryStartQueuedDelivery(any());
         assertEquals(List.of(head, later), ledger.prefill.captureQueue(10).items());
         assertEquals(0, later.decodeEndpoint().resourceSnapshot().activeDispatchPermits());
         assertEquals(0, ledger.prefill.stats().batchCount());
@@ -1182,7 +1184,7 @@ class QueuedBatchDeliveryTest {
                             return ledger.commit(call.getArgument(0));
                         })
                 .when(prefill)
-                .dequeueForDelivery(any());
+                .tryStartQueuedDelivery(any());
         cycle();
         assertEquals(
                 List.of(first, arrival.get(5, TimeUnit.SECONDS)),

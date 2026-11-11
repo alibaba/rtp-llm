@@ -63,8 +63,7 @@ class PrefillCompletionProjectionTest {
                         DeliveryTestSupport.route(reporter),
                         new CapacityNotifier(),
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                                service.loadBalanceConfig()),
-                        () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
+                                service.loadBalanceConfig()));
         var runtime =
                 new SchedulerTestServices(
                         SchedulerTestSupport.repository(requests),
@@ -83,12 +82,18 @@ class PrefillCompletionProjectionTest {
             try {
                 prefill =
                         (PrefillEndpoint)
-                                endpoints.publishPreparedEndpoint(
-                                        worker.getLogicalIpPort(),
-                                        worker,
-                                        worker.prepareNewStatus(
-                                                WorkerStatusTestSupport.freezeStatusResponse(
-                                                        worker, status(1L, Map.of(), Map.of()))));
+                                endpoints
+                                        .updateEndpoint(
+                                                worker.getLogicalIpPort(),
+                                                worker,
+                                                worker.prepareStatus(
+                                                        WorkerStatusTestSupport
+                                                                .freezeStatusResponse(
+                                                                        worker,
+                                                                        status(
+                                                                                1L, Map.of(),
+                                                                                Map.of()))))
+                                        .endpoint();
             } finally {
                 worker.lock.unlock();
             }
@@ -182,7 +187,9 @@ class PrefillCompletionProjectionTest {
                                 now));
             }
             assertTrue(future.get(2L, TimeUnit.SECONDS).isSuccess());
-            assertEquals(1L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(
+                    1L,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(prefill));
 
             TaskInfo task = new TaskInfo();
             task.setRequestId(String.valueOf(101L));
@@ -206,7 +213,9 @@ class PrefillCompletionProjectionTest {
             applyStatus(prefill, status(3L, Map.of(), Map.of("101", task)));
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests));
-            assertEquals(0L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(
+                    0L,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(prefill));
             synchronized (requestContext) {
                 assertTrue(
                         requestContext.snapshot().phase() != Phase.CLOSED,
@@ -251,7 +260,9 @@ class PrefillCompletionProjectionTest {
             applyStatus(prefill, status(4L, Map.of(), Map.of("101", task)));
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests));
-            assertEquals(0L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(
+                    0L,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(prefill));
 
             var decodeFinished = decodeStatus(3L, Map.of());
             decodeFinished.setFinishedTaskInfo(Map.of("101", task));
@@ -327,9 +338,9 @@ class PrefillCompletionProjectionTest {
         worker.lock.lock();
         try {
             projection =
-                    endpoint.applyPreparedStatus(
+                    endpoint.applyWorkerStatus(
                             worker,
-                            worker.prepareNewStatus(
+                            worker.prepareStatus(
                                     WorkerStatusTestSupport.freezeStatusResponse(
                                             worker, response)));
         } finally {

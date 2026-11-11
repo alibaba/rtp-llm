@@ -432,7 +432,7 @@ class EndpointRegistryCloseTest {
                         WorkerStatusRpcClient.convertToStatusObservation(
                                 status,
                                 runningStatus(status.appliedStatusCursor().statusVersion() + 1L));
-                endpoint.applyPreparedStatus(status, status.prepareNewStatus(observation));
+                endpoint.applyWorkerStatus(status, status.prepareStatus(observation));
                 assertTrue(
                         endpoint.resourceSnapshot().requests().containsKey(String.valueOf(123L)));
             } finally {
@@ -698,8 +698,7 @@ class EndpointRegistryCloseTest {
                 mock(DeliveryMetricsReporter.class),
                 org.flexlb.balance.scheduler.SchedulerTestSupport.dispatcher(),
                 availability,
-                org.flexlb.balance.planner.BuiltinGroupPlanner.from(config.loadBalanceConfig()),
-                () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
+                org.flexlb.balance.planner.BuiltinGroupPlanner.from(config.loadBalanceConfig()));
     }
 
     @SuppressWarnings("unchecked")

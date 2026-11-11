@@ -80,7 +80,9 @@ class RequestInflightRecoveryTest {
 
             // Establish the safety evidence before asserting the missing lifecycle transition.
             assertEquals(
-                    0L, f.prefill.admissionSummary(0, f.prefill.requestLimit).occupiedRequests());
+                    0L,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                            f.prefill));
 
             assertEquals(0L, f.decode.routingView().totalLoad());
             assertFalse(f.decode.ownership(f.reservation).owned());
@@ -121,7 +123,8 @@ class RequestInflightRecoveryTest {
             // Java cannot infer "Decode never started" from these wire replies.
             assertEquals(
                     prefillErrorTerminal ? 0L : 1L,
-                    f.prefill.admissionSummary(0, f.prefill.requestLimit).occupiedRequests());
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                            f.prefill));
             assertEquals(1L, f.decode.routingView().totalLoad());
             assertTrue(f.decode.ownership(f.reservation).owned());
             assertFalse(f.claim.completion().toCompletableFuture().isDone());
@@ -350,9 +353,9 @@ class RequestInflightRecoveryTest {
         worker.lock.lock();
         try {
             projection =
-                    endpoint.applyPreparedStatus(
+                    endpoint.applyWorkerStatus(
                             worker,
-                            worker.prepareNewStatus(
+                            worker.prepareStatus(
                                     WorkerStatusTestSupport.freezeStatusResponse(
                                             worker, response)));
         } finally {
@@ -405,8 +408,7 @@ class RequestInflightRecoveryTest {
                             DeliveryTestSupport.route(reporter),
                             new CapacityNotifier(),
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                                    service.loadBalanceConfig()),
-                            () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
+                                    service.loadBalanceConfig()));
             org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner),
                     "endpoints",
@@ -439,7 +441,8 @@ class RequestInflightRecoveryTest {
                     RequestExecutionTestSupport.registerPrefillRoute(
                             context, prefill, decode, reservation, 0L, System.currentTimeMillis());
             prefillState = (PrefillEndpoint) prefill;
-            prefillState.enableQueue(
+            org.flexlb.balance.endpoint.EndpointTestSupport.enableQueue(
+                    prefillState,
                     QueueExecutionSettings.capture(
                             config, org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)));
             var admission = SchedulerTestSupport.claim(owner, String.valueOf(REQUEST_ID), future);
@@ -489,12 +492,14 @@ class RequestInflightRecoveryTest {
             var worker = WorkerStatus.createDiscovered(role, "g1", ip, 8080, 8081, "test");
             worker.lock.lock();
             try {
-                return endpoints.publishPreparedEndpoint(
-                        worker.getLogicalIpPort(),
-                        worker,
-                        worker.prepareNewStatus(
-                                WorkerStatusTestSupport.freezeStatusResponse(
-                                        worker, status(role, 1L, Map.of()))));
+                return endpoints
+                        .updateEndpoint(
+                                worker.getLogicalIpPort(),
+                                worker,
+                                worker.prepareStatus(
+                                        WorkerStatusTestSupport.freezeStatusResponse(
+                                                worker, status(role, 1L, Map.of()))))
+                        .endpoint();
             } finally {
                 worker.lock.unlock();
             }
@@ -553,7 +558,7 @@ class RequestInflightRecoveryTest {
                             org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(prefillState),
                             () -> {
                                 return prefillState
-                                        .dequeueForDelivery(
+                                        .tryStartQueuedDelivery(
                                                 org.flexlb.balance.scheduler.DeliveryTestSupport
                                                         .queued(
                                                                 List.of(route),
@@ -647,7 +652,9 @@ class RequestInflightRecoveryTest {
         }
 
         void assertReleased() {
-            assertEquals(0L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(
+                    0L,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(prefill));
             assertEquals(0L, decode.routingView().totalLoad());
             assertFalse(decode.ownership(reservation).owned());
             assertTrue(prefillState.batchCapacityAvailable(1));

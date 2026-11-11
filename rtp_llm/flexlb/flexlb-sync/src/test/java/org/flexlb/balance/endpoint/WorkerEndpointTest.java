@@ -188,7 +188,8 @@ class WorkerEndpointTest {
         registerBatch(5L, 9999, first, failed, third);
         assertTrue(endpoint.releaseRequest(failed));
 
-        assertEquals(2, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+        assertEquals(
+                2, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(endpoint));
     }
 
     @Test
@@ -259,7 +260,7 @@ class WorkerEndpointTest {
         status.lock.lock();
         try {
             prepared =
-                    status.prepareNewStatus(
+                    status.prepareStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, resp));
         } finally {
             status.lock.unlock();
@@ -314,11 +315,11 @@ class WorkerEndpointTest {
         newStatus.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    newStatus.prepareNewStatus(
+                    newStatus.prepareStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(newStatus, resp));
             assertThrows(
                     IllegalArgumentException.class,
-                    () -> endpoint.applyPreparedStatus(newStatus, prepared));
+                    () -> endpoint.applyWorkerStatus(newStatus, prepared));
         } finally {
             newStatus.lock.unlock();
         }

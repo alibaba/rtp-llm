@@ -25,10 +25,10 @@ import static org.mockito.Mockito.when;
 /**
  * Checks queue ordering, exact item identity and immutable captures while additions and removals change the live queue.
  */
-class OrderedPrefillRequestQueueTest {
+class PrefillRequestQueueTest {
     @Test
     void acceptanceOrderIgnoresPriorityAndOriginalEnqueueSequence() {
-        var queue = OrderedPrefillRequestQueue.fifo(4);
+        var queue = PrefillRequestQueue.fifo(4);
         var first = item(30, 10);
         var second = item(10, 90);
         var third = item(20, 50);
@@ -41,7 +41,7 @@ class OrderedPrefillRequestQueueTest {
 
     @Test
     void removingMiddleItemPreservesOrderAndReceivingItAgainAppendsIt() {
-        var queue = OrderedPrefillRequestQueue.fifo(4);
+        var queue = PrefillRequestQueue.fifo(4);
         var first = item(30, 10);
         var middle = item(10, 90);
         var last = item(20, 50);
@@ -58,7 +58,7 @@ class OrderedPrefillRequestQueueTest {
 
     @Test
     void directModeNeverAcquiresQueueMembership() {
-        var index = OrderedPrefillRequestQueue.disabled();
+        var index = PrefillRequestQueue.disabled();
         var request = item(1, 50);
         var empty = index.capture();
         assertThrows(IllegalStateException.class, () -> index.add(request));
@@ -75,12 +75,12 @@ class OrderedPrefillRequestQueueTest {
         assertSame(empty, index.capture());
         assertTrue(empty.items().isEmpty());
         assertFalse(index.iterator().hasNext());
-        assertSame(index, OrderedPrefillRequestQueue.disabled());
+        assertSame(index, PrefillRequestQueue.disabled());
     }
 
     @Test
     void capturedEmptinessDoesNotMaterializeOrFollowLaterQueueChanges() {
-        var index = OrderedPrefillRequestQueue.fifo(4);
+        var index = PrefillRequestQueue.fifo(4);
         var request = item(1, 50);
         when(request.seqLen())
                 .thenThrow(new AssertionError("must not materialize prediction input"));
@@ -96,7 +96,7 @@ class OrderedPrefillRequestQueueTest {
 
     @Test
     void additionsAndRemovalsMatchReferenceOrderAndPreserveOldCaptures() {
-        var index = OrderedPrefillRequestQueue.fifo(16);
+        var index = PrefillRequestQueue.fifo(16);
         var expected = new ArrayList<RouteResult>();
         var random = new Random(36);
         for (int step = 0; step < 400; step++) {
@@ -152,7 +152,7 @@ class OrderedPrefillRequestQueueTest {
 
     @Test
     void equalOrderingKeysStillRequireExactIdentity() {
-        var index = OrderedPrefillRequestQueue.fifo(2);
+        var index = PrefillRequestQueue.fifo(2);
         var first = item(1, 50);
         var second = item(1, 50);
         assertTrue(index.add(first));
@@ -177,7 +177,7 @@ class OrderedPrefillRequestQueueTest {
     @Test
     @Timeout(10)
     void concurrentCapturesShareMaterializationAndUnchangedRequestValues() throws Exception {
-        var index = OrderedPrefillRequestQueue.fifo(2);
+        var index = PrefillRequestQueue.fifo(2);
         var first = item(1, 50);
         index.add(first);
         var old = index.capture();
@@ -209,7 +209,7 @@ class OrderedPrefillRequestQueueTest {
 
     @Test
     void captureDoesNotReadPlanningInputs() {
-        var index = OrderedPrefillRequestQueue.fifo(2);
+        var index = PrefillRequestQueue.fifo(2);
         var first = item(1, 50);
         var second = item(2, 40);
         when(second.seqLen()).thenThrow(new IllegalStateException("test failure")).thenReturn(10L);

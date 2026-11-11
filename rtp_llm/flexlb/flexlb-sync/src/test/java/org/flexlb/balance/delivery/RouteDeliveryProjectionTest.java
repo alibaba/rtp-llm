@@ -5,7 +5,7 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.EstimationSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport;
 import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.Candidate;
@@ -197,7 +197,7 @@ class RouteDeliveryProjectionTest {
             }
         }
         var queue =
-                new ProjectionQueueSnapshot(
+                new EstimationSnapshot(
                         1000,
                         true,
                         BuiltinGroupPlanner.FIXED_WINDOW,

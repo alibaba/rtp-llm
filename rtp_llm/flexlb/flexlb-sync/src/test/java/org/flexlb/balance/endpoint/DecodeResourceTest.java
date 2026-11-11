@@ -363,18 +363,24 @@ class DecodeResourceTest {
     }
 
     @Test
-    void initializationRejectsAnotherGenerationBeforeChangingResources() {
+    void statusUpdateRejectsAnotherGenerationBeforeChangingResources() {
         WorkerStatus owner = status();
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(owner);
         var incoming = response();
         incoming.setRunningTaskInfo(Map.of("1", task(1, TaskPhase.RUNNING)));
         long version = state.routingView().admissionVersion();
-        assertThrows(
-                IllegalArgumentException.class,
-                () ->
-                        state.initializeFromPreparedStatus(
-                                state.getStatus(),
-                                WorkerStatusTestSupport.freezeStatusResponse(status(), incoming)));
+        var other = status();
+        incoming.setStatusVersion(1L);
+        other.lock.lock();
+        try {
+            var prepared =
+                    other.prepareStatus(
+                            WorkerStatusTestSupport.freezeStatusResponse(other, incoming));
+            assertThrows(
+                    IllegalArgumentException.class, () -> state.applyWorkerStatus(other, prepared));
+        } finally {
+            other.lock.unlock();
+        }
         assertEquals(version, state.routingView().admissionVersion());
         assertEquals(0, state.routingView().totalLoad());
     }
@@ -977,7 +983,7 @@ class DecodeResourceTest {
         status.lock.lock();
         try {
             var prepared =
-                    status.prepareNewStatus(
+                    status.prepareStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, response));
             return withStateLock(
                     state.stateLock(),

@@ -174,7 +174,10 @@ class RequestExecutionQueueTest {
                     assertFalse(future.get(5L, TimeUnit.SECONDS).isSuccess());
                     RequestProtocolTestSupport.awaitCondition(
                             () -> !owner.repository.isCurrent(context));
-                    assertEquals(0L, prefillEndpoint.admissionSummary(0, 0L).occupiedRequests());
+                    assertEquals(
+                            0L,
+                            org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                                    prefillEndpoint));
                     assertFalse(decode.ownership(reservation).owned());
                     assertEquals(0, decode.routingView().totalLoad());
                 } else {
@@ -185,7 +188,10 @@ class RequestExecutionQueueTest {
                     assertFalse(future.get(5L, TimeUnit.SECONDS).isSuccess());
                     RequestProtocolTestSupport.awaitCondition(
                             () -> !owner.repository.isCurrent(context));
-                    assertEquals(0L, prefillEndpoint.admissionSummary(0, 0L).occupiedRequests());
+                    assertEquals(
+                            0L,
+                            org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                                    prefillEndpoint));
                     assertFalse(decode.ownership(reservation).owned());
                     assertEquals(0, decode.routingView().totalLoad());
                 }
@@ -466,7 +472,10 @@ class RequestExecutionQueueTest {
                                                                     queued.prefillWorkMs(),
                                                                     true)
                                                             .accepted());
-                                            assertTrue(prefillEndpoint.tryEnqueueRoute(queued));
+                                            assertTrue(
+                                                    org.flexlb.balance.endpoint.EndpointTestSupport
+                                                            .tryEnqueueRoute(
+                                                                    prefillEndpoint, queued));
                                             return true;
                                         })));
             }
@@ -513,9 +522,8 @@ class RequestExecutionQueueTest {
             assertEquals(0, RequestExecutionTestSupport.state(runtime).queueDepth());
             assertEquals(
                     0L,
-                    RequestExecutionTestSupport.state(runtime)
-                            .admissionSummary(0, 0L)
-                            .occupiedRequests());
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                            RequestExecutionTestSupport.state(runtime)));
             assertEquals(1, releases.get(), "the exact waiting resource seat is released once");
             assertFalse(
                     org.flexlb.balance.endpoint.EndpointTestSupport.releaseRequest(
@@ -581,7 +589,12 @@ class RequestExecutionQueueTest {
         assertTrue(
                 RequestExecutionTestSupport.offer(
                         runtime, item(922L, 50, Long.MAX_VALUE, System.currentTimeMillis(), 128L)));
+        var notifier = mock(CapacityNotifier.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                RequestExecutionTestSupport.state(runtime), "capacityNotifier", notifier);
         assertSame(cleanupFailure, runtime.failQueuedRequests(cause));
+        org.mockito.Mockito.verify(notifier, org.mockito.Mockito.times(callbackFails ? 2 : 3))
+                .notifyChanged(RequestExecutionTestSupport.state(runtime));
         assertEquals(2, callbacks.get(), "a failed callback must not skip later requests");
         assertFalse(
                 RequestExecutionTestSupport.offer(
@@ -643,7 +656,7 @@ class RequestExecutionQueueTest {
         var state =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                         new java.util.concurrent.locks.ReentrantLock(),
-                        org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(4),
+                        org.flexlb.balance.endpoint.PrefillRequestQueue.fifo(4),
                         System::currentTimeMillis);
         var dispatcher = mock(DeliveryCoordinator.class);
         var execution =
@@ -674,7 +687,9 @@ class RequestExecutionQueueTest {
             assertTrue(
                     SelectionTestSupport.registerPrefill(state, route, route.prefillWorkMs(), true)
                             .accepted());
-            assertTrue(execution.prefillEndpoint().tryEnqueueRoute(route));
+            assertTrue(
+                    org.flexlb.balance.endpoint.EndpointTestSupport.tryEnqueueRoute(
+                            execution.prefillEndpoint(), route));
             assertFalse(delivered.await(100, TimeUnit.MILLISECONDS));
             assertEquals(List.of(route), execution.captureQueue(10).items());
         } finally {

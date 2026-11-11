@@ -4,6 +4,7 @@ import org.flexlb.balance.RoutingResult;
 import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.scheduler.CapacityKey;
 import org.flexlb.dao.SchedulingMetadata;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.route.RoleType;
 
@@ -51,17 +52,11 @@ public interface PrefillSelectionStrategy {
          */
         boolean requestCapacityAvailable();
 
-        /** Exact priority counts, read only on a capacity failure. */
-        AdmissionSummary admissionSummary(int priority);
+        /**
+         * Explains a capacity failure without reserving resources.
+         */
+        AdmissionRejectReason explainAdmissionRejection(int priority);
     }
-
-    record AdmissionSummary(
-            long occupiedRequests,
-            long requestsToRelease,
-            long lowerPriorityRequests,
-            long samePriorityRequests,
-            long higherPriorityRequests,
-            long unknownPriorityRequests) {}
 
     /**
      * Frozen scores; input must be the original candidate object, never a reconstructed identity.

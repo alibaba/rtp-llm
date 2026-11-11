@@ -76,7 +76,6 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
     private final org.flexlb.config.DispatcherConfig.Type deliveryMode;
     private final CapacityNotifier capacityNotifier;
     private final QueueExecutionSettings queueSettings;
-    private final PrefillRequestQueue.Factory workerQueues;
     private final Object lifecycleGate = new Object();
 
     /**
@@ -97,8 +96,7 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
             DeliveryMetricsReporter reporter,
             DeliveryCoordinator dispatcher,
             CapacityNotifier capacityNotifier,
-            GroupPlanner grouping,
-            PrefillRequestQueue.Factory workerQueues) {
+            GroupPlanner grouping) {
         checkArgument(retirementTimeoutMs > 0L, "endpoint retirement timeout must be positive");
         this.configService = java.util.Objects.requireNonNull(configService, "configService");
         this.requests = java.util.Objects.requireNonNull(requests, "requests");
@@ -109,7 +107,6 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
                 config.isQueue()
                         ? QueueExecutionSettings.capture(config, Objects.requireNonNull(grouping))
                         : null;
-        this.workerQueues = Objects.requireNonNull(workerQueues);
         this.capacityNotifier =
                 java.util.Objects.requireNonNull(capacityNotifier, "capacityNotifier");
     }
@@ -243,25 +240,18 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
     }
 
     /**
-     * Reduce a private candidate from a new status delta, commit the validated
-     * Engine observation, then make the candidate routable. A private candidate
-     * cannot own any published RequestContext identity, so there are no request
-     * transitions to apply before publication.
-     *
-     * <p>A factory, endpoint-reducer, or status-commit failure closes the
-     * candidate before routing publication. If final map publication fails
-     * after commit, the caller withdraws the entire WorkerStatus generation;
-     * it is never restored.</p>
+     * Finds or creates the Endpoint, applies the report, then registers a new Endpoint for routing.
+     * Failed candidates are closed; notifications from the update are published by the caller after unlocking.
      */
-    public WorkerEndpoint publishPreparedEndpoint(
+    public EndpointUpdate updateEndpoint(
             String address, WorkerStatus status, WorkerStatus.PreparedStatus prepared) {
-        beginCandidatePublication();
-        WorkerEndpoint candidate = null;
+        status.requireActiveGeneration();
+        var existing = get(status.getRole(), address, status);
+        if (existing == null) beginCandidatePublication();
+        WorkerEndpoint candidate = existing;
         boolean publicationAttempted = false;
         Throwable failure = null;
         try {
-            status.requireGenerationLock();
-            status.requireActiveGeneration();
             WorkerStatus.StatusObservation observation = prepared.observation();
             checkArgument(
                     observation.owner() == status,
@@ -271,16 +261,15 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
                     role == status.getRole(),
                     "staged status role does not match its worker generation");
             java.util.Objects.requireNonNull(address, "address");
-            if (status.appliedStatusCursor().statusVersion() >= 0L) {
-                throw new IllegalStateException(
-                        "A committed WorkerStatus generation cannot publish a second endpoint: "
-                                + address
-                                + "#"
-                                + status.getGenerationId());
+            if (candidate == null) {
+                checkState(
+                        status.appliedStatusCursor().statusVersion() < 0L,
+                        "Committed WorkerStatus has no exact endpoint generation: %s",
+                        address);
+                candidate = createEndpoint(status, role, observation.engine());
             }
-            candidate = createEndpoint(status, role, observation.engine());
-            candidate.initializeFromPreparedStatus(status, observation);
-            status.publishPreparedStatus(prepared);
+            var change = candidate.applyWorkerStatus(status, prepared);
+            if (existing != null) return new EndpointUpdate(candidate, change);
             status.trace().record(Stage.ENDPOINT_PUBLISHED);
             WorkerEndpoint exact = candidate;
             publicationAttempted = true;
@@ -296,13 +285,13 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
                         return exact;
                     });
             capacityNotifier.notifyChanged(exact);
-            return candidate;
+            return new EndpointUpdate(candidate, change);
         } catch (Throwable publicationFailure) {
             failure = publicationFailure;
-            throw Failures.propagate(failure, "Endpoint publication failed for " + address);
+            throw Failures.propagate(failure, "Endpoint update failed for " + address);
         } finally {
             try {
-                if (failure != null && candidate != null) {
+                if (failure != null && candidate != null && existing == null) {
                     WorkerEndpoint exact = candidate;
                     try {
                         if (publicationAttempted) {
@@ -320,7 +309,7 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
                     }
                 }
             } finally {
-                endCandidatePublication();
+                if (existing == null) endCandidatePublication();
             }
         }
     }
@@ -712,8 +701,7 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
                             deliveryMode,
                             reporter,
                             capacityNotifier,
-                            queueSettings,
-                            workerQueues);
+                            queueSettings);
             case DECODE -> new DecodeEndpoint(status, requests, capacityNotifier);
             case ENCODER -> new EncoderEndpoint(status, capacityNotifier);
             case VIT -> new WorkerEndpoint(status);
@@ -896,6 +884,11 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
     }
 
     /**
+     * Notifications belong to the returned Endpoint and must be published after releasing the WorkerStatus lock.
+     */
+    public record EndpointUpdate(WorkerEndpoint endpoint, WorkerEndpoint.StatusChange change) {}
+
+    /**
      * One non-owning Prefill generation exposed to routing, with queue projections and Prefill request capacity reads.
      *
      * <p>The endpoint identity is advisory: a caller must selectEndpoint the address
@@ -938,9 +931,9 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
             return endpoint.requestCapacityAvailable(endpoint.requestLimit, 1);
         }
 
-        public org.flexlb.balance.strategy.PrefillSelectionStrategy.AdmissionSummary
-                admissionSummary(int priority) {
-            return endpoint.admissionSummary(priority, endpoint.requestLimit);
+        public org.flexlb.dao.loadbalance.AdmissionRejectReason explainAdmissionRejection(
+                int priority) {
+            return endpoint.explainAdmissionRejection(priority);
         }
     }
 

@@ -241,10 +241,12 @@ public final class PrefillQueueScheduler {
             failure = problem;
         }
         failure = Failures.run(failure, () -> observeWait(null));
-        for (var route : removed) {
+        if (!removed.isEmpty()) {
             failure =
                     Failures.run(
                             failure, () -> prefillEndpoint.signal(PrefillEndpoint.Signal.CAPACITY));
+        }
+        for (var route : removed) {
             failure =
                     Failures.run(
                             failure,

@@ -299,7 +299,7 @@ class RequestExecutionPerformanceTest {
         var settings =
                 QueueExecutionSettings.capture(
                         config, org.flexlb.balance.planner.BuiltinGroupPlanner.from(config));
-        endpoint.enableQueue(settings);
+        org.flexlb.balance.endpoint.EndpointTestSupport.enableQueue(endpoint, settings);
         PrefillQueueScheduler runtime =
                 org.flexlb.balance.endpoint.EndpointTestSupport.worker(
                         endpoint.ipPort(), endpoint, settings, delivery, endpoint, execution);

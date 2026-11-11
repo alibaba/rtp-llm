@@ -101,8 +101,8 @@ class RejectedDeliveryWithdrawalRaceTest {
                         call ->
                                 EndpointTestSupport.releaseRequest(
                                         ledger.prefill, call.getArgument(0)));
-        when(prefill.dequeueForDelivery(any()))
-                .thenAnswer(call -> ledger.prefill.dequeueForDelivery(call.getArgument(0)));
+        when(prefill.tryStartQueuedDelivery(any()))
+                .thenAnswer(call -> ledger.prefill.tryStartQueuedDelivery(call.getArgument(0)));
 
         DecodeEndpoint decode =
                 EndpointTestSupport.decode(

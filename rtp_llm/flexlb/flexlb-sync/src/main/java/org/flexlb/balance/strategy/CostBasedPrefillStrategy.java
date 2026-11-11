@@ -7,7 +7,6 @@ import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.SchedulingMetadata;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -230,7 +229,7 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
         @SuppressWarnings("unchecked")
         I winner = (I) candidates.capturedSources[selected];
         if (!queueScheduling && !winner.requestCapacityAvailable()) {
-            var reason = classifyWorkerCapacity(winner.admissionSummary(metadata.priority()));
+            var reason = winner.explainAdmissionRejection(metadata.priority());
             var error =
                     switch (reason) {
                         case HIGHER_PRIORITY_AHEAD, SAME_PRIORITY_AHEAD ->
@@ -270,20 +269,6 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                         winner,
                         cacheMatches,
                         candidates.inputs[selected]));
-    }
-
-    private static AdmissionRejectReason classifyWorkerCapacity(AdmissionSummary summary) {
-        long residual = Math.max(0L, summary.requestsToRelease() - summary.lowerPriorityRequests());
-        long protectedRequests = summary.higherPriorityRequests() + summary.samePriorityRequests();
-        if (residual > protectedRequests && summary.unknownPriorityRequests() > 0L) {
-            return AdmissionRejectReason.UNSPECIFIED;
-        }
-        if (residual > 0L && protectedRequests >= residual) {
-            return summary.higherPriorityRequests() > 0L
-                    ? AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
-                    : AdmissionRejectReason.SAME_PRIORITY_AHEAD;
-        }
-        return AdmissionRejectReason.RESOURCE_EXHAUSTED;
     }
 
     private static <I extends CandidateInput>

@@ -227,31 +227,13 @@ public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
                             + ", response="
                             + version);
         }
-        WorkerEndpoint endpoint = endpointRegistry.get(roleType, ipPort, workerStatus);
-        if (endpoint == null && cursor.statusVersion() >= 0L) {
-            throw new IllegalStateException(
-                    "Committed WorkerStatus has no exact endpoint generation: "
-                            + ipPort
-                            + "#"
-                            + workerStatus.getGenerationId());
-        }
         var previousStep = workerStatus.committedEngineObservation().lastStepMetrics();
-        WorkerEndpoint.StatusChange change = WorkerEndpoint.NO_STATUS_CHANGE;
-        if (version > cursor.statusVersion()) {
-            WorkerStatus.PreparedStatus prepared = workerStatus.prepareNewStatus(observation);
-            if (endpoint != null) {
-                change = endpoint.applyPreparedStatus(workerStatus, prepared);
-            } else {
-                endpoint = endpointRegistry.publishPreparedEndpoint(ipPort, workerStatus, prepared);
-            }
-        } else if (endpoint != null) {
-            // Same-version running_tasks is still a full liveness snapshot; never replay versioned
-            // mutations.
-            change = endpoint.applyStatusHeartbeat(workerStatus, observation);
-        }
+        var update =
+                endpointRegistry.updateEndpoint(
+                        ipPort, workerStatus, workerStatus.prepareStatus(observation));
         return new StatusApplication(
-                endpoint,
-                change,
+                update.endpoint(),
+                update.change(),
                 version > cursor.statusVersion(),
                 observation.latestFinishedVersion() != null
                         && observation.latestFinishedVersion() > cursor.latestFinishedTaskVersion(),

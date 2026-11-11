@@ -1588,10 +1588,8 @@ class RequestRouteSelectorTest {
         var selected = selection(RoleType.PREFILL, 70L, "p", 8001, "g1");
         var endpoint = (PrefillEndpoint) selected.selectedEndpoint();
         when(endpoint.requestCapacityAvailable(anyLong(), anyInt())).thenReturn(false);
-        when(endpoint.admissionSummary(anyInt(), anyLong()))
-                .thenReturn(
-                        new org.flexlb.balance.strategy.PrefillSelectionStrategy.AdmissionSummary(
-                                1L, 1L, 0L, 0L, 0L, 1L));
+        when(endpoint.explainAdmissionRejection(anyInt()))
+                .thenReturn(org.flexlb.dao.loadbalance.AdmissionRejectReason.UNSPECIFIED);
         org.mockito.Mockito.doAnswer(
                         call -> SelectionTestSupport.registerResult(call, selected(call, selected)))
                 .when(prefillSelector)
@@ -1611,7 +1609,7 @@ class RequestRouteSelectorTest {
             var route = result.value();
             assertSame(endpoint, route.prefillEndpoint());
             verify(endpoint, never()).requestCapacityAvailable(anyLong(), anyInt());
-            verify(endpoint, never()).admissionSummary(anyInt(), anyLong());
+            verify(endpoint, never()).explainAdmissionRejection(anyInt());
         }
     }
 

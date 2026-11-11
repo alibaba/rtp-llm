@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.EstimationSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 
 import java.util.ArrayList;
@@ -77,14 +77,14 @@ public final class RequestTimeEstimationTestSupport {
                 maxRequests, 1_000_000L, 1_000_000L, 0L, collectionWindowMs);
     }
 
-    static ProjectionQueueSnapshot queue(
+    static EstimationSnapshot queue(
             boolean priority,
             GroupPlanner.Constraints constraints,
             List<GroupPlanner.Item> activeItems) {
         return queue(true, priority, constraints, activeItems);
     }
 
-    static ProjectionQueueSnapshot queue(
+    static EstimationSnapshot queue(
             boolean queueScheduling,
             boolean priority,
             GroupPlanner.Constraints constraints,
@@ -92,7 +92,7 @@ public final class RequestTimeEstimationTestSupport {
         Comparator<GroupPlanner.Item> ordering = priority ? PRIORITY : FIFO;
         List<GroupPlanner.Item> ordered = new ArrayList<>(activeItems);
         ordered.sort(ordering);
-        return new ProjectionQueueSnapshot(
+        return new EstimationSnapshot(
                 NOW_MS,
                 queueScheduling,
                 org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
@@ -149,7 +149,7 @@ public final class RequestTimeEstimationTestSupport {
     }
 
     static Candidate project(
-            ProjectionQueueSnapshot queue,
+            EstimationSnapshot queue,
             WorkSnapshot work,
             PrefillTimePredictor.Evaluator evaluator,
             Probe probe,

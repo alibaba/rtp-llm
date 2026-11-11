@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
+import org.flexlb.balance.scheduler.Delivery;
 import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -29,7 +30,7 @@ public final class DeliverySettlementTestSupport {
     public DeliverySettlementTestSupport() {
         prefill =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
-                        lock, OrderedPrefillRequestQueue.fifo(4), System::currentTimeMillis);
+                        lock, PrefillRequestQueue.fifo(4), System::currentTimeMillis);
     }
 
     public void enqueue(RouteResult item) {
@@ -43,8 +44,8 @@ public final class DeliverySettlementTestSupport {
     }
 
     public org.flexlb.balance.delivery.CapacityBoundary.Attempt<WorkSnapshot> commit(
-            PrefillEndpoint.DeliverySelection plan) {
-        return prefill.dequeueForDelivery(plan);
+            Delivery.Selection plan) {
+        return prefill.tryStartQueuedDelivery(plan);
     }
 
     public void commit(long batchId, List<RouteResult> items) {

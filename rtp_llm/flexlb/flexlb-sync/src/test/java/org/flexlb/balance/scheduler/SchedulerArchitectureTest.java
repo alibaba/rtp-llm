@@ -195,8 +195,7 @@ class SchedulerArchitectureTest {
     void queueImplementationsDoNotOwnResourcesOrRequestSettlement() throws IOException {
         for (Class<?> queue :
                 new Class<?>[] {
-                    OrderedRequestQueue.class,
-                    org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.class
+                    OrderedRequestQueue.class, org.flexlb.balance.endpoint.PrefillRequestQueue.class
                 }) {
             for (Class<?> owner :
                     new Class<?>[] {
@@ -455,7 +454,7 @@ class SchedulerArchitectureTest {
         for (Class<?> dependency :
                 new Class<?>[] {
                     OrderedRequestQueue.class,
-                    org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.class,
+                    org.flexlb.balance.endpoint.PrefillRequestQueue.class,
                     org.flexlb.engine.grpc.EngineGrpcClient.CancelReply.class,
                     org.flexlb.balance.preemption.DefaultDecodePreemption.class,
                     org.flexlb.balance.planner.BuiltinGroupPlanner.class
@@ -488,8 +487,7 @@ class SchedulerArchitectureTest {
         for (Class<?> consumer :
                 new Class<?>[] {
                     DirectRequestScheduler.class, QueuedRequestScheduler.class,
-                    OrderedRequestQueue.class,
-                            org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.class
+                    OrderedRequestQueue.class, org.flexlb.balance.endpoint.PrefillRequestQueue.class
                 }) {
             for (Class<?> dependency :
                     new Class<?>[] {

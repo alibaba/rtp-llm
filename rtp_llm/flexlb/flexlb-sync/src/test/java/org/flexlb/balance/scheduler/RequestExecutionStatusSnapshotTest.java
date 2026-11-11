@@ -18,6 +18,9 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 
+/**
+ * Verifies scheduling projections use committed worker capacity and status observations.
+ */
 class RequestExecutionStatusSnapshotTest {
 
     @ParameterizedTest
@@ -96,7 +99,7 @@ class RequestExecutionStatusSnapshotTest {
         status.lock.lock();
         try {
             status.publishPreparedStatus(
-                    status.prepareNewStatus(
+                    status.prepareStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, response)));
         } finally {
             status.lock.unlock();

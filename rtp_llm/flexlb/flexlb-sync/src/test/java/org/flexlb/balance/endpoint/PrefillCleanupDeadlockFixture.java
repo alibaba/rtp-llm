@@ -22,7 +22,7 @@ public final class PrefillCleanupDeadlockFixture {
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillEndpoint state =
             org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
-                    lock, OrderedPrefillRequestQueue.fifo(4), clock::get);
+                    lock, PrefillRequestQueue.fifo(4), clock::get);
     private final EndpointRetirementTestSupport generation =
             new EndpointRetirementTestSupport(() -> {});
     private final RouteResult next;

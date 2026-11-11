@@ -3,7 +3,6 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
-import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.enums.TaskPhase;
@@ -200,9 +199,7 @@ class DecodeEndpointTest {
                                 : DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN,
                 endpoint.resourceSnapshot().requests().get(String.valueOf(100L)).phase());
 
-        endpoint.publishStatus(
-                endpoint.applyStatusHeartbeat(
-                        status, WorkerStatusTestSupport.freezeStatusResponse(status, response)));
+        EndpointTestSupport.applyStatus(endpoint, response).run();
         verify(sink, times(2))
                 .onWorkerRequestEvent(
                         org.mockito.ArgumentMatchers.any(),

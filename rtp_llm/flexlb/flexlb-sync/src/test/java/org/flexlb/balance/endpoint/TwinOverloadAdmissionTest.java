@@ -52,7 +52,7 @@ class TwinOverloadAdmissionTest {
         assertEquals(2, endpoint.stats().batchCount());
         assertEquals(
                 16,
-                endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests(),
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(endpoint),
                 "maxRequests=8 bounds one decision, not the engine's total inflight work");
     }
 
@@ -61,7 +61,8 @@ class TwinOverloadAdmissionTest {
         FlexlbConfig config = config(1);
         PrefillEndpoint endpoint = prefill(config);
         commitBatch(endpoint, config, 11L, 1L);
-        assertEquals(8, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+        assertEquals(
+                8, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(endpoint));
         assertTrue(!endpoint.batchCapacityAvailable(1));
 
         Map<String, TaskInfo> finished = tasks(1L, 7, 11L, TaskPhase.RUNNING);
@@ -69,7 +70,7 @@ class TwinOverloadAdmissionTest {
         assertEquals(1, endpoint.stats().batchCount());
         assertEquals(
                 1,
-                endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests(),
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(endpoint),
                 "completed members immediately leave ownership while the last member retains the batch");
         assertTrue(
                 !endpoint.batchCapacityAvailable(1),
@@ -77,11 +78,13 @@ class TwinOverloadAdmissionTest {
 
         applyStatus(endpoint, Map.of(), tasks(8L, 1, 11L, TaskPhase.RUNNING));
         assertEquals(0, endpoint.stats().batchCount());
-        assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+        assertEquals(
+                0, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(endpoint));
         assertTrue(endpoint.batchCapacityAvailable(1));
         // The full snapshot may repeat across polls without releasing ownership twice.
         applyStatus(endpoint, Map.of(), tasks(8L, 1, 11L, TaskPhase.RUNNING));
-        assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+        assertEquals(
+                0, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(endpoint));
     }
 
     @ParameterizedTest
@@ -92,12 +95,13 @@ class TwinOverloadAdmissionTest {
         FlexlbConfig config = config(2);
         PrefillEndpoint endpoint = prefill(config);
         commitBatch(endpoint, config, 70L, 101L);
-        assertEquals(8, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+        assertEquals(
+                8, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(endpoint));
 
         applyStatus(endpoint, tasks(101L, 8, 70L, phase), Map.of());
         assertEquals(
                 8,
-                endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests(),
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(endpoint),
                 "the local batch and its engine observation describe the same eight requests");
         assertEquals(1, endpoint.stats().batchCount());
         assertEquals(
@@ -112,7 +116,8 @@ class TwinOverloadAdmissionTest {
                 "repeated status must neither release nor duplicate the local batch slot");
 
         applyStatus(endpoint, Map.of(), tasks(101L, 8, 70L, phase));
-        assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+        assertEquals(
+                0, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(endpoint));
     }
 
     @Test
@@ -142,10 +147,12 @@ class TwinOverloadAdmissionTest {
         config.setDispatcher(ConfigTestSupport.nonBatch());
         PrefillEndpoint endpoint = prefill(config);
         applyStatus(endpoint, tasks(101L, 8, 70L, TaskPhase.RUNNING), Map.of());
-        assertEquals(8, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+        assertEquals(
+                8, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(endpoint));
         assertTrue(endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().isEmpty());
         applyStatus(endpoint, Map.of(), tasks(101L, 8, 70L, TaskPhase.RUNNING));
-        assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+        assertEquals(
+                0, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(endpoint));
         assertEquals(
                 0L,
                 endpoint.captureRouteProjectionInputs()

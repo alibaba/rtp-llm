@@ -690,10 +690,8 @@ class TransientCapacityQueueContractTest {
                     () ->
                             fixture.decodeEndpoint.resourceSnapshot().reservedCount()
                                             == capacityRequests
-                                    && fixture.prefillEndpoint
-                                                    .admissionSummary(
-                                                            0, fixture.prefillEndpoint.requestLimit)
-                                                    .occupiedRequests()
+                                    && org.flexlb.balance.endpoint.EndpointTestSupport
+                                                    .occupiedRequestCount(fixture.prefillEndpoint)
                                             == capacityRequests,
                     2_000L);
             assertEquals(
@@ -701,10 +699,8 @@ class TransientCapacityQueueContractTest {
                     fixture.decodeEndpoint.resourceSnapshot().reservedCount(),
                     () ->
                             "batch credits must not become an extra worker request-count limit: prefill="
-                                    + fixture.prefillEndpoint
-                                            .admissionSummary(
-                                                    0, fixture.prefillEndpoint.requestLimit)
-                                            .occupiedRequests()
+                                    + org.flexlb.balance.endpoint.EndpointTestSupport
+                                            .occupiedRequestCount(fixture.prefillEndpoint)
                                     + ", queued="
                                     + org.flexlb.balance.scheduler.SchedulerTestServices
                                             .pendingDeliveryRequestCount(
@@ -720,9 +716,8 @@ class TransientCapacityQueueContractTest {
                     "each dispatched group respects decision.maxRequests");
             assertEquals(
                     capacityRequests,
-                    fixture.prefillEndpoint
-                            .admissionSummary(0, fixture.prefillEndpoint.requestLimit)
-                            .occupiedRequests());
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                            fixture.prefillEndpoint));
             assertEquals(
                     capacityRequests - 4,
                     fixture.prefillEndpoint.queueDepth(),
@@ -1157,10 +1152,10 @@ class TransientCapacityQueueContractTest {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(
+                    status.prepareStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, response));
             WorkerEndpoint endpoint =
-                    registry.publishPreparedEndpoint(status.getLogicalIpPort(), status, prepared);
+                    registry.updateEndpoint(status.getLogicalIpPort(), status, prepared).endpoint();
             status.recordSuccessfulPoll(true);
             return endpoint;
         } finally {

@@ -94,8 +94,7 @@ class EndpointRegistryRoleTest {
                         EndpointTestSupport.routeStrategy(requestRuntime),
                         availability,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                                configService.loadBalanceConfig()),
-                        () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
+                                configService.loadBalanceConfig()));
     }
 
     @AfterEach

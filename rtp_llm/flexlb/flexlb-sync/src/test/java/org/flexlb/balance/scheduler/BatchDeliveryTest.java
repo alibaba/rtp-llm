@@ -6,8 +6,8 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
-import org.flexlb.balance.endpoint.OrderedPrefillRequestQueue;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillRequestQueue;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
@@ -717,7 +717,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
     final ReentrantLock queueLock = new ReentrantLock();
     final PrefillEndpoint queueOwnership =
             org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
-                    queueLock, OrderedPrefillRequestQueue.fifo(16), System::currentTimeMillis);
+                    queueLock, PrefillRequestQueue.fifo(16), System::currentTimeMillis);
 
     final List<String> events = new CopyOnWriteArrayList<>();
     final List<Delivery.Member> claims = new CopyOnWriteArrayList<>();
@@ -833,12 +833,11 @@ final class LinearDeliveryFixture implements AutoCloseable {
         when(prefill.getIp()).thenReturn("127.0.0.1");
         when(prefill.getGrpcPort()).thenReturn(8090);
         doReturn(true).when(prefill).batchCapacityAvailable(anyInt());
-        when(prefill.dequeueForDelivery(
-                        any(org.flexlb.balance.endpoint.PrefillEndpoint.DeliverySelection.class)))
+        when(prefill.tryStartQueuedDelivery(any(Delivery.Selection.class)))
                 .thenAnswer(
                         call -> {
                             assertFalse(queueLock.isHeldByCurrentThread());
-                            var plan = call.getArgument(0, PrefillEndpoint.DeliverySelection.class);
+                            var plan = call.getArgument(0, Delivery.Selection.class);
                             committedItems = List.copyOf(plan.items());
                             if (plan.batch()) {
                                 committedPrediction = plan.predictedMs();

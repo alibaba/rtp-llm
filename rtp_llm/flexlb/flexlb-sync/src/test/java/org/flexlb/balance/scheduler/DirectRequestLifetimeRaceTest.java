@@ -219,7 +219,7 @@ class DirectRequestLifetimeRaceTest {
             verify(prefill)
                     .commitDirect(
                             org.mockito.ArgumentMatchers.argThat(route -> route.ctx() == context));
-            verify(prefill, org.mockito.Mockito.never()).dequeueForDelivery(any());
+            verify(prefill, org.mockito.Mockito.never()).tryStartQueuedDelivery(any());
             verify(selectedEndpoint, org.mockito.Mockito.never()).close();
         } finally {
             RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(requests);

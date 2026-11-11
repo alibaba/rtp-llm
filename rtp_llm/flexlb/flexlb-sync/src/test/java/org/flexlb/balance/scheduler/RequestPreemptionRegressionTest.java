@@ -355,9 +355,9 @@ class RequestPreemptionRegressionTest {
         status.lock.lock();
         try {
             var prepared =
-                    status.prepareNewStatus(
+                    status.prepareStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, report));
-            change = decode.applyPreparedStatus(status, prepared);
+            change = decode.applyWorkerStatus(status, prepared);
         } finally {
             status.lock.unlock();
         }

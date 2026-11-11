@@ -10,19 +10,19 @@
 本轮校验改动涉及 18 个生产文件，删除 22 处空值校验、2 处直接状态校验和 3 处参数校验调用。
 此外收拢重复的锁检查调用、条件表达式和只为已验证参数服务的转换，不把这些都混算为直接 checkState 删除数。
 
-| 位置                                   | 收拢方式与保留的保证                                                                                                                                                                        |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| RoutingResult、CapacityBoundary 的工厂 | payload 合法性统一由 record 构造器检查；工厂的空 payload 现在统一抛 IllegalArgumentException，原先工厂抛 NullPointerException。新增合同测试覆盖工厂和直接构造。                             |
-| RequestContext → RequestData           | 配置在 RequestData 构造器校验一次；绑定参数及未绑定状态由 Repository 在相同 Data 锁内校验，内部 register 直接绑定。                                                                         |
-| DeliveryDispatcher → Delivery.Member   | 入口核对发送模式和 batchId，initialize 保留“不能重复初始化”的状态校验，删除相同参数校验。                                                                                                   |
-| WorkerStatus                           | prepareNewStatus、recordSuccessfulPoll、updateDiscoveryLabels 通过 requireActiveGeneration 一次检查锁和活跃状态；publishPreparedStatus 自己检查锁，由 publishReducedStatus 检查未退休状态。 |
-| EndpointRegistry                       | 映射发布保留 current == null，一并拒绝已有的相同或不同代际；删除被该条件完全包含的判断。关闭前后、跨锁边界的复查保留。                                                                      |
-| RoleSelection                          | 角色类型由各个 sealed 子类精确检查一次；父类仍检查成功元数据，Prefill 子类同时拒绝空 role。                                                                                                 |
-| DecodeEndpoint                         | 新候选初始化的 observation 身份统一由 calibrateLocked 检查；涉及 beginRetirement 副作用之前的身份校验继续保留。                                                                             |
-| ArithmeticFormula → Parser             | 外层 copyOf 完成空值校验与不可变封装，包内 parser 使用已经验证的绑定，不重复 copyOf/requireNonNull。                                                                                        |
-| CapacityRelease.plus                   | 两个不可变 CapacityRelease 已在构造时检查非负容量，plus 直接饱和相加；原有饱和加法校验 helper 仍供未验证的计数输入使用。                                                                    |
-| 定时任务、退休回调                     | ScheduledThreadPoolExecutor.schedule 和 CompletableFuture.thenRun 已拒绝空任务，删除转交前相同检查。                                                                                        |
-| 排队恢复与选路                         | 恢复节点的 removed 条件在插入时检查；RoutingContext 构造器保证 context 非空，选路仍检查其是否为当前准确上下文。                                                                             |
+| 位置                                   | 收拢方式与保留的保证                                                                                                                                                                     |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| RoutingResult、CapacityBoundary 的工厂 | payload 合法性统一由 record 构造器检查；工厂的空 payload 现在统一抛 IllegalArgumentException，原先工厂抛 NullPointerException。新增合同测试覆盖工厂和直接构造。                          |
+| RequestContext → RequestData           | 配置在 RequestData 构造器校验一次；绑定参数及未绑定状态由 Repository 在相同 Data 锁内校验，内部 register 直接绑定。                                                                      |
+| DeliveryDispatcher → Delivery.Member   | 入口核对发送模式和 batchId，initialize 保留“不能重复初始化”的状态校验，删除相同参数校验。                                                                                                |
+| WorkerStatus                           | prepareStatus、recordSuccessfulPoll、updateDiscoveryLabels 通过 requireActiveGeneration 一次检查锁和活跃状态；publishPreparedStatus 自己检查锁，由 publishReducedStatus 检查未退休状态。 |
+| EndpointRegistry                       | 映射发布保留 current == null，一并拒绝已有的相同或不同代际；删除被该条件完全包含的判断。关闭前后、跨锁边界的复查保留。                                                                   |
+| RoleSelection                          | 角色类型由各个 sealed 子类精确检查一次；父类仍检查成功元数据，Prefill 子类同时拒绝空 role。                                                                                              |
+| DecodeEndpoint                         | 新候选初始化的 observation 身份统一由 calibrateLocked 检查；涉及 beginRetirement 副作用之前的身份校验继续保留。                                                                          |
+| ArithmeticFormula → Parser             | 外层 copyOf 完成空值校验与不可变封装，包内 parser 使用已经验证的绑定，不重复 copyOf/requireNonNull。                                                                                     |
+| CapacityRelease.plus                   | 两个不可变 CapacityRelease 已在构造时检查非负容量，plus 直接饱和相加；原有饱和加法校验 helper 仍供未验证的计数输入使用。                                                                 |
+| 定时任务、退休回调                     | ScheduledThreadPoolExecutor.schedule 和 CompletableFuture.thenRun 已拒绝空任务，删除转交前相同检查。                                                                                     |
+| 排队恢复与选路                         | 恢复节点的 removed 条件在插入时检查；RoutingContext 构造器保证 context 非空，选路仍检查其是否为当前准确上下文。                                                                          |
 
 保留项包括独立对象的构造约束、外部 RPC/策略返回值校验、CAS 成功与否、容量转移结果、
 下溢和溢出检查，以及状态可能在锁或线程边界发生变化后的复查。未进行吞吐或延迟测量，不以删除检查数量声称性能收益。
@@ -77,7 +77,7 @@ PrefillQueueScheduler、PrefillDeliveryScheduler、PrefillEndpoint、DecodeEndpo
 先增加队头和批次容量边界 UT，在旧实现上通过后删除反向回写接口，再迁移调用方。
 
 - 删除 `PrefillEndpoint.commitDelivery(Delivery)` 和对外可访问的 `commitLocked`。
-  新入口 `dequeueForDelivery(DeliverySelection)` 在一个方法内加锁、校验和修改账本，删除单次转调的私有包装。
+  新入口 `tryStartQueuedDelivery(DeliverySelection)` 在一个方法内加锁、校验和修改账本，删除单次转调的私有包装。
 - 删除 `Delivery.committed(...)`、`committed`、`removedFailedMember`、`selectionTimeMs`、
   `maxInflightBatches` 以及类级 Lombok Getter、`items()`、`failedMember()`。
   临时许可和成员集合只在 scheduler 包内供 Dispatcher 使用，不再向 Endpoint 暴露。
@@ -109,7 +109,7 @@ if (dequeued == null) return boundary; // finally 归还临时资源
 dispatchCommitted(delivery); // 提交任务或发布路由
 // 若出队后提交任务失败，上报每个成员的准备失败；Scheduler 清理请求登记。
 
-// PrefillEndpoint.dequeueForDelivery：所有队列和 Prefill 账本变化在同一把锁内。
+// PrefillEndpoint.tryStartQueuedDelivery：所有队列和 Prefill 账本变化在同一把锁内。
 lock();
 now = clock.getAsLong();
 checkExactWaitingMembersAndPrefix(selection, now);

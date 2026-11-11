@@ -59,7 +59,8 @@ class DeliverySettlementSignalContractTest {
             assertEquals(1, fixture.decode.routingView().totalLoad());
             assertEquals(
                     side == Side.PREFILL ? 1L : 0L,
-                    fixture.prefill.admissionSummary(0, 0L).occupiedRequests());
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                            fixture.prefill));
             assertFalse(fixture.settled.isDone(), "a release still owns real resources");
             fixture.session.get(2, TimeUnit.SECONDS);
             assertSame(
@@ -85,7 +86,10 @@ class DeliverySettlementSignalContractTest {
             var close = fixture.context.snapshot().close();
             assertTrue(close.prefillSettled());
             assertFalse(close.decodeSettled());
-            assertEquals(0L, fixture.prefill.admissionSummary(0, 0L).occupiedRequests());
+            assertEquals(
+                    0L,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                            fixture.prefill));
             assertEquals(1, fixture.decode.routingView().totalLoad());
             assertTrue(fixture.scheduler.repository.isCurrent(fixture.context));
             assertFalse(fixture.settled.isDone(), "failed release is still an obligation");
@@ -197,9 +201,9 @@ class DeliverySettlementSignalContractTest {
             worker.lock.lock();
             try {
                 projection =
-                        decode.applyPreparedStatus(
+                        decode.applyWorkerStatus(
                                 worker,
-                                worker.prepareNewStatus(
+                                worker.prepareStatus(
                                         org.flexlb.dao.master.WorkerStatusTestSupport
                                                 .freezeStatusResponse(worker, status)));
             } finally {
@@ -247,7 +251,7 @@ class DeliverySettlementSignalContractTest {
                     withStateLock(
                             org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(state),
                             () ->
-                                    prefill.dequeueForDelivery(
+                                    prefill.tryStartQueuedDelivery(
                                                     org.flexlb.balance.scheduler.DeliveryTestSupport
                                                             .queued(
                                                                     List.of(route),
@@ -341,7 +345,9 @@ class DeliverySettlementSignalContractTest {
             settled.get(2, TimeUnit.SECONDS);
             session.get(2, TimeUnit.SECONDS);
             SchedulerTestSupport.awaitRequestWork(runtime);
-            assertEquals(0L, prefill.admissionSummary(0, 0L).occupiedRequests());
+            assertEquals(
+                    0L,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(prefill));
             assertEquals(0, prefill.queueCounters().batchSlots());
             assertEquals(0, decode.routingView().totalLoad());
             assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());

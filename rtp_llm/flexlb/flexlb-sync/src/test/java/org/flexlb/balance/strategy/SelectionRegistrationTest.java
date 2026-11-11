@@ -178,7 +178,8 @@ class SelectionRegistrationTest {
             var headDecode = head.decodeReservation();
             try {
                 assertTrue(
-                        prefill.enqueueRoute(
+                        org.flexlb.balance.endpoint.EndpointTestSupport.enqueueRoute(
+                                prefill,
                                 head,
                                 QueueExecutionSettings.capture(
                                         settings, BuiltinGroupPlanner.from(settings))));
@@ -197,9 +198,9 @@ class SelectionRegistrationTest {
                 status.lock.lock();
                 try {
                     change =
-                            decode.applyPreparedStatus(
+                            decode.applyWorkerStatus(
                                     status,
-                                    status.prepareNewStatus(
+                                    status.prepareStatus(
                                             WorkerStatusTestSupport.freezeStatusResponse(
                                                     status, full)));
                 } finally {
@@ -362,13 +363,18 @@ class SelectionRegistrationTest {
                                 settings,
                                 org.flexlb.balance.planner.BuiltinGroupPlanner.from(settings));
                 org.junit.jupiter.api.Assertions.assertFalse(
-                        endpoint.enqueueRoute(withoutRegistration, queue));
-                assertTrue(endpoint.enqueueRoute(selected, queue));
+                        org.flexlb.balance.endpoint.EndpointTestSupport.enqueueRoute(
+                                endpoint, withoutRegistration, queue));
+                assertTrue(
+                        org.flexlb.balance.endpoint.EndpointTestSupport.enqueueRoute(
+                                endpoint, selected, queue));
             }
             assertEquals(1, endpoint.queueCounters().outstandingRequests());
             release(selected);
             org.junit.jupiter.api.Assertions.assertNull(endpoint.commitDirect(selected));
-            org.junit.jupiter.api.Assertions.assertFalse(endpoint.tryEnqueueRoute(selected));
+            org.junit.jupiter.api.Assertions.assertFalse(
+                    org.flexlb.balance.endpoint.EndpointTestSupport.tryEnqueueRoute(
+                            endpoint, selected));
             assertEquals(0, endpoint.queueCounters().outstandingRequests());
         }
     }

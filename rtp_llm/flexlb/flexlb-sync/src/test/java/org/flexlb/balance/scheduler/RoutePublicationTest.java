@@ -56,7 +56,7 @@ class RoutePublicationTest {
                             batch
                                     ? CapacityBoundary.Resource.PREFILL_BATCH
                                     : CapacityBoundary.Resource.PREFILL_REQUEST);
-            when(f.prefill.dequeueForDelivery(any()))
+            when(f.prefill.tryStartQueuedDelivery(any()))
                     .thenReturn(CapacityBoundary.Attempt.rejected(boundary));
             assertSame(boundary, f.process(List.of(first, second), OptionalLong.empty()));
             assertEquals(0, endpoint.resourceSnapshot().activeDispatchPermits());
@@ -466,10 +466,7 @@ class RoutePublicationTest {
             var endpoint = f.realDecode();
             var first = f.realItem(endpoint, 1, 10);
             var second = f.realItem(endpoint, 2, 20);
-            when(f.prefill.dequeueForDelivery(
-                            any(
-                                    org.flexlb.balance.endpoint.PrefillEndpoint.DeliverySelection
-                                            .class)))
+            when(f.prefill.tryStartQueuedDelivery(any(Delivery.Selection.class)))
                     .thenReturn(
                             org.flexlb.balance.delivery.CapacityBoundary.Attempt.rejected(
                                     org.flexlb.balance.delivery.CapacityBoundary.OWNERSHIP_LOST));

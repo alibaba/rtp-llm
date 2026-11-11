@@ -396,12 +396,13 @@ class CacheHitFeedbackFlowTest {
         var value = RunnerTestSupport.response(status, true, 1, 1_000_000, 1_000_000, 1, Map.of());
         status.lock.lock();
         try {
-            registry.publishPreparedEndpoint(
-                    status.getLogicalIpPort(),
-                    status,
-                    status.prepareNewStatus(
-                            org.flexlb.dao.master.WorkerStatusTestSupport.freezeStatusResponse(
-                                    status, value)));
+            registry.updateEndpoint(
+                            status.getLogicalIpPort(),
+                            status,
+                            status.prepareStatus(
+                                    org.flexlb.dao.master.WorkerStatusTestSupport
+                                            .freezeStatusResponse(status, value)))
+                    .endpoint();
             status.recordSuccessfulPoll(true);
         } finally {
             status.lock.unlock();

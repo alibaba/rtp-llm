@@ -239,7 +239,7 @@ class PrefillPlanningInputChangeTest {
         status.lock.lock();
         try {
             status.publishPreparedStatus(
-                    status.prepareNewStatus(
+                    status.prepareStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, response)));
         } finally {
             status.lock.unlock();
@@ -252,9 +252,9 @@ class PrefillPlanningInputChangeTest {
         status.lock.lock();
         try {
             effects =
-                    endpoint.applyPreparedStatus(
+                    endpoint.applyWorkerStatus(
                             status,
-                            status.prepareNewStatus(
+                            status.prepareStatus(
                                     WorkerStatusTestSupport.freezeStatusResponse(
                                             status, response)));
         } finally {

@@ -75,37 +75,12 @@ public class WorkerEndpoint {
      * exact endpoint-owned identities and are consumed only after this method
      * has released the Endpoint lock.
      */
-    public StatusChange applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
+    public StatusChange applyWorkerStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
         if (!prepared.observation().alive()) {
             beginRetirement();
         }
         ws.publishPreparedStatus(prepared);
-        return NO_STATUS_CHANGE;
-    }
-
-    /**
-     * Initialize role-local state on a candidate which is not yet routable.
-     * Publication is owned by {@link EndpointRegistry} after all reducers
-     * succeed.
-     */
-    public void initializeFromPreparedStatus(
-            WorkerStatus ws, WorkerStatus.StatusObservation observation) {
-        requireStatusGeneration(ws);
-    }
-
-    /**
-     * Apply active-request facts from a successful same-version status heartbeat
-     * without replaying versioned endpoint state or terminal facts.
-     *
-     * @return request notifications to run after releasing {@link WorkerStatus#lock}
-     */
-    public StatusChange applyStatusHeartbeat(
-            WorkerStatus ws, WorkerStatus.StatusObservation observation) {
-        requireStatusGeneration(ws);
-        checkArgument(
-                observation.owner() == ws,
-                "Status observation belongs to another WorkerStatus generation");
         return NO_STATUS_CHANGE;
     }
 

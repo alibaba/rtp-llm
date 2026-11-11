@@ -201,9 +201,9 @@ class RequestExecutionRequestCapacityTest {
                             invocation -> {
                                 assertEquals(
                                         1L,
-                                        RequestExecutionTestSupport.state(runtime)
-                                                .admissionSummary(0, 0L)
-                                                .occupiedRequests(),
+                                        org.flexlb.balance.endpoint.EndpointTestSupport
+                                                .occupiedRequestCount(
+                                                        RequestExecutionTestSupport.state(runtime)),
                                         "eligibility failure must happen before queue publication");
                                 throw failure;
                             })
@@ -218,9 +218,8 @@ class RequestExecutionRequestCapacityTest {
             assertEquals(List.of(previous), RequestExecutionTestSupport.capture(runtime).items());
             assertEquals(
                     1L,
-                    RequestExecutionTestSupport.state(runtime)
-                            .admissionSummary(0, 0L)
-                            .occupiedRequests());
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                            RequestExecutionTestSupport.state(runtime)));
             verify(requests.events(), times(0)).rejectRoute(any(), org.mockito.Mockito.isNull());
             RouteResult next = item(config, endpoint, 3L);
             assertTrue(RequestExecutionTestSupport.offer(runtime, next));
@@ -228,9 +227,8 @@ class RequestExecutionRequestCapacityTest {
                     List.of(previous, next), RequestExecutionTestSupport.capture(runtime).items());
             assertEquals(
                     2L,
-                    RequestExecutionTestSupport.state(runtime)
-                            .admissionSummary(0, 0L)
-                            .occupiedRequests());
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                            RequestExecutionTestSupport.state(runtime)));
         } finally {
             org.junit.jupiter.api.Assertions.assertNull(
                     org.flexlb.balance.scheduler.RequestExecutionTestSupport.stopAndAwait(runtime));
@@ -258,9 +256,9 @@ class RequestExecutionRequestCapacityTest {
                         invocation -> {
                             assertEquals(
                                     0L,
-                                    RequestExecutionTestSupport.state(runtime)
-                                            .admissionSummary(0, 0L)
-                                            .occupiedRequests(),
+                                    org.flexlb.balance.endpoint.EndpointTestSupport
+                                            .occupiedRequestCount(
+                                                    RequestExecutionTestSupport.state(runtime)),
                                     "retirement rejects queue publication before occupying a request seat");
                             return true;
                         })
@@ -272,9 +270,8 @@ class RequestExecutionRequestCapacityTest {
             assertFalse(RequestExecutionTestSupport.offer(runtime, item));
             assertEquals(
                     0L,
-                    RequestExecutionTestSupport.state(runtime)
-                            .admissionSummary(0, 0L)
-                            .occupiedRequests());
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                            RequestExecutionTestSupport.state(runtime)));
             assertTrue(RequestExecutionTestSupport.capture(runtime).items().isEmpty());
             assertFalse(endpoint.releaseRequest(item));
         } finally {

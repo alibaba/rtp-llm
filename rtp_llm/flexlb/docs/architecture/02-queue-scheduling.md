@@ -28,7 +28,8 @@ Generation，以兼容旧客户端。常见 EPD 调用先单独决策 Encoder，
 QUEUE 模式下，`ordering.type` 和 `dispatcher.type` 是两个正交维度：
 
 - ordering：`FIFO`（默认）或 `PRIORITY`；`SchedulingQueue` 保存全局候选及顺序，
-  `PrefillRequestQueue` 保存已选中 Prefill 的成员及顺序。
+  `PrefillRequestQueue` 是固定 FIFO 队列，由 Endpoint 直接创建；新成员追加到队尾，
+  移除成员不改变其余成员的相对顺序，优先级计数只用于统计。
 - dispatcher：`BATCH`（默认）或 `NON_BATCH`；前者通过引擎 enqueue RPC 发布批次，
   后者将路由决策返回调用方，由调用方向引擎发请求。
 
@@ -197,8 +198,11 @@ Delivery 仅归还自己持有的成员许可，不保存准备完成标志、�
 排名耗时保留在 `state/projectedTtftMsValue`，容量阻塞单独反映在
 `admissionState/admissionDetail`，选择策略可以保留候选排序并识别阻塞原因。
 调用方不再单独应用准入策略。结果是当前线程复用的只读视图，必须在下一次投影前消费完毕。
-`ProjectionQueueSnapshot` 保存冻结的投影输入；`PrefillEndpoint.QueueSnapshot`
+`EstimationSnapshot` 保存冻结的投影输入；`PrefillEndpoint.QueueSnapshot`
 保存本轮调度取得的实际路由队列，两者不共用类型。
+Endpoint 按状态版本缓存 `RequestTimeEstimation.Inputs`。队列快照在锁外首次读取时
+转换并缓存规划输入，随后释放原始路由引用；工作量快照独立缓存计算结果。
+模型变化时复用队列和工作量快照，较晚返回的旧读取不能覆盖已发布的新缓存。
 
 路由选择原因只记录在 `RequestData` 的 `RoutingDecision` 中；指标从该决策读取，
 PV 日志输出同一份决策，不维护或输出第二份选择原因映射。
@@ -232,7 +236,7 @@ BATCH 在发送任务内先构造完整 payload，再由 Dispatcher 的同一个
 
 1. `PrefillQueueScheduler.processSelection` 只提交选中的连续队头、预测信息和交付策略；
    Coordinator 在内部创建 `Delivery`，准备预测与临时许可，上游不创建或清理交付对象。
-2. Coordinator 将不可变的 `PrefillEndpoint.DeliverySelection` 传给 `dequeueForDelivery`。
+2. Coordinator 将不可变的 `Delivery.Selection` 传给 `tryStartQueuedDelivery`。
    Endpoint 在自己的锁内检查精确路由、队头顺序、当前时间下的截止期限、容量和节点可用性，
    一次完成出队及工作量登记，返回出队前的工作快照。失败返回具体拒绝原因，不修改队列或容量。
    该入口只修改选中的有效前缀；未选中的成员不参与其校验。

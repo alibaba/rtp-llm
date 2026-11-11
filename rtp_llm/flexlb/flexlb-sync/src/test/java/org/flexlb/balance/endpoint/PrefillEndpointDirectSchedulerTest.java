@@ -71,7 +71,9 @@ class PrefillEndpointDirectSchedulerTest {
                 }
             }
             assertEquals(4, owned.size());
-            assertEquals(4, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+            assertEquals(
+                    4,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(endpoint));
             {
                 var selectedEndpoint = endpoint;
 
@@ -84,7 +86,9 @@ class PrefillEndpointDirectSchedulerTest {
                         "four exact owners already consume the four-request limit");
             }
             owned.forEach(reservation -> endpoint.rollback(reservation));
-            assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+            assertEquals(
+                    0,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(endpoint));
             {
                 var selectedEndpoint = endpoint;
 
@@ -95,7 +99,9 @@ class PrefillEndpointDirectSchedulerTest {
                 endpoint.rollback(result.value());
                 endpoint.rollback(result.value());
             }
-            assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+            assertEquals(
+                    0,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(endpoint));
         } finally {
             endpoint.close();
         }

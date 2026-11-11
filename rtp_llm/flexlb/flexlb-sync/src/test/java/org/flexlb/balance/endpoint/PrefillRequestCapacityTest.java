@@ -40,7 +40,7 @@ class PrefillRequestCapacityTest {
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillEndpoint state =
             org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
-                    lock, OrderedPrefillRequestQueue.fifo(16), System::currentTimeMillis);
+                    lock, PrefillRequestQueue.fifo(16), System::currentTimeMillis);
 
     @Test
     void duplicateDirectAdmissionDoesNotReplaceOrReleaseTheOriginalOwner() {
@@ -51,7 +51,9 @@ class PrefillRequestCapacityTest {
             var duplicate = reserve(route, 1L);
             assertFalse(duplicate.accepted());
             assertSame(CapacityBoundary.OWNERSHIP_LOST, duplicate.boundary());
-            assertEquals(1L, state.admissionSummary(0, 0L).occupiedRequests());
+            assertEquals(
+                    1L,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state));
             assertEquals(
                     CapacityBoundary.Resource.PREFILL_REQUEST,
                     reserve(item(2), 1L).boundary().resource());
@@ -82,7 +84,8 @@ class PrefillRequestCapacityTest {
         assertTrue(state.requestCapacityAvailable(2, 1));
         EndpointTestSupport.rollback(second);
         assertTrue(state.requestCapacityAvailable(2, 2));
-        assertEquals(1L, state.admissionSummary(0, 0L).occupiedRequests());
+        assertEquals(
+                1L, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state));
     }
 
     @Test
@@ -94,18 +97,22 @@ class PrefillRequestCapacityTest {
         heartbeat(Map.of("local", localObservation, "foreign", foreign, "duplicate", foreign), 2L);
         assertEquals(
                 2L,
-                state.admissionSummary(0, 0L).occupiedRequests(),
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state),
                 "early Engine observation and prepared local ownership are one request");
         {
             var handoff = commit(local, registration);
         }
         EndpointTestSupport.rollback(registration);
         heartbeat(Map.of("local", localObservation, "foreign", foreign), 2L);
-        assertEquals(2L, state.admissionSummary(0, 0L).occupiedRequests());
-        assertFalse(state.admissionSummary(0, 0L).occupiedRequests() < 2L);
+        assertEquals(
+                2L, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state));
+        assertFalse(
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state) < 2L);
         heartbeat(Map.of("local", localObservation), 1L);
-        assertEquals(1L, state.admissionSummary(0, 0L).occupiedRequests());
-        assertTrue(state.admissionSummary(0, 0L).occupiedRequests() < 2L);
+        assertEquals(
+                1L, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state));
+        assertTrue(
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state) < 2L);
     }
 
     @Test
@@ -114,13 +121,14 @@ class PrefillRequestCapacityTest {
         heartbeat(Map.of(), 2L);
         assertEquals(
                 3L,
-                state.admissionSummary(0, 0L).occupiedRequests(),
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state),
                 "unseen local shadow cannot explain unidentified Engine work");
         assertEquals(
                 CapacityBoundary.Resource.PREFILL_REQUEST,
                 reserve(item(2), 3L).boundary().resource());
         EndpointTestSupport.rollback(registration);
-        assertEquals(2L, state.admissionSummary(0, 0L).occupiedRequests());
+        assertEquals(
+                2L, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state));
     }
 
     @Test
@@ -130,15 +138,19 @@ class PrefillRequestCapacityTest {
         assertEquals(
                 CapacityBoundary.Resource.PREFILL_REQUEST,
                 reserve(item(3), 1L).boundary().resource());
-        assertEquals(2L, state.admissionSummary(0, 0L).occupiedRequests());
-        assertFalse(state.admissionSummary(0, 0L).occupiedRequests() < 1L);
-        assertTrue(state.admissionSummary(0, 0L).occupiedRequests() < 5L);
+        assertEquals(
+                2L, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state));
+        assertFalse(
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state) < 1L);
+        assertTrue(
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state) < 5L);
         EndpointTestSupport.rollback(first);
         assertEquals(
                 CapacityBoundary.Resource.PREFILL_REQUEST,
                 reserve(item(3), 1L).boundary().resource());
         EndpointTestSupport.rollback(second);
-        assertTrue(state.admissionSummary(0, 0L).occupiedRequests() < 1L);
+        assertTrue(
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state) < 1L);
         assertNotNull(reserve(item(3), 1L).value());
     }
 
@@ -156,10 +168,12 @@ class PrefillRequestCapacityTest {
         assertFalse(state.batchCapacityAvailable(1));
         assertTrue(enqueue(item(3), 0L));
         assertTrue(EndpointTestSupport.releaseRequest(state, first));
-        assertEquals(2L, state.admissionSummary(0, 0L).occupiedRequests());
+        assertEquals(
+                2L, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state));
         assertFalse(state.batchCapacityAvailable(1));
         assertTrue(EndpointTestSupport.releaseRequest(state, second));
-        assertEquals(1L, state.admissionSummary(0, 0L).occupiedRequests());
+        assertEquals(
+                1L, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state));
         assertTrue(state.batchCapacityAvailable(1));
     }
 
@@ -171,14 +185,17 @@ class PrefillRequestCapacityTest {
         var current = reserve(item(1), 1L).value();
         EndpointTestSupport.rollback(old);
         assertFalse(EndpointTestSupport.releaseRequest(state, previous));
-        assertEquals(1L, state.admissionSummary(0, 0L).occupiedRequests());
+        assertEquals(
+                1L, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state));
         EndpointTestSupport.rollback(current);
-        assertEquals(0L, state.admissionSummary(0, 0L).occupiedRequests());
+        assertEquals(
+                0L, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state));
     }
 
     @Test
     void immediateAdmissionChecksCurrentCapacityAfterOtherOwnershipChanges() {
-        assertTrue(state.admissionSummary(0, 0L).occupiedRequests() < 2L);
+        assertTrue(
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state) < 2L);
         assertNotNull(reserve(item(1), 2L).value());
         assertNotNull(
                 reserve(item(2), 2L).value(),
@@ -221,7 +238,9 @@ class PrefillRequestCapacityTest {
                         executor.submit(
                                 () -> {
                                     assertTrue(
-                                            state.admissionSummary(0, 0L).occupiedRequests() < 1L);
+                                            org.flexlb.balance.endpoint.EndpointTestSupport
+                                                            .occupiedRequestCount(state)
+                                                    < 1L);
                                     selected.countDown();
                                     assertTrue(admit.await(5, TimeUnit.SECONDS));
                                     return reserve(request, 1L);
@@ -244,9 +263,13 @@ class PrefillRequestCapacityTest {
                 }
             }
             assertEquals(1, acquired.size());
-            assertFalse(state.admissionSummary(0, 0L).occupiedRequests() < 1L);
+            assertFalse(
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state)
+                            < 1L);
             EndpointTestSupport.rollback(acquired.getFirst());
-            assertTrue(state.admissionSummary(0, 0L).occupiedRequests() < 1L);
+            assertTrue(
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state)
+                            < 1L);
         }
     }
 
@@ -254,23 +277,31 @@ class PrefillRequestCapacityTest {
     void summaryCountsUnknownWorkWithoutOverflowAndClearsOnRetirement() {
         var reservation = reserve(item(1), 2L).value();
         heartbeat(Map.of(), Long.MAX_VALUE);
-        assertFalse(state.admissionSummary(0, 0L).occupiedRequests() < Long.MAX_VALUE);
+        assertFalse(
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state)
+                        < Long.MAX_VALUE);
         EndpointTestSupport.rollback(reservation);
-        assertFalse(state.admissionSummary(0, 0L).occupiedRequests() < Long.MAX_VALUE);
+        assertFalse(
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state)
+                        < Long.MAX_VALUE);
         heartbeat(Map.of(), 0L);
         assertTrue(enqueue(item(2), 1L));
-        assertFalse(state.admissionSummary(0, 0L).occupiedRequests() < 1L);
+        assertFalse(
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state) < 1L);
         state.retireResources();
-        assertTrue(state.admissionSummary(0, 0L).occupiedRequests() < 1L);
-        assertFalse(state.admissionSummary(0, 0L).occupiedRequests() < 0L);
-        assertFalse(state.admissionSummary(0, 0L).occupiedRequests() < -1L);
+        assertTrue(
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state) < 1L);
+        assertFalse(
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state) < 0L);
+        assertFalse(
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state) < -1L);
     }
 
     @Test
     void failedQueueInsertionDoesNotConsumePublishedCapacity() {
         var direct =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
-                        lock, OrderedPrefillRequestQueue.disabled(), System::currentTimeMillis);
+                        lock, PrefillRequestQueue.disabled(), System::currentTimeMillis);
         runWithStateLock(
                 lock,
                 () -> {
@@ -279,8 +310,14 @@ class PrefillRequestCapacityTest {
                             () ->
                                     org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(
                                             direct, item(1)));
-                    assertTrue(direct.admissionSummary(0, 0L).occupiedRequests() < 1L);
-                    assertEquals(0L, direct.admissionSummary(0, 0L).occupiedRequests());
+                    assertTrue(
+                            org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                                            direct)
+                                    < 1L);
+                    assertEquals(
+                            0L,
+                            org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                                    direct));
                 });
     }
 
@@ -295,7 +332,7 @@ class PrefillRequestCapacityTest {
         when(second.priority()).thenReturn(50);
         when(incoming.priority()).thenReturn(90);
         AtomicBoolean failInsertion = new AtomicBoolean(true);
-        var queue = org.mockito.Mockito.spy(OrderedPrefillRequestQueue.fifo(16));
+        var queue = org.mockito.Mockito.spy(PrefillRequestQueue.fifo(16));
         org.mockito.Mockito.doAnswer(
                         call -> {
                             if (failInsertion.get()) {
@@ -328,7 +365,10 @@ class PrefillRequestCapacityTest {
                                             ledger, incoming));
                     assertEquals(
                             List.of(first, second), ledger.captureQueue(Integer.MAX_VALUE).items());
-                    assertEquals(2L, ledger.admissionSummary(0, 0L).occupiedRequests());
+                    assertEquals(
+                            2L,
+                            org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                                    ledger));
 
                     failInsertion.set(false);
                     assertSame(
@@ -338,7 +378,10 @@ class PrefillRequestCapacityTest {
                     assertEquals(
                             List.of(first, second, incoming),
                             ledger.captureQueue(Integer.MAX_VALUE).items());
-                    assertEquals(3L, ledger.admissionSummary(0, 0L).occupiedRequests());
+                    assertEquals(
+                            3L,
+                            org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                                    ledger));
                     assertNull(
                             org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(
                                     ledger, item(3)),
@@ -347,8 +390,42 @@ class PrefillRequestCapacityTest {
                 });
     }
 
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+        "1,0,0,1,0,HIGHER_PRIORITY_AHEAD",
+        "1,0,1,0,0,SAME_PRIORITY_AHEAD",
+        "1,0,0,0,1,UNSPECIFIED",
+        "1,1,0,0,0,RESOURCE_EXHAUSTED",
+        "1,0,1,0,1,UNSPECIFIED",
+        "2,1,1,1,0,HIGHER_PRIORITY_AHEAD",
+        "0,0,0,1,0,RESOURCE_EXHAUSTED"
+    })
+    void explainsRejectedAdmissionFromCurrentPriorities(
+            long limit,
+            int lower,
+            int same,
+            int higher,
+            long unknown,
+            org.flexlb.dao.loadbalance.AdmissionRejectReason expected) {
+        org.springframework.test.util.ReflectionTestUtils.setField(state, "requestLimit", limit);
+        int id = 1;
+        for (int priority : new int[] {10, 50, 90}) {
+            int count = priority == 10 ? lower : priority == 50 ? same : higher;
+            for (int i = 0; i < count; i++) {
+                RouteResult route = item(id++);
+                when(route.priority()).thenReturn(priority);
+                assertTrue(enqueue(route, 0L));
+            }
+        }
+        heartbeat(Map.of(), unknown);
+        assertEquals(expected, state.explainAdmissionRejection(50));
+        assertEquals(
+                lower + same + higher, state.queueDepth(), "explaining does not change the queue");
+    }
+
     @Test
-    void admissionSummaryKeepsOneRevisionAndReflectsReleaseAndUnknownEngineWork() {
+    void rejectionExplanationReflectsReleaseAndUnknownEngineWork() {
+        org.springframework.test.util.ReflectionTestUtils.setField(state, "requestLimit", 2L);
         RouteResult lower = item(1), same = item(2), higher = item(3);
         when(lower.priority()).thenReturn(10);
         when(same.priority()).thenReturn(50);
@@ -356,27 +433,17 @@ class PrefillRequestCapacityTest {
         assertTrue(enqueue(lower, 3L));
         assertTrue(enqueue(same, 3L));
         assertTrue(enqueue(higher, 3L));
-        var captured = state.admissionSummary(50, 2L);
         assertEquals(
-                new org.flexlb.balance.strategy.PrefillSelectionStrategy.AdmissionSummary(
-                        3, 2, 1, 1, 1, 0),
-                captured);
-        assertEquals(captured, state.admissionSummary(50, 2L));
-        assertTrue(state.releaseRequest(lower));
+                org.flexlb.dao.loadbalance.AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+                state.explainAdmissionRejection(50));
+        assertTrue(state.releaseRequest(higher));
         assertEquals(
-                new org.flexlb.balance.strategy.PrefillSelectionStrategy.AdmissionSummary(
-                        2, 1, 0, 1, 1, 0),
-                state.admissionSummary(50, 2L));
+                org.flexlb.dao.loadbalance.AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                state.explainAdmissionRejection(50));
         heartbeat(Map.of(), 2L);
         assertEquals(
-                new org.flexlb.balance.strategy.PrefillSelectionStrategy.AdmissionSummary(
-                        4, 3, 0, 1, 1, 2),
-                state.admissionSummary(50, 2L));
-        assertEquals(
-                new org.flexlb.balance.strategy.PrefillSelectionStrategy.AdmissionSummary(
-                        3, 2, 1, 1, 1, 0),
-                captured,
-                "a retained summary cannot change when the ledger advances");
+                org.flexlb.dao.loadbalance.AdmissionRejectReason.UNSPECIFIED,
+                state.explainAdmissionRejection(50));
     }
 
     @Test
@@ -388,10 +455,13 @@ class PrefillRequestCapacityTest {
         when(observation.engine()).thenReturn(engine);
         when(observation.finishedTasks()).thenReturn(Map.of());
         var result = EndpointTestSupport.reconcile(state, observation, unused -> 0L);
-        assertFalse(state.admissionSummary(0, 0L).occupiedRequests() < 2L);
-        assertTrue(state.admissionSummary(0, 0L).occupiedRequests() < 3L);
+        assertFalse(
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state) < 2L);
+        assertTrue(
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state) < 3L);
         heartbeat(Map.of(), 1L);
-        assertTrue(state.admissionSummary(0, 0L).occupiedRequests() < 2L);
+        assertTrue(
+                org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state) < 2L);
     }
 
     private CapacityBoundary.Attempt<PrefillEndpoint.RequestRecord> reserve(
@@ -423,8 +493,7 @@ class PrefillRequestCapacityTest {
         runWithStateLock(
                 lock,
                 () -> {
-                    state.commitStatusLocked(
-                            state.prepareStatusLocked(observation, false), java.util.Map.of());
+                    EndpointTestSupport.reconcile(state, observation, unused -> 0L);
                 });
     }
 

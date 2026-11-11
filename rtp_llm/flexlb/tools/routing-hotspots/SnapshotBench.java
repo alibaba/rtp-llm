@@ -1,6 +1,5 @@
 import com.sun.management.ThreadMXBean;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
-import org.flexlb.balance.endpoint.OrderedPrefillRequestQueue;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillRequestQueue;
 import org.flexlb.balance.planner.BuiltinGroupPlanner;
@@ -25,7 +24,6 @@ import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Random;
@@ -140,8 +138,7 @@ public class SnapshotBench {
                         DispatcherConfig.Type.class,
                         DeliveryMetricsReporter.class,
                         CapacityNotifier.class,
-                        QueueExecutionSettings.class,
-                        PrefillRequestQueue.Factory.class);
+                        QueueExecutionSettings.class);
         constructor.setAccessible(true);
         var endpoint =
                 constructor.newInstance(
@@ -151,16 +148,14 @@ public class SnapshotBench {
                         DispatcherConfig.Type.BATCH,
                         mock(DeliveryMetricsReporter.class),
                         new CapacityNotifier(),
-                        QueueExecutionSettings.capture(config, BuiltinGroupPlanner.from(config)),
-                        (PrefillRequestQueue.Factory)
-                                order -> OrderedPrefillRequestQueue.ordered(16, order));
+                        QueueExecutionSettings.capture(config, BuiltinGroupPlanner.from(config)));
         Field predictorField = PrefillEndpoint.class.getDeclaredField("predictor");
         predictorField.setAccessible(true);
         predictorField.set(endpoint, model);
         var state = endpoint;
         var lock = EndpointTestSupport.stateLock(state);
-        endpoint.enableQueue(
-                QueueExecutionSettings.capture(config, BuiltinGroupPlanner.from(config)));
+        org.flexlb.balance.endpoint.EndpointTestSupport.enableQueue(
+                endpoint, QueueExecutionSettings.capture(config, BuiltinGroupPlanner.from(config)));
         var random = new Random(seed);
         RouteResult last = null;
         lock.lock();
@@ -231,16 +226,7 @@ public class SnapshotBench {
 
     static void writes(int depth) {
         var config = config();
-        var index =
-                OrderedPrefillRequestQueue.ordered(
-                        depth,
-                        Comparator.comparingInt(
-                                        org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
-                                                ::priority)
-                                .reversed()
-                                .thenComparingLong(
-                                        org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
-                                                ::enqueueSeq));
+        var index = PrefillRequestQueue.fifo(depth);
         var members = new ArrayList<RouteResult>();
         for (int i = 0; i < depth; i++) {
             var item = request(config, i, i % 4, 100);

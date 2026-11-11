@@ -157,7 +157,6 @@ class ReviewLifecycleRegressionTest {
                 mock(DeliveryMetricsReporter.class),
                 EndpointTestSupport.routeStrategy(EndpointTestSupport.requestRuntime()),
                 new CapacityNotifier(),
-                org.flexlb.balance.planner.BuiltinGroupPlanner.from(config.loadBalanceConfig()),
-                () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
+                org.flexlb.balance.planner.BuiltinGroupPlanner.from(config.loadBalanceConfig()));
     }
 }

@@ -68,8 +68,7 @@ class RequestConfirmationTimeoutTest {
                         DeliveryTestSupport.route(reporter),
                         new CapacityNotifier(),
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                                service.loadBalanceConfig()),
-                        () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
+                                service.loadBalanceConfig()));
         var runtime =
                 new SchedulerTestServices(
                         SchedulerTestSupport.repository(requests),
@@ -87,13 +86,16 @@ class RequestConfirmationTimeoutTest {
             try {
                 prefill =
                         (PrefillEndpoint)
-                                endpoints.publishPreparedEndpoint(
-                                        prefillEndpoint.getLogicalIpPort(),
-                                        prefillEndpoint,
-                                        prefillEndpoint.prepareNewStatus(
-                                                WorkerStatusTestSupport.freezeStatusResponse(
-                                                        prefillEndpoint,
-                                                        status(RoleType.PREFILL))));
+                                endpoints
+                                        .updateEndpoint(
+                                                prefillEndpoint.getLogicalIpPort(),
+                                                prefillEndpoint,
+                                                prefillEndpoint.prepareStatus(
+                                                        WorkerStatusTestSupport
+                                                                .freezeStatusResponse(
+                                                                        prefillEndpoint,
+                                                                        status(RoleType.PREFILL))))
+                                        .endpoint();
             } finally {
                 prefillEndpoint.lock.unlock();
             }
@@ -221,7 +223,9 @@ class RequestConfirmationTimeoutTest {
             }
             assertEquals(1, SchedulerTestSupport.repository(requests).liveRequestCount());
             assertFalse(future.isDone());
-            assertEquals(1L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(
+                    1L,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(prefill));
             assertEquals(16L, decode.routingView().inflightHardKv());
             assertEquals(32L, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
             assertEquals(1, decode.routingView().engineCapacityUsed());
@@ -245,7 +249,9 @@ class RequestConfirmationTimeoutTest {
             RequestProtocolTestSupport.awaitCondition(
                     () -> SchedulerTestSupport.repository(requests).liveRequestCount() == 0);
             assertEquals(0, SchedulerTestSupport.repository(requests).liveRequestCount());
-            assertEquals(0L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(
+                    0L,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(prefill));
             assertEquals(0, prefill.stats().locallyOwnedRequests());
             assertEquals(0L, decode.routingView().inflightHardKv());
             assertEquals(0L, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
@@ -289,7 +295,9 @@ class RequestConfirmationTimeoutTest {
             RequestProtocolTestSupport.awaitCondition(
                     () -> SchedulerTestSupport.repository(requests).liveRequestCount() == 0);
             assertEquals(0, SchedulerTestSupport.repository(requests).liveRequestCount());
-            assertEquals(0L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(
+                    0L,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(prefill));
             assertEquals(0, decode.routingView().engineCapacityUsed());
         } finally {
             try {
@@ -326,9 +334,9 @@ class RequestConfirmationTimeoutTest {
         worker.lock.lock();
         try {
             projection =
-                    endpoint.applyPreparedStatus(
+                    endpoint.applyWorkerStatus(
                             worker,
-                            worker.prepareNewStatus(
+                            worker.prepareStatus(
                                     WorkerStatusTestSupport.freezeStatusResponse(
                                             worker, response)));
         } finally {

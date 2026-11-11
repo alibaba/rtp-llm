@@ -239,9 +239,9 @@ class QueuedDeliveryWithdrawalRaceTest {
         worker.lock.lock();
         try {
             projection =
-                    endpoint.applyPreparedStatus(
+                    endpoint.applyWorkerStatus(
                             worker,
-                            worker.prepareNewStatus(
+                            worker.prepareStatus(
                                     WorkerStatusTestSupport.freezeStatusResponse(
                                             worker, response)));
         } finally {
@@ -307,8 +307,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                             dispatcher,
                             availability,
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                                    service.loadBalanceConfig()),
-                            () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
+                                    service.loadBalanceConfig()));
             runtime =
                     new SchedulerTestServices(
                             repository,
@@ -346,8 +345,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                                 org.flexlb.config.DispatcherConfig.Type.class,
                                 DeliveryMetricsReporter.class,
                                 CapacityNotifier.class,
-                                QueueExecutionSettings.class,
-                                org.flexlb.balance.endpoint.PrefillRequestQueue.Factory.class
+                                QueueExecutionSettings.class
                             },
                             pStatus,
                             config,
@@ -356,11 +354,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                             availability,
                             QueueExecutionSettings.capture(
                                     config,
-                                    org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)),
-                            (org.flexlb.balance.endpoint.PrefillRequestQueue.Factory)
-                                    () ->
-                                            org.flexlb.balance.endpoint.OrderedPrefillRequestQueue
-                                                    .fifo(16));
+                                    org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)));
             decode =
                     construct(
                             DecodeEndpoint.class,
@@ -373,7 +367,8 @@ class QueuedDeliveryWithdrawalRaceTest {
             applyStatus(prefill, status(RoleType.PREFILL));
             applyStatus(decode, status(RoleType.DECODE));
             var state = prefill;
-            prefill.enableQueue(
+            org.flexlb.balance.endpoint.EndpointTestSupport.enableQueue(
+                    prefill,
                     QueueExecutionSettings.capture(
                             config, org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)));
             batcher =

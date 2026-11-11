@@ -6,7 +6,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.EstimationSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.CapacityKey;
 import org.flexlb.cache.match.CacheAwareService;
@@ -200,7 +200,7 @@ class PrefillSelectionContractTest {
         var endpoint = publish(registry, RoleType.PREFILL);
         var clock = new AtomicLong(1000L);
         var queue =
-                new ProjectionQueueSnapshot(
+                new EstimationSnapshot(
                         1000L,
                         true,
                         BuiltinGroupPlanner.SINGLE,
@@ -472,34 +472,18 @@ class PrefillSelectionContractTest {
 
     @ParameterizedTest
     @CsvSource({
-        "1,0,0,1,0,PRIORITY_ADMISSION_REJECTED,HIGHER_PRIORITY_AHEAD",
-        "1,0,1,0,0,PRIORITY_ADMISSION_REJECTED,SAME_PRIORITY_AHEAD",
-        "1,0,0,0,1,ADMISSION_UNAVAILABLE,UNSPECIFIED",
-        "1,1,0,0,0,RESOURCE_EXHAUSTED,RESOURCE_EXHAUSTED",
-        "2,0,1,0,1,ADMISSION_UNAVAILABLE,UNSPECIFIED"
+        "PRIORITY_ADMISSION_REJECTED,HIGHER_PRIORITY_AHEAD",
+        "PRIORITY_ADMISSION_REJECTED,SAME_PRIORITY_AHEAD",
+        "ADMISSION_UNAVAILABLE,UNSPECIFIED",
+        "RESOURCE_EXHAUSTED,RESOURCE_EXHAUSTED"
     })
     void capacityBlockKeepsItsReasonWithoutAcquiringTheSelectedGeneration(
-            long release,
-            long lower,
-            long same,
-            long higher,
-            long unknown,
-            StrategyErrorType error,
-            AdmissionRejectReason reason) {
+            StrategyErrorType error, AdmissionRejectReason reason) {
         var endpoint = spy(publish(registry, RoleType.PREFILL));
         var ownership = endpoint;
         org.flexlb.balance.endpoint.EndpointTestSupport.stubResources(endpoint, ownership);
         doReturn(false).when(ownership).requestCapacityAvailable(endpoint.requestLimit, 1);
-        doReturn(
-                        new PrefillSelectionStrategy.AdmissionSummary(
-                                lower + same + higher + unknown,
-                                release,
-                                lower,
-                                same,
-                                higher,
-                                unknown))
-                .when(ownership)
-                .admissionSummary(metadata.priority(), endpoint.requestLimit);
+        doReturn(reason).when(ownership).explainAdmissionRejection(metadata.priority());
         var selectedEndpoint = endpoint;
         var directory = spy(registry);
         var address = endpoint.ipPort();

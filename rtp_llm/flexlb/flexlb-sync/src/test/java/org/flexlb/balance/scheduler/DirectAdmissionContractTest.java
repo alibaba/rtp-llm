@@ -228,9 +228,8 @@ class DirectAdmissionContractTest {
             assertEquals(0, fixture.prefill.queueDepth());
             assertEquals(
                     0L,
-                    fixture.prefill
-                            .admissionSummary(0, fixture.prefill.requestLimit)
-                            .occupiedRequests());
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                            fixture.prefill));
             assertEquals(0, fixture.prefill.stats().batchCount());
             assertFalse(future.isDone(), "the scheduler still owns the blocked/rejected decision");
             fixture.scheduler.cancel(context, 0L, CancelReason.CLIENT_CANCELLED);
@@ -304,7 +303,10 @@ class DirectAdmissionContractTest {
                                 .findFirst()
                                 .orElseThrow()
                                 .getServerIp());
-                assertEquals(1L, fixture.prefill.admissionSummary(0, 0).occupiedRequests());
+                assertEquals(
+                        1L,
+                        org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                                fixture.prefill));
                 assertEquals(1, fixture.decode.routingView().engineCapacityUsed());
                 assertEquals(
                         48L,
@@ -458,7 +460,10 @@ class DirectAdmissionContractTest {
                 assertEquals(
                         48L,
                         EndpointTestSupport.expectedReservedKv(replacement.resourceSnapshot()));
-                assertEquals(1L, fixture.prefill.admissionSummary(0, 0).occupiedRequests());
+                assertEquals(
+                        1L,
+                        org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                                fixture.prefill));
                 verify(fixture.prefillSelector, times(2))
                         .selectAndRegister(
                                 any(),
@@ -544,7 +549,8 @@ class DirectAdmissionContractTest {
                                         "a prepared route is still local to selection");
                                 assertEquals(
                                         1L,
-                                        fixture.prefill.admissionSummary(0, 0).occupiedRequests());
+                                        org.flexlb.balance.endpoint.EndpointTestSupport
+                                                .occupiedRequestCount(fixture.prefill));
                                 assertEquals(
                                         1,
                                         fixture.decode.resourceSnapshot().activeDispatchPermits());
@@ -622,20 +628,22 @@ class DirectAdmissionContractTest {
                                     try {
                                         replacement.set(
                                                 (PrefillEndpoint)
-                                                        fixture.endpoints.publishPreparedEndpoint(
-                                                                worker.getLogicalIpPort(),
-                                                                worker,
-                                                                worker.prepareNewStatus(
-                                                                        WorkerStatusTestSupport
-                                                                                .freezeStatusResponse(
-                                                                                        worker,
-                                                                                        Fixture
-                                                                                                .status(
-                                                                                                        worker,
-                                                                                                        Map
-                                                                                                                .of(),
-                                                                                                        Map
-                                                                                                                .of())))));
+                                                        fixture.endpoints
+                                                                .updateEndpoint(
+                                                                        worker.getLogicalIpPort(),
+                                                                        worker,
+                                                                        worker.prepareStatus(
+                                                                                WorkerStatusTestSupport
+                                                                                        .freezeStatusResponse(
+                                                                                                worker,
+                                                                                                Fixture
+                                                                                                        .status(
+                                                                                                                worker,
+                                                                                                                Map
+                                                                                                                        .of(),
+                                                                                                                Map
+                                                                                                                        .of()))))
+                                                                .endpoint());
                                     } finally {
                                         worker.lock.unlock();
                                     }
@@ -702,7 +710,10 @@ class DirectAdmissionContractTest {
                             .get(2L, TimeUnit.SECONDS);
             assertTrue(response.isSuccess());
             assertEquals(2, captures.get());
-            assertEquals(1L, fixture.prefill.admissionSummary(0, 0).occupiedRequests());
+            assertEquals(
+                    1L,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                            fixture.prefill));
             assertEquals(1, fixture.decode.routingView().engineCapacityUsed());
             fixture.assertNoWaitingQueue();
         }
@@ -741,9 +752,8 @@ class DirectAdmissionContractTest {
                 assertEquals(0L, fixture.prefill.queueDepth());
                 assertEquals(
                         0L,
-                        fixture.prefill
-                                .admissionSummary(0, fixture.prefill.requestLimit)
-                                .occupiedRequests());
+                        org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                                fixture.prefill));
                 assertEquals(0, fixture.prefill.stats().batchCount());
                 assertEquals(0, fixture.decode.routingView().engineCapacityUsed());
             } finally {
@@ -801,9 +811,8 @@ class DirectAdmissionContractTest {
             }
             assertEquals(
                     prefillCapacity,
-                    fixture.prefill
-                            .admissionSummary(0, fixture.prefill.requestLimit)
-                            .occupiedRequests());
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                            fixture.prefill));
             assertEquals(prefillCapacity, fixture.decode.routingView().engineCapacityUsed());
             assertEquals(
                     48L * prefillCapacity,
@@ -849,9 +858,8 @@ class DirectAdmissionContractTest {
             fixture.assertNoWaitingQueue();
             assertEquals(
                     1,
-                    fixture.prefill
-                            .admissionSummary(0, fixture.prefill.requestLimit)
-                            .occupiedRequests());
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                            fixture.prefill));
             assertEquals(0, fixture.prefill.stats().batchCount());
             assertEquals(1, fixture.decode.routingView().engineCapacityUsed());
             assertEquals(
@@ -878,9 +886,8 @@ class DirectAdmissionContractTest {
                     fixture.prefill, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
             assertEquals(
                     0L,
-                    fixture.prefill
-                            .admissionSummary(0, fixture.prefill.requestLimit)
-                            .occupiedRequests());
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                            fixture.prefill));
             assertEquals(
                     48L,
                     EndpointTestSupport.expectedReservedKv(fixture.decode.resourceSnapshot()),
@@ -1299,7 +1306,7 @@ class DirectAdmissionContractTest {
                                 SchedulerTestSupport.enqueueRoute(queue, plan).status());
                         org.junit.jupiter.api.Assertions.assertSame(
                                 exact, context.snapshot().route());
-                        verify(prefill).enqueueRoute(eq(exact), any());
+                        verify(prefill).acceptQueuedRoute(eq(exact), any(), any());
                         verify(fixture.decode, never())
                                 .release(any(), eq(DecodeResources.ReleaseReason.LOCAL_ROLLBACK));
                         assertEquals(1L, prefill.queueDepth());
@@ -1336,12 +1343,12 @@ class DirectAdmissionContractTest {
             var secondRecord = second.prefillReservation();
             assertEquals(
                     2L,
-                    fixture.prefill
-                            .admissionSummary(0, fixture.prefill.requestLimit)
-                            .occupiedRequests());
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                            fixture.prefill));
             try {
                 assertTrue(
-                        fixture.prefill.enqueueRoute(
+                        org.flexlb.balance.endpoint.EndpointTestSupport.enqueueRoute(
+                                fixture.prefill,
                                 first,
                                 QueueExecutionSettings.capture(
                                         fixture.config,
@@ -1362,16 +1369,14 @@ class DirectAdmissionContractTest {
                 assertEquals(40_000L, second.prefillWorkMs());
                 assertEquals(
                         2L,
-                        fixture.prefill
-                                .admissionSummary(0, fixture.prefill.requestLimit)
-                                .occupiedRequests());
+                        org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                                fixture.prefill));
                 assertEquals(1L, fixture.prefill.queueDepth());
                 assertTrue(fixture.prefill.releaseRequest(first));
                 assertEquals(
                         1L,
-                        fixture.prefill
-                                .admissionSummary(0, fixture.prefill.requestLimit)
-                                .occupiedRequests());
+                        org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                                fixture.prefill));
                 assertSame(
                         second,
                         org.springframework.test.util.ReflectionTestUtils.getField(
@@ -1382,9 +1387,8 @@ class DirectAdmissionContractTest {
             }
             assertEquals(
                     0L,
-                    fixture.prefill
-                            .admissionSummary(0, fixture.prefill.requestLimit)
-                            .occupiedRequests());
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                            fixture.prefill));
             assertEquals(0L, fixture.prefill.queueDepth());
         }
     }
@@ -1452,10 +1456,7 @@ class DirectAdmissionContractTest {
                                     queuedDelivery,
                                     placement,
                                     org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                                            service.loadBalanceConfig()),
-                                    () ->
-                                            org.flexlb.balance.endpoint.OrderedPrefillRequestQueue
-                                                    .fifo(16)));
+                                            service.loadBalanceConfig())));
             runtime =
                     spy(
                             new SchedulerTestServices(
@@ -1513,12 +1514,15 @@ class DirectAdmissionContractTest {
                 var response = status(worker, Map.of(), Map.of());
                 prefill =
                         (PrefillEndpoint)
-                                endpoints.publishPreparedEndpoint(
-                                        worker.getLogicalIpPort(),
-                                        worker,
-                                        worker.prepareNewStatus(
-                                                WorkerStatusTestSupport.freezeStatusResponse(
-                                                        worker, response)));
+                                endpoints
+                                        .updateEndpoint(
+                                                worker.getLogicalIpPort(),
+                                                worker,
+                                                worker.prepareStatus(
+                                                        WorkerStatusTestSupport
+                                                                .freezeStatusResponse(
+                                                                        worker, response)))
+                                        .endpoint();
             } finally {
                 worker.lock.unlock();
             }
@@ -1583,10 +1587,12 @@ class DirectAdmissionContractTest {
                                 worker, status(worker, Map.of(), Map.of()));
                 replacement =
                         (PrefillEndpoint)
-                                endpoints.publishPreparedEndpoint(
-                                        worker.getLogicalIpPort(),
-                                        worker,
-                                        worker.prepareNewStatus(observation));
+                                endpoints
+                                        .updateEndpoint(
+                                                worker.getLogicalIpPort(),
+                                                worker,
+                                                worker.prepareStatus(observation))
+                                        .endpoint();
             } finally {
                 worker.lock.unlock();
             }
@@ -1677,7 +1683,9 @@ class DirectAdmissionContractTest {
 
         private void assertNoPrefillOwnership() {
             assertNoWaitingQueue();
-            assertEquals(0L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(
+                    0L,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(prefill));
             assertEquals(0, prefill.stats().batchCount());
         }
 
@@ -1711,9 +1719,9 @@ class DirectAdmissionContractTest {
             try {
                 var response = status(worker, running, finished);
                 projection =
-                        endpoint.applyPreparedStatus(
+                        endpoint.applyWorkerStatus(
                                 worker,
-                                worker.prepareNewStatus(
+                                worker.prepareStatus(
                                         WorkerStatusTestSupport.freezeStatusResponse(
                                                 worker, response)));
             } finally {

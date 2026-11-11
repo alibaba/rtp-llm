@@ -47,7 +47,7 @@ public final class EndpointCleanupTestSupport {
         private final ReentrantLock lock = new ReentrantLock();
         private final PrefillEndpoint state =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
-                        lock, OrderedPrefillRequestQueue.fifo(4), clock::get);
+                        lock, PrefillRequestQueue.fifo(4), clock::get);
         private final EndpointRetirementTestSupport generation =
                 new EndpointRetirementTestSupport(() -> {});
 
@@ -150,7 +150,9 @@ public final class EndpointCleanupTestSupport {
             assertEquals(0, state.stats().locallyOwnedRequests());
             assertEquals(0, state.stats().individuallyOwnedRequests());
             assertEquals(0, state.stats().batchCount());
-            assertEquals(0L, state.admissionSummary(0, 0L).occupiedRequests());
+            assertEquals(
+                    0L,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state));
             assertFalse(
                     org.flexlb.balance.endpoint.EndpointTestSupport.committedWork(state)
                             .hasUnknownWork());

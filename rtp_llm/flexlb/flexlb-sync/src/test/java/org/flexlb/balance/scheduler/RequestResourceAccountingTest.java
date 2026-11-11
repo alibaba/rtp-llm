@@ -611,9 +611,9 @@ class RequestResourceAccountingTest {
         worker.lock.lock();
         try {
             projection =
-                    endpoint.applyPreparedStatus(
+                    endpoint.applyWorkerStatus(
                             worker,
-                            worker.prepareNewStatus(
+                            worker.prepareStatus(
                                     WorkerStatusTestSupport.freezeStatusResponse(
                                             worker, response)));
         } finally {
@@ -681,8 +681,7 @@ class RequestResourceAccountingTest {
                             DeliveryTestSupport.route(reporter),
                             new CapacityNotifier(),
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                                    service.loadBalanceConfig()),
-                            () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
+                                    service.loadBalanceConfig()));
             runtime = org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests);
             org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                     runtime, "endpoints", endpoints);
@@ -694,19 +693,22 @@ class RequestResourceAccountingTest {
                 prefill =
                         org.mockito.Mockito.spy(
                                 (PrefillEndpoint)
-                                        endpoints.publishPreparedEndpoint(
-                                                worker.getLogicalIpPort(),
-                                                worker,
-                                                worker.prepareNewStatus(
-                                                        WorkerStatusTestSupport
-                                                                .freezeStatusResponse(
-                                                                        worker,
-                                                                        status(
-                                                                                RoleType.PREFILL,
-                                                                                1,
-                                                                                Map.of(),
-                                                                                Map.of(),
-                                                                                TOTAL_KV)))));
+                                        endpoints
+                                                .updateEndpoint(
+                                                        worker.getLogicalIpPort(),
+                                                        worker,
+                                                        worker.prepareStatus(
+                                                                WorkerStatusTestSupport
+                                                                        .freezeStatusResponse(
+                                                                                worker,
+                                                                                status(
+                                                                                        RoleType
+                                                                                                .PREFILL,
+                                                                                        1,
+                                                                                        Map.of(),
+                                                                                        Map.of(),
+                                                                                        TOTAL_KV))))
+                                                .endpoint());
             } finally {
                 worker.lock.unlock();
             }

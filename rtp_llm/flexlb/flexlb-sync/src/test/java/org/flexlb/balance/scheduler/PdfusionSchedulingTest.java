@@ -105,8 +105,7 @@ class PdfusionSchedulingTest {
                         delivery,
                         availability,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                                service.loadBalanceConfig()),
-                        () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
+                                service.loadBalanceConfig()));
         WorkerStatus worker =
                 WorkerStatus.createDiscovered(
                         RoleType.PDFUSION, "g1", "127.0.0.1", 8080, 8081, "test");
@@ -121,11 +120,13 @@ class PdfusionSchedulingTest {
         status.setMaxBatchTokensSize(10000L);
         worker.lock.lock();
         try {
-            endpoints.publishPreparedEndpoint(
-                    worker.getLogicalIpPort(),
-                    worker,
-                    worker.prepareNewStatus(
-                            WorkerStatusTestSupport.freezeStatusResponse(worker, status)));
+            endpoints
+                    .updateEndpoint(
+                            worker.getLogicalIpPort(),
+                            worker,
+                            worker.prepareStatus(
+                                    WorkerStatusTestSupport.freezeStatusResponse(worker, status)))
+                    .endpoint();
         } finally {
             worker.lock.unlock();
         }
@@ -192,7 +193,9 @@ class PdfusionSchedulingTest {
             assertEquals(1, SchedulerTestSupport.repository(lifecycle).liveRequestCount());
             PrefillEndpoint endpoint =
                     (PrefillEndpoint) endpoints.get(RoleType.PDFUSION, worker.getLogicalIpPort());
-            assertEquals(1, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+            assertEquals(
+                    1,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(endpoint));
             var committedWork = endpoint.captureRouteProjectionInputs().work();
             assertTrue(committedWork.containsRequest(String.valueOf(requestId)));
             TaskInfo finished = new TaskInfo();
@@ -212,9 +215,9 @@ class PdfusionSchedulingTest {
             worker.lock.lock();
             try {
                 projection =
-                        endpoint.applyPreparedStatus(
+                        endpoint.applyWorkerStatus(
                                 worker,
-                                worker.prepareNewStatus(
+                                worker.prepareStatus(
                                         WorkerStatusTestSupport.freezeStatusResponse(
                                                 worker, status)));
             } finally {
@@ -223,7 +226,9 @@ class PdfusionSchedulingTest {
             endpoint.publishStatus(projection);
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
-            assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+            assertEquals(
+                    0,
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(endpoint));
             assertEquals(0, endpoint.stats().batchCount());
             assertTrue(
                     committedWork.containsRequest(String.valueOf(requestId)),

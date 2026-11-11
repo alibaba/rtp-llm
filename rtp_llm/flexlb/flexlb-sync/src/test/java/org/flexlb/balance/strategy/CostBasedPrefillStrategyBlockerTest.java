@@ -6,7 +6,7 @@ import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.EstimationSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.cache.match.CacheAwareService;
@@ -67,7 +67,7 @@ class CostBasedPrefillStrategyBlockerTest {
                                 .toList();
         var inputs =
                 new RequestTimeEstimation.Inputs(
-                        new ProjectionQueueSnapshot(
+                        new EstimationSnapshot(
                                 0L,
                                 true,
                                 BuiltinGroupPlanner.FIXED_WINDOW,

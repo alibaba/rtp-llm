@@ -181,7 +181,8 @@ class QueuedPublicationNotificationFailureTest {
                                 assertEquals(0L, fixture.prefill.queueDepth());
                                 assertEquals(
                                         0L,
-                                        fixture.prefill.admissionSummary(0, 0).occupiedRequests());
+                                        org.flexlb.balance.endpoint.EndpointTestSupport
+                                                .occupiedRequestCount(fixture.prefill));
                                 assertEquals(0, fixture.decode.resourceSnapshot().reservedCount());
                                 assertEquals(
                                         0,
@@ -248,12 +249,26 @@ class QueuedPublicationNotificationFailureTest {
             var secondRoute = fixture.publish(second);
             var observation = new WorkerStatusResponse();
             observation.setRole(RoleType.PREFILL);
+            observation.setAlive(true);
+            observation.setAvailableKvCacheTokens(100000L);
+            observation.setTotalKvCacheTokens(100000L);
             observation.setRunningQueryLen(1L);
-            fixture.prefill.publishStatus(
-                    fixture.prefill.applyStatusHeartbeat(
-                            fixture.prefill.getStatus(),
-                            WorkerStatusTestSupport.freezeStatusResponse(
-                                    fixture.prefill.getStatus(), observation)));
+            var status = fixture.prefill.getStatus();
+            org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange change;
+            status.lock.lock();
+            try {
+                observation.setStatusVersion(
+                        Math.max(1L, status.appliedStatusCursor().statusVersion()));
+                change =
+                        fixture.prefill.applyWorkerStatus(
+                                status,
+                                status.prepareStatus(
+                                        WorkerStatusTestSupport.freezeStatusResponse(
+                                                status, observation)));
+            } finally {
+                status.lock.unlock();
+            }
+            fixture.prefill.publishStatus(change);
             assertFalse(fixture.prefill.requestCapacityAvailable(fixture.prefill.requestLimit, 1));
             fixture.metricsFailure = new IllegalStateException("unused victim metric");
             var incoming = fixture.context(9323L, 80);
@@ -457,7 +472,7 @@ class QueuedPublicationNotificationFailureTest {
                                 return call.callRealMethod();
                             })
                     .when(prefill)
-                    .enqueueRoute(any(), any());
+                    .acceptQueuedRoute(any(), any(), any());
         }
 
         @Override

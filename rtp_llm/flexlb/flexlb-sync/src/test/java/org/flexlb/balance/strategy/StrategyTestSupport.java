@@ -138,8 +138,7 @@ final class StrategyTestSupport {
                 delivery,
                 new CapacityNotifier(),
                 org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                        configService.loadBalanceConfig()),
-                () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
+                        configService.loadBalanceConfig()));
     }
 
     /**
@@ -187,7 +186,7 @@ final class StrategyTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(
+                    status.prepareStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, response));
             status.publishPreparedStatus(prepared);
             status.recordSuccessfulPoll(response.isAlive());
@@ -211,8 +210,8 @@ final class StrategyTestSupport {
                         source.committedEngineObservation(), true, 1L, 0L, Map.of());
         status.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(observation);
-            return registry.publishPreparedEndpoint(address, status, prepared);
+            WorkerStatus.PreparedStatus prepared = status.prepareStatus(observation);
+            return registry.updateEndpoint(address, status, prepared).endpoint();
         } finally {
             status.lock.unlock();
         }
@@ -227,7 +226,8 @@ final class StrategyTestSupport {
                     && org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
                                     endpoint, exactItem, exactItem.prefillWorkMs(), true)
                             .accepted()
-                    && endpoint.enqueueRoute(
+                    && org.flexlb.balance.endpoint.EndpointTestSupport.enqueueRoute(
+                            endpoint,
                             exactItem,
                             org.flexlb.balance.scheduler.QueueExecutionSettings.capture(
                                     exactItem.ctx().data().getConfig(),
@@ -251,7 +251,7 @@ final class StrategyTestSupport {
                         new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(
                                 batchId, Integer.MAX_VALUE),
                         new long[] {predictedMs});
-        return endpoint.dequeueForDelivery(delivery).value();
+        return endpoint.tryStartQueuedDelivery(delivery).value();
     }
 
     static void setCacheStatus(WorkerStatus status, long blockSize, long availableKv) {

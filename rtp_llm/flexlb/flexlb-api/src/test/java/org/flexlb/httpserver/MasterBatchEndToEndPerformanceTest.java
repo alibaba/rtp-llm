@@ -1301,7 +1301,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                     address + " retained Prefill ownership");
             assertEquals(
                     0L,
-                    endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests(),
+                    org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(endpoint),
                     address + " retained Prefill requests");
         }
         for (String address : endpointRegistry.endpointAddressSnapshot(RoleType.DECODE)) {

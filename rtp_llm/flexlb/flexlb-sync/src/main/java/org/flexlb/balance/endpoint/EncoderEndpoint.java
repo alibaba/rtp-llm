@@ -109,7 +109,7 @@ public final class EncoderEndpoint extends WorkerEndpoint
     }
 
     @Override
-    public StatusChange applyPreparedStatus(
+    public StatusChange applyWorkerStatus(
             WorkerStatus status, WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(status);
         List<RequestStatus> changes = new ArrayList<>();
@@ -118,19 +118,12 @@ public final class EncoderEndpoint extends WorkerEndpoint
             com.google.common.base.Preconditions.checkState(
                     !isRetired(), "Encoder endpoint is retired");
             if (!prepared.observation().alive()) beginRetirement();
-            collectStatusLocked(prepared.observation(), true, changes);
+            collectStatusLocked(prepared.observation(), changes);
             status.publishReducedStatus(prepared);
         } finally {
             stateLock().unlock();
         }
         return new StatusChange.Encoder(changes);
-    }
-
-    @Override
-    public StatusChange applyStatusHeartbeat(
-            WorkerStatus status, WorkerStatus.StatusObservation observation) {
-        super.applyStatusHeartbeat(status, observation);
-        return collectStatus(observation, false);
     }
 
     @Override
@@ -188,22 +181,8 @@ public final class EncoderEndpoint extends WorkerEndpoint
                 + pending;
     }
 
-    private StatusChange collectStatus(
-            WorkerStatus.StatusObservation observation, boolean includeFinished) {
-        List<RequestStatus> changes = new ArrayList<>();
-        stateLock().lock();
-        try {
-            collectStatusLocked(observation, includeFinished, changes);
-        } finally {
-            stateLock().unlock();
-        }
-        return new StatusChange.Encoder(changes);
-    }
-
     private void collectStatusLocked(
-            WorkerStatus.StatusObservation observation,
-            boolean includeFinished,
-            List<RequestStatus> changes) {
+            WorkerStatus.StatusObservation observation, List<RequestStatus> changes) {
         // Only locally tracked requests need reconciliation; reports may include many other tasks.
         for (var entry : requests.entrySet()) {
             if (!observation.activeTasks().containsKey(entry.getKey())) continue;
@@ -214,22 +193,20 @@ public final class EncoderEndpoint extends WorkerEndpoint
                     new RequestStatus(
                             tracked.route(), ContextResult.WorkerRequestEventType.ACTIVE, 0));
         }
-        if (includeFinished) {
-            var members = requests.entrySet().iterator();
-            while (members.hasNext()) {
-                var entry = members.next();
-                var task = observation.finishedTasks().get(entry.getKey());
-                if (task != null) {
-                    var tracked = entry.getValue();
-                    members.remove();
-                    changes.add(
-                            new RequestStatus(
-                                    tracked.route(),
-                                    task.errorCode() == 0
-                                            ? ContextResult.WorkerRequestEventType.COMPLETED
-                                            : ContextResult.WorkerRequestEventType.FAILED,
-                                    task.errorCode()));
-                }
+        var members = requests.entrySet().iterator();
+        while (members.hasNext()) {
+            var entry = members.next();
+            var task = observation.finishedTasks().get(entry.getKey());
+            if (task != null) {
+                var tracked = entry.getValue();
+                members.remove();
+                changes.add(
+                        new RequestStatus(
+                                tracked.route(),
+                                task.errorCode() == 0
+                                        ? ContextResult.WorkerRequestEventType.COMPLETED
+                                        : ContextResult.WorkerRequestEventType.FAILED,
+                                task.errorCode()));
             }
         }
     }

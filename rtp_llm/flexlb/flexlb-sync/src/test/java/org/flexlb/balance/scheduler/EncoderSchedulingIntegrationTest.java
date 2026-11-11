@@ -612,7 +612,7 @@ class EncoderSchedulingIntegrationTest {
                             waiting);
             var observation =
                     status.bindStatusObservation(engine, true, version, version, finished);
-            change = endpoint.applyPreparedStatus(status, status.prepareNewStatus(observation));
+            change = endpoint.applyWorkerStatus(status, status.prepareStatus(observation));
         } finally {
             status.lock.unlock();
         }

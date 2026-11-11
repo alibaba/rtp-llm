@@ -80,7 +80,7 @@ class RequestDeliveryLockContractTest {
         var state =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                         new java.util.concurrent.locks.ReentrantLock(),
-                        org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(1),
+                        org.flexlb.balance.endpoint.PrefillRequestQueue.fifo(1),
                         System::currentTimeMillis);
         Registered registered = registerQueuedItem(809L, endpoint, state);
         bind(lifecycle, registered);
@@ -151,7 +151,7 @@ class RequestDeliveryLockContractTest {
                         org.flexlb.balance.delivery.CapacityBoundary.Attempt.rejected(
                                 org.flexlb.balance.delivery.CapacityBoundary.OWNERSHIP_LOST))
                 .when(endpoint)
-                .dequeueForDelivery(org.mockito.ArgumentMatchers.any());
+                .tryStartQueuedDelivery(org.mockito.ArgumentMatchers.any());
         try {
             worker.processSelection(
                     List.of(registered.item()),
@@ -415,7 +415,7 @@ class RequestDeliveryLockContractTest {
         PrefillEndpoint state =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                         new java.util.concurrent.locks.ReentrantLock(),
-                        org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(1),
+                        org.flexlb.balance.endpoint.PrefillRequestQueue.fifo(1),
                         System::currentTimeMillis);
         Registered registered = registerQueuedItem(151L, prefill, state);
         java.util.concurrent.atomic.AtomicInteger releases =
@@ -487,7 +487,10 @@ class RequestDeliveryLockContractTest {
                                                         .SUCCESS));
                 assertTrue(queuePublished.await(5, TimeUnit.SECONDS));
                 assertEquals(List.of(registered.item()), state.captureQueue(1).items());
-                assertEquals(1L, state.admissionSummary(0, 0L).occupiedRequests());
+                assertEquals(
+                        1L,
+                        org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(
+                                state));
 
                 Future<RequestState> cancellation =
                         operations.submit(
@@ -520,7 +523,8 @@ class RequestDeliveryLockContractTest {
         verify(prefill).releaseRequest(registered.item());
         assertEquals(1, releases.get());
         assertTrue(state.captureQueue(1).items().isEmpty());
-        assertEquals(0L, state.admissionSummary(0, 0L).occupiedRequests());
+        assertEquals(
+                0L, org.flexlb.balance.endpoint.EndpointTestSupport.occupiedRequestCount(state));
         assertFalse(
                 org.flexlb.balance.endpoint.EndpointTestSupport.releaseRequest(
                         state, registered.item()),

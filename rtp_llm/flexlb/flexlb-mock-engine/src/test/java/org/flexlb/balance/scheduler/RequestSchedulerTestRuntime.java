@@ -61,8 +61,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         delivery,
                         capacityNotifier,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                                configService.loadBalanceConfig()),
-                        () -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.fifo(16));
+                                configService.loadBalanceConfig()));
         this.router = new BindingRouter(registry, configService, capacity);
         this.runtime =
                 org.mockito.Mockito.spy(
@@ -232,12 +231,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             }
             WorkerStatus.StatusObservation observation =
                     WorkerStatusTestSupport.freezeStatusResponse(status, response);
-            if (responseVersion == committedVersion) {
-                projection = endpoint.applyStatusHeartbeat(status, observation);
-            } else {
-                WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(observation);
-                projection = endpoint.applyPreparedStatus(status, prepared);
-            }
+            projection = endpoint.applyWorkerStatus(status, status.prepareStatus(observation));
         } finally {
             status.lock.unlock();
         }

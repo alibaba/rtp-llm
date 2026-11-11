@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.util.Failures;
 
@@ -259,5 +260,42 @@ public final class Delivery implements AutoCloseable {
          * The route decision may have been returned to the caller.
          */
         ROUTE_DECISION
+    }
+
+    /**
+     * Exact queue prefix and its precomputed work. Batch predictions apply to the whole batch;
+     * route predictions correspond to each item. Inputs do not own resources or delivery state.
+     */
+    public record Selection(
+            List<RouteResult> items,
+            boolean batch,
+            long batchId,
+            int maxInflightBatches,
+            long predictedMs,
+            PrefillBatchFeatures features,
+            long[] predictions) {
+        public Selection {
+            items = List.copyOf(items);
+            predictions = predictions == null ? null : predictions.clone();
+            checkArgument(!items.isEmpty(), "delivery selection must not be empty");
+            if (batch) {
+                checkArgument(maxInflightBatches > 0, "maximumInflightBatches must be positive");
+                Objects.requireNonNull(features, "batch features");
+                checkArgument(predictedMs >= 0L, "predicted batch work must be non-negative");
+            } else {
+                checkArgument(
+                        predictions != null && predictions.length >= items.size(),
+                        "missing predictions");
+            }
+        }
+
+        public long predictionAt(int index) {
+            return predictions[index];
+        }
+
+        @Override
+        public long[] predictions() {
+            return predictions == null ? null : predictions.clone();
+        }
     }
 }

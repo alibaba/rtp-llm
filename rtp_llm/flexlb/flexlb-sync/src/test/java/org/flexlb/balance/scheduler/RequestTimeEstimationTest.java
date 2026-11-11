@@ -4,7 +4,7 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.EstimationSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.Candidate;
 import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.Probe;
@@ -95,7 +95,7 @@ class RequestTimeEstimationTest {
                                 "disabled execution budget must not construct a prefix predictor");
                     }
                 };
-        ProjectionQueueSnapshot snapshot =
+        EstimationSnapshot snapshot =
                 queue(
                         false,
                         constraints(2, 0L),
@@ -157,7 +157,7 @@ class RequestTimeEstimationTest {
 
     @Test
     void liveMembersOnBothSidesOfProbeKeepTheirBatchAndRouteCosts() {
-        ProjectionQueueSnapshot snapshot =
+        EstimationSnapshot snapshot =
                 queue(
                         true,
                         constraints(5, 30L),
@@ -313,7 +313,7 @@ class RequestTimeEstimationTest {
 
     @Test
     void inputsRejectSnapshotsFromDifferentLinearizationPoints() {
-        ProjectionQueueSnapshot queue = queue(false, constraints(1, 0L), List.of());
+        EstimationSnapshot queue = queue(false, constraints(1, 0L), List.of());
         WorkSnapshot later = new WorkSnapshot(NOW_MS + 1L, List.of(), List.of(), 0L);
 
         assertThrows(
@@ -636,7 +636,7 @@ class RequestTimeEstimationTest {
                         List.of(
                                 item(1L, 50, 1L, 1L, NOW_MS + 5L),
                                 item(2L, 50, 2L, 1L, NOW_MS + 5L)));
-        for (ProjectionQueueSnapshot snapshot : List.of(blockedSuffix, consumedPrefix)) {
+        for (EstimationSnapshot snapshot : List.of(blockedSuffix, consumedPrefix)) {
             AtomicInteger planningSessions = new AtomicInteger();
             PrefillTimePredictor.Evaluator counted =
                     new PrefillTimePredictor.Evaluator() {
@@ -694,7 +694,7 @@ class RequestTimeEstimationTest {
 
     @Test
     void futureExpiryDoesNotEraseKnownWorkInLaterGroups() {
-        ProjectionQueueSnapshot snapshot =
+        EstimationSnapshot snapshot =
                 queue(
                         false,
                         constraints(5, 30L),
@@ -788,8 +788,7 @@ class RequestTimeEstimationTest {
         GroupPlanner.Item expiringSuffix = item(1L, 10, 1L, 100L, NOW_MS + 10L);
         GroupPlanner.Constraints splitByComputeShape =
                 new GroupPlanner.Constraints(2, 150L, 1_000_000L, 0L, 30L);
-        ProjectionQueueSnapshot snapshot =
-                queue(true, splitByComputeShape, List.of(expiringSuffix));
+        EstimationSnapshot snapshot = queue(true, splitByComputeShape, List.of(expiringSuffix));
         Probe probe = probe(99L, 90, NOW_MS - 30L, Long.MAX_VALUE, 20L, 0L);
         Candidate result = project(snapshot, noCommittedWork(), TOKEN_EVALUATOR, probe, ROUTE);
 
@@ -892,7 +891,7 @@ class RequestTimeEstimationTest {
         PrefillTimePredictor.Evaluator second =
                 sharedEvaluator(sharedSnapshot, singleCalls, batchCalls);
 
-        ProjectionQueueSnapshot empty =
+        EstimationSnapshot empty =
                 queue(
                         false,
                         new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 500L, 0L),

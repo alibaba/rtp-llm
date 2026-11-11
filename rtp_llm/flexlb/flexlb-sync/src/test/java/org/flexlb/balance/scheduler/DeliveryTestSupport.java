@@ -73,9 +73,9 @@ public final class DeliveryTestSupport {
                 : org.springframework.test.util.ReflectionTestUtils.getField(target, name);
     }
 
-    public static org.flexlb.balance.endpoint.PrefillEndpoint.DeliverySelection queued(
+    public static Delivery.Selection queued(
             List<RouteResult> items, BatchInput batchInput, long[] predictions) {
-        return new org.flexlb.balance.endpoint.PrefillEndpoint.DeliverySelection(
+        return new Delivery.Selection(
                 items,
                 batchInput != null,
                 batchInput == null ? 0L : batchInput.batchId(),

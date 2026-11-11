@@ -1269,7 +1269,7 @@ class EngineHealthReporterTest {
                 response.setBlockSize(cacheStatus.getBlockSize());
             }
             WorkerStatus.PreparedStatus prepared =
-                    workerStatus.prepareNewStatus(
+                    workerStatus.prepareStatus(
                             org.flexlb.dao.master.WorkerStatusTestSupport.freezeStatusResponse(
                                     workerStatus, response));
             workerStatus.publishPreparedStatus(prepared);
