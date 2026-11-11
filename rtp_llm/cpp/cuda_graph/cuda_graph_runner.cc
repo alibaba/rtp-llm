@@ -2287,6 +2287,16 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         !isGenerationPrefillCudaGraph() && !isEmbeddingStylePrefillCudaGraph()
         && cudaGraphBackendFlag(graph_instances_[key].mem_hold_.attn_pyobj_, "cuda_graph_uses_device_metadata");
 
+    // Release allocator cache accumulated by the datatype-probe forward(s)
+    // before the per-graph warmup below. Under expandable segments the freed
+    // probe transients sit in partially-mapped segments that cannot serve a
+    // fresh large request, so the warmup's first scoring rectangle can OOM
+    // with tens of MiB physically free and hundreds pinned in cache
+    // (observed: 64MiB request, 45.88MiB free, 397MiB reserved-unallocated
+    // on a tight-HBM rank). The existing emptyCache before graphCaptureBegin
+    // runs after this warmup and is therefore too late for it.
+    cuda_graph::graphEmptyCache();
+
     size_t pre_capture_reserved = cuda_graph::graphReservedBytes();
 
     // Attention preparation and input initialization run on the caller's
