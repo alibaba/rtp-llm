@@ -47,6 +47,26 @@ class PLEHashTritonTest(unittest.TestCase):
             obj.eos_token_id,
         ).cuda()
 
+    def test_supported_gpu_uses_fused_hash(self):
+        if torch.cuda.get_device_capability() not in ((9, 0), (12, 0)):
+            self.skipTest("Fused PLE hash is qualified for SM90 and SM120")
+        obj = self.module()
+        history = torch.arange(33, device="cuda").view(1, 33)
+        actual = try_hashed_ngram_ids(
+            history,
+            31,
+            obj.vocab_sizes,
+            obj.offsets,
+            obj.multipliers,
+            ngram_size=obj.ngram_size,
+            heads_per_ngram=obj.heads_per_ngram,
+            eos_token_id=obj.eos_token_id,
+        )
+        # Calling hashed_ids alone could pass by silently using Torch fallback.
+        self.assertIsNotNone(actual)
+        self.assertTrue(actual.is_contiguous())
+        self.assertTrue(torch.equal(actual, self.reference(obj, history, 31)))
+
     def test_actual_metadata_prime_shapes_and_eos_resets(self):
         obj = self.module()
         torch.manual_seed(3016)

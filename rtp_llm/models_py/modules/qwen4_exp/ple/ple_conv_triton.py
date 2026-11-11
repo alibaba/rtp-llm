@@ -19,6 +19,7 @@ def _ple_conv(
     Weight,
     Output,
     Residual,
+    RolledState,
     ROWS,
     LENGTH,
     WIDTH: tl.constexpr,
@@ -26,6 +27,7 @@ def _ple_conv(
     DILATION: tl.constexpr,
     HAS_INITIAL: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
+    ROLL_STATE: tl.constexpr,
     INITIAL_BATCH_STRIDE: tl.constexpr,
     INITIAL_ROW_STRIDE: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -68,9 +70,42 @@ def _ple_conv(
         residual = tl.load(Residual + offset, valid, other=0).to(tl.float32)
         output = residual + output
     tl.store(Output + offset, output, valid)
+    if ROLL_STATE:
+        # S=1: retain old rows 1..8 and append the new normed token. This
+        # publishes a fresh buffer, never an overlapping persistent cache row.
+        for state_row in tl.static_range(state_len - 1):
+            prior = tl.load(
+                Initial
+                + batch * INITIAL_BATCH_STRIDE
+                + (state_row + 1) * INITIAL_ROW_STRIDE
+                + col,
+                valid,
+                other=0,
+            )
+            tl.store(
+                RolledState + (batch * state_len + state_row) * WIDTH + col,
+                prior,
+                valid,
+            )
+        current = tl.load(Normed + offset, valid, other=0)
+        tl.store(
+            RolledState + (batch * state_len + state_len - 1) * WIDTH + col,
+            current,
+            valid,
+        )
 
 
-def try_ple_conv(gated, normed, initial, weight, dilation, *, residual=None):
+def try_ple_conv(
+    gated,
+    normed,
+    initial,
+    weight,
+    dilation,
+    *,
+    residual=None,
+    roll_state=False,
+    tune_bf16_prefill=False,
+):
     if not (
         gated.is_cuda
         and torch.version.hip is None
@@ -97,6 +132,16 @@ def try_ple_conv(gated, normed, initial, weight, dilation, *, residual=None):
         )
         and not any(x.requires_grad for x in (gated, normed, weight))
         and (
+            not roll_state
+            or (
+                gated.shape[1] == 1
+                and gated.shape[0] > 0
+                and initial is not None
+                and not initial.requires_grad
+                and torch.cuda.get_device_capability(gated.device) == (9, 0)
+            )
+        )
+        and (
             residual is None
             or (
                 residual.shape == gated.shape
@@ -109,13 +154,32 @@ def try_ple_conv(gated, normed, initial, weight, dilation, *, residual=None):
     ):
         return None
     output = torch.empty_like(gated)
-    _ple_conv[(triton.cdiv(gated.numel(), 1024),)](
+    rolled_state = (
+        torch.empty(initial.shape, dtype=initial.dtype, device=initial.device)
+        if roll_state
+        else output
+    )
+    # Smaller tiles reduce register pressure on the measured long SM90
+    # prefill path. Keep the common, speculative and decode-roll tile intact.
+    block = (
+        512
+        if tune_bf16_prefill
+        and not roll_state
+        and residual is not None
+        and gated.shape[0] == 1
+        and 8192 <= gated.shape[1] <= 32768
+        and gated.shape[1] % 64 == 0
+        and torch.cuda.get_device_capability(gated.device) == (9, 0)
+        else 1024
+    )
+    _ple_conv[(triton.cdiv(gated.numel(), block),)](
         gated,
         normed,
         initial if initial is not None else normed,
         weight,
         output,
         residual if residual is not None else gated,
+        rolled_state,
         ROWS=gated.shape[0] * gated.shape[1],
         LENGTH=gated.shape[1],
         WIDTH=10240,
@@ -123,9 +187,10 @@ def try_ple_conv(gated, normed, initial, weight, dilation, *, residual=None):
         DILATION=3,
         HAS_INITIAL=initial is not None,
         HAS_RESIDUAL=residual is not None,
+        ROLL_STATE=roll_state,
         INITIAL_BATCH_STRIDE=initial.stride(0) if initial is not None else 0,
         INITIAL_ROW_STRIDE=initial.stride(1) if initial is not None else 0,
-        BLOCK=1024,
+        BLOCK=block,
         num_warps=4,
     )
-    return output
+    return (output, rolled_state) if roll_state else output

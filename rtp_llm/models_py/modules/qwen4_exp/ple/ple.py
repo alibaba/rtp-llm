@@ -601,6 +601,46 @@ class Qwen4ExpPLELayer(nn.Module):
     def _norm(self, x: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
         return grouped_rms_norm(x, gamma, self.hidden_size, self.norm_eps)
 
+    def _bf16_prefill_enabled(self, hyper_states, embeddings, page_size):
+        """Select the qualified single-request SM90 BF16 projection path."""
+        return (
+            page_size == 64
+            and hyper_states.is_cuda
+            and torch.version.hip is None
+            and hyper_states.shape[0] == 1
+            and 128 <= hyper_states.shape[1] <= 32768
+            and hyper_states.shape[1] % 64 == 0
+            and hyper_states.shape[2] == 10240
+            and embeddings.shape == (1, hyper_states.shape[1], 2560)
+            and self.key_projection is None
+            and self.value_projection is None
+            and self.key_proj.shape == (10240, 2560)
+            and self.value_proj.shape == (2560, 2560)
+            and self.conv_weight.shape == (10240, 1, 4)
+            and self.conv_dilation == 3
+            and all(
+                weight.shape == (10240,)
+                for weight in (self.norm_key, self.norm_query, self.norm_conv)
+            )
+            and all(
+                tensor.device == hyper_states.device
+                and tensor.dtype == torch.bfloat16
+                and tensor.is_contiguous()
+                and not tensor.requires_grad
+                for tensor in (
+                    hyper_states,
+                    embeddings,
+                    self.key_proj,
+                    self.value_proj,
+                    self.conv_weight,
+                    self.norm_key,
+                    self.norm_query,
+                    self.norm_conv,
+                )
+            )
+            and torch.cuda.get_device_capability(hyper_states.device) == (9, 0)
+        )
+
     def _short_conv(self, hidden_states: torch.Tensor) -> torch.Tensor:
         seq_len = hidden_states.shape[1]
         hidden_states = hidden_states.transpose(1, 2)
@@ -773,6 +813,9 @@ class Qwen4ExpPLELayer(nn.Module):
             raise ValueError("PLE snapshot prefill must contain at least one token")
         if embeddings is None:
             embeddings = self.ple_embedding(token_history, length)
+        bf16_prefill = self._bf16_prefill_enabled(
+            hyper_states, embeddings, page_size
+        )
         if (
             batch == 1
             and width == 10240
@@ -780,10 +823,15 @@ class Qwen4ExpPLELayer(nn.Module):
             and hyper_states.dtype == torch.bfloat16
             and torch.version.hip is None
             and _sm_supported(hyper_states.device)
-            and self.key_projection is not None
-            and self.value_projection is not None
-            and self.key_projection.use_scaled_mm
-            and self.value_projection.use_scaled_mm
+            and (
+                bf16_prefill
+                or (
+                    self.key_projection is not None
+                    and self.value_projection is not None
+                    and self.key_projection.use_scaled_mm
+                    and self.value_projection.use_scaled_mm
+                )
+            )
         ):
             from rtp_llm.models_py.modules.base.common.fp8_linear import (
                 project_fp8_pair,
@@ -792,9 +840,18 @@ class Qwen4ExpPLELayer(nn.Module):
             from .ple_gate_triton import try_ple_gate
             from .ple_page_projection import project_pages_pair
 
-            projected = project_pages_pair(
-                embeddings, self.key_projection, self.value_projection, page_size
-            )
+            if bf16_prefill:
+                # BF16 has no page-local activation-quantization domain. Keep
+                # both projection outputs BF16 and share the existing tail.
+                projected = (
+                    F.linear(embeddings, self.key_proj),
+                    F.linear(embeddings, self.value_proj),
+                    None,
+                )
+            else:
+                projected = project_pages_pair(
+                    embeddings, self.key_projection, self.value_projection, page_size
+                )
             projection_scales = None
             projection_done = projected is not None
             if projection_done:
@@ -839,6 +896,7 @@ class Qwen4ExpPLELayer(nn.Module):
                         self.conv_weight,
                         self.conv_dilation,
                         residual=hyper_states if add_residual else None,
+                        tune_bf16_prefill=bf16_prefill,
                     )
                     if output is not None:
                         snapshots = []
@@ -950,6 +1008,19 @@ class Qwen4ExpPLELayer(nn.Module):
         gated_value, gated_value_normed = self._gated_values(
             hyper_state, token_history_step, embeddings=embeddings
         )
+        if hyper_state.is_cuda and torch.version.hip is None:
+            from .ple_conv_triton import try_ple_conv
+
+            fused = try_ple_conv(
+                gated_value,
+                gated_value_normed,
+                conv_buffer,
+                self.conv_weight,
+                self.conv_dilation,
+                roll_state=True,
+            )
+            if fused is not None:
+                return fused
         conv_in = torch.cat([conv_buffer, gated_value_normed], dim=1).transpose(1, 2)
         conv_out = F.silu(
             F.conv1d(

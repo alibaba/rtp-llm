@@ -138,6 +138,38 @@ py_test(
     tags = ["L20_CU13"],
 )
 
+py_test(
+    name = "test_chunk_h_sm90",
+    srcs = ["test_chunk_h_sm90.py"],
+    deps = ["//rtp_llm/models_py/triton_kernels:fla"] + [
+        ":einops",
+        ":numpy",
+        ":packaging",
+        ":torch",
+        ":triton",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_scatter_qkv_l2norm_sm90",
+    srcs = ["test_scatter_qkv_l2norm_sm90.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:common",
+        "//rtp_llm/models_py/triton_kernels:fla",
+        ":einops",
+        ":numpy",
+        ":packaging",
+        ":torch",
+        ":triton",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
 # Reuse test_chunk_prefill on AMD to verify chunk-gdn Triton path on ROCm.
 # NOTE: The Gluon fwd_h kernel uses CDNA4-specific instructions (e.g.
 # v_mfma_f32_32x32x16_f16, ds_read_b128 with k_width=8) that are only

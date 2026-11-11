@@ -323,6 +323,17 @@ py_test(
 )
 
 py_test(
+    name = "gdn_sm90_decode_conv_gate_test",
+    srcs = ["gdn_composition_test.py"],
+    main = "gdn_composition_test.py",
+    args = ["GdnDecodeConvGateSM90Test"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "fp8_kv_test",
     srcs = ["fp8_kv_test.py", "sparse_paged_fmha_test.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],
@@ -441,6 +452,16 @@ py_test(
     env = {"GPU_COUNT": "1"},
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "ple_hash_sm90_test",
+    srcs = ["ple_hash_triton_test.py", "ple_test.py"],
+    main = "ple_hash_triton_test.py",
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )
 
 py_test(
@@ -833,6 +854,37 @@ py_test(
         "ple_sm90_test_utils.py",
     ],
     deps = ["//rtp_llm:testlib", ":math_references"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "ple_bf16_prefill_test",
+    srcs = ["ple_bf16_prefill_test.py"],
+    deps = ["//rtp_llm/models_py:ple_component_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "ple_decode_fusion_test",
+    srcs = ["ple_decode_fusion_test.py"],
+    deps = ["//rtp_llm/models_py:ple_component_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "ple_decode_expansion_test",
+    srcs = ["ple_decode_expansion_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+    ],
     env = {"GPU_COUNT": "1"},
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},

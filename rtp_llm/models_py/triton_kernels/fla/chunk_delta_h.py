@@ -32,6 +32,26 @@ _gluon_fallback_warned = False
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
 
 
+def _use_sm90_bv16_chunk_h(k, w, u, gk, state_dtype, num_sequences):
+    """Select BV16 for Qwen4 TP1/2/4/8 SM90 single-sequence prefill."""
+    return (
+        not is_amd
+        and num_sequences == 1
+        and k.is_cuda
+        and (k.shape[-2], u.shape[-2], k.shape[-1], u.shape[-1])
+        in (
+            (16, 48, 128, 128),
+            (8, 24, 128, 128),
+            (4, 12, 128, 128),
+            (2, 6, 128, 128),
+        )
+        and k.dtype == w.dtype == u.dtype == torch.bfloat16
+        and state_dtype == torch.float32
+        and gk is None
+        and torch.cuda.get_device_capability(k.device) == (9, 0)
+    )
+
+
 @triton.heuristics(
     {
         "USE_G": lambda args: args["g"] is not None,
@@ -526,6 +546,10 @@ def chunk_gated_delta_rule_fwd_h(
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), N * H)
 
+    block_v = 64 if is_amd_cdna3 else (16 if is_amd_cdna4 else 32)
+    if _use_sm90_bv16_chunk_h(k, w, u, gk, h_dtype, N):
+        block_v = 16
+
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
         k=k,
         v=u,
@@ -544,7 +568,7 @@ def chunk_gated_delta_rule_fwd_h(
         K=K,
         V=V,
         BT=BT,
-        BV=64 if is_amd_cdna3 else (16 if is_amd_cdna4 else 32),
+        BV=block_v,
         IS_LOG2=is_amd,
         num_warps=4,
         num_stages=2,
