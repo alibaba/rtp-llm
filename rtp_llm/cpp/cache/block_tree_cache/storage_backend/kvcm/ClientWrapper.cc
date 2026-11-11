@@ -1,4 +1,5 @@
 #include "ClientWrapper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "kvcm_client/HostCacheStateCompat.h"
 #include "kvcm_client/TransferClientCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/Subscriber.h"
@@ -15,38 +16,44 @@ namespace kvcm {
 
 namespace {
 
-thread_local const ClientWrapper* transfer_deadline_owner = nullptr;
+thread_local const ClientWrapper*                                 transfer_deadline_owner = nullptr;
 thread_local std::optional<std::chrono::steady_clock::time_point> transfer_deadline;
-thread_local ClientWrapper::TransferCompletion* transfer_completion = nullptr;
+thread_local ClientWrapper::TransferCompletion*                   transfer_completion = nullptr;
 
 class TransferDeadlineScope {
 public:
-    TransferDeadlineScope(const ClientWrapper* owner, std::optional<std::chrono::steady_clock::time_point> deadline,
-                          ClientWrapper::TransferCompletion* completion = nullptr):
-        previous_owner_(transfer_deadline_owner), previous_deadline_(transfer_deadline),
+    TransferDeadlineScope(const ClientWrapper*                                 owner,
+                          std::optional<std::chrono::steady_clock::time_point> deadline,
+                          ClientWrapper::TransferCompletion*                   completion = nullptr):
+        previous_owner_(transfer_deadline_owner),
+        previous_deadline_(transfer_deadline),
         previous_completion_(transfer_completion) {
         transfer_deadline_owner = owner;
-        transfer_deadline = deadline;
-        transfer_completion = completion;
+        transfer_deadline       = deadline;
+        transfer_completion     = completion;
     }
     ~TransferDeadlineScope() {
         transfer_deadline_owner = previous_owner_;
-        transfer_deadline = previous_deadline_;
-        transfer_completion = previous_completion_;
+        transfer_deadline       = previous_deadline_;
+        transfer_completion     = previous_completion_;
     }
+
 private:
-    const ClientWrapper* previous_owner_;
+    const ClientWrapper*                                 previous_owner_;
     std::optional<std::chrono::steady_clock::time_point> previous_deadline_;
-    ClientWrapper::TransferCompletion* previous_completion_;
+    ClientWrapper::TransferCompletion*                   previous_completion_;
 };
 
 }  // namespace
 
-ClientWrapper::ClientWrapper(std::unique_ptr<ClientFactory> client_factory,
-                             std::chrono::milliseconds reinit_interval):
+ClientWrapper::ClientWrapper(std::unique_ptr<ClientFactory> client_factory, std::chrono::milliseconds reinit_interval):
     client_factory_(std::move(client_factory)),
     reinit_interval_(std::max(reinit_interval, std::chrono::milliseconds(1))) {
     RTP_LLM_CHECK_WITH_INFO(client_factory_ != nullptr, "ClientWrapper requires a client factory");
+}
+
+ClientWrapper::TransferCompletion ClientWrapper::sdkResultCompletion(kv_cache_manager::ClientErrorCode ec) {
+    return sdkCodeProvesBufferSafety(ec) ? TransferCompletion::PAYLOAD_COMPLETE : TransferCompletion::UNKNOWN;
 }
 
 ClientWrapper::~ClientWrapper() {
@@ -146,12 +153,10 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
                 continue;
             }
             for (const auto& gpu : registration.memory_registrations->gpu) {
-                const auto duplicate = std::find_if(memory_registrations.gpu.begin(),
-                                                    memory_registrations.gpu.end(),
-                                                    [&](const auto& other) {
-                                                        return gpu.base == other.base && gpu.size == other.size
-                                                               && gpu.device_id == other.device_id;
-                                                    });
+                const auto duplicate = std::find_if(
+                    memory_registrations.gpu.begin(), memory_registrations.gpu.end(), [&](const auto& other) {
+                        return gpu.base == other.base && gpu.size == other.size && gpu.device_id == other.device_id;
+                    });
                 if (duplicate == memory_registrations.gpu.end()) {
                     memory_registrations.gpu.push_back(gpu);
                 }
@@ -176,10 +181,10 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
                 params.regist_span             = &pool_registrations_[index].span;
                 params.self_location_spec_name = pool_registrations_[index].location_spec_name;
             }
-            auto client = pool_registrations_[index].memory_registrations.has_value()
-                              ? client_factory_->createTransferClientWithMemory(
-                                    config_json, params, *pool_registrations_[index].memory_registrations)
-                              : client_factory_->createTransferClient(config_json, params);
+            auto client = pool_registrations_[index].memory_registrations.has_value() ?
+                              client_factory_->createTransferClientWithMemory(
+                                  config_json, params, *pool_registrations_[index].memory_registrations) :
+                              client_factory_->createTransferClient(config_json, params);
             if (!client) {
                 RTP_LLM_LOG_ERROR("init KVCM transfer client failed for pool %zu", index);
                 return false;
@@ -225,8 +230,8 @@ void ClientWrapper::shutdown() noexcept {
     std::lock_guard<std::mutex> shutdown_lock(shutdown_mutex_);
     {
         std::lock_guard<std::mutex> lock(reinit_worker_mutex_);
-        stop_requested_   = true;
-        reinit_action_ = ReinitAction::NONE;
+        stop_requested_ = true;
+        reinit_action_  = ReinitAction::NONE;
     }
     reinit_worker_cv_.notify_all();
     if (reinit_worker_.joinable()) {
@@ -288,7 +293,8 @@ bool ClientWrapper::initMetaClient(const std::string& unique_id, KVCMConfigPtr c
         for (const auto& address : address_snapshot_) {
             auto candidate_config = *config;
             candidate_config.set_addresses({address});
-            meta_client = client_factory_->createMetaClient(autil::legacy::ToJsonString(candidate_config), init_params_);
+            meta_client =
+                client_factory_->createMetaClient(autil::legacy::ToJsonString(candidate_config), init_params_);
             if (meta_client) {
                 bound_address_ = address;
                 break;
@@ -358,31 +364,45 @@ ClientWrapper::getWriteLocation(const std::string&              unique_id,
                                 int64_t                         write_timeout_seconds,
                                 int32_t                         min_replica_count) {
     CHECK_INIT2(unique_id);
-    CALL_CLIENT2(StartWrite, trace_id, keys, tokens, location_spec_group_names, write_timeout_seconds, min_replica_count);
+    CALL_CLIENT2(
+        StartWrite, trace_id, keys, tokens, location_spec_group_names, write_timeout_seconds, min_replica_count);
 }
 
-bool ClientWrapper::removeCache(const std::string& unique_id, const std::string& trace_id,
-                                const std::vector<int64_t>& keys, const std::vector<int64_t>& tokens,
+bool ClientWrapper::removeCache(const std::string&                 unique_id,
+                                const std::string&                 trace_id,
+                                const std::vector<int64_t>&        keys,
+                                const std::vector<int64_t>&        tokens,
                                 const kv_cache_manager::BlockMask& block_mask) {
     CHECK_INIT1(unique_id);
     return checkError(client->RemoveCache(trace_id, keys, tokens, block_mask), client);
 }
 
 std::pair<bool, kv_cache_manager::BackendLocations>
-ClientWrapper::getCacheLocationsByBackend(const std::string& unique_id, const std::string& trace_id,
-                                          const std::vector<int64_t>& keys, const std::vector<int64_t>& tokens,
+ClientWrapper::getCacheLocationsByBackend(const std::string&                 unique_id,
+                                          const std::string&                 trace_id,
+                                          const std::vector<int64_t>&        keys,
+                                          const std::vector<int64_t>&        tokens,
                                           const kv_cache_manager::BlockMask& block_mask,
-                                          const std::vector<std::string>& location_spec_names,
-                                          kv_cache_manager::StorageType backend_type) {
+                                          const std::vector<std::string>&    location_spec_names,
+                                          kv_cache_manager::StorageType      backend_type) {
     CHECK_INIT2(unique_id);
-    CALL_CLIENT2(GetCacheLocationsByBackend, trace_id, keys, tokens, block_mask, location_spec_names,
-                 backend_type, kv_cache_manager::BackendSelectStrategy::LSS_WEIGHTED_RANDOM);
+    CALL_CLIENT2(GetCacheLocationsByBackend,
+                 trace_id,
+                 keys,
+                 tokens,
+                 block_mask,
+                 location_spec_names,
+                 backend_type,
+                 kv_cache_manager::BackendSelectStrategy::LSS_WEIGHTED_RANDOM);
 }
 
 std::pair<bool, kv_cache_manager::HostCacheState>
-ClientWrapper::getHostCacheState(const std::string& unique_id, const std::string& trace_id,
-                                 kv_cache_manager::QueryType query_type, const std::vector<int64_t>& keys,
-                                 const std::vector<std::string>& medium, int32_t p2p_host_count) {
+ClientWrapper::getHostCacheState(const std::string&              unique_id,
+                                 const std::string&              trace_id,
+                                 kv_cache_manager::QueryType     query_type,
+                                 const std::vector<int64_t>&     keys,
+                                 const std::vector<std::string>& medium,
+                                 int32_t                         p2p_host_count) {
     CHECK_INIT2(unique_id);
     auto [ec, result] = getSdkHostCacheState(*client, trace_id, query_type, keys, medium, p2p_host_count);
     if (!checkError(ec, client)) {
@@ -406,14 +426,15 @@ bool ClientWrapper::finishWrite(const std::string&                 unique_id,
     return true;
 }
 
-bool ClientWrapper::abortWrite(const std::string& unique_id, const std::string& trace_id,
+bool ClientWrapper::abortWrite(const std::string& unique_id,
+                               const std::string& trace_id,
                                const std::string& write_session_id) {
     if (write_session_id.empty()) {
         return false;
     }
     // SDK retries do not cover CHECK_INIT rejecting an unsent request.
-    constexpr int max_attempts = 3;
-    auto attempt_abort = [&]() -> std::optional<kv_cache_manager::ClientErrorCode> {
+    constexpr int max_attempts  = 3;
+    auto          attempt_abort = [&]() -> std::optional<kv_cache_manager::ClientErrorCode> {
         CHECK_INIT_BASE(unique_id, std::nullopt);
         const auto ec = client->FinishWrite(trace_id, write_session_id, kv_cache_manager::BlockMaskOffset{0}, {});
         checkError(ec, client);
@@ -430,7 +451,9 @@ bool ClientWrapper::abortWrite(const std::string& unique_id, const std::string& 
             return true;
         }
         RTP_LLM_LOG_WARNING("KVCM abort unconfirmed, session=%s attempt=%d code=%d",
-                            write_session_id.c_str(), attempt + 1, ec ? static_cast<int>(*ec) : -1);
+                            write_session_id.c_str(),
+                            attempt + 1,
+                            ec ? static_cast<int>(*ec) : -1);
         if (ec && *ec != kv_cache_manager::ClientErrorCode::ER_INVALID_GRPCSTATUS
             && *ec != kv_cache_manager::ClientErrorCode::ER_INVALID_STUB
             && *ec != kv_cache_manager::ClientErrorCode::ER_CONNECT_FAIL) {
@@ -443,7 +466,7 @@ bool ClientWrapper::abortWrite(const std::string& unique_id, const std::string& 
     return false;
 }
 
-bool ClientWrapper::checkError(kv_cache_manager::ClientErrorCode ec,
+bool ClientWrapper::checkError(kv_cache_manager::ClientErrorCode                    ec,
                                const std::shared_ptr<kv_cache_manager::MetaClient>& client) {
     if (ec == kv_cache_manager::ClientErrorCode::ER_OK) {
         return true;
@@ -468,10 +491,10 @@ bool ClientWrapper::checkError(kv_cache_manager::ClientErrorCode ec,
 
 void ClientWrapper::reinitWorkerLoop() noexcept {
     pthread_setname_np(pthread_self(), "kvcm_reinit");
-    bool attempted = false;
-    size_t attempt_index = 0;
+    bool                     attempted     = false;
+    size_t                   attempt_index = 0;
     std::vector<std::string> attempt_addresses;
-    std::string attempt_preferred;
+    std::string              attempt_preferred;
     const auto& [unique_id, config] = *config_map_.begin();
     std::unique_lock<std::mutex> lock(reinit_worker_mutex_);
     while (!stop_requested_) {
@@ -499,15 +522,17 @@ void ClientWrapper::reinitWorkerLoop() noexcept {
             }
         } catch (const std::exception& error) {
             RTP_LLM_LOG_WARNING("KVCM VIP refresh failed: %s", error.what());
-        } catch (...) { RTP_LLM_LOG_WARNING("KVCM VIP refresh threw"); }
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("KVCM VIP refresh threw");
+        }
         lock.lock();
         if (stop_requested_) {
             return;
         }
         const bool bound_present = std::find(addresses.begin(), addresses.end(), bound_address_) != addresses.end();
-        const bool removed = !bound_present
-                             && std::find(address_snapshot_.begin(), address_snapshot_.end(), bound_address_)
-                                    != address_snapshot_.end();
+        const bool removed =
+            !bound_present
+            && std::find(address_snapshot_.begin(), address_snapshot_.end(), bound_address_) != address_snapshot_.end();
         address_snapshot_ = addresses;
         if (removed && reinit_action_ == ReinitAction::NONE) {
             reinit_action_ = ReinitAction::REGISTER;
@@ -517,7 +542,7 @@ void ClientWrapper::reinitWorkerLoop() noexcept {
             continue;
         }
 
-        const auto action = reinit_action_;
+        const auto  action = reinit_action_;
         std::string preferred;
         if (!config->enable_vipserver() || bound_present) {
             preferred = bound_address_;
@@ -533,14 +558,17 @@ void ClientWrapper::reinitWorkerLoop() noexcept {
                 }
                 {
                     std::lock_guard<std::mutex> stop_lock(reinit_worker_mutex_);
-                    if (stop_requested_) return;
+                    if (stop_requested_)
+                        return;
                 }
                 try {
                     preferred = client_factory_->getLeaderAddress(
                         source, config->instance_id(), config->meta_channel_config()->call_timeout());
                 } catch (const std::exception& error) {
                     RTP_LLM_LOG_WARNING("KVCM leader discovery failed: %s", error.what());
-                } catch (...) { RTP_LLM_LOG_WARNING("KVCM leader discovery threw"); }
+                } catch (...) {
+                    RTP_LLM_LOG_WARNING("KVCM leader discovery threw");
+                }
             }
         }
         if (!preferred.empty()) {
@@ -549,9 +577,9 @@ void ClientWrapper::reinitWorkerLoop() noexcept {
         }
         // Keep fallback order stable across VIP reordering, but try a newly discovered leader first.
         if (preferred != attempt_preferred
-            || !std::is_permutation(addresses.begin(), addresses.end(),
-                                    attempt_addresses.begin(), attempt_addresses.end())) {
-            attempt_index = 0;
+            || !std::is_permutation(
+                addresses.begin(), addresses.end(), attempt_addresses.begin(), attempt_addresses.end())) {
+            attempt_index     = 0;
             attempt_preferred = preferred;
             attempt_addresses = addresses;
         }
@@ -568,13 +596,15 @@ void ClientWrapper::reinitWorkerLoop() noexcept {
             candidate = client_factory_->createMetaClient(autil::legacy::ToJsonString(candidate_config), init_params_);
         } catch (const std::exception& error) {
             RTP_LLM_LOG_ERROR("KVCM re-registration attempt failed: %s", error.what());
-        } catch (...) { RTP_LLM_LOG_ERROR("KVCM re-registration attempt failed with an unknown exception"); }
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("KVCM re-registration attempt failed with an unknown exception");
+        }
         lock.lock();
         if (candidate && !stop_requested_) {
             candidate.swap(meta_client_map_.at(unique_id));
             bound_address_ = address;
             reinit_action_ = ReinitAction::NONE;
-            attempt_index = 0;
+            attempt_index  = 0;
             attempt_addresses.clear();
             attempt_preferred.clear();
             RTP_LLM_LOG_INFO("KVCM metadata client recovered, address=%s", address.c_str());
@@ -608,23 +638,26 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
                                             const kv_cache_manager::UriStrVec&                          uri_str_vec,
                                             kv_cache_manager::BlockBuffers&                             block_buffers,
                                             const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
-    const auto deadline = transfer_deadline_owner == this ? transfer_deadline : std::nullopt;
+    const auto deadline   = transfer_deadline_owner == this ? transfer_deadline : std::nullopt;
+    auto*      completion = transfer_deadline_owner == this ? transfer_completion : nullptr;
+    if (completion)
+        *completion = TransferCompletion::NOT_SUBMITTED;
     std::shared_lock read_guard(transfer_mutex_);
     if (deadline && std::chrono::steady_clock::now() >= *deadline) {
         return kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT;
     }
-    const auto       slot = tag_to_index_.find(tag);
+    const auto slot = tag_to_index_.find(tag);
     if (slot == tag_to_index_.end()) {
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS;
     }
-    auto* completion = transfer_deadline_owner == this ? transfer_completion : nullptr;
-    if (completion) *completion = TransferCompletion::UNKNOWN;
-    const int64_t deadline_ms = deadline ?
-        std::chrono::duration_cast<std::chrono::milliseconds>(deadline->time_since_epoch()).count() : 0;
+    if (completion)
+        *completion = TransferCompletion::UNKNOWN;
+    const int64_t deadline_ms =
+        deadline ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline->time_since_epoch()).count() : 0;
     auto ec = loadSdkKvCaches(*transfer_clients_[slot->second], uri_str_vec, block_buffers, deadline_ms, trace_info);
-    if (completion && ec == kv_cache_manager::ClientErrorCode::ER_OK)
-        *completion = TransferCompletion::PAYLOAD_COMPLETE;
+    if (completion)
+        *completion = sdkResultCompletion(ec);
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
         RTP_LLM_LOG_ERROR("kvcm client loadKvCaches fail, ec [%d]", ec);
     }
@@ -648,71 +681,88 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
                                             const kv_cache_manager::UriStrVec&                          uri_str_vec,
                                             const kv_cache_manager::BlockBuffers&                       block_buffers,
                                             const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
-    const auto deadline = transfer_deadline_owner == this ? transfer_deadline : std::nullopt;
+    const auto deadline   = transfer_deadline_owner == this ? transfer_deadline : std::nullopt;
+    auto*      completion = transfer_deadline_owner == this ? transfer_completion : nullptr;
+    if (completion)
+        *completion = TransferCompletion::NOT_SUBMITTED;
     std::shared_lock read_guard(transfer_mutex_);
     if (deadline && std::chrono::steady_clock::now() >= *deadline) {
         return {kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT, {}};
     }
-    const auto       slot = tag_to_index_.find(tag);
+    const auto slot = tag_to_index_.find(tag);
     if (slot == tag_to_index_.end()) {
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return {kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS, {}};
     }
-    auto* completion = transfer_deadline_owner == this ? transfer_completion : nullptr;
-    if (completion) *completion = TransferCompletion::UNKNOWN;
-    const int64_t deadline_ms = deadline ?
-        std::chrono::duration_cast<std::chrono::milliseconds>(deadline->time_since_epoch()).count() : 0;
+    if (completion)
+        *completion = TransferCompletion::UNKNOWN;
+    const int64_t deadline_ms =
+        deadline ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline->time_since_epoch()).count() : 0;
     auto [ec, result] =
         saveSdkKvCaches(*transfer_clients_[slot->second], uri_str_vec, block_buffers, deadline_ms, trace_info);
-    if (completion && ec == kv_cache_manager::ClientErrorCode::ER_OK)
-        *completion = TransferCompletion::PAYLOAD_COMPLETE;
+    if (completion)
+        *completion = sdkResultCompletion(ec);
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
         RTP_LLM_LOG_ERROR("kvcm client saveKvCaches fail, ec [%d]", ec);
     }
     return {ec, std::move(result)};
 }
 
-
-
-kv_cache_manager::ClientErrorCode ClientWrapper::loadKvCachesForTagWithStatus(
-    const std::string& tag, const kv_cache_manager::UriStrVec& uris,
-    kv_cache_manager::BlockBuffers& buffers,
-    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace,
-    std::optional<std::chrono::steady_clock::time_point> deadline) {
-    if (deadline && std::chrono::steady_clock::now() >= *deadline) return kv_cache_manager::ER_SDK_TIMEOUT;
+kv_cache_manager::ClientErrorCode
+ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                                          tag,
+                                            const kv_cache_manager::UriStrVec&                          uris,
+                                            kv_cache_manager::BlockBuffers&                             buffers,
+                                            const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace,
+                                            std::optional<std::chrono::steady_clock::time_point>        deadline) {
+    if (deadline && std::chrono::steady_clock::now() >= *deadline)
+        return kv_cache_manager::ER_SDK_TIMEOUT;
     TransferDeadlineScope scope(this, deadline);
     return loadKvCachesForTagWithStatus(tag, uris, buffers, trace);
 }
 
-std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec> ClientWrapper::saveKvCachesForTagWithStatus(
-    const std::string& tag, const kv_cache_manager::UriStrVec& uris,
-    const kv_cache_manager::BlockBuffers& buffers,
-    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace,
-    std::optional<std::chrono::steady_clock::time_point> deadline) {
-    if (deadline && std::chrono::steady_clock::now() >= *deadline) return {kv_cache_manager::ER_SDK_TIMEOUT, {}};
+std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
+ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                                          tag,
+                                            const kv_cache_manager::UriStrVec&                          uris,
+                                            const kv_cache_manager::BlockBuffers&                       buffers,
+                                            const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace,
+                                            std::optional<std::chrono::steady_clock::time_point>        deadline) {
+    if (deadline && std::chrono::steady_clock::now() >= *deadline)
+        return {kv_cache_manager::ER_SDK_TIMEOUT, {}};
     TransferDeadlineScope scope(this, deadline);
     return saveKvCachesForTagWithStatus(tag, uris, buffers, trace);
 }
 
-kv_cache_manager::ClientErrorCode ClientWrapper::loadKvCachesForTagWithStatus(
-    const std::string& tag, const kv_cache_manager::UriStrVec& uris,
-    kv_cache_manager::BlockBuffers& buffers,
-    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace,
-    TransferCompletion* completion, std::optional<std::chrono::steady_clock::time_point> deadline) {
-    if (completion) *completion = TransferCompletion::NOT_SUBMITTED;
-    if (deadline && std::chrono::steady_clock::now() >= *deadline) return kv_cache_manager::ER_SDK_TIMEOUT;
+kv_cache_manager::ClientErrorCode
+ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                                          tag,
+                                            const kv_cache_manager::UriStrVec&                          uris,
+                                            kv_cache_manager::BlockBuffers&                             buffers,
+                                            const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace,
+                                            TransferCompletion*                                         completion,
+                                            std::optional<std::chrono::steady_clock::time_point>        deadline) {
+    if (completion)
+        *completion = TransferCompletion::NOT_SUBMITTED;
+    if (deadline && std::chrono::steady_clock::now() >= *deadline)
+        return kv_cache_manager::ER_SDK_TIMEOUT;
     TransferDeadlineScope scope(this, deadline, completion);
+    if (completion)
+        *completion = TransferCompletion::UNKNOWN;
     return loadKvCachesForTagWithStatus(tag, uris, buffers, trace);
 }
 
-std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec> ClientWrapper::saveKvCachesForTagWithStatus(
-    const std::string& tag, const kv_cache_manager::UriStrVec& uris,
-    const kv_cache_manager::BlockBuffers& buffers,
-    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace,
-    TransferCompletion* completion, std::optional<std::chrono::steady_clock::time_point> deadline) {
-    if (completion) *completion = TransferCompletion::NOT_SUBMITTED;
-    if (deadline && std::chrono::steady_clock::now() >= *deadline) return {kv_cache_manager::ER_SDK_TIMEOUT, {}};
+std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
+ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                                          tag,
+                                            const kv_cache_manager::UriStrVec&                          uris,
+                                            const kv_cache_manager::BlockBuffers&                       buffers,
+                                            const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace,
+                                            TransferCompletion*                                         completion,
+                                            std::optional<std::chrono::steady_clock::time_point>        deadline) {
+    if (completion)
+        *completion = TransferCompletion::NOT_SUBMITTED;
+    if (deadline && std::chrono::steady_clock::now() >= *deadline)
+        return {kv_cache_manager::ER_SDK_TIMEOUT, {}};
     TransferDeadlineScope scope(this, deadline, completion);
+    if (completion)
+        *completion = TransferCompletion::UNKNOWN;
     return saveKvCachesForTagWithStatus(tag, uris, buffers, trace);
 }
 }  // namespace kvcm

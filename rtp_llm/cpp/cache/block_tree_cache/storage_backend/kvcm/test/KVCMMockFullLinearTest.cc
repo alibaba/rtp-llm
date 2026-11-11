@@ -40,6 +40,7 @@ TEST(KVCMMockFullLinearTest, PaceReadAndWriteForwardAllGroupsAndIovsInOneCall) {
                              std::vector<std::string>{"linear0", "full1", "full0", "linear0", "full0", "full1"};
             RemoteOperationRequestPB request;
             request.set_op(operation);
+            identifyReadRequest(request);
             kv_cache_manager::UriStrVec expected_uris, actual_uris;
             for (size_t index = 0; index < tags.size(); ++index) {
                 request.add_group_tags(tags[index]);
@@ -106,6 +107,7 @@ TEST(KVCMMockFullLinearTest, PaceTransferPreservesFailureTimeoutAndWriteResponse
                                       }));
             RemoteOperationRequestPB request;
             request.set_op(operation);
+            identifyReadRequest(request);
             const kv_cache_manager::UriStrVec uris{"pace://store/full1", "pace://store/linear0", "pace://store/full0"};
             size_t                            index = 0;
             for (const auto& tag : {"full1", "linear0", "full0"}) {
@@ -154,6 +156,7 @@ TEST(KVCMMockFullLinearTest, MooncakeKeepsTagRoutingAndPublishesUrisOnlyAfterAll
                                       }));
             RemoteOperationRequestPB request;
             request.set_op(operation);
+            identifyReadRequest(request);
             const std::vector<std::string> tags{"linear0", "full1", "full0", "linear0", "full0", "full1"};
             for (size_t index = 0; index < tags.size(); ++index) {
                 request.add_group_tags(tags[index]);
@@ -213,23 +216,24 @@ TEST(KVCMMockFullLinearTest, MooncakeKeepsTagRoutingAndPublishesUrisOnlyAfterAll
 
 TEST(KVCMMockFullLinearTest, RegistersFullLinearWriteShapeBeforeSwaBecomesComplete) {
     auto environment = makeMultiGroupBackendEnvironment("kvcm_hybrid_write_mask", 1, 2);
-    auto groups = environment.cache_config.topology().groups();
+    auto groups      = environment.cache_config.topology().groups();
     for (auto& group : groups) {
         if (group.tag == "linear1") {
-            group.policy.group_type = CacheGroupType::SWA;
+            group.policy.group_type          = CacheGroupType::SWA;
             group.policy.sliding_window_size = 16;
         }
     }
     auto topology = CacheTopology::create(std::move(groups), environment.cache_config.topology().layers());
     kvcm::FullLinearLayerGroupPolicy policy(*topology,
-        [](int, const std::string&, int) { return std::vector<BlockInfo>{}; },
-        {"full0"}, {"linear0", "linear1"});
+                                            [](int, const std::string&, int) { return std::vector<BlockInfo>{}; },
+                                            {"full0"},
+                                            {"linear0", "linear1"});
     ASSERT_TRUE(policy.init());
     kvcm::GroupPolicy::LocationSpecGroups registered_groups;
     ASSERT_TRUE(policy.buildLocationSpecGroups(1, registered_groups));
     ASSERT_EQ(registered_groups.count("Ffull0Llinear0"), 1u);
     StorageRequest request;
-    request.keys = std::make_shared<CacheKeysType>(CacheKeysType{101});
+    request.keys    = std::make_shared<CacheKeysType>(CacheKeysType{101});
     request.handles = {{{"full0", 0}, {"linear0", 0}}};
     std::vector<std::string> selected;
     ASSERT_TRUE(policy.getNeedWriteGroups(request, 1, selected));
@@ -327,16 +331,16 @@ void expectTaggedTransfers(MockClientWrapper&                 client,
 
 TEST(KVCMMockFullLinearTest, ReuseDisabledGroupsAreExcludedFromRemoteProtocolAndPayloads) {
     BackendEnvironment environment;
-    environment.cache_config.dtype = DataType::TYPE_FP16;
-    environment.cache_config.layer_num = 4;
+    environment.cache_config.dtype              = DataType::TYPE_FP16;
+    environment.cache_config.layer_num          = 4;
     environment.cache_config.seq_size_per_block = 8;
-    auto disabled_full = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    disabled_full.enable_prefix_reuse = false;
-    auto hca_state = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    hca_state.enable_prefix_reuse = false;
-    auto window = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    window.enable_prefix_reuse = true;
-    window.sliding_window_size = 16;
+    auto disabled_full                          = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    disabled_full.enable_prefix_reuse           = false;
+    auto hca_state                              = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    hca_state.enable_prefix_reuse               = false;
+    auto window                                 = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    window.enable_prefix_reuse                  = true;
+    window.sliding_window_size                  = 16;
     environment.cache_config.fromGroupedSpecs(
         {test::makeMhaSpec("full0", 8, DataType::TYPE_FP16, 1, 2),
          test::makeMhaSpec("full1", 8, DataType::TYPE_FP16, 1, 2),
@@ -363,42 +367,40 @@ TEST(KVCMMockFullLinearTest, ReuseDisabledGroupsAreExcludedFromRemoteProtocolAnd
     EXPECT_CALL(*client, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
-    ScopedReferencedBlocks source_blocks(environment, 3);
-    const auto& block_ids = source_blocks.get();
-    const kv_cache_manager::Locations locations{
-        {},
-        {{"tp0_Ffull0", "full_102"}, {"tp0_Lwindow0", "window_102"}},
-        {{"tp0_Ffull0", "full_103"}, {"tp0_Lwindow0", "window_103"}}};
+    ScopedReferencedBlocks            source_blocks(environment, 3);
+    const auto&                       block_ids = source_blocks.get();
+    const kv_cache_manager::Locations locations{{},
+                                                {{"tp0_Ffull0", "full_102"}, {"tp0_Lwindow0", "window_102"}},
+                                                {{"tp0_Ffull0", "full_103"}, {"tp0_Lwindow0", "window_103"}}};
     const kv_cache_manager::BlockMask offset = kv_cache_manager::BlockMaskOffset{0};
-    EXPECT_CALL(*client, match(_, _, kv_cache_manager::QueryType::QT_BATCH_GET,
-                              std::vector<int64_t>({102, 103}), offset, _))
-        .WillOnce(Return(std::make_pair(
-            true, kv_cache_manager::Locations(locations.begin() + 1, locations.end()))));
-    auto request = makeGroupedStorageRequest(environment, {101, 102, 103}, 1, block_ids,
-                                             {{"full0"}, {"full0", "window0"}, {"full0", "window0"}});
+    EXPECT_CALL(*client,
+                match(_, _, kv_cache_manager::QueryType::QT_BATCH_GET, std::vector<int64_t>({102, 103}), offset, _))
+        .WillOnce(Return(std::make_pair(true, kv_cache_manager::Locations(locations.begin() + 1, locations.end()))));
+    auto request = makeGroupedStorageRequest(
+        environment, {101, 102, 103}, 1, block_ids, {{"full0"}, {"full0", "window0"}, {"full0", "window0"}});
     auto result = match(*backend.backend, request);
     ASSERT_TRUE(result.success);
     ASSERT_EQ(result.matched_blocks_num, 3u);
     ASSERT_NE(result.match_meta, nullptr);
     const kv_cache_manager::Locations selected_locations{locations[1], locations[2]};
-    const auto read_bases = expectedBases(environment, {block_ids[1], block_ids[2]},
-                                          {{"full0", "window0"}, {"full0", "window0"}});
+    const auto                        read_bases =
+        expectedBases(environment, {block_ids[1], block_ids[2]}, {{"full0", "window0"}, {"full0", "window0"}});
     expectTaggedTransfers(*client, selected_locations, read_bases, false);
     EXPECT_TRUE(read(*backend.backend, std::move(request), std::move(result.match_meta)));
 
     kv_cache_manager::WriteLocation write_location;
     write_location.write_session_id = "reusable_groups_session";
-    write_location.block_mask = kv_cache_manager::BlockMaskOffset{0};
-    write_location.locations = {{{"tp0_Ffull0", "full_101"}}, locations[1], locations[2]};
+    write_location.block_mask       = kv_cache_manager::BlockMaskOffset{0};
+    write_location.locations        = {{{"tp0_Ffull0", "full_101"}}, locations[1], locations[2]};
     const std::vector<std::string> write_groups{"Ffull0", "Ffull0Lwindow0", "Ffull0Lwindow0"};
     EXPECT_CALL(*client, getWriteLocation(_, _, std::vector<int64_t>({101, 102, 103}), _, write_groups, 40, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
-    const std::vector<std::vector<std::string>> groups_by_key{
-        {"full0"}, {"full0", "window0"}, {"full0", "window0"}};
-    expectTaggedTransfers(*client, write_location.locations, expectedBases(environment, block_ids, groups_by_key), true);
+    const std::vector<std::vector<std::string>> groups_by_key{{"full0"}, {"full0", "window0"}, {"full0", "window0"}};
+    expectTaggedTransfers(
+        *client, write_location.locations, expectedBases(environment, block_ids, groups_by_key), true);
     EXPECT_CALL(*client, finishWrite(_, _, "reusable_groups_session", _, _)).WillOnce(Return(true));
-    backend->write(backend->prepareWrite(makeGroupedStorageRequest(environment, {101, 102, 103}, 0,
-                                                                  block_ids, groups_by_key)));
+    backend->write(
+        backend->prepareWrite(makeGroupedStorageRequest(environment, {101, 102, 103}, 0, block_ids, groups_by_key)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 }
 
@@ -455,8 +457,8 @@ TEST(KVCMMockFullLinearTest, ReadsOnlyThroughNewestCompleteLinearStateAfterLocal
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 
-    ScopedReferencedBlocks      source_blocks(environment, 4);
-    const auto&                 block_ids = source_blocks.get();
+    ScopedReferencedBlocks source_blocks(environment, 4);
+    const auto&            block_ids = source_blocks.get();
     // Prefix queries include the FULL-only tail. RTP must stop at the newest
     // complete LINEAR state (103), before the trailing FULL-only block (104).
     kv_cache_manager::Locations locations{
@@ -527,8 +529,8 @@ TEST(KVCMMockFullLinearTest, FullLinearWriteRoutesEachGroupToItsOwnLayerBuffers)
         kv_cache_manager::LocationSpecUnit{"tp0_Ffull1", "full_uri"},
         kv_cache_manager::LocationSpecUnit{"tp0_Llinear", "linear_uri"},
     }};
-    EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, std::vector<int64_t>{101}, _,
-                                                 std::vector<std::string>{"Ffull1Llinear"}, 40, 0))
+    EXPECT_CALL(*client_wrapper,
+                getWriteLocation(_, _, std::vector<int64_t>{101}, _, std::vector<std::string>{"Ffull1Llinear"}, 40, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
     for (const auto& tag : std::vector<std::string>{"full1", "linear"}) {
         const auto                        bases = tag == "full1" ? expected_full_bases : expected_linear_bases;

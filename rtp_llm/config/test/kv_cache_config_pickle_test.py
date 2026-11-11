@@ -23,17 +23,20 @@ class KVCacheConfigPickleTest(TestCase):
         config.disk_cache_write_thread_count = 5
         config.enable_disk_cache = True
         config.disk_cache_paths = "/tmp/cache"
+        config.block_tree_frozen_recovery_interval_ms = 2500
+        config.block_tree_frozen_recovery_query_timeout_ms = 750
         for name, value in BASE_EVENT_FIELD_VALUES.items():
             setattr(config, name, value)
         for enable_crc in (False, True):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 92)
-                self.assertEqual(state[:2], ("KVCacheConfig", 17))
+                self.assertEqual(len(state), 94)
+                self.assertEqual(state[:2], ("KVCacheConfig", 18))
                 self.assertEqual(state[64:69], tuple(BASE_EVENT_FIELD_VALUES.values()))
                 self.assertIs(state[69], enable_crc)
                 self.assertEqual(state[84:88], (3, False, 3, 5))
+                self.assertEqual(state[92:94], (2500, 750))
                 # Normalizing old fields must not mutate the supplied tuple.
                 original_state = tuple(list(state))
                 direct = KVCacheConfig.__new__(KVCacheConfig)
@@ -52,6 +55,18 @@ class KVCacheConfigPickleTest(TestCase):
                 self.assertEqual(restored.disk_cache_write_thread_count, 5)
                 self.assertTrue(restored.enable_disk_cache)
                 self.assertEqual(restored.disk_cache_paths, "/tmp/cache")
+                self.assertEqual(restored.block_tree_frozen_recovery_interval_ms, 2500)
+                self.assertEqual(
+                    restored.block_tree_frozen_recovery_query_timeout_ms, 750
+                )
+                self.assertIn(
+                    "block_tree_frozen_recovery_interval_ms: 2500\n",
+                    restored.to_string(),
+                )
+                self.assertIn(
+                    "block_tree_frozen_recovery_query_timeout_ms: 750\n",
+                    restored.to_string(),
+                )
                 for name, value in BASE_EVENT_FIELD_VALUES.items():
                     self.assertEqual(getattr(restored, name), value, name)
                 self.assertIn(f"enable_crc: {int(enable_crc)}\n", restored.to_string())
@@ -152,7 +167,7 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertTrue(restored.btc_transfer_engine_async)
         self.assertEqual(restored.disk_cache_read_thread_count, 16)
         self.assertEqual(restored.disk_cache_write_thread_count, 16)
-        self.assertEqual(restored.__getstate__()[:2], ("KVCacheConfig", 17))
+        self.assertEqual(restored.__getstate__()[:2], ("KVCacheConfig", 18))
 
     def test_disk_timeout_defaults_and_overrides_survive_worker_round_trips(self):
         self.assertEqual(KVCacheConfig().disk_cache_sync_timeout_ms, 30000)
@@ -313,6 +328,81 @@ class KVCacheConfigPickleTest(TestCase):
         defaults = KVCacheConfig()
         for name in values:
             self.assertEqual(getattr(legacy, name), getattr(defaults, name), name)
+
+    def test_frozen_recovery_timing_defaults_and_boundaries_round_trip(self):
+        config = KVCacheConfig()
+        self.assertEqual(config.block_tree_frozen_recovery_interval_ms, 1000)
+        self.assertEqual(config.block_tree_frozen_recovery_query_timeout_ms, 1000)
+        for interval, timeout in (
+            (0, 1),
+            (1, 1000),
+            (2500, 750),
+            (2**31 - 1, 2**31 - 1),
+        ):
+            with self.subTest(interval=interval, timeout=timeout):
+                config.block_tree_frozen_recovery_interval_ms = interval
+                config.block_tree_frozen_recovery_query_timeout_ms = timeout
+                for _ in range(2):
+                    config = pickle.loads(pickle.dumps(config))
+                    self.assertEqual(
+                        config.block_tree_frozen_recovery_interval_ms, interval
+                    )
+                    self.assertEqual(
+                        config.block_tree_frozen_recovery_query_timeout_ms, timeout
+                    )
+
+    def test_invalid_frozen_recovery_timing_is_rejected_during_restore(self):
+        state = KVCacheConfig().__getstate__()
+        for interval, timeout in (
+            (-1, 1000),
+            (2**31, 1000),
+            (1000, 0),
+            (1000, -1),
+            (1000, 2**31),
+            (0, 0),
+        ):
+            with self.subTest(
+                interval=interval, timeout=timeout
+            ), self.assertRaisesRegex(
+                RuntimeError, "invalid KVCacheConfig frozen recovery timing"
+            ):
+                restored = KVCacheConfig.__new__(KVCacheConfig)
+                restored.__setstate__((*state[:92], interval, timeout))
+
+    def test_previous_versions_use_default_frozen_recovery_timing(self):
+        source = KVCacheConfig()
+        source.block_tree_frozen_recovery_interval_ms = 2500
+        source.block_tree_frozen_recovery_query_timeout_ms = 750
+        source.disk_cache_evict_max_pending_bytes = 80 * 1024 * 1024
+        state = source.__getstate__()
+        for version, size in (
+            (6, 64),
+            (7, 69),
+            (8, 70),
+            (9, 72),
+            (10, 78),
+            (11, 80),
+            (12, 84),
+            (13, 88),
+            (14, 89),
+            (15, 90),
+            (16, 91),
+            (17, 92),
+        ):
+            with self.subTest(version=version):
+                previous = (state[0], version, *state[2:size])
+                original = tuple(list(previous))
+                restored = KVCacheConfig.__new__(KVCacheConfig)
+                restored.__setstate__(previous)
+                self.assertEqual(previous, original)
+                self.assertEqual(restored.block_tree_frozen_recovery_interval_ms, 1000)
+                self.assertEqual(
+                    restored.block_tree_frozen_recovery_query_timeout_ms, 1000
+                )
+                if version == 17:
+                    self.assertEqual(
+                        restored.disk_cache_evict_max_pending_bytes, 80 * 1024 * 1024
+                    )
 
     def test_malformed_event_states_are_rejected(self):
         state = KVCacheConfig().__getstate__()

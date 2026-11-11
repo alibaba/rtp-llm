@@ -36,7 +36,8 @@ public:
             requests_.emplace_back(route, body);
         }
         response = std::string(R"({"header":{"status":{"code":"OK"}},"snapshot_required":true,
-            "extra_info":"{\"rtp_remote_cache_enabled\":)") + (enabled.load() ? "true" : "false") + R"(}"})";
+            "extra_info":"{\"rtp_remote_cache_enabled\":)")
+                   + (enabled.load() ? "true" : "false") + R"(}"})";
         cv_.notify_all();
         return true;
     }
@@ -56,16 +57,16 @@ public:
     }
 
 private:
-    std::mutex mutex_;
-    std::condition_variable cv_;
+    std::mutex                                       mutex_;
+    std::condition_variable                          cv_;
     std::vector<std::pair<std::string, std::string>> requests_;
 };
 
 TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings) {
     for (int mode = 0; mode < 8; ++mode) {
         SCOPED_TRACE(mode);
-        auto environment = makeBackendEnvironment("kvcm_control_only_" + std::to_string(mode));
-        auto client = std::make_shared<MockClientWrapper>();
+        auto        environment = makeBackendEnvironment("kvcm_control_only_" + std::to_string(mode));
+        auto        client      = std::make_shared<MockClientWrapper>();
         std::string expected_registration;
         EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Invoke([&](const auto& configs, auto, auto&, auto&) {
             expected_registration = configs.at("")->registerInstanceRequest();
@@ -73,13 +74,13 @@ TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings
         }));
         EXPECT_CALL(*client, shutdown()).Times(1);
         KVCacheConfig config;
-        config.enable_remote_cache = true;
-        config.kvcm_server_address = "outer-rpc";
-        config.kv_cache_event_host_ip_port = "127.0.0.1:19999";
+        config.enable_remote_cache                 = true;
+        config.kvcm_server_address                 = "outer-rpc";
+        config.kv_cache_event_host_ip_port         = "127.0.0.1:19999";
         config.kv_cache_event_snapshot_interval_ms = mode == 4 ? 0 : 600000;
-        config.kv_cache_event_publisher_type = mode == 0 ? "none" : (mode == 6 ? "unknown" : "kvcm");
-        config.reuse_cache = mode != 1;
-        config.enable_device_cache = mode != 2;
+        config.kv_cache_event_publisher_type       = mode == 0 ? "none" : (mode == 6 ? "unknown" : "kvcm");
+        config.reuse_cache                         = mode != 1;
+        config.enable_device_cache                 = mode != 2;
         if (mode != 0 && mode != 3) {
             config.kv_cache_event_instance_id = "hbm-event-instance";
         }
@@ -90,15 +91,29 @@ TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings
             infos->emplace("tp0_Fdefault", environment.cache_config.blockSizeBytesForGroup("default"));
             auto groups = std::make_shared<kvcm::KVCMConfig::LocationSpecGroups>();
             groups->emplace("Fdefault", std::vector<std::string>{"tp0_Fdefault"});
-            auto custom = std::make_shared<kvcm::KVCMConfig>(false, "", 8, "custom-group", "custom-remote",
-                std::vector<std::string>{"rpc-a", "rpc-b"}, infos, std::make_shared<kvcm::MetaChannelConfig>(),
-                std::make_shared<kvcm::SdkWrapperConfig>(), groups,
+            auto custom = std::make_shared<kvcm::KVCMConfig>(
+                false,
+                "",
+                8,
+                "custom-group",
+                "custom-remote",
+                std::vector<std::string>{"rpc-a", "rpc-b"},
+                infos,
+                std::make_shared<kvcm::MetaChannelConfig>(),
+                std::make_shared<kvcm::SdkWrapperConfig>(),
+                groups,
                 kvcm::ModelDeployment(runtime.model_name, "fp16", false, 1, 1, 1, "extra", "user-data"));
             config.kvcm_client_config = autil::legacy::ToJsonString(kvcm::ClientWrapper::ConfigMap{{"alias", custom}});
         }
-        auto backend = std::make_shared<KVCMStorageBackend>(
-            environment.cache_config, config, runtime, singleRankConfig(),
-            SpeculativeExecutionConfig{}, nullptr, false, nullptr, client);
+        auto backend = std::make_shared<KVCMStorageBackend>(environment.cache_config,
+                                                            config,
+                                                            runtime,
+                                                            singleRankConfig(),
+                                                            SpeculativeExecutionConfig{},
+                                                            nullptr,
+                                                            false,
+                                                            nullptr,
+                                                            client);
         ASSERT_FALSE(backend->controlConfig().has_value());
         ASSERT_TRUE(initSingleRank(*backend, environment));
         ASSERT_TRUE(backend->controlConfig().has_value());
@@ -112,18 +127,18 @@ TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings
 
         auto manager_config = environment.cache_config;
         if (mode == 5) {
-            auto groups = manager_config.topology().groups();
+            auto groups                               = manager_config.topology().groups();
             groups.front().policy.enable_prefix_reuse = false;
-            auto layers = manager_config.topology().layers();
+            auto layers                               = manager_config.topology().layers();
             manager_config.setTopology(std::move(groups), std::move(layers));
         }
         KVCacheManager manager(manager_config, false, nullptr, config, singleRankConfig(), runtime);
-        auto full = std::make_shared<FullGroupSet>(
-            std::vector<DeviceBlockPoolPtr>{environment.device_pool}, nullptr, nullptr);
+        auto           full =
+            std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{environment.device_pool}, nullptr, nullptr);
         full->initialize(0, manager_config.topologyPtr(), {"default"});
-        manager.block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full});
+        manager.block_tree_cache_                   = block_tree_cache_test::makeBlockTreeCacheForTest({full});
         manager.block_tree_cache_->storage_backend_ = backend;
-        auto reporter = std::make_shared<ControlOnlyReporter>();
+        auto reporter                               = std::make_shared<ControlOnlyReporter>();
         manager.initCacheEventPublisher(reporter);
         ASSERT_NE(manager.cache_event_publisher_, nullptr);
         ASSERT_TRUE(reporter->waitFor("EVENT_NODE_REGISTER"));
@@ -382,8 +397,7 @@ TEST(KVCMLocalTest, DirectClientRoutesMetadataAndPayload) {
     EXPECT_CALL(*transfer_ptr, SaveKvCaches(failed_uris, _, _))
         .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT,
                                         kv_cache_manager::UriStrVec{"partial_uri"})));
-    const auto [failed_save_ok, failed_actual_uris] =
-        wrapper.saveKvCachesForTag("default", failed_uris, buffers);
+    const auto [failed_save_ok, failed_actual_uris] = wrapper.saveKvCachesForTag("default", failed_uris, buffers);
     EXPECT_FALSE(failed_save_ok);
     EXPECT_TRUE(failed_actual_uris.empty());
 
@@ -424,8 +438,8 @@ TEST(KVCMLocalTest, InitRejectsInvalidQuarantineAbortRatio) {
 }
 
 TEST(KVCMLocalTest, GdrRegistrationUsesActualAllocationSpan) {
-    auto             environment    = makeBackendEnvironment("kvcm_storage_backend_gdr_span");
-    auto             client_wrapper = std::make_shared<MockClientWrapper>();
+    auto environment    = makeBackendEnvironment("kvcm_storage_backend_gdr_span");
+    auto client_wrapper = std::make_shared<MockClientWrapper>();
 
     EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _))
         .WillOnce(Invoke([&](const kvcm::ClientWrapper::ConfigMap&,
@@ -477,9 +491,9 @@ TEST(KVCMLocalTest, GdrFallsBackToStandardRegistrationForHostPinnedPool) {
     auto old_pool = environment.pools_by_tag.at(host_tag);
     old_pool->decRef(environment.block_id);
 
-    auto host_config = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfigForGroup(
+    auto host_config       = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfigForGroup(
         environment.cache_config, environment.cache_config.topology().group(host_tag)));
-    host_config->pool_name                 = "mixed_gdr_host_pinned";
+    host_config->pool_name = "mixed_gdr_host_pinned";
     host_config->use_pinned_cpu_backing    = true;
     host_config->use_device_malloc_backing = false;
     auto host_pool                         = std::make_shared<DeviceBlockPool>(host_config);
@@ -580,6 +594,7 @@ TEST(KVCMLocalTest, ExecuteFunctionPropagatesMetadataErrorsAndPreservesTransferS
             FunctionRequestPB request;
             auto*             remote = request.mutable_remote_request();
             remote->set_op(operation);
+            identifyReadRequest(*remote);
             remote->add_group_tags("default");
             remote->add_block_ids(environment.block_id);
             remote->add_uris("transfer_uri");
@@ -721,20 +736,22 @@ TEST(KVCMLocalTest, InvalidMatchLocationReportsNoHitAndDoesNotDispatchPayload) {
 }
 
 TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement) {
-    for (const auto& [write, late] : {std::make_pair(false, false), std::make_pair(false, true),
-                                      std::make_pair(true, false), std::make_pair(true, true)}) {
+    for (const auto& [write, late] : {std::make_pair(false, false),
+                                      std::make_pair(false, true),
+                                      std::make_pair(true, false),
+                                      std::make_pair(true, true)}) {
         SCOPED_TRACE(::testing::Message() << "write=" << write << ", late=" << late);
         auto environment = std::make_shared<BackendEnvironment>(
             makeBackendEnvironment(write ? "kvcm_tp2_deferred_write" : "kvcm_tp2_deferred_read"));
-        auto client      = std::make_shared<MockClientWrapper>();
+        auto client = std::make_shared<MockClientWrapper>();
         EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
         EXPECT_CALL(*client, shutdown()).Times(1);
-        auto first_state         = std::make_shared<KVCMBroadcastState>();
-        auto second_state        = std::make_shared<KVCMBroadcastState>();
-        auto entered             = std::make_shared<std::promise<void>>();
-        auto release             = std::make_shared<std::promise<void>>();
-        auto rank_entered        = entered->get_future();
-        auto released            = release->get_future().share();
+        auto first_state            = std::make_shared<KVCMBroadcastState>();
+        auto second_state           = std::make_shared<KVCMBroadcastState>();
+        auto entered                = std::make_shared<std::promise<void>>();
+        auto release                = std::make_shared<std::promise<void>>();
+        auto rank_entered           = entered->get_future();
+        auto released               = release->get_future().share();
         second_state->worker_action = [entered, released, first_call = std::make_shared<std::atomic<bool>>(true)] {
             if (first_call->exchange(false)) {
                 entered->set_value();
@@ -744,36 +761,38 @@ TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement
         KVCMBroadcastRpcServer first(0, first_state), second(1, second_state);
         ASSERT_TRUE(first.start());
         ASSERT_TRUE(second.start());
-        auto broadcast = std::make_shared<BroadcastManager>(std::vector<std::string>{first.address(), second.address()});
+        auto broadcast =
+            std::make_shared<BroadcastManager>(std::vector<std::string>{first.address(), second.address()});
         ASSERT_TRUE(broadcast->init());
         auto parallel    = singleRankConfig();
         parallel.tp_size = 2;
         KVCacheConfig config;
         config.kvcm_asyncwrapper_thread_num = 1;
         config.kvcm_asyncwrapper_queue_size = 0;
-        auto backend =
-            std::make_shared<BackendHandle>(makeBackend(*environment, parallel, client, broadcast, nullptr, false, config));
+        auto backend                        = std::make_shared<BackendHandle>(
+            makeBackend(*environment, parallel, client, broadcast, nullptr, false, config));
         block_tree_cache_detail::ScopeRollback unblock([release] { release->set_value(); });
         ASSERT_TRUE(initSingleRank(*backend->backend, *environment));
         auto profile = AsyncProfileSession::start(128);
         ASSERT_TRUE(profile);
         block_tree_cache_detail::ScopeRollback stop_profile([&] { profile->finish(); });
-        const kv_cache_manager::Locations locations{{{"tp0_Fdefault", "pace://read0"}, {"tp1_Fdefault", "pace://read1"}}};
-        auto request = makeStorageRequest(*environment);
+        const kv_cache_manager::Locations      locations{
+                 {{"tp0_Fdefault", "pace://read0"}, {"tp1_Fdefault", "pace://read1"}}};
+        auto request       = makeStorageRequest(*environment);
         request.request_id = 42;
         if (late)
             request.transfer_task.emplace(std::vector<TransferDescriptor>{}, std::chrono::seconds(2));
-        const auto refs = environment->device_pool->refCount(environment->block_id);
-        auto completed = std::make_shared<std::promise<void>>();
-        auto result = completed->get_future();
-        auto progressed = std::make_shared<std::promise<bool>>();
-        auto next = progressed->get_future();
+        const auto refs       = environment->device_pool->refCount(environment->block_id);
+        auto       completed  = std::make_shared<std::promise<void>>();
+        auto       result     = completed->get_future();
+        auto       progressed = std::make_shared<std::promise<bool>>();
+        auto       next       = progressed->get_future();
         if (write) {
             kv_cache_manager::WriteLocation allocation;
-            allocation.write_session_id = "deferred-write";
-            allocation.block_mask = kv_cache_manager::BlockMaskOffset{0};
-            allocation.locations = locations;
-            auto next_allocation = allocation;
+            allocation.write_session_id      = "deferred-write";
+            allocation.block_mask            = kv_cache_manager::BlockMaskOffset{0};
+            allocation.locations             = locations;
+            auto next_allocation             = allocation;
             next_allocation.write_session_id = "next-write";
             EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
                 .WillOnce(Return(std::make_pair(true, allocation)))
@@ -784,14 +803,16 @@ TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement
                     progressed->set_value(true);
                     return true;
                 }));
-            auto acknowledge = ::testing::InvokeWithoutArgs([completed] { completed->set_value(); return true; });
+            auto acknowledge = ::testing::InvokeWithoutArgs([completed] {
+                completed->set_value();
+                return true;
+            });
             if (late) {
                 EXPECT_CALL(*client, finishWrite(_, _, "deferred-write", _, _)).Times(0);
                 EXPECT_CALL(*client, abortWrite(_, _, "deferred-write")).WillOnce(acknowledge);
             } else {
                 EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
-                EXPECT_CALL(*client, finishWrite(_, _, "deferred-write", all_written, _))
-                    .WillOnce(acknowledge);
+                EXPECT_CALL(*client, finishWrite(_, _, "deferred-write", all_written, _)).WillOnce(acknowledge);
             }
             ASSERT_TRUE(backend->backend->write(backend->backend->prepareWrite(request)));
         } else {
@@ -810,7 +831,7 @@ TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement
         EXPECT_EQ(result.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
         EXPECT_EQ(environment->device_pool->refCount(environment->block_id), refs + 1);
         if (write) {
-            auto next_request = makeStorageRequest(*environment, {102});
+            auto next_request       = makeStorageRequest(*environment, {102});
             next_request.request_id = 43;
             ASSERT_TRUE(backend->backend->write(backend->backend->prepareWrite(std::move(next_request))));
         } else {
@@ -819,15 +840,17 @@ TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement
         ASSERT_EQ(next.wait_for(std::chrono::seconds(5)), std::future_status::ready);
         EXPECT_TRUE(next.get());
         if (late) {
-            auto worker_entered = std::make_shared<std::promise<void>>();
-            auto worker = worker_entered->get_future();
-            std::promise<void> release_worker;
-            auto worker_released = release_worker.get_future().share();
+            auto                                   worker_entered = std::make_shared<std::promise<void>>();
+            auto                                   worker         = worker_entered->get_future();
+            std::promise<void>                     release_worker;
+            auto                                   worker_released = release_worker.get_future().share();
             block_tree_cache_detail::ScopeRollback unblock_worker([&] { release_worker.set_value(); });
-            ASSERT_TRUE(backend->backend->executor_->submit([worker_entered, worker_released] {
-                worker_entered->set_value();
-                worker_released.wait();
-            }, BlockTreeTaskClass::LOAD));
+            ASSERT_TRUE(backend->backend->executor_->submit(
+                [worker_entered, worker_released] {
+                    worker_entered->set_value();
+                    worker_released.wait();
+                },
+                BlockTreeTaskClass::LOAD));
             ASSERT_EQ(worker.wait_for(std::chrono::seconds(5)), std::future_status::ready);
             unblock.run();
             const auto deadline = request.transfer_task->deadline();
@@ -854,7 +877,7 @@ TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement
         const auto events = profile->finish();
         stop_profile.dismiss();
         const std::string io_stage = write ? "write_io" : "read_io";
-        const auto count = std::count_if(events.begin(), events.end(), [&](const auto& event) {
+        const auto        count    = std::count_if(events.begin(), events.end(), [&](const auto& event) {
             return event.record.stage == io_stage && event.record.kind == AsyncProfileKind::Lifecycle;
         });
         EXPECT_EQ(count, write ? 2 : 1);
@@ -936,10 +959,9 @@ TEST(KVCMLocalTest, PayloadReadFailurePropagatesToCompletion) {
 
 TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {
     autil::EnvGuard quarantine_abort_ratio("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", "0.125");
-    auto environment    = makeBackendEnvironment("kvcm_storage_backend_read_timeout");
-    auto client_wrapper = std::make_shared<MockClientWrapper>();
-    auto metrics_reporter =
-        std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    auto            environment      = makeBackendEnvironment("kvcm_storage_backend_read_timeout");
+    auto            client_wrapper   = std::make_shared<MockClientWrapper>();
+    auto            metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
 
     EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
@@ -968,8 +990,7 @@ TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {
     const auto ref_count_before = environment.device_pool->refCount(environment.block_id);
     client_wrapper->load_status = kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT;
     EXPECT_CALL(*client_wrapper, loadKvCachesForTag(_, _, _, _)).Times(0);
-    const auto error =
-        readResult(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta));
+    const auto error = readResult(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta));
     EXPECT_EQ(error.code(), ErrorCode::DEADLINE_EXCEEDED);
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
     EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);

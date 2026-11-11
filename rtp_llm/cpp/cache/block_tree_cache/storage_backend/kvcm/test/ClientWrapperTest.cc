@@ -7,11 +7,13 @@
 #include <future>
 #include <memory>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
 #include "kvcm_client/TransferClientCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/MockKVCMClient.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 
@@ -53,21 +55,23 @@ KVCMConfigPtr makeConfig(bool enable_vipserver, const std::string& endpoint, uin
                                         ModelDeployment());
 }
 
-std::shared_ptr<ClientWrapper> initializeClient(bool                                   enable_vipserver,
-                                                const std::string&                     endpoint,
-                                                kv_cache_manager::RegistSpan&          registration_span,
-                                                InitObservation&                       observation,
-                                                std::shared_ptr<int>                   transfer_destruction_count,
-                                                kv_cache_manager::MockMetaClient**     initial_meta_client = nullptr,
-                                                std::shared_ptr<std::atomic<int>>      reinit_attempts     = nullptr,
-                                                kv_cache_manager::MockTransferClient** transfer_client     = nullptr,
-                                                std::chrono::milliseconds              reinit_interval     = std::chrono::seconds(10),
-                                                MockClientFactory**                    observed_factory    = nullptr,
-                                                const std::vector<std::string>&         endpoints           = {},
-                                                std::unique_ptr<kv_cache_manager::MockTransferClient> injected_transfer = nullptr) {
-    auto  factory        = std::make_unique<MockClientFactory>();
-    auto* factory_ptr    = factory.get();
-    if (observed_factory) *observed_factory = factory_ptr;
+std::shared_ptr<ClientWrapper>
+initializeClient(bool                                                  enable_vipserver,
+                 const std::string&                                    endpoint,
+                 kv_cache_manager::RegistSpan&                         registration_span,
+                 InitObservation&                                      observation,
+                 std::shared_ptr<int>                                  transfer_destruction_count,
+                 kv_cache_manager::MockMetaClient**                    initial_meta_client = nullptr,
+                 std::shared_ptr<std::atomic<int>>                     reinit_attempts     = nullptr,
+                 kv_cache_manager::MockTransferClient**                transfer_client     = nullptr,
+                 std::chrono::milliseconds                             reinit_interval     = std::chrono::seconds(10),
+                 MockClientFactory**                                   observed_factory    = nullptr,
+                 const std::vector<std::string>&                       endpoints           = {},
+                 std::unique_ptr<kv_cache_manager::MockTransferClient> injected_transfer   = nullptr) {
+    auto  factory     = std::make_unique<MockClientFactory>();
+    auto* factory_ptr = factory.get();
+    if (observed_factory)
+        *observed_factory = factory_ptr;
     EXPECT_CALL(*factory_ptr, getLeaderAddress(_, _, _)).WillRepeatedly(Return(std::string{}));
     auto  subscriber     = std::make_unique<MockSubscriber>();
     auto* subscriber_ptr = subscriber.get();
@@ -122,18 +126,19 @@ std::shared_ptr<ClientWrapper> initializeClient(bool                            
                 observation.registration_base       = params.regist_span->base;
                 observation.registration_size       = params.regist_span->size;
             }
-            auto client = injected_transfer ? std::move(injected_transfer) :
-                                               std::make_unique<kv_cache_manager::MockTransferClient>(
-                                                   transfer_destruction_count);
+            auto client = injected_transfer ?
+                              std::move(injected_transfer) :
+                              std::make_unique<kv_cache_manager::MockTransferClient>(transfer_destruction_count);
             if (transfer_client != nullptr) {
                 *transfer_client = client.get();
             }
             return client;
         }));
 
-    auto                         wrapper = std::make_shared<ClientWrapper>(std::move(factory), reinit_interval);
-    ClientWrapper::ConfigMap     config_map{{"", makeConfig(enable_vipserver, endpoint)}};
-    if (!endpoints.empty()) config_map.begin()->second->set_addresses(endpoints);
+    auto                     wrapper = std::make_shared<ClientWrapper>(std::move(factory), reinit_interval);
+    ClientWrapper::ConfigMap config_map{{"", makeConfig(enable_vipserver, endpoint)}};
+    if (!endpoints.empty())
+        config_map.begin()->second->set_addresses(endpoints);
     kv_cache_manager::InitParams params{kv_cache_manager::RoleType::HYBRID, &registration_span, "tp0_Fgroup"};
     if (!wrapper->init(config_map, params, "default")) {
         return nullptr;
@@ -144,58 +149,73 @@ std::shared_ptr<ClientWrapper> initializeClient(bool                            
 class MetadataRecoveryTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        wrapper = initializeClient(false, "old", span, observation, std::make_shared<int>(0), &meta, nullptr,
-                                   nullptr, interval, &factory, {"old", "standby"});
+        wrapper = initializeClient(false,
+                                   "old",
+                                   span,
+                                   observation,
+                                   std::make_shared<int>(0),
+                                   &meta,
+                                   nullptr,
+                                   nullptr,
+                                   interval,
+                                   &factory,
+                                   {"old", "standby"});
         ASSERT_NE(wrapper, nullptr);
         EXPECT_CALL(*factory, getLeaderAddress(_, _, _)).Times(0);
     }
 
     void TearDown() override {
-        if (wrapper) wrapper->shutdown();
+        if (wrapper)
+            wrapper->shutdown();
     }
 
     bool awaitFinish(const std::string& trace) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         while (std::chrono::steady_clock::now() < deadline) {
-            if (wrapper->finishWrite("", trace, "session", {}, {})) return true;
+            if (wrapper->finishWrite("", trace, "session", {}, {}))
+                return true;
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         return false;
     }
 
-    const std::chrono::milliseconds interval{80};
-    std::array<char, 32> data{};
-    kv_cache_manager::RegistSpan span{data.data(), data.size()};
-    InitObservation observation;
-    kv_cache_manager::MockMetaClient* meta = nullptr;
-    MockClientFactory* factory = nullptr;
-    std::shared_ptr<ClientWrapper> wrapper;
+    const std::chrono::milliseconds   interval{80};
+    std::array<char, 32>              data{};
+    kv_cache_manager::RegistSpan      span{data.data(), data.size()};
+    InitObservation                   observation;
+    kv_cache_manager::MockMetaClient* meta    = nullptr;
+    MockClientFactory*                factory = nullptr;
+    std::shared_ptr<ClientWrapper>    wrapper;
 };
 
 TEST_F(MetadataRecoveryTest, OnlyRegistrationErrorsRecoverAndEveryAttemptIsRateLimited) {
-    using Clock = std::chrono::steady_clock;
-    auto first = std::make_unique<kv_cache_manager::MockMetaClient>();
-    auto second = std::make_unique<kv_cache_manager::MockMetaClient>();
+    using Clock                           = std::chrono::steady_clock;
+    auto                           first  = std::make_unique<kv_cache_manager::MockMetaClient>();
+    auto                           second = std::make_unique<kv_cache_manager::MockMetaClient>();
     std::vector<Clock::time_point> attempts;
-    std::promise<void> started;
-    auto ready = started.get_future();
+    std::promise<void>             started;
+    auto                           ready = started.get_future();
     EXPECT_CALL(*meta, FinishWrite(_, _, _, _)).WillRepeatedly(Return(kv_cache_manager::ER_INVALID_GRPCSTATUS));
     EXPECT_CALL(*meta, FinishWrite("business", _, _, _)).WillOnce(Return(kv_cache_manager::ER_SERVICE_INTERNAL_ERROR));
-    EXPECT_CALL(*meta, FinishWrite("missing", _, _, _)).WillOnce(Return(kv_cache_manager::ER_SERVICE_INSTANCE_NOT_EXIST));
+    EXPECT_CALL(*meta, FinishWrite("missing", _, _, _))
+        .WillOnce(Return(kv_cache_manager::ER_SERVICE_INSTANCE_NOT_EXIST));
     EXPECT_CALL(*first, FinishWrite("ready", _, _, _)).WillOnce(Return(kv_cache_manager::ER_OK));
     EXPECT_CALL(*first, FinishWrite("leader", _, _, _)).WillRepeatedly(Return(kv_cache_manager::ER_SERVICE_NOT_LEADER));
     EXPECT_CALL(*second, FinishWrite("leader", _, _, _)).WillOnce(Return(kv_cache_manager::ER_OK));
-    EXPECT_CALL(*factory, createMetaClient(_, _)).Times(3).WillRepeatedly(
-        Invoke([&](const auto&, const auto&) -> std::unique_ptr<kv_cache_manager::MetaClient> {
+    EXPECT_CALL(*factory, createMetaClient(_, _))
+        .Times(3)
+        .WillRepeatedly(Invoke([&](const auto&, const auto&) -> std::unique_ptr<kv_cache_manager::MetaClient> {
             attempts.push_back(Clock::now());
             if (attempts.size() == 1) {
                 started.set_value();
                 return {};
             }
-            if (attempts.size() == 2) return std::move(first);
+            if (attempts.size() == 2)
+                return std::move(first);
             return std::move(second);
         }));
-    for (int i = 0; i < 8; ++i) EXPECT_FALSE(wrapper->finishWrite("", "grpc", "session", {}, {}));
+    for (int i = 0; i < 8; ++i)
+        EXPECT_FALSE(wrapper->finishWrite("", "grpc", "session", {}, {}));
     EXPECT_FALSE(wrapper->finishWrite("", "business", "session", {}, {}));
     EXPECT_EQ(ready.wait_for(interval * 2), std::future_status::timeout);
     EXPECT_FALSE(wrapper->finishWrite("", "missing", "session", {}, {}));
@@ -210,10 +230,10 @@ TEST_F(MetadataRecoveryTest, OnlyRegistrationErrorsRecoverAndEveryAttemptIsRateL
 
 TEST_F(MetadataRecoveryTest, RecoveryCoalescesSignalsKeepsServingAndStopsOnShutdown) {
     using block_tree_cache_test::BoundedThread;
-    auto candidate = std::make_unique<kv_cache_manager::MockMetaClient>();
+    auto               candidate = std::make_unique<kv_cache_manager::MockMetaClient>();
     std::promise<void> entered, release;
-    auto ready = entered.get_future();
-    auto released = release.get_future().share();
+    auto               ready    = entered.get_future();
+    auto               released = release.get_future().share();
     EXPECT_CALL(*meta, FinishWrite(_, _, _, _)).WillRepeatedly(Return(kv_cache_manager::ER_OK));
     EXPECT_CALL(*meta, FinishWrite("missing", _, _, _))
         .WillRepeatedly(Return(kv_cache_manager::ER_SERVICE_INSTANCE_NOT_EXIST));
@@ -231,11 +251,12 @@ TEST_F(MetadataRecoveryTest, RecoveryCoalescesSignalsKeepsServingAndStopsOnShutd
     BoundedThread<bool> calls([wrapper = wrapper] {
         for (int i = 0; i < 4; ++i) {
             if (wrapper->finishWrite("", "missing", "session", {}, {})
-                || !wrapper->finishWrite("", "healthy", "session", {}, {})) return false;
+                || !wrapper->finishWrite("", "healthy", "session", {}, {}))
+                return false;
         }
         return true;
     });
-    const auto status = calls.waitFor(std::chrono::seconds(2));
+    const auto          status = calls.waitFor(std::chrono::seconds(2));
     BoundedThread<void> stopped([wrapper = wrapper] { wrapper->shutdown(); });
     EXPECT_EQ(stopped.waitFor(std::chrono::milliseconds(20)), std::future_status::timeout);
     release.set_value();
@@ -250,7 +271,8 @@ TEST_F(MetadataRecoveryTest, RecoveryCoalescesSignalsKeepsServingAndStopsOnShutd
 TEST_F(MetadataRecoveryTest, NotLeaderDiscoversOnDemandAndFallsBackWhenAdvertisedAddressIsUnreachable) {
     auto next = std::make_unique<kv_cache_manager::MockMetaClient>();
     EXPECT_CALL(*factory, getLeaderAddress("old", _, _))
-        .Times(2).WillRepeatedly(Return(std::string("unreachable-leader")));
+        .Times(2)
+        .WillRepeatedly(Return(std::string("unreachable-leader")));
     EXPECT_CALL(*meta, FinishWrite(_, _, _, _)).Times(0);
     EXPECT_CALL(*meta, FinishWrite("redirect", _, _, _)).WillOnce(Return(kv_cache_manager::ER_SERVICE_NOT_LEADER));
     EXPECT_CALL(*next, FinishWrite(_, _, _, _)).WillRepeatedly(Return(kv_cache_manager::ER_OK));
@@ -401,37 +423,40 @@ TEST(ClientWrapperTest, TransferStatusPreservesSdkCodesAndLegacyWrappers) {
 
 TEST(ClientWrapperTest, SubmissionTrackingDistinguishesSdkCallsFromLocalRejection) {
     using Completion = ClientWrapper::TransferCompletion;
-    std::array<char, 32> data{};
-    kv_cache_manager::RegistSpan registration{data.data(), data.size()};
-    InitObservation observation;
+    std::array<char, 32>                  data{};
+    kv_cache_manager::RegistSpan          registration{data.data(), data.size()};
+    InitObservation                       observation;
     kv_cache_manager::MockTransferClient* transfer = nullptr;
-    auto wrapper = initializeClient(false, "direct", registration, observation, std::make_shared<int>(0),
-                                    nullptr, nullptr, &transfer);
+    auto                                  wrapper  = initializeClient(
+        false, "direct", registration, observation, std::make_shared<int>(0), nullptr, nullptr, &transfer);
     ASSERT_NE(wrapper, nullptr);
     ASSERT_NE(transfer, nullptr);
     const kv_cache_manager::UriStrVec uris{"requested_uri"};
-    kv_cache_manager::BlockBuffers buffers;
-    for (const auto code : {kv_cache_manager::ER_OK, kv_cache_manager::ER_INVALID_PARAMS,
-                            kv_cache_manager::ER_SDK_TIMEOUT}) {
+    kv_cache_manager::BlockBuffers    buffers;
+    for (const auto code :
+         {kv_cache_manager::ER_OK, kv_cache_manager::ER_INVALID_PARAMS, kv_cache_manager::ER_SDK_TIMEOUT}) {
         SCOPED_TRACE(static_cast<int>(code));
         const auto expected = code == kv_cache_manager::ER_OK ? Completion::PAYLOAD_COMPLETE : Completion::UNKNOWN;
         EXPECT_CALL(*transfer, LoadKvCaches(uris, _, _)).WillOnce(Return(code));
         EXPECT_CALL(*transfer, SaveKvCaches(uris, _, _)).WillOnce(Return(std::make_pair(code, uris)));
         auto completion = Completion::NOT_SUBMITTED;
-        EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion, std::nullopt), code);
+        EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion, std::nullopt),
+                  code);
         EXPECT_EQ(completion, expected);
         completion = Completion::NOT_SUBMITTED;
-        EXPECT_EQ(wrapper->saveKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion, std::nullopt).first,
-                  code);
+        EXPECT_EQ(
+            wrapper->saveKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion, std::nullopt).first,
+            code);
         EXPECT_EQ(completion, expected);
     }
     EXPECT_CALL(*transfer, LoadKvCaches(_, _, _)).Times(0);
     EXPECT_CALL(*transfer, SaveKvCaches(_, _, _)).Times(0);
     for (const bool expired : {false, true}) {
-        auto completion = Completion::UNKNOWN;
-        const auto deadline = expired ? std::make_optional(std::chrono::steady_clock::now()) : std::nullopt;
-        const auto expected = expired ? kv_cache_manager::ER_SDK_TIMEOUT : kv_cache_manager::ER_CLIENT_NOT_EXISTS;
-        EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("missing", uris, buffers, nullptr, &completion, deadline), expected);
+        auto       completion = Completion::UNKNOWN;
+        const auto deadline   = expired ? std::make_optional(std::chrono::steady_clock::now()) : std::nullopt;
+        const auto expected   = expired ? kv_cache_manager::ER_SDK_TIMEOUT : kv_cache_manager::ER_CLIENT_NOT_EXISTS;
+        EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("missing", uris, buffers, nullptr, &completion, deadline),
+                  expected);
         EXPECT_EQ(completion, Completion::NOT_SUBMITTED);
         completion = Completion::UNKNOWN;
         EXPECT_EQ(wrapper->saveKvCachesForTagWithStatus("missing", uris, buffers, nullptr, &completion, deadline).first,
@@ -440,65 +465,218 @@ TEST(ClientWrapperTest, SubmissionTrackingDistinguishesSdkCallsFromLocalRejectio
     }
 }
 
+template<typename Code>
+std::vector<std::pair<Code, bool>> nativeSafetyCodes() {
+    std::vector<std::pair<Code, bool>> codes{{Code::ER_OK, true},
+                                             {Code::ER_SDK_TIMEOUT, false},
+                                             {Code::ER_SDKREAD_ERROR, false},
+                                             {Code::ER_SDKWRITE_ERROR, false},
+                                             {Code::ER_INVALID_PARAMS, false}};
+    if constexpr (detail::HasExplicitBufferSafeCodes<Code>::value) {
+        codes.emplace_back(Code::ER_SDK_TIMEOUT_BUFFER_SAFE, true);
+        codes.emplace_back(Code::ER_SDK_ERROR_BUFFER_SAFE, true);
+    }
+    return codes;
+}
+
+TEST(ClientWrapperTest, NativeSdkSafetyRequiresExplicitCompletionEvidence) {
+    using Completion = ClientWrapper::TransferCompletion;
+    std::array<char, 32>                  data{};
+    kv_cache_manager::RegistSpan          registration{data.data(), data.size()};
+    InitObservation                       observation;
+    kv_cache_manager::MockTransferClient* transfer = nullptr;
+    auto                                  wrapper  = initializeClient(
+        false, "direct", registration, observation, std::make_shared<int>(0), nullptr, nullptr, &transfer);
+    ASSERT_NE(wrapper, nullptr);
+    ASSERT_NE(transfer, nullptr);
+    const kv_cache_manager::UriStrVec uris{"requested_uri"};
+    kv_cache_manager::BlockBuffers    buffers;
+    for (const auto& [code, safe] : nativeSafetyCodes<kv_cache_manager::ClientErrorCode>()) {
+        SCOPED_TRACE(static_cast<int>(code));
+        const auto expected = safe ? Completion::BUFFER_SAFE : Completion::UNKNOWN;
+        EXPECT_EQ(ClientWrapper::sdkResultCompletion(code), expected);
+        EXPECT_CALL(*transfer, LoadKvCaches(uris, _, _)).WillOnce(Return(code));
+        EXPECT_CALL(*transfer, SaveKvCaches(uris, _, _)).WillOnce(Return(std::make_pair(code, uris)));
+        auto completion = Completion::NOT_SUBMITTED;
+        EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion, std::nullopt),
+                  code);
+        EXPECT_EQ(completion, expected);
+        completion = Completion::NOT_SUBMITTED;
+        EXPECT_EQ(
+            wrapper->saveKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion, std::nullopt).first,
+            code);
+        EXPECT_EQ(completion, expected);
+    }
+    // Actual native preflight rejects locally, without calling an SDK method.
+    EXPECT_CALL(*transfer, LoadKvCaches(_, _, _)).Times(0);
+    EXPECT_CALL(*transfer, SaveKvCaches(_, _, _)).Times(0);
+    auto completion = Completion::UNKNOWN;
+    EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("missing", uris, buffers, nullptr, &completion, std::nullopt),
+              kv_cache_manager::ER_CLIENT_NOT_EXISTS);
+    EXPECT_EQ(completion, Completion::NOT_SUBMITTED);
+    completion = Completion::UNKNOWN;
+    EXPECT_EQ(wrapper->saveKvCachesForTagWithStatus("missing", uris, buffers, nullptr, &completion, std::nullopt).first,
+              kv_cache_manager::ER_CLIENT_NOT_EXISTS);
+    EXPECT_EQ(completion, Completion::NOT_SUBMITTED);
+}
+
+enum class LegacySafetyCode {
+    ER_OK          = 0,
+    ER_SDK_TIMEOUT = 119,
+    ER_SDK_ERROR   = 120
+};
+
+TEST(ClientWrapperTest, LegacyNumericSdkErrorsCannotSupplyBufferSafetyProof) {
+    static_assert(!detail::HasExplicitBufferSafeCodes<LegacySafetyCode>::value);
+    EXPECT_TRUE(sdkCodeProvesBufferSafety(LegacySafetyCode::ER_OK));
+    EXPECT_FALSE(sdkCodeProvesBufferSafety(LegacySafetyCode::ER_SDK_TIMEOUT));
+    EXPECT_FALSE(sdkCodeProvesBufferSafety(LegacySafetyCode::ER_SDK_ERROR));
+    EXPECT_FALSE(sdkCodeProvesBufferSafety(static_cast<LegacySafetyCode>(119)));
+    EXPECT_FALSE(sdkCodeProvesBufferSafety(static_cast<LegacySafetyCode>(120)));
+}
+
+class LegacyStatusOnlyClient final: public ClientWrapper {
+public:
+    LegacyStatusOnlyClient(): ClientWrapper(std::make_unique<MockClientFactory>()) {}
+    using ClientWrapper::loadKvCachesForTagWithStatus;
+    using ClientWrapper::saveKvCachesForTagWithStatus;
+    kv_cache_manager::ClientErrorCode code{kv_cache_manager::ER_SDK_TIMEOUT};
+    bool                              throws{false};
+    size_t                            reads{0};
+    size_t                            writes{0};
+
+    kv_cache_manager::ClientErrorCode
+    loadKvCachesForTagWithStatus(const std::string&,
+                                 const kv_cache_manager::UriStrVec&,
+                                 kv_cache_manager::BlockBuffers&,
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&) override {
+        ++reads;
+        if (throws)
+            throw std::runtime_error("legacy READ completion unknown");
+        return code;
+    }
+    std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
+    saveKvCachesForTagWithStatus(const std::string&,
+                                 const kv_cache_manager::UriStrVec& uris,
+                                 const kv_cache_manager::BlockBuffers&,
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&) override {
+        ++writes;
+        if (throws)
+            throw std::runtime_error("legacy WRITE completion unknown");
+        return {code, uris};
+    }
+};
+
+TEST(ClientWrapperTest, LegacyVirtualStatusWithoutCompletionFeedbackRemainsUnknown) {
+    using Completion = ClientWrapper::TransferCompletion;
+    LegacyStatusOnlyClient            legacy;
+    const kv_cache_manager::UriStrVec uris{"legacy_uri"};
+    kv_cache_manager::BlockBuffers    buffers;
+    // Even ER_OK from a legacy override is not a new-interface buffer proof.
+    for (const auto code : {kv_cache_manager::ER_OK,
+                            kv_cache_manager::ER_SDK_TIMEOUT,
+                            kv_cache_manager::ER_SDKREAD_ERROR,
+                            kv_cache_manager::ER_INVALID_PARAMS}) {
+        legacy.code     = code;
+        auto completion = Completion::NOT_SUBMITTED;
+        EXPECT_EQ(legacy.loadKvCachesForTagWithStatus("legacy", uris, buffers, nullptr, &completion, std::nullopt),
+                  code);
+        EXPECT_EQ(completion, Completion::UNKNOWN);
+        completion = Completion::NOT_SUBMITTED;
+        EXPECT_EQ(
+            legacy.saveKvCachesForTagWithStatus("legacy", uris, buffers, nullptr, &completion, std::nullopt).first,
+            code);
+        EXPECT_EQ(completion, Completion::UNKNOWN);
+    }
+    EXPECT_EQ(legacy.reads, 4u);
+    EXPECT_EQ(legacy.writes, 4u);
+}
+
+TEST(ClientWrapperTest, LegacyVirtualThrowStaysUnknownAndExpiredAdmissionDoesNotCallOverride) {
+    using Completion = ClientWrapper::TransferCompletion;
+    LegacyStatusOnlyClient legacy;
+    legacy.throws = true;
+    const kv_cache_manager::UriStrVec uris{"legacy_uri"};
+    kv_cache_manager::BlockBuffers    buffers;
+    auto                              completion = Completion::NOT_SUBMITTED;
+    EXPECT_THROW(legacy.loadKvCachesForTagWithStatus("legacy", uris, buffers, nullptr, &completion, std::nullopt),
+                 std::runtime_error);
+    EXPECT_EQ(completion, Completion::UNKNOWN);
+    completion = Completion::NOT_SUBMITTED;
+    EXPECT_THROW(legacy.saveKvCachesForTagWithStatus("legacy", uris, buffers, nullptr, &completion, std::nullopt),
+                 std::runtime_error);
+    EXPECT_EQ(completion, Completion::UNKNOWN);
+    const auto expired = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    completion         = Completion::UNKNOWN;
+    EXPECT_EQ(legacy.loadKvCachesForTagWithStatus("legacy", uris, buffers, nullptr, &completion, expired),
+              kv_cache_manager::ER_SDK_TIMEOUT);
+    EXPECT_EQ(completion, Completion::NOT_SUBMITTED);
+    completion = Completion::UNKNOWN;
+    EXPECT_EQ(legacy.saveKvCachesForTagWithStatus("legacy", uris, buffers, nullptr, &completion, expired).first,
+              kv_cache_manager::ER_SDK_TIMEOUT);
+    EXPECT_EQ(completion, Completion::NOT_SUBMITTED);
+    EXPECT_EQ(legacy.reads, 1u);
+    EXPECT_EQ(legacy.writes, 1u);
+}
+
 class LegacySdkTransfer {
 public:
-    kv_cache_manager::ClientErrorCode LoadKvCaches(
-        const kv_cache_manager::UriStrVec&,
-        const kv_cache_manager::BlockBuffers&,
-        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace) {
+    kv_cache_manager::ClientErrorCode LoadKvCaches(const kv_cache_manager::UriStrVec&,
+                                                   const kv_cache_manager::BlockBuffers&,
+                                                   const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace) {
         ++legacy_reads;
         last_trace = trace;
         return kv_cache_manager::ER_OK;
     }
 
-    std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec> SaveKvCaches(
-        const kv_cache_manager::UriStrVec& uris,
-        const kv_cache_manager::BlockBuffers&,
-        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace) {
+    std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
+    SaveKvCaches(const kv_cache_manager::UriStrVec& uris,
+                 const kv_cache_manager::BlockBuffers&,
+                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace) {
         ++legacy_writes;
         last_trace = trace;
         return {kv_cache_manager::ER_OK, uris};
     }
 
-    size_t legacy_reads{0};
-    size_t legacy_writes{0};
+    size_t                                               legacy_reads{0};
+    size_t                                               legacy_writes{0};
     std::shared_ptr<kv_cache_manager::TransferTraceInfo> last_trace;
 };
 
 class DeadlineSdkTransfer: public LegacySdkTransfer {
 public:
-    kv_cache_manager::ClientErrorCode LoadKvCachesWithDeadline(
-        const kv_cache_manager::UriStrVec&,
-        const kv_cache_manager::BlockBuffers&,
-        int64_t deadline_ms,
-        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace) {
+    kv_cache_manager::ClientErrorCode
+    LoadKvCachesWithDeadline(const kv_cache_manager::UriStrVec&,
+                             const kv_cache_manager::BlockBuffers&,
+                             int64_t                                                     deadline_ms,
+                             const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace) {
         ++deadline_reads;
         last_deadline_ms = deadline_ms;
-        last_trace = trace;
+        last_trace       = trace;
         return kv_cache_manager::ER_SDK_TIMEOUT;
     }
 
-    std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec> SaveKvCachesWithDeadline(
-        const kv_cache_manager::UriStrVec& uris,
-        const kv_cache_manager::BlockBuffers&,
-        int64_t deadline_ms,
-        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace) {
+    std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
+    SaveKvCachesWithDeadline(const kv_cache_manager::UriStrVec& uris,
+                             const kv_cache_manager::BlockBuffers&,
+                             int64_t                                                     deadline_ms,
+                             const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace) {
         ++deadline_writes;
         last_deadline_ms = deadline_ms;
-        last_trace = trace;
+        last_trace       = trace;
         return {kv_cache_manager::ER_SDK_TIMEOUT, uris};
     }
 
-    size_t deadline_reads{0};
-    size_t deadline_writes{0};
+    size_t  deadline_reads{0};
+    size_t  deadline_writes{0};
     int64_t last_deadline_ms{0};
 };
 
 TEST(TransferClientCompatTest, LegacySdkUsesOriginalCallsWithAParentDeadline) {
-    LegacySdkTransfer client;
-    const kv_cache_manager::UriStrVec uris{"uri"};
+    LegacySdkTransfer                    client;
+    const kv_cache_manager::UriStrVec    uris{"uri"};
     const kv_cache_manager::BlockBuffers buffers;
-    auto trace = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+    auto                                 trace = std::make_shared<kv_cache_manager::TransferTraceInfo>();
     EXPECT_EQ(loadSdkKvCaches(client, uris, buffers, 1234, trace), kv_cache_manager::ER_OK);
     EXPECT_EQ(client.last_trace, trace);
     EXPECT_EQ(saveSdkKvCaches(client, uris, buffers, 1234, trace), std::make_pair(kv_cache_manager::ER_OK, uris));
@@ -508,10 +686,10 @@ TEST(TransferClientCompatTest, LegacySdkUsesOriginalCallsWithAParentDeadline) {
 }
 
 TEST(TransferClientCompatTest, ZeroDeadlineUsesOriginalCallsOnDeadlineCapableSdk) {
-    DeadlineSdkTransfer client;
-    const kv_cache_manager::UriStrVec uris{"uri"};
+    DeadlineSdkTransfer                  client;
+    const kv_cache_manager::UriStrVec    uris{"uri"};
     const kv_cache_manager::BlockBuffers buffers;
-    auto trace = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+    auto                                 trace = std::make_shared<kv_cache_manager::TransferTraceInfo>();
     EXPECT_EQ(loadSdkKvCaches(client, uris, buffers, 0, trace), kv_cache_manager::ER_OK);
     EXPECT_EQ(saveSdkKvCaches(client, uris, buffers, 0, trace), std::make_pair(kv_cache_manager::ER_OK, uris));
     EXPECT_EQ(client.last_trace, trace);
@@ -522,10 +700,10 @@ TEST(TransferClientCompatTest, ZeroDeadlineUsesOriginalCallsOnDeadlineCapableSdk
 }
 
 TEST(TransferClientCompatTest, PositiveDeadlineAndSdkErrorsPassThroughUnchanged) {
-    DeadlineSdkTransfer client;
-    const kv_cache_manager::UriStrVec uris{"uri"};
+    DeadlineSdkTransfer                  client;
+    const kv_cache_manager::UriStrVec    uris{"uri"};
     const kv_cache_manager::BlockBuffers buffers;
-    auto trace = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+    auto                                 trace = std::make_shared<kv_cache_manager::TransferTraceInfo>();
     EXPECT_EQ(loadSdkKvCaches(client, uris, buffers, 1234, trace), kv_cache_manager::ER_SDK_TIMEOUT);
     EXPECT_EQ(client.last_deadline_ms, 1234);
     EXPECT_EQ(client.last_trace, trace);
@@ -542,14 +720,13 @@ TEST(TransferClientCompatTest, PositiveDeadlineAndSdkErrorsPassThroughUnchanged)
 class DeadlineTransferClient: public kv_cache_manager::MockTransferClient {
 public:
     using MockTransferClient::MockTransferClient;
-    using Code = kv_cache_manager::ClientErrorCode;
-    using Uris = kv_cache_manager::UriStrVec;
+    using Code    = kv_cache_manager::ClientErrorCode;
+    using Uris    = kv_cache_manager::UriStrVec;
     using Buffers = kv_cache_manager::BlockBuffers;
-    using Trace = std::shared_ptr<kv_cache_manager::TransferTraceInfo>;
+    using Trace   = std::shared_ptr<kv_cache_manager::TransferTraceInfo>;
 
     MOCK_METHOD(Code, LoadKvCachesWithDeadline, (const Uris&, const Buffers&, int64_t, Trace));
-    MOCK_METHOD((std::pair<Code, Uris>), SaveKvCachesWithDeadline,
-                (const Uris&, const Buffers&, int64_t, Trace));
+    MOCK_METHOD((std::pair<Code, Uris>), SaveKvCachesWithDeadline, (const Uris&, const Buffers&, int64_t, Trace));
 };
 
 TEST(ClientWrapperTest, ReadAndWriteForwardParentDeadlineAndPreserveSubmissionState) {
@@ -557,21 +734,31 @@ TEST(ClientWrapperTest, ReadAndWriteForwardParentDeadlineAndPreserveSubmissionSt
         GTEST_SKIP() << "SDK does not expose transfer deadline methods";
     }
     using namespace kv_cache_manager;
-    using Completion = ClientWrapper::TransferCompletion;
-    unsigned char byte = 7;
-    RegistSpan span{&byte, 1};
+    using Completion     = ClientWrapper::TransferCompletion;
+    unsigned char   byte = 7;
+    RegistSpan      span{&byte, 1};
     InitObservation observation;
-    auto destruction_count = std::make_shared<int>(0);
-    auto transfer = std::make_unique<DeadlineTransferClient>(destruction_count);
-    auto* mock = transfer.get();
-    auto client = initializeClient(false, "sdk_deadline", span, observation, destruction_count,
-                                   nullptr, nullptr, nullptr, std::chrono::seconds(10), nullptr, {}, std::move(transfer));
+    auto            destruction_count = std::make_shared<int>(0);
+    auto            transfer          = std::make_unique<DeadlineTransferClient>(destruction_count);
+    auto*           mock              = transfer.get();
+    auto            client            = initializeClient(false,
+                                   "sdk_deadline",
+                                   span,
+                                   observation,
+                                   destruction_count,
+                                   nullptr,
+                                   nullptr,
+                                   nullptr,
+                                   std::chrono::seconds(10),
+                                   nullptr,
+                                                         {},
+                                   std::move(transfer));
     ASSERT_NE(client, nullptr);
-    UriStrVec uris{"uri"};
+    UriStrVec    uris{"uri"};
     BlockBuffers buffers(1);
     buffers.front().iovs.push_back({kv_cache_manager::MemoryType::CPU, &byte, 1, false});
-    auto trace = std::make_shared<TransferTraceInfo>();
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    auto          trace    = std::make_shared<TransferTraceInfo>();
+    const auto    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     const int64_t deadline_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(deadline.time_since_epoch()).count();
     EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).Times(0);
@@ -581,13 +768,12 @@ TEST(ClientWrapperTest, ReadAndWriteForwardParentDeadlineAndPreserveSubmissionSt
         EXPECT_CALL(*mock, LoadKvCachesWithDeadline(uris, _, deadline_ms, trace)).WillOnce(Return(code));
         EXPECT_CALL(*mock, SaveKvCachesWithDeadline(uris, _, deadline_ms, trace))
             .WillOnce(Return(std::make_pair(code, uris)));
-        const auto expected = code == ER_OK ? Completion::PAYLOAD_COMPLETE : Completion::UNKNOWN;
-        auto completion = Completion::NOT_SUBMITTED;
+        const auto expected   = code == ER_OK ? Completion::PAYLOAD_COMPLETE : Completion::UNKNOWN;
+        auto       completion = Completion::NOT_SUBMITTED;
         EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", uris, buffers, trace, &completion, deadline), code);
         EXPECT_EQ(completion, expected);
-        completion = Completion::NOT_SUBMITTED;
-        const auto saved =
-            client->saveKvCachesForTagWithStatus("default", uris, buffers, trace, &completion, deadline);
+        completion       = Completion::NOT_SUBMITTED;
+        const auto saved = client->saveKvCachesForTagWithStatus("default", uris, buffers, trace, &completion, deadline);
         EXPECT_EQ(saved.first, code);
         EXPECT_EQ(saved.second, uris);
         EXPECT_EQ(completion, expected);
@@ -598,9 +784,10 @@ TEST(ClientWrapperTest, ReadAndWriteForwardParentDeadlineAndPreserveSubmissionSt
     EXPECT_CALL(*mock, SaveKvCaches(uris, _, trace)).WillOnce(Return(std::make_pair(ER_OK, uris)));
     EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", uris, buffers, trace), ER_OK);
     EXPECT_EQ(client->saveKvCachesForTagWithStatus("default", uris, buffers, trace).first, ER_OK);
-    auto completion = Completion::UNKNOWN;
-    const auto expired = std::chrono::steady_clock::now();
-    EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", uris, buffers, trace, &completion, expired), ER_SDK_TIMEOUT);
+    auto       completion = Completion::UNKNOWN;
+    const auto expired    = std::chrono::steady_clock::now();
+    EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", uris, buffers, trace, &completion, expired),
+              ER_SDK_TIMEOUT);
     EXPECT_EQ(completion, Completion::NOT_SUBMITTED);
     completion = Completion::UNKNOWN;
     EXPECT_EQ(client->saveKvCachesForTagWithStatus("default", uris, buffers, trace, &completion, expired).first,
@@ -709,7 +896,7 @@ TEST(ClientWrapperTest, ForwardsGpuMemoryRegistrationToTransferClient) {
     auto*                gpu_base = reinterpret_cast<void*>(0x100000);
     EXPECT_CALL(*factory_ptr, createTransferClientWithMemory(_, _, _))
         .WillOnce(Invoke([&](const std::string&,
-                             const kv_cache_manager::InitParams& params,
+                             const kv_cache_manager::InitParams&                params,
                              const kv_cache_manager::ClientMemoryRegistrations& registrations) {
             EXPECT_NE(params.regist_span, nullptr);
             EXPECT_EQ(registrations.gpu.size(), 1u);
@@ -726,10 +913,8 @@ TEST(ClientWrapperTest, ForwardsGpuMemoryRegistrationToTransferClient) {
     const std::vector<ClientWrapper::PoolRegistration> registrations{
         {{pool.data(), pool.size()}, "tp0_Ffull", std::move(memory_registrations)}};
     ClientWrapper wrapper(std::move(factory));
-    ASSERT_TRUE(wrapper.initForPools({{"", makeConfig(false, "direct")}},
-                                    kv_cache_manager::RoleType::HYBRID,
-                                    registrations,
-                                    {"full"}));
+    ASSERT_TRUE(wrapper.initForPools(
+        {{"", makeConfig(false, "direct")}}, kv_cache_manager::RoleType::HYBRID, registrations, {"full"}));
     wrapper.shutdown();
 }
 
@@ -958,12 +1143,19 @@ TEST(ClientWrapperTest, RecreatesMetadataClientWhenVipAddressChanges) {
     kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
     ASSERT_TRUE(wrapper.init(
         {{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}, "default"));
-    bool routed = false;
+    bool       routed   = false;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (!routed && std::chrono::steady_clock::now() < deadline) {
-        routed = wrapper.match("", "match", kv_cache_manager::QueryType::QT_PREFIX_MATCH,
-                                {1}, kv_cache_manager::BlockMaskOffset{0}, {}).first;
-        if (!routed) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        routed = wrapper
+                     .match("",
+                            "match",
+                            kv_cache_manager::QueryType::QT_PREFIX_MATCH,
+                            {1},
+                            kv_cache_manager::BlockMaskOffset{0},
+                            {})
+                     .first;
+        if (!routed)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     EXPECT_TRUE(routed);
     wrapper.shutdown();
@@ -1012,10 +1204,12 @@ TEST_P(MetadataClientLifetimeTest, VipRefreshRetainsInFlightClient) {
             return std::make_pair(kv_cache_manager::ER_SERVICE_NOT_LEADER, kv_cache_manager::WriteLocation{});
         }));
     } else {
-        EXPECT_CALL(*old_client, FinishWrite(_, _, _, _)).WillOnce(Invoke([hold](const auto&...) {
-            hold();
-            return kv_cache_manager::ER_SERVICE_NOT_LEADER;
-        })).WillRepeatedly(Return(kv_cache_manager::ER_INVALID_GRPCSTATUS));
+        EXPECT_CALL(*old_client, FinishWrite(_, _, _, _))
+            .WillOnce(Invoke([hold](const auto&...) {
+                hold();
+                return kv_cache_manager::ER_SERVICE_NOT_LEADER;
+            }))
+            .WillRepeatedly(Return(kv_cache_manager::ER_INVALID_GRPCSTATUS));
     }
     if (GetParam() != "finish_write") {
         EXPECT_CALL(*old_client, FinishWrite(_, _, _, _))
@@ -1064,7 +1258,8 @@ TEST_P(MetadataClientLifetimeTest, VipRefreshRetainsInFlightClient) {
     BoundedThread<bool> refreshed([wrapper] {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         while (std::chrono::steady_clock::now() < deadline) {
-            if (wrapper->finishWrite("", "refresh", "session", {}, {})) return true;
+            if (wrapper->finishWrite("", "refresh", "session", {}, {}))
+                return true;
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         return false;
@@ -1089,17 +1284,17 @@ INSTANTIATE_TEST_SUITE_P(MetadataCalls,
                          [](const ::testing::TestParamInfo<std::string>& info) { return info.param; });
 
 TEST(ClientWrapperTest, VipFailureAndMembershipChangesKeepCallingCurrentMetadataClient) {
-    auto  factory           = std::make_unique<MockClientFactory>();
-    auto* factory_ptr       = factory.get();
-    auto  subscriber        = std::make_unique<MockSubscriber>();
-    auto* subscriber_ptr    = subscriber.get();
-    auto  meta_client       = std::make_unique<kv_cache_manager::MockMetaClient>();
-    auto* meta_ptr          = meta_client.get();
-    auto  destruction_count = std::make_shared<int>(0);
-    auto  transfer_client   = std::make_unique<kv_cache_manager::MockTransferClient>(destruction_count);
+    auto               factory           = std::make_unique<MockClientFactory>();
+    auto*              factory_ptr       = factory.get();
+    auto               subscriber        = std::make_unique<MockSubscriber>();
+    auto*              subscriber_ptr    = subscriber.get();
+    auto               meta_client       = std::make_unique<kv_cache_manager::MockMetaClient>();
+    auto*              meta_ptr          = meta_client.get();
+    auto               destruction_count = std::make_shared<int>(0);
+    auto               transfer_client   = std::make_unique<kv_cache_manager::MockTransferClient>(destruction_count);
     std::promise<void> polled;
-    auto ready = polled.get_future();
-    int polls = 0;
+    auto               ready = polled.get_future();
+    int                polls = 0;
 
     EXPECT_CALL(*factory_ptr, createSubscriber(true)).WillOnce(Invoke([&subscriber](bool) {
         return std::move(subscriber);
@@ -1109,9 +1304,10 @@ TEST(ClientWrapperTest, VipFailureAndMembershipChangesKeepCallingCurrentMetadata
         .WillOnce(DoAll(SetArgReferee<0>(std::vector<std::string>{"old_address"}), Return(true)))
         .WillRepeatedly(Invoke([&](auto& addresses) {
             ++polls;
-            addresses = polls % 2 ? std::vector<std::string>{"old_address", "standby"}
-                                 : std::vector<std::string>{"standby", "old_address"};
-            if (polls == 3) polled.set_value();
+            addresses = polls % 2 ? std::vector<std::string>{"old_address", "standby"} :
+                                    std::vector<std::string>{"standby", "old_address"};
+            if (polls == 3)
+                polled.set_value();
             return polls != 1;
         }));
     EXPECT_CALL(*factory_ptr, createMetaClient(_, _)).WillOnce(Invoke([&meta_client](const auto&, const auto&) {
@@ -1175,11 +1371,12 @@ TEST(ClientWrapperTest, RetriesVipAddressChangeAfterClientCreationFailure) {
     ASSERT_TRUE(wrapper.init(
         {{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}, "default"));
     EXPECT_TRUE(wrapper.finishWrite("", "finish_1", "session", kv_cache_manager::BlockMaskOffset{0}, {}));
-    bool routed = false;
+    bool       routed   = false;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (!routed && std::chrono::steady_clock::now() < deadline) {
         routed = wrapper.finishWrite("", "finish_2", "session", kv_cache_manager::BlockMaskOffset{0}, {});
-        if (!routed) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (!routed)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     EXPECT_TRUE(routed);
     wrapper.shutdown();
