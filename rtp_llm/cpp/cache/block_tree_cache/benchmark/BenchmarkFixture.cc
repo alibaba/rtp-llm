@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm::benchmark {
@@ -241,14 +242,15 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
                                                               double                   device_watermark_ratio,
                                                               double                   host_watermark_ratio) {
     BlockTreeCacheConfig config;
-    config.enable_device_cache       = true;
-    config.enable_host_cache         = enable_host;
-    config.enable_disk_cache         = enable_disk;
-    config.btc_transfer_engine_async = true;
-    config.task_pool_size            = static_cast<int>(task_pool_size);
-    config.watermark_device          = {1.0, 1.0};
-    config.watermark_host            = {1.0, 1.0};
-    config.watermark_disk            = {1.0, 1.0};
+    config.enable_device_cache                = true;
+    config.enable_host_cache                  = enable_host;
+    config.enable_disk_cache                  = enable_disk;
+    config.disk_cache_evict_max_pending_bytes = KVCacheConfig{}.disk_cache_evict_max_pending_bytes;
+    config.btc_transfer_engine_async          = true;
+    config.task_pool_size                     = static_cast<int>(task_pool_size);
+    config.watermark_device                   = {1.0, 1.0};
+    config.watermark_host                     = {1.0, 1.0};
+    config.watermark_disk                     = {1.0, 1.0};
     // Event-driven eviction: insert commits trigger checkWatermark, which
     // demotes overflow down to the per-tier ratio watermark (0.0 = disabled).
     if (device_watermark_ratio > 0.0) {

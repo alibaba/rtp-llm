@@ -412,7 +412,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="DISK_CACHE_EVICT_MAX_PENDING_BYTES",
         bind_to=(kv_cache_config, "disk_cache_evict_max_pending_bytes"),
         type=int,
-        default=64 * 1024 * 1024,
+        default=kv_cache_config.disk_cache_evict_max_pending_bytes,
         help=(
             "HOST->DISK 水位淘汰共享的未结算字节上限，按协调 rank 的落盘 stride 计费（不累加其他 rank）；"
             "必须大于 0，超大单块允许独占提交。"
