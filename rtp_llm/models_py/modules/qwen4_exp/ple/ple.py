@@ -658,20 +658,7 @@ class Qwen4ExpPLELayer(nn.Module):
         )
         return hidden_states.transpose(1, 2)
 
-    def _gated_values(
-        self,
-        hyper_states: torch.Tensor,
-        token_history: torch.Tensor,
-        padding_mask: Optional[torch.Tensor] = None,
-        *,
-        embeddings: Optional[torch.Tensor] = None,
-    ) -> tuple:
-        """Shared front half: n-gram embed, gate against the stream, normalize.
-
-        Returns ``(gated_value, gated_value_normed)``, both ``[B, S, hc_hidden]``.
-        The short conv is applied by the caller so prefill and decode can feed it
-        different left context.
-        """
+    def _project_key_value(self, hyper_states, token_history, embeddings):
         seq_len = hyper_states.shape[1]
         if embeddings is None:
             embeddings = self.ple_embedding(token_history, seq_len)
@@ -694,6 +681,21 @@ class Qwen4ExpPLELayer(nn.Module):
                 if self.value_projection is not None
                 else F.linear(embeddings, self.value_proj)
             )
+        return key, value
+
+    def _gated_values(
+        self,
+        hyper_states: torch.Tensor,
+        token_history: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
+        *,
+        embeddings: Optional[torch.Tensor] = None,
+    ) -> tuple:
+        """Return the gated values and normalized convolution inputs."""
+        key, value = self._project_key_value(hyper_states, token_history, embeddings)
+        return self._gate_projected_values(key, value, hyper_states, padding_mask)
+
+    def _gate_projected_values(self, key, value, hyper_states, padding_mask=None):
         if hyper_states.is_cuda and torch.version.hip is None:
             from .ple_gate_triton import try_ple_gate
 
@@ -1005,8 +1007,28 @@ class Qwen4ExpPLELayer(nn.Module):
         Unlike prefill's ``_short_conv``, the real cached history is used instead
         of a zero left pad.
         """
-        gated_value, gated_value_normed = self._gated_values(
-            hyper_state, token_history_step, embeddings=embeddings
+        key, value = self._project_key_value(
+            hyper_state, token_history_step, embeddings
+        )
+        if hyper_state.is_cuda and torch.version.hip is None:
+            from .ple_decode_fusion_triton import try_ple_decode_fusion
+
+            fused = try_ple_decode_fusion(
+                key,
+                value,
+                hyper_state,
+                self.norm_key,
+                self.norm_query,
+                self.norm_conv,
+                conv_buffer,
+                self.conv_weight,
+                self.norm_eps,
+                self.conv_dilation,
+            )
+            if fused is not None:
+                return fused
+        gated_value, gated_value_normed = self._gate_projected_values(
+            key, value, hyper_state
         )
         if hyper_state.is_cuda and torch.version.hip is None:
             from .ple_conv_triton import try_ple_conv

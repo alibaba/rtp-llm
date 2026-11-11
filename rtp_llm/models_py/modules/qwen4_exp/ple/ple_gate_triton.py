@@ -19,34 +19,27 @@ def _sm_supported(device: torch.device) -> bool:
 
 
 @triton.jit
-def _ple_gate(
+def _gate_branch(
     Key,
     Value,
     Hidden,
     GK,
     GQ,
     GC,
-    Gated,
-    Normed,
     KS,
     VS,
-    WIDTH: tl.constexpr,
+    row,
+    col,
+    hc_col,
+    valid,
     H: tl.constexpr,
     EPS: tl.constexpr,
     KEY_STRIDE: tl.constexpr,
     VALUE_STRIDE: tl.constexpr,
     HIDDEN_STRIDE: tl.constexpr,
-    BLOCK: tl.constexpr,
     PROJECTED_FP32: tl.constexpr = False,
     PAGE: tl.constexpr = 128,
 ):
-    # row * WIDTH exceeds int32 once a single prefill step passes ~2^31/10240
-    # rows; max_seq_len=262144 allows that, so promote before multiplying.
-    row = tl.program_id(0).to(tl.int64)
-    branch = tl.program_id(1)
-    col = tl.arange(0, BLOCK)
-    valid = col < H
-    hc_col = branch * H + col
     k = tl.load(Key + row * KEY_STRIDE + hc_col, valid, other=0).to(tl.float32)
     if PROJECTED_FP32:
         k = (k * tl.load(KS + row // PAGE)).to(tl.bfloat16).to(tl.float32)
@@ -73,6 +66,40 @@ def _ple_gate(
     f = gated.to(tl.float32)
     gc = tl.load(GC + hc_col, valid, other=0).to(tl.float32)
     normed = f * tl.rsqrt(tl.sum(f * f, 0) / H + EPS) * (1 + gc)
+    return gated, normed.to(tl.bfloat16)
+
+
+@triton.jit
+def _ple_gate(
+    Key,
+    Value,
+    Hidden,
+    GK,
+    GQ,
+    GC,
+    Gated,
+    Normed,
+    KS,
+    VS,
+    WIDTH: tl.constexpr,
+    H: tl.constexpr,
+    EPS: tl.constexpr,
+    KEY_STRIDE: tl.constexpr,
+    VALUE_STRIDE: tl.constexpr,
+    HIDDEN_STRIDE: tl.constexpr,
+    BLOCK: tl.constexpr,
+    PROJECTED_FP32: tl.constexpr = False,
+    PAGE: tl.constexpr = 128,
+):
+    # The row offset can exceed int32 for long prefill sequences.
+    row = tl.program_id(0).to(tl.int64)
+    col = tl.arange(0, BLOCK)
+    valid = col < H
+    hc_col = tl.program_id(1) * H + col
+    gated, normed = _gate_branch(
+        Key, Value, Hidden, GK, GQ, GC, KS, VS, row, col, hc_col, valid,
+        H, EPS, KEY_STRIDE, VALUE_STRIDE, HIDDEN_STRIDE, PROJECTED_FP32, PAGE,
+    )
     tl.store(Gated + row * WIDTH + hc_col, gated, valid)
     tl.store(Normed + row * WIDTH + hc_col, normed, valid)
 
