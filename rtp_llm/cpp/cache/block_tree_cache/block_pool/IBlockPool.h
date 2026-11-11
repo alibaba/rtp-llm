@@ -27,7 +27,6 @@ enum class BlockTreeRefType : uint8_t {
     CACHE = 0,
     LOAD,
     EVICTION,
-    STORE,
     FROZEN,
     COUNT,
 };
@@ -40,12 +39,27 @@ struct BlockPoolConfigBase {
     BlockPoolType pool_type{BlockPoolType::DEVICE};
     std::string   pool_name;
     size_t        physical_block_count{0};
+    // Sample once per process in [lower, upper); equal bounds fix the threshold, and lower=0 disables it.
+    double        frozen_block_abort_lower_ratio{0.3};
+    double        frozen_block_abort_upper_ratio{0.4};
 };
 
 // IBlockPool owns allocation and Tree-internal lifetime shared by Device, Host, and Disk.
 // DeviceBlockPool adds request-like outer ownership through the protected Tree edge hooks.
 class IBlockPool {
 public:
+    struct TreeReferenceStats {
+        size_t                                     total_blocks;
+        size_t                                     free_blocks;
+        size_t                                     cache_only_blocks;
+        size_t                                     active_blocks;
+        std::array<size_t, kBlockTreeRefTypeCount> ref_blocks;
+
+        size_t blocksWithRef(BlockTreeRefType type) const {
+            return ref_blocks[static_cast<size_t>(type)];
+        }
+    };
+
     virtual ~IBlockPool() = default;
 
     void setCapacityChangeCallback(std::function<void()> callback);
@@ -62,6 +76,10 @@ public:
     void     decTreeRef(BlockIdxType block, BlockTreeRefType ref_type);
     void     decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type);
     uint32_t treeRefCount(BlockIdxType block) const;
+
+    // True when releasing one CACHE reference would immediately free the block.
+    // Checks tree and external ownership together under the pool mutex.
+    bool canReclaimCacheBlock(BlockIdxType block) const;
 
     // Keep one permanent tree reference per physical block for this pool's lifetime.
     void freezeBlock(BlockIdxType block) noexcept;
@@ -126,6 +144,7 @@ protected:
     // Helpers for derived-pool transactions; the caller holds mutex_.
     std::optional<BlockIdList> mallocNoLock(size_t n);
     size_t                     availableFreeBlocksNoLock() const;
+    TreeReferenceStats         treeReferenceStatsNoLock() const;
     void                       reserveReleasedBlocksNoLock(size_t additional) {
         released_blocks_.reserve(released_blocks_.size() + additional);
     }
@@ -164,6 +183,7 @@ private:
 
 private:
     std::shared_ptr<const BlockPoolConfigBase>                config_;
+    double                                                    effective_frozen_block_abort_ratio_{0.0};
     bool                                                      initialized_{false};
     std::function<void()>                                     capacity_change_callback_;
     std::vector<uint8_t>                                      allocated_;

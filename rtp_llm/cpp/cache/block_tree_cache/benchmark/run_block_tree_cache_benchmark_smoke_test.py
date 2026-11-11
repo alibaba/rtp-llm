@@ -37,6 +37,53 @@ def _load_json(path):
 
 
 class BenchmarkSmokeTest(unittest.TestCase):
+    def test_three_tier_transfer_and_route_batch_limit(self):
+        binary = _runfiles_path(
+            "rtp_llm/cpp/cache/block_tree_cache/benchmark/block_tree_cache_gpu_benchmark"
+        )
+        profile = _runfiles_path(
+            "rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles/"
+            "deepseek_v4_flash_fp8_tp1_cp1_tpb1024.json"
+        )
+        self.assertIsNotNone(binary)
+        self.assertIsNotNone(profile)
+        env = dict(os.environ)
+        lib_dir = _libpython_dir()
+        if lib_dir:
+            env["LD_LIBRARY_PATH"] = (
+                lib_dir + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+            )
+        with tempfile.TemporaryDirectory() as tmp:
+            for async_enabled in (True, False):
+                with self.subTest(async_enabled=async_enabled):
+                    result_path = os.path.join(tmp, f"result_{async_enabled}.json")
+                    cmd = [
+                        binary,
+                        "transfer",
+                        f"--model-profile={profile}",
+                        f"--output-json={result_path}",
+                        "--group-set=full_context",
+                        "--transfer-directions=d2h,h2disk,disk2d",
+                        "--transfer-operation-count=12",
+                        "--transfer-concurrency=4",
+                        "--transfer-descriptor-batch-size=4",
+                        "--working-set-blocks=4",
+                        "--device-disk-staging-block-count=4",
+                        "--btc-crc-slot-count=1",
+                        "--min-measured-seconds=1",
+                        f"--disk-path={tmp}",
+                        "--disk-io-mode=buffered",
+                        f"--btc-transfer-engine-async={str(async_enabled).lower()}",
+                        f"--enable-crc={str(async_enabled).lower()}",
+                    ]
+                    proc = subprocess.run(
+                        cmd, capture_output=True, text=True, timeout=120, env=env
+                    )
+                    self.assertEqual(
+                        proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}"
+                    )
+                    self.assertEqual(_load_json(result_path).get("status"), "completed")
+
     def test_smoke_suite(self):
         driver = _runfiles_path(
             "rtp_llm/cpp/cache/block_tree_cache/benchmark/run_block_tree_cache_benchmark.py"
@@ -89,6 +136,11 @@ class BenchmarkSmokeTest(unittest.TestCase):
                 self.assertEqual(_load_json(manifest_path).get("status"), "completed")
                 results[case] = _load_json(result_path)
                 self.assertEqual(results[case].get("status"), "completed")
+                mode = results[case].get("resolved_config", {})
+                self.assertEqual(mode.get("transfer_implementation"), "workloop")
+                self.assertEqual(mode.get("btc_transfer_engine_async"), 1)
+                self.assertEqual(mode.get("enable_crc"), 1)
+                self.assertEqual(mode.get("owners_per_direction"), 1)
 
             tree = results["smoke_tree_online_mini"]
             self.assertGreater(tree.get("metrics", {}).get("loads_committed", 0), 0)

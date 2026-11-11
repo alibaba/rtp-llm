@@ -27,6 +27,8 @@ public:
         config.pool_type            = BlockPoolType::DEVICE;
         config.pool_name            = group.tag.empty() ? "group" : group.tag;
         config.physical_block_count = group.block_num;
+        config.frozen_block_abort_lower_ratio = cache_config.block_pool_frozen_abort_lower_ratio;
+        config.frozen_block_abort_upper_ratio = cache_config.block_pool_frozen_abort_upper_ratio;
         RTP_LLM_CHECK_WITH_INFO(group.block_num > 0, "group tag=%s requires positive pool capacity", group.tag.c_str());
         RTP_LLM_LOG_INFO("createConfigForGroup: pool_name=%s block_num=%zu groupNums=%d",
                          config.pool_name.c_str(),

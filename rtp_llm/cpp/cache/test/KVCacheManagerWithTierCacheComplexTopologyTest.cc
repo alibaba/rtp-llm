@@ -175,9 +175,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         makeTokenIds(/*offset=*/0, 2 * seq_size_per_block + 1, 2 * seq_size_per_block + 1, seq_size_per_block);
     MallocInfo load_info{load_resource, load_token_ids};
     load_info.enable_remove_skipped_blocks = false;
-    load_info.reuse_cache         = true;
-    load_info.enable_cache_lookup = true;
-    const auto load_result        = manager_->malloc(load_info);
+    load_info.reuse_cache                  = true;
+    load_info.enable_cache_lookup          = true;
+    const auto load_result                 = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
     EXPECT_EQ(load_result.reuse_len, 0);
 
@@ -264,9 +264,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         makeTokenIds(/*offset=*/0, 2 * seq_size_per_block + 1, 2 * seq_size_per_block + 1, seq_size_per_block);
     MallocInfo hit_info{hit_resource, hit_token_ids};
     hit_info.enable_remove_skipped_blocks = false;
-    hit_info.reuse_cache         = true;
-    hit_info.enable_cache_lookup = true;
-    const auto hit_result        = manager_->malloc(hit_info);
+    hit_info.reuse_cache                  = true;
+    hit_info.enable_cache_lookup          = true;
+    const auto hit_result                 = manager_->malloc(hit_info);
     ASSERT_TRUE(hit_result.success);
     EXPECT_EQ(hit_result.reuse_len, 2 * seq_size_per_block);
 
@@ -287,7 +287,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     for (const bool fail_load : {false, true}) {
         SCOPED_TRACE(fail_load ? "mixed protected/legacy failure" : "mixed successful load-back");
         ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
-        auto cache  = manager_->blockTreeCache();
+        auto cache = manager_->blockTreeCache();
         auto engine =
             std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, engine);
@@ -536,12 +536,33 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
             ASSERT_TRUE(after_failure.has_value());
             for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
                 const auto&  group_set   = cache->groupSets()[group_set_id];
+                const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
+                ASSERT_GT(reuse_count, 0u);
+                ASSERT_LE(reuse_count, 3u);
+                const size_t reuse_begin = 3 - reuse_count;
                 // Injected transport failure does not identify a corrupt record.
+                // Successful HOST copies remain cached even when DISK fails; HOST
+                // states outside the SWA reuse window must not be loaded.
                 for (size_t path = 0; path < 3; ++path) {
-                    const auto& source = (*after_failure)[path][group_set_id];
+                    const auto& source      = (*after_failure)[path][group_set_id];
+                    const bool  host_loaded = path == 1 && path >= reuse_begin;
+                    const Tier  expected    = host_loaded ? Tier::DEVICE : (*mixed)[path][group_set_id].getTopTier();
                     EXPECT_TRUE(source.isMatchUsable());
                     EXPECT_EQ(source.transfer_state, GroupSetTransferState::IDLE);
-                    EXPECT_EQ(source.getTopTier(), (*mixed)[path][group_set_id].getTopTier());
+                    EXPECT_EQ(source.getTopTier(), expected) << "path=" << path << " group_set=" << group_set_id;
+                    if (expected == Tier::DEVICE) {
+                        ASSERT_EQ(source.device_blocks.size(), group_set->groupTags().size());
+                        for (size_t member = 0; member < group_set->groupTags().size(); ++member) {
+                            EXPECT_TRUE(groupBlockPayloadMatches(manager_,
+                                                                 cache_config_,
+                                                                 group_set->groupTags()[member],
+                                                                 source.device_blocks[member],
+                                                                 path));
+                        }
+                    }
+                    EXPECT_EQ(source.host_block,
+                              host_loaded ? NULL_BLOCK_IDX : (*mixed)[path][group_set_id].host_block);
+                    EXPECT_EQ(source.disk_block, (*mixed)[path][group_set_id].disk_block);
                 }
                 for (size_t member = 0; member < group_set->groupTags().size(); ++member) {
                     const auto& blocks =
@@ -620,8 +641,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                         const BlockIndicesType& blocks = load_resource->blocks(0, tag);
                         ASSERT_GE(blocks.size(), 3u);
                         ASSERT_FALSE(isNullBlockIdx(blocks[path]));
-                        ASSERT_TRUE(fillGroupBlockPayload(
-                            manager_, cache_config_, tag, blocks[path], path, /*poison=*/true));
+                        ASSERT_TRUE(
+                            fillGroupBlockPayload(manager_, cache_config_, tag, blocks[path], path, /*poison=*/true));
                     }
                 }
             }
@@ -688,18 +709,18 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
     if (GetParam() != TierLayout::HOST_DISK) {
         GTEST_SKIP() << "long disk round-trip requires HostDisk layout";
     }
-    ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
+    ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/32));
     auto             cache               = manager_->blockTreeCache();
-    constexpr size_t staging_block_count = 2;
+    constexpr size_t staging_block_count = 4;
     auto             engine              = std::make_shared<PausableRecordingTransferEngine>(
         cache->groupSets(), cache->isDiskCacheEnabled(), staging_block_count);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, engine);
     transfer_engine_.reset();
-    EXPECT_EQ(cache->config().device_disk_staging_block_count, staging_block_count);
+    ASSERT_TRUE(engine->asyncEnabled());
 
     const auto    initial_device = snapshotDevicePools(manager_);
     const auto    initial_lower  = snapshotLowerPools(*cache, GetParam());
-    constexpr int logical_blocks = 5;
+    constexpr int logical_blocks = 9;
     auto seed_opt = seedDevicePrefix(manager_, cache_config_, /*token_offset=*/0, /*cached_blocks=*/logical_blocks);
     ASSERT_TRUE(seed_opt.has_value());
     auto seed = std::move(*seed_opt);
@@ -805,12 +826,16 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
     const auto found = cache->tree()->findNode(seed.cache_keys);
     ASSERT_EQ(found.size(), seed.cache_keys.size());
     size_t expected_load_descriptors = 0;
+    bool   exceeds_staging_capacity  = false;
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
         const auto&  group_set   = cache->groupSets()[group_set_id];
         const size_t reuse_count = group_set->computeReuseBlockCount(static_cast<size_t>(logical_blocks));
         ASSERT_GT(reuse_count, 0u);
         ASSERT_LE(reuse_count, static_cast<size_t>(logical_blocks));
         expected_load_descriptors += reuse_count;
+        const auto& staging = engine->load_loops_.front()->staging_.pool;
+        ASSERT_NE(staging, nullptr);
+        exceeds_staging_capacity = exceeds_staging_capacity || reuse_count > staging->capacity();
         const size_t reuse_begin = static_cast<size_t>(logical_blocks) - reuse_count;
         for (const auto& tag : group_set->groupTags()) {
             const BlockIndicesType& blocks = resource->blocks(0, tag);
@@ -822,7 +847,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
             }
         }
     }
-    EXPECT_GT(expected_load_descriptors, staging_block_count);
+    EXPECT_TRUE(exceeds_staging_capacity);
 
     engine->release();
     ASSERT_TRUE(waitForAsyncContextDoneFor(

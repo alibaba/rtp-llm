@@ -2,7 +2,7 @@
 
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/models_py/bindings/cuda/test/MainStagedCopyBaseline.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyStrategy.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceHostCopyStrategy.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -145,19 +145,19 @@ size_t maximumLayoutPayload() {
 }
 
 struct FrameworkCopyPlan::Impl {
-    DeviceHostCopyPlan store;
+    DeviceHostCopyPlan evict;
     DeviceHostCopyPlan load;
 
     Impl(const std::vector<CrcCopyItem>& items, const Layout& layout) {
-        store.device_to_host = true;
+        evict.device_to_host = true;
         load.device_to_host  = false;
         if (!items.empty()) {
-            store.host = load.host = {items.front().host, items.front().payload_bytes, items.front().capacity_bytes};
+            evict.host = load.host = {items.front().host, items.front().payload_bytes, items.front().capacity_bytes};
         }
         size_t count = 0;
         for (const auto& item : items)
             count += item.tiles.size();
-        store.copy_tiles.reserve(count);
+        evict.copy_tiles.reserve(count);
         load.copy_tiles.reserve(count);
         for (const auto& item : items) {
             if (item.tiles.size() != layout.geometry.size())
@@ -171,7 +171,7 @@ struct FrameworkCopyPlan::Impl {
                 copy.device_index      = 0;
                 copy.member_group_id   = layout.geometry[i].member;
                 copy.local_layer_index = layout.geometry[i].local_layer;
-                store.copy_tiles.push_back(copy);
+                evict.copy_tiles.push_back(copy);
                 load.copy_tiles.push_back(copy);
             }
         }
@@ -184,7 +184,7 @@ FrameworkCopyPlan::~FrameworkCopyPlan() = default;
 
 uintptr_t FrameworkCopyPlan::touchMetadata() const {
     uintptr_t sum = 0;
-    for (const auto* plan : {&impl_->store, &impl_->load}) {
+    for (const auto* plan : {&impl_->evict, &impl_->load}) {
         sum += plan->device_to_host ^ plan->group_set_id ^ reinterpret_cast<uintptr_t>(plan->host.base)
                ^ plan->host.payload_bytes ^ plan->host.capacity_bytes;
         for (const auto& tile : plan->copy_tiles)
@@ -195,12 +195,14 @@ uintptr_t FrameworkCopyPlan::touchMetadata() const {
 }
 
 struct FrameworkCopies::Impl {
-    CudaBatchDeviceHostCopyStrategy              batch;
-    StagedSmDeviceHostCopyStrategy               staged;
+    std::shared_ptr<DeviceHostCopyStreams>        copy_streams;
+    CudaBatchDeviceHostCopyStrategy               batch;
+    StagedSmDeviceHostCopyStrategy                staged;
     main_baseline::StagedSmDeviceHostCopyStrategy main_staged;
-    at::cuda::CUDAStream                         stream;
+    at::cuda::CUDAStream                          stream;
 
-    explicit Impl(int device): stream(at::cuda::getStreamFromPool(false, device)) {}
+    explicit Impl(int device):
+        copy_streams(acquireDeviceHostCopyStreams(device)), stream(at::cuda::getStreamFromPool(false, device)) {}
 };
 
 FrameworkCopies::FrameworkCopies(int device) {
@@ -210,18 +212,23 @@ FrameworkCopies::FrameworkCopies(int device) {
 
 FrameworkCopies::~FrameworkCopies() = default;
 
-void FrameworkCopies::copyBatch(const FrameworkCopyPlan& plan, bool store) {
-    requireDone(impl_->batch.tryExecute(store ? plan.impl_->store : plan.impl_->load, DeviceHostCopyOptions{}),
+void FrameworkCopies::copyBatch(const FrameworkCopyPlan& plan, bool evict) {
+    const DeviceHostCopyExecutionContext context{impl_->copy_streams,
+                                                 evict ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D};
+    requireDone(impl_->batch.tryExecute(evict ? plan.impl_->evict : plan.impl_->load, DeviceHostCopyOptions{}, context),
                 "CUDA 1D batch");
 }
 
-void FrameworkCopies::copyStaged(const FrameworkCopyPlan& plan, bool store) {
-    requireDone(impl_->staged.tryExecute(store ? plan.impl_->store : plan.impl_->load, DeviceHostCopyOptions{}),
-                "rebased production staged without CRC");
+void FrameworkCopies::copyStaged(const FrameworkCopyPlan& plan, bool evict) {
+    const DeviceHostCopyExecutionContext context{impl_->copy_streams,
+                                                 evict ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D};
+    requireDone(
+        impl_->staged.tryExecute(evict ? plan.impl_->evict : plan.impl_->load, DeviceHostCopyOptions{}, context),
+        "rebased production staged without CRC");
 }
 
-void FrameworkCopies::copyMainStaged(const FrameworkCopyPlan& plan, bool store) {
-    requireDone(impl_->main_staged.tryExecute(store ? plan.impl_->store : plan.impl_->load, DeviceHostCopyOptions{}),
+void FrameworkCopies::copyMainStaged(const FrameworkCopyPlan& plan, bool evict) {
+    requireDone(impl_->main_staged.tryExecute(evict ? plan.impl_->evict : plan.impl_->load, DeviceHostCopyOptions{}),
                 "main staged without CRC");
 }
 

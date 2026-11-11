@@ -3,11 +3,17 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace rtp_llm {
 
 struct KVCacheEventPublisherConfig {
     std::string manager_endpoint;
+    bool        enable_vipserver = false;
+    std::string vipserver_domain;
+    std::string server_address;
+    std::vector<std::string> server_addresses;
+    bool                     publish_cache_events = true;
 
     size_t queue_capacity        = 100000;
     size_t report_batch_size     = 1000;
@@ -16,7 +22,14 @@ struct KVCacheEventPublisherConfig {
     int    request_timeout_ms    = 1500;
     int    snapshot_timeout_ms   = 30000;
     int    retry_interval_ms     = 500;
-    int    snapshot_interval_ms  = 300000;
+    int    snapshot_interval_ms  = 600000;
+    // Only heartbeat and nonempty mutation ACKs rearm this recovery window.
+    int    ack_recovery_timeout_ms = 60000;
+};
+
+struct KVCacheEventSpec {
+    std::string name;
+    std::string location_uri;
 };
 
 struct KVCacheEventPublisherContext {
@@ -25,16 +38,17 @@ struct KVCacheEventPublisherContext {
     std::string host_ip_port;
     std::string model_name;
     std::string dtype;
-    std::string spec_name;
-    std::string location_uri;
+    // Same order as BlockTree::setEventPublisher publication group tags.
+    std::vector<KVCacheEventSpec> specs;
 
     int32_t block_size_tokens = 0;
-    int64_t spec_size_bytes   = 0;
     int32_t tp_size           = 1;
     int32_t dp_size           = 1;
     int32_t pp_size           = 1;
     int32_t dp_rank           = 0;
     bool    use_mla           = false;
+    // Control-only mode replays the backend's exact registration schema.
+    std::string register_instance_request;
 };
 
 }  // namespace rtp_llm

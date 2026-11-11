@@ -23,7 +23,7 @@ CUDA_VISIBLE_DEVICES=0 bazelisk test \
 
 | 路径 | 实现与计时边界 |
 |---|---|
-| `integrated_crc` | 直接链接当前仓库的 `CrcBlockCopyBatch`，每个 backing 的完整 payload 对应一条 CRC 消息。包含 metadata、GPU CRC、数据传输、同步和 verdict。 |
+| `integrated_crc` | 直接链接当前仓库的 `CrcCopyWorkspace`，每个 backing 的完整 payload 对应一条 CRC 消息。包含 metadata、GPU CRC、数据传输、同步和 verdict。 |
 | `copy1d_batch` | 调用真实 `CudaBatchDeviceHostCopyStrategy`，包含每次 descriptor 构造和 binding 内同步；禁止自动 fallback。 |
 | `copy3d_batch` | 从实际 tiles 推导连续的 affine span；只有宽度相同、host 连续、device pitch 恒定的 tiles 才合并。当前 shape 预期每 backing 三个操作，代码不写死这个数量。构造和检查 descriptor、提交、等待完成都计时；使用独立 Torch 非默认 stream 和测试局部提交锁。 |
 | `staged_no_crc` | 调用真实的 `StagedSmDeviceHostCopyStrategy`，保留与 CRC 统一的 `CopyTileKernel`。GPU staging 与最终 HOST segment 直接 DMA，不再通过额外 pinned host scratch 做 CPU payload pack/unpack。 |

@@ -111,7 +111,7 @@ void StreamCacheResource::releaseResource() {
                           std::hash<std::thread::id>{}(std::this_thread::get_id()));
         abort();
     }
-    if (allocator_load_context_) {
+    if (allocator_load_context_ && !deferAllocatorLoadRelease()) {
         if (!resource_context_.cache_manager->abortPendingLoad(allocator_load_context_)) {
             RTP_LLM_LOG_DEBUG("allocator load was already committed or completed before release");
         }
@@ -150,22 +150,24 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 
     if (total_blocks > 0) {
         if (reuseCache() && !stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED) {
-            const Tier target_tier = storeTarget();
-            RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d, target_tier=%s",
+            const Tier target_tier = insertTarget();
+            RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, inserting cache, curBlocksNum=%d, target_tier=%s",
                               stream_->streamId(),
                               total_blocks,
                               tierName(target_tier));
             if (target_tier != Tier::NONE) {
-                InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier};
-                size_t     resident_prefix_length = 0;
+                InsertInfo insert_info{
+                    batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier, stream_->streamId()};
+                size_t resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             }
         } else {
-            RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, NOT storing cache, reuseCache=%d, hasError=%d, status=%s",
-                              stream_->streamId(),
-                              reuseCache(),
-                              stream_->hasErrorWithoutLock(),
-                              StreamStateToString(stream_->getStatus()).c_str());
+            RTP_LLM_LOG_DEBUG(
+                "tryReleaseKVBlock: stream=%ld, NOT inserting cache, reuseCache=%d, hasError=%d, status=%s",
+                stream_->streamId(),
+                reuseCache(),
+                stream_->hasErrorWithoutLock(),
+                StreamStateToString(stream_->getStatus()).c_str());
         }
 
         FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
@@ -231,6 +233,7 @@ absl::Status StreamCacheResource::initKVBlock() {
         malloc_info.enable_cache_lookup = enableCacheLookup();
     }
     malloc_info.enable_remove_skipped_blocks = false;
+    malloc_info.enable_storage_backend       = !skip_remote_cache_;
     malloc_info.max_chunk_tokens =
         stream_->chunkedPrefillEnabled() && stream_->isContextStream() ? stream_->maxChunkSize() : 0;
 
@@ -278,6 +281,15 @@ void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& resul
     cache_reuse_metrics_.report_match_cost_time = result.match_end_time_us > 0;
     malloc_begin_time_us_                       = result.malloc_begin_time_us;
     cache_reuse_metrics_.load_attempted         = result.load_attempted;
+
+    // A retry must not inherit the previous attempt's metrics, even when it no longer needs a load.
+    cache_reuse_metrics_.load_success                  = false;
+    cache_reuse_metrics_.report_load_metrics           = false;
+    cache_reuse_metrics_.report_load_wait_latency      = false;
+    cache_reuse_metrics_.load_wait_latency_us          = 0;
+    cache_reuse_metrics_.report_match_to_ready_latency = false;
+    cache_reuse_metrics_.match_to_ready_latency_us     = 0;
+    cache_reuse_metrics_.load_prepare_latency_us       = result.load_prepare_latency_us;
     if (!result.load_attempted) {
         if (result.match_end_time_us > 0) {
             cache_reuse_metrics_.match_to_ready_latency_us =
@@ -287,16 +299,7 @@ void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& resul
         return;
     }
 
-    // Metrics describe the current load attempt. A retry must not inherit the
-    // previous attempt's terminal result or latency.
-    cache_reuse_metrics_.load_success                  = false;
-    cache_reuse_metrics_.report_load_metrics           = false;
-    cache_reuse_metrics_.report_load_wait_latency      = false;
-    cache_reuse_metrics_.load_wait_latency_us          = 0;
-    cache_reuse_metrics_.report_match_to_ready_latency = false;
-    cache_reuse_metrics_.match_to_ready_latency_us     = 0;
-    cache_reuse_metrics_.load_prepare_latency_us       = result.load_prepare_latency_us;
-    load_wait_begin_time_us_                           = currentTimeUs();
+    load_wait_begin_time_us_ = currentTimeUs();
     if (!result.success) {
         clearCacheReuseState();
         cache_reuse_metrics_.load_success              = false;
@@ -306,45 +309,65 @@ void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& resul
     }
 }
 
+void StreamCacheResource::publishAllocatorReuse(const LoadAsyncContext& context, bool local_only) {
+    const size_t local = local_only ? context.deviceReadyBlocks() : context.localMatchedBlocks();
+    const size_t total = local_only ? local : context.matchedBlocks();
+    const size_t host  = context.matchedBlocks(Tier::HOST, local);
+    const size_t disk  = context.matchedBlocks(Tier::DISK, local);
+    RTP_LLM_CHECK_WITH_INFO(total >= local && host <= local && disk <= local - host,
+                            "invalid allocator reuse counts: total=%zu local=%zu host=%zu disk=%zu",
+                            total,
+                            local,
+                            host,
+                            disk);
+    const int tokens = reuseBlockTokens();
+    RTP_LLM_CHECK_WITH_INFO(tokens > 0 && total <= static_cast<size_t>(std::numeric_limits<int>::max()) / tokens,
+                            "allocator reuse token count exceeds int range: blocks=%zu tokens=%d",
+                            total,
+                            tokens);
+    const size_t backend = total - local;
+    // Initial allocation shares the matched prefix across all batches.
+    for (int batch = 0; batch < batch_kv_cache_resource_->batchSize(); ++batch) {
+        auto& resource = batch_kv_cache_resource_->cacheResource(batch);
+        resource.setDeviceReuseBlockNum(local - host - disk);
+        resource.setMemoryReuseBlockNum(host);
+        resource.setDiskReuseBlockNum(disk);
+        resource.setStorageBackendReuseBlockNum(backend);
+    }
+    publishReuseLengths(total * tokens, host * tokens, disk * tokens, backend * tokens);
+}
+
 absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     const bool load_success  = allocator_load_context_->success();
     const auto error         = allocator_load_context_->errorInfo();
     const auto load_context  = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
     auto       malloc_status = load_context == nullptr ? MallocStatus::NONE : load_context->mallocStatus();
+    const bool timed_out     = load_context && load_context->deadlineExceeded();
+    if (timed_out) {
+        deferAllocatorLoadRelease();
+    }
     if (load_success) {
         RTP_LLM_CHECK(load_context != nullptr);
-        const size_t total = load_context->matchedBlocks();
-        const size_t local = load_context->localMatchedBlocks();
-        const size_t host  = load_context->matchedBlocks(Tier::HOST);
-        const size_t disk  = load_context->matchedBlocks(Tier::DISK);
-        RTP_LLM_CHECK_WITH_INFO(total >= local && host <= local && disk <= local - host,
-                                "invalid allocator reuse counts: total=%zu local=%zu host=%zu disk=%zu",
-                                total,
-                                local,
-                                host,
-                                disk);
-        const int tokens = reuseBlockTokens();
-        RTP_LLM_CHECK_WITH_INFO(tokens > 0 && total <= static_cast<size_t>(std::numeric_limits<int>::max()) / tokens,
-                                "allocator reuse token count exceeds int range: blocks=%zu tokens=%d",
-                                total,
-                                tokens);
-        const size_t backend  = total - local;
-        auto&        resource = batch_kv_cache_resource_->cacheResource(0);
-        resource.setDeviceReuseBlockNum(local - host - disk);
-        resource.setMemoryReuseBlockNum(host);
-        resource.setDiskReuseBlockNum(disk);
-        resource.setStorageBackendReuseBlockNum(backend);
-        publishReuseLengths(total * tokens, host * tokens, disk * tokens, backend * tokens);
-    } else if (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
-        stream_->setHostReuseLength(0);
-        stream_->setDiskReuseLength(0);
-        if (!resource_context_.cache_manager->detachSharedBlocksForRecompute(batch_kv_cache_resource_,
-                                                                             stream_->reuseLength())) {
+        publishAllocatorReuse(*load_context, false);
+    } else if (!timed_out && resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
+        const bool backend_timeout = load_context && load_context->backendTimedOut();
+        skip_remote_cache_         = skip_remote_cache_ || backend_timeout;
+        const int ready_length =
+            load_context ? static_cast<int>(load_context->deviceReadyBlocks()) * reuseBlockTokens() : 0;
+        const bool reuse_local =
+            load_context && (load_context->localLoadSucceeded() || ready_length > stream_->reuseLength());
+        const int reuse_length = reuse_local ? ready_length : stream_->reuseLength();
+        if (!resource_context_.cache_manager->detachSharedBlocksForRecompute(batch_kv_cache_resource_, reuse_length)) {
             // Re-enter admission with no request refs if detaching the writable
             // suffix cannot fit. Never compute into cache/other-request blocks.
             resource_context_.cache_manager->free({batch_kv_cache_resource_, stream_->completeTokenIdsPtr()});
             clearCacheReuseState();
             malloc_status = MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
+        } else if (reuse_local) {
+            publishAllocatorReuse(*load_context, true);
+        } else {
+            stream_->setHostReuseLength(0);
+            stream_->setDiskReuseLength(0);
         }
     } else {
         clearCacheReuseState();
@@ -360,6 +383,9 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     }
     allocator_load_context_.reset();
 
+    if (timed_out) {
+        return absl::DeadlineExceededError("match-to-ready deadline exceeded");
+    }
     if (load_success) {
         return absl::OkStatus();
     }
@@ -380,6 +406,20 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
         return absl::DeadlineExceededError(error_text.empty() ? "allocator load timed out" : error_text);
     }
     return absl::InternalError(error_text.empty() ? "allocator load failed" : "allocator load failed: " + error_text);
+}
+
+bool StreamCacheResource::deferAllocatorLoadRelease() {
+    auto context = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
+    if (!context || !context->needBackendMatch()) {
+        return false;
+    }
+    auto replacement = std::make_shared<BatchKVCacheResource>();
+    replacement->resetBatchSize(batch_kv_cache_resource_->batchSize());
+    replacement->initGroups(resource_context_.cache_manager->cacheConfig().topologyPtr());
+    context->deferRelease(batch_kv_cache_resource_);
+    batch_kv_cache_resource_ = std::move(replacement);
+    allocator_load_context_.reset();
+    return true;
 }
 
 void StreamCacheResource::reportCacheReuseMetrics() {
@@ -465,9 +505,19 @@ bool StreamCacheResource::loadCacheDone() {
         if (!allocator_load_context_->done()) {
             return false;
         }
-        const ErrorInfo error   = allocator_load_context_->errorInfo();
-        const bool      success = allocator_load_context_->success();
-        const auto      status  = finalizeAllocatorLoad();
+        const ErrorInfo error        = allocator_load_context_->errorInfo();
+        const bool      success      = allocator_load_context_->success();
+        const auto      load_context = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
+        const int64_t   completed_us = load_context ? load_context->completionTimeUs() : 0;
+        if (completed_us > 0) {
+            stream_->endCacheExposedWaitWithoutLock(completed_us);
+        }
+        const auto status = finalizeAllocatorLoad();
+        if (status.ok()) {
+            // Successful pages were ready when the transfer settled, even if the
+            // scheduler only observes them after another batch finishes.
+            stream_->recordKvReadyTime(success && completed_us > 0 ? completed_us : currentTimeUs());
+        }
         if (!success && !absl::IsUnavailable(status)) {
             RTP_LLM_LOG_WARNING(
                 "block tree load failed, stream=%ld error=%s", stream_->streamId(), error.ToString().c_str());
@@ -585,18 +635,12 @@ bool StreamCacheResource::enableCacheLookup() const {
     return reuseCache() && any_global_tier;
 }
 
-Tier StreamCacheResource::storeTarget() const {
+Tier StreamCacheResource::insertTarget() const {
     if (!reuseCache()) {
         return Tier::NONE;
     }
     if (enableDeviceCache()) {
         return Tier::DEVICE;
-    }
-    if (enableMemoryCache()) {
-        return Tier::HOST;
-    }
-    if (enableDiskCache()) {
-        return Tier::DISK;
     }
     return Tier::NONE;
 }

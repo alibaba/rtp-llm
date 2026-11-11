@@ -1,8 +1,33 @@
 # BlockTreeCache Benchmark
 
-## Device/Host copy API priority
+Tree 和默认 Transfer 使用真实 CRC layout 与 WorkLoop，benchmark 默认
+`--btc-transfer-engine-async=true --enable-crc=true`；服务配置也默认开启 async，按最终布局选择实现。
+默认 case 检查实际选择 WorkLoop，不能把布局回退计作新路径结果。
 
-默认顺序为 `cuda_3d_batch > cuda_batch > sm > generic`；不支持 3D 的平台从旧路径继续。
+Transfer 支持 `--btc-crc-slot-count`（每个异步 CRC service 在每 GPU 上的 slot 数 C，默认 8）、
+`--transfer-queue-max-size`（驻留 batch 预算 Q，默认 10000）和现有 descriptor batch/staging 参数。
+`--transfer-worker-count`、`--copy-strategy=batch|staged-sm` 只允许显式 legacy case：
+`--btc-transfer-engine-async=false --enable-crc=false`。registry 中原策略与 worker 比较均显式标为 legacy。
+保留原 2 个 smoke、81 个 profile case；Tree 与默认 auto Transfer 为 WorkLoop。
+
+结果 `resolved_config` 包含 `transfer_implementation`、配置 bool、CRC、owner/worker、C/M/Q、staging
+和 `layout_fallback_reason`；manifest 包含 `expected_transfer_implementation`。
+WorkLoop Device copy 的 `actual_copy_strategy=crc`，不把旧策略计时伪装成 CRC kernel 计时。
+Host/Disk 初始数据由真实 CRC store 预填后再测量；主路径与 legacy 结果按实现分别解释。
+
+WorkLoop staging 按 owner 和 load/evict 方向隔离，同方向 FULL/SWA 共用一个池。
+每对 loops 的 N 个槽位按方向各分 N/2；统一 stride 覆盖参与 group 的 CRC storage 与实际 Disk stride，
+按 4096 B 对齐。有效 batch 上限为 `min(M, N/2)`，没有 Device/Disk staging 时为 M。
+`resolved_config` 的 `staging_load_blocks/staging_evict_blocks` 汇总所有 owner，
+`staging_stride_bytes/staging_data_bytes` 报告共享槽位大小及实际数据内存，不再按 FULL/SWA 重复计数。
+Disk executor 使用默认读写线程数；异步队列由 PerRank 按 Q 和有效 batch 上限 B 统一推导：
+读队列为 `Q * min(B, read_threads)`，写队列为 Q，不随 owner 或 backing file 数量增加。
+结果中的 `disk_read_queue_size/disk_write_queue_size` 记录引擎实际采用的容量。
+legacy 继续报告原有类别容量。固定块数合并池时，较小 group 也占一个最大 stride 槽位，比较时须核对实际字节预算。
+
+## legacy Device/Host copy API priority
+
+仅 legacy 普通 copy 使用 `cuda_3d_batch > cuda_batch > sm > generic`；WorkLoop 不读取此策略配置。
 
 `BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY` 可设置为 `cuda_3d_batch`、`cuda_batch`、`sm` 或 `generic`。
 只把指定接口移到首位，其他接口保持相对顺序。例如：
@@ -195,7 +220,7 @@ logical_coordinate = operation_index / direction_count
 working_set_index = permutation(logical_coordinate) % working_set_blocks
 ```
 
-`--transfer-descriptor-batch-size` 控制一次 transfer-engine `submit()` 最多携带多少 descriptor，`0` 表示跟随 concurrency；正式 case 显式设为 8。它与 `--copy-strategy` 不同：前者控制 transfer-engine API 的 descriptor 组批，后者指定 Device↔Host 的底层 copy 路径（`batch` 为 CUDA 1D batch，`cuda-3d-batch` 为 CUDA 3D batch）。当前 Device→Disk 引擎合约仅接受 singleton，runner 在 wave 内并发提交 singleton 以保留 lane concurrency；其余五个方向走真实 descriptor batch。
+`--transfer-descriptor-batch-size` 控制一次 transfer-engine `submit()` 最多携带多少 descriptor，`0` 表示跟随 concurrency；正式 case 显式设为 8。它与 `--copy-strategy` 不同：前者控制 transfer-engine API 的 descriptor 组批，后者指定 Device↔Host 的底层 copy 路径（`batch` 为 CUDA 1D batch，`cuda-3d-batch` 为 CUDA 3D batch）。WorkLoop 和 legacy 的六个方向都走批量提交，wave 与 business 提交均受引擎有效上限约束；legacy 的 Device↔Disk executor 还会按 staging pool 容量进一步切批。
 
 正式结果必须满足：
 
@@ -566,3 +591,7 @@ curl -sI "http://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/$PREFIX/index.html" 
 | tree 结果 `pressure_ready=false` | warmup 后未达到预期压力形态 | 查看 `warmup.*` / `pool.*` 快照解释容量或时长；它是观察项，不会单独使 repetition 无效 |
 | 某张 perf 火焰图样本很少 | 短 case 或大量 off-CPU 等待导致 on-CPU samples 不足 | 在报告标明样本数并避免强热点归因；必要时延长独立 profiling process，不伪装成 suite repetition |
 | suite 全部 case 秒挂、stderr 报 libpython | 见第一行 | 设置 `LD_LIBRARY_PATH` 后重跑 |
+
+manual CRC/profile binary 的 `measurement_layer=copy_primitive`，旧 staged 对比显式标为 legacy；
+它不测量 WorkLoop 调度。driver 在设置 `CRC_BENCH_SOURCE_COMMIT`、`CRC_BENCH_BASE_COMMIT` 后，
+可用 `CRC_BENCH_WORKTREE_PATCH_SHA256` 为未提交工作区补丁记录 SHA256；该值写入 run manifest。

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkCli.h"
 
 #include <iostream>
+#include <algorithm>
 #include <stdexcept>
 
 namespace rtp_llm::benchmark {
@@ -13,6 +14,20 @@ void printUsage(const char* program) {
 }
 
 void validateTransferOptions(const TransferOptions& options) {
+    if (options.btc_transfer_engine_async && options.copy_strategy != "auto")
+        throw std::runtime_error("copy-strategy options require --btc-transfer-engine-async=false");
+    const bool device_route =
+        std::any_of(options.transfer_directions.begin(), options.transfer_directions.end(), [](const auto& direction) {
+            return direction == "d2h" || direction == "h2d" || direction == "disk2d";
+        });
+    if (options.enable_crc && options.copy_strategy != "auto")
+        throw std::runtime_error("copy-strategy requires --enable-crc=false");
+    if (options.btc_transfer_engine_async && device_route && !options.enable_crc)
+        throw std::runtime_error("WorkLoop benchmark Device fixtures require --enable-crc=true");
+    if (options.transfer_worker_count == 0 || options.btc_crc_slot_count == 0)
+        throw std::runtime_error("worker and CRC slot counts must be positive");
+    if (options.btc_transfer_engine_async && options.transfer_queue_max_size < options.transfer_worker_count)
+        throw std::runtime_error("WorkLoop queue budget Q must be >= worker count");
     if (options.group_set.empty() || options.transfer_directions.empty())
         throw std::runtime_error("transfer group set and directions must not be empty");
     if (options.transfer_operation_count == 0 || options.transfer_concurrency == 0 || options.min_measured_seconds == 0

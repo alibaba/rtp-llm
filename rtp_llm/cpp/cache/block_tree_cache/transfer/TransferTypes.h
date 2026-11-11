@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -12,10 +13,22 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSetResource.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
 namespace rtp_llm {
 
 struct TreeNode;
+
+// Transfer lanes describe cache movement, independently of business priority.
+enum class TransferDirection {
+    LOAD,
+    EVICT,
+};
+
+// Disk -> Device uses host staging internally without exposing Disk -> Host.
+inline bool isLoadTransfer(Tier source, Tier target) {
+    return (source == Tier::DISK && target == Tier::DEVICE) || (source == Tier::HOST && target == Tier::DEVICE);
+}
 
 enum class TransferStatus {
     OK,
@@ -24,7 +37,6 @@ enum class TransferStatus {
     DISK_IO_ERROR,
     RESOURCE_EXHAUSTED,
     CRC_MISMATCH,
-    CRC_COMPUTE_ERROR,
 };
 
 // Diagnostic categories for the existing cache-copy metric. They do not change
@@ -38,7 +50,6 @@ enum class CacheCopyError : uint8_t {
     INVALID_REQUEST,
     IO_FAILED,
     RPC_FAILED,
-    CRC_COMPUTE_FAILED,
     CRC_MISMATCH,
 };
 
@@ -56,8 +67,6 @@ inline const char* cacheCopyErrorName(CacheCopyError error) {
             return "IO_FAILED";
         case CacheCopyError::RPC_FAILED:
             return "RPC_FAILED";
-        case CacheCopyError::CRC_COMPUTE_FAILED:
-            return "CRC_COMPUTE_FAILED";
         case CacheCopyError::CRC_MISMATCH:
             return "CRC_MISMATCH";
     }
@@ -72,8 +81,6 @@ inline CacheCopyError cacheCopyErrorFor(TransferStatus status) {
             return CacheCopyError::INVALID_REQUEST;
         case TransferStatus::DISK_IO_ERROR:
             return CacheCopyError::IO_FAILED;
-        case TransferStatus::CRC_COMPUTE_ERROR:
-            return CacheCopyError::CRC_COMPUTE_FAILED;
         case TransferStatus::CRC_MISMATCH:
             return CacheCopyError::CRC_MISMATCH;
         default:
@@ -91,8 +98,6 @@ inline ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
             return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "device block transfer failed");
         case TransferStatus::DISK_IO_ERROR:
             return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "disk block transfer failed");
-        case TransferStatus::CRC_COMPUTE_ERROR:
-            return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "cache CRC computation failed");
         case TransferStatus::CRC_MISMATCH:
             return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "cache integrity verification failed");
         case TransferStatus::RESOURCE_EXHAUSTED:
@@ -166,14 +171,6 @@ struct DeviceHostCopyTemplate {
     size_t device_pitch;
 };
 
-struct DeviceHostCopyOptions {
-    size_t staged_sm_min_tile_count{16};
-    size_t staged_sm_min_bytes{64 * 1024};
-    bool   staged_sm_copy_enabled{true};
-    bool   cuda_batch_copy_enabled{true};
-    bool   cuda_3d_batch_copy_enabled{true};
-};
-
 struct HostBufferView {
     void*  base{nullptr};
     size_t payload_bytes{0};
@@ -236,27 +233,6 @@ struct TransferDescriptor {
         return desc;
     }
 
-    static TransferDescriptor diskToHost(size_t group_set_id, BlockIdxType disk_block, BlockIdxType host_block) {
-        TransferDescriptor desc;
-        desc.group_set_id  = group_set_id;
-        desc.source_tier   = Tier::DISK;
-        desc.target_tier   = Tier::HOST;
-        desc.source_blocks = {disk_block};
-        desc.target_blocks = {host_block};
-        return desc;
-    }
-
-    static TransferDescriptor
-    deviceToDisk(size_t group_set_id, std::vector<BlockIdxType> device_blocks, BlockIdxType disk_block) {
-        TransferDescriptor desc;
-        desc.group_set_id  = group_set_id;
-        desc.source_tier   = Tier::DEVICE;
-        desc.target_tier   = Tier::DISK;
-        desc.source_blocks = std::move(device_blocks);
-        desc.target_blocks = {disk_block};
-        return desc;
-    }
-
     static TransferDescriptor
     diskToDevice(size_t group_set_id, BlockIdxType disk_block, std::vector<BlockIdxType> device_blocks) {
         TransferDescriptor desc;
@@ -282,9 +258,9 @@ struct TransferDescriptor {
 
     bool isExecutable() const {
         const bool supported_direction =
-            (source_tier == Tier::DEVICE && (target_tier == Tier::HOST || target_tier == Tier::DISK))
+            (source_tier == Tier::DEVICE && target_tier == Tier::HOST)
             || (source_tier == Tier::HOST && (target_tier == Tier::DEVICE || target_tier == Tier::DISK))
-            || (source_tier == Tier::DISK && (target_tier == Tier::DEVICE || target_tier == Tier::HOST));
+            || (source_tier == Tier::DISK && target_tier == Tier::DEVICE);
         return supported_direction && endpointResolved(source_tier, source_blocks)
                && endpointResolved(target_tier, target_blocks);
     }
@@ -325,12 +301,45 @@ private:
     }
 };
 
+// Shared task description across preparation, RPC transport and local batching.
+// Builders resolve descriptors before submission; execution entrances validate
+// their batch constraints. Executors own their copy and do not mutate it.
+// Results use the current descriptor order; PerRank owns the parent-index maps.
 class TransferTask {
 public:
     using Clock = std::chrono::steady_clock;
 
-    TransferTask(std::vector<TransferDescriptor> descriptors, std::chrono::milliseconds timeout):
-        descriptors_(std::move(descriptors)), deadline_(Clock::now() + timeout) {}
+    TransferTask(std::vector<TransferDescriptor> descriptors,
+                 std::chrono::milliseconds       timeout,
+                 std::optional<int64_t>          request_id = {}):
+        descriptors_(std::move(descriptors)), deadline_(Clock::now() + timeout), request_id_(request_id) {}
+
+    std::optional<int64_t> requestId() const {
+        return request_id_;
+    }
+
+    uint64_t traceId() const {
+        if (AsyncProfileSession::enabled())
+            AsyncProfileSession::taskLink(trace_id_, workflow_id_, parent_trace_id_, request_id_.value_or(-1));
+        return trace_id_;
+    }
+    uint64_t workflowId() const {
+        return workflow_id_;
+    }
+    uint64_t parentTraceId() const {
+        return parent_trace_id_;
+    }
+    void setWorkflow(uint64_t workflow, uint64_t parent = 0) {
+        workflow_id_     = workflow ? workflow : trace_id_;
+        parent_trace_id_ = parent;
+    }
+    void setTraceId(uint64_t id) {
+        if (id != 0) {
+            if (workflow_id_ == trace_id_)
+                workflow_id_ = id;
+            trace_id_ = id;
+        }
+    }
 
     const std::vector<TransferDescriptor>& descriptors() const {
         return descriptors_;
@@ -362,15 +371,25 @@ public:
     }
 
     TransferTask subtask(std::vector<TransferDescriptor> descriptors) const {
-        return TransferTask(std::move(descriptors), deadline_);
+        return TransferTask(std::move(descriptors), *this);
     }
 
 private:
-    TransferTask(std::vector<TransferDescriptor> descriptors, Clock::time_point deadline):
-        descriptors_(std::move(descriptors)), deadline_(deadline) {}
+    TransferTask(std::vector<TransferDescriptor> descriptors, const TransferTask& parent):
+        descriptors_(std::move(descriptors)),
+        deadline_(parent.deadline_),
+        request_id_(parent.request_id_),
+        trace_id_(parent.trace_id_),
+        workflow_id_(parent.workflow_id_),
+        parent_trace_id_(parent.parent_trace_id_) {}
 
-    std::vector<TransferDescriptor> descriptors_;
-    Clock::time_point               deadline_;
+    std::vector<TransferDescriptor>     descriptors_;
+    Clock::time_point                   deadline_;
+    std::optional<int64_t>              request_id_;
+    inline static std::atomic<uint64_t> next_trace_id_{1};
+    uint64_t                            trace_id_{next_trace_id_.fetch_add(1, std::memory_order_relaxed)};
+    uint64_t                            workflow_id_{trace_id_};
+    uint64_t                            parent_trace_id_{0};
 };
 
 }  // namespace rtp_llm

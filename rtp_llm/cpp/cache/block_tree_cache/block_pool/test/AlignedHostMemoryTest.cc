@@ -3,12 +3,16 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
 
-#include <ATen/cuda/CachingHostAllocator.h>
 #include <gtest/gtest.h>
+
+#if USING_CUDA
+#include <ATen/cuda/CachingHostAllocator.h>
+#endif
 
 namespace rtp_llm {
 namespace {
@@ -19,8 +23,8 @@ public:
         if (const char* old = std::getenv(name)) {
             old_value_ = old;
         }
-        if (setenv(name, value, 1) != 0) {
-            throw std::runtime_error("setenv failed");
+        if ((value == nullptr ? unsetenv(name) : setenv(name, value, 1)) != 0) {
+            throw std::runtime_error("environment update failed");
         }
     }
 
@@ -55,6 +59,39 @@ TEST(AlignedHostMemoryTest, AllocatesAlignedWritablePinnedMemory) {
     memory.data()[kUsableBytes - 1] = 0x34;
     EXPECT_EQ(memory.data()[0], 0x12);
     EXPECT_EQ(memory.data()[kUsableBytes - 1], 0x34);
+}
+
+TEST(AlignedHostMemoryTest, RejectsOverflowAndZeroAlignmentBeforeAllocation) {
+    EXPECT_THROW(AlignedHostMemory(std::numeric_limits<size_t>::max(), 4096, "overflow"), std::overflow_error);
+    EXPECT_THROW(AlignedHostMemory(static_cast<size_t>(std::numeric_limits<int64_t>::max()), 1, "signed overflow"),
+                 std::overflow_error);
+    EXPECT_THROW(AlignedHostMemory(64, 0, "zero alignment"), std::invalid_argument);
+}
+
+#if USING_CUDA
+TEST(AlignedHostMemoryTest, DefaultCudaAllocationKeepsExactLargeSizeOutsideTorchCache) {
+    constexpr size_t kGiB         = 1024ULL * 1024 * 1024;
+    constexpr size_t kUsableBytes = 33 * kGiB;
+    constexpr size_t kAlignment   = 4096;
+    ScopedEnvVar     pin_mode("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE", nullptr);
+
+    auto* allocator = at::getHostAllocator(at::kCUDA);
+    allocator->empty_cache();
+    const auto before = allocator->get_stats();
+
+    {
+        AlignedHostMemory memory(kUsableBytes, kAlignment, "default CUDA allocation size test");
+        ASSERT_NE(memory.data(), nullptr);
+        EXPECT_FALSE(memory.isRegistered());
+        EXPECT_EQ(memory.backingBytes(), kUsableBytes + kAlignment);
+        const auto tensor =
+            torch::from_blob(memory.data(), {kUsableBytes}, torch::TensorOptions().dtype(torch::kUInt8));
+        EXPECT_TRUE(tensor.is_pinned());
+
+        const auto during = allocator->get_stats();
+        EXPECT_EQ(during.allocated_bytes.current, before.allocated_bytes.current);
+        EXPECT_EQ(during.active_bytes.current, before.active_bytes.current);
+    }
 }
 
 TEST(AlignedHostMemoryTest, TorchPinnedAllocatorRoundsLargeAllocationToPowerOfTwo) {
@@ -98,12 +135,16 @@ TEST(AlignedHostMemoryTest, RegisteredPinnedAllocationKeepsExactLargeSize) {
         ASSERT_NE(memory.data(), nullptr);
         EXPECT_TRUE(memory.isRegistered());
         EXPECT_EQ(memory.backingBytes(), kUsableBytes + kAlignment);
+        const auto tensor =
+            torch::from_blob(memory.data(), {kUsableBytes}, torch::TensorOptions().dtype(torch::kUInt8));
+        EXPECT_TRUE(tensor.is_pinned());
 
         const auto during = allocator->get_stats();
         EXPECT_EQ(during.allocated_bytes.current, before.allocated_bytes.current);
         EXPECT_EQ(during.active_bytes.current, before.active_bytes.current);
     }
 }
+#endif
 
 TEST(AlignedHostMemoryTest, MemfdRegisteredPinnedAllocationIsWritable) {
     if (!hostMemoryRegistrationSupported()) {

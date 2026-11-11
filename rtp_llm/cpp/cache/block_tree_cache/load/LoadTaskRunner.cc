@@ -6,6 +6,8 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"
 
 namespace rtp_llm {
 
@@ -35,9 +37,13 @@ LoadTaskRunner::TaskPtr LoadTaskRunner::createTask(const std::shared_ptr<LoadAsy
 
     auto task = std::make_shared<Task>(
         std::move(task_load_descs),
-        TransferTask(std::move(host_to_device_descriptors), std::chrono::milliseconds(host_timeout_ms_)),
-        TransferTask(std::move(disk_to_device_descriptors), std::chrono::milliseconds(disk_timeout_ms_)),
+        TransferTask(
+            std::move(host_to_device_descriptors), std::chrono::milliseconds(host_timeout_ms_), context->requestId()),
+        TransferTask(
+            std::move(disk_to_device_descriptors), std::chrono::milliseconds(disk_timeout_ms_), context->requestId()),
         context);
+    task->host_to_device_task.setWorkflow(context->workflowId(), context->workflowId());
+    task->disk_to_device_task.setWorkflow(context->workflowId(), context->workflowId());
     return task;
 }
 
@@ -45,78 +51,96 @@ void LoadTaskRunner::runTransfer(TaskPtr                        task,
                                  const BlockTransferDispatcher& transfer_dispatcher,
                                  BlockTreeCacheMetricsReporter& metrics_reporter,
                                  TransferDoneCallback           callback) {
-    if (task->host_to_device_task.descriptors().empty()) {
-        startDiskTransfer(task, transfer_dispatcher, metrics_reporter, callback);
-        return;
-    }
+    task->phase = Task::Phase::TRANSFERRING;
+    const auto& completion_transfer =
+        task->disk_to_device_task.descriptors().empty() ? task->host_to_device_task : task->disk_to_device_task;
+    const auto workflow  = CompletionStageContext::forWorkflow(metrics_reporter,
+                                                              task->load_descs,
+                                                              "load",
+                                                              completion_transfer.requestId().value_or(-1),
+                                                              completion_transfer.traceId());
+    auto       transfers = std::make_shared<TransferStageState>(
+        [task, workflow, callback = std::move(callback)](TransferResult result) mutable {
+            task->wait.finish(result.ok());
+            task->phase         = Task::Phase::FINISHED;
+            auto observation    = workflow;
+            observation.success = result.ok();
+            CompletionStageScope notify(observation, "context_complete", "workflow_callback");
+            callback(std::move(result.status));
+        });
 
-    task->phase = Task::Phase::HOST_TO_DEVICE;
-    const int64_t transfer_begin =
-        metrics_reporter.reportTransferStarted(CacheTransferOperation::LOAD, Tier::HOST, Tier::DEVICE);
-    transfer_dispatcher.runTransfer(
-        task->host_to_device_task,
-        [this, task, &transfer_dispatcher, &metrics_reporter, transfer_begin, callback = std::move(callback)](
-            TransferResult result) mutable {
-            task->host_result = result;
-            try {
-                reportStageFinished(*task,
-                                    metrics_reporter,
-                                    Tier::HOST,
-                                    task->host_to_device_task.descriptors(),
-                                    transfer_begin,
-                                    result.ok());
-                metrics_reporter.maybeReportCopyError(Tier::HOST, Tier::DEVICE, result);
-                if (!result.ok()) {
-                    task->phase = Task::Phase::FINISHED;
-                    callback(std::move(result.status));
-                    return;
+    for (Tier source_tier : {Tier::HOST, Tier::DISK}) {
+        const auto& transfer = source_tier == Tier::HOST ? task->host_to_device_task : task->disk_to_device_task;
+        if (transfer.descriptors().empty()) {
+            continue;
+        }
+        transfers->addBatch();
+        int64_t transfer_begin   = 0;
+        bool    transfer_started = false;
+        auto    complete = [this, task, transfers, &metrics_reporter, source_tier, observe_wait = workflow.enabled](
+                            TransferResult result, int64_t transfer_begin, bool transfer_started) {
+            const auto& transfer = source_tier == Tier::HOST ? task->host_to_device_task : task->disk_to_device_task;
+            auto observation     = CompletionStageContext::forTransfer(metrics_reporter, transfer, "load", result.ok());
+            CompletionStageScope total(observation, "callback_total", "workflow_callback");
+            if (observe_wait && !task->host_to_device_task.descriptors().empty()
+                && !task->disk_to_device_task.descriptors().empty()) {
+                std::lock_guard<std::mutex> lock(task->wait_mutex);
+                bool&      completed       = source_tier == Tier::HOST ? task->host_completed : task->disk_completed;
+                const bool other_completed = source_tier == Tier::HOST ? task->disk_completed : task->host_completed;
+                completed                  = true;
+                if (other_completed) {
+                    task->direction_wait.finish(result.ok());
+                } else if (result.ok()) {
+                    task->direction_wait =
+                        observation.start(source_tier == Tier::HOST ? "wait_disk2d" : "wait_h2d", "workflow_callback");
                 }
-                startDiskTransfer(task, transfer_dispatcher, metrics_reporter, callback);
-            } catch (const std::exception& exception) {
-                task->phase = Task::Phase::FINISHED;
-                callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what()));
-            } catch (...) {
-                task->phase = Task::Phase::FINISHED;
-                callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown host load completion exception"));
             }
-        });
-}
-
-void LoadTaskRunner::startDiskTransfer(TaskPtr                        task,
-                                       const BlockTransferDispatcher& transfer_dispatcher,
-                                       BlockTreeCacheMetricsReporter& metrics_reporter,
-                                       TransferDoneCallback           callback) {
-    if (task->disk_to_device_task.descriptors().empty()) {
-        task->phase = Task::Phase::FINISHED;
-        callback(ErrorInfo::OkStatus());
-        return;
-    }
-
-    task->phase = Task::Phase::DISK_TO_DEVICE;
-    const int64_t transfer_begin =
-        metrics_reporter.reportTransferStarted(CacheTransferOperation::LOAD, Tier::DISK, Tier::DEVICE);
-    transfer_dispatcher.runTransfer(
-        task->disk_to_device_task,
-        [this, task, &metrics_reporter, transfer_begin, callback = std::move(callback)](TransferResult result) mutable {
-            task->disk_result = result;
             try {
-                reportStageFinished(*task,
-                                    metrics_reporter,
-                                    Tier::DISK,
-                                    task->disk_to_device_task.descriptors(),
-                                    transfer_begin,
-                                    result.ok());
-                metrics_reporter.maybeReportCopyError(Tier::DISK, Tier::DEVICE, result);
-                task->phase = Task::Phase::FINISHED;
-                callback(std::move(result.status));
+                CompletionStageScope metrics(observation, "metrics_report", "workflow_callback");
+                if (transfer_started) {
+                    reportStageFinished(
+                        *task, metrics_reporter, source_tier, transfer.descriptors(), transfer_begin, result.ok());
+                    metrics_reporter.maybeReportCopyError(source_tier, Tier::DEVICE, result);
+                }
             } catch (const std::exception& exception) {
-                task->phase = Task::Phase::FINISHED;
-                callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what()));
+                total.setSuccess(false);
+                result.merge(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what()));
             } catch (...) {
-                task->phase = Task::Phase::FINISHED;
-                callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown disk load completion exception"));
+                total.setSuccess(false);
+                result.merge(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown load completion exception"));
             }
-        });
+            observation.success = result.ok();
+            {
+                CompletionStageScope save(observation, "save_result", "workflow_callback");
+                auto&                saved_result = source_tier == Tier::HOST ? task->host_result : task->disk_result;
+                saved_result                      = result;
+            }
+            transfers->completeBatch(std::move(result));
+        };
+        try {
+            auto                 observation = CompletionStageContext::forTransfer(metrics_reporter, transfer, "load");
+            CompletionStageScope submit(observation, "next_stage_submit", "workflow_callback");
+            transfer_begin =
+                metrics_reporter.reportTransferStarted(CacheTransferOperation::LOAD, source_tier, Tier::DEVICE);
+            transfer_started = true;
+            transfer_dispatcher.runTransfer(
+                transfer,
+                [complete, transfer_begin](TransferResult result) {
+                    complete(std::move(result), transfer_begin, true);
+                },
+                "load");
+        } catch (const std::exception& exception) {
+            complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what()), transfer_begin, transfer_started);
+        } catch (...) {
+            complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown load submission exception"),
+                     transfer_begin,
+                     transfer_started);
+        }
+    }
+    // Keep sources and targets protected until every submitted direction has drained,
+    // including when an earlier direction fails or completes inline.
+    task->wait = workflow.start("wait", "workflow_callback");
+    transfers->finishSubmitting();
 }
 
 void LoadTaskRunner::reportStageFinished(const Task&                            task,

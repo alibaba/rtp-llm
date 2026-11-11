@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/LegacyCopyBenchmarkSupport.h"
 #include <map>
 #include <memory>
 #include <string>
@@ -12,24 +13,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 
 namespace rtp_llm::benchmark {
-
-struct BenchmarkDeviceHostCopyStats {
-    std::atomic<size_t>  cuda_3d_batch{0};
-    std::atomic<size_t>  staged_sm{0};
-    std::atomic<size_t>  cuda_batch{0};
-    std::atomic<size_t>  generic{0};
-    std::atomic<int64_t> lowest_api_ns{0};
-    std::atomic<size_t>  lowest_api_calls{0};
-
-    void reset() {
-        cuda_3d_batch.store(0, std::memory_order_relaxed);
-        staged_sm.store(0, std::memory_order_relaxed);
-        cuda_batch.store(0, std::memory_order_relaxed);
-        generic.store(0, std::memory_order_relaxed);
-        lowest_api_ns.store(0, std::memory_order_relaxed);
-        lowest_api_calls.store(0, std::memory_order_relaxed);
-    }
-};
 
 class TransferBenchmarkRunner {
 public:
@@ -107,7 +90,7 @@ private:
                                      const std::string&             pool_prefix,
                                      bool                           need_device,
                                      std::shared_ptr<HostBlockPool> host_pool,
-                                     BlockTreeDiskBlockPoolPtr      disk_pool);
+                                     DiskBlockPoolPtr               disk_pool);
 
     TransferDescriptor createDescriptor(const std::string&               direction,
                                         const MemberDeviceBlocks&        device_blocks,
@@ -122,7 +105,6 @@ private:
                                  const MemberDeviceBlocks&                          device_blocks,
                                  const std::vector<BlockIdxType>&                   host_blocks,
                                  const std::vector<BlockIdxType>&                   disk_blocks,
-                                 BlockTreeTaskPool*                                 d2disk_submit_pool,
                                  BlockTreeTaskPool*                                 business_pool,
                                  size_t                                             wave_width,
                                  size_t                                             descriptor_batch_size,

@@ -534,6 +534,22 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args(args)
     py_env_configs.server_config.validate_allocator_dump_config()
+    kv_cache_config = py_env_configs.kv_cache_config
+    if (
+        kv_cache_config.block_pool_frozen_abort_lower_ratio
+        > kv_cache_config.block_pool_frozen_abort_upper_ratio
+    ):
+        parser.error(
+            "block_pool_frozen_abort_lower_ratio must not exceed "
+            "block_pool_frozen_abort_upper_ratio"
+        )
+    if (
+        kv_cache_config.kv_cache_event_snapshot_interval_ms <= 0
+        and not kv_cache_config.enable_remote_cache
+    ):
+        parser.error(
+            "kv_cache_event_snapshot_interval_ms must be positive when remote cache is disabled"
+        )
 
     # Normalize the two switches before model construction and process spawn.
     from rtp_llm.utils.warmup import configure_warmup

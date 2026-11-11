@@ -18,35 +18,22 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
 namespace rtp_llm {
 namespace {
 using namespace block_tree_cache_test;
 
 struct StoreEnvironment {
-    std::vector<DeviceBlockPoolPtr>                      device_pools;
-    std::vector<std::shared_ptr<HostBlockPool>>          host_pools;
-    std::vector<std::shared_ptr<BlockTreeDiskBlockPool>> disk_pools;
-    std::vector<GroupSetPtr>                             groups;
-    std::unique_ptr<BlockTreeCache>                      cache;
+    std::vector<DeviceBlockPoolPtr>             device_pools;
+    std::vector<std::shared_ptr<HostBlockPool>> host_pools;
+    std::vector<std::shared_ptr<DiskBlockPool>> disk_pools;
+    std::vector<GroupSetPtr>                    groups;
+    std::unique_ptr<BlockTreeCache>             cache;
 
     IBlockPool& poolFor(Tier tier, size_t group_set_id = 0) const {
         return tier == Tier::HOST ? static_cast<IBlockPool&>(*host_pools[group_set_id]) :
                                     static_cast<IBlockPool&>(*disk_pools[group_set_id]);
-    }
-
-    size_t storeRefCount() const {
-        size_t store_refs = 0;
-        for (const DeviceBlockPoolPtr& pool : device_pools) {
-            store_refs += pool->referencedBlocksNum(BlockTreeRefType::STORE);
-        }
-        for (const std::shared_ptr<HostBlockPool>& pool : host_pools) {
-            store_refs += pool == nullptr ? 0 : pool->referencedBlocksNum(BlockTreeRefType::STORE);
-        }
-        for (const std::shared_ptr<BlockTreeDiskBlockPool>& pool : disk_pools) {
-            store_refs += pool == nullptr ? 0 : pool->referencedBlocksNum(BlockTreeRefType::STORE);
-        }
-        return store_refs;
     }
 };
 
@@ -91,7 +78,7 @@ public:
     bool start() override {
         return true;
     }
-    bool submit(Task task) override {
+    bool submit(Task task, BlockTreeTaskClass = BlockTreeTaskClass::BACKGROUND) override {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             tasks_.push_back(std::move(task));
@@ -219,7 +206,7 @@ private:
     bool                                  submitted_outside_tree_lock_{false};
 };
 
-std::shared_ptr<ControlledPerRankBlockTransferEngine> installStoreTransferEngine(
+std::shared_ptr<ControlledPerRankBlockTransferEngine> installLoadTransferEngine(
     StoreEnvironment& env, TransferCopyAction action, std::shared_ptr<CallbackBarrier> barrier = nullptr) {
     auto engine = std::make_shared<ControlledPerRankBlockTransferEngine>(env.groups, action, std::move(barrier));
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*env.cache, engine);
@@ -259,13 +246,8 @@ protected:
         if (!cudaAvailable()) {
             GTEST_SKIP() << "CUDA not available";
         }
-        env_ = std::make_shared<StoreEnvironment>(makeStoreEnvironment("resident_" + std::string(tierName(GetParam())),
-                                                                       true,
-                                                                       GetParam() == Tier::HOST,
-                                                                       GetParam() == Tier::DISK,
-                                                                       {4},
-                                                                       2,
-                                                                       nullptr));
+        env_                          = std::make_shared<StoreEnvironment>(makeStoreEnvironment(
+            "resident_" + std::string(tierName(GetParam())), true, true, GetParam() == Tier::DISK, {4}, 2, nullptr));
         const MultiNodeBlocks sources = allocateDeviceBlocksForTest(*env_->groups[0], keys_.size());
         for (const BlockIndicesType& blocks : sources) {
             request_holds_.push_back(blocks);
@@ -273,9 +255,20 @@ protected:
             resources_.back()[0].device_blocks = blocks;
         }
         ASSERT_EQ(sources.size(), keys_.size());
-        engine_ = installStoreTransferEngine(*env_, TransferCopyAction::Succeed, nullptr);
+        engine_ = installLoadTransferEngine(*env_, TransferCopyAction::Succeed, nullptr);
         ASSERT_NE(engine_, nullptr);
-        env_->cache->insert(keys_, resources_, GetParam());
+        std::vector<std::vector<GroupSetResource>> lower(keys_.size(), std::vector<GroupSetResource>(1));
+        for (auto& item : lower) {
+            const auto block = env_->groups[0]->allocateSingleBlock(GetParam(), BlockTreeRefType::CACHE);
+            ASSERT_NE(block, NULL_BLOCK_IDX);
+            item[0].setBlocks(GetParam(), {block});
+            if (GetParam() == Tier::DISK) {
+                std::vector<uint8_t> record(env_->disk_pools[0]->strideBytes(), 0);
+                block_transfer_engine_test::encodeTestRecord(record.data(), env_->groups[0]->payloadBytes());
+                ASSERT_EQ(env_->disk_pools[0]->write(block, record.data(), record.size()), BlockIOStatus::OK);
+            }
+        }
+        ASSERT_TRUE(insertGroupSetResources(*env_->cache, keys_, lower));
         ASSERT_TRUE(waitForIdle());
         const std::vector<TreeNode*> path = env_->cache->tree()->findNode(keys_);
         ASSERT_EQ(path.size(), keys_.size());
@@ -296,7 +289,6 @@ protected:
         });
         ASSERT_EQ(cleanup.waitFor(std::chrono::seconds(5)), std::future_status::ready);
         cleanup.get();
-        EXPECT_EQ(env_->storeRefCount(), 0u);
         EXPECT_EQ(env_->device_pools[0]->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
         EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
     }
@@ -386,15 +378,14 @@ protected:
             EXPECT_EQ(node->group_set_resources[0].getTopTier(), succeeded ? Tier::DEVICE : GetParam());
         }
 
-        const size_t resident_prefix_length =
-            env_->cache->insert(keys_, resources_, Tier::DEVICE, /*is_resident=*/true);
-        EXPECT_EQ(resident_prefix_length, succeeded ? keys_.size() : 0u);
         if (succeeded) {
+            const size_t resident_prefix_length =
+                env_->cache->insert(keys_, resources_, Tier::DEVICE, /*is_resident=*/true);
+            EXPECT_EQ(resident_prefix_length, keys_.size());
             expectResidentPrefix(target_blocks);
             EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
         } else {
-            // A failed load retains the only source; resident insertion must not
-            // publish a second serving tier or mark an unpromoted prefix resident.
+            // Before any replacement insert, a failed load retains its source for retry.
             for (const TreeNode* node : settled_path) {
                 EXPECT_FALSE(node->is_resident);
                 EXPECT_EQ(node->group_set_resources[0].getTopTier(), GetParam());
@@ -419,23 +410,25 @@ protected:
     std::vector<BlockIndicesType>                         request_holds_;
 };
 
-TEST_P(ResidentTieredCacheTest, ResidentInsertDoesNotDuplicateExistingLowerTier) {
+TEST_P(ResidentTieredCacheTest, ResidentInsertReplacesIdleLowerTierWithoutCopy) {
     EXPECT_EQ(candidateCountForTier(*env_->cache, GetParam()), 1u);
+    const auto   original_path    = env_->cache->tree()->findNode(keys_);
+    const size_t submitted_before = engine_->submittedBatchCount();
     {
         const size_t resident_prefix_length =
             env_->cache->insert(keys_, resources_, Tier::DEVICE, /*is_resident=*/true);
-        EXPECT_EQ(resident_prefix_length, 0u);
+        EXPECT_EQ(resident_prefix_length, keys_.size());
     }
     const auto path = env_->cache->tree()->findNode(keys_);
-    ASSERT_EQ(path.size(), keys_.size());
-    for (const TreeNode* node : path) {
-        EXPECT_FALSE(node->is_resident);
-        EXPECT_EQ(node->group_set_resources[0].getTopTier(), GetParam());
-        EXPECT_EQ(node->group_set_resources[0].servingTierCount(), 1u);
+    EXPECT_EQ(path, original_path);
+    EXPECT_EQ(engine_->submittedBatchCount(), submitted_before);
+    BlockIndicesType expected_blocks;
+    for (const auto& resource : resources_) {
+        expected_blocks.push_back(resource[0].device_blocks.front());
     }
-    EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::CACHE), keys_.size());
-    EXPECT_EQ(candidateCountForTier(*env_->cache, GetParam()), 1u);
-    EXPECT_EQ(candidateCountForTier(*env_->cache, Tier::DEVICE), 0u);
+    expectResidentPrefix(expected_blocks);
+    EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+    EXPECT_EQ(env_->poolFor(GetParam()).freeBlocksNum(), env_->poolFor(GetParam()).totalBlocksNum());
 }
 
 TEST_P(ResidentTieredCacheTest, SuccessfulAsyncLoadCanBePromotedToResidentAfterSettlement) {
@@ -492,42 +485,6 @@ TEST_P(ResidentTieredCacheTest, CancelPendingLoadThenRetryBeforeRegisteringResid
 }
 
 INSTANTIATE_TEST_SUITE_P(HostAndDisk, ResidentTieredCacheTest, ::testing::Values(Tier::HOST, Tier::DISK));
-
-TEST(BlockTreeStorerTest, StorePublishesTargetTierOnlyWithoutDeviceResidency) {
-    if (!cudaAvailable()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    for (const Tier target_tier : {Tier::HOST, Tier::DISK}) {
-        SCOPED_TRACE(tierName(target_tier));
-        StoreEnvironment env         = makeStoreEnvironment("store_publish_" + std::string(tierName(target_tier)),
-                                                    /*device_cache_on=*/false,
-                                                    /*host_cache_on=*/target_tier == Tier::HOST,
-                                                    /*disk_cache_on=*/target_tier == Tier::DISK);
-        IBlockPool&      target_pool = env.poolFor(target_tier);
-        const size_t     free_before = target_pool.freeBlocksNum();
-
-        MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
-        ASSERT_EQ(request_holder.size(), 1u);
-        env.cache->insert({100}, deviceSourceResources({request_holder[0]}), target_tier);
-        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
-
-        auto find = env.cache->tree()->findNode({100});
-        ASSERT_EQ(find.size(), 1u);
-        const GroupSetResource& resource = find.back()->group_set_resources[0];
-        EXPECT_TRUE(resource.device_blocks.empty());
-        ASSERT_TRUE(resource.hasTier(target_tier));
-        EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
-
-        const BlockIdxType target_block = resource.getBlocks(target_tier).front();
-        EXPECT_EQ(target_pool.treeRefCount(target_block), 1u) << "only the tree may hold the published block";
-        EXPECT_EQ(target_pool.freeBlocksNum(), free_before - 1);
-        EXPECT_EQ(candidateCountForTier(*env.cache, target_tier), 1u)
-            << "the accepted target must reach its eviction heap";
-        EXPECT_EQ(env.storeRefCount(), 0u);
-        releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
-    }
-}
 
 TEST(BlockTreeStorerTest, DeviceInsertSubmitsAllBlocksOutsideTreeLockAndPinsUntilCompletion) {
     if (!cudaAvailable()) {
@@ -591,13 +548,54 @@ TEST(BlockTreeStorerTest, DeviceInsertSubmitsAllBlocksOutsideTreeLockAndPinsUnti
     releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[1]);
 }
 
+TEST(BlockTreeStorerTest, RemoteReuseIntervalFiltersWritesBeforePinningAndKeepsTheLocalTreeComplete) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    auto backend = std::make_shared<PendingWriteBackend>();
+    auto env     = makeStoreEnvironment("remote_reuse_interval", true, false, false, {2}, 4, backend);
+    backend->setCache(env.cache.get());
+    auto holder = allocateDeviceBlocksForTest(*env.groups[0], 3);
+    ASSERT_EQ(holder.size(), 3u);
+    const CacheKeysType                        keys{100, 101, 102};
+    std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
+    for (size_t i = 0; i < holder.size(); ++i) {
+        resources[i][0].device_blocks = holder[i];
+    }
+
+    env.cache->insert(keys, resources, Tier::DEVICE, false, {}, 0, keys.size());
+    EXPECT_EQ(backend->submittedCount(), 0u);
+    EXPECT_EQ(env.cache->getKeySnapshot().keys, keys);
+    for (const auto& blocks : holder) {
+        EXPECT_EQ(env.device_pools[0]->refCount(blocks[0]), 2u);  // Request + tree, no remote pin.
+    }
+
+    env.cache->insert(keys, resources, Tier::DEVICE, false, {}, 1, 2);
+    EXPECT_EQ(backend->submittedCount(), 1u);
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), 3u);
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[1][0]), 2u);
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[2][0]), 3u);
+    backend->finishWrite();
+    EXPECT_EQ(backend->keys(), (CacheKeysType{100, 102}));
+    EXPECT_EQ(backend->blocks(), (BlockIndicesType{holder[0][0], holder[2][0]}));
+
+    // Without an adopted remote interval, all keys take the original write path.
+    env.cache->insert(keys, resources, Tier::DEVICE);
+    EXPECT_EQ(backend->submittedCount(), 2u);
+    backend->finishWrite();
+    EXPECT_EQ(backend->keys(), (CacheKeysType{100, 102, 100, 101, 102}));
+    for (const auto& blocks : holder) {
+        releaseDeviceBlocks(*env.cache, env.device_pools[0], blocks);
+    }
+}
+
 TEST(BlockTreeStorerTest, UnsupportedInsertTargetsRejectWithoutPublishingOrPinning) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
     auto             backend = std::make_shared<PendingWriteBackend>();
-    StoreEnvironment env     = makeStoreEnvironment("storage_remote_only",
-                                                /*device_cache_on=*/false,
+    StoreEnvironment env     = makeStoreEnvironment("storage_invalid_target",
+                                                /*device_cache_on=*/true,
                                                 /*host_cache_on=*/false,
                                                 /*disk_cache_on=*/false,
                                                 /*lower_tier_blocks=*/{2},
@@ -611,7 +609,7 @@ TEST(BlockTreeStorerTest, UnsupportedInsertTargetsRejectWithoutPublishingOrPinni
     resources[1][0].device_blocks = holder[1];
 
     const auto    version = env.cache->getKeySnapshot().version;
-    for (const Tier target : {Tier::REMOTE, Tier::NONE}) {
+    for (const Tier target : {Tier::HOST, Tier::DISK, Tier::REMOTE, Tier::NONE}) {
         SCOPED_TRACE(tierName(target));
         EXPECT_ANY_THROW(env.cache->insert({100, 101}, resources, target));
         EXPECT_TRUE(env.cache->tree()->findNode({100, 101}).empty());
@@ -628,7 +626,7 @@ TEST(BlockTreeStorerTest, UnsupportedInsertTargetsRejectWithoutPublishingOrPinni
     releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[1]);
 }
 
-TEST(BlockTreeStorerTest, WatermarkDropKeepsPendingRemoteWritePayloadAlive) {
+TEST(BlockTreeStorerTest, WatermarkPreservesPendingRemoteWriteUntilReferencesRelease) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -647,6 +645,7 @@ TEST(BlockTreeStorerTest, WatermarkDropKeepsPendingRemoteWritePayloadAlive) {
     }
     std::vector<int> uploaded_bytes;
     backend->inspect_write = [&](const StorageRequest& request) {
+        EXPECT_EQ(request.request_id, 214);
         for (const auto& handles : request.handles) {
             ASSERT_EQ(handles.size(), 1u);
             const auto buffers = pool->convertIndexToBuffer(0, handles[0].block);
@@ -658,21 +657,32 @@ TEST(BlockTreeStorerTest, WatermarkDropKeepsPendingRemoteWritePayloadAlive) {
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = holders[0];
     resources[1][0].device_blocks = holders[1];
-    env.cache->insert({100, 101}, resources, Tier::DEVICE);
+    env.cache->insert({100, 101}, resources, Tier::DEVICE, false, 214);
     EXPECT_EQ(backend->submittedCount(), 1u);
-    EXPECT_EQ(env.cache->getStats().tree_node_count, 0u);
-    EXPECT_EQ(env.cache->match({100, 101}).matched_device_blocks, 0u);
+    EXPECT_EQ(env.cache->getStats().tree_node_count, 2u);
+    BlockTreeMatchResult match = env.cache->match({100, 101});
+    EXPECT_EQ(match.matched_device_blocks, 2u);
+    block_tree_cache_test::releaseRequestRefsForTest(*env.cache, match.matched_device_resources);
+    match.matched_device_resources.clear();
     for (const auto& holder : holders) {
-        EXPECT_EQ(pool->treeRefCount(holder[0]), 0u);
-        EXPECT_EQ(pool->refCount(holder[0]), 2u);  // REQUEST and pending storage write.
+        EXPECT_EQ(pool->treeRefCount(holder[0]), 1u);
+        EXPECT_EQ(pool->refCount(holder[0]), 3u);  // CACHE, REQUEST and pending storage write.
         unreferenceDeviceBlocksForTest(*env.groups[0], {holder});
         EXPECT_TRUE(pool->isAllocated(holder[0]));
-        EXPECT_EQ(pool->refCount(holder[0]), 1u);
+        EXPECT_EQ(pool->refCount(holder[0]), 2u);
     }
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*env.cache);
+    EXPECT_EQ(env.cache->getStats().tree_node_count, 2u);
     backend->finishWrite();
     EXPECT_EQ(uploaded_bytes, (std::vector<int>{17, 18}));
     EXPECT_EQ(backend->keys(), (CacheKeysType{100, 101}));
     EXPECT_TRUE(backend->submittedOutsideTreeLock());
+    for (const auto& holder : holders) {
+        EXPECT_EQ(pool->refCount(holder[0]), 1u);
+        EXPECT_EQ(pool->treeRefCount(holder[0]), 1u);
+    }
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*env.cache);
+    EXPECT_EQ(env.cache->getStats().tree_node_count, 0u);
     for (const auto& holder : holders) {
         EXPECT_FALSE(pool->isAllocated(holder[0]));
     }
@@ -741,65 +751,6 @@ TEST(BlockTreeStorerTest, DeviceInsertDoesNotWaitForBackendWriteOrLocalTaskPool)
     releaseDeviceBlocks(*env->cache, env->device_pools[0], holder[0]);
 }
 
-TEST(BlockTreeStorerTest, HostAndDiskInsertReturnBeforeTransferSettlement) {
-    if (!cudaAvailable()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-    for (const Tier target_tier : {Tier::HOST, Tier::DISK}) {
-        SCOPED_TRACE(std::string(tierName(target_tier)));
-        auto backend = std::make_shared<PendingWriteBackend>();
-        auto env     = std::make_shared<StoreEnvironment>(
-            makeStoreEnvironment("store_settlement_" + std::string(tierName(target_tier)) + "_async",
-                                 /*device_cache_on=*/false,
-                                 /*host_cache_on=*/target_tier == Tier::HOST,
-                                 /*disk_cache_on=*/target_tier == Tier::DISK,
-                                 /*lower_tier_blocks=*/{2},
-                                 /*task_pool_size=*/2,
-                                 backend));
-        backend->setCache(env->cache.get());
-        auto barrier = std::make_shared<CallbackBarrier>();
-        installStoreTransferEngine(*env, TransferCopyAction::Succeed, barrier);
-        MultiNodeBlocks holder = allocateDeviceBlocksForTest(*env->groups[0], 1);
-        ASSERT_EQ(holder.size(), 1u);
-
-        const auto          resources = deviceSourceResources({holder[0]});
-        BoundedThread<void> insert(
-            [env, resources, target_tier] { env->cache->insert({100}, resources, target_tier); });
-        if (!barrier->waitUntilEnteredFor(1, std::chrono::seconds(5))) {
-            barrier->release();
-            if (insert.waitFor(std::chrono::seconds(5)) == std::future_status::ready) {
-                insert.get();
-            }
-            FAIL() << "HOST/DISK transfer did not enter the controlled barrier";
-        }
-        const auto before_release = insert.waitFor(std::chrono::seconds(5));
-        barrier->release();
-        const auto after_cleanup =
-            before_release == std::future_status::ready ? before_release : insert.waitFor(std::chrono::seconds(5));
-        if (after_cleanup != std::future_status::ready) {
-            FAIL() << "HOST/DISK insert did not finish after releasing the transfer barrier";
-        }
-        insert.get();
-        EXPECT_EQ(before_release, std::future_status::ready)
-            << "async HOST/DISK insert must return while transfer is blocked";
-        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env->cache);
-
-        const auto path = env->cache->tree()->findNode({100});
-        ASSERT_EQ(path.size(), 1u);
-        const GroupSetResource& resource = path.back()->group_set_resources[0];
-        ASSERT_TRUE(resource.hasTier(target_tier));
-        const BlockIdxType target_block = resource.getBlocks(target_tier).front();
-        EXPECT_EQ(env->poolFor(target_tier).treeRefCount(target_block), 1u);
-        EXPECT_EQ(env->storeRefCount(), 0u);
-        backend->finishWrite();
-        EXPECT_TRUE(backend->blocks().empty());
-        EXPECT_TRUE(backend->keyHandleCounts().empty());
-        EXPECT_EQ(backend->submittedCount(), 0u);
-        EXPECT_EQ(env->device_pools[0]->refCount(holder[0][0]), 1u);
-        releaseDeviceBlocks(*env->cache, env->device_pools[0], holder[0]);
-    }
-}
-
 TEST(BlockTreeStorerTest, DeviceInsertWithoutBackendOnlyPublishesLocalCache) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
@@ -837,7 +788,7 @@ TEST(BlockTreeStorerTest, StorageHandlesUseTopologyGroupsAndResolveGpuBuffers) {
         return group;
     };
     auto topology  = CacheTopology::create({make_group("z_group", 0), make_group("a_group", 1)},
-                                          {{0, {"z_group"}}, {1, {"a_group"}}});
+                                           {{0, {"z_group"}}, {1, {"a_group"}}});
     auto pool_z    = makeDevicePool({{16, 0}}, kStoreDeviceBlocks, "storage_tag_z");
     auto pool_a    = makeDevicePool({{16, 0}}, kStoreDeviceBlocks, "storage_tag_a");
     auto group_set = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_z, pool_a}, nullptr, nullptr);
@@ -862,242 +813,6 @@ TEST(BlockTreeStorerTest, StorageHandlesUseTopologyGroupsAndResolveGpuBuffers) {
                                   pool_a->convertIndexToBuffer(0, holder[0][1]).front().addr}));
     releaseDeviceBlocks(*cache, pool_z, {holder[0][0]});
     releaseDeviceBlocks(*cache, pool_a, {holder[0][1]});
-}
-
-TEST(BlockTreeStorerTest, StoreToDiskStaysDiscoverableWhenDeviceCacheIsEnabled) {
-    if (!cudaAvailable()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    StoreEnvironment env = makeStoreEnvironment("store_l1_l3_promotion",
-                                                /*device_cache_on=*/true,
-                                                /*host_cache_on=*/false,
-                                                /*disk_cache_on=*/true);
-
-    MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
-    ASSERT_EQ(request_holder.size(), 1u);
-
-    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::DISK);
-    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
-
-    auto find = env.cache->tree()->findNode({100});
-    ASSERT_EQ(find.size(), 1u);
-    const GroupSetResource& resource = find.back()->group_set_resources[0];
-    ASSERT_TRUE(resource.hasTier(Tier::DISK));
-    EXPECT_TRUE(resource.device_blocks.empty()) << "the request forbade L1, so nothing may be published there";
-    const BlockIdxType disk_block = resource.disk_block;
-
-    BlockTreeMatchResult              result       = env.cache->match({100});
-    std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
-    ASSERT_NE(load_context, nullptr);
-    EXPECT_EQ(result.matched_device_blocks, 0u);
-    EXPECT_EQ(load_context->matchedBlocks(), 1u);
-    ASSERT_EQ(load_context->loadDescs().size(), 1u);
-    EXPECT_EQ(load_context->loadDescs()[0].source_tier, Tier::DISK);
-    EXPECT_EQ(load_context->loadDescs()[0].target_tier, Tier::DEVICE);
-    EXPECT_EQ(load_context->loadDescs()[0].source_blocks, (BlockIndicesType{disk_block}));
-
-    load_context.reset();
-    releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
-}
-
-TEST(BlockTreeStorerTest, StoreKeepsDeviceSourceAliveAfterRequestRelease) {
-    if (!cudaAvailable()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    for (const bool device_cache_on : {false, true}) {
-        SCOPED_TRACE(device_cache_on ? "device_cache_on" : "device_cache_off");
-        StoreEnvironment env =
-            makeStoreEnvironment(std::string("store_source_lifetime_") + (device_cache_on ? "l1" : "no_l1"),
-                                 device_cache_on,
-                                 /*host_cache_on=*/true,
-                                 /*disk_cache_on=*/false);
-        auto barrier = std::make_shared<CallbackBarrier>();
-        installStoreTransferEngine(env, TransferCopyAction::Succeed, barrier);
-
-        const size_t device_free_before = env.device_pools[0]->freeBlocksNum();
-        const size_t host_free_before   = env.host_pools[0]->freeBlocksNum();
-
-        MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
-        ASSERT_EQ(request_holder.size(), 1u);
-        const BlockIdxType device_block = request_holder[0][0];
-
-        if (device_cache_on) {
-            env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::DEVICE);
-        }
-        env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::HOST);
-        barrier->waitUntilEntered();
-        EXPECT_EQ(env.device_pools[0]->referencedBlocksNum(BlockTreeRefType::STORE), 1u);
-
-        releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
-        EXPECT_TRUE(env.device_pools[0]->isAllocated(device_block)) << "the pending store still owns the source";
-        EXPECT_EQ(env.device_pools[0]->refCount(device_block), 1u);
-        EXPECT_EQ(env.device_pools[0]->treeRefCount(device_block), device_cache_on ? 2u : 1u);
-        EXPECT_EQ(candidateCountForTier(*env.cache, Tier::DEVICE), device_cache_on ? 1u : 0u)
-            << "a store hold must not make a cached source ineligible for eviction";
-        if (device_cache_on) {
-            EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*env.cache, 1, Tier::DEVICE), 1);
-        }
-
-        barrier->release();
-        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
-
-        EXPECT_EQ(env.storeRefCount(), 0u);
-        if (device_cache_on) {
-            EXPECT_FALSE(env.device_pools[0]->isAllocated(device_block));
-            EXPECT_EQ(env.device_pools[0]->freeBlocksNum(), device_free_before);
-            const std::vector<TreeNode*> path = env.cache->tree()->findNode({100});
-            if (path.empty()) {
-                EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before)
-                    << "eviction settled before STORE publication";
-            } else {
-                const GroupSetResource& resource = path.back()->group_set_resources[0];
-                EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
-                EXPECT_TRUE(resource.hasTier(Tier::HOST));
-                EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before - 1)
-                    << "STORE publication won the settlement race";
-            }
-        } else {
-            ASSERT_EQ(env.cache->tree()->findNode({100}).size(), 1u);
-            EXPECT_FALSE(env.device_pools[0]->isAllocated(device_block));
-            EXPECT_EQ(env.device_pools[0]->freeBlocksNum(), device_free_before);
-            EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before - 1);
-            EXPECT_EQ(candidateCountForTier(*env.cache, Tier::HOST), 1u);
-        }
-    }
-}
-
-TEST(BlockTreeStorerTest, StoreCopyFailureLeavesTreeAndPoolsUntouched) {
-    for (const Tier target_tier : {Tier::HOST, Tier::DISK}) {
-        for (const TransferCopyAction action : {TransferCopyAction::Fail, TransferCopyAction::Throw}) {
-            SCOPED_TRACE(std::string(tierName(target_tier)) + "/" + transferCopyActionName(action));
-            StoreEnvironment env = makeStoreEnvironment("store_copy_failure_" + std::string(tierName(target_tier)) + "_"
-                                                            + transferCopyActionName(action),
-                                                        /*device_cache_on=*/false,
-                                                        /*host_cache_on=*/target_tier == Tier::HOST,
-                                                        /*disk_cache_on=*/target_tier == Tier::DISK);
-            auto             engine = installStoreTransferEngine(env, action);
-
-            const size_t target_free_before = env.poolFor(target_tier).freeBlocksNum();
-            const size_t device_free_before = env.device_pools[0]->freeBlocksNum();
-
-            MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
-            ASSERT_EQ(request_holder.size(), 1u);
-
-            env.cache->insert({100}, deviceSourceResources({request_holder[0]}), target_tier);
-            block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
-
-            EXPECT_EQ(engine->submittedBatchCount(), 1u);
-            EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
-            EXPECT_EQ(env.poolFor(target_tier).freeBlocksNum(), target_free_before);
-            EXPECT_EQ(env.storeRefCount(), 0u);
-
-            releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
-            EXPECT_EQ(env.device_pools[0]->freeBlocksNum(), device_free_before);
-        }
-    }
-}
-
-enum class StoreRejection {
-    TargetExhausted,
-    PartialPrepare
-};
-
-const char* storeRejectionName(StoreRejection rejection) {
-    switch (rejection) {
-        case StoreRejection::TargetExhausted:
-            return "target_exhausted";
-        case StoreRejection::PartialPrepare:
-            return "partial_prepare";
-    }
-    return "unknown";
-}
-
-TEST(BlockTreeStorerTest, StoreRejectionRollsBackEveryTemporaryHolderExactlyOnce) {
-    for (const StoreRejection rejection : {StoreRejection::TargetExhausted, StoreRejection::PartialPrepare}) {
-        SCOPED_TRACE(storeRejectionName(rejection));
-        const std::vector<size_t> lower_tier_blocks =
-            rejection == StoreRejection::PartialPrepare ? std::vector<size_t>{1, 1} : std::vector<size_t>{1};
-        StoreEnvironment env    = makeStoreEnvironment(std::string("store_reject_") + storeRejectionName(rejection),
-                                                    /*device_cache_on=*/false,
-                                                    /*host_cache_on=*/true,
-                                                    /*disk_cache_on=*/false,
-                                                    lower_tier_blocks);
-        auto             engine = installStoreTransferEngine(env, TransferCopyAction::Succeed);
-
-        std::vector<BlockIdxType> squatters(env.groups.size(), NULL_BLOCK_IDX);
-        const size_t              failing_group_set_id = env.groups.size() - 1;
-        const auto                squatter             = env.host_pools[failing_group_set_id]->malloc();
-        ASSERT_TRUE(squatter.has_value());
-        env.host_pools[failing_group_set_id]->incTreeRef(*squatter, BlockTreeRefType::LOAD);
-        squatters[failing_group_set_id] = *squatter;
-
-        std::vector<MultiNodeBlocks>           holders;
-        std::vector<std::vector<BlockIdxType>> sources;
-        std::vector<size_t>                    device_free_before;
-        for (const GroupSetPtr& group : env.groups) {
-            holders.push_back(allocateDeviceBlocksForTest(*group, 1));
-            ASSERT_EQ(holders.back().size(), 1u);
-            sources.push_back(holders.back()[0]);
-            device_free_before.push_back(kStoreDeviceBlocks);
-        }
-
-        env.cache->insert({100}, deviceSourceResources(sources), Tier::HOST);
-        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
-
-        EXPECT_EQ(engine->submittedBatchCount(), 0u) << "a rejected store must never copy";
-        EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
-        EXPECT_EQ(env.storeRefCount(), 0u);
-        for (size_t group_set_id = 0; group_set_id < env.groups.size(); ++group_set_id) {
-            const size_t squatted = isNullBlockIdx(squatters[group_set_id]) ? 0u : 1u;
-            EXPECT_EQ(env.host_pools[group_set_id]->freeBlocksNum(), lower_tier_blocks[group_set_id] - squatted);
-            if (squatted > 0) {
-                env.host_pools[group_set_id]->decTreeRef(squatters[group_set_id], BlockTreeRefType::LOAD);
-            }
-            releaseDeviceBlocks(*env.cache, env.device_pools[group_set_id], holders[group_set_id].front());
-            EXPECT_EQ(env.device_pools[group_set_id]->freeBlocksNum(), device_free_before[group_set_id]);
-        }
-    }
-}
-
-TEST(BlockTreeStorerTest, DuplicateStoreForSameKeyReleasesLoserBlock) {
-    if (!cudaAvailable()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    StoreEnvironment env              = makeStoreEnvironment("store_duplicate_key",
-                                                /*device_cache_on=*/false,
-                                                /*host_cache_on=*/true,
-                                                /*disk_cache_on=*/false);
-    const size_t     host_free_before = env.host_pools[0]->freeBlocksNum();
-
-    MultiNodeBlocks first_holder  = allocateDeviceBlocksForTest(*env.groups[0], 1);
-    MultiNodeBlocks second_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
-    ASSERT_EQ(first_holder.size(), 1u);
-    ASSERT_EQ(second_holder.size(), 1u);
-
-    auto barrier = std::make_shared<CallbackBarrier>();
-    auto engine  = installStoreTransferEngine(env, TransferCopyAction::Succeed, barrier);
-
-    env.cache->insert({100}, deviceSourceResources({first_holder[0]}), Tier::HOST);
-    env.cache->insert({100}, deviceSourceResources({second_holder[0]}), Tier::HOST);
-    barrier->waitUntilEntered(2);
-    EXPECT_EQ(engine->submittedBatchCount(), 2u);
-    barrier->release();
-    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
-
-    auto find = env.cache->tree()->findNode({100});
-    ASSERT_EQ(find.size(), 1u);
-    const GroupSetResource& resource = find.back()->group_set_resources[0];
-    ASSERT_TRUE(resource.hasTier(Tier::HOST));
-    EXPECT_EQ(env.host_pools[0]->treeRefCount(resource.host_block), 1u);
-    EXPECT_EQ(candidateCountForTier(*env.cache, Tier::HOST), 1u);
-    EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before - 1) << "the losing copy must be returned";
-    EXPECT_EQ(env.storeRefCount(), 0u);
-
-    releaseDeviceBlocks(*env.cache, env.device_pools[0], first_holder.front());
-    releaseDeviceBlocks(*env.cache, env.device_pools[0], second_holder.front());
 }
 
 }  // namespace

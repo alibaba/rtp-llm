@@ -55,7 +55,7 @@ Tree 的逻辑 block 固定覆盖 256 tokens。20 个请求长度桶（tokens）
 | `transfer_device_disk_swa_direct` | swa | direct | auto（c×4） |
 | `transfer_device_disk_swa_buffered` | swa | buffered | 4096 blocks |
 
-方向为 `d2disk,disk2d`。device 仅分配 8 个可复用 lane blocks，disk 分配并寻址完整 working set；每个 wave 先完成全部 write，再提交相同 coordinate 的 read。当前 engine 的 Device→Disk 合约只接受 singleton，runner 通过 case 生命周期内的固定 worker pool 在 wave 内并发提交 8 个 singleton；Disk→Device 则真正提交最多 8 个 descriptor 的 batch，报告按方向展示实际 avg/max batch size。
+方向为 `d2h,h2disk,disk2d`。device 和 host 使用可复用的 lane blocks，disk 分配完整 working set；每个 wave 先完成 Device→Host 和 Host→Disk，再读取相同 coordinate 的 Disk→Device。各方向按对应的批次上限提交；legacy 的磁盘读取按 staging 容量进一步切批。报告按方向展示 API 提交的实际 avg/max batch size。
 
 ### Host↔Disk（4 个）
 
@@ -66,7 +66,7 @@ Tree 的逻辑 block 固定覆盖 256 tokens。20 个请求长度桶（tokens）
 | `transfer_host_disk_swa_direct` | swa | direct | auto（c×8） |
 | `transfer_host_disk_swa_buffered` | swa | buffered | 4096 blocks |
 
-方向为 `h2disk,disk2h`。两个方向都按最多 8 个 descriptor 的 batch 提交；host 不需要 GPU staging，不限制最小操作数。
+方向为 `h2disk`。按最多 8 个 descriptor 的 batch 提交；host 不需要 GPU staging，不限制最小操作数。
 
 ### Batch API matrix（单方向）
 
@@ -90,7 +90,7 @@ matrix_{label}_{direction}_{group_set}_{strategy}_c640_t{tasks}_d{descriptors}_b
 e2e_B_{direction}_{group_set}_{strategy}_u{upper}_l{lower}_n160_b8
 ```
 
-方向 `d2h`/`h2d` 各有 `cuda_batch`、`cuda_3d_batch`、`staged_sm` 三种策略；`h2disk`/`disk2h` 各使用 `direct`。每种组合展开 `full_context`/`swa`、上层业务并发 1/4、下层 worker 数 1/4，共 64 个 case。每个业务包含 160 个 descriptor，API descriptor batch 为 8，working set 为 640 blocks。driver 先按 profile payload 与最小字节数上调操作数，再向上对齐到 160 的整数倍，保证完整业务请求；case manifest 的 `resolved_transfer_operation_count` 记录送入 native 的值，native pilot 仍可继续上调，最终测量操作数以 result 为准。
+方向 `d2h`/`h2d` 各有 `cuda_batch`、`cuda_3d_batch`、`staged_sm` 三种策略；`h2disk`/`disk2d` 各使用 `direct`。每种组合展开 `full_context`/`swa`、上层业务并发 1/4、下层 worker 数 1/4，共 64 个 case。每个业务包含 160 个 descriptor，API descriptor batch 为 8，working set 为 640 blocks。driver 先按 profile payload 与最小字节数上调操作数，再向上对齐到 160 的整数倍，保证完整业务请求；case manifest 的 `resolved_transfer_operation_count` 记录送入 native 的值，native pilot 仍可继续上调，最终测量操作数以 result 为准。
 
 用于观察业务并发和 transfer worker 并发的组合影响。报告可按方向、group set 和策略分别展示 2×2 并发矩阵，或仅展示与实验问题有关的组合。这里的 e2e 是 transfer 业务提交路径，不代表完整模型推理；不要解释为线上请求吞吐。
 
@@ -130,3 +130,13 @@ e2e_B_{direction}_{group_set}_{strategy}_u{upper}_l{lower}_n160_b8
 | `requested_copy_strategy` / `actual_copy_strategy` | 请求与实际使用的传输策略 |
 | `requested_transfer_descriptor_batch_size` / `resolved_transfer_descriptor_batch_size` | transfer engine API 请求/解析后的 descriptor batch 大小；与 CUDA copy strategy 无关 |
 | `descriptor_batch_size_avg/max` | measured window 内每次 `submit()` 携带的 descriptor 数量；另有 `direction.<dir>.*` 分方向值 |
+
+## Transfer 实现与布局 provenance
+
+case 名称及计数保持原矩阵；`BenchmarkCase.transfer_implementation` 明确记录预期实现。
+默认 Tree/auto Transfer（含 smoke）使用 CRC＋WorkLoop；保留的 batch/staged-sm 和 worker/e2e 对比
+显式携带 `--btc-transfer-engine-async=false --enable-crc=false`，属于 legacy 比较。
+worker 参数不会出现在 WorkLoop case 中，CLI 拒绝把它当作 owner 配置。
+检查 manifest 的 `expected_transfer_implementation` 以及结果 `resolved_config` 的
+`transfer_implementation`、`btc_transfer_engine_async`、`enable_crc`、C/M/Q、owner/worker 与 staging。
+WorkLoop Device copy 报 `actual_copy_strategy=crc`，旧策略 lowest-api 统计仅用于 legacy。

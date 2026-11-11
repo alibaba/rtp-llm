@@ -6,24 +6,24 @@
 namespace rtp_llm {
 
 CrcDumpWriter::Metadata CrcDumpWriter::dumpMetadata(const TransferDescriptor& descriptor, const GroupSet& group) {
-    const bool              store = descriptor.source_tier == Tier::DEVICE;
+    const bool              evict = descriptor.source_tier == Tier::DEVICE;
     CrcDumpWriter::Metadata metadata{
         {"device", std::to_string(group.devicePools().front()->deviceIndex())},
-        {"operation", store ? "store" : "load"},
+        {"operation", evict ? "evict" : "load"},
         {"direction", std::string(tierName(descriptor.source_tier)) + "->" + tierName(descriptor.target_tier)},
         {"copy_item", descriptor.debugString()},
         {"group_set_id", std::to_string(descriptor.group_set_id)},
         {"kind", cacheGroupTypeName(group.groupType())},
         {"layout", group.usesPhysicalPayloadGeometry() ? "physical_pool_geometry" : "topology_geometry"},
         {"member_count", std::to_string(group.groupTags().size())},
-        // CRC diagnostics are emitted after gather/store or load/scatter has completed.
+        // CRC diagnostics are emitted after gather/evict or load/scatter has completed.
         {"output_written", "true"},
-        {"cpu_snapshot_role", store ? "candidate_output_after_failure" : "restore_source_after_failure"},
-        {"gpu_footer_role", store ? "candidate_output" : "checked_source"},
-        {"gpu_snapshot_role", store ? "gathered_candidate_output" : "checked_source"},
-        {"tile_copy_stage", store ? "gather_completed" : "scatter_completed"},
+        {"cpu_snapshot_role", evict ? "candidate_output_after_failure" : "restore_source_after_failure"},
+        {"gpu_footer_role", evict ? "candidate_output" : "checked_source"},
+        {"gpu_snapshot_role", evict ? "gathered_candidate_output" : "checked_source"},
+        {"tile_copy_stage", evict ? "gather_completed" : "scatter_completed"},
         {"cpu_backing",
-         descriptor.source_tier == Tier::HOST || descriptor.target_tier == Tier::HOST ? "memory_pool" :
+         descriptor.source_tier == Tier::HOST || descriptor.target_tier == Tier::HOST ? "host_pool" :
                                                                                         "disk_staging_buffer"},
     };
     for (size_t member = 0; member < group.groupTags().size(); ++member) {

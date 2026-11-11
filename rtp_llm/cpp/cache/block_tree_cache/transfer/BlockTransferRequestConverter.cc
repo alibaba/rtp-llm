@@ -61,14 +61,6 @@ bool BlockTransferRequestConverter::directionFor(const TransferDescriptor&      
         request_direction = MemoryOperationRequestPB::H2DISK;
         return true;
     }
-    if (descriptor.source_tier == Tier::DISK && descriptor.target_tier == Tier::HOST) {
-        request_direction = MemoryOperationRequestPB::DISK2H;
-        return true;
-    }
-    if (descriptor.source_tier == Tier::DEVICE && descriptor.target_tier == Tier::DISK) {
-        request_direction = MemoryOperationRequestPB::D2DISK;
-        return true;
-    }
     if (descriptor.source_tier == Tier::DISK && descriptor.target_tier == Tier::DEVICE) {
         request_direction = MemoryOperationRequestPB::DISK2D;
         return true;
@@ -109,11 +101,16 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
         return false;
     }
     request.set_timeout_ms(remaining->count());
-    const auto&                             descriptors = task.descriptors();
+    request.set_transfer_trace_id(task.traceId());
+    request.set_transfer_workflow_id(task.workflowId());
+    request.set_transfer_parent_id(task.parentTraceId());
+    request.set_has_transfer_request_id(task.requestId().has_value());
+    request.set_transfer_request_id(task.requestId().value_or(0));
+    const auto& descriptors = task.descriptors();
     if (descriptors.empty()) {
         return false;
     }
-    const TransferDescriptor&               first       = descriptors.front();
+    const TransferDescriptor&               first = descriptors.front();
     MemoryOperationRequestPB::CopyDirection request_direction;
     if (!directionFor(first, request_direction)) {
         return false;
@@ -201,24 +198,6 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
                 descriptor =
                     TransferDescriptor::hostToDisk(group_set.groupSetId(), item.mem_block(), item.disk_block());
                 break;
-            case MemoryOperationRequestPB::DISK2H:
-                if (!group_set.hostPool() || !group_set.hostPool()->validBlock(item.mem_block())
-                    || !group_set.diskPool() || !group_set.diskPool()->validBlock(item.disk_block())) {
-                    return false;
-                }
-                descriptor =
-                    TransferDescriptor::diskToHost(group_set.groupSetId(), item.disk_block(), item.mem_block());
-                break;
-            case MemoryOperationRequestPB::D2DISK: {
-                std::vector<BlockIdxType> device_blocks;
-                if (!group_set.diskPool() || !group_set.diskPool()->validBlock(item.disk_block())
-                    || !decodeDeviceBlocks(item, group_set, device_blocks)) {
-                    return false;
-                }
-                descriptor = TransferDescriptor::deviceToDisk(
-                    group_set.groupSetId(), std::move(device_blocks), item.disk_block());
-                break;
-            }
             case MemoryOperationRequestPB::DISK2D: {
                 std::vector<BlockIdxType> device_blocks;
                 if (!group_set.diskPool() || !group_set.diskPool()->validBlock(item.disk_block())
@@ -249,8 +228,6 @@ MemoryOperationResponsePB::Code BlockTransferRequestConverter::encodeCode(CacheC
             return MemoryOperationResponsePB::INVALID_REQUEST;
         case CacheCopyError::IO_FAILED:
             return MemoryOperationResponsePB::IO_FAILED;
-        case CacheCopyError::CRC_COMPUTE_FAILED:
-            return MemoryOperationResponsePB::CRC_COMPUTE_FAILED;
         case CacheCopyError::CRC_MISMATCH:
             return MemoryOperationResponsePB::CRC_MISMATCH;
         default:
@@ -268,8 +245,6 @@ CacheCopyError BlockTransferRequestConverter::decodeCode(MemoryOperationResponse
             return CacheCopyError::INVALID_REQUEST;
         case MemoryOperationResponsePB::IO_FAILED:
             return CacheCopyError::IO_FAILED;
-        case MemoryOperationResponsePB::CRC_COMPUTE_FAILED:
-            return CacheCopyError::CRC_COMPUTE_FAILED;
         case MemoryOperationResponsePB::CRC_MISMATCH:
             return CacheCopyError::CRC_MISMATCH;
         default:

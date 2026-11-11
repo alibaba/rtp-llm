@@ -1,11 +1,15 @@
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <atomic>
+#include <cstring>
 #include <functional>
 #include <c10/cuda/CUDAGuard.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceHostTransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/LegacyTransferEngine.h"
+#include "rtp_llm/models_py/bindings/CrcBlockCopy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
@@ -88,7 +92,7 @@ TEST(DeviceHostCopyTemplateTest, Disabled3DBatchDoesNotInitializeTemplates) {
     BlockTreeTaskPool     tasks(1, 8, "DisabledTemplateInitTest");
     DeviceHostCopyOptions options;
     options.cuda_3d_batch_copy_enabled = false;
-    DeviceHostTransferExecutor executor(tasks, 8, options, nullptr, nullptr, nullptr, {group});
+    DeviceHostTransferExecutor executor(tasks, 8, options, nullptr, nullptr, nullptr, nullptr, {group});
     auto* strategy = dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(executor.strategies_.front().get());
     ASSERT_NE(strategy, nullptr);
     EXPECT_TRUE(strategy->templates_.empty());
@@ -327,61 +331,81 @@ TEST(DeviceHostCopyTemplateTest, RejectsMismatchedCopyWidthBeforeLegacyDispatch)
     }
 }
 
-TEST(DeviceHostCopyTemplateTest, RejectsMixedDirectionBeforeStrategyDispatch) {
-    BlockTreeTaskPool          tasks(1, 8, "MixedDirectionTest");
-    DeviceHostTransferExecutor executor(tasks, 8);
-    auto                       group = templateGroup(CacheGroupType::FULL);
-    std::vector<uint8_t>       host(96);
+GroupSetPtr transferTemplateGroup(bool enable_crc = false) {
+    const auto base = templateGroup(CacheGroupType::FULL);
+    return makeTestGroupSet(0,
+                            base->topologyPtr(),
+                            base->groupTags(),
+                            base->devicePools(),
+                            makeHostPool(base->payloadBytes(), 4, enable_crc),
+                            nullptr,
+                            enable_crc);
+}
+
+TEST(DeviceHostCopyTemplateTest, PerRankGroupsMixedDirectionsBeforeStrategyDispatch) {
+    auto                       group = transferTemplateGroup();
+    std::atomic<size_t>        attempts{0};
+    PerRankBlockTransferEngine engine({group}, false, {}, 128, 8, 1, 8, nullptr, 0, 8, false);
+    auto&                      executor = *engine.legacy_->device_host_executor_;
     executor.strategies_.clear();
-    executor.strategies_.push_back(std::make_unique<BatchProbe>([] { return StrategyResult::done(); }));
-    EXPECT_EQ(executor
-                  .executeBatch({{host.data(), 48, 48}, {host.data() + 48, 48, 48}},
-                                {TransferDescriptor::hostToDevice(0, 1, {1, 2, 3}),
-                                 TransferDescriptor::deviceToHost(0, {1, 2, 3}, 2)},
-                                {group.get(), group.get()})
-                  .copy_error,
-              CacheCopyError::INVALID_REQUEST);
+    executor.strategies_.push_back(std::make_unique<BatchProbe>([&] {
+        ++attempts;
+        return StrategyResult::done();
+    }));
+    const auto first = poolMalloc(*group->hostPool()), second = poolMalloc(*group->hostPool());
+    auto       context = engine.execute(makeTransferTask({TransferDescriptor::hostToDevice(0, first, {1, 2, 3}),
+                                                          TransferDescriptor::deviceToHost(0, {1, 2, 3}, second)}));
+    context->waitDone();
+    engine.waitForIdle();
+    EXPECT_TRUE(context->success());
+    EXPECT_EQ(attempts.load(), 2u);
+    releasePoolBlock(*group->hostPool(), first);
+    releasePoolBlock(*group->hostPool(), second);
 }
 
 TEST(DeviceHostCopyTemplateTest, CrcBackingsDoNotDispatchPlainCopyStrategies) {
-    BlockTreeTaskPool          tasks(1, 8, "CrcDispatchTest");
-    DeviceHostTransferExecutor executor(tasks, 8);
-    auto                       group = templateGroup(CacheGroupType::FULL);
-    group->initialize(0, group->topologyPtr(), group->groupTags(), BackingLayout{0, 64, 64, true});
-    size_t attempts = 0;
+    if (!CrcCopyWorkspace::available())
+        GTEST_SKIP() << "requires CUDA13 CRC";
+    auto                       group = transferTemplateGroup(true);
+    std::atomic<size_t>        attempts{0};
+    PerRankBlockTransferEngine engine({group}, false, {}, 128, 8, 1, 8, nullptr, 0, 8, false);
+    auto&                      executor = *engine.legacy_->device_host_executor_;
     executor.strategies_.clear();
     executor.strategies_.push_back(std::make_unique<BatchProbe>([&] {
         ++attempts;
         return StrategyResult::done();
     }));
-    std::vector<uint8_t> host(64);
-    EXPECT_EQ(
-        executor
-            .executeBatch({{host.data(), 48, 64}}, {TransferDescriptor::hostToDevice(0, 1, {1, 2, 3})}, {group.get()})
-            .copy_error,
-        CacheCopyError::INVALID_REQUEST);
-    EXPECT_EQ(attempts, 0u);
+    const auto host_block = poolMalloc(*group->hostPool());
+    const auto buffer     = group->hostPool()->blockBuffer(host_block);
+    std::memset(buffer.addr, 0x5A, group->payloadBytes());
+    encodeTestRecord(buffer.addr, group->payloadBytes());
+    auto context = engine.execute(makeTransferTask({TransferDescriptor::hostToDevice(0, host_block, {1, 2, 3})}));
+    context->waitDone();
+    engine.waitForIdle();
+    EXPECT_TRUE(context->success());
+    EXPECT_EQ(attempts.load(), 0u);
+    releasePoolBlock(*group->hostPool(), host_block);
 }
 
 TEST(DeviceHostCopyTemplateTest, RejectsMismatchedMemberBlocksBeforeStrategyDispatch) {
-    BlockTreeTaskPool          tasks(1, 8, "MemberBlockCountTest");
-    DeviceHostTransferExecutor executor(tasks, 8);
-    auto                       group = templateGroup(CacheGroupType::FULL);
-    std::vector<uint8_t>       host(96);
-    int                        attempts = 0;
+    auto                       group = transferTemplateGroup();
+    std::atomic<size_t>        attempts{0};
+    PerRankBlockTransferEngine engine({group}, false, {}, 128, 8, 1, 8, nullptr, 0, 8, false);
+    auto&                      executor = *engine.legacy_->device_host_executor_;
     executor.strategies_.clear();
     executor.strategies_.push_back(std::make_unique<BatchProbe>([&] {
         ++attempts;
         return StrategyResult::done();
     }));
-    EXPECT_EQ(executor
-                  .executeBatch({{host.data(), 48, 48}, {host.data() + 48, 48, 48}},
-                                {TransferDescriptor::hostToDevice(0, 1, {1, 2, 3}),
-                                 TransferDescriptor::hostToDevice(0, 2, {1, 2})},
-                                {group.get(), group.get()})
-                  .copy_error,
-              CacheCopyError::INVALID_REQUEST);
-    EXPECT_EQ(attempts, 0);
+    const auto first = poolMalloc(*group->hostPool()), second = poolMalloc(*group->hostPool());
+    auto       context = engine.execute(makeTransferTask(
+        {TransferDescriptor::hostToDevice(0, first, {1, 2, 3}), TransferDescriptor::hostToDevice(0, second, {1, 2})}));
+    context->waitDone();
+    engine.waitForIdle();
+    EXPECT_EQ(context->result().copy_error, CacheCopyError::INVALID_REQUEST);
+    EXPECT_EQ(attempts.load(), 0u);
+    releasePoolBlock(*group->hostPool(), first);
+    releasePoolBlock(*group->hostPool(), second);
 }
 
 TEST(DeviceHostCopyTemplateTest, Disabled3DBatchFallsBackToLegacyStrategy) {

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -10,6 +11,7 @@
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheLayout.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -359,8 +361,17 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   const ParallelismConfig& parallelism_config,
                                                   const KVCacheConfig&     kv_cache_config,
                                                   int                      gen_num_per_cycle) {
-    auto config        = createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+    auto config = createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config.reuse_cache_tail_blocks > 0, "reuse_cache_tail_blocks must be positive");
+    RTP_LLM_CHECK_WITH_INFO(std::isfinite(kv_cache_config.block_pool_frozen_abort_lower_ratio)
+                               && std::isfinite(kv_cache_config.block_pool_frozen_abort_upper_ratio)
+                               && kv_cache_config.block_pool_frozen_abort_lower_ratio >= 0.0
+                               && kv_cache_config.block_pool_frozen_abort_lower_ratio
+                                      <= kv_cache_config.block_pool_frozen_abort_upper_ratio
+                               && kv_cache_config.block_pool_frozen_abort_upper_ratio <= 1.0,
+                           "block pool frozen abort ratios must be finite and satisfy 0 <= lower <= upper <= 1");
+    config.block_pool_frozen_abort_lower_ratio = kv_cache_config.block_pool_frozen_abort_lower_ratio;
+    config.block_pool_frozen_abort_upper_ratio = kv_cache_config.block_pool_frozen_abort_upper_ratio;
     config.reuse_cache_tail_blocks = kv_cache_config.reuse_cache_tail_blocks;
     auto groups                    = config.topology().groups();
     for (auto& group : groups) {
@@ -444,9 +455,18 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
         block_num = static_cast<uint32_t>(kv_cache_config.test_block_num);
     } else {
-        const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
-            runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
-        const auto block_budget = blockBudgetForConfig(config);
+        // CRC services are created only after the KV pools. Reserve their
+        // persistent allocations before choosing automatic pool capacity.
+        const auto transfer_memory_bytes =
+            kv_cache_config.kv_cache_mem_mb > 0 ? 0 : blockTreeTransferDeviceMemory(config, kv_cache_config);
+        const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(runtime_config,
+                                                                                    kv_cache_config,
+                                                                                    model_config,
+                                                                                    parallelism_config,
+                                                                                    warm_up_result,
+                                                                                    sp_config,
+                                                                                    transfer_memory_bytes);
+        const auto block_budget      = blockBudgetForConfig(config);
         if (block_budget.explicit_pool_reserve_bytes > 0) {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size >= block_budget.explicit_pool_reserve_bytes,
                                     "kv cache budget %zu MiB is smaller than explicitly-sized pool reservation %zu MiB "

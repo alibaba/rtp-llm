@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 
 using namespace std;
 
@@ -380,6 +381,14 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         if (model_inputs_logger_) {
             const auto role = is_propose_ ? ModelInputsModelRole::DRAFT : ModelInputsModelRole::NORMAL;
             model_inputs_logger_->log(model_input, role, model_->model_id_);
+        }
+        if (telemetry::TelemetryRuntime::isActive()) {
+            const auto forward_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            for (const auto& stream : streams) {
+                if (stream->isContextStream()) {
+                    stream->recordPrefillForwardTime(forward_time_us);
+                }
+            }
         }
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;

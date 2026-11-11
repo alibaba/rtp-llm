@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
+#include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
@@ -15,6 +16,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "autil/TimeUtility.h"
@@ -60,16 +62,20 @@ void releaseHostMemoryCache() {
 #endif
 }
 
-bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const CacheStoreConfig& cache_store_config) {
-    // Only PD cache-store RDMA registers KV cache as user MR.  Keep the
-    // raw device allocation backing out of direct KVCacheManager users and non-RDMA
-    // paths so PyTorch allocator behavior is unchanged elsewhere.
+bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig&      pd_sep_config,
+                                         const CacheStoreConfig& cache_store_config,
+                                         const KVCacheConfig&    kv_cache_config) {
+    const bool remote_cache_gdr = kv_cache_config.enable_remote_cache && remoteCacheGdrEnabled();
+    // Raw device allocation is required by PD cache-store RDMA and by the
+    // KVCM RemoteCache GDR backend. Keep the PyTorch allocator for deployments
+    // where neither registered-memory path is active.
     const bool pd_role = pd_sep_config.role_type == RoleType::PREFILL || pd_sep_config.role_type == RoleType::DECODE;
     const bool has_cache_store_server = pd_sep_config.cache_store_listen_port > 0
                                         || pd_sep_config.cache_store_rdma_listen_port > 0
                                         || pd_sep_config.remote_rpc_server_port > 0;
-    return pd_role && pd_sep_config.cache_store_rdma_mode
-           && (cache_store_config.cache_store_rdma_mode || has_cache_store_server);
+    const bool cache_store_rdma = pd_role && pd_sep_config.cache_store_rdma_mode
+                                  && (cache_store_config.cache_store_rdma_mode || has_cache_store_server);
+    return cache_store_rdma || remote_cache_gdr;
 }
 
 // Must keep the same parsing semantics as NormalExecutor::useDeviceInput()
@@ -769,7 +775,8 @@ void NormalEngine::initializeAndPublishCacheManager(ResourceContext&            
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     normalizeSystemPromptCacheConfig();
-    const bool use_device_malloc_block_pool = shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config);
+    const bool use_device_malloc_block_pool =
+        shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config, kv_cache_config);
     const ModelConfig* draft_model_config   = propose_params_ && propose_params_->draftModel() ?
                                                   &propose_params_->getEngineInitParams().model_config_ :
                                                   nullptr;
@@ -1004,6 +1011,16 @@ absl::Status NormalEngine::step() try {
         }
     }
 
+    if (telemetry::TelemetryRuntime::isActive()) {
+        const auto dispatch_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        for (const auto& stream : streams) {
+            if (stream->isContextStream()) {
+                stream->recordPrefillDispatchTime(dispatch_time_us);
+                stream->recordPrefillPreviousReleaseTime(previous_execution_release_us_);
+            }
+        }
+    }
+
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
@@ -1033,6 +1050,10 @@ absl::Status NormalEngine::step() try {
         if (propose_params_) {
             step_profiler_.finishStep();
         }
+    }
+
+    if (!streams.empty()) {
+        previous_execution_release_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
     }
 
     // report step metrics

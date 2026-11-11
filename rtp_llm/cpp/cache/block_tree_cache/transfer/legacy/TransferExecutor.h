@@ -22,14 +22,17 @@ protected:
     TransferExecutor(BlockTreeTaskPool&                             transfer_task_pool,
                      size_t                                         max_descriptors_per_batch,
                      std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
-                     BlockTreeTaskPool*                             load_task_pool = nullptr);
+                     BlockTreeTaskPool*                             load_task_pool = nullptr,
+                     int64_t                                        world_rank     = -1);
 
+    // PerRank validates endpoints and submits nonempty batches of one direction
+    // and GroupSet. The caller supplies one host view and group per descriptor.
     virtual TransferResult executeBatch(const std::vector<HostBufferView>&     hosts,
                                         const std::vector<TransferDescriptor>& descriptors,
                                         const std::vector<const GroupSet*>&    group_sets) = 0;
 
 private:
-    friend class PerRankBlockTransferEngine;
+    friend class LegacyTransferEngine;
 
     std::shared_ptr<TransferAsyncContext>
     execute(TransferTask task, std::vector<HostBufferView> hosts, std::vector<const GroupSet*> group_sets);
@@ -38,6 +41,7 @@ private:
     BlockTreeTaskPool*                             load_task_pool_;
     size_t                                         max_descriptors_per_batch_;
     std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter_;
+    int64_t                                        world_rank_;
 };
 
 }  // namespace rtp_llm

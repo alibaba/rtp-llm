@@ -3,6 +3,8 @@
 #include <memory>
 #include <optional>
 #include <type_traits>
+#include <unistd.h>
+#include <utility>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -21,7 +23,9 @@ static_assert(std::is_same_v<decltype(DeviceBlockPoolConfigHelper::createConfigF
                                  std::declval<const CacheConfig&>(), std::declval<const GroupBase&>())),
                              DeviceBlockPoolConfig>);
 
-std::shared_ptr<DeviceBlockPoolConfig> makeConfig() {
+std::shared_ptr<DeviceBlockPoolConfig>
+makeConfig(double frozen_abort_lower_ratio       = kDefaultBlockPoolFrozenAbortLowerRatio,
+           double frozen_abort_upper_ratio = kDefaultBlockPoolFrozenAbortUpperRatio) {
     constexpr int        kLayerNum       = 4;
     constexpr int        kBlockNum       = 10;
     constexpr size_t     kTokensPerBlock = 1;
@@ -32,6 +36,8 @@ std::shared_ptr<DeviceBlockPoolConfig> makeConfig() {
                                                                                 /*local_head_num_kv=*/1,
                                                                                 /*size_per_head=*/64);
     cache_config.finalizeBlockNums(kBlockNum, rtp_llm::RuntimeConfig{});
+    cache_config.block_pool_frozen_abort_lower_ratio       = frozen_abort_lower_ratio;
+    cache_config.block_pool_frozen_abort_upper_ratio = frozen_abort_upper_ratio;
     auto config = std::make_shared<DeviceBlockPoolConfig>(
         DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front()));
     config->pool_name                 = "device";
@@ -84,12 +90,25 @@ CacheConfig makeMtpCacheConfig() {
 
 }  // namespace
 
+TEST(DeviceBlockPoolTest, FrozenAbortBoundsSurviveCacheConfigAndPoolNormalization) {
+    for (const auto& [lower, upper] : {std::pair{0.0, 0.4}, {0.55, 0.85}, {1.0, 1.0}}) {
+        SCOPED_TRACE(::testing::Message() << "lower=" << lower << " upper=" << upper);
+        auto config = makeConfig(lower, upper);
+        EXPECT_DOUBLE_EQ(config->frozen_block_abort_lower_ratio, lower);
+        EXPECT_DOUBLE_EQ(config->frozen_block_abort_upper_ratio, upper);
+        DeviceBlockPool pool(config);
+        EXPECT_DOUBLE_EQ(pool.config().frozen_block_abort_lower_ratio, lower);
+        EXPECT_DOUBLE_EQ(pool.config().frozen_block_abort_upper_ratio, upper);
+    }
+}
+
 TEST(DeviceBlockPoolTest, InitKeepsBlockZeroInvalid) {
     auto config                       = makeConfig();
     config->use_device_malloc_backing = false;
     DeviceBlockPool pool(config);
 
     ASSERT_TRUE(pool.init());
+    EXPECT_FALSE(pool.usesDedicatedDeviceAllocation());
     EXPECT_FALSE(pool.isAllocated(0));
     EXPECT_FALSE(pool.validBlock(0));
     EXPECT_EQ(pool.totalBlocksNum(), config->physical_block_count - 1);
@@ -165,6 +184,11 @@ TEST(DeviceBlockPoolTest, MultiLayoutMtpConfigUsesMainBlockCountAndGlobalLayerMa
 
     DeviceBlockPool pool(config);
     ASSERT_TRUE(pool.init());
+    EXPECT_TRUE(pool.usesDedicatedDeviceAllocation());
+    EXPECT_GE(pool.getAllocationSizeBytes(), pool.getTotalSizeBytes());
+    const long page_size = sysconf(_SC_PAGESIZE);
+    ASSERT_GT(page_size, 0);
+    EXPECT_EQ(pool.getAllocationSizeBytes() % static_cast<size_t>(page_size), 0u);
     auto block = pool.malloc();
     ASSERT_TRUE(block.has_value());
 
@@ -291,6 +315,64 @@ TEST(DeviceBlockPoolTest, RequestAndCacheRefsUpdateAvailableIndependently) {
     EXPECT_EQ(pool.availableBlocksNum(), total_blocks);
 }
 
+TEST(DeviceBlockPoolTest, HasRequestRefDistinguishesRequestAndTreeReferences) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto block = pool.malloc();
+    ASSERT_TRUE(block.has_value());
+    EXPECT_FALSE(pool.hasRequestRef(*block));
+    pool.incTreeRef(*block, BlockTreeRefType::CACHE);
+    pool.incTreeRef(*block, BlockTreeRefType::EVICTION);
+    EXPECT_EQ(pool.refCount(*block), 1u);
+    EXPECT_FALSE(pool.hasRequestRef(*block));
+    pool.incRef(*block);
+    pool.incRef(*block);
+    EXPECT_TRUE(pool.hasRequestRef(*block));
+    pool.decRef(*block);
+    EXPECT_TRUE(pool.hasRequestRef(*block));
+    pool.decRef(*block);
+    EXPECT_FALSE(pool.hasRequestRef(*block));
+    pool.decTreeRef(*block, BlockTreeRefType::EVICTION);
+    pool.decTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_FALSE(pool.isAllocated(*block));
+}
+
+TEST(DeviceBlockPoolTest, ReclaimCacheBlockRequiresOneCacheRefAndNoOtherHolders) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto block = pool.malloc();
+    ASSERT_TRUE(block.has_value());
+    EXPECT_FALSE(pool.canReclaimCacheBlock(*block));
+
+    pool.incTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_TRUE(pool.canReclaimCacheBlock(*block));
+    pool.incRef(*block);
+    pool.incRef(*block);
+    EXPECT_FALSE(pool.canReclaimCacheBlock(*block));
+    pool.decRef(*block);
+    EXPECT_FALSE(pool.canReclaimCacheBlock(*block));
+    pool.decRef(*block);
+    EXPECT_TRUE(pool.canReclaimCacheBlock(*block));
+
+    for (const BlockTreeRefType type : {BlockTreeRefType::CACHE, BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION}) {
+        pool.incTreeRef(*block, type);
+        EXPECT_FALSE(pool.canReclaimCacheBlock(*block));
+        pool.decTreeRef(*block, type);
+        EXPECT_TRUE(pool.canReclaimCacheBlock(*block));
+    }
+    pool.decTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_FALSE(pool.isAllocated(*block));
+
+    const auto frozen = pool.malloc();
+    ASSERT_TRUE(frozen.has_value());
+    pool.incTreeRef(*frozen, BlockTreeRefType::CACHE);
+    pool.freezeBlock(*frozen);
+    EXPECT_FALSE(pool.canReclaimCacheBlock(*frozen));
+    pool.decTreeRef(*frozen, BlockTreeRefType::CACHE);
+    EXPECT_TRUE(pool.isAllocated(*frozen));
+    EXPECT_TRUE(pool.isFrozen(*frozen));
+}
+
 TEST(DeviceBlockPoolTest, ActiveBlocksIncludeRequestAndTreeOperationRefs) {
     std::shared_ptr<const DeviceBlockPoolConfig> config = makeConfig();
     DeviceBlockPool                              pool(config);
@@ -318,6 +400,87 @@ TEST(DeviceBlockPoolTest, ActiveBlocksIncludeRequestAndTreeOperationRefs) {
     EXPECT_EQ(active_blocks, 0u);
 
     pool.decTreeRef(*block, BlockTreeRefType::CACHE);
+}
+
+TEST(DeviceBlockPoolTest, ExternalOwnersCountSharedBlocksIndependently) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto block = pool.malloc().value();
+    const auto total = pool.totalBlocksNum();
+    pool.incTreeRef(block, BlockTreeRefType::CACHE);
+    pool.incRef(block);
+    pool.incRef(block, DeviceBlockRefType::REMOTE_CONNECTOR);
+    pool.incRef(block, DeviceBlockRefType::REMOTE_CONNECTOR);
+    pool.incRef(block, DeviceBlockRefType::PD_CONNECTOR);
+
+    EXPECT_EQ(pool.refCount(block), 5u);
+    EXPECT_EQ(pool.referencedBlocksNum(), 1u);
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 1u);
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 1u);
+    EXPECT_EQ(pool.referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
+
+    pool.decRef(block);
+    EXPECT_EQ(pool.referencedBlocksNum(), 0u);
+    EXPECT_EQ(pool.activeBlocksNum(), 1u);
+    EXPECT_EQ(pool.availableBlocksNum(), total - 1);
+    pool.decRef(block, DeviceBlockRefType::REMOTE_CONNECTOR);
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 1u);
+    pool.decRef(block, DeviceBlockRefType::REMOTE_CONNECTOR);
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+    EXPECT_TRUE(pool.isAllocated(block));
+    pool.decRef(block, DeviceBlockRefType::PD_CONNECTOR);
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 0u);
+    EXPECT_EQ(pool.activeBlocksNum(), 0u);
+    EXPECT_EQ(pool.availableBlocksNum(), total);
+    pool.decTreeRef(block, BlockTreeRefType::CACHE);
+    EXPECT_FALSE(pool.isAllocated(block));
+}
+
+TEST(DeviceBlockPoolTest, RequestReleaseCannotConsumeConnectorReference) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto block = pool.malloc().value();
+    pool.incRef(block, DeviceBlockRefType::REMOTE_CONNECTOR);
+
+    EXPECT_ANY_THROW(pool.decRef(block));
+    EXPECT_ANY_THROW(pool.decRef(block, DeviceBlockRefType::PD_CONNECTOR));
+
+    EXPECT_EQ(pool.refCount(block), 1u);
+    EXPECT_EQ(pool.referencedBlocksNum(), 0u);
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 1u);
+    EXPECT_FALSE(pool.isExclusiveRequestBlock(block));
+    pool.decRef(block, DeviceBlockRefType::REMOTE_CONNECTOR);
+    EXPECT_FALSE(pool.isAllocated(block));
+}
+
+TEST(DeviceBlockPoolTest, RequestReplacementCannotRecycleConnectorHeldDonor) {
+    for (const auto owner : {DeviceBlockRefType::REMOTE_CONNECTOR, DeviceBlockRefType::PD_CONNECTOR}) {
+        DeviceBlockPool pool(makeConfig());
+        ASSERT_TRUE(pool.init());
+        const auto blocks = pool.malloc(pool.totalBlocksNum()).value();
+        pool.incRef(blocks);
+        const auto donor = blocks.front();
+        pool.incRef(donor, owner);
+        EXPECT_FALSE(pool.isExclusiveRequestBlock(donor));
+
+        BlockIndicesType replacements;
+        int              required_free = 0;
+        EXPECT_FALSE(pool.tryReplaceRequestReferences({{donor, 1, 0}}, 1, replacements, required_free));
+        EXPECT_EQ(required_free, 1);
+        EXPECT_TRUE(replacements.empty());
+        EXPECT_EQ(pool.refCount(donor), 2u);
+        EXPECT_EQ(pool.referencedBlocksNum(), blocks.size());
+        EXPECT_EQ(pool.referencedBlocksNum(owner), 1u);
+
+        pool.decRef(donor, owner);
+        EXPECT_TRUE(pool.isExclusiveRequestBlock(donor));
+        ASSERT_TRUE(pool.tryReplaceRequestReferences({{donor, 1, 0}}, 1, replacements, required_free));
+        EXPECT_EQ(replacements, (BlockIndicesType{donor}));
+        EXPECT_EQ(pool.referencedBlocksNum(), blocks.size());
+        EXPECT_EQ(pool.referencedBlocksNum(owner), 0u);
+        pool.decRef(blocks);
+        EXPECT_EQ(pool.freeBlocksNum(), pool.totalBlocksNum());
+    }
 }
 
 TEST(DeviceBlockPoolTest, ExplicitReleaseCannotConsumeTreeUmbrella) {

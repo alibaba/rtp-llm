@@ -64,6 +64,7 @@ cc_test(
     ],
     deps = pool_test_deps + [
         ":block_tree_cache_test_utils",
+        "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache_layout",
         "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache:coordinator_cache_manager",
         "//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils",
@@ -92,7 +93,10 @@ cc_library(
     name = "bounded_thread_test_utils",
     testonly = True,
     hdrs = ["BoundedThreadTestUtils.h"],
-    visibility = ["//rtp_llm/cpp/cache/block_tree_cache:__subpackages__"],
+    visibility = [
+        "//rtp_llm/cpp/cache/block_tree_cache:__subpackages__",
+        "//rtp_llm/cpp/engine_base/stream/test:__pkg__",
+    ],
 )
 
 cc_library(
@@ -106,6 +110,7 @@ cc_library(
         "//rtp_llm/cpp/cache/block_tree_cache:__subpackages__",
         "//rtp_llm/cpp/cache/test:__pkg__",
         "//rtp_llm/cpp/engine_base/system_prompt/test:__pkg__",
+        "//rtp_llm/cpp/engine_base/stream/test:__pkg__",
     ],
     deps = [
         "//rtp_llm/cpp/cache/block_tree_cache",

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <limits>
 
 #include "gtest/gtest.h"
 
@@ -41,6 +42,12 @@ TEST(HostBlockPoolTest, InitAllocatesHostBuffersAndSkipsBlockZero) {
 
 TEST(HostBlockPoolTest, RejectsSentinelOnlyPhysicalCount) {
     EXPECT_ANY_THROW(HostBlockPool(makeConfig(/*physical_block_count=*/1)));
+}
+
+TEST(HostBlockPoolTest, RejectsBackingSizeMultiplicationOverflow) {
+    const size_t  stride = std::numeric_limits<size_t>::max() / 4 + 1 + 4096;
+    HostBlockPool pool(makeConfig(4, 64, stride));
+    EXPECT_ANY_THROW(pool.init());
 }
 
 TEST(HostBlockPoolTest, InitWithDontDumpKeepsBufferUsable) {
@@ -169,9 +176,9 @@ TEST(HostBlockPoolTest, LastTreeRefReleasesBlock) {
     EXPECT_TRUE(pool.isAllocated(*block));
     EXPECT_EQ(pool.treeRefCount(*block), 0u);
 
-    pool.incTreeRef(*block, BlockTreeRefType::STORE);
+    pool.incTreeRef(*block, BlockTreeRefType::EVICTION);
     EXPECT_EQ(pool.treeRefCount(*block), 1u);
-    pool.decTreeRef(*block, BlockTreeRefType::STORE);
+    pool.decTreeRef(*block, BlockTreeRefType::EVICTION);
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 

@@ -16,6 +16,66 @@ from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
 
+class KVCacheControlArgumentsTest(TestCase):
+    def test_remote_control_accepts_unused_nonpositive_snapshot_interval(self):
+        from rtp_llm.server.server_args import server_args
+
+        for publisher in ("none", "kvcm"):
+            for interval in ("0", "-1"):
+                with self.subTest(publisher=publisher, interval=interval):
+                    with patch.dict(os.environ, {}, clear=True):
+                        configs = server_args.setup_args(
+                            [
+                                "--kv_cache_event_snapshot_interval_ms",
+                                interval,
+                                "--kv_cache_event_publisher_type",
+                                publisher,
+                                "--enable_remote_cache",
+                                "true",
+                            ]
+                        )
+                    self.assertTrue(configs.kv_cache_config.enable_remote_cache)
+                    self.assertEqual(
+                        configs.kv_cache_config.kv_cache_event_snapshot_interval_ms,
+                        int(interval),
+                    )
+
+    def test_remote_control_env_accepts_unused_snapshot_interval(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(
+            os.environ,
+            {
+                "ENABLE_REMOTE_CACHE": "1",
+                "KV_CACHE_EVENT_PUBLISHER_TYPE": "none",
+                "KV_CACHE_EVENT_SNAPSHOT_INTERVAL_MS": "0",
+            },
+            clear=True,
+        ):
+            configs = server_args.setup_args([])
+        self.assertTrue(configs.kv_cache_config.enable_remote_cache)
+        self.assertEqual(configs.kv_cache_config.kv_cache_event_snapshot_interval_ms, 0)
+
+    def test_nonpositive_snapshot_interval_without_remote_is_rejected(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True), self.assertRaises(SystemExit):
+            server_args.setup_args(["--kv_cache_event_snapshot_interval_ms", "0"])
+
+    def test_snapshot_interval_still_requires_int32(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True), self.assertRaises(SystemExit):
+            server_args.setup_args(
+                [
+                    "--enable_remote_cache",
+                    "true",
+                    "--kv_cache_event_snapshot_interval_ms",
+                    str(2**31),
+                ]
+            )
+
+
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {
@@ -101,6 +161,128 @@ class CacheConfigArgumentsTest(TestCase):
         with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv):
             parser.parse_args(None if use_sys_argv else args)
         return config
+
+    def test_disk_timeouts_support_independent_env_and_cli_overrides(self):
+        cases = (
+            ([], {}, (30000, -1)),
+            ([], {"DISK_CACHE_SYNC_TIMEOUT_MS": "4321"}, (4321, -1)),
+            (
+                [],
+                {
+                    "DISK_CACHE_SYNC_TIMEOUT_MS": "200",
+                    "DISK_CACHE_EVICT_TIMEOUT_MS": "45000",
+                },
+                (200, 45000),
+            ),
+            (
+                ["--disk_cache_sync_timeout_ms", "100"],
+                {
+                    "DISK_CACHE_SYNC_TIMEOUT_MS": "200",
+                    "DISK_CACHE_EVICT_TIMEOUT_MS": "45000",
+                },
+                (100, 45000),
+            ),
+            (
+                ["--disk_cache_evict_timeout_ms", "60000"],
+                {
+                    "DISK_CACHE_SYNC_TIMEOUT_MS": "200",
+                    "DISK_CACHE_EVICT_TIMEOUT_MS": "45000",
+                },
+                (200, 60000),
+            ),
+        )
+        for args, env, expected in cases:
+            with self.subTest(args=args, env=env):
+                config = self.parse_cache_config(args, env)
+                config = pickle.loads(pickle.dumps(config))
+                self.assertEqual(
+                    (
+                        config.disk_cache_sync_timeout_ms,
+                        config.disk_cache_evict_timeout_ms,
+                    ),
+                    expected,
+                )
+
+    def test_remote_task_budget_is_independent_of_host_and_sdk(self):
+        cases = (
+            ([], {}, 20000),
+            ([], {"KVCM_TASK_TIMEOUT_MS": "23000"}, 23000),
+            (
+                ["--kvcm_task_timeout_ms", "24000"],
+                {"KVCM_TASK_TIMEOUT_MS": "23000"},
+                24000,
+            ),
+        )
+        for args, env, expected in cases:
+            with self.subTest(args=args, env=env):
+                config = self.parse_cache_config(args, env)
+                self.assertEqual(config.kvcm_task_timeout_ms, expected)
+                self.assertEqual(config.memory_cache_sync_timeout_ms, 10000)
+                self.assertEqual(config.disk_cache_sync_timeout_ms, 30000)
+                self.assertEqual(config.kvcm_get_timeout_ms, 12000)
+                self.assertEqual(config.kvcm_put_timeout_ms, 12000)
+
+    def test_block_pool_frozen_abort_range_defaults_environment_and_cli(self):
+        lower_env = "BLOCK_POOL_FROZEN_ABORT_LOWER_RATIO"
+        upper_env = "BLOCK_POOL_FROZEN_ABORT_UPPER_RATIO"
+        lower_option = "--block_pool_frozen_abort_lower_ratio"
+        upper_option = "--block_pool_frozen_abort_upper_ratio"
+        for args, env, lower, upper in (
+            ([], {}, 0.3, 0.4),
+            (None, {}, 0.3, 0.4),
+            ([], {lower_env: "0.35"}, 0.35, 0.4),
+            (None, {lower_env: "0.35"}, 0.35, 0.4),
+            ([], {upper_env: "0.8"}, 0.3, 0.8),
+            (None, {upper_env: "0.8"}, 0.3, 0.8),
+            ([], {lower_env: "0.45", upper_env: "0.8"}, 0.45, 0.8),
+            ([lower_option, "0.6"], {lower_env: "0.45", upper_env: "0.8"}, 0.6, 0.8),
+            ([upper_option, "0.7"], {upper_env: "0.8"}, 0.3, 0.7),
+            ([lower_option, "0"], {lower_env: "0.35"}, 0.0, 0.4),
+            ([lower_option, "1", upper_option, "1"], {}, 1.0, 1.0),
+            ([lower_option, "0", upper_option, "0"], {}, 0.0, 0.0),
+            ([lower_option, "0.4", upper_option, "0.4"], {}, 0.4, 0.4),
+        ):
+            with self.subTest(args=args, env=env):
+                config = self.parse_cache_config(args, env)
+                self.assertEqual(config.block_pool_frozen_abort_lower_ratio, lower)
+                self.assertEqual(
+                    config.block_pool_frozen_abort_upper_ratio, upper
+                )
+                restored = pickle.loads(pickle.dumps(config))
+                self.assertEqual(restored.block_pool_frozen_abort_lower_ratio, lower)
+                self.assertEqual(
+                    restored.block_pool_frozen_abort_upper_ratio, upper
+                )
+
+    def test_block_pool_frozen_abort_bounds_reject_invalid_cli_and_environment(self):
+        for name in (
+            "block_pool_frozen_abort_lower_ratio",
+            "block_pool_frozen_abort_upper_ratio",
+        ):
+            for value in ("-0.1", "1.1", "nan", "inf", "-inf", "invalid"):
+                with self.subTest(
+                    name=name, value=value, source="cli"
+                ), self.assertRaises(SystemExit):
+                    self.parse_cache_config([f"--{name}", value], {})
+                for args in (None, []):
+                    with self.subTest(
+                        name=name, value=value, source="env", args=args
+                    ), self.assertRaises(SystemExit):
+                        self.parse_cache_config(args, {name.upper(): value})
+
+    def test_setup_rejects_reversed_frozen_abort_bounds(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for args, env in (
+            (["--block_pool_frozen_abort_lower_ratio", "0.45"], {}),
+            (["--block_pool_frozen_abort_upper_ratio", "0.2"], {}),
+            ([], {"BLOCK_POOL_FROZEN_ABORT_LOWER_RATIO": "0.45"}),
+            (None, {"BLOCK_POOL_FROZEN_ABORT_UPPER_RATIO": "0.2"}),
+        ):
+            with self.subTest(args=args, env=env), patch.dict(
+                os.environ, env, clear=True
+            ), patch.object(sys, "argv", ["server"]), self.assertRaises(SystemExit):
+                setup_args(args)
 
     def test_crc_default_and_environment(self):
         for args in (None, []):

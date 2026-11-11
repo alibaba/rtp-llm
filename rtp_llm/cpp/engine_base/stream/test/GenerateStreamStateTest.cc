@@ -530,4 +530,26 @@ TEST_F(GenerateStreamStateTest, testNormalPathTriggersAsyncLoadCache) {
     ASSERT_TRUE(new_state == StreamState::LOADING_CACHE || new_state == StreamState::WAITING);
 }
 
+
+TEST_F(GenerateStreamStateTest, AsyncRequestLifecycleEndsOnlyAtCommittedTerminal) {
+    auto session = AsyncProfileSession::start(32);
+    auto stream = createStream();
+    stream->reportError(ErrorCode::CANCELLED, "trace cancellation");
+    EXPECT_NE(stream->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    stream->moveToNext();
+    stream.reset();
+    const auto events = session->finish();
+    size_t roots = 0, cancelled = 0, released = 0;
+    for (const auto& e : events) {
+        if (e.record.path != "request") continue;
+        roots += e.record.stage == "request_lifetime";
+        cancelled += e.record.stage == "cancelled";
+        released += e.record.stage == "released_without_terminal";
+        EXPECT_FALSE(e.end_clipped);
+    }
+    EXPECT_EQ(roots, 1u);
+    EXPECT_EQ(cancelled, 1u);
+    EXPECT_EQ(released, 0u);
+}
 }  // namespace rtp_llm

@@ -797,6 +797,13 @@ message MemoryOperationRequestPB {
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
     int64 timeout_ms = 3;
+    // Diagnostic identity only; absent on older peers. Never used for allocation or routing.
+    uint64 transfer_trace_id = 4;
+    int64 transfer_request_id = 5;
+    bool has_transfer_request_id = 6;
+    // Optional diagnostics. Older peers omit these and retain task-local grouping.
+    uint64 transfer_workflow_id = 7;
+    uint64 transfer_parent_id = 8;
 }
 
 message MemoryOperationResponsePB {
@@ -806,7 +813,6 @@ message MemoryOperationResponsePB {
         COPY_FAILED = 1;
         INVALID_REQUEST = 2;
         IO_FAILED = 3;
-        CRC_COMPUTE_FAILED = 4;
         CRC_MISMATCH = 5;
         NOT_EXECUTED = 6;
     }
@@ -904,6 +910,9 @@ enum RemoteOpType {
     REMOTE_OPERATION_UNSPECIFIED = 0;
     REMOTE_OPERATION_READ = 1;
     REMOTE_OPERATION_WRITE = 2;
+    REMOTE_OPERATION_REMOVE_CACHE = 3;
+    REMOTE_OPERATION_GET_LOCATIONS_BY_BACKEND = 4;
+    REMOTE_OPERATION_GET_HOST_CACHE_STATE = 5;
 }
 
 message RemoteBoolMasksTypePB { repeated bool values = 1; }
@@ -933,6 +942,54 @@ message RemoteOperationRequestPB {
     repeated int32 block_ids = 4;
     repeated string uris = 5;
     repeated string group_tags = 6;
+    // Metadata operations are served by TP rank 0 for this backend's instance.
+    RemoteMetadataRequestPB metadata = 7;
+    // Remaining task budget for READ/WRITE; metadata operations keep their own policy.
+    int64 timeout_ms = 8;
+    // Empty preserves one block per URI. Otherwise each positive count gives
+    // the number of consecutive physical group_tags/block_ids for that URI.
+    repeated uint32 uri_block_counts = 9;
+}
+
+message RemoteMetadataRequestPB {
+    // KVCM QueryType: 0=instance default, 1=batch, 2=prefix, 4=Mamba.
+    int32 query_type = 1;
+    repeated int64 block_keys = 2;
+    repeated int64 token_ids = 3;
+    RemoteBlockMaskPB block_mask = 4;
+    int32 backend_type = 5; // KVCM StorageType; one backend per request
+    repeated string location_spec_names = 6;
+    repeated string medium = 7;
+    // P2P-only host selection; newer KVCM SDKs use top_k_host_count plus L2.
+    int32 p2p_host_count = 8;
+}
+
+message RemoteLocationSpecPB {
+    string name = 1;
+    string uri = 2;
+}
+
+message RemoteCacheLocationPB {
+    repeated RemoteLocationSpecPB specs = 1;
+    int32 backend_type = 2;
+    int32 spec_size = 3;
+}
+
+message RemoteBackendKeyLocationsPB {
+    repeated RemoteCacheLocationPB locations = 1;
+}
+
+message RemoteHostCacheMatchPB {
+    string host_ip_port = 1;
+    int64 local = 2;
+    // Legacy SDK details. New SDKs do not provide or reconstruct these values.
+    int64 p2p_1_fetch = 3;
+    int64 p2p_1_total_match = 4;
+    // Presence distinguishes an unsupported global estimate from a real zero.
+    // This is the SDK's union-prefix estimate, not either legacy P2P metric.
+    oneof global_match {
+        int64 global = 5;
+    }
 }
 
 enum RemoteTransferStatusPB {
@@ -947,6 +1004,12 @@ message RemoteOperationResponsePB {
     repeated string actual_uris = 2; // only for write
     // Legacy workers return UNSPECIFIED on RPC success.
     RemoteTransferStatusPB transfer_status = 3;
+    repeated RemoteBackendKeyLocationsPB backend_locations = 4;
+    repeated RemoteHostCacheMatchPB hosts = 5;
+    // Absent means unknown, not SDK success. This is not a buffer-safety proof.
+    oneof sdk_result {
+        bool sdk_failed = 7;
+    }
 }
 
 message FunctionResponsePB {

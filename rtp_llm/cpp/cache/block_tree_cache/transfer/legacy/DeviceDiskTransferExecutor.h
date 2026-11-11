@@ -26,15 +26,13 @@ public:
                                BlockTreeTaskPool&                             transfer_task_pool,
                                size_t                                         max_descriptors_per_batch,
                                std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
-                               BlockTreeTaskPool*                             load_task_pool   = nullptr);
+                               BlockTreeTaskPool*                             load_task_pool   = nullptr,
+                               int64_t                                        world_rank       = -1);
 
     DeviceDiskTransferExecutor(const DeviceDiskTransferExecutor&)            = delete;
     DeviceDiskTransferExecutor& operator=(const DeviceDiskTransferExecutor&) = delete;
 
-    std::shared_ptr<TransferAsyncContext> executeDiskToDevice(TransferTask                        task,
-                                                              const std::vector<const GroupSet*>& group_sets);
-
-    std::shared_ptr<TransferAsyncContext> executeDeviceToDisk(TransferTask task, const GroupSet& group_set);
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task, const std::vector<const GroupSet*>& group_sets);
 
     void cancelPendingTransfers();
 
@@ -44,7 +42,6 @@ private:
 
     DeviceHostTransferExecutor&                    device_host_executor_;
     HostDiskTransferExecutor&                      host_disk_executor_;
-    BlockTreeTaskPool&                             transfer_task_pool_;
     BlockTreeTaskPool*                             load_task_pool_;
     std::unique_ptr<HostStagingBlockPool>          full_staging_pool_;
     std::unique_ptr<HostStagingBlockPool>          swa_staging_pool_;
@@ -52,6 +49,7 @@ private:
     size_t                                         swa_batch_capacity_{0};
     size_t                                         max_descriptors_per_batch_;
     std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter_;
+    int64_t                                        world_rank_{-1};
 };
 
 }  // namespace rtp_llm

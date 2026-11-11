@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/TransferExecutor.h"
 
 namespace rtp_llm {
 
@@ -14,7 +14,8 @@ public:
     HostDiskTransferExecutor(BlockTreeTaskPool&                             transfer_task_pool,
                              size_t                                         max_descriptors_per_batch,
                              std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
-                             BlockTreeTaskPool*                             load_task_pool   = nullptr);
+                             BlockTreeTaskPool*                             load_task_pool   = nullptr,
+                             int64_t                                        world_rank       = -1);
 
 private:
     friend class DeviceDiskTransferExecutor;
@@ -22,9 +23,6 @@ private:
     TransferResult executeBatch(const std::vector<HostBufferView>&     hosts,
                                 const std::vector<TransferDescriptor>& descriptors,
                                 const std::vector<const GroupSet*>&    group_sets) override;
-
-    static TransferStatus blockIOStatusToTransferStatus(BlockIOStatus status);
-    static const char*    blockIOStatusName(BlockIOStatus status);
 };
 
 }  // namespace rtp_llm

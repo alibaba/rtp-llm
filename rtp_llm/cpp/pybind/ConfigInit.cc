@@ -467,17 +467,26 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("multi_task_prompt_tokens", &KVCacheConfig::multi_task_prompt_tokens)
         .def_readwrite("reserve_block_ratio", &KVCacheConfig::reserve_block_ratio)
         .def_readwrite("memory_cache_size_mb", &KVCacheConfig::memory_cache_size_mb)
+        .def_readwrite("memory_cache_swa_block_ratio", &KVCacheConfig::memory_cache_swa_block_ratio)
+        .def_readwrite("dsv41_decoder_swa_pool_blocks", &KVCacheConfig::dsv41_decoder_swa_pool_blocks)
         .def_readwrite("memory_cache_sync_timeout_ms", &KVCacheConfig::memory_cache_sync_timeout_ms)
         .def_readwrite("disk_cache_paths", &KVCacheConfig::disk_cache_paths)
         .def_readwrite("disk_cache_size_mb", &KVCacheConfig::disk_cache_size_mb)
         .def_readwrite("disk_cache_buffered_io", &KVCacheConfig::disk_cache_buffered_io)
+        .def_readwrite("disk_cache_read_thread_count", &KVCacheConfig::disk_cache_read_thread_count)
+        .def_readwrite("disk_cache_write_thread_count", &KVCacheConfig::disk_cache_write_thread_count)
         .def_readwrite("disk_cache_sync_timeout_ms", &KVCacheConfig::disk_cache_sync_timeout_ms)
+        .def_readwrite("disk_cache_evict_timeout_ms", &KVCacheConfig::disk_cache_evict_timeout_ms)
         .def_readwrite("disk_cache_staging_block_count", &KVCacheConfig::disk_cache_staging_block_count)
         .def_readwrite("memory_cache_max_descriptors_per_transfer_batch",
                        &KVCacheConfig::memory_cache_max_descriptors_per_transfer_batch)
+        .def_readwrite("btc_transfer_engine_async", &KVCacheConfig::btc_transfer_engine_async)
+        .def_readwrite("btc_crc_slot_count", &KVCacheConfig::btc_crc_slot_count)
         .def_readwrite("block_tree_transfer_worker_count", &KVCacheConfig::block_tree_transfer_worker_count)
         .def_readwrite("block_tree_business_queue_max_size", &KVCacheConfig::block_tree_business_queue_max_size)
         .def_readwrite("block_tree_transfer_queue_max_size", &KVCacheConfig::block_tree_transfer_queue_max_size)
+        .def_readwrite("block_pool_frozen_abort_lower_ratio", &KVCacheConfig::block_pool_frozen_abort_lower_ratio)
+        .def_readwrite("block_pool_frozen_abort_upper_ratio", &KVCacheConfig::block_pool_frozen_abort_upper_ratio)
         .def_readwrite("block_tree_device_evict_low_watermark_ratio",
                        &KVCacheConfig::block_tree_device_evict_low_watermark_ratio)
         .def_readwrite("block_tree_device_evict_high_watermark_ratio",
@@ -490,6 +499,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &KVCacheConfig::block_tree_disk_evict_low_watermark_ratio)
         .def_readwrite("block_tree_disk_evict_high_watermark_ratio",
                        &KVCacheConfig::block_tree_disk_evict_high_watermark_ratio)
+        .def_readwrite("block_tree_full_device_evict_low_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_device_evict_low_watermark_ratio)
+        .def_readwrite("block_tree_full_device_evict_high_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_device_evict_high_watermark_ratio)
+        .def_readwrite("block_tree_full_memory_evict_low_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_memory_evict_low_watermark_ratio)
+        .def_readwrite("block_tree_full_memory_evict_high_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_memory_evict_high_watermark_ratio)
+        .def_readwrite("block_tree_full_disk_evict_low_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_disk_evict_low_watermark_ratio)
+        .def_readwrite("block_tree_full_disk_evict_high_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_disk_evict_high_watermark_ratio)
         .def_readwrite("reuse_cache_tail_blocks", &KVCacheConfig::reuse_cache_tail_blocks)
         .def_readwrite("linear_pool_blocks", &KVCacheConfig::linear_pool_blocks)
         .def_readwrite("swa_pool_blocks", &KVCacheConfig::swa_pool_blocks)
@@ -511,6 +532,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("kvcm_vipserver_domain", &KVCacheConfig::kvcm_vipserver_domain)
         .def_readwrite("kvcm_server_address", &KVCacheConfig::kvcm_server_address)
         .def_readwrite("kvcm_instance_group", &KVCacheConfig::kvcm_instance_group)
+        .def_readwrite("kvcm_task_timeout_ms", &KVCacheConfig::kvcm_task_timeout_ms)
+        .def_readwrite("kvcm_read_backend_type", &KVCacheConfig::kvcm_read_backend_type)
+        .def_readwrite("kvcm_min_replica_count", &KVCacheConfig::kvcm_min_replica_count)
         .def_readwrite("kvcm_meta_channel_retry_time", &KVCacheConfig::kvcm_meta_channel_retry_time)
         .def_readwrite("kvcm_meta_channel_connection_timeout", &KVCacheConfig::kvcm_meta_channel_connection_timeout)
         .def_readwrite("kvcm_meta_channel_call_timeout", &KVCacheConfig::kvcm_meta_channel_call_timeout)
@@ -557,10 +581,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("kv_cache_event_instance_group", &KVCacheConfig::kv_cache_event_instance_group)
         .def_readwrite("kv_cache_event_instance_id", &KVCacheConfig::kv_cache_event_instance_id)
         .def_readwrite("kv_cache_event_host_ip_port", &KVCacheConfig::kv_cache_event_host_ip_port)
+        .def_readwrite("kv_cache_event_snapshot_interval_ms", &KVCacheConfig::kv_cache_event_snapshot_interval_ms)
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      9,
+                                      16,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -630,9 +655,72 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_host_ip_port,
                                       self.enable_crc,
                                       self.linear_pool_blocks,
-                                      self.swa_pool_blocks);
+                                      self.swa_pool_blocks,
+                                      self.block_tree_full_device_evict_low_watermark_ratio,
+                                      self.block_tree_full_device_evict_high_watermark_ratio,
+                                      self.block_tree_full_memory_evict_low_watermark_ratio,
+                                      self.block_tree_full_memory_evict_high_watermark_ratio,
+                                      self.block_tree_full_disk_evict_low_watermark_ratio,
+                                      self.block_tree_full_disk_evict_high_watermark_ratio,
+                                      self.memory_cache_swa_block_ratio,
+                                      self.dsv41_decoder_swa_pool_blocks,
+                                      self.kvcm_task_timeout_ms,
+                                      self.kvcm_read_backend_type,
+                                      self.kvcm_min_replica_count,
+                                      self.kv_cache_event_snapshot_interval_ms,
+                                      self.btc_crc_slot_count,
+                                      self.btc_transfer_engine_async,
+                                      self.disk_cache_read_thread_count,
+                                      self.disk_cache_write_thread_count,
+                                      self.disk_cache_evict_timeout_ms,
+                                      self.block_pool_frozen_abort_lower_ratio,
+                                      self.block_pool_frozen_abort_upper_ratio);
             },
             [](py::tuple t) {
+                const py::tuple frozen_bounds_state = t;
+                const bool has_frozen_bounds =
+                    t.size() == 91 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 16;
+                if (has_frozen_bounds) {
+                    t = t[py::slice(0, 90, 1)].cast<py::tuple>();
+                    t[1] = py::int_(15);
+                }
+                const py::tuple frozen_ratio_state = t;
+                const bool has_frozen_ratio =
+                    t.size() == 90 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 15;
+                if (has_frozen_ratio) {
+                    t = t[py::slice(0, 89, 1)].cast<py::tuple>();
+                    t[1] = py::int_(14);
+                }
+                const py::tuple disk_timeout_state = t;
+                const bool has_disk_timeout =
+                    t.size() == 89 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 14;
+                if (has_disk_timeout) {
+                    t = t[py::slice(0, 88, 1)].cast<py::tuple>();
+                    t[1] = py::int_(13);
+                }
+                const py::tuple backend_state = t;
+                const bool      has_async_fields =
+                    t.size() == 88 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 13;
+                const bool has_backend_fields =
+                    has_async_fields || (t.size() == 84 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 12);
+                if (has_backend_fields) {
+                    t    = t[py::slice(0, 80, 1)].cast<py::tuple>();
+                    t[1] = py::int_(11);
+                }
+                const py::tuple host_pool_state = t;
+                const bool      has_host_pool_fields =
+                    t.size() == 80 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 11;
+                if (has_host_pool_fields) {
+                    t    = t[py::slice(0, 78, 1)].cast<py::tuple>();
+                    t[1] = py::int_(10);
+                }
+                const py::tuple full_watermark_state = t;
+                const bool      has_full_watermarks =
+                    t.size() == 78 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
+                if (has_full_watermarks) {
+                    t    = t[py::slice(0, 72, 1)].cast<py::tuple>();
+                    t[1] = py::int_(9);
+                }
                 const py::tuple tail_state = t;
                 const bool has_tail_fields = t.size() == 72 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
                 if (has_tail_fields) {
@@ -677,6 +765,41 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
 
                 KVCacheConfig c;
+                if (has_frozen_bounds) {
+                    c.block_pool_frozen_abort_upper_ratio = frozen_bounds_state[90].cast<double>();
+                }
+                if (has_frozen_ratio) {
+                    c.block_pool_frozen_abort_lower_ratio = frozen_ratio_state[89].cast<double>();
+                }
+                if (!std::isfinite(c.block_pool_frozen_abort_lower_ratio)
+                    || !std::isfinite(c.block_pool_frozen_abort_upper_ratio)
+                    || c.block_pool_frozen_abort_lower_ratio < 0.0
+                    || c.block_pool_frozen_abort_lower_ratio > c.block_pool_frozen_abort_upper_ratio
+                    || c.block_pool_frozen_abort_upper_ratio > 1.0) {
+                    throw std::runtime_error("invalid KVCacheConfig block pool frozen abort ratio range: expected finite "
+                                             "0 <= lower <= upper <= 1");
+                }
+                if (has_disk_timeout) {
+                    c.disk_cache_evict_timeout_ms = disk_timeout_state[88].cast<int64_t>();
+                }
+                if (has_async_fields) {
+                    c.btc_crc_slot_count            = backend_state[84].cast<int64_t>();
+                    c.btc_transfer_engine_async     = backend_state[85].cast<bool>();
+                    c.disk_cache_read_thread_count  = backend_state[86].cast<int64_t>();
+                    c.disk_cache_write_thread_count = backend_state[87].cast<int64_t>();
+                }
+                if (has_host_pool_fields) {
+                    c.memory_cache_swa_block_ratio  = host_pool_state[78].cast<double>();
+                    c.dsv41_decoder_swa_pool_blocks = host_pool_state[79].cast<uint32_t>();
+                }
+                if (has_full_watermarks) {
+                    c.block_tree_full_device_evict_low_watermark_ratio  = full_watermark_state[72].cast<double>();
+                    c.block_tree_full_device_evict_high_watermark_ratio = full_watermark_state[73].cast<double>();
+                    c.block_tree_full_memory_evict_low_watermark_ratio  = full_watermark_state[74].cast<double>();
+                    c.block_tree_full_memory_evict_high_watermark_ratio = full_watermark_state[75].cast<double>();
+                    c.block_tree_full_disk_evict_low_watermark_ratio    = full_watermark_state[76].cast<double>();
+                    c.block_tree_full_disk_evict_high_watermark_ratio   = full_watermark_state[77].cast<double>();
+                }
                 // Legacy indices include host pinning (removed in v4) and the absolute reserve (removed in v5).
                 const auto value = [&](size_t index) {
                     return t[index + 2 - (version >= 4 && index > 18 ? 1 : 0) - (version >= 5 && index > 49 ? 1 : 0)];
@@ -763,6 +886,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
                 if (has_crc_field) {
                     c.enable_crc = crc_state[69].cast<bool>();
+                }
+                if (has_backend_fields) {
+                    c.kvcm_task_timeout_ms                = backend_state[80].cast<int>();
+                    c.kvcm_read_backend_type              = backend_state[81].cast<int32_t>();
+                    c.kvcm_min_replica_count              = backend_state[82].cast<int32_t>();
+                    c.kv_cache_event_snapshot_interval_ms = backend_state[83].cast<int>();
                 }
                 return c;
             }));

@@ -85,6 +85,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     dtype_(model_config.data_type),
     hidden_size_(model_config.hidden_size) {
     RTP_LLM_PROFILE_FUNCTION();
+    request_profile_.begin(input->request_id, input->begin_time_us, input->generate_config->global_request_id);
     stream_async_reserve_ = useStreamAsyncReserveTokens();
     generate_input_->generate_config->validatePrefillOnly();
     if (!updatePrefix(resource_context.system_prompt)) {
@@ -210,15 +211,22 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
 void GenerateStream::resetBeginTime(int64_t begin_time_us) {
     std::lock_guard<std::mutex> lock(*mutex_);
-    begin_time_us_               = begin_time_us;
-    wait_time_us_                = 0;
-    scheduler_enqueue_time_us_   = 0;
-    can_run_time_us_             = 0;
-    loading_cache_start_time_us_ = 0;
-    loading_cache_done_time_us_  = 0;
-    first_running_time_us_       = 0;
-    loading_cache_latency_us_    = 0;
-    load_done_to_running_us_     = 0;
+    begin_time_us_                     = begin_time_us;
+    wait_time_us_                      = 0;
+    scheduler_enqueue_time_us_         = 0;
+    can_run_time_us_                   = 0;
+    kv_ready_time_us_                  = 0;
+    prefill_previous_release_us_       = 0;
+    prefill_previous_release_recorded_ = false;
+    loading_cache_start_time_us_       = 0;
+    loading_cache_done_time_us_        = 0;
+    first_running_time_us_             = 0;
+    prefill_dispatch_time_us_          = 0;
+    prefill_forward_time_us_           = 0;
+    cache_exposed_wait_start_us_       = 0;
+    cache_exposed_wait_us_             = 0;
+    loading_cache_latency_us_          = 0;
+    load_done_to_running_us_           = 0;
     if (running_started_) {
         running_started_time_us_ = begin_time_us;
     }
@@ -806,11 +814,22 @@ void GenerateStream::recordLoadingCacheStartTime() {
 }
 
 void GenerateStream::recordLoadingCacheDoneTime() {
+    const auto now_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (cache_exposed_wait_start_us_ > 0) {
+        cache_exposed_wait_us_ += std::max<int64_t>(0, now_us - cache_exposed_wait_start_us_);
+        cache_exposed_wait_start_us_ = 0;
+    }
     if (loading_cache_done_time_us_ == 0) {
-        loading_cache_done_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+        loading_cache_done_time_us_ = now_us;
         if (loading_cache_start_time_us_ > 0) {
-            loading_cache_latency_us_ = loading_cache_done_time_us_ - loading_cache_start_time_us_;
+            loading_cache_latency_us_ = now_us - loading_cache_start_time_us_;
         }
+    }
+}
+
+void GenerateStream::recordKvReadyTime(int64_t time_us) {
+    if (kv_ready_time_us_ == 0 && time_us >= can_run_time_us_) {
+        kv_ready_time_us_ = time_us;
     }
 }
 
@@ -821,6 +840,49 @@ void GenerateStream::recordRunningTime() {
     first_running_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
     if (loading_cache_done_time_us_ > 0) {
         load_done_to_running_us_ = first_running_time_us_ - loading_cache_done_time_us_;
+    }
+}
+
+void GenerateStream::recordPrefillDispatchTime(int64_t time_us) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (prefill_dispatch_time_us_ == 0) {
+        prefill_dispatch_time_us_ = time_us;
+    }
+}
+
+void GenerateStream::recordPrefillPreviousReleaseTime(int64_t time_us) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (!prefill_previous_release_recorded_) {
+        prefill_previous_release_us_       = time_us;
+        prefill_previous_release_recorded_ = true;
+    }
+}
+
+void GenerateStream::recordPrefillForwardTime(int64_t time_us) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (prefill_forward_time_us_ == 0) {
+        prefill_forward_time_us_ = time_us;
+    }
+}
+
+void GenerateStream::startCacheExposedWait(int64_t time_us) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    // FIFO calls this only for the current LOADING_CACHE attempt; an earlier
+    // retry may already have set the first-completion timestamp.
+    if (cache_exposed_wait_start_us_ == 0 && loading_cache_start_time_us_ > 0) {
+        cache_exposed_wait_start_us_ = time_us;
+    }
+}
+
+void GenerateStream::endCacheExposedWait(int64_t time_us) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    endCacheExposedWaitWithoutLock(time_us);
+}
+
+void GenerateStream::endCacheExposedWaitWithoutLock(int64_t time_us) {
+    if (cache_exposed_wait_start_us_ > 0) {
+        cache_exposed_wait_us_ += std::max<int64_t>(0, time_us - cache_exposed_wait_start_us_);
+        cache_exposed_wait_start_us_ = 0;
     }
 }
 
@@ -962,6 +1024,18 @@ StreamState GenerateStream::moveToNext() {
         }
         state                 = generate_status_->moveToNext();
         const auto new_status = getStatus();
+        if (old_status == StreamState::LOADING_CACHE && new_status != StreamState::LOADING_CACHE
+            && cache_exposed_wait_start_us_ > 0) {
+            const auto now_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            cache_exposed_wait_us_ += std::max<int64_t>(0, now_us - cache_exposed_wait_start_us_);
+            cache_exposed_wait_start_us_ = 0;
+        }
+        const char* phase = new_status == StreamState::RUNNING ? "running" :
+                            new_status == StreamState::LOADING_CACHE ? "loading_cache" : "waiting";
+        const char* terminal = new_status != StreamState::FINISHED ? nullptr :
+                               generate_status_->error_info.ok() ? "finished" :
+                               generate_status_->error_info.code() == ErrorCode::CANCELLED ? "cancelled" : "error";
+        request_profile_.observe(phase, terminal);
 
         if ((old_status == StreamState::WAITING && new_status != StreamState::WAITING)
             || (old_status != StreamState::RUNNING && new_status == StreamState::RUNNING && !running_started_)) {
@@ -1679,9 +1753,20 @@ GenerateStream::TimeInfo GenerateStream::getTimeInfo() {
     // read-time subtraction would go negative and diverge from the frozen
     // metrics/aux_info definition. The frozen value is non-negative by
     // construction; clamping the subtraction to 0 would instead mask the reset.
-    time_info.first_token_rt_us       = complete_token_ids_->firstTokenLatencyUs();
-    time_info.generation_done         = generation_done_;
-    time_info.generation_done_time_us = generation_done_time_us_;
+    time_info.first_token_rt_us           = complete_token_ids_->firstTokenLatencyUs();
+    time_info.generation_done             = generation_done_;
+    time_info.generation_done_time_us     = generation_done_time_us_;
+    time_info.scheduler_enqueue_time_us   = scheduler_enqueue_time_us_;
+    time_info.can_run_time_us             = can_run_time_us_;
+    time_info.kv_ready_time_us            = kv_ready_time_us_;
+    time_info.prefill_previous_release_us = prefill_previous_release_us_;
+    time_info.prefill_dispatch_time_us    = prefill_dispatch_time_us_;
+    time_info.prefill_forward_time_us     = prefill_forward_time_us_;
+    time_info.cache_exposed_wait_us       = cache_exposed_wait_us_;
+    if (cache_exposed_wait_start_us_ > 0) {
+        time_info.cache_exposed_wait_us +=
+            std::max<int64_t>(0, autil::TimeUtility::currentTimeInMicroSeconds() - cache_exposed_wait_start_us_);
+    }
     return time_info;
 }
 

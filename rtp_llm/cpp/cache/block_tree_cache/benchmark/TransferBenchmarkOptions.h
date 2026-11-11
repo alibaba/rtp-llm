@@ -12,7 +12,7 @@ struct TransferOptions {
     std::string group_set{"full_context"};  // "full_context" or "swa"
 
     // Transfer directions (comma separated, e.g. "d2h,h2d" mixes both in one case)
-    std::vector<std::string> transfer_directions{"d2h"};  // d2h, h2d, d2disk, disk2d, h2disk, disk2h
+    std::vector<std::string> transfer_directions{"d2h"};  // d2h, h2d, h2disk, disk2d
 
     // Operation count and concurrency
     size_t transfer_operation_count{1024};
@@ -23,11 +23,15 @@ struct TransferOptions {
     // same-direction descriptors and batches remain serial within a request.
     size_t business_concurrency{0};
     size_t descriptors_per_business{0};
-    size_t transfer_worker_count{1};
+    size_t transfer_worker_count{1};  // WorkLoop owners or legacy workers per direction
+    bool   btc_transfer_engine_async{true};
+    bool   enable_crc{true};
+    size_t btc_crc_slot_count{8};
+    size_t transfer_queue_max_size{10000};
 
     // Number of same-direction descriptors submitted in one transfer-engine
-    // API call. 0 follows transfer_concurrency. Device->Disk is the only
-    // direction whose engine contract still requires singleton submissions.
+    // API call. 0 follows transfer_concurrency. Every direction is bounded by
+    // the engine's effective batch limit.
     size_t transfer_descriptor_batch_size{0};
 
     // Device<->Host copy strategy. Explicit strategies disable the other

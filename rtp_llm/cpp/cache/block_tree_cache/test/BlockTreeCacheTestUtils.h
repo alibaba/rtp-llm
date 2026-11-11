@@ -25,6 +25,8 @@ class BroadcastManager;
 
 namespace rtp_llm::block_tree_cache_test {
 
+std::vector<GroupSetPtr> workLoopTestGroups(std::vector<GroupSetPtr> groups);
+
 struct DeviceLayerBufferSpec {
     size_t kv_bytes{0};
     size_t scale_bytes{0};
@@ -46,7 +48,7 @@ private:
     std::vector<char> data_;
 };
 
-std::shared_ptr<BlockTreeDiskBlockPool>
+std::shared_ptr<DiskBlockPool>
 makeDiskPool(size_t payload_bytes, size_t usable_count, std::unique_ptr<DiskBlockIO> io = nullptr);
 
 bool cudaAvailable();
@@ -103,7 +105,7 @@ public:
                                          TransferCopyAction               action,
                                          std::shared_ptr<CallbackBarrier> barrier = nullptr);
 
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override;
+    std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override;
 
     // Reconfigure only after all cache tasks settle and before submitting new work.
     void   setCopyBehavior(TransferCopyAction action, std::shared_ptr<CallbackBarrier> barrier);
@@ -158,12 +160,12 @@ public:
     static void   markPathMatchedForTest(BlockTreeCache& cache, const std::vector<TreeNode*>& path);
     static size_t pendingEvictionReleasesForTest(const BlockTreeCache& cache);
     static void   runMaintenanceForTest(BlockTreeCache& cache);
-    static void   beginStoreShutdownForTest(BlockTreeCache& cache);
     static bool
     demoteOneForGroupSetForTest(BlockTreeCache& cache, size_t group_set_id, Tier tier, bool force_drop = false);
     static int  reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier = Tier::DEVICE);
     static void waitForTaskPoolIdleForTest(const BlockTreeCache& cache);
     static void setTransferDrainObserverForTest(BlockTreeCache& cache, std::function<void()> observer);
+    static std::unique_lock<std::mutex> lockForTest(const BlockTreeCache& cache);
 
 private:
     static bool armQueueRejectionForTest(BlockTreeCache& cache);
@@ -174,9 +176,10 @@ class ScriptedPerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
     explicit ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups,
                                                 bool                            perform_successful_transfers = true,
-                                                bool                            enable_disk_cache            = false);
+                                                bool                            enable_disk_cache            = false,
+                                                bool                            btc_transfer_engine_async    = true);
 
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override;
+    std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override;
 
     // Scripts the outcome of upcoming submits. Successful submits delegate to
     // the real engine unless perform_successful_transfers is false.
@@ -202,6 +205,7 @@ struct FullSWAEnvironmentOptions {
     size_t path_length{4};
     size_t usable_device_blocks{16};
     size_t usable_host_blocks{16};
+    size_t usable_swa_host_blocks{0};  // Zero follows usable_host_blocks.
     size_t usable_disk_blocks{16};
     bool   enable_disk{true};
 };
@@ -233,7 +237,7 @@ public:
     std::vector<GroupSetPtr>                             groups;
     std::vector<DeviceBlockPoolPtr>                      device_pools;
     std::vector<std::shared_ptr<HostBlockPool>>          host_pools;
-    std::vector<std::shared_ptr<BlockTreeDiskBlockPool>> disk_pools;
+    std::vector<std::shared_ptr<DiskBlockPool>>          disk_pools;
     std::shared_ptr<const CacheTopology>                 topology;
     std::vector<MultiNodeBlocks>                         request_blocks;
     std::shared_ptr<ScriptedPerRankBlockTransferEngine>  scripted_per_rank_transfer_engine;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
+
 #include "absl/status/statusor.h"
 #include "autil/TimeUtility.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -333,7 +335,13 @@ public:
     void    recordCanRunTime();
     void    recordLoadingCacheStartTime();
     void    recordLoadingCacheDoneTime();
+    void    recordKvReadyTime(int64_t time_us);
     void    recordRunningTime();
+    void    recordPrefillPreviousReleaseTime(int64_t time_us);
+    void    recordPrefillDispatchTime(int64_t time_us);
+    void    recordPrefillForwardTime(int64_t time_us);
+    void    startCacheExposedWait(int64_t time_us);
+    void    endCacheExposedWait(int64_t time_us);
 
     // 统一的事件上报接口，替代原先所有 reportXX 方法。
     // 外部线程调用时自动加锁保护 error_info 和 events_ 的一致性。
@@ -875,15 +883,22 @@ public:
 
 public:
     struct TimeInfo {
-        int64_t begin_time_us           = 0;
-        int64_t wait_time_us            = 0;  // legacy metric/metadata field
-        bool    running_started         = false;
-        int64_t running_started_time_us = 0;
-        bool    first_token_committed   = false;
-        int64_t first_token_time_us     = 0;
-        int64_t first_token_rt_us       = 0;
-        bool    generation_done         = false;
-        int64_t generation_done_time_us = 0;
+        int64_t begin_time_us               = 0;
+        int64_t wait_time_us                = 0;  // legacy metric/metadata field
+        bool    running_started             = false;
+        int64_t running_started_time_us     = 0;
+        bool    first_token_committed       = false;
+        int64_t first_token_time_us         = 0;
+        int64_t first_token_rt_us           = 0;
+        bool    generation_done             = false;
+        int64_t generation_done_time_us     = 0;
+        int64_t scheduler_enqueue_time_us   = 0;
+        int64_t can_run_time_us             = 0;
+        int64_t kv_ready_time_us            = 0;
+        int64_t prefill_previous_release_us = 0;
+        int64_t prefill_dispatch_time_us    = 0;
+        int64_t prefill_forward_time_us     = 0;
+        int64_t cache_exposed_wait_us       = 0;
     };
     TimeInfo getTimeInfo();
     bool     queryPdSep() const;
@@ -927,19 +942,26 @@ protected:
     size_t                                output_vocab_size_;
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
-    int64_t                               wait_time_us_                = 0;
-    bool                                  metrics_reported_            = false;
-    int64_t                               scheduler_enqueue_time_us_   = 0;
-    int64_t                               can_run_time_us_             = 0;
-    int64_t                               loading_cache_start_time_us_ = 0;
-    int64_t                               loading_cache_done_time_us_  = 0;
-    int64_t                               first_running_time_us_       = 0;
-    int64_t                               loading_cache_latency_us_    = 0;
-    int64_t                               load_done_to_running_us_     = 0;
-    bool                                  running_started_             = false;
-    int64_t                               running_started_time_us_     = 0;
-    bool                                  generation_done_             = false;
-    int64_t                               generation_done_time_us_     = 0;
+    int64_t                               wait_time_us_                      = 0;
+    bool                                  metrics_reported_                  = false;
+    int64_t                               scheduler_enqueue_time_us_         = 0;
+    int64_t                               can_run_time_us_                   = 0;
+    int64_t                               kv_ready_time_us_                  = 0;
+    int64_t                               prefill_previous_release_us_       = 0;
+    bool                                  prefill_previous_release_recorded_ = false;
+    int64_t                               loading_cache_start_time_us_       = 0;
+    int64_t                               loading_cache_done_time_us_        = 0;
+    int64_t                               first_running_time_us_             = 0;
+    int64_t                               prefill_dispatch_time_us_          = 0;
+    int64_t                               prefill_forward_time_us_           = 0;
+    int64_t                               cache_exposed_wait_start_us_       = 0;
+    int64_t                               cache_exposed_wait_us_             = 0;
+    int64_t                               loading_cache_latency_us_          = 0;
+    int64_t                               load_done_to_running_us_           = 0;
+    bool                                  running_started_                   = false;
+    int64_t                               running_started_time_us_           = 0;
+    bool                                  generation_done_                   = false;
+    int64_t                               generation_done_time_us_           = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     // Prefill-to-decode transition is committed by the output/bookkeeping
     // worker and observed by the scheduler thread. Keep this flag atomic; the
@@ -1049,11 +1071,14 @@ protected:
     // just for bool test
     bool perf_test_ = false;
     friend class StreamCacheResource;
+    void endCacheExposedWaitWithoutLock(int64_t time_us);
     bool                             is_fake_stream_ = false;
     std::shared_ptr<RecordedRequest> recorded_request_;
 
     // prefill TP size queried from prefill server (used for asymmetric TP)
     int prefill_tp_size_ = -1;
+private:
+    AsyncProfileRequest request_profile_;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;
