@@ -1,9 +1,11 @@
 #pragma once
 
+#include <string>
+#include <unordered_map>
+
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/CommonDefine.h"
 
 namespace rtp_llm {
 
@@ -45,6 +47,7 @@ inline ErrorCode transRPCErrorCode(ErrorCodePB error_code) {
         {ErrorCodePB::UNKNOWN_ERROR, ErrorCode::UNKNOWN_ERROR},
         {ErrorCodePB::CANCELLED, ErrorCode::CANCELLED},
         {ErrorCodePB::LOAD_CACHE_TIMEOUT, ErrorCode::LOAD_CACHE_TIMEOUT},
+        {ErrorCodePB::LOAD_KV_CACHE_FAILED, ErrorCode::LOAD_KV_CACHE_FAILED},
         {ErrorCodePB::CACHE_STORE_LOAD_CONNECT_FAILED, ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED},
         {ErrorCodePB::CACHE_STORE_LOAD_SEND_REQUEST_FAILED, ErrorCode::CACHE_STORE_LOAD_SEND_REQUEST_FAILED},
         {ErrorCodePB::CACHE_STORE_CALL_PREFILL_TIMEOUT, ErrorCode::CACHE_STORE_CALL_PREFILL_TIMEOUT},
@@ -90,6 +93,7 @@ inline ErrorCodePB transErrorCodeToRPC(ErrorCode error_code) {
         {ErrorCode::UNKNOWN_ERROR, ErrorCodePB::UNKNOWN_ERROR},
         {ErrorCode::CANCELLED, ErrorCodePB::CANCELLED},
         {ErrorCode::LOAD_CACHE_TIMEOUT, ErrorCodePB::LOAD_CACHE_TIMEOUT},
+        {ErrorCode::LOAD_KV_CACHE_FAILED, ErrorCodePB::LOAD_KV_CACHE_FAILED},
         {ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED, ErrorCodePB::CACHE_STORE_LOAD_CONNECT_FAILED},
         {ErrorCode::CACHE_STORE_LOAD_SEND_REQUEST_FAILED, ErrorCodePB::CACHE_STORE_LOAD_SEND_REQUEST_FAILED},
         {ErrorCode::CACHE_STORE_CALL_PREFILL_TIMEOUT, ErrorCodePB::CACHE_STORE_CALL_PREFILL_TIMEOUT},

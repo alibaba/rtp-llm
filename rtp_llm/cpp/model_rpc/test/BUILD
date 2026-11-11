@@ -48,6 +48,25 @@ test_deps = [
 ] + torch_deps() + device_impl_target() + cuda13_torch_link_deps
 
 cc_test(
+    name = "rpc_error_code_test",
+    srcs = ["RpcErrorCodeTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/model_rpc:rpc_error_code",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "decode_remote_load_test",
+    srcs = ["DecodeRemoteLoadTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "L20A_DEV"},
+)
+
+cc_test(
     name = "prefill_multimodal_retry_test",
     srcs = ["PrefillMultimodalRetryTest.cc"],
     copts = test_copts,

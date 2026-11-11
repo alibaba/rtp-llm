@@ -554,13 +554,42 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
 ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_context,
                                                LoadKVCacheContext&    load_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    int64_t load_cache_begin_time_us = currentTimeUs();
+    int64_t    load_cache_begin_time_us = currentTimeUs();
+    const auto worker_size              = resource_.grpc_workers.size();
+
+    // The only worker in a single-rank decode group is this process. Do not
+    // send its load through a pooled loopback gRPC channel: an idle-close
+    // GOAWAY can race the next call before gRPC's backup poll observes it.
+    // Build and execute the same request as RemoteLoad so asymmetric P/D TP,
+    // hybrid-cache fan-in, CP, and connection-retry semantics stay identical.
+    if (worker_size == 1 && resource_.workers.size() == 1) {
+        if (load_context.server_context->IsCancelled()) {
+            return ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");
+        }
+        auto request = engine_->resourceContext().cache_manager->cacheConfig().use_mla ?
+                           constructRemoteLoadRequestForMla(load_context, 0, decode_context.peer_addrs) :
+                           constructRemoteLoadRequest(load_context, 0, decode_context.peer_addrs);
+        request.set_retry_rdma_connect(decode_context.peer_addrs.size() != 1);
+        auto error_info = loadCacheFromRequest(load_context.server_context, request);
+        if (load_context.server_context->IsCancelled()) {
+            return ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");
+        }
+        if (!error_info.ok()) {
+            return error_info;
+        }
+        const auto done_time_us                             = currentTimeUs();
+        decode_context.stat_info.load_cache_min_rt_us       = done_time_us - load_cache_begin_time_us;
+        decode_context.stat_info.load_cache_max_rt_us       = done_time_us - load_cache_begin_time_us;
+        decode_context.stat_info.load_cache_polling_cost_us = 0;
+        return ErrorInfo::OkStatus();
+    }
 
     struct WorkerRpcContext {
         BroadcastLoadResponsePB           response;
         Status                            status;
         std::shared_ptr<RpcService::Stub> stub;
         std::unique_ptr<ClientContext>    client_context;
+        std::unique_ptr<ClientAsyncResponseReader<BroadcastLoadResponsePB>> reader;
         bool                              finished = false;
     };
 
@@ -585,7 +614,6 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         }
     };
 
-    uint32_t                 worker_size = resource_.grpc_workers.size();
     vector<WorkerRpcContext> all_context(worker_size);
     uint32_t                 cq_size = worker_size % 2 == 0 ? worker_size / 2 : worker_size / 2 + 1;
     vector<CompletionQueue>  completion_queues(cq_size);
@@ -625,9 +653,9 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         }
         // A TP1 fallback already exhausted its direct connection retries.
         load_request.set_retry_rdma_connect(resource_.workers.size() != 1 || decode_context.peer_addrs.size() != 1);
-        std::unique_ptr<ClientAsyncResponseReader<BroadcastLoadResponsePB>> reader(rpc_context.stub->AsyncRemoteLoad(
-            rpc_context.client_context.get(), load_request, &completion_queues[i % completion_queues.size()]));
-        reader->Finish(&rpc_context.response, &rpc_context.status, reinterpret_cast<void*>(i));
+        rpc_context.reader = rpc_context.stub->AsyncRemoteLoad(
+            rpc_context.client_context.get(), load_request, &completion_queues[i % completion_queues.size()]);
+        rpc_context.reader->Finish(&rpc_context.response, &rpc_context.status, reinterpret_cast<void*>(i));
     }
 
     bool        all_success               = true;
@@ -691,7 +719,18 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
                 }
                 all_success = false;
                 error_code  = ErrorCode::LOAD_KV_CACHE_FAILED;
-                error_msg += std::to_string(rank) + ": " + status.error_message() + ", ";
+                const auto& worker = resource_.grpc_workers[rank];
+                RTP_LLM_LOG_WARNING("request [%s] RemoteLoad transport failed, rank index [%lu], peer [%s], "
+                                    "grpc status [%d], elapsed [%ld] ms: %s",
+                                    decode_context.request_key.c_str(),
+                                    static_cast<unsigned long>(rank),
+                                    worker.c_str(),
+                                    static_cast<int>(status.error_code()),
+                                    (currentTimeUs() - load_cache_begin_time_us) / 1000,
+                                    status.error_message().c_str());
+                error_msg += std::to_string(rank) + " peer [" + worker + "] grpc status ["
+                             + std::to_string(static_cast<int>(status.error_code())) + "]: " + status.error_message()
+                             + ", ";
             } else if (pb_error_code != ErrorCodePB::NONE_ERROR) {
                 all_success = false;
                 error_code  = transRPCErrorCode(pb_error_code);
@@ -1350,6 +1389,36 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context, int
     return ErrorInfo::OkStatus();
 }
 
+ErrorInfo DecodeRpcServer::loadCacheFromRequest(grpc::ServerContext*          server_context,
+                                                const BroadcastLoadRequestPB& request) {
+    std::vector<CacheKeyType> cache_keys(request.cache_keys().begin(), request.cache_keys().end());
+    GroupBlockIds             block_ids_by_group;
+    block_ids_by_group.reserve(static_cast<size_t>(request.group_block_ids_size()));
+    for (int i = 0; i < request.group_block_ids_size(); ++i) {
+        const auto& row              = request.group_block_ids(i);
+        auto        block_ids_holder = std::make_shared<BlockIds>();
+        block_ids_holder->assign(BlockIndicesType(row.values().begin(), row.values().end()));
+        block_ids_by_group.push_back(std::move(block_ids_holder));
+    }
+
+    std::vector<std::string> peer_addrs(request.peer_addrs().begin(), request.peer_addrs().end());
+
+    const auto connect_retries =
+        request.retry_rdma_connect() ? maga_init_params_.pd_sep_config.rdma_connect_retry_times : 0;
+    return loadCache({request.request_id(),
+                      request.request_key(),
+                      peer_addrs,
+                      cache_keys,
+                      block_ids_by_group,
+                      request.reuse_block_size(),
+                      request.timeout_ms(),
+                      request.partition_count(),
+                      request.partition_id(),
+                      server_context,
+                      std::max(1, request.prefill_cp_size())},
+                     connect_retries);
+}
+
 grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_context,
                                          const BroadcastLoadRequestPB* request,
                                          BroadcastLoadResponsePB*      response) {
@@ -1358,33 +1427,7 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
         return grpc::Status::OK;
     }
-
-    std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    GroupBlockIds             block_ids_by_group;
-    block_ids_by_group.reserve(static_cast<size_t>(request->group_block_ids_size()));
-    for (int i = 0; i < request->group_block_ids_size(); ++i) {
-        const auto& row              = request->group_block_ids(i);
-        auto        block_ids_holder = std::make_shared<BlockIds>();
-        block_ids_holder->assign(BlockIndicesType(row.values().begin(), row.values().end()));
-        block_ids_by_group.push_back(std::move(block_ids_holder));
-    }
-
-    std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
-
-    const auto connect_retries =
-        request->retry_rdma_connect() ? maga_init_params_.pd_sep_config.rdma_connect_retry_times : 0;
-    auto error_info = loadCache({request->request_id(),
-                                 request->request_key(),
-                                 peer_addrs,
-                                 cache_keys,
-                                 block_ids_by_group,
-                                 request->reuse_block_size(),
-                                 request->timeout_ms(),
-                                 request->partition_count(),
-                                 request->partition_id(),
-                                 server_context,
-                                 std::max(1, request->prefill_cp_size())},
-                                connect_retries);
+    auto error_info = loadCacheFromRequest(server_context, *request);
     response->mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     response->mutable_error_info()->set_error_message(error_info.ToString());
     response->set_done_time_us(currentTimeUs());
