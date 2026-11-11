@@ -24,6 +24,7 @@ import triton.language as tl
 from rtp_llm.models_py.modules.dsv41.fp8 import (
     _v41_candidate_deepselect as candidate_deepselect,
 )
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_candidate_pool as candidate_pool
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_candidate_topk_v3 as candidate_topk
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_deepselect as deepselect
 from rtp_llm.models_py.modules.dsv41.fp8.indexer import _TOPK_V3_OK, _get_topk_workspace
@@ -450,18 +451,21 @@ def select_candidates(
         and (topk_blocks != 2048 or use_candidate_v3)
     )
     if bounded_pool:
-        _candidate_pool_bounded_kernel[(rows,)](
-            logits,
-            lengths,
-            scores,
-            block_lengths,
-            width,
-            logits.stride(0),
-            block_size,
-            score_stride,
-            256,
-            num_warps=8,
-        )
+        if not candidate_pool.try_pool(
+            logits, lengths, scores, block_lengths, block_size
+        ):
+            _candidate_pool_bounded_kernel[(rows,)](
+                logits,
+                lengths,
+                scores,
+                block_lengths,
+                width,
+                logits.stride(0),
+                block_size,
+                score_stride,
+                256,
+                num_warps=8,
+            )
     else:
         _candidate_pool_kernel[(rows, triton.cdiv(nblocks, 128))](
             logits,

@@ -811,6 +811,191 @@ class DecodeTopKTest(unittest.TestCase):
             self.assertEqual(actual.dtype, torch.bfloat16)
             torch.testing.assert_close(actual.float(), expected, rtol=0, atol=0)
 
+    def _assert_persistent_pool_matches_row_loop(self, logits, ends, scores, counts):
+        rows, width = logits.shape
+        reference_scores = torch.empty_like(scores)
+        reference_counts = torch.empty_like(counts)
+        selector._candidate_pool_bounded_kernel[(rows,)](
+            logits,
+            ends,
+            reference_scores,
+            reference_counts,
+            width,
+            logits.stride(0),
+            8,
+            reference_scores.stride(0),
+            256,
+            num_warps=8,
+        )
+        torch.testing.assert_close(counts, reference_counts, rtol=0, atol=0)
+        columns = torch.arange(scores.shape[1], device=scores.device)
+        visible = columns[None] < reference_counts[:, None]
+        torch.testing.assert_close(
+            scores[visible], reference_scores[visible], rtol=0, atol=0, equal_nan=True
+        )
+        self.assertTrue(bool((scores[~visible] == 256).all()))
+
+    @patch.dict(os.environ, {"DSV41_DECODE_CANDIDATE_POOL_PERSISTENT": "1"})
+    def test_persistent_candidate_pool_preserves_bounds_nan_and_strides(self):
+        rows, width = 259, 131072
+        # Odd rows and a second preparation CTA cover both partial query groups
+        # and the prefix-task offsets omitted by the original upstream shape.
+        storage = torch.randn(rows, width + 32, device="cuda", dtype=torch.bfloat16)
+        logits = storage[:, :width]
+        pattern = torch.tensor(
+            [0, 1, 7, 8, 15, 16, 16383, 16384, 16385, width - 1, width, width + 7],
+            device="cuda",
+            dtype=torch.int32,
+        )
+        ends = pattern.repeat((rows + len(pattern) - 1) // len(pattern))[
+            :rows
+        ].contiguous()
+        logits[9, 0] = float("nan")
+        logits[9, 17] = float("inf")
+        logits[10].fill_(-float("inf"))
+        logits[11].fill_(float("inf"))
+        # Invisible NaNs must never affect a preceding visible block.
+        columns = torch.arange(width, device="cuda")
+        logits.masked_fill_(columns[None] >= ends[:, None], float("nan"))
+        backing = torch.full(
+            (rows, width // 8 + 32), 256, device="cuda", dtype=torch.bfloat16
+        )
+        scores = backing[:, : width // 8]
+        counts = torch.empty_like(ends)
+        self.assertTrue(
+            selector.candidate_pool.try_pool(logits, ends, scores, counts, 8)
+        )
+        self._assert_persistent_pool_matches_row_loop(logits, ends, scores, counts)
+
+    @patch.dict(os.environ, {"DSV41_DECODE_CANDIDATE_POOL_PERSISTENT": "1"})
+    def test_persistent_candidate_pool_graph_replays_live_auxiliary_inputs(self):
+        rows, width = 259, 65536
+        logits = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
+        ends = torch.full((rows,), 32768, device="cuda", dtype=torch.int32)
+        scores = torch.full(
+            (rows, width // 8), 256, device="cuda", dtype=torch.bfloat16
+        )
+        counts = torch.empty_like(ends)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            self.assertTrue(
+                selector.candidate_pool.try_pool(logits, ends, scores, counts, 8)
+            )
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            selected = selector.candidate_pool.try_pool(logits, ends, scores, counts, 8)
+        self.assertTrue(selected)
+        for step in range(4):
+            logits.normal_()
+            logits[:, 8:16] = float("nan")
+            pattern = [0] if step == 0 else [1, 7, 16383, 16384, 45000, width]
+            values = torch.tensor(pattern, dtype=torch.int32, device="cuda")
+            ends.copy_(values.repeat((rows + len(pattern) - 1) // len(pattern))[:rows])
+            if step % 2:
+                ends.copy_(ends.flip(0))
+            scores.fill_(256)
+            graph.replay()
+            self._assert_persistent_pool_matches_row_loop(logits, ends, scores, counts)
+
+    def test_persistent_candidate_pool_gate_retains_old_paths(self):
+        logits = torch.randn(128, 65536, device="cuda", dtype=torch.bfloat16)
+        ends = torch.full((128,), 65536, device="cuda", dtype=torch.int32)
+        scores = torch.full((128, 8192), 256, device="cuda", dtype=torch.bfloat16)
+        counts = torch.full_like(ends, -1)
+        with patch.dict(
+            os.environ, {"DSV41_DECODE_CANDIDATE_POOL_PERSISTENT": "0"}
+        ), patch.object(
+            selector.candidate_pool,
+            "_load_kernel",
+            side_effect=AssertionError("disabled import"),
+        ):
+            self.assertFalse(
+                selector.candidate_pool.try_pool(logits, ends, scores, counts, 8)
+            )
+        self.assertFalse(
+            selector.candidate_pool.is_supported(
+                logits.float(), ends, scores, counts, 8
+            )
+        )
+        self.assertFalse(
+            selector.candidate_pool.is_supported(
+                logits, ends, scores.float(), counts, 8
+            )
+        )
+        self.assertFalse(
+            selector.candidate_pool.is_supported(logits, ends, scores, counts, 16)
+        )
+        self.assertTrue(bool((counts == -1).all()))
+        self.assertTrue(bool((scores == 256).all()))
+
+    @patch.dict(os.environ, {"DSV41_DECODE_CANDIDATE_POOL_PERSISTENT": "1"})
+    def test_persistent_candidate_pool_rejects_misaligned_views(self):
+        rows, width = 128, 65536
+        logits = torch.empty(rows, width, device="cuda", dtype=torch.bfloat16)
+        ends = torch.full((rows,), width, device="cuda", dtype=torch.int32)
+        scores = torch.full(
+            (rows, width // 8), 256, device="cuda", dtype=torch.bfloat16
+        )
+        counts = torch.full_like(ends, -1)
+        aligned = (logits, ends, scores, counts)
+        self.assertTrue(selector.candidate_pool.is_supported(*aligned, 8))
+
+        # These views retain every admitted shape, stride and contiguity property.
+        # Their first addresses violate the TileLang vector load/store alignment.
+        offset_logits = torch.empty(
+            rows, width + 16, device="cuda", dtype=torch.bfloat16
+        )[:, 1 : width + 1]
+        offset_scores = torch.full(
+            (rows, width // 8 + 16), 256, device="cuda", dtype=torch.bfloat16
+        )[:, 1 : width // 8 + 1]
+        offset_ends = torch.full((rows + 1,), width, device="cuda", dtype=torch.int32)[
+            1:
+        ]
+        offset_counts = torch.full((rows + 1,), -1, device="cuda", dtype=torch.int32)[
+            1:
+        ]
+        cases = (
+            ("logits", 0, offset_logits, 32),
+            ("lengths", 1, offset_ends, 8),
+            ("scores", 2, offset_scores, 32),
+            ("block_lengths", 3, offset_counts, 8),
+        )
+        for name, index, tensor, alignment in cases:
+            with self.subTest(tensor=name):
+                self.assertNotEqual(tensor.data_ptr() % alignment, 0)
+                args = list(aligned)
+                args[index] = tensor
+                # Guard the loader too: no unsafe kernel may compile or launch,
+                # even when this test is run before the admission fix is applied.
+                with patch.object(
+                    selector.candidate_pool,
+                    "_load_kernel",
+                    side_effect=AssertionError("misaligned kernel must not launch"),
+                ) as load_kernel:
+                    self.assertFalse(selector.candidate_pool.is_supported(*args, 8))
+                    self.assertFalse(selector.candidate_pool.try_pool(*args, 8))
+                    load_kernel.assert_not_called()
+                self.assertTrue(bool((args[2] == 256).all()))
+                self.assertTrue(bool((args[3] == -1).all()))
+
+    def test_complete_candidate_selection_uses_persistent_pool(self):
+        self.require_native(torch.bfloat16)
+        logits = torch.randn(128, 65536, device="cuda", dtype=torch.bfloat16)
+        ends = torch.full((128,), 50000, device="cuda", dtype=torch.int32)
+        with patch.dict(os.environ, {"DSV41_DECODE_CANDIDATE_POOL_PERSISTENT": "0"}):
+            expected = selector.select_candidates(logits, ends, 8, 2048, complete=True)
+        with patch.dict(
+            os.environ, {"DSV41_DECODE_CANDIDATE_POOL_PERSISTENT": "1"}
+        ), patch.object(
+            selector.candidate_pool, "try_pool", wraps=selector.candidate_pool.try_pool
+        ) as persistent:
+            actual = selector.select_candidates(logits, ends, 8, 2048, complete=True)
+            persistent.assert_called_once()
+        for got, ref in zip(actual, expected):
+            torch.testing.assert_close(got, ref, rtol=0, atol=0)
+
 
 if __name__ == "__main__":
     unittest.main()
