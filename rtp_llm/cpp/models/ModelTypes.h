@@ -135,6 +135,9 @@ enum GptModelInputIndex : size_t {
     mmFeaturesSpans,
     engramTokenWindowRows,
     engramTokenWindowWidth,
+    // Engine chunked prefill: total collective forwards in this step. Kept at
+    // the end so existing shape-hint indices remain unchanged.
+    prefillChunkTotal,
     gptModelInputLength,
 };
 

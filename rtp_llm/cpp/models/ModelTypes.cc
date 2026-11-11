@@ -165,6 +165,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
         inputs.engram_token_windows.defined() ? inputs.engram_token_windows.size(0) : 0;
     shape_hints[GptModelInputIndex::engramTokenWindowWidth] =
         inputs.engram_token_windows.defined() ? inputs.engram_token_windows.size(1) : 0;
+    shape_hints[GptModelInputIndex::prefillChunkTotal] =
+        inputs.prefill_chunk_total > 1 ? inputs.prefill_chunk_total : 1;
 
     uint32_t control_flags = 0;
     auto     encode_flag   = [&](bool enabled, GptModelInputControlFlag flag) {
@@ -326,6 +328,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.need_all_hidden_states    = has_flag(GptModelInputControlFlag::kControlNeedAllHiddenStates);
     inputs.skip_lm_head              = shape_hints_ptr[GptModelInputIndex::skipLmHead];
     inputs.capture_hidden_states     = shape_hints_ptr[GptModelInputIndex::captureHiddenStates];
+    inputs.prefill_chunk_total       = shape_hints_ptr[GptModelInputIndex::prefillChunkTotal] > 1 ?
+                                         shape_hints_ptr[GptModelInputIndex::prefillChunkTotal] :
+                                         1;
     inputs.need_moe_gating           = has_flag(GptModelInputControlFlag::kControlNeedMoeGating);
     inputs.warmup                    = has_flag(GptModelInputControlFlag::kControlWarmup);
     inputs.skip_run                  = has_flag(GptModelInputControlFlag::kControlSkipRun);

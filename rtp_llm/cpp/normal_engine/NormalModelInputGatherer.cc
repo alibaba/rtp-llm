@@ -734,9 +734,16 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             if (ctx.need_cal_position_id) {
                 auto context_pos_ids = stream->generateContextPositionIds();
                 int  reuse_offset    = stream->reuseLength() * config_.position_id_len_factor;
+                // combo_position_ids only holds the rows executed this round.
+                // That equals the remaining tail for a full-context prefill and
+                // is strictly smaller for one chunk of an engine chunked
+                // prefill, so clamp to the gathered token count.
+                const int64_t remaining_positions = context_pos_ids.numel() - reuse_offset;
+                const int64_t execute_positions =
+                    static_cast<int64_t>(input_tokens.size()) * config_.position_id_len_factor;
                 memcpy(ctx.combo_position_ids + ctx.token_idx * config_.position_id_len_factor,
                        context_pos_ids.data_ptr<int>() + reuse_offset,
-                       (context_pos_ids.numel() - reuse_offset) * sizeof(int));
+                       std::min(remaining_positions, execute_positions) * sizeof(int));
             }
 
             copyKvCacheBlocksToModelInput(model_input, stream, i, ctx.batch_idx);

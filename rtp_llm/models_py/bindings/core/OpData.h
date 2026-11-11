@@ -98,6 +98,11 @@ struct GptModelInputs {
     bool warmup                 = false;
     bool skip_run               = false;
     bool is_fake_stream         = false;
+    // Engine chunked prefill (RTP_LLM_PREFILL_CHUNK_TOKENS): total forwards this step
+    // will execute for the context batch. Root computes it from the stream
+    // plan; non-root ranks read it from the synced shape hints so every TP
+    // rank runs the same number of collective forwards. 1 = not chunked.
+    int64_t prefill_chunk_total = 1;
 
     // Linear attention target verify should write draft tokens mamba states
     // to extra kv_cache blocks when normal inference only write last token mamba state.

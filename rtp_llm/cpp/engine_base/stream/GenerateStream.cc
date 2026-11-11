@@ -492,6 +492,13 @@ int GenerateStream::seqSizePerBlock() const {
 int GenerateStream::contextLength() const {
     int begin_pos = prefixLength();
     int end_pos   = seqLength();
+    // Chunked prefill: while the executor holds a per-step cap, the visible
+    // context is the active chunk only, so gather, StreamGroups sizing and
+    // attention metadata all see one consistent chunk-length batch. The cap is
+    // engine-loop owned and always cleared before scheduling resumes.
+    if (isContextStream() && context_chunk_cap_ > 0) {
+        return std::min(end_pos - begin_pos, context_chunk_cap_);
+    }
     return end_pos - begin_pos;
 }
 
@@ -509,6 +516,14 @@ int GenerateStream::initialReuseLength() const {
 
 void GenerateStream::setReuseLength(int reuse_length) {
     reuse_length_ = reuse_length;
+}
+
+void GenerateStream::setContextChunkCap(int cap) {
+    context_chunk_cap_ = cap;
+}
+
+int GenerateStream::contextChunkCap() const {
+    return context_chunk_cap_;
 }
 
 void GenerateStream::setLocalReuseLength(int length) {

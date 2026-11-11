@@ -241,87 +241,125 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         prepareGrpcNormalDeviceState(stream_groups);
     }
 
-    {
-        RTP_LLM_PROFILE_SCOPE("executor.gather_model_input");
-        int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_);
-        RETURN_IF_STATUS_OR_ERROR(model_input_status);
-        model_input                              = std::move(model_input_status.value());
-        executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
-    {
-        RTP_LLM_PROFILE_SCOPE("executor.tp_sync_input");
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+    // Engine chunked prefill (RTP_LLM_PREFILL_CHUNK_TOKENS). Rank 0 plans
+    // per-chunk caps for one oversized context stream; the total rides in the
+    // synced shape hints so every TP rank runs the same number of collective
+    // forwards. total==1 keeps the legacy single-forward path.
+    const auto        chunk_plan  = tp_rank_ == 0 ? planContextChunks(streams) : ContextChunkPlan{};
+    ContextChunkGuard chunk_guard(chunk_plan);
+    int64_t           chunk_total = std::max<int64_t>(1, chunk_plan.total);
 
-        // Move metadata to CUDA before tpSyncModelInputs so broadcasts use the
-        // GPU packed-buffer path instead of CPU execBroadcastCpu/unpack loops.
-        ensureModelInputsOnCuda(model_input, "process.before_tp_sync");
+    for (int64_t chunk_index = 0;; ++chunk_index) {
+        if (chunk_total > 1) {
+            // Rank 0 advances reuseLength()/cap so this gather sees exactly the
+            // active chunk as a prefix-continuation prefill; intermediate
+            // chunks carry only the chunked stream, the final chunk re-admits
+            // the decode streams for the shared sampler/dispatch tail.
+            applyContextChunkState(chunk_plan, chunk_index);
+            stream_groups =
+                StreamGroups(chunk_index + 1 < chunk_total ? chunk_plan.intermediate_streams : streams);
+        }
+        {
+            RTP_LLM_PROFILE_SCOPE("executor.gather_model_input");
+            int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
+            auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_);
+            RETURN_IF_STATUS_OR_ERROR(model_input_status);
+            model_input = std::move(model_input_status.value());
+            executor_collector.gather_model_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        }
+        {
+            RTP_LLM_PROFILE_SCOPE("executor.tp_sync_input");
+            int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+            // Root stamps the plan total; non-root ranks pick it up from the
+            // broadcast below and mirror the loop count.
+            model_input.prefill_chunk_total = chunk_total;
+            if (chunk_total > 1 && chunk_index + 1 < chunk_total) {
+                // Intermediate chunk: KV writes are the only consumed output.
+                model_input.skip_lm_head = true;
+            }
 
-        tpSyncModelInputs(model_input, parallelism_config_);
-        if (model_input.skip_run) {
+            // Move metadata to CUDA before tpSyncModelInputs so broadcasts use the
+            // GPU packed-buffer path instead of CPU execBroadcastCpu/unpack loops.
+            ensureModelInputsOnCuda(model_input, "process.before_tp_sync");
+
+            tpSyncModelInputs(model_input, parallelism_config_);
+            chunk_total = std::max<int64_t>(1, model_input.prefill_chunk_total);
+            if (model_input.skip_run) {
+                return absl::OkStatus();
+            }
+
+            // Post-sync guard for fields not covered by the root device bitmap
+            // (notably sequence_lengths_plus_1) before model_->forward.
+            ensureModelInputsOnCuda(model_input, "process.after_tp_sync");
+
+            executor_collector.tp_sync_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        }
+
+        if (chunk_index == 0 && profile_step_start_) {
+            profile_step_start_();
+        }
+
+        // make sure last model input is released before forward
+        // TensorHolder release point (NormalExecutor): after current TP sync has
+        // consumed model-input H2D staging, advance the one-extra-round hold window
+        // for model-input sources and previous sampler-input host tensors.
+        buffer_holder_.release();
+        // PyWrappedModel TensorHolder release point for the previous model forward.
+        model_->releaseBuffers();
+
+        {
+            // update kv cache
+            if (model_input.kv_cache_update_mapping.defined() && model_input.kv_cache_update_mapping.numel() > 0) {
+                RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
+                RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(cache_manager_),
+                                        "cache update mapping requires a cache manager");
+                cache_manager_->blockBatchCopyForForward(model_input.kv_cache_update_mapping,
+                                                         model_input.kv_cache_group_tags);
+            }
+        }
+        {
+            bool force = tp_rank_ == 0 && enable_detail_log_;
+            if (force) {
+                RTP_LLM_LOG_INFO("model_input: %s", model_input.debugString(force).c_str());
+            } else {
+                RTP_LLM_LOG_TRACE("model_input: %s", model_input.debugString(force).c_str());
+            }
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.model_forward(ctx_batch=%zu,gen_batch=%zu,tokens=%zu,max_seq=%zu)",
+                                          stream_groups.totalContextBatchSize(),
+                                          stream_groups.totalDecodeBatchSize(),
+                                          stream_groups.modelExecuteTokenSize(),
+                                          stream_groups.maxSeqLen());
+            int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            if (model_inputs_logger_) {
+                const auto role = is_propose_ ? ModelInputsModelRole::DRAFT : ModelInputsModelRole::NORMAL;
+                model_inputs_logger_->log(model_input, role, model_->model_id_);
+            }
+            model_output = std::move(model_->forward(model_input));
+            executor_collector.model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        }
+
+        if (auto capture_error = model_->takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {
+            cudaSyncAndCheck();
+            model_->releaseBuffers();
+            for (const auto& stream : streams) {
+                stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *capture_error);
+            }
+            if (profile_step_finish_) {
+                profile_step_finish_();
+            }
             return absl::OkStatus();
         }
 
-        // Post-sync guard for fields not covered by the root device bitmap
-        // (notably sequence_lengths_plus_1) before model_->forward.
-        ensureModelInputsOnCuda(model_input, "process.after_tp_sync");
-
-        executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
-
-    if (profile_step_start_) {
-        profile_step_start_();
-    }
-
-    // make sure last model input is released before forward
-    // TensorHolder release point (NormalExecutor): after current TP sync has
-    // consumed model-input H2D staging, advance the one-extra-round hold window
-    // for model-input sources and previous sampler-input host tensors.
-    buffer_holder_.release();
-    // PyWrappedModel TensorHolder release point for the previous model forward.
-    model_->releaseBuffers();
-
-    {
-        // update kv cache
-        if (model_input.kv_cache_update_mapping.defined() && model_input.kv_cache_update_mapping.numel() > 0) {
-            RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
-            RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(cache_manager_), "cache update mapping requires a cache manager");
-            cache_manager_->blockBatchCopyForForward(model_input.kv_cache_update_mapping,
-                                                     model_input.kv_cache_group_tags);
+        if (chunk_index + 1 < chunk_total) {
+            // Intermediate chunk done: KV writes are stream-ordered ahead of
+            // the next chunk's reads on the same device stream. Drop the
+            // (lm_head-skipped) outputs and continue with the next slice.
+            model_output = GptModelOutputs();
+            model_->releaseBuffers();
+            continue;
         }
-    }
-    {
-        bool force = tp_rank_ == 0 && enable_detail_log_;
-        if (force) {
-            RTP_LLM_LOG_INFO("model_input: %s", model_input.debugString(force).c_str());
-        } else {
-            RTP_LLM_LOG_TRACE("model_input: %s", model_input.debugString(force).c_str());
-        }
-        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.model_forward(ctx_batch=%zu,gen_batch=%zu,tokens=%zu,max_seq=%zu)",
-                                      stream_groups.totalContextBatchSize(),
-                                      stream_groups.totalDecodeBatchSize(),
-                                      stream_groups.modelExecuteTokenSize(),
-                                      stream_groups.maxSeqLen());
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        if (model_inputs_logger_) {
-            const auto role = is_propose_ ? ModelInputsModelRole::DRAFT : ModelInputsModelRole::NORMAL;
-            model_inputs_logger_->log(model_input, role, model_->model_id_);
-        }
-        model_output                        = std::move(model_->forward(model_input));
-        executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
-
-    if (auto capture_error = model_->takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {
-        cudaSyncAndCheck();
-        model_->releaseBuffers();
-        for (const auto& stream : streams) {
-            stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *capture_error);
-        }
-        if (profile_step_finish_) {
-            profile_step_finish_();
-        }
-        return absl::OkStatus();
+        break;
     }
 
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
@@ -484,6 +522,111 @@ bool NormalExecutor::checkDeviceInput() const {
         return readEnvFlagOnce("RTP_LLM_DEVICE_INPUT_CHECK", "normal-device-input", "enabled");
     }();
     return enabled;
+}
+
+int64_t NormalExecutor::prefillChunkTokens() const {
+    static const int64_t chunk_tokens = []() {
+        const char* env          = std::getenv("RTP_LLM_PREFILL_CHUNK_TOKENS");
+        int64_t     value        = 0;
+        if (env != nullptr) {
+            value = std::atoll(env);
+            if (value < 0) {
+                value = 0;
+            }
+        }
+        RTP_LLM_LOG_INFO("[normal-executor] RTP_LLM_PREFILL_CHUNK_TOKENS=%s -> prefill_chunk_tokens=%ld",
+                         env != nullptr ? env : "(unset)",
+                         static_cast<long>(value));
+        return value;
+    }();
+    return chunk_tokens;
+}
+
+NormalExecutor::ContextChunkPlan NormalExecutor::planContextChunks(const std::list<GenerateStreamPtr>& streams) const {
+    ContextChunkPlan plan;
+    const int64_t    budget = prefillChunkTokens();
+    if (budget <= 0 || warm_up_ || is_propose_ || enable_ffn_disaggregate_) {
+        return plan;
+    }
+    // The chunk loop mutates host stream state between collective forwards and
+    // re-runs gather per chunk; only the synchronous host-gather path supports
+    // that contract today.
+    if (useStreamAsync() || useDeviceInput()) {
+        return plan;
+    }
+    GenerateStreamPtr candidate;
+    for (const auto& stream : streams) {
+        if (!stream || stream->hasError() || !stream->isContextStream()) {
+            continue;
+        }
+        if (candidate) {
+            // Multiple context streams: the sampler tail needs a logits row for
+            // every one of them, but intermediate chunks discard their outputs.
+            // Chunk only the single-oversized-context batch the FIFO scheduler
+            // already produces for over-budget requests.
+            return plan;
+        }
+        candidate = stream;
+    }
+    if (!candidate) {
+        return plan;
+    }
+    const int context_length = candidate->contextLength();
+    if (context_length <= budget) {
+        return plan;
+    }
+    // Conservative eligibility: anything that consumes full-context rows,
+    // per-token side outputs or PD/speculative handoff state stays on the
+    // legacy single-forward path.
+    if (candidate->currentBatchSize() != 1 || candidate->hasNumBeams() || candidate->getProposeStep() > 0
+        || candidate->generateConfig()->isPrefillOnly() || candidate->multimodalFeaturesLength() > 0
+        || candidate->calculateLoss()
+        || candidate->returnPromptLogits() || candidate->needReturnHiddenStates()
+        || candidate->generateInput()->custom_output_token_position >= 0
+        || !candidate->streamCacheResource().getKVBlockUpdateMapping().empty()) {
+        RTP_LLM_LOG_INFO("[normal-executor] prefill chunking skipped for stream [%ld]: ineligible payload "
+                         "(context_length=%d, budget=%ld)",
+                         static_cast<long>(candidate->streamId()),
+                         context_length,
+                         static_cast<long>(budget));
+        return plan;
+    }
+    // Keep chunks block-aligned so every intermediate chunk completes whole
+    // KV blocks; the tail chunk carries the remainder.
+    const int block_tokens = std::max(candidate->seqSizePerBlock(), 1);
+    int64_t   chunk_tokens = (budget / block_tokens) * block_tokens;
+    if (chunk_tokens <= 0) {
+        chunk_tokens = block_tokens;
+    }
+    if (context_length <= chunk_tokens) {
+        return plan;
+    }
+    plan.stream          = candidate;
+    plan.original_prefix = candidate->prefixLength();
+    for (int done = 0; done < context_length;) {
+        const int cap = static_cast<int>(std::min<int64_t>(chunk_tokens, context_length - done));
+        plan.offsets.push_back(done);
+        plan.caps.push_back(cap);
+        done += cap;
+    }
+    plan.total = static_cast<int64_t>(plan.caps.size());
+    plan.intermediate_streams.push_back(candidate);
+    RTP_LLM_LOG_INFO("[normal-executor] chunked prefill planned for stream [%ld]: context_length=%d "
+                     "chunk_tokens=%ld chunks=%ld (prefix=%d)",
+                     static_cast<long>(candidate->streamId()),
+                     context_length,
+                     static_cast<long>(chunk_tokens),
+                     static_cast<long>(plan.total),
+                     plan.original_prefix);
+    return plan;
+}
+
+void NormalExecutor::applyContextChunkState(const ContextChunkPlan& plan, int64_t chunk_index) {
+    if (plan.total <= 1 || !plan.stream || chunk_index < 0 || chunk_index >= plan.total) {
+        return;
+    }
+    plan.stream->setReuseLength(plan.original_prefix + plan.offsets[chunk_index]);
+    plan.stream->setContextChunkCap(plan.caps[chunk_index]);
 }
 
 void NormalExecutor::ensureModelInputsOnCuda(GptModelInputs& model_input, const char* tag) {

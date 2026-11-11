@@ -88,6 +88,48 @@ protected:
     void ensureModelInputsOnCuda(GptModelInputs& model_input, const char* tag);
     void checkModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
 
+public:
+    // Engine chunked prefill (RTP_LLM_PREFILL_CHUNK_TOKENS). Rank 0 plans
+    // per-chunk token caps for exactly one oversized context stream; every TP
+    // rank then runs the same number of collective forwards (the total travels
+    // in the synced model-input shape hints). Intermediate chunks carry only
+    // the chunked stream, skip the lm_head and discard their outputs; the
+    // final chunk re-admits the decode streams and feeds the normal
+    // sampler/dispatch tail. The plan temporarily advances the stream's
+    // reuseLength()/context chunk cap so every gather sees one chunk-sized
+    // prefix-continuation prefill; ContextChunkGuard restores both when the
+    // step ends (or throws). Default env value 0 keeps the legacy single
+    // forward path bit-identical.
+    struct ContextChunkPlan {
+        GenerateStreamPtr            stream;
+        int                          original_prefix = 0;
+        std::vector<int>             caps;
+        std::vector<int>             offsets;
+        std::list<GenerateStreamPtr> intermediate_streams;
+        int64_t                      total = 1;
+    };
+
+    class ContextChunkGuard {
+    public:
+        explicit ContextChunkGuard(const ContextChunkPlan& plan): plan_(plan) {}
+        ~ContextChunkGuard() {
+            if (plan_.total > 1 && plan_.stream) {
+                plan_.stream->setContextChunkCap(0);
+                plan_.stream->setReuseLength(plan_.original_prefix);
+            }
+        }
+        ContextChunkGuard(const ContextChunkGuard&)            = delete;
+        ContextChunkGuard& operator=(const ContextChunkGuard&) = delete;
+
+    private:
+        const ContextChunkPlan& plan_;
+    };
+
+protected:
+    int64_t          prefillChunkTokens() const;
+    ContextChunkPlan planContextChunks(const std::list<GenerateStreamPtr>& streams) const;
+    static void      applyContextChunkState(const ContextChunkPlan& plan, int64_t chunk_index);
+
 private:
     std::unique_ptr<ModelBase>                                               model_;
     std::unique_ptr<Sampler>                                                 sampler_;

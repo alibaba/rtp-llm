@@ -302,6 +302,15 @@ public:
     int              currentExecuteTokenSize();
     std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
 
+    // Engine-driven chunked prefill (RTP_LLM_PREFILL_CHUNK_TOKENS). The executor owns
+    // these values for the duration of one process() call: it sets a per-chunk
+    // token cap before each gather so currentExecuteTokens()/contextLength()
+    // present only the active chunk, advances reuseLength() between chunks,
+    // and clears the cap after the final chunk. Sampler and dispatch see the
+    // final-chunk layout; no other component reads the cap.
+    void setContextChunkCap(int cap);
+    int  contextChunkCap() const;
+
     void step();
     void spStep();
 
@@ -995,6 +1004,8 @@ protected:
     size_t                             last_output_pos_                   = 0;
     int                                initial_reuse_length_              = 0;
     int                                reuse_length_                      = 0;
+    // Chunked-prefill token cap for the in-flight engine step; engine-loop owned.
+    int                                context_chunk_cap_                 = 0;
     int                                local_reuse_length_                = 0;
     int                                device_reuse_length_               = 0;
     int                                remote_reuse_length_               = 0;
