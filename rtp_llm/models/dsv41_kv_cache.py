@@ -71,7 +71,14 @@ def build_v41_kv_cache_spec_descs(
         # The indexer pool is the remaining graph-critical device allocation
         # that full-context decode reads with ordinary loads (not TMA), so it
         # can use the same placement and free ~143 MiB of HBM per rank.
-        for desc in (state, swa, decoder_swa, indexer):
+        for desc in (
+            state,
+            swa,
+            decoder_swa,
+            indexer,
+            global_pools[1],
+            global_pools[2],
+        ):
             _use_host_pinned_memory(desc)
     sources = set(source_layers)
     decoder_start = max(sources) + 1 if sources else 0
