@@ -311,6 +311,7 @@ def chunk_gated_delta_rule_fwd_intra_a_only(
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,
     chunk_indices: Optional[torch.LongTensor] = None,
+    cu_seqlens_cpu: Optional[torch.Tensor] = None,
 ):
     B, T, Hg, K = k.shape
     H = beta.shape[2]
@@ -318,7 +319,7 @@ def chunk_gated_delta_rule_fwd_intra_a_only(
     BC = 16
 
     if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     A = torch.zeros(B, T, H, BT, device=k.device, dtype=k.dtype)
@@ -353,6 +354,7 @@ def chunk_gated_delta_rule_fwd_intra(
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,
     chunk_indices: Optional[torch.LongTensor] = None,
+    cu_seqlens_cpu: Optional[torch.Tensor] = None,
 ):
     A = chunk_gated_delta_rule_fwd_intra_a_only(
         k=k,
@@ -361,6 +363,7 @@ def chunk_gated_delta_rule_fwd_intra(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
+        cu_seqlens_cpu=cu_seqlens_cpu,
     )
     w, u = recompute_w_u_fwd(
         k=k,
@@ -369,5 +372,6 @@ def chunk_gated_delta_rule_fwd_intra(
         A=A,
         g_cumsum=g,
         cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
     )
     return w, u, A

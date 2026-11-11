@@ -175,6 +175,7 @@ def chunk_gated_delta_rule_fwd(
     initial_state: Optional[torch.Tensor],
     output_final_state: bool,
     cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens_cpu: Optional[torch.Tensor] = None,
 ):
     # AMD: scale g to log2 domain (multiply cumsum by 1/ln2) so AMD-side
     # downstream kernels can use the single-instruction exp2.
@@ -187,6 +188,7 @@ def chunk_gated_delta_rule_fwd(
             chunk_size=64,
             scale=RCP_LN2,
             cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
         )
         # AMD-optimized: fused kkt + solve_tril + recompute_w_u
         w, u, A = chunk_gated_delta_rule_fwd_intra(
@@ -195,11 +197,14 @@ def chunk_gated_delta_rule_fwd(
             g=g,
             beta=beta,
             cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
         )
         # The public API must return per-chunk h/v_new. The production FlyDSL
         # path is Qwen3Next's direct-store helper, which skips materialized h.
     else:
-        g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
+        g = chunk_local_cumsum(
+            g, chunk_size=64, cu_seqlens=cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu
+        )
         # Original pipeline: separate kkt -> solve_tril -> recompute_w_u
         A = chunk_scaled_dot_kkt_fwd(
             k=k,
@@ -207,8 +212,14 @@ def chunk_gated_delta_rule_fwd(
             g_cumsum=g,
             cu_seqlens=cu_seqlens,
             output_dtype=torch.float32,
+            cu_seqlens_cpu=cu_seqlens_cpu,
         )
-        A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
+        A = solve_tril(
+            A=A,
+            cu_seqlens=cu_seqlens,
+            output_dtype=k.dtype,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+        )
         w, u = recompute_w_u_fwd(
             k=k,
             v=v,
@@ -216,6 +227,7 @@ def chunk_gated_delta_rule_fwd(
             A=A,
             g_cumsum=g,
             cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
         )
 
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
@@ -226,6 +238,7 @@ def chunk_gated_delta_rule_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
     )
     o = chunk_fwd_o(
         q=q,
@@ -235,6 +248,7 @@ def chunk_gated_delta_rule_fwd(
         g=g,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
     )
     return g, o, A, final_state, w, h, v_new
 
@@ -405,6 +419,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         output_final_state: bool,
         cu_seqlens: Optional[torch.LongTensor] = None,
         use_qk_l2norm_in_kernel: bool = False,
+        cu_seqlens_cpu: Optional[torch.Tensor] = None,
     ):
         q_orig = q
         k_orig = k
@@ -428,6 +443,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
         )
         return o.to(q.dtype), h, final_state
 
@@ -445,6 +461,7 @@ def chunk_gated_delta_rule(
     cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    cu_seqlens_cpu: Optional[torch.Tensor] = None,
 ):
     r"""
     Args:
@@ -509,6 +526,11 @@ def chunk_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
+    if cu_seqlens_cpu is not None:
+        if cu_seqlens is None or cu_seqlens_cpu.device.type != "cpu":
+            raise ValueError("cu_seqlens_cpu requires device lengths and a CPU mirror")
+        if cu_seqlens_cpu.shape != cu_seqlens.shape:
+            raise ValueError("cu_seqlens_cpu must match the device lengths shape")
     assert q.dtype == k.dtype == v.dtype
     assert (
         q.dtype != torch.float32
@@ -547,6 +569,7 @@ def chunk_gated_delta_rule(
         # a proper V-first contiguous tensor has stride(-2) == K and stride(-1) == 1.
         if V == K and initial_state.stride(-2) == 1 and initial_state.stride(-1) == V:
             import warnings
+
             warnings.warn(
                 f"initial_state appears to be a transposed K-first view "
                 f"(stride(-2)=1, stride(-1)={V}) rather than a true V-first layout. "
@@ -579,6 +602,7 @@ def chunk_gated_delta_rule(
         output_final_state,
         cu_seqlens,
         use_qk_l2norm_in_kernel,
+        cu_seqlens_cpu,
     )
     if head_first:
         o = rearrange(o, "b t h ... -> b h t ...")
