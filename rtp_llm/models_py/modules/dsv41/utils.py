@@ -41,20 +41,31 @@ class V41MXFP8Linear(torch.nn.Module):
         self._host_resident = self._reference_gemm and weight.device.type == "cpu"
         if self._reference_gemm:
             # Pre-Blackwell GPUs cannot run the SM100 DeepGEMM group-32 MXFP8
-            # recipe. The projections served by this class are small under TP
-            # (a couple of GB per rank), so dequantize them exactly once at
-            # load time (e4m3 x ue8m0 embeds losslessly into BF16) and keep
-            # the packed checkpoint tensors as the canonical weights.
+            # recipe; every projection served by this class runs the exact
+            # BF16 dequant instead (e4m3 x ue8m0 embeds losslessly).
             if scales.shape != ((self.N + 31) // 32, (self.K + 31) // 32):
                 raise ValueError(
                     f"Invalid V4.1 FP8 scales: {(self.N, self.K)}, {scales.shape}"
                 )
-            self._w_bf16 = fp8_block32_to_bf16(weight, scales)
             if self._host_resident:
-                self._w_bf16 = self._w_bf16.pin_memory()
+                # Engram WKV: dequantize once on CPU and pin the BF16 result
+                # for the UVA-reading Triton kernel. Host RAM, not VRAM — no
+                # per-call path exists across PCIe.
+                self._w_bf16 = fp8_block32_to_bf16(weight, scales).pin_memory()
+                self._w_scales_raw = None
+            else:
+                # Device-resident: keep ONLY the packed checkpoint tensors and
+                # dequantize per call. A load-time BF16 mirror doubled resident
+                # dense weights (~20 GiB/rank live vs native fp8, the boot-30g
+                # 1M-context pool OOM); the per-call exact dequant trades ~1%
+                # of decode-step time for that memory, and its transient is
+                # reused across layers by the caching allocator / graph pool.
+                self._w_bf16 = None
+                self._w_scales_raw = scales
             self.weight_scales = None
         else:
             self._w_bf16 = None
+            self._w_scales_raw = None
             self.weight_scales = self.pack_scales(scales)
 
     def pack_scales(self, scales: torch.Tensor) -> torch.Tensor:
@@ -145,7 +156,14 @@ class V41MXFP8Linear(torch.nn.Module):
 
                 y = linear_host_weight(flat, self._w_bf16).view(*x.shape[:-1], self.N)
             else:
-                y = torch.nn.functional.linear(flat, self._w_bf16).view(
+                from rtp_llm.models_py.modules.dsv41.sm80_support import (
+                    fp8_block32_to_bf16,
+                )
+
+                # Exact per-call dequant (same lossless map used at load time
+                # elsewhere); keeps only the packed fp8 resident on device.
+                w_bf16 = fp8_block32_to_bf16(self.weight, self._w_scales_raw)
+                y = torch.nn.functional.linear(flat, w_bf16).view(
                     *x.shape[:-1], self.N
                 )
             if out is not None:
