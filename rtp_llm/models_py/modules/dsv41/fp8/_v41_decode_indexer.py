@@ -566,6 +566,10 @@ def score_decode_indexer(
         return_bf16=True,
         metadata=None if metadata is None else metadata.paged,
     )
+    # The native scorer uses an owner-expanded table for packed queries.
+    # Compaction must inspect the same per-query pages rather than row//S.
+    compact_table = safe_table if metadata is None else metadata.paged.tables
+    compact_query_len = s if metadata is None else 1
     compact = torch.empty(
         b * s,
         max_ctx_len,
@@ -577,10 +581,10 @@ def score_decode_indexer(
             logits,
             compact,
             lengths,
-            safe_table,
+            compact_table,
             max_ctx_len,
-            s,
-            block_table.shape[1],
+            compact_query_len,
+            compact_table.shape[1],
             logits.stride(0),
             logical_entries,
             block_size,
@@ -594,10 +598,10 @@ def score_decode_indexer(
             logits,
             compact,
             lengths,
-            safe_table,
+            compact_table,
             max_ctx_len,
-            s,
-            block_table.shape[1],
+            compact_query_len,
+            compact_table.shape[1],
             logits.stride(0),
             logical_entries,
             block_size,
