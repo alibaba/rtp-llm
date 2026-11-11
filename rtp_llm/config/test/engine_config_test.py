@@ -10,12 +10,14 @@ class DummyFIFOSchedulerConfig:
         self.max_context_batch_size = 2
         self.max_batch_tokens_size = 0
         self.prefill_chunk_size = 0
+        self.prefill_chunk_batch_tokens = 0
 
 
 class EngineConfigTest(TestCase):
-    def _finalize(self, chunk_size=0, **overrides):
+    def _finalize(self, chunk_size=0, chunk_batch_tokens=0, **overrides):
         cfg = DummyFIFOSchedulerConfig()
         cfg.prefill_chunk_size = chunk_size
+        cfg.prefill_chunk_batch_tokens = chunk_batch_tokens
         args = {
             "max_seq_len": 1024,
             "role_type": RoleType.PREFILL,
@@ -25,6 +27,30 @@ class EngineConfigTest(TestCase):
         args.update(overrides)
         finalize_scheduler_config(cfg, **args)
         return cfg
+
+    def test_finalize_scheduler_config_disabled_by_default(self):
+        cfg = self._finalize()
+
+        self.assertEqual(cfg.max_batch_tokens_size, 2048)
+        self.assertEqual(cfg.prefill_chunk_size, 0)
+        self.assertEqual(cfg.prefill_chunk_batch_tokens, 0)
+
+    def test_chunk_batch_budget_preserves_default_and_aligns_explicit_budget(self):
+        self.assertEqual(self._finalize(chunk_size=128).prefill_chunk_batch_tokens, 0)
+        cfg = self._finalize(chunk_size=130, chunk_batch_tokens=259)
+        self.assertEqual(cfg.prefill_chunk_size, 128)
+        self.assertEqual(cfg.prefill_chunk_batch_tokens, 256)
+
+    def test_chunk_batch_budget_rejects_invalid_ranges(self):
+        for chunk, batch in ((0, 256), (128, -1), (128, 64), (128, 17), (128, 2112)):
+            with self.subTest(chunk=chunk, batch=batch):
+                with self.assertRaisesRegex(ValueError, "prefill_chunk_batch_tokens"):
+                    self._finalize(chunk_size=chunk, chunk_batch_tokens=batch)
+
+    def test_chunk_batch_budget_is_disabled_on_decode_role(self):
+        cfg = self._finalize(chunk_size=128, chunk_batch_tokens=256, role_type=RoleType.DECODE)
+        self.assertEqual(cfg.prefill_chunk_size, 0)
+        self.assertEqual(cfg.prefill_chunk_batch_tokens, 0)
 
     def test_finalize_scheduler_config_rejects_chunk_size_smaller_than_one_block(self):
         with self.assertRaises(ValueError):

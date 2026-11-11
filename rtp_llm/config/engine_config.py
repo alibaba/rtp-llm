@@ -362,7 +362,12 @@ def finalize_scheduler_config(
 
     # Chunked prefill normalization + engine-level hard gates.
     chunk_size = fifo_scheduler_config.prefill_chunk_size
+    chunk_batch_tokens = fifo_scheduler_config.prefill_chunk_batch_tokens
+    if chunk_batch_tokens < 0:
+        raise ValueError("prefill_chunk_batch_tokens must be non-negative")
     if chunk_size <= 0:
+        if chunk_batch_tokens:
+            raise ValueError("prefill_chunk_batch_tokens requires prefill_chunk_size > 0")
         return  # chunked prefill disabled; nothing to validate.
 
     if role_type not in (RoleType.PREFILL, RoleType.PDFUSION):
@@ -371,6 +376,7 @@ def finalize_scheduler_config(
             f"disabling for role_type={role_type}"
         )
         fifo_scheduler_config.prefill_chunk_size = 0
+        fifo_scheduler_config.prefill_chunk_batch_tokens = 0
         return
 
     if use_batch_decode_scheduler:
@@ -405,4 +411,23 @@ def finalize_scheduler_config(
         chunk_size = aligned
         fifo_scheduler_config.prefill_chunk_size = chunk_size
 
-    logging.info(f"chunked prefill enabled: prefill_chunk_size={chunk_size}")
+    if chunk_batch_tokens:
+        if seq_size_per_block > 0:
+            aligned = (chunk_batch_tokens // seq_size_per_block) * seq_size_per_block
+            if aligned != chunk_batch_tokens:
+                logging.warning(
+                    f"prefill_chunk_batch_tokens ({chunk_batch_tokens}) is not a multiple "
+                    f"of seq_size_per_block ({seq_size_per_block}); adjusted to {aligned}"
+                )
+            chunk_batch_tokens = aligned
+        if not chunk_size <= chunk_batch_tokens <= fifo_scheduler_config.max_batch_tokens_size:
+            raise ValueError(
+                "prefill_chunk_batch_tokens must be between the aligned prefill_chunk_size "
+                "and max_batch_tokens_size"
+            )
+        fifo_scheduler_config.prefill_chunk_batch_tokens = chunk_batch_tokens
+
+    logging.info(
+        f"chunked prefill enabled: prefill_chunk_size={chunk_size}, "
+        f"prefill_chunk_batch_tokens={chunk_batch_tokens}"
+    )
