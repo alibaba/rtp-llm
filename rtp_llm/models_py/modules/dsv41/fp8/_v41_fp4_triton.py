@@ -50,6 +50,28 @@ FP4_GLOBAL_ENTRY_BYTES = 288  # 256B e2m1 payload + 32B E4M3 scales
 FP4_INDEXER_HEAD_DIM = 128
 FP4_INDEXER_GROUP = 32
 FP4_INDEXER_ENTRY_BYTES = 68  # 64B e2m1 payload + 4B packed UE8M0 scales
+
+# AMD rejects a single kernel launch whose TOTAL work-items reach 2^32
+# (hipErrorInvalidValue — measured: grid 12.6M x 256 threads OK, 16.7M x 256
+# == 2^32 invalid, while a 33.5M x 32-thread dummy kernel launches fine).
+# The indexer gather/dequant kernels run one program per KV slot with
+# num_warps=4 (256 threads), so full-context decode at 1,048,576 tokens with
+# batch >= 16 crosses that cap (native-n9 initCapture: 32 dummy requests x
+# 1M slots). Slice oversized launches into consecutive chunks; the kernels
+# index purely by program_id over the passed pointers, so slicing is
+# semantics-preserving and stays graph-capturable.
+_MAX_SLOTS_PER_LAUNCH = 8_388_608  # 2^23 -> 2^31 work-items at 256 threads
+
+
+def _launch_chunks(n: int):
+    if n <= _MAX_SLOTS_PER_LAUNCH:
+        yield 0, n
+        return
+    start = 0
+    while start < n:
+        end = min(start + _MAX_SLOTS_PER_LAUNCH, n)
+        yield start, end
+        start = end
 FP4_ROWS_PER_CTA = 16
 
 
@@ -588,19 +610,20 @@ def gather_indexer_k_fp4(
     sf = torch.empty(N, dtype=torch.int32, device=device)
     if N == 0:
         return payload, sf
-    _fp4_indexer_gather_kernel[(N,)](
-        kv_cache_packed,
-        slot_mapping,
-        payload,
-        sf,
-        N,
-        D=FP4_INDEXER_HEAD_DIM,
-        GROUP=FP4_INDEXER_GROUP,
-        cache_block_size=int(kv_cache_packed.shape[1]),
-        block_stride=int(kv_cache_packed.stride(0)),
-        num_cache_blocks=int(kv_cache_packed.shape[0]),
-        num_warps=4,
-    )
+    for lo, hi in _launch_chunks(N):
+        _fp4_indexer_gather_kernel[(hi - lo,)](
+            kv_cache_packed,
+            slot_mapping[lo:hi],
+            payload[lo:hi],
+            sf[lo:hi],
+            hi - lo,
+            D=FP4_INDEXER_HEAD_DIM,
+            GROUP=FP4_INDEXER_GROUP,
+            cache_block_size=int(kv_cache_packed.shape[1]),
+            block_stride=int(kv_cache_packed.stride(0)),
+            num_cache_blocks=int(kv_cache_packed.shape[0]),
+            num_warps=4,
+        )
     return payload, sf
 
 
@@ -627,19 +650,20 @@ def dequantize_indexer_k_fp4(
         torch.bfloat16: tl.bfloat16,
         torch.float16: tl.float16,
     }[out.dtype]
-    _fp4_indexer_dequant_kernel[(N,)](
-        kv_cache_packed,
-        slot_mapping,
-        out,
-        N,
-        D=FP4_INDEXER_HEAD_DIM,
-        GROUP=FP4_INDEXER_GROUP,
-        cache_block_size=int(kv_cache_packed.shape[1]),
-        block_stride=int(kv_cache_packed.stride(0)),
-        num_cache_blocks=int(kv_cache_packed.shape[0]),
-        OUT_DTYPE=_OUT_DTYPE,
-        num_warps=4,
-    )
+    for lo, hi in _launch_chunks(N):
+        _fp4_indexer_dequant_kernel[(hi - lo,)](
+            kv_cache_packed,
+            slot_mapping[lo:hi],
+            out[lo:hi],
+            hi - lo,
+            D=FP4_INDEXER_HEAD_DIM,
+            GROUP=FP4_INDEXER_GROUP,
+            cache_block_size=int(kv_cache_packed.shape[1]),
+            block_stride=int(kv_cache_packed.stride(0)),
+            num_cache_blocks=int(kv_cache_packed.shape[0]),
+            OUT_DTYPE=_OUT_DTYPE,
+            num_warps=4,
+        )
     return out
 
 
