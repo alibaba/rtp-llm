@@ -7,7 +7,6 @@ import os
 import re
 import threading
 import time
-import uuid
 from enum import Enum
 from subprocess import check_call
 from typing import Dict, Optional, Tuple, Type
@@ -117,65 +116,22 @@ def _fuse_mount_options(path: str) -> Optional[set[str]]:
     )
 
 
-@retry_with_timeout(
-    timeout_seconds=10,
-    retry_interval=0.1,
-    exceptions=(FileNotFoundError, RetryableError),
-)
-def _read_external_mount_probe(path: str, expected: bytes) -> None:
-    # Some FUSE implementations expose a file only after its upload completes.
-    with open(path, "rb") as probe:
-        if probe.read(len(expected) + 1) != expected:
-            raise RetryableError(f"external fuse probe is not readable yet: {path}")
-
-
-@retry_with_timeout(
-    timeout_seconds=10,
-    retry_interval=0.1,
-    exceptions=(FileNotFoundError,),
-)
-def _rename_external_mount_probe(path: str, renamed: str) -> None:
-    # Write-only mounts cannot use a read probe to wait for upload visibility.
-    os.rename(path, renamed)
-
-
 def _check_external_mount_access(
     path: str, mode: MountRwMode, options: set[str]
 ) -> None:
+    """Validate a borrowed mount without writing into it.
+
+    mountinfo already reports the read-only flag, and statfs is the cheapest
+    proof that the FUSE server behind the mount is still alive. Creating a file
+    and reading it back would race OSS-backed FUSE, which only exposes an
+    object after its background upload, and would leave probe files in a shared
+    remote directory. The first real operation reports the same error anyway.
+    """
     if mode != MountRwMode.RWMODE_RO and "ro" in options:
         raise PermissionError(errno.EROFS, "external fuse mount is read-only", path)
     if not os.path.isdir(path):
         raise NotADirectoryError(path)
-    if mode != MountRwMode.RWMODE_WO:
-        with os.scandir(path) as entries:
-            for entry in entries:
-                if mode == MountRwMode.RWMODE_RW:
-                    break
-                if entry.is_file(follow_symlinks=False):
-                    with open(entry.path, "rb") as sample:
-                        sample.read(1)
-                    break
-    if mode == MountRwMode.RWMODE_RO:
-        return
-
-    # Probe only the borrowed mount, without touching existing files or chmod.
-    probe_path = os.path.join(path, f".rtp_llm_fuse_probe_{uuid.uuid4().hex}")
-    payload, created = b"rtp-llm fuse access probe", False
-    try:
-        with open(probe_path, "xb") as probe:
-            created = True
-            probe.write(payload)
-        if mode == MountRwMode.RWMODE_RW:
-            _read_external_mount_probe(probe_path, payload)
-        renamed = probe_path + ".ready"
-        _rename_external_mount_probe(probe_path, renamed)
-        probe_path = renamed
-    finally:
-        if created:
-            try:
-                os.unlink(probe_path)
-            except FileNotFoundError:
-                pass
+    os.statvfs(path)
 
 
 # Fuser is a wrapper class for c2 sidecar fuse.
