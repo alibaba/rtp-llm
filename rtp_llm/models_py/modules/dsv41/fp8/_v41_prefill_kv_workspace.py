@@ -462,23 +462,17 @@ def combine_kv(shared, globals_by_req, swa):
         # Drop the old buffer before allocating a new source group's layout.
         shared.pop("prefill_kv_workspace")
         del cached, source, output
-    # Prefer the buffer reserved at prefill entry; fall back to the old
-    # allocation only for shapes that exceed the reservation.
+    # FlashMLA consumes BF16 KV.  Allocate the combined tensor directly in
+    # BF16 instead of concatenating (and temporarily materialising) float32
+    # globals: at full context the latter needs a fresh 2 GiB block that no
+    # longer exists, while the BF16 copy is ~1.1 GiB and fits the residual
+    # reserve.  The copy also converts any FP32 fallback rows correctly.
     g_rows = g.shape[0]
     total_rows = g_rows + sw.shape[0]
-    row_elems = g[0].numel()
-    need = total_rows * row_elems * g.element_size()
-    buffer = shared.get("prefill_kv_buffer")
-    if buffer is not None and buffer.numel() >= need:
-        output = buffer[:need].view(g.dtype).view(total_rows, *g.shape[1:])
-        output[:g_rows].copy_(g)
-        output[g_rows:].copy_(sw)
-        shared["prefill_kv_workspace"] = (g, signature, output)
-        return output
-    try:
-        torch.cuda.empty_cache()
-    except Exception:
-        pass
-    output = torch.cat((g, sw))
+    output = torch.empty(
+        (total_rows, *g.shape[1:]), dtype=torch.bfloat16, device=g.device
+    )
+    output[:g_rows].copy_(g)
+    output[g_rows:].copy_(sw)
     shared["prefill_kv_workspace"] = (g, signature, output)
     return output
