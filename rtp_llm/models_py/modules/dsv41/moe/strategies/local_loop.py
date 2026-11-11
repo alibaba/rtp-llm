@@ -76,7 +76,7 @@ def _get_or_create_local_y(
     return cached
 
 
-_GROUPED_CAPTURE_GROUP = 4
+_GROUPED_CAPTURE_GROUP = 8
 
 
 def _fp4_byte_lut(device: torch.device) -> torch.Tensor:
@@ -118,11 +118,11 @@ def _fp4_group_dequant_bf16(
     if weight.dim() != 2:
         # The strategy passes a group slice [G, out, in/2]; flatten experts
         # into rows for the row-wise FP4 unpack and reshape back by shape.
-        row_chunk = weight.shape[-2]
+        row_chunk = max(1, weight.shape[-2] // 2)
         weight = weight.reshape(-1, weight.shape[-1])
         scale = scale.reshape(-1, scale.shape[-1])
     else:
-        row_chunk = min(4096, weight.shape[0])
+        row_chunk = min(2048, weight.shape[0])
     rows, packed = weight.shape
     in_dim = packed * 2
     out = torch.empty((rows, in_dim), dtype=torch.bfloat16, device=weight.device)
@@ -133,9 +133,9 @@ def _fp4_group_dequant_bf16(
     # int64 index tensor; on the 44 GiB L20 that competes with graph capture.
     for r0 in range(0, rows, row_chunk):
         r1 = min(r0 + row_chunk, rows)
-        vals = byte_lut[wb[r0:r1].long()].reshape(r1 - r0, in_dim)
-        scales = e8m0_lut[sb[r0:r1].long()].repeat_interleave(32, dim=1)
-        vals.mul_(scales)
+        vals = byte_lut[wb[r0:r1].int()].reshape(r1 - r0, in_dim)
+        scales = e8m0_lut[sb[r0:r1].long()]
+        vals.view(r1 - r0, in_dim // 32, 32).mul_(scales[:, :, None])
         out[r0:r1].copy_(vals)
     return out
 
