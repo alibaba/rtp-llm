@@ -22,10 +22,14 @@ def supports_bf16() -> bool:
 
 
 def is_supported(logits: torch.Tensor, visible: torch.Tensor, topk: int = 512) -> bool:
+    # topk_v3 is compiled for SM90+; A100 has no kernel image even though the
+    # op is exported.  Let callers use the finite torch.topk fallback instead.
+    major = torch.cuda.get_device_capability(logits.device)[0] if logits.is_cuda else 0
     return (
         _TOPK_V3_OK
         and torch.version.hip is None
         and logits.is_cuda
+        and major >= 9
         and (
             logits.dtype == torch.float32
             or (logits.dtype == torch.bfloat16 and supports_bf16())
