@@ -161,8 +161,8 @@ TEST_F(CPSlotMapperTest, BuildStorePlanUsesPolicyActiveTailBlocks) {
 
 TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     CacheConfig config;
-    config.seq_size_per_block = 8;
-    config.layer_num          = 1;
+    config.seq_size_per_block    = 8;
+    config.main_config.layer_num = 1;
 
     auto full_spec = std::make_shared<MHAKVCacheSpec>();
     full_spec->tag = "full";
@@ -184,9 +184,33 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
 
     CPSlotMapper mapper(0, 2, 8);
 
-    EXPECT_EQ(mapper.layoutForGroup(config, "full").mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
-    EXPECT_EQ(mapper.layoutForGroup(config, "full").slice, CpBlockSliceMode::NONE);
-    EXPECT_EQ(mapper.layoutForGroup(config, "swa").slice, CpBlockSliceMode::EQUAL_BYTES);
+    EXPECT_EQ(mapper.layoutForGroup(config.main_config, "full").mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
+    EXPECT_EQ(mapper.layoutForGroup(config.main_config, "full").slice, CpBlockSliceMode::NONE);
+    EXPECT_EQ(mapper.layoutForGroup(config.main_config, "swa").slice, CpBlockSliceMode::EQUAL_BYTES);
+}
+
+TEST_F(CPSlotMapperTest, ResolvesMtpGroupOutsideMainTopology) {
+    CacheConfig config;
+    config.seq_size_per_block = 8;
+
+    GroupBase main_group;
+    main_group.tag    = "full";
+    main_group.spec   = std::make_shared<MHAKVCacheSpec>("full", 8, 8, 1);
+    main_group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    config.setTopology({main_group}, {{0, {"full"}}});
+
+    GroupBase mtp_group;
+    mtp_group.tag    = "mtp_swa";
+    mtp_group.spec   = std::make_shared<MHAKVCacheSpec>("mtp_swa", 16, 8, 1);
+    mtp_group.policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    CacheModuleConfig mtp_config;
+    mtp_config.setTopology({mtp_group}, {{0, {"mtp_swa"}}});
+    config.mtp_sub_configs.push_back(std::move(mtp_config));
+
+    CPSlotMapper mapper(0, 2, 8);
+    EXPECT_EQ(mapper.logicalSeqSizePerBlock(config, "mtp_swa"), 16u);
+    EXPECT_FALSE(mapper.blockRoundRobinGroup(config, "mtp_swa"));
+    EXPECT_NO_THROW(mapper.buildStorePlan(config, "mtp_swa", 2, 0, true));
 }
 
 }  // namespace test

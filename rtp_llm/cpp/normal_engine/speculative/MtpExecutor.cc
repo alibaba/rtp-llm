@@ -39,6 +39,7 @@
 #include <memory>
 #include <thread>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace rtp_llm {
@@ -559,7 +560,7 @@ void MtpExecutor::maybePrintModelInput(const GptModelInputs& model_input, const 
     }
 }
 
-static void applyCacheStrideToModelInput(GptModelInputs& model_input, const CacheConfig& cache_config) {
+static void applyCacheStrideToModelInput(GptModelInputs& model_input, const CacheModuleConfig& cache_config) {
     model_input.kv_block_stride_bytes = 0;
     model_input.kv_scale_stride_bytes = 0;
     if (cache_config.groupNums() == 1) {
@@ -823,10 +824,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     // variable beams may still increase sampler rows. Keep the safe dynamic growth path enabled.
     sampler_.reset(new Sampler(SamplerInitParams{initial_sampler_batch_size, false}));
 
-    // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
+    // Optional per-layer cache buffers for the main model.
     std::optional<GroupedCacheLayerLayout> kv_cache_layer_layout = std::nullopt;
     if (cache_manager && cache_manager->cacheConfig().groupNums() > 1) {
-        kv_cache_layer_layout = cache_manager->allLayerCacheBase();
+        kv_cache_layer_layout = cache_manager->getMainModelGroupedCacheLayerLayout();
     }
 
     // Cache-backed target and draft geometry comes from their own resolved configs.
@@ -891,10 +892,16 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         && std::any_of(cache_config.topology().groups().begin(),
                        cache_config.topology().groups().end(),
                        [](const GroupBase& group) { return group.policy.group_type == CacheGroupType::LINEAR; });
+    // The batch stream processor gathers model inputs whose block tables carry
+    // every cache group the stream owns (main + MTP). The CacheConfig-aware
+    // constructor emits all tagged rows itself, so no merged topology is built
+    // here; the draft module only supplies per-module scalar metadata.
+    const size_t module_id = cache_config.moduleCount() > 1 ? 1 : 0;
     batch_stream_processor_.reset(new MtpBatchStreamProcessor(params.model_config_,
                                                               params.pd_sep_config,
                                                               params.profiling_debug_logging_config,
                                                               cache_config,
+                                                              module_id,
                                                               params.sp_config,
                                                               warm_up_));
 
@@ -1640,7 +1647,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                     {static_cast<int64_t>(batch_size), static_cast<int64_t>(propose_step_ + 1)});
                 ensureModelInputsOnCuda(model_input, "decode.prepare_dspark_target_verify");
             }
-            applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
+            applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig().main_config);
             tpSyncModelInputs(model_input, parallelism_config_);
             ensureModelInputsOnCuda(model_input, "decode.dspark_target_verify_after_tp_sync");
         }
@@ -2029,7 +2036,7 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     if (!useAsyncPrepare()) {
         return;
     }
-    const auto& cache_cfg = cache_manager_->cacheConfig();
+    const auto& cache_cfg = cache_manager_->cacheConfig().main_config;
     // NOTE: combo_tokens never used in prepare stage, so it is safe to use shallow copy
     auto model_input_copy = model_input;
     applyCacheStrideToModelInput(model_input_copy, cache_cfg);
@@ -2169,7 +2176,6 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     model_input.is_target_verify = false;
     return model_output;
 }
-
 SpecLogitsVerifyRunner::LaunchResult
 MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
                                          const torch::Tensor&                draft_tokens,
@@ -2860,7 +2866,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             execBroadcast({broadcast_tensors, 0});
         }
 
-        applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
+        applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig().main_config);
     }
 }
 
@@ -3098,8 +3104,9 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                          verify_position_ids, accept_len_gpu_all, batch_size, static_cast<int64_t>(propose_step_ + 1)) :
                      torch::Tensor();
 
-    torch::Tensor next_kv_cache_block_id;
-    torch::Tensor next_kv_cache_kernel_block_id;
+    torch::Tensor            next_kv_cache_block_id;
+    torch::Tensor            next_kv_cache_kernel_block_id;
+    std::vector<std::string> next_kv_cache_row_tags;
     if (is_linear_attention_model_ && useDeviceInput() && kv_cache_block_id.defined() && kv_cache_block_id.is_cuda()
         && kv_cache_kernel_block_id.defined() && kv_cache_kernel_block_id.is_cuda()) {
         RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id.dim() == 3 && kv_cache_block_id.size(1) == batch_size,
@@ -3110,9 +3117,27 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                                 batch_size);
         std::vector<CacheGroupType> group_types;
         const auto&                 cache_config = cache_manager_->cacheConfig();
-        group_types.reserve(cache_config.topology().groups().size());
-        for (const auto& group : cache_config.topology().groups()) {
-            group_types.push_back(group.policy.group_type);
+        // Snapshot rows cover every module's groups in main-then-sub order. The
+        // published tag vector is the snapshot's own row order; consumers must
+        // not infer it from a module-local topology.
+        for (size_t module_id = 0; module_id < cache_config.moduleCount(); ++module_id) {
+            for (const auto& group : cache_config.moduleConfig(module_id).groups()) {
+                group_types.push_back(group.policy.group_type);
+                next_kv_cache_row_tags.push_back(group.tag);
+            }
+        }
+        RTP_LLM_CHECK_WITH_INFO(next_kv_cache_row_tags.size() == static_cast<size_t>(kv_cache_block_id.size(0))
+                                    && next_kv_cache_row_tags.size()
+                                           == static_cast<size_t>(kv_cache_kernel_block_id.size(0)),
+                                "MTP cache snapshot tag count %zu differs from physical rows %ld or kernel rows %ld",
+                                next_kv_cache_row_tags.size(),
+                                kv_cache_block_id.size(0),
+                                kv_cache_kernel_block_id.size(0));
+        std::unordered_set<std::string> unique_tags;
+        for (const auto& tag : next_kv_cache_row_tags) {
+            RTP_LLM_CHECK_WITH_INFO(!tag.empty() && unique_tags.insert(tag).second,
+                                    "MTP cache snapshot row tags must be non-empty and unique: tag=%s",
+                                    tag.c_str());
         }
         const auto block_size  = static_cast<int>(cache_config.seq_size_per_block);
         const auto table_width = std::min(kv_cache_block_id.size(2), kv_cache_kernel_block_id.size(2));
@@ -3127,6 +3152,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
             // snapshot makes the next scheduler iteration join bookkeeping and
             // rebuild both tables from authoritative host state instead of
             // risking an out-of-range CUDA gather.
+            next_kv_cache_row_tags.clear();
             RTP_LLM_LOG_DEBUG("MTP cache snapshot capacity exhausted: physical_width=%ld kernel_width=%ld "
                               "batch=%ld; next round will synchronize and regather",
                               kv_cache_block_id.size(2),
@@ -3151,6 +3177,9 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
             next_kv_cache_block_id.defined() ? next_kv_cache_block_id.narrow(1, idx, 1) : torch::Tensor();
         state.next_kv_cache_kernel_block_id_gpu =
             next_kv_cache_kernel_block_id.defined() ? next_kv_cache_kernel_block_id.narrow(1, idx, 1) : torch::Tensor();
+        if (state.next_kv_cache_block_id_gpu.defined()) {
+            state.next_kv_cache_row_tags = next_kv_cache_row_tags;
+        }
         state.last_hidden_states_gpu = last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
 
         const auto next_batch_size = stream->nextBatchSize();

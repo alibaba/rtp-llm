@@ -128,7 +128,7 @@ public:
         BatchKVCacheResource addr;
         // New (refactored) BatchKVCacheResource: [batch_id][group_id] -> block_indices
         addr.resetBatchSize(1);
-        addr.initGroups(makeProcessorCacheConfig().topologyPtr());
+        addr.initGroups(makeProcessorCacheConfig());
         addr.setBatchBlocks(0, "default", {block_id});
         stream->setKVCache(addr);
 
@@ -240,8 +240,13 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputBuildsPositionSpec
     stream2->generateConfig()->temperature = 1.0f;
 
     auto stream_groups = StreamGroups({stream1, stream2});
-    auto processor     = MtpBatchStreamProcessor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto processor     = MtpBatchStreamProcessor(model_config,
+                                             pd_sep_config,
+                                             profiling_debug_logging_config,
+                                             cache_config.main_config,
+                                             cache_config.seq_size_per_block,
+                                             sp_config,
+                                             false);
 
     GptModelInputs  model_inputs;
     GptModelOutputs model_output;
@@ -301,9 +306,14 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     auto stream = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1, {7}, {8, 9});
     stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
 
-    MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    StreamGroups stream_groups({stream});
+    MtpBatchStreamProcessor processor(model_config,
+                                      pd_sep_config,
+                                      profiling_debug_logging_config,
+                                      cache_config.main_config,
+                                      cache_config.seq_size_per_block,
+                                      sp_config,
+                                      false);
+    StreamGroups            stream_groups({stream});
 
     GptModelInputs  model_input;
     GptModelOutputs model_output;
@@ -369,8 +379,13 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
     streams.emplace_back(stream1);
     streams.emplace_back(stream2);
 
-    MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    MtpBatchStreamProcessor processor(model_config,
+                                      pd_sep_config,
+                                      profiling_debug_logging_config,
+                                      cache_config.main_config,
+                                      cache_config.seq_size_per_block,
+                                      sp_config,
+                                      false);
 
     StreamGroups stream_groups(streams);
 
@@ -436,8 +451,13 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     draft_prefill_output.sampler_output.all_probs =
         torch::tensor({0.2f, 0.1f, 0.3f, 0.5f, 0.3f, 0.1f, 0.4f, 0.2f}, torch::kFloat32).reshape({2, 4});
 
-    MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    MtpBatchStreamProcessor processor(model_config,
+                                      pd_sep_config,
+                                      profiling_debug_logging_config,
+                                      cache_config.main_config,
+                                      cache_config.seq_size_per_block,
+                                      sp_config,
+                                      false);
 
     auto status = processor.dispatchDecode(stream_groups, spec_decode_output, std::move(draft_prefill_output));
     EXPECT_TRUE(status.ok());
@@ -458,7 +478,13 @@ TEST_F(MtpBatchStreamProcessorTest, EmptyDSpARKDecodeRoundPreservesEmptyEngramHi
     SpeculativeExecutionConfig sp_config;
     sp_config.type              = SP_TYPE_DSPARK;
     sp_config.gen_num_per_cycle = 3;
-    MtpBatchStreamProcessor processor(model_config, {}, {}, makeProcessorCacheConfig(), sp_config, false);
+    MtpBatchStreamProcessor processor(model_config,
+                                      {},
+                                      {},
+                                      makeProcessorCacheConfig().main_config,
+                                      makeProcessorCacheConfig().seq_size_per_block,
+                                      sp_config,
+                                      false);
     TensorHolder            holder;
     StreamGroups            empty(std::list<GenerateStreamPtr>{});
     auto                    input = processor.gatherDecodeModelInput(empty, holder);
@@ -506,8 +532,13 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
 
     auto stream_groups = StreamGroups({stream1, stream2});
 
-    auto processor = MtpBatchStreamProcessor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto         processor = MtpBatchStreamProcessor(model_config,
+                                             pd_sep_config,
+                                             profiling_debug_logging_config,
+                                             cache_config.main_config,
+                                             cache_config.seq_size_per_block,
+                                             sp_config,
+                                             false);
     TensorHolder holder;
     auto         model_input = processor.gatherDecodeModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input.ok());
@@ -590,8 +621,13 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
 
     auto stream_groups = StreamGroups({stream1, stream2});
 
-    auto processor = MtpBatchStreamProcessor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto         processor = MtpBatchStreamProcessor(model_config,
+                                             pd_sep_config,
+                                             profiling_debug_logging_config,
+                                             cache_config.main_config,
+                                             cache_config.seq_size_per_block,
+                                             sp_config,
+                                             false);
     TensorHolder holder;
     auto         model_input_status = processor.gatherDecodeModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
@@ -703,8 +739,13 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
 
     auto stream_groups = StreamGroups({stream1, stream2});
 
-    auto processor = MtpBatchStreamProcessor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto         processor = MtpBatchStreamProcessor(model_config,
+                                             pd_sep_config,
+                                             profiling_debug_logging_config,
+                                             cache_config.main_config,
+                                             cache_config.seq_size_per_block,
+                                             sp_config,
+                                             false);
     TensorHolder holder;
     auto         model_input_status = processor.gatherDecodeModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
@@ -797,8 +838,13 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
 
     auto stream_groups = StreamGroups({stream1, stream2});
 
-    auto processor = MtpBatchStreamProcessor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto         processor = MtpBatchStreamProcessor(model_config,
+                                             pd_sep_config,
+                                             profiling_debug_logging_config,
+                                             cache_config.main_config,
+                                             cache_config.seq_size_per_block,
+                                             sp_config,
+                                             false);
     TensorHolder holder;
     auto         model_input_status = processor.gatherDecodeModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
@@ -872,7 +918,13 @@ TEST_F(MtpBatchStreamProcessorTest, DraftCacheWritesRemainContiguousAcrossPrepar
     model_config.attn_config.rope_config.index_factor  = 3;
     sp_config.gen_num_per_cycle                        = 4;
     auto                    cache_config               = test::makeSimpleMhaCacheConfig(1, 4, 2048, rtp_llm::TYPE_FP16);
-    MtpBatchStreamProcessor processor(model_config, pd_sep_config, logging_config, cache_config, sp_config, false);
+    MtpBatchStreamProcessor processor(model_config,
+                                      pd_sep_config,
+                                      logging_config,
+                                      cache_config.main_config,
+                                      cache_config.seq_size_per_block,
+                                      sp_config,
+                                      false);
 
     for (int prompt_len : {465, 2048, 2051}) {
         SCOPED_TRACE(prompt_len);
@@ -986,8 +1038,13 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
     sp_config.gen_num_per_cycle       = gamma;
     sp_config.sp_dspark_mask_token_id = mask_id;
 
-    MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    MtpBatchStreamProcessor processor(model_config,
+                                      pd_sep_config,
+                                      profiling_debug_logging_config,
+                                      cache_config.main_config,
+                                      cache_config.seq_size_per_block,
+                                      sp_config,
+                                      false);
 
     GptModelInputs model_input;
     model_input.input_lengths  = torch::tensor({3, 2}, torch::kInt32);
@@ -1009,8 +1066,13 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
     // A non-positive draft width must refuse the commit.
     SpeculativeExecutionConfig zero_width_config = sp_config;
     zero_width_config.gen_num_per_cycle          = 0;
-    MtpBatchStreamProcessor zero_width(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, zero_width_config, false);
+    MtpBatchStreamProcessor zero_width(model_config,
+                                       pd_sep_config,
+                                       profiling_debug_logging_config,
+                                       cache_config.main_config,
+                                       cache_config.seq_size_per_block,
+                                       zero_width_config,
+                                       false);
     EXPECT_THROW(zero_width.validatePrefillDSparkCommitInput(model_input), std::exception);
 
     // Anchors / committed ends come from stream state at the decode round
@@ -1028,8 +1090,13 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
     // Fill-in DSpark keeps the anchor as conditioning only, so it queries one
     // extra row while still proposing gamma tokens.
     sp_config.sp_dspark_sample_from_anchor = false;
-    MtpBatchStreamProcessor qwen_processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    MtpBatchStreamProcessor qwen_processor(model_config,
+                                           pd_sep_config,
+                                           profiling_debug_logging_config,
+                                           cache_config.main_config,
+                                           cache_config.seq_size_per_block,
+                                           sp_config,
+                                           false);
     qwen_processor.buildDSparkProposeInput(model_input, anchors, committed_ends, host_holder);
     EXPECT_EQ((std::vector<int32_t>{101, mask_id, mask_id, mask_id, 202, mask_id, mask_id, mask_id}),
               toVec<int32_t>(model_input.combo_tokens));
@@ -1078,11 +1145,16 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
     GptModelInputs model_input;
     model_input.sequence_lengths = torch::tensor({1, 2}, torch::kInt32);
 
-    MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    TensorHolder host_holder;
-    auto         round_state    = processor.buildDSparkRoundState(stream_groups, model_input, host_holder);
-    auto         proposal_input = model_input;
+    MtpBatchStreamProcessor processor(model_config,
+                                      pd_sep_config,
+                                      profiling_debug_logging_config,
+                                      cache_config.main_config,
+                                      cache_config.seq_size_per_block,
+                                      sp_config,
+                                      false);
+    TensorHolder            host_holder;
+    auto                    round_state    = processor.buildDSparkRoundState(stream_groups, model_input, host_holder);
+    auto                    proposal_input = model_input;
     processor.prepareDSparkProposeModelInput(round_state, proposal_input, host_holder);
 
     EXPECT_EQ((std::vector<int32_t>{102, 22}), toVec<int32_t>(round_state.anchors));
@@ -1125,8 +1197,13 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGe
     sp_config.type              = SP_TYPE_DSPARK;
     sp_config.gen_num_per_cycle = gamma;
 
-    MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    MtpBatchStreamProcessor processor(model_config,
+                                      pd_sep_config,
+                                      profiling_debug_logging_config,
+                                      cache_config.main_config,
+                                      cache_config.seq_size_per_block,
+                                      sp_config,
+                                      false);
 
     GptModelInputs model_input;
     model_input.combo_tokens      = torch::tensor({11, 12, 13, 14, 21, 22, 23, 24}, torch::kInt32);
@@ -1181,19 +1258,23 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
 
-    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
-    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
-    GenerateStreamPtr stream3 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 3);
-    GenerateStreamPtr middle_stream =
-        createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 4);
+    GenerateStreamPtr stream1       = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    GenerateStreamPtr stream2       = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
+    GenerateStreamPtr stream3       = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 3);
+    GenerateStreamPtr middle_stream = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 4);
     middle_stream->setChunkSize(2);
     ASSERT_TRUE(middle_stream->isMiddleChunk());
 
     std::list<GenerateStreamPtr> streams{stream1, stream2, stream3, middle_stream};
     auto                         stream_groups = StreamGroups(streams);
 
-    auto processor = MtpBatchStreamProcessor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto         processor = MtpBatchStreamProcessor(model_config,
+                                             pd_sep_config,
+                                             profiling_debug_logging_config,
+                                             cache_config.main_config,
+                                             cache_config.seq_size_per_block,
+                                             sp_config,
+                                             false);
     TensorHolder holder;
     auto         model_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
@@ -1204,8 +1285,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     model_output.all_hidden_states = torch::zeros({7, 2}, torch::kFloat32);
 
     SamplerOutput sampler_output;
-    sampler_output.token_ids =
-        torch::tensor({1, -2, 2, 1, 2, 3, 3, 2, 1, 0, 1, 2}, torch::kInt32).reshape({4, 3});
+    sampler_output.token_ids = torch::tensor({1, -2, 2, 1, 2, 3, 3, 2, 1, 0, 1, 2}, torch::kInt32).reshape({4, 3});
 
     processor.updatePrefillPostDraftModelInput(stream_groups, model_input, model_output, sampler_output, holder);
 
@@ -1225,14 +1305,18 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     model_config.mm_model_config.mm_position_ids_style = MROPE;
     model_config.attn_config.rope_config.index_factor  = 3;
     sp_config.gen_num_per_cycle                        = 2;
-    MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    RuntimeConfig   runtime_config;
-    ResourceContext resource_context;
-    auto            stream1 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1);
-    auto            stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 2);
-    auto            middle_stream =
-        createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 0}, 3);
+    MtpBatchStreamProcessor processor(model_config,
+                                      pd_sep_config,
+                                      profiling_debug_logging_config,
+                                      cache_config.main_config,
+                                      cache_config.seq_size_per_block,
+                                      sp_config,
+                                      false);
+    RuntimeConfig           runtime_config;
+    ResourceContext         resource_context;
+    auto                    stream1 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1);
+    auto                    stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 2);
+    auto middle_stream = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 0}, 3);
     stream1->setContextPositionIds(torch::tensor({100, 101, 102, 110, 111, 112}, torch::kInt32));
     stream2->setContextPositionIds(torch::tensor({200, 201, 202, 210, 211, 212, 220, 221, 222}, torch::kInt32));
     middle_stream->setContextPositionIds(
@@ -1241,12 +1325,11 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     ASSERT_TRUE(middle_stream->isMiddleChunk());
     auto           stream_groups = StreamGroups({stream1, stream2, middle_stream});
     GptModelInputs model_input;
-    model_input.input_lengths = torch::tensor({2, 3, 2}, torch::kInt32);
-    model_input.combo_tokens  = torch::tensor({10, 11, 20, 21, 22, 30, 31}, torch::kInt32);
-    model_input.combo_position_ids =
-        torch::tensor({100, 101, 102, 110, 111, 112, 200, 201, 202, 210, 211, 212,
-                       220, 221, 222, 300, 301, 302, 310, 311, 312},
-                      torch::kInt32);
+    model_input.input_lengths      = torch::tensor({2, 3, 2}, torch::kInt32);
+    model_input.combo_tokens       = torch::tensor({10, 11, 20, 21, 22, 30, 31}, torch::kInt32);
+    model_input.combo_position_ids = torch::tensor(
+        {100, 101, 102, 110, 111, 112, 200, 201, 202, 210, 211, 212, 220, 221, 222, 300, 301, 302, 310, 311, 312},
+        torch::kInt32);
     GptModelOutputs model_output;
     model_output.all_hidden_states = torch::zeros({7, 2}, torch::kFloat32);
     SamplerOutput sampler_output;
@@ -1254,9 +1337,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     TensorHolder holder;
     processor.updatePrefillPostDraftModelInput(stream_groups, model_input, model_output, sampler_output, holder);
     EXPECT_EQ((vector<int>{11, 12, 21, 22, 23, 31, 3}), toVec<int>(model_input.combo_tokens));
-    EXPECT_EQ((vector<int>{110, 111, 112, 112, 112, 112,
-                           210, 211, 212, 220, 221, 222, 222, 222, 222,
-                           310, 311, 312, 320, 321, 322}),
+    EXPECT_EQ((vector<int>{110, 111, 112, 112, 112, 112, 210, 211, 212, 220, 221,
+                           222, 222, 222, 222, 310, 311, 312, 320, 321, 322}),
               toVec<int>(model_input.combo_position_ids));
 }
 
@@ -1297,8 +1379,13 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
 
     auto stream_groups = StreamGroups({stream1, stream2});
 
-    auto processor = MtpBatchStreamProcessor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto         processor = MtpBatchStreamProcessor(model_config,
+                                             pd_sep_config,
+                                             profiling_debug_logging_config,
+                                             cache_config.main_config,
+                                             cache_config.seq_size_per_block,
+                                             sp_config,
+                                             false);
     TensorHolder holder;
     auto         model_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
@@ -1350,8 +1437,13 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputKeepsDens
     model_config.num_layers     = 1;
     sp_config.gen_num_per_cycle = 2;
 
-    MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    MtpBatchStreamProcessor               processor(model_config,
+                                      pd_sep_config,
+                                      profiling_debug_logging_config,
+                                      cache_config.main_config,
+                                      cache_config.seq_size_per_block,
+                                      sp_config,
+                                      false);
     GptModelInputs                        model_input;
     speculative::SpeculativeSamplerOutput spec_decode_output;
     spec_decode_output.accept_len    = torch::tensor({3, 1}, torch::kInt32).to(torch::kCUDA);
@@ -1413,8 +1505,13 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputCompactsC
 
     auto stream_groups = StreamGroups({stream1, stream2, stream3});
 
-    auto processor = MtpBatchStreamProcessor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto         processor = MtpBatchStreamProcessor(model_config,
+                                             pd_sep_config,
+                                             profiling_debug_logging_config,
+                                             cache_config.main_config,
+                                             cache_config.seq_size_per_block,
+                                             sp_config,
+                                             false);
     TensorHolder holder;
     auto         model_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
@@ -1476,8 +1573,13 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodeDraftModelInputAdvancesCombo
     model_config.attn_config.rope_config.index_factor  = 3;
     sp_config.gen_num_per_cycle                        = 2;
 
-    MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    MtpBatchStreamProcessor processor(model_config,
+                                      pd_sep_config,
+                                      profiling_debug_logging_config,
+                                      cache_config.main_config,
+                                      cache_config.seq_size_per_block,
+                                      sp_config,
+                                      false);
 
     GptModelInputs model_input;
     model_input.combo_tokens       = torch::tensor({11, 21}, torch::kInt32);
@@ -1511,8 +1613,13 @@ TEST_F(MtpBatchStreamProcessorTest, testExpandTargetVerifyPositionIdsInitializes
     model_config.attn_config.rope_config.index_factor  = 3;
     sp_config.gen_num_per_cycle                        = 2;
 
-    MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    MtpBatchStreamProcessor processor(model_config,
+                                      pd_sep_config,
+                                      profiling_debug_logging_config,
+                                      cache_config.main_config,
+                                      cache_config.seq_size_per_block,
+                                      sp_config,
+                                      false);
 
     GptModelInputs model_input;
     model_input.combo_position_ids = torch::tensor({5, 6, 7, 10, 11, 12}, torch::kInt32);
@@ -1564,8 +1671,13 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutput) {
     stream2->getSPOutputBuffer()->tokens    = torch::tensor({2, 3}, torch::kInt32).reshape({1, 2});
 
     auto stream_groups = StreamGroups({stream1, stream2});
-    auto processor     = MtpBatchStreamProcessor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto processor     = MtpBatchStreamProcessor(model_config,
+                                             pd_sep_config,
+                                             profiling_debug_logging_config,
+                                             cache_config.main_config,
+                                             cache_config.seq_size_per_block,
+                                             sp_config,
+                                             false);
 
     torch::Tensor draft_token_probs_d_t;
     SamplerOutput sampler_output;
@@ -1631,8 +1743,13 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutputFromDevic
     stream2->setMtpAsyncDeviceState(std::move(state2));
 
     auto stream_groups = StreamGroups({stream1, stream2});
-    auto processor     = MtpBatchStreamProcessor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto processor     = MtpBatchStreamProcessor(model_config,
+                                             pd_sep_config,
+                                             profiling_debug_logging_config,
+                                             cache_config.main_config,
+                                             cache_config.seq_size_per_block,
+                                             sp_config,
+                                             false);
 
     torch::Tensor draft_token_probs_d_t;
     SamplerOutput sampler_output;
@@ -1697,8 +1814,13 @@ TEST_F(MtpBatchStreamProcessorTest, updateMultiStepDraftSamplerOutput) {
     auto draft_token_ids_t = torch::tensor({2, 0, 1, 2, 3, 1, 2, 3}, torch::kInt32).reshape({2, 4});
 
     auto stream_groups = StreamGroups({stream1, stream2});
-    auto processor     = MtpBatchStreamProcessor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto processor     = MtpBatchStreamProcessor(model_config,
+                                             pd_sep_config,
+                                             profiling_debug_logging_config,
+                                             cache_config.main_config,
+                                             cache_config.seq_size_per_block,
+                                             sp_config,
+                                             false);
 
     torch::Tensor              draft_token_probs_d_t;
     torch::Tensor              draft_token_ids_d_t = draft_token_ids_t;
@@ -1746,8 +1868,13 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchUsesDraftLastHiddenOverri
     streams.emplace_back(stream1);
     streams.emplace_back(stream2);
 
-    MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    MtpBatchStreamProcessor processor(model_config,
+                                      pd_sep_config,
+                                      profiling_debug_logging_config,
+                                      cache_config.main_config,
+                                      cache_config.seq_size_per_block,
+                                      sp_config,
+                                      false);
 
     StreamGroups stream_groups(streams);
 
@@ -1787,8 +1914,13 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkCommitOnlyPrefillDispatch) {
     auto            stream = createContextStream(model_config, runtime_config, resource_context, {2}, 1);
     stream->getSPOutputBuffer()->propose_tokens_gpu = torch::tensor({9}, torch::kInt32).to(torch::kCUDA);
     StreamGroups            stream_groups({stream});
-    MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    MtpBatchStreamProcessor processor(model_config,
+                                      pd_sep_config,
+                                      profiling_debug_logging_config,
+                                      cache_config.main_config,
+                                      cache_config.seq_size_per_block,
+                                      sp_config,
+                                      false);
 
     MergedOutput target_output;
     target_output.sampler_output.token_ids = torch::tensor({3}, torch::kInt32).reshape({1, 1});
@@ -1911,6 +2043,7 @@ TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayKeepsPhysicalKernelP
     state.next_kv_cache_block_id_gpu = torch::tensor({11, 12, 13}, torch::kInt32).reshape({1, 1, 3}).to(cuda_i32);
     state.next_kv_cache_kernel_block_id_gpu =
         torch::tensor({101, 102, 103, 104}, torch::kInt32).reshape({1, 1, 4}).to(cuda_i32);
+    state.next_kv_cache_row_tags = cache_config.allGroupTags();
     steady->setMtpAsyncDeviceState(std::move(state));
 
     GptModelInputs model_input;
@@ -1921,9 +2054,14 @@ TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayKeepsPhysicalKernelP
     model_input.kv_cache_kernel_block_id.select(1, 1).copy_(
         torch::tensor({201, 202, 203, 204, 205, 206, 207}, torch::kInt32));
 
-    TestableMtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    TensorHolder holder;
+    TestableMtpBatchStreamProcessor processor(model_config,
+                                              pd_sep_config,
+                                              profiling_debug_logging_config,
+                                              cache_config.main_config,
+                                              cache_config.seq_size_per_block,
+                                              sp_config,
+                                              false);
+    TensorHolder                    holder;
     processor.overlayMtpCacheSnapshots(StreamGroups({steady, fresh}), model_input, holder);
 
     ASSERT_TRUE(model_input.kv_cache_block_id.is_cuda());
@@ -1955,8 +2093,13 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillShiftsMultimodalMaskAndPackedLoca
     auto            groups  = StreamGroups({stream1, stream2});
     SpeculativeExecutionConfig speculative;
     speculative.gen_num_per_cycle = 1;
-    MtpBatchStreamProcessor processor(
-        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, makeProcessorCacheConfig(), speculative, false);
+    MtpBatchStreamProcessor processor(model_config,
+                                      PDSepConfig{},
+                                      ProfilingDebugLoggingConfig{},
+                                      makeProcessorCacheConfig().main_config,
+                                      makeProcessorCacheConfig().seq_size_per_block,
+                                      speculative,
+                                      false);
     for (bool starts_at_boundary : {false, true}) {
         GptModelInputs input;
         input.combo_tokens          = torch::tensor({10, 11, 12, 20, 21}, torch::kInt32);

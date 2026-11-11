@@ -9,8 +9,8 @@ namespace rtp_llm {
 
 // ==================== LayerCacheBuffer ====================
 
-LayerCacheBuffer::LayerCacheBuffer(int layer_id, std::string cache_tag):
-    layer_id_(layer_id), cache_tag_(std::move(cache_tag)) {
+LayerCacheBuffer::LayerCacheBuffer(int layer_id, std::string cache_tag, size_t module_id):
+    layer_id_(layer_id), cache_tag_(std::move(cache_tag)), module_id_(module_id) {
     RTP_LLM_CHECK_WITH_INFO(!cache_tag_.empty(), "LayerCacheBuffer requires a non-empty cache tag");
 }
 
@@ -33,20 +33,20 @@ LayerCacheBufferStore::LayerCacheBufferStore(uint64_t timeout_ms): timeout_ms_(t
 void LayerCacheBufferStore::addLayerCacheBuffer(const std::string&                       unique_key,
                                                 const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer) {
     std::lock_guard<std::mutex> lock(mutex_);
-    layer_cache_buffer_map_[unique_key][{layer_cache_buffer->getLayerId(), layer_cache_buffer->cacheTag()}] =
-        layer_cache_buffer;
-    expired_time_map_[unique_key] = currentTimeMs() + timeout_ms_;
+    layer_cache_buffer_map_[unique_key][layer_cache_buffer->descriptor()] = layer_cache_buffer;
+    expired_time_map_[unique_key]                                         = currentTimeMs() + timeout_ms_;
 }
 
 std::shared_ptr<LayerCacheBuffer> LayerCacheBufferStore::getLayerCacheBuffer(const std::string& unique_key,
                                                                              int                layer_id,
-                                                                             const std::string& cache_tag) const {
+                                                                             const std::string& cache_tag,
+                                                                             size_t             module_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto                        it = layer_cache_buffer_map_.find(unique_key);
     if (it == layer_cache_buffer_map_.end()) {
         return nullptr;
     }
-    auto it2 = it->second.find({layer_id, cache_tag});
+    auto it2 = it->second.find({module_id, layer_id, cache_tag});
     if (it2 == it->second.end()) {
         return nullptr;
     }

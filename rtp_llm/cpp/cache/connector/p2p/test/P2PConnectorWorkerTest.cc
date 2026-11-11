@@ -8,6 +8,7 @@
 #include <chrono>
 #include <map>
 #include <tuple>
+#include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorker.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerPrefill.h"
@@ -16,6 +17,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheSender.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheReceiver.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
 #include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PKeyUtil.h"
@@ -37,13 +39,25 @@ TEST(P2PKeyUtilTest, LayerCacheBufferUsesTagIdentity) {
 
 class RecordingLayerBlockConverter: public LayerBlockConverter {
 public:
-    std::vector<BlockInfo> convertIndexToBuffer(
-        int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(int                layer_id,
+                                                const std::string& tag,
+                                                int                block_id,
+                                                int                partition_count,
+                                                int                partition_id,
+                                                size_t) const override {
         calls.emplace_back(layer_id, tag, block_id, partition_count, partition_id);
         BlockInfo info;
         info.addr       = reinterpret_cast<void*>(static_cast<uintptr_t>(block_id + 1));
         info.size_bytes = static_cast<size_t>(block_id + 4);
         return {info};
+    }
+
+    size_t moduleOfTag(const std::string&) const override {
+        return 0;
+    }
+
+    bool tagOwnsLayer(const std::string&, int) const override {
+        return true;
     }
 
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
@@ -71,8 +85,16 @@ TEST(P2PKeyUtilTest, BufferConversionCarriesLayerTagAndBlockIdentity) {
 // Mock LayerBlockConverter for testing
 class MockLayerBlockConverter: public LayerBlockConverter {
 public:
-    std::vector<BlockInfo> convertIndexToBuffer(int, const std::string&, int, int, int) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(int, const std::string&, int, int, int, size_t) const override {
         return {};
+    }
+
+    size_t moduleOfTag(const std::string&) const override {
+        return 0;
+    }
+
+    bool tagOwnsLayer(const std::string&, int) const override {
+        return true;
     }
 
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
@@ -168,36 +190,31 @@ public:
     }
 
 private:
-    /// @brief Parse layer_id from layer_key = base_key + "_" + layer_id + "_" + partition_id
-    /// or base_key + "_" + layer_id + "_tag" + cache_tag + "_" + partition_id.
+    /// @brief Parse layer_id from layer_key = base_key + "_" + layer_id + "_tag" + cache_tag + "_" + partition_id.
+    /// The cache tag may itself contain '_', so anchor on the "_tag" marker and the partition suffix.
     static int parseLayerId(const std::string& layer_key) {
-        auto last = layer_key.rfind('_');
-        if (last == std::string::npos || last == 0) {
+        const auto tag_marker = layer_key.rfind("_tag");
+        if (tag_marker == std::string::npos) {
             return -1;
         }
-        auto second_last = layer_key.rfind('_', last - 1);
+        const auto second_last = layer_key.rfind('_', tag_marker - 1);
         if (second_last == std::string::npos) {
             return -1;
         }
-        auto third_last = layer_key.rfind('_', second_last - 1);
         try {
-            const bool has_identity = layer_key.compare(second_last + 1, 3, "tag") == 0;
-            const auto layer_begin = has_identity && third_last != std::string::npos ? third_last + 1 : second_last + 1;
-            const auto layer_end   = has_identity ? second_last : last;
-            return std::stoi(layer_key.substr(layer_begin, layer_end - layer_begin));
-        } catch (...) { return -1; }
+            return std::stoi(layer_key.substr(second_last + 1, tag_marker - second_last - 1));
+        } catch (...) {
+            return -1;
+        }
     }
 
     static std::string parseCacheTag(const std::string& layer_key) {
-        const auto last = layer_key.rfind('_');
-        if (last == std::string::npos || last == 0) {
+        const auto tag_marker = layer_key.rfind("_tag");
+        const auto last       = layer_key.rfind('_');
+        if (tag_marker == std::string::npos || last == std::string::npos || last <= tag_marker + 4) {
             return {};
         }
-        const auto second_last = layer_key.rfind('_', last - 1);
-        if (second_last == std::string::npos || layer_key.compare(second_last + 1, 3, "tag") != 0) {
-            return {};
-        }
-        return layer_key.substr(second_last + 4, last - second_last - 4);
+        return layer_key.substr(tag_marker + 4, last - tag_marker - 4);
     }
 
     bool                      should_succeed_ = true;
@@ -306,6 +323,18 @@ private:
 };
 
 // Test fixture for P2PConnectorWorker (tests Prefill and Decode sub-objects directly)
+CacheConfig makeTwoModuleCacheConfig(int main_layers, int mtp_layers) {
+    CacheConfig config = ::rtp_llm::test::makeSimpleMhaCacheConfig(
+        main_layers, /*block_num=*/16, /*tokens_per_block=*/1, DataType::TYPE_FP16);
+    CacheModuleConfig draft = ::rtp_llm::test::renameMtpModuleTags(
+        ::rtp_llm::test::makeSimpleMhaCacheConfig(
+            mtp_layers, /*block_num=*/16, /*tokens_per_block=*/1, DataType::TYPE_FP16)
+            .main_config,
+        config.main_config);
+    config.mtp_sub_configs.push_back(std::move(draft));
+    return config;
+}
+
 class P2PConnectorWorkerTest: public ::testing::Test {
 protected:
     void SetUp() override {
@@ -315,7 +344,7 @@ protected:
         worker_config_.tp_size                                              = 2;
         worker_config_.tp_rank                                              = 0;
         worker_config_.transfer_backend_config.cache_store_listen_port      = 0;
-        worker_config_.layer_all_num                                        = 2;
+        worker_config_.total_layer_num                                      = 2;
 
         mock_layer_block_converter_ = std::make_shared<MockLayerBlockConverter>();
 
@@ -339,7 +368,7 @@ protected:
 
     KVCacheResourcePtr createKVCacheResource(int layer_id, int num_blocks = 2) {
         auto                          resource  = std::make_shared<KVCacheResource>();
-        int                           layer_num = static_cast<int>(worker_config_.layer_all_num);
+        int                           layer_num = static_cast<int>(worker_config_.total_layer_num);
         std::vector<std::vector<int>> layer_to_group_ids(layer_num);
         for (int i = 0; i < layer_num; ++i) {
             layer_to_group_ids[i] = {i};
@@ -373,7 +402,7 @@ protected:
     void addComputedBuffer(int64_t request_id, int layer_id, int64_t deadline_ms, const std::string& cache_tag) {
         auto computed_buffer = computed_buffers_->addBuffer(request_id, nullptr, deadline_ms);
         if (!computed_buffer->expectedBufferCount().has_value()) {
-            computed_buffer->setExpectedBufferCount(static_cast<size_t>(worker_config_.layer_all_num));
+            computed_buffer->setExpectedBufferCount(static_cast<size_t>(worker_config_.total_layer_num));
         }
         auto layer_cache_buffer = createTaggedLayerCacheBuffer(layer_id, cache_tag, 2);
         computed_buffers_->addBuffer(request_id, layer_cache_buffer, deadline_ms);
@@ -384,12 +413,24 @@ protected:
         computed_buffer->setExpectedBufferCount(expected_buffer_count);
     }
 
-    std::shared_ptr<LayerCacheBuffer> createTaggedLayerCacheBuffer(int layer_id, std::string tag, int num_blocks) {
-        auto buffer = std::make_shared<LayerCacheBuffer>(layer_id, std::move(tag));
+    std::shared_ptr<LayerCacheBuffer>
+    createTaggedLayerCacheBuffer(int layer_id, std::string tag, int num_blocks, size_t module_id = 0) {
+        auto buffer = std::make_shared<LayerCacheBuffer>(layer_id, std::move(tag), module_id);
         for (int i = 0; i < num_blocks; ++i) {
             buffer->addBlockId(layer_id * 1000 + i, i);
         }
         return buffer;
+    }
+
+    void recreateWorkers() {
+        prefill_.reset();
+        decode_.reset();
+        prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(
+            worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+        prefill_->init(10 * 1000);
+        decode_ = std::make_unique<P2PConnectorWorkerDecode>(
+            worker_config_, mock_layer_block_converter_, nullptr, mock_receiver_);
+        computed_buffers_ = prefill_->getComputedBuffersStore();
     }
 
     void simulateTaskDone(const std::string& base_key, const std::vector<int>& layer_ids, bool all_success = true) {
@@ -1286,6 +1327,226 @@ TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_StartIdxNegative) {
     auto resource = createResource(2, 3);
     auto buf      = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, -1, -1);
     EXPECT_EQ(buf, nullptr);
+}
+
+// ==================== multi-module publication identity ====================
+
+TEST_F(P2PConnectorWorkerTest, TwoModulesShareLocalLayerZero_PublishDistinctDescriptors) {
+    constexpr int64_t request_id = 5001;
+    auto              config     = makeTwoModuleCacheConfig(/*main_layers=*/2, /*mtp_layers=*/1);
+    auto              resource   = std::make_shared<KVCacheResource>();
+    resource->initGroups(config);
+    resource->mutableBlockIds("default").add({0, 1});
+    resource->mutableBlockIds("mtp_default").add({2});
+    resource->cacheKeys() = {101, 102};
+
+    ASSERT_EQ(resource->moduleNum(), 2u);
+    ASSERT_EQ(resource->layerNum(0), 2);
+    ASSERT_EQ(resource->layerNum(1), 1);
+    ASSERT_EQ(resource->groupTagsForLayer(0, 0), std::vector<std::string>{"default"});
+    ASSERT_EQ(resource->groupTagsForLayer(0, 1), std::vector<std::string>{"mtp_default"});
+
+    EXPECT_TRUE(prefill_->writeByLayer(0, resource, request_id, std::nullopt, 0));
+    EXPECT_TRUE(prefill_->writeByLayer(1, resource, request_id, std::nullopt, 0));
+    EXPECT_TRUE(prefill_->writeByLayer(0, resource, request_id, std::nullopt, 1));
+
+    auto computed_buffer = computed_buffers_->getBuffer(request_id);
+    ASSERT_NE(computed_buffer, nullptr);
+    const auto expected = computed_buffer->expectedDescriptors();
+    ASSERT_TRUE(expected.has_value());
+    EXPECT_EQ(expected->size(), 3u);
+    EXPECT_TRUE(expected->count({0, 0, "default"}));
+    EXPECT_TRUE(expected->count({0, 1, "default"}));
+    EXPECT_TRUE(expected->count({1, 0, "mtp_default"}));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+    EXPECT_TRUE(computed_buffer->descriptorsComplete());
+
+    mock_sender_->setShouldSucceed(true);
+    mock_sender_->setAsyncCallback(false);
+    const std::vector<std::pair<std::string, uint32_t>> servers{{"127.0.0.1", 12345}};
+    ErrorInfo result = prefill_->sendKVCache(request_id, "multi_module_key", currentTimeMs() + 5000, servers);
+    EXPECT_TRUE(result.ok());
+
+    const auto calls = mock_sender_->getTransferCalls();
+    ASSERT_EQ(calls.size(), 3u);
+    std::set<std::pair<int, std::string>> transferred;
+    for (const auto& call : calls) {
+        transferred.insert({call.layer_id, call.cache_tag});
+    }
+    EXPECT_TRUE(transferred.count({0, "default"}));
+    EXPECT_TRUE(transferred.count({1, "default"}));
+    EXPECT_TRUE(transferred.count({0, "mtp_default"}));
+}
+
+TEST_F(P2PConnectorWorkerTest, DuplicatePublicationDoesNotDoubleCountOrCompleteEarly) {
+    constexpr int64_t request_id   = 5002;
+    worker_config_.total_layer_num = 1;
+    recreateWorkers();
+    auto config   = makeTwoModuleCacheConfig(/*main_layers=*/1, /*mtp_layers=*/1);
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->initGroups(config);
+    resource->mutableBlockIds("default").add({0, 1});
+    resource->mutableBlockIds("mtp_default").add({2});
+    resource->cacheKeys() = {201, 202};
+
+    EXPECT_TRUE(prefill_->writeByLayer(0, resource, request_id, std::nullopt, 0));
+    EXPECT_TRUE(prefill_->writeByLayer(0, resource, request_id, std::nullopt, 0));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+
+    auto computed_buffer = computed_buffers_->getBuffer(request_id);
+    ASSERT_NE(computed_buffer, nullptr);
+    ASSERT_TRUE(computed_buffer->expectedBufferCount().has_value());
+    EXPECT_EQ(*computed_buffer->expectedBufferCount(), 2u);
+    EXPECT_EQ(computed_buffer->getAllBuffers().size(), 1u);
+    EXPECT_FALSE(computed_buffer->descriptorsComplete());
+
+    EXPECT_TRUE(prefill_->writeByLayer(0, resource, request_id, std::nullopt, 1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+    EXPECT_EQ(computed_buffer->getAllBuffers().size(), 2u);
+    EXPECT_TRUE(computed_buffer->descriptorsComplete());
+
+    mock_sender_->setShouldSucceed(true);
+    mock_sender_->setAsyncCallback(false);
+    const std::vector<std::pair<std::string, uint32_t>> servers{{"127.0.0.1", 12345}};
+    ErrorInfo result = prefill_->sendKVCache(request_id, "duplicate_key", currentTimeMs() + 5000, servers);
+    EXPECT_TRUE(result.ok());
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 2);
+}
+
+TEST_F(P2PConnectorWorkerTest, MissingPublicationTimesOutWithoutPrematureCompletion) {
+    constexpr int64_t request_id   = 5003;
+    worker_config_.total_layer_num = 1;
+    recreateWorkers();
+    auto config   = makeTwoModuleCacheConfig(/*main_layers=*/1, /*mtp_layers=*/1);
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->initGroups(config);
+    resource->mutableBlockIds("default").add({0});
+    resource->mutableBlockIds("mtp_default").add({1});
+    resource->cacheKeys() = {301};
+
+    EXPECT_TRUE(prefill_->writeByLayer(0, resource, request_id, std::nullopt, 0));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+
+    mock_sender_->setShouldSucceed(true);
+    mock_sender_->setAsyncCallback(false);
+    const std::vector<std::pair<std::string, uint32_t>> servers{{"127.0.0.1", 12345}};
+    const int64_t                                       deadline_ms = currentTimeMs() + 200;
+    ErrorInfo result = prefill_->sendKVCache(request_id, "missing_key", deadline_ms, servers);
+
+    EXPECT_TRUE(result.hasError());
+    EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 1);
+}
+
+TEST_F(P2PConnectorWorkerTest, ZeroTransferableCpGroupsSealEmptyAndSucceed) {
+    constexpr int64_t request_id   = 5004;
+    worker_config_.cp_rank         = 1;
+    worker_config_.cp_size         = 2;
+    worker_config_.total_layer_num = 1;
+    recreateWorkers();
+
+    auto config   = makeTwoModuleCacheConfig(/*main_layers=*/1, /*mtp_layers=*/1);
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->initGroups(config);
+    resource->mutableBlockIds("default").add({0, 1});
+    resource->mutableBlockIds("mtp_default").add({2, 3});
+    resource->cacheKeys() = {401};
+
+    EXPECT_TRUE(prefill_->writeByLayer(0, resource, request_id, std::nullopt, 0));
+    EXPECT_TRUE(prefill_->writeByLayer(0, resource, request_id, std::nullopt, 1));
+
+    auto computed_buffer = computed_buffers_->getBuffer(request_id);
+    ASSERT_NE(computed_buffer, nullptr);
+    const auto expected = computed_buffer->expectedDescriptors();
+    ASSERT_TRUE(expected.has_value());
+    EXPECT_TRUE(expected->empty());
+    EXPECT_TRUE(computed_buffer->descriptorsComplete());
+
+    mock_sender_->setShouldSucceed(true);
+    const std::vector<std::pair<std::string, uint32_t>> servers{{"127.0.0.1", 12345}};
+    ErrorInfo result = prefill_->sendKVCache(request_id, "zero_cp_key", currentTimeMs() + 5000, servers);
+    EXPECT_TRUE(result.ok());
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 0);
+}
+
+TEST_F(P2PConnectorWorkerTest, DecodeReadCarriesDistinctModuleTagsForSharedLocalLayer) {
+    const std::string unique_key  = "multi_module_read";
+    const int64_t     request_id  = 5005;
+    const int64_t     deadline_ms = currentTimeMs() + 5000;
+
+    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
+    layer_cache_buffers.push_back(createTaggedLayerCacheBuffer(0, "default", 2, /*module_id=*/0));
+    layer_cache_buffers.push_back(createTaggedLayerCacheBuffer(0, "mtp_default", 1, /*module_id=*/1));
+
+    std::thread completion_thread([this, &unique_key]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        mock_receiver_->setTaskDone(P2PKeyUtil::makePartitionLayerTagKey(unique_key, 0, "default", 0), true);
+        mock_receiver_->setTaskDone(P2PKeyUtil::makePartitionLayerTagKey(unique_key, 0, "mtp_default", 0), true);
+    });
+
+    ErrorInfo error_info = decode_->read(request_id, unique_key, deadline_ms, layer_cache_buffers);
+    completion_thread.join();
+
+    EXPECT_TRUE(error_info.ok());
+}
+
+TEST_F(LayerCacheBufferUtilTest, ConvertEnumeratesPerModuleLocalLayerZero) {
+    auto config   = makeTwoModuleCacheConfig(/*main_layers=*/2, /*mtp_layers=*/1);
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->initGroups(config);
+    resource->mutableBlockIds("default").add({0, 1});
+    resource->mutableBlockIds("mtp_default").add({2});
+    resource->cacheKeys() = {501, 502};
+
+    const auto buffers = LayerCacheBufferUtil::convert(*resource, 0);
+    ASSERT_EQ(buffers.size(), 3u);
+    std::set<std::tuple<size_t, int, std::string>> descriptors;
+    for (const auto& buffer : buffers) {
+        descriptors.insert({buffer->moduleId(), buffer->getLayerId(), buffer->cacheTag()});
+    }
+    EXPECT_TRUE(descriptors.count({0, 0, "default"}));
+    EXPECT_TRUE(descriptors.count({0, 1, "default"}));
+    EXPECT_TRUE(descriptors.count({1, 0, "mtp_default"}));
+}
+
+class FakeModuleLayoutCoordinator: public CoordinatorCacheManager {
+public:
+    explicit FakeModuleLayoutCoordinator(std::vector<GroupedCacheLayerLayout> layouts):
+        CoordinatorCacheManager(CacheConfig()), layouts_(std::move(layouts)) {}
+
+    std::vector<GroupedCacheLayerLayout> allModuleLayouts() const override {
+        return layouts_;
+    }
+
+private:
+    std::vector<GroupedCacheLayerLayout> layouts_;
+};
+
+TEST(LayerBlockConverterImplTest, RegistersEveryModuleBufferWithoutMergedLayout) {
+    auto main_topology = ::rtp_llm::test::makeTestCacheTopology(/*group_num=*/1, /*layer_num=*/2, {{0}, {0}});
+    auto mtp_topology  = ::rtp_llm::test::makeTestCacheTopology(/*group_num=*/1, /*layer_num=*/1, {{0}});
+
+    auto main_layer_0 = torch::ones({4}, torch::kFloat32);
+    auto main_layer_1 = torch::ones({4}, torch::kFloat32);
+    auto mtp_layer_0  = torch::ones({4}, torch::kFloat32);
+
+    GroupedCacheLayerLayout::GroupLayouts main_groups;
+    main_groups.emplace("group0",
+                        CacheLayerLayout({BlockBufferPtrInfo{main_layer_0, torch::Tensor()},
+                                          BlockBufferPtrInfo{main_layer_1, torch::Tensor()}}));
+    GroupedCacheLayerLayout::GroupLayouts mtp_groups;
+    mtp_groups.emplace("group0", CacheLayerLayout({BlockBufferPtrInfo{mtp_layer_0, torch::Tensor()}}));
+
+    std::vector<GroupedCacheLayerLayout> layouts;
+    layouts.emplace_back(main_topology, std::move(main_groups));
+    layouts.emplace_back(mtp_topology, std::move(mtp_groups));
+
+    auto                    coordinator = std::make_shared<FakeModuleLayoutCoordinator>(std::move(layouts));
+    LayerBlockConverterImpl converter(coordinator);
+
+    const auto buffers = converter.getAllBuffers();
+    EXPECT_EQ(buffers.size(), 3u);
 }
 
 }  // namespace test

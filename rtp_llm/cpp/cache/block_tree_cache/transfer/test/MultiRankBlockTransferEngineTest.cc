@@ -24,6 +24,7 @@
 namespace rtp_llm {
 namespace {
 using namespace block_tree_cache_test;
+using block_transfer_engine_test::makeTestCacheConfig;
 
 struct MultiRankBlockTransferRpcState {
     std::mutex                            mutex;
@@ -32,14 +33,14 @@ struct MultiRankBlockTransferRpcState {
 };
 
 struct MultiRankBlockTransferRpcConfig {
-    bool                                              has_mem_response;
-    MemoryOperationResponsePB::Code                   mem_response_code;
-    grpc::Status                                      rpc_status;
-    std::shared_ptr<MultiRankBlockTransferRpcState>   state{nullptr};
-    int                                               sleep_millis{0};
-    std::shared_future<void>                          response_release{};
-    std::vector<MemoryOperationResponsePB::Code>       block_errors{};
-    ErrorInfo                                         error_info{};
+    bool                                            has_mem_response;
+    MemoryOperationResponsePB::Code                 mem_response_code;
+    grpc::Status                                    rpc_status;
+    std::shared_ptr<MultiRankBlockTransferRpcState> state{nullptr};
+    int                                             sleep_millis{0};
+    std::shared_future<void>                        response_release{};
+    std::vector<MemoryOperationResponsePB::Code>    block_errors{};
+    ErrorInfo                                       error_info{};
 };
 
 class MultiRankBlockTransferRpcService final: public RpcService::Service {
@@ -136,15 +137,15 @@ makeBroadcastManager(const std::vector<MultiRankBlockTransferRpcConfig>&        
 
 static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<BroadcastManager>& broadcast_manager) {
     // The RPC service is mocked; these tests need block metadata, not CUDA storage.
-    DeviceBlockPoolPtr device_pool = makeStructuralDevicePool(0);
-    std::shared_ptr<FullGroupSet> full =
-        std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool},
-                                       block_transfer_engine_test::makeHostPool(256, 8),
-                                       nullptr);
+    DeviceBlockPoolPtr            device_pool = makeStructuralDevicePool(0);
+    std::shared_ptr<FullGroupSet> full        = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{device_pool}, block_transfer_engine_test::makeHostPool(256, 8), nullptr);
     auto topology = block_transfer_engine_test::makeTestTopology(
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
-    full->initialize(
-        0, topology, topology->groupTags(), block_transfer_engine_test::makeTestBackingLayout(256, false));
+    full->initialize(0,
+                     makeTestCacheConfig(*topology),
+                     topology->groupTags(),
+                     block_transfer_engine_test::makeTestBackingLayout(256, false));
     std::vector<GroupSetPtr> groups = {full};
     return makeBlockTreeCacheForTest(std::move(groups),
                                      BlockTreeCacheConfig{},
@@ -165,7 +166,7 @@ static BlockIdxType prepareDeviceTarget(const std::shared_ptr<FullGroupSet>& gro
     const DeviceBlockPoolPtr& device_pool = group->devicePools().front();
     auto                      topology    = block_transfer_engine_test::makeTestTopology(
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
-    group->initialize(0, topology, topology->groupTags());
+    group->initialize(0, makeTestCacheConfig(*topology), topology->groupTags());
     const auto block = device_pool->malloc();
     if (!block.has_value()) {
         return NULL_BLOCK_IDX;
@@ -182,10 +183,10 @@ static void initializeBroadcastGroups(const std::vector<std::shared_ptr<FullGrou
         group_bases.push_back(block_transfer_engine_test::makeTestGroupBase(
             defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, payload_bytes));
     }
-    auto topology = block_transfer_engine_test::makeTestTopology(std::move(group_bases));
+    auto   topology = block_transfer_engine_test::makeTestTopology(std::move(group_bases));
     size_t group_id = 0;
     for (const auto& tag : topology->groupTags()) {
-        groups[group_id]->initialize(group_id, topology, {tag});
+        groups[group_id]->initialize(group_id, makeTestCacheConfig(*topology), {tag});
         ++group_id;
     }
 }
@@ -1224,7 +1225,7 @@ TEST_F(MultiRankBlockTransferEngineTest, EncodeTransferRequestIncludesMultipleDe
 }
 
 static std::vector<GroupSetPtr> makeMixedIntegrityBroadcastGroups() {
-    auto ordinary = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)},
+    auto ordinary        = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)},
                                                    block_transfer_engine_test::makeHostPool(256, 8),
                                                    nullptr);
     auto protected_group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(1)},
@@ -1233,7 +1234,7 @@ static std::vector<GroupSetPtr> makeMixedIntegrityBroadcastGroups() {
     initializeBroadcastGroups({ordinary, protected_group});
     protected_group->initialize(
         1,
-        protected_group->topologyPtr(),
+        protected_group->cacheConfig(),
         protected_group->groupTags(),
         block_transfer_engine_test::makeTestBackingLayout(protected_group->payloadBytes(), true));
     return {ordinary, protected_group};
@@ -1310,7 +1311,7 @@ TEST_F(MultiRankBlockTransferEngineTest, MixedIntegrityFailureWaitsForEveryRankA
     MultiRankBlockTransferRpcConfig pending{true, MemoryOperationResponsePB::OK, grpc::Status::OK, state};
     pending.response_release = release->get_future().share();
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
-    auto                                                          manager = makeBroadcastManager({failing, pending}, servers);
+    auto manager = makeBroadcastManager({failing, pending}, servers);
     ASSERT_NE(manager, nullptr);
     MultiRankBlockTransferEngine engine(makeMixedIntegrityBroadcastGroups(), manager);
     auto                         context = engine.execute(
@@ -1353,12 +1354,13 @@ TEST_F(MultiRankBlockTransferEngineTest, ExpiredOrdinaryTransferNeedsNoRemoteCom
 }
 
 static void mixedBroadcastLosesCompletion(bool through_dispatcher) {
-    MultiRankBlockTransferRpcConfig config{
-        true, MemoryOperationResponsePB::OK, grpc::Status(grpc::StatusCode::UNAVAILABLE, "mixed batch completion lost")};
+    MultiRankBlockTransferRpcConfig                               config{true,
+                                           MemoryOperationResponsePB::OK,
+                                           grpc::Status(grpc::StatusCode::UNAVAILABLE, "mixed batch completion lost")};
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     auto                                                          manager = makeBroadcastManager({config}, servers);
     ASSERT_NE(manager, nullptr);
-    auto engine = std::make_shared<MultiRankBlockTransferEngine>(makeMixedIntegrityBroadcastGroups(), manager);
+    auto         engine = std::make_shared<MultiRankBlockTransferEngine>(makeMixedIntegrityBroadcastGroups(), manager);
     TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2}), TransferDescriptor::hostToDevice(1, 3, {4})},
                       std::chrono::seconds(5));
     if (through_dispatcher) {
@@ -1390,7 +1392,7 @@ TEST_F(MultiRankBlockTransferEngineTest, CrcBusinessFailureFallsBack) {
     ASSERT_NE(manager, nullptr);
     MultiRankBlockTransferEngine          engine(makeMixedIntegrityBroadcastGroups(), manager);
     const std::vector<TransferDescriptor> descriptors{TransferDescriptor::hostToDevice(1, 1, {1})};
-    auto context                                   = engine.execute(TransferTask(descriptors, std::chrono::seconds(5)));
+    auto                                  context = engine.execute(TransferTask(descriptors, std::chrono::seconds(5)));
     context->waitDone();
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
@@ -1433,8 +1435,8 @@ TEST_F(MultiRankBlockTransferEngineTest, ProtectedTransferReportsMissingWorkerRe
     auto                                                          manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(manager, nullptr);
     MultiRankBlockTransferEngine engine(makeMixedIntegrityBroadcastGroups(), manager);
-    auto context = engine.execute(
-        TransferTask({TransferDescriptor::hostToDevice(1, 1, {1})}, std::chrono::milliseconds(5000)));
+    auto                         context =
+        engine.execute(TransferTask({TransferDescriptor::hostToDevice(1, 1, {1})}, std::chrono::milliseconds(5000)));
     ASSERT_NE(context, nullptr);
     context->waitDone();
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);

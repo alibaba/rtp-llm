@@ -3,6 +3,7 @@
 #include <unordered_map>
 
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -13,6 +14,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
@@ -90,11 +92,11 @@ struct StorageTaskState;
 
 class StorageWriteTask {
 public:
-    StorageWriteTask()                            = default;
-    StorageWriteTask(StorageWriteTask&&) noexcept = default;
+    StorageWriteTask()                                       = default;
+    StorageWriteTask(StorageWriteTask&&) noexcept            = default;
     StorageWriteTask& operator=(StorageWriteTask&&) noexcept = default;
 
-    StorageWriteTask(const StorageWriteTask&) = delete;
+    StorageWriteTask(const StorageWriteTask&)            = delete;
     StorageWriteTask& operator=(const StorageWriteTask&) = delete;
 
     explicit operator bool() const {
@@ -111,11 +113,14 @@ private:
 // before derived backend state starts destruction.
 class StorageBackend {
 public:
-    using MatchDone      = std::function<void(
+    using MatchDone  = std::function<void(
         size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success)>;
-    using Done           = std::function<void(ErrorInfo error)>;
-    using PoolsByTag     = std::unordered_map<std::string, DeviceBlockPoolPtr>;
-    using BufferResolver = std::function<std::vector<BlockInfo>(int layer_id, const std::string& tag, int block_id)>;
+    using Done       = std::function<void(ErrorInfo error)>;
+    using PoolsByTag = std::unordered_map<std::string, DeviceBlockPoolPtr>;
+    // The resolver receives module-local layer IDs; the backend validates
+    // local layer membership through the tag owner before invoking it.
+    using StorageBufferResolver =
+        std::function<std::vector<BlockInfo>(int module_local_layer_id, const std::string& tag, int block_id)>;
 
     // An injected executor may be observed by its owner but belongs to only
     // one backend; init rejects binding the same instance a second time.
@@ -124,9 +129,11 @@ public:
 
     // Initialization is single-attempt. A failed start may permanently stop
     // an injected executor; create a fresh backend/executor to retry.
-    bool init(std::shared_ptr<const CacheTopology> topology, PoolsByTag pools_by_tag, BufferResolver buffer_resolver);
-    void match(StorageRequest request, MatchDone done);
-    void read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
+    bool             init(std::shared_ptr<const CacheConfig> cache_config,
+                          PoolsByTag                         pools_by_tag,
+                          StorageBufferResolver              buffer_resolver);
+    void             match(StorageRequest request, MatchDone done);
+    void             read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
     StorageWriteTask prepareWrite(StorageRequest request);
     // Returns admission only, not the I/O result; never waits for completion.
     // Source pins live until execution or rejection.
@@ -135,9 +142,10 @@ public:
     void shutdown();
 
 protected:
-    const CacheTopology&      topology() const;
     const DeviceBlockPoolPtr& devicePool(const std::string& tag) const;
     std::vector<BlockInfo>    convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const;
+    const CacheConfig&        cacheConfig() const;
+    std::vector<BlockInfo> resolveStorageBuffer(int module_local_layer_id, const std::string& tag, int block_id) const;
     // Match queries contain every possible group handle. Derived matchers use
     // this predicate for each candidate prefix; the core applies the same rule
     // before allocating read targets.
@@ -163,15 +171,15 @@ private:
     using Operation = std::function<void(Lifecycle outcome)>;
 
     std::shared_ptr<storage_backend_detail::StorageTaskState> prepare(StorageRequest request);
-    void                                 validateRequest(const StorageRequest& request, bool allow_null_blocks) const;
-    bool                                 dispatch(Operation operation);
-    void                                 taskFinished();
+    void validateRequest(const StorageRequest& request, bool allow_null_blocks) const;
+    bool dispatch(Operation operation);
+    void taskFinished();
     void quarantineTask(const std::shared_ptr<storage_backend_detail::StorageTaskState>& state,
                         bool                                                             is_write,
                         StorageQuarantineReason                                          reason);
-    std::shared_ptr<const CacheTopology> topology_;
-    PoolsByTag                           pools_by_tag_;
-    BufferResolver                       buffer_resolver_;
+    std::shared_ptr<const CacheConfig>      cache_config_;
+    PoolsByTag                              pools_by_tag_;
+    StorageBufferResolver                   storage_buffer_resolver_;
     std::shared_ptr<StorageBackendExecutor> executor_;
     bool                                    init_attempted_{false};
     bool                                    initialized_{false};

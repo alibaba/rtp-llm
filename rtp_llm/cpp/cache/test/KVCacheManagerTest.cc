@@ -51,8 +51,7 @@ protected:
         createDevice();
     }
 
-    void TearDown() override {
-    }
+    void TearDown() override {}
 
 private:
 };
@@ -202,7 +201,7 @@ static void expectDsv4SwaAllocatedBlocks(const CacheConfig&      config,
                                          const std::string&      label,
                                          bool                    enable_reuse_cache = false) {
     const int tail_blocks = enable_reuse_cache && config.group(tag).policy.enable_prefix_reuse ?
-                                config.reuse_cache_tail_blocks :
+                                config.reuse_cache_tail_blocks() :
                                 dsv4ActiveTailBlocks(config, tag);
     const int tail_begin  = std::max(static_cast<int>(blocks.size()) - tail_blocks, 0);
     for (int i = 0; i < static_cast<int>(blocks.size()); ++i) {
@@ -259,7 +258,7 @@ makeProductionDSV4Config(uint32_t full_block_num, uint32_t max_concurrency, uint
 static BatchKVCacheResourcePtr makeDSV4BatchResource(const CacheConfig& config) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(1);
-    res->initGroups(config.topologyPtr());
+    res->initGroups(config);
     return res;
 }
 
@@ -319,10 +318,10 @@ TEST_F(KVCacheManagerTest, PublicationRejectsTailSparseReuseAcrossAllGroups) {
                 auto config = makeSimpleMhaCacheConfig(2, 5, 2, DataType::TYPE_FP16);
                 auto full   = config.group("default");
                 full.tag    = "full";
-                full.spec   = makeResolvedMhaSpec(config.dtype, 1, 1, config.seq_size_per_block, "full");
+                full.spec   = makeResolvedMhaSpec(config.dtype(), 1, 1, config.seq_size_per_block, "full");
                 auto tail   = full;
                 tail.tag    = "tail";
-                tail.spec   = makeResolvedMhaSpec(config.dtype, 1, 1, config.seq_size_per_block, "tail");
+                tail.spec   = makeResolvedMhaSpec(config.dtype(), 1, 1, config.seq_size_per_block, "tail");
                 tail.policy = defaultCacheGroupPolicy(tail_type);
                 tail.policy.active_tail_blocks  = 2;
                 tail.policy.enable_prefix_reuse = tail_reuse;
@@ -365,8 +364,8 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
 TEST_F(KVCacheManagerTest, TaggedAddressLookupIgnoresGroupOrderAndPreservesLayerBlockOrder) {
     for (const bool reversed : {false, true}) {
         auto config      = makeSimpleMhaCacheConfig(2, 5, 2, DataType::TYPE_FP16);
-        auto narrow_spec = makeResolvedMhaSpec(config.dtype, 1, 1, 2, "narrow");
-        auto wide_spec   = makeResolvedMhaSpec(config.dtype, 2, 4, 2, "wide");
+        auto narrow_spec = makeResolvedMhaSpec(config.dtype(), 1, 1, 2, "narrow");
+        auto wide_spec   = makeResolvedMhaSpec(config.dtype(), 2, 4, 2, "wide");
         config.fromGroupedSpecs(
             {narrow_spec, wide_spec}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"narrow", "wide"});
         rtp_llm::test::setGroupBlockLayout(
@@ -468,8 +467,8 @@ TEST_F(KVCacheManagerTest, WarmupPreservesCompletedCapacity) {
 
 TEST_F(KVCacheManagerTest, TestBlockWriterChecksSelectedGroupCapacity) {
     auto config = makeSimpleMhaCacheConfig(2, 5, 2, DataType::TYPE_FP16);
-    auto small  = makeResolvedMhaSpec(config.dtype, 1, 1, 2, "small");
-    auto large  = makeResolvedMhaSpec(config.dtype, 1, 1, 2, "large");
+    auto small  = makeResolvedMhaSpec(config.dtype(), 1, 1, 2, "small");
+    auto large  = makeResolvedMhaSpec(config.dtype(), 1, 1, 2, "large");
     config.fromGroupedSpecs(
         {small, large}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"small", "large"});
     config.setGroupBlockLayout(
@@ -490,7 +489,7 @@ TEST_F(KVCacheManagerTest, LayoutWithoutCapacityCannotAllocatePool) {
     groups.front().block_num = 0;
     ASSERT_NO_THROW(config.setTopology(std::move(groups), config.topology().layers()));
     EXPECT_EQ(config.group("default").block_num, 0u);
-    EXPECT_ANY_THROW(DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("default")));
+    EXPECT_ANY_THROW(DeviceBlockPoolConfigHelper::createConfigForGroup(config.main_config, config.group("default")));
     EXPECT_ANY_THROW(KVCacheManager(config, /*warmup=*/true));
     EXPECT_ANY_THROW(KVCacheManager(config, /*warmup=*/false));
 }
@@ -538,10 +537,8 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     const auto candidate =
         CacheConfigCreator::computeLocalBlockNum(candidate_config, target, {}, options, {}, std::nullopt, sp);
     EXPECT_EQ(candidate_config.group("default").block_num, 0u);
-    ASSERT_EQ(candidate_config.mtp_sub_configs.size(), 2u);
-    for (const auto& sub : candidate_config.mtp_sub_configs) {
-        EXPECT_EQ(sub->group("default").block_num, 0u);
-    }
+    ASSERT_EQ(candidate_config.mtp_sub_configs.size(), 1u);
+    EXPECT_EQ(candidate_config.mtp_sub_configs[0].group("mtp_default").block_num, 0u);
     candidate_config.finalizeBlockNums(candidate, RuntimeConfig{});
     const auto     child    = candidate_config.mtp_sub_configs[0];
     const auto     topology = candidate_config.topologyPtr();
@@ -549,26 +546,24 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     ASSERT_TRUE(manager.init());
     const auto& config = manager.cacheConfig();
     EXPECT_EQ(config.group("default").block_num, candidate);
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
-    ASSERT_EQ(manager.coordinator_manager_->groupBlockPools().size(), 1u);
-    const auto& pool        = manager.coordinator_manager_->groupBlockPools()[0];
-    const auto  pool_config = std::dynamic_pointer_cast<const DeviceBlockPoolConfig>(pool->config_);
-    ASSERT_NE(pool_config, nullptr);
-    ASSERT_EQ(pool_config->memory_layouts.size(), 3u);
-    // FP16 K+V: 4 tokens/block * 2 bytes/element * (2 target + 2*4 draft elements/token).
-    constexpr size_t bytes_per_block = 4 * 2 * 2 * (2 + 2 * 4);
-    constexpr size_t budget_bytes    = 1024 * 1024;
-    EXPECT_EQ(config.group("default").block_num, budget_bytes / bytes_per_block);
-    EXPECT_EQ(pool->getTotalSizeBytes(), static_cast<size_t>(config.group("default").block_num) * bytes_per_block);
-    EXPECT_LE(pool->getTotalSizeBytes(), budget_bytes);
-    EXPECT_GT(pool->getTotalSizeBytes() + bytes_per_block, budget_bytes);
-    for (const auto& sub : config.mtp_sub_configs) {
-        EXPECT_EQ(sub->group("default").block_num, candidate);
-    }
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    EXPECT_EQ(config.mtp_sub_configs[0].group("mtp_default").block_num, candidate);
+    ASSERT_EQ(manager.coordinator_manager_->groupBlockPools().size(), 2u);
+    const auto&  main_pool  = manager.coordinator_manager_->groupBlockPools()[0];
+    const auto&  mtp_pool   = manager.coordinator_manager_->groupBlockPools()[1];
+    const size_t main_bytes = config.moduleConfig(0).blockSizeBytesForGroup("default");
+    const size_t mtp_bytes  = config.moduleConfig(1).blockSizeBytesForGroup("mtp_default");
+    ASSERT_GT(main_bytes, 0u);
+    ASSERT_GT(mtp_bytes, 0u);
+    constexpr size_t budget_bytes = 1024 * 1024;
+    EXPECT_EQ(main_pool->getTotalSizeBytes(), static_cast<size_t>(candidate) * main_bytes);
+    EXPECT_EQ(mtp_pool->getTotalSizeBytes(), static_cast<size_t>(candidate) * mtp_bytes);
+    EXPECT_LE(main_pool->getTotalSizeBytes() + mtp_pool->getTotalSizeBytes(), budget_bytes);
+    EXPECT_GT(main_pool->getTotalSizeBytes() + mtp_pool->getTotalSizeBytes() + main_bytes + mtp_bytes, budget_bytes);
     // Manager consumes the completed topology without cloning or changing child capacities.
-    EXPECT_EQ(manager.cacheConfig().mtp_sub_configs[0], child);
+    EXPECT_EQ(manager.cacheConfig().mtp_sub_configs[0].topologyPtr(), child.topologyPtr());
     EXPECT_EQ(manager.cacheConfig().topologyPtr(), topology);
-    EXPECT_EQ(candidate_config.mtp_sub_configs[0]->group("default").block_num, candidate);
+    EXPECT_EQ(candidate_config.mtp_sub_configs[0].group("mtp_default").block_num, candidate);
 }
 
 TEST_F(KVCacheManagerTest, UnresolvedNormalConfigCannotBeUsedForWarmup) {
@@ -817,7 +812,7 @@ TEST_F(KVCacheManagerTest, ConnectorReferenceReleaseWakesAllocationWaiter) {
 
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->resetBatchSize(1);
-    resource->initGroups(cache_config.topologyPtr());
+    resource->initGroups(cache_config);
     auto tokens = makeDSV4CompleteTokenIds(/*initial_seq_len=*/2, /*max_seq_len=*/4, /*seq_size_per_block=*/2);
 
     MallocInfo malloc_info{resource, tokens};
@@ -853,7 +848,7 @@ TEST_F(KVCacheManagerTest, UpdateKVBlockReleaseWakesAllocationWaiter) {
 
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->resetBatchSize(2);
-    resource->initGroups(cache_config.topologyPtr());
+    resource->initGroups(cache_config);
     auto tokens = makeDSV4CompleteTokenIds(
         /*initial_seq_len=*/2, /*max_seq_len=*/4, /*seq_size_per_block=*/2, /*batch_size=*/2);
 
@@ -1134,7 +1129,7 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
     auto layout = manager->getMainModelGroupedCacheLayerLayout();
     ASSERT_EQ(layout.topology().groups().size(), static_cast<size_t>(kDsv4PoolNum));
     EXPECT_EQ(publishedGroupTags(layout.topology()), kDsv4Tags);
-    EXPECT_EQ(layout.topology().layers().size(), static_cast<size_t>(manager_config.layer_num));
+    EXPECT_EQ(layout.topology().layers().size(), static_cast<size_t>(manager_config.layer_num()));
 
     const int csa_layer = manager_config.layerIdsForGroup("csa_kv")[0];
     const int hca_layer = manager_config.layerIdsForGroup("hca_kv")[0];
@@ -1799,8 +1794,8 @@ public:
         return std::make_shared<CompletedTransferAsyncContext>(std::move(result), task.descriptors().size());
     }
 
-    size_t submitted_batch_count{0};
-    size_t submitted_descriptor_count{0};
+    size_t                      submitted_batch_count{0};
+    size_t                      submitted_descriptor_count{0};
     std::vector<CacheCopyError> copy_errors;
     ErrorInfo                   completion_error{ErrorInfo::OkStatus()};
 };
