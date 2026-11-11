@@ -8,6 +8,11 @@
 #include <string>
 #include <utility>
 #include <variant>
+#include <vector>
+
+#include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 #include "absl/status/status.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -17,6 +22,83 @@
 namespace rtp_llm {
 
 namespace {
+
+std::string serializeJson(const rapidjson::Value& value) {
+    rapidjson::StringBuffer                    buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    value.Accept(writer);
+    return {buffer.GetString(), buffer.GetSize()};
+}
+
+// CompileStructuralTag does not take CompileJSONSchema's whitespace option.
+// Use the same JSON compiler for schemas inside reasoning/tool envelopes. An
+// explicit per-node whitespace cap remains a request-level formatting choice.
+std::string withFixedJsonWhitespace(const std::string& structural_tag, bool strict_mode) {
+    rapidjson::Document document;
+    document.Parse<rapidjson::kParseIterativeFlag>(structural_tag.data(), structural_tag.size());
+    if (document.HasParseError()) {
+        throw std::runtime_error("structural_tag must be valid JSON");
+    }
+    if (!document.IsObject() || !document.HasMember("format")) {
+        // Leave legacy structural tags and input validation to XGrammar.
+        return structural_tag;
+    }
+
+    bool                           changed = false;
+    std::vector<rapidjson::Value*> pending{&document["format"]};
+    while (!pending.empty()) {
+        auto& node = *pending.back();
+        pending.pop_back();
+        if (node.IsArray()) {
+            for (auto& child : node.GetArray()) {
+                pending.push_back(&child);
+            }
+            continue;
+        }
+        if (!node.IsObject()) {
+            continue;
+        }
+        const auto type = node.FindMember("type");
+        if (type != node.MemberEnd() && type->value.IsString()
+            && std::string(type->value.GetString(), type->value.GetStringLength()) == "json_schema") {
+            const auto schema = node.FindMember("json_schema");
+            const auto style  = node.FindMember("style");
+            const auto cap    = node.FindMember("max_whitespace_cnt");
+            const auto order  = node.FindMember("any_order");
+            if (schema != node.MemberEnd() && (schema->value.IsObject() || schema->value.IsBool())
+                && (style == node.MemberEnd()
+                    || (style->value.IsString()
+                        && std::string(style->value.GetString(), style->value.GetStringLength()) == "json"))
+                && (cap == node.MemberEnd() || cap->value.IsNull())
+                && (order == node.MemberEnd() || order->value.IsBool())) {
+                const auto grammar =
+                    xgrammar::Grammar::FromJSONSchema(serializeJson(schema->value),
+                                                      /*any_whitespace=*/false,
+                                                      std::nullopt,
+                                                      std::nullopt,
+                                                      strict_mode,
+                                                      /*max_whitespace_cnt=*/std::nullopt,
+                                                      /*print_converted_ebnf=*/false,
+                                                      /*any_order=*/order != node.MemberEnd() && order->value.GetBool())
+                        .ToString();
+                node.SetObject();
+                node.AddMember("type", "grammar", document.GetAllocator());
+                node.AddMember("grammar",
+                               rapidjson::Value(grammar.data(), grammar.size(), document.GetAllocator()),
+                               document.GetAllocator());
+                changed = true;
+            }
+            // JSON Schema is opaque data, not structural-tag format nodes.
+            continue;
+        }
+        for (auto& member : node.GetObject()) {
+            if (member.name != "json_schema" && member.name != "schema") {
+                pending.push_back(&member.value);
+            }
+        }
+    }
+    return changed ? serializeJson(document) : structural_tag;
+}
 
 template<typename CompileFn>
 absl::StatusOr<std::shared_ptr<xgrammar::CompiledGrammar>> compileWithErrorClassification(CompileFn compile_fn) {
@@ -71,9 +153,8 @@ std::shared_ptr<XGrammarBackend> XGrammarBackend::create(const std::string&   to
         Options opts   = optionsFromConfig(cfg);
         auto    result = xgrammar::TokenizerInfo::DeserializeJSON(tokenizer_info_json);
         if (std::holds_alternative<xgrammar::SerializationError>(result)) {
-            throw std::runtime_error(
-                "tokenizer info deserialize failed: "
-                + serializationErrorToString(std::get<xgrammar::SerializationError>(result)));
+            throw std::runtime_error("tokenizer info deserialize failed: "
+                                     + serializationErrorToString(std::get<xgrammar::SerializationError>(result)));
         }
         const auto& serialized_tokenizer_info = std::get<xgrammar::TokenizerInfo>(result);
         // xgrammar derives its token-id lookup in the constructor but does not serialize it.
@@ -149,7 +230,10 @@ absl::StatusOr<std::shared_ptr<xgrammar::CompiledGrammar>> XGrammarBackend::comp
     } else if (key.key_type == "ebnf") {
         result = compileWithErrorClassification([&] { return compiler_.CompileGrammar(s); });
     } else if (key.key_type == "structural_tag") {
-        result = compileWithErrorClassification([&] { return compiler_.CompileStructuralTag(s); });
+        result = compileWithErrorClassification([&] {
+            return compiler_.CompileStructuralTag(
+                options_.any_whitespace ? s : withFixedJsonWhitespace(s, options_.strict_mode));
+        });
     }
 
     logCompileResult(key, result, elapsedMsSince(t_start));
