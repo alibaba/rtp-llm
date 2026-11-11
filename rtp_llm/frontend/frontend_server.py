@@ -563,6 +563,21 @@ class FrontendServer(object):
 
     def _handle_exception(self, request: Dict[str, Any], e: BaseException):
         exception_json = format_exception(e)
+        # Frozen smoke contract (q_r_v4_flash main cases 3-4): rejected
+        # requests report zeroed aux_info counters alongside the error code.
+        # Backend-side failures already attach them (pipeline backend_stream,
+        # visitor enqueue set_aux_info), but extraction-time validation
+        # (create_generate_config -> GenerateConfig.validate) raises before
+        # those wrappers ever see the request, so mirror the same defaults
+        # here. Additive only: exceptions that already carry aux_info keep
+        # theirs, and comparators only inspect aux_info when the reference
+        # defines it.
+        if "aux_info" not in exception_json:
+            exception_json["aux_info"] = {
+                "output_len": 0,
+                "step_output_len": 0,
+                "reuse_len": 0,
+            }
         error_code_str = exception_json.get("error_code_str", "")
         if isinstance(e, ConcurrencyException):
             kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
