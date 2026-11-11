@@ -466,7 +466,8 @@ def main():
             args.checkpoint_path,
             parent={
                 name: env[name]
-                for name in ("RTP_V41_PPU_MOE_BACKEND", "RTP_V41_PPU_MOE_PRECISION")
+                for name in ("RTP_V41_PPU_MOE_BACKEND", "RTP_V41_PPU_MOE_PRECISION",
+                             "RTP_V41_PPU_QUANT_MODE", "RTP_V41_PPU_WEIGHT_AUDIT_DIR")
                 if name in env
             },
             **{**options, "fake_balance_expert": env_bool(env, "FAKE_BALANCE_EXPERT")},

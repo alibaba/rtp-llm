@@ -468,6 +468,9 @@ def forward_graph_attention(attn, x, state):
         preserve_signed_zero=verify_packed,
     )
     output = rotated.reshape(-1, g.o_groups, g.n_heads * g.head_dim // g.o_groups)
+    if hasattr(attn.wo_a, "forward_grouped"):
+        projected = attn.wo_a.forward_grouped(output)
+        return attn.wo_b(projected.flatten(1)).reshape(shape)
     weight = attn.wo_a.weight
     verify_q4 = (
         verify_packed

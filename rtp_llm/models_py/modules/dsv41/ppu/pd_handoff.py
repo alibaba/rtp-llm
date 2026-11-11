@@ -39,7 +39,9 @@ def config_signature(config, checkpoint=None):
     # Location is not model identity; P and D may mount the same checkpoint
     # at different paths. Token-map contents and all model fields are covered.
     text = {k: v for k, v in config.items() if k != "checkpoint_path"}
-    text["_native_cache_protocol"] = native_cache_protocol()
+    if text.get("_ppu_quant_mode") == "legacy":
+        text.pop("_ppu_quant_mode")
+    text["_native_cache_protocol"] = native_cache_protocol(config)
     if checkpoint is not None:
         root = Path(checkpoint)
         text["_checkpoint_metadata"] = {

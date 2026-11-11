@@ -735,6 +735,7 @@ class SharedNativeRuntime:
         rank = dist.get_rank() if dist.is_initialized() else 0
         report = {
             "schema": "v41-ppu-shared-forward-v1", "rank": rank, "call": self.calls,
+            "quant_mode": self.model.shared_weight_views.quant_mode,
             "idle": state.idle, "prefill": state.prefill, "model_layers": self.geometry.num_layers,
             "geometry": {"hidden_size": self.geometry.hidden_size, "hc_mult": self.geometry.hc_mult,
                          "routed_experts": self.geometry.n_routed_experts, "top_k": self.geometry.n_activated_experts},

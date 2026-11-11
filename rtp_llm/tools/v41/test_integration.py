@@ -659,6 +659,15 @@ class IntegrationTest(unittest.TestCase):
             result = checkpoint_metadata(root, signature)
             self.assertEqual(result["engram_table_bytes"], 3000 * 264)
             self.assertEqual(result["full_weight_signature"], "not_measured")
+            self.assertEqual(result["declared_weight_bytes"], 16)
+            # The qualified Qlean PTPC index has no declared byte count.
+            (root / "model.safetensors.index.json").write_text(
+                json.dumps({"metadata": {}, "weight_map": {"weight": "one.safetensors"}})
+            )
+            result = checkpoint_metadata(root, signature)
+            self.assertIsNone(result["declared_weight_bytes"])
+            self.assertEqual(result["shard_count"], 1)
+            self.assertEqual(result["full_weight_signature"], "not_measured")
             with self.assertRaisesRegex(ValueError, "SHA256 mismatch"):
                 checkpoint_metadata(root, "invalid")
             (root / "one.safetensors").unlink()

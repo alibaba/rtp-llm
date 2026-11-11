@@ -19,6 +19,30 @@ if [[ "$v41_role" == s5-kernel-surface ]]; then
     exec "$v41_python" -B rtp_llm/models_py/modules/dsv41/ppu/test/test_mhc_mega_probe.py --mode surface
 fi
 "$v41_python" -B -c 'from rtp_llm.models_py.modules.dsv41.ppu.pd_handoff import runtime_identity; print(runtime_identity())'
+if [[ "$v41_role" == ptpc-contracts || "$v41_role" == ptpc-device ]]; then
+    if [[ "$v41_role" == ptpc-device ]]; then export RTP_V41_TEST_PTPC_DEVICE=1; fi
+    exec "$v41_python" -B -m unittest \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc \
+        rtp_llm.tools.v41.test_integration.IntegrationTest.test_checkpoint_metadata_does_not_claim_weight_content_signature
+fi
+if [[ "$v41_role" == ptpc-alignment ]]; then
+    exec "$v41_python" -B -m rtp_llm.tools.v41.validate_ptpc \
+        --source "${RTP_V41_TEST_CHECKPOINT:?source checkpoint required}" \
+        --reference "${RTP_V41_TEST_REFERENCE:?reference checkpoint required}" \
+        --output "$v41_output"
+fi
+if [[ "$v41_role" == ptpc-audit ]]; then
+    exec "$v41_python" -B -m rtp_llm.tools.v41.validate_ptpc \
+        --audit-dir "${RTP_V41_TEST_AUDIT_DIR:?actual loader audit required}" \
+        --expected-report "${RTP_V41_TEST_EXPECTED_REPORT:?full checkpoint comparison required}" \
+        --output "$v41_output"
+fi
+if [[ "$v41_role" == ptpc-layout ]]; then
+    exec "$v41_python" -B -m rtp_llm.tools.v41.validate_ptpc \
+        --audit-dir "${RTP_V41_TEST_AUDIT_DIR:?source loader receipts required}" \
+        --compare-layout-dir "${RTP_V41_TEST_COMPARE_LAYOUT_DIR:?reference loader receipts required}" \
+        --output "$v41_output"
+fi
 if [[ "$v41_role" == moe-device ]]; then
     export RTP_V41_TEST_W4A8_DEVICE=1
     exec "$v41_python" -B rtp_llm/models_py/modules/dsv41/ppu/test/test_moe_w4a8.py

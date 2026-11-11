@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from typing import Mapping, Optional
 
+from rtp_llm.models_py.modules.dsv41.ppu.quant_mode import MXFP4_FP8_PTPC, quant_mode
+
 MOE_PRECISION_ENV = "RTP_V41_PPU_MOE_PRECISION"
 MOE_BACKEND_ENV = "RTP_V41_PPU_MOE_BACKEND"
 
@@ -20,7 +22,7 @@ def moe_backend(env: Optional[Mapping[str, str]] = None) -> str:
 def moe_precision(env: Optional[Mapping[str, str]] = None) -> str:
     env = os.environ if env is None else env
     backend = moe_backend(env)
-    default = "w4a4" if backend == "megamoe" else "w4a8"
+    default = "w4a4" if backend == "megamoe" or quant_mode(env) == MXFP4_FP8_PTPC else "w4a8"
     value = env.get(MOE_PRECISION_ENV, default).strip().lower()
     if value not in ("w4a8", "w4a4"):
         raise ValueError(f"{MOE_PRECISION_ENV} must be w4a8 or w4a4, got {value!r}")

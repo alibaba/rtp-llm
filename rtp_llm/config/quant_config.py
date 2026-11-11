@@ -217,6 +217,14 @@ class QuantizationConfig(ABC):
 
         if quant_config is None:
             return None
+        if quant_method == "mxfp4" and config_json.get("model_type") == "deepseek_v41":
+            from rtp_llm.models_py.modules.dsv41.ppu.quant_mode import MXFP4_FP8_PTPC, quant_mode
+
+            if quant_mode() != MXFP4_FP8_PTPC:
+                raise ValueError("Flash1017 mixed checkpoint requires RTP_V41_PPU_QUANT_MODE=mxfp4_fp8_ptpc")
+            if quant_config.get("expert_dtype") != "fp4" or not quant_config.get("fp8_channelwise_layers"):
+                raise ValueError("Flash1017 mixed checkpoint needs native FP4 experts and channelwise layers")
+            return DeepSeekV41PPUPTPCQuantConfig(bits=8, group_size=32, is_quanted=True)
         group_size = quant_config["group_size"] if "group_size" in quant_config else 0
         bits = quant_config["bits"] if "bits" in quant_config else 0
         if quant_method == "fp8":
@@ -562,6 +570,22 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8BlockWiseQuantConfig(**config)
+
+
+class DeepSeekV41PPUPTPCQuantConfig(Fp8BlockWiseQuantConfig):
+    """Mixed V4.1 storage; PPU descriptors own each projection's scheme.
+
+    Inherit the existing model-wide FP8 pricing/KV contract, not its dense
+    block-scale loader. The PPU descriptors retain MXFP4 experts separately.
+    """
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "DSV41_PPU_MXFP4_FP8_PTPC"
+
+    @classmethod
+    def _from_config(cls, config):
+        return cls(**config)
 
 
 class CompressedTensorsQuantConfig(QuantizationConfig):

@@ -4,15 +4,20 @@ from rtp_llm.models.deepseek_v4 import DeepSeekV4Weight
 from rtp_llm.models.deepseek_v41 import DeepSeekV41DSparkWeight
 from rtp_llm.models_py.modules.dsv41.ppu.model_weights import _ppu_descriptors
 from rtp_llm.utils.model_weight import W
+from rtp_llm.models_py.modules.dsv41.ppu.quant_mode import quant_mode
 
 
 class DeepSeekV41PPUDSparkWeight(DeepSeekV41DSparkWeight):
+    def __init__(self, *args, **kwargs):
+        self.ppu_quant_mode = quant_mode()
+        super().__init__(*args, **kwargs)
+
     def _get_hf_layer_weight_info(self, layer_id):
-        return _ppu_descriptors(super()._get_hf_layer_weight_info(layer_id))
+        return _ppu_descriptors(super()._get_hf_layer_weight_info(layer_id), self.ppu_quant_mode)
 
     def _get_weight_info(self):
         info = super()._get_weight_info()
-        info.weights = _ppu_descriptors(info.weights)
+        info.weights = _ppu_descriptors(info.weights, self.ppu_quant_mode)
         return info
 
     def get_weight_info(self):

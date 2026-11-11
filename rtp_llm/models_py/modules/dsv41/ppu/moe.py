@@ -1770,6 +1770,12 @@ class PPUMoE:
             w2_sp = preprocess_mxfp4_f4f4_scales(_ue8m0_scale_bytes(w2_s))
             inv13 = inv2 = 1.0
         processed = (w13_u, w13_sp, w2_u, w2_sp, inv13, inv2)
+        if os.environ.get("RTP_V41_PPU_WEIGHT_AUDIT_DIR"):
+            from rtp_llm.models_py.modules.dsv41.ppu.quant_conversion import audit_loaded_tensor
+
+            label = f"moe:{self.num_routed_experts}:L{layer_id}:{self.backend}:{self.precision}"
+            for part, tensor in zip(("w13:weight", "w13:scale", "w2:weight", "w2:scale"), processed[:4]):
+                audit_loaded_tensor(label + ":" + part, tensor, self.ep_rank, layout=True)
         self._processed[key] = processed
         return processed
 

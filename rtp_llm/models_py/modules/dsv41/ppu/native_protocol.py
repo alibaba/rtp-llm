@@ -8,6 +8,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import (
     PrefillPolicy,
     SharedPrefillPolicy,
 )
+from rtp_llm.models_py.modules.dsv41.ppu.quant_mode import LEGACY, quant_mode
 
 NATIVE_CACHE_PROTOCOL = "v41-ppu-native-cache-v2"
 FRAMEWORK_POOL_TAGS = {
@@ -53,6 +54,10 @@ def native_cache_key_hash_seed(config=None):
         "model": config.get("ppu_model_identity", "target"),
         "capture": tuple(config.get("ppu_target_capture_layer_ids") or ()),
     }
+    mode = config.get("_ppu_quant_mode")
+    mode = quant_mode() if mode is None else mode
+    if mode != LEGACY:
+        profile["quant_mode"] = mode
     speculative = _shared_dspark_contract(config)
     if speculative is not None:
         profile["dspark"] = speculative
@@ -74,6 +79,10 @@ def native_cache_protocol(config=None):
         "cache_key_hash_seed": native_cache_key_hash_seed(config),
         "model_identity": (config or {}).get("ppu_model_identity", "target"),
     }
+    mode = (config or {}).get("_ppu_quant_mode")
+    mode = quant_mode() if mode is None else mode
+    if mode != LEGACY:
+        contract["quant_mode"] = mode
     if policy.bounded_replay:
         contract["decoder_swa_tag"] = "decoder_swa_kv"
         contract["decoder_replay"] = "last-window-original-positions-v1"

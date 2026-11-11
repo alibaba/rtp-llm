@@ -30,13 +30,78 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.models_py.modules.dsv41.ppu.quant_conversion import FP8_INV_MAX
+
 __all__ = [
     "dequant_fp8_block32_ue8m0",
     "PPUResidentBF16Linear",
+    "PPUPTPCLinear",
     "FP8_BLOCK_SIZE",
 ]
 
 FP8_BLOCK_SIZE = 32  # UE8M0 scale block for dense V4.1 weights (32 x 32)
+
+
+def quantize_ptpc_activation(x):
+    """Dynamic symmetric whole-row E4M3, one FP32 scale per token."""
+    values = x.float()
+    amax = values.abs().amax(-1, keepdim=True).clamp_min(1e-10)
+    scale = amax * FP8_INV_MAX
+    payload = (values * (448.0 / amax)).clamp(-448, 448).to(torch.float8_e4m3fn)
+    return payload.contiguous(), scale.contiguous()
+
+
+class PPUPTPCLinear:
+    """Resident E4M3 weight, FP32 output-channel scale, BF16 GEMM output."""
+
+    def __init__(self, weight, scale):
+        if weight.dtype != torch.float8_e4m3fn or weight.ndim != 2:
+            raise TypeError("PTPC linear weight must be E4M3 [N, K]")
+        if scale.dtype != torch.float32 or tuple(scale.shape) != (weight.shape[0], 1):
+            raise TypeError("PTPC linear scale must be FP32 [N, 1]")
+        if weight.device != scale.device:
+            raise ValueError("PTPC payload and scale must share a device")
+        self.weight, self.scale = weight.contiguous(), scale.contiguous()
+        self.output_dtype = torch.bfloat16
+        self.quantization = "fp8_per_channel_per_token"
+        self._groups = None
+        self._gemm = None
+        if weight.is_cuda:
+            from rtp_llm.models_py.kernels.ppu.runtime import install_deep_gemm_build_lock, require_symbol
+
+            self._gemm = require_symbol("deep_gemm", "fp8_gemm_nt")
+            install_deep_gemm_build_lock()
+
+    def prepare_grouped(self, groups, rank):
+        if self.weight.shape[0] != groups * rank:
+            raise ValueError("grouped PTPC wo_a rows disagree with model geometry")
+        self._groups = tuple(
+            PPUPTPCLinear(self.weight[i * rank:(i + 1) * rank], self.scale[i * rank:(i + 1) * rank])
+            for i in range(groups)
+        )
+
+    def forward_grouped(self, x):
+        if self._groups is None or x.ndim != 3 or x.shape[1] != len(self._groups):
+            raise ValueError("PTPC grouped projection must be prepared before forward")
+        return torch.stack([part(x[:, i].contiguous()) for i, part in enumerate(self._groups)], 1)
+
+    def forward(self, x):
+        if x.shape[-1] != self.weight.shape[1] or x.device != self.weight.device:
+            raise ValueError("PTPC input shape/device differs from its weight")
+        shape = (*x.shape[:-1], self.weight.shape[0])
+        flat = x.reshape(-1, x.shape[-1])
+        output = torch.empty((flat.shape[0], self.weight.shape[0]), device=x.device, dtype=torch.bfloat16)
+        if flat.shape[0] == 0:
+            return output.reshape(shape)
+        payload, scale = quantize_ptpc_activation(flat)
+        if x.is_cuda:
+            self._gemm((payload, scale), (self.weight, self.scale), output)
+        else:
+            # Portable component oracle only; device execution always uses GEMM.
+            output.copy_((payload.float() @ self.weight.float().T) * scale * self.scale.T)
+        return output.reshape(shape)
+
+    __call__ = forward
 
 
 def _ue8m0_scales_to_float(scales: torch.Tensor) -> torch.Tensor:

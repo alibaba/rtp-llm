@@ -8,6 +8,7 @@ Engram host tables deliberately remain outside the generic device loader.
 """
 
 from collections import Counter
+import logging
 
 import torch
 
@@ -16,7 +17,9 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.deepseek_v41 import DeepSeekV41Weight
-from rtp_llm.models_py.modules.dsv41.ppu.linear import PPUResidentBF16Linear
+from rtp_llm.models_py.modules.dsv41.ppu.linear import PPUResidentBF16Linear, PPUPTPCLinear
+from rtp_llm.models_py.modules.dsv41.ppu.quant_conversion import audit_loaded_tensor, convert_dense_ptpc
+from rtp_llm.models_py.modules.dsv41.ppu.quant_mode import MXFP4_FP8_PTPC, quant_mode
 from rtp_llm.models_py.modules.dsv41.ppu.weight import V41Geometry
 from rtp_llm.utils.model_weight import CkptWeightInfo, W
 
@@ -84,12 +87,72 @@ class PPUSharedMoeWeight(MoeAtomicWeight):
         return tensor
 
     def _load_raw_tensor(self, tensor_source, layer_id, device, load_config):
-        return super()._load_raw_tensor(
+        result = super()._load_raw_tensor(
             _StorageTensorSource(tensor_source), layer_id, device, load_config
         )
+        # Report each selected logical expert after the production stack/split.
+        # The optional receipt is independent of native backend packing.
+        import os
+
+        if os.environ.get("RTP_V41_PPU_WEIGHT_AUDIT_DIR"):
+            if len(self.weights) != 1:
+                raise ValueError("expert audit expects native separate w1/w2/w3 descriptors")
+            selected = load_config.get_selected_experts(layer_id, self.config.expert_num)
+            value = result[self.name]
+            if value.shape[0] != len(selected):
+                raise ValueError("expert audit selection differs from actual stacked buffer")
+            for local, expert in enumerate(selected):
+                name = self.weights[0].name.format(i=layer_id, i_1=layer_id + 1, expert_id=expert)
+                audit_loaded_tensor(name, value[local], load_config.ep_rank)
+        return result
 
     def _postprocess(self, tensor, device, load_config):
         return tensor
+
+
+class PPUPTPCWeight(PPUSharedAtomicWeight):
+    """One real loader operation produces both payload and channel scales."""
+
+    def __init__(self, original, scale_name):
+        super().__init__(
+            original.name, original.weights, original.process_fun,
+            data_type=torch.float8_e4m3fn,
+        )
+        self.scale_name = scale_name
+
+    def get_ckpt_tensor_names(self):
+        names = super().get_ckpt_tensor_names()
+        return names + [n.removesuffix(".weight") + ".scale" for n in names]
+
+    def get_tensor_names(self, layer_id, load_config):
+        names = super().get_tensor_names(layer_id, load_config)
+        return names | {n.removesuffix(".weight") + ".scale" for n in names}
+
+    def _load_raw_tensor(self, tensor_source, layer_id, device, load_config):
+        values, scales = [], []
+        for item in self.weights:
+            name = item.tensor_name(layer_id)
+            weight = item.merge_fun(tensor_source.load_tensor(name, None))
+            scale = item.merge_fun(tensor_source.load_tensor(
+                name.removesuffix(".weight") + ".scale", None
+            ))
+            value, scale = convert_dense_ptpc(weight, scale)
+            observer = getattr(tensor_source, "observe_conversion", None)
+            if observer is not None:
+                observer(name, value, scale)
+            # Merge bytes so concatenation also works on CPU torch versions
+            # without a float8 cat implementation. Scale rows use the same order.
+            values.append(value.view(torch.uint8).to(device))
+            scales.append(scale.to(device))
+            audit_loaded_tensor(name, values[-1].view(torch.float8_e4m3fn), getattr(load_config, "ep_rank", 0))
+            audit_loaded_tensor(name.removesuffix(".weight") + ".scale", scales[-1], getattr(load_config, "ep_rank", 0))
+        return {
+            self.name: self.process_fun(values).view(torch.float8_e4m3fn),
+            self.scale_name: self.process_fun(scales),
+        }
+
+    def _merge_lora(self, *args, **kwargs):
+        raise NotImplementedError("Flash1017 PTPC does not support merged LoRA")
 
 
 # Existing W keys, not a second weight namespace. The checkpoint stores two
@@ -108,7 +171,8 @@ _DENSE_PAIRS = {
 }
 
 
-def _ppu_descriptors(weights):
+def _ppu_descriptors(weights, mode=None):
+    mode = quant_mode() if mode is None else mode
     result = []
     for original in weights:
         if isinstance(original, MoeAtomicWeight):
@@ -118,7 +182,7 @@ def _ppu_descriptors(weights):
                     original.weights,
                     original.process_fun,
                     data_type=(
-                        torch.uint8 if original.name.endswith(".scale")
+                        torch.uint8 if mode == MXFP4_FP8_PTPC or original.name.endswith(".scale")
                         else original.data_type
                     ),
                     config=original.config,
@@ -130,6 +194,9 @@ def _ppu_descriptors(weights):
         # weights_proj is stored BF16, not an FP8 projection.
         if original.name == W.v4_indexer_weights_proj_w:
             scale_key = None
+        if scale_key is not None and mode == MXFP4_FP8_PTPC:
+            result.append(PPUPTPCWeight(original, scale_key))
+            continue
         if scale_key is not None:
             dtype = torch.float8_e4m3fn
         result.append(
@@ -162,8 +229,12 @@ class DeepSeekV41PPUWeight(DeepSeekV41Weight):
     def framework_base_available(cls):
         return True
 
+    def __init__(self, *args, **kwargs):
+        self.ppu_quant_mode = quant_mode()
+        super().__init__(*args, **kwargs)
+
     def _get_hf_layer_weight_info(self, layer_id):
-        return _ppu_descriptors(super()._get_hf_layer_weight_info(layer_id))
+        return _ppu_descriptors(super()._get_hf_layer_weight_info(layer_id), self.ppu_quant_mode)
 
 
 class SharedWeightViews:
@@ -177,7 +248,10 @@ class SharedWeightViews:
         if not isinstance(weights, ModelWeights):
             raise TypeError("shared PPU requires framework ModelWeights")
         self.weights = weights
+        self.quant_mode = quant_mode()
+        logging.info("V4.1 PPU loaded weight view quant_mode=%s ep_rank=%s", self.quant_mode, ep_rank)
         self.config = dict(config)
+        self.config["_ppu_quant_mode"] = self.quant_mode
         if self.config.get("engram_layer_ids") and "engram_token_map" not in self.config:
             from pathlib import Path
 
@@ -230,6 +304,19 @@ class SharedWeightViews:
         if key == W.v4_indexer_weights_proj_w:
             scale_key = None
         identity = (layer_id, key, scale_key, output_dtype)
+        if self.quant_mode == MXFP4_FP8_PTPC and scale_key is not None:
+            if output_dtype != torch.bfloat16:
+                raise ValueError("PTPC projections require BF16 GEMM output")
+            if identity not in self._linears:
+                self._linears[identity] = PPUPTPCLinear(
+                    self.tensor(layer_id, key), self.tensor(layer_id, scale_key)
+                )
+                op = self._linears[identity]
+                label = f"dense:{self.geometry.num_layers}:L{layer_id}:{key}"
+                audit_loaded_tensor(label + ":weight", op.weight, self.ep_rank, layout=True)
+                audit_loaded_tensor(label + ":scale", op.scale, self.ep_rank, layout=True)
+                self.conversions[f"L{layer_id}:{key}:ptpc"] += 1
+            return self._linears[identity]
         if identity not in self._linears:
             resident_key = (layer_id, key, scale_key)
             if resident_key not in self._resident:

@@ -307,7 +307,9 @@ def main(*, mode=None):
     if not retained:
         argv.append("--kv-cache-sharded")
     if graph:
-        argv.append("--shared-grouped-graph")
+        from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import moe_backend
+
+        argv.append("--shared-decode-graph" if moe_backend() == "megamoe" else "--shared-grouped-graph")
         if graph_stream_async:
             argv.append("--shared-graph-async")
     if not mode.sample_from_anchor:

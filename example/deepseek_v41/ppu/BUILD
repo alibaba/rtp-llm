@@ -4,6 +4,27 @@ exports_files(["test_functional.sh"])
 
 [
     sh_test(
+        name = "ptpc_" + name + "_test",
+        srcs = ["test_functional.sh"],
+        args = ["ptpc-" + name],
+        data = [
+            "//rtp_llm/models_py:v41_ppu_shared_sources",
+            "//rtp_llm/models_py/modules/dsv41/ppu/test:ptpc_sources",
+            "//rtp_llm/tools/v41:tooling",
+        ],
+        env = {"GPU_COUNT": str(gpus)},
+        tags = ["manual", "PPU-ZW890P"],
+        timeout = "eternal",
+        target_compatible_with = select({
+            "@//:using_ppu": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+    for name, gpus in [("contracts", 0), ("device", 1), ("alignment", 0), ("audit", 0), ("layout", 0)]
+]
+
+[
+    sh_test(
         name = name,
         srcs = ["test_functional.sh"],
         args = [role],

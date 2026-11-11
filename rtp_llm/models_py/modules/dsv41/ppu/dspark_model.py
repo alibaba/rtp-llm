@@ -490,6 +490,7 @@ class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
         features = getattr(state.inputs, "input_hiddens", None)
         report = {
             "schema": "v41-ppu-shared-dspark-v1", "rank": rank,
+            "quant_mode": self.shared_weight_views.quant_mode,
             "call": self.shared_runtime.calls, "event": kind, "idle": state.idle,
             "commit_only": self._commit_only_prefill, "model_layers": 3,
             "geometry": {"hidden_size": self.shared_weight_views.geometry.hidden_size, "hc_mult": self.shared_weight_views.geometry.hc_mult, "routed_experts": self.shared_weight_views.geometry.n_routed_experts,

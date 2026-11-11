@@ -1,6 +1,6 @@
 py_library(
     name = "tooling",
-    srcs = ["__init__.py", "capture_logits.py", "create_rdma_container.py", "launch.py", "native_build_precheck.py", "native_smoke.py", "preflight.py", "prepare_native_runtime.py"],
+    srcs = ["__init__.py", "capture_logits.py", "create_rdma_container.py", "launch.py", "native_build_precheck.py", "native_smoke.py", "preflight.py", "prepare_native_runtime.py", "validate_ptpc.py"],
     deps = [
         "//rtp_llm:v41_runtime_contract",
         "//rtp_llm/models_py:v41_ppu_contract",

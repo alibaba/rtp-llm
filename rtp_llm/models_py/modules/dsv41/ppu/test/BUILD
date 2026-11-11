@@ -1,6 +1,11 @@
 package(default_visibility = ["//visibility:public"])
 
 filegroup(
+    name = "ptpc_sources",
+    srcs = ["test_ptpc.py"],
+)
+
+filegroup(
     name = "shared_eplb_native_sources",
     srcs = [
         "service_fixture.py",

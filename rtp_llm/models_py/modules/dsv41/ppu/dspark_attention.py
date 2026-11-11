@@ -122,6 +122,9 @@ def _project_query_output(
     else:
         output = _rope_tail(output, freqs, inverse=True)
     output = output.reshape(-1, g.o_groups, g.n_heads * g.head_dim // g.o_groups)
+    if hasattr(attn.wo_a, "forward_grouped"):
+        projected = attn.wo_a.forward_grouped(output)
+        return attn.wo_b(projected.flatten(1)).reshape(shape)
     weight = attn.wo_a.weight
     if valid_mask is not None and proposal_batched_wo_a:
         from rtp_llm.models_py.modules.dsv41.ppu.graph_attention_layer import _try_batched_wo_a

@@ -27,6 +27,9 @@ from rtp_llm.models_py.modules.dsv41.ppu.backend import (
 )
 from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import moe_backend, moe_precision
 from rtp_llm.models_py.modules.dsv41.ppu.native_protocol import native_cache_protocol
+from rtp_llm.models_py.modules.dsv41.ppu.quant_mode import (
+    MXFP4_FP8_PTPC, PTPC_CONFIG_SHA256, PTPC_INDEX_SHA256, quant_mode,
+)
 
 GIB = 1024**3
 SDK_VERSION = "2.2.0-663c22"
@@ -48,9 +51,13 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def checkpoint_metadata(path, expected=CONFIG_SHA256):
+def checkpoint_metadata(path, expected=None):
     path = Path(path)
     config_hash = sha256(path / "config.json")
+    if expected is None:
+        expected = CONFIG_SHA256
+        if config_hash == PTPC_CONFIG_SHA256 and quant_mode() == MXFP4_FP8_PTPC:
+            expected = PTPC_CONFIG_SHA256
     if config_hash != expected:
         raise ValueError(f"config SHA256 mismatch: {config_hash} != {expected}")
     raw = json.loads((path / "config.json").read_text())
@@ -58,6 +65,9 @@ def checkpoint_metadata(path, expected=CONFIG_SHA256):
     if (text["n_routed_experts"], text["num_experts_per_tok"]) != (384, 6):
         raise ValueError("release requires 384 routed experts and model top-k=6")
     index_path = path / "model.safetensors.index.json"
+    index_hash = sha256(index_path)
+    if config_hash == PTPC_CONFIG_SHA256 and index_hash != PTPC_INDEX_SHA256:
+        raise ValueError("Flash1017 PTPC checkpoint index identity mismatch")
     index = json.loads(index_path.read_text())
     shards = sorted(set(index["weight_map"].values()))
     missing = [name for name in shards if not (path / name).is_file()]
@@ -72,10 +82,10 @@ def checkpoint_metadata(path, expected=CONFIG_SHA256):
     table_bytes = sum(text["engram_num_embeddings"]) * (dim + dim // 32)
     return {
         "config_sha256": config_hash,
-        "index_sha256": sha256(index_path),
+        "index_sha256": index_hash,
         "tokenizer_sha256": tokenizer,
         "shard_count": len(shards),
-        "declared_weight_bytes": index["metadata"]["total_size"],
+        "declared_weight_bytes": index["metadata"].get("total_size"),
         "full_weight_signature": "not_measured",
         "engram_table_bytes": table_bytes,
         "engram_shard_estimate_bytes": (table_bytes + 7) // 8,

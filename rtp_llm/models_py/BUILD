@@ -21,6 +21,7 @@ py_library(
         "modules/dsv41/ppu/__init__.py",
         "modules/dsv41/ppu/backend.py",
         "modules/dsv41/ppu/moe_precision.py",
+        "modules/dsv41/ppu/quant_mode.py",
         "modules/dsv41/ppu/native_protocol.py",
         "modules/dsv41/ppu/pd_handoff.py",
         "modules/dsv41/ppu/replay_policy.py",
@@ -33,6 +34,7 @@ py_library(
     name = "v41_ppu_moe",
     srcs = [
         "modules/dsv41/ppu/linear.py",
+        "modules/dsv41/ppu/quant_conversion.py",
         "modules/dsv41/ppu/moe.py",
     ],
     deps = [

@@ -975,11 +975,14 @@ class SharedPPUAttention(PPUAttentionProjections):
         )
         output = _rope_tail(output, freqs, inverse=True) if rotated_output is None else rotated_output
         output = output.reshape(-1, g.o_groups, g.n_heads * g.head_dim // g.o_groups)
-        projected = _project_wo_a(
-            output, self.wo_a.weight, g.o_groups, g.o_lora_rank,
-            batched=full_cp8 and enabled(CP8_WO_A_BMM_ENV),
-            pack_groups=compact_cp8,
-        )
+        if hasattr(self.wo_a, "forward_grouped"):
+            projected = self.wo_a.forward_grouped(output)
+        else:
+            projected = _project_wo_a(
+                output, self.wo_a.weight, g.o_groups, g.o_lora_rank,
+                batched=full_cp8 and enabled(CP8_WO_A_BMM_ENV),
+                pack_groups=compact_cp8,
+            )
         result = self.wo_b(projected.flatten(1))
         if diagnostic is not None:
             _optimized_record_layer(

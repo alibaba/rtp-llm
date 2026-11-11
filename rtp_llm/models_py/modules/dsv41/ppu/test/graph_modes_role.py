@@ -259,7 +259,14 @@ def direct_main():
         if snapshot[key] != bound[key]:
             raise ValueError(f"source/runtime mismatch: {key}")
     checkpoint = checkpoint_metadata(os.environ["RTP_V41_TEST_CHECKPOINT"])
-    if checkpoint["index_sha256"] != "74b0686a3d2891980d5e303251b075a3bccae2c2ff650747db2620a649b98fa8":
+    from rtp_llm.models_py.modules.dsv41.ppu.quant_mode import (
+        MXFP4_FP8_PTPC, PTPC_CONFIG_SHA256, PTPC_INDEX_SHA256, quant_mode,
+    )
+
+    allowed = {"74b0686a3d2891980d5e303251b075a3bccae2c2ff650747db2620a649b98fa8"}
+    if quant_mode() == MXFP4_FP8_PTPC and checkpoint["config_sha256"] == PTPC_CONFIG_SHA256:
+        allowed.add(PTPC_INDEX_SHA256)
+    if checkpoint["index_sha256"] not in allowed:
         raise ValueError("N9 fixture requires the qualified V4.1 checkpoint index")
     port = int(os.environ["RTP_V41_N9_DIRECT_PORT"])
     if not 1024 <= port <= 65400:

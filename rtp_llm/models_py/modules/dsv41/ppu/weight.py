@@ -420,6 +420,17 @@ def _load_dense(
     if values is None:
         raise KeyError(f"checkpoint is missing {prefix}.weight")
     scale = _as_scale(source.get(f"{prefix}.scale"))
+    from rtp_llm.models_py.modules.dsv41.ppu.quant_mode import MXFP4_FP8_PTPC, quant_mode
+
+    if prefix.endswith(".engram.wkv") and quant_mode() == MXFP4_FP8_PTPC:
+        from rtp_llm.models_py.modules.dsv41.ppu.quant_conversion import convert_engram_wkv
+
+        weight = convert_engram_wkv(values, scale)
+        from rtp_llm.models_py.modules.dsv41.ppu.quant_conversion import audit_loaded_tensor
+
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        audit_loaded_tensor(prefix + ".weight", weight, rank)
+        return PPUResidentBF16Linear(weight, output_dtype=output_dtype)
     if scale is not None and values.dtype in (torch.uint8, torch.int8):
         values = values.view(torch.float8_e4m3fn)
     if scale is None and values.dtype == torch.float8_e4m3fn:

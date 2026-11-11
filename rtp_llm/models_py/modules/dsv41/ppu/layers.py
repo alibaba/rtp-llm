@@ -31,6 +31,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.weight import (
     _load_engram_shard,
 )
 from rtp_llm.utils.model_weight import W
+from rtp_llm.models_py.modules.dsv41.ppu.quant_mode import MXFP4_FP8_PTPC, quant_mode
 
 
 def _ordinary_decode_graph(runtime):
@@ -142,9 +143,17 @@ class PPUSharedRMSNorm(BaseNorm):
             raise TypeError("shared PPU RMSNorm requires a BF16 gamma vector")
         super().__init__(weight, eps)
         self.calls = 0
+        self._ptpc = quant_mode() == MXFP4_FP8_PTPC
 
     def forward(self, hidden_states):
         self.calls += 1
+        if self._ptpc:
+            # A one-ULP BF16 norm difference can cross the following FP8
+            # quantization boundary. Freeze the same FP32 operation sequence
+            # for eager, CP Prefill and Graph in this quantization profile.
+            x = hidden_states.float()
+            inv = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.variance_epsilon)
+            return (x * inv * self.weight.float()).to(hidden_states.dtype)
         runtime = getattr(self, "runtime", None)
         state = runtime.current if runtime is not None else None
         graph_runtime = getattr(self, "_full_graph_runtime", runtime)
@@ -429,6 +438,8 @@ class PPUAttentionProjections(nn.Module):
         self.wkv = views.linear(layer_id, W.v4_attn_wkv_w)
         self.wo_a = views.linear(layer_id, W.v4_attn_wo_a_w)
         self.wo_b = views.linear(layer_id, W.v4_attn_wo_b_w)
+        if hasattr(self.wo_a, "prepare_grouped"):
+            self.wo_a.prepare_grouped(g.o_groups, g.o_lora_rank)
         self.kv_norm = PPUSharedRMSNorm(
             views.tensor(layer_id, W.v4_attn_kv_norm), views.geometry.norm_eps
         )
