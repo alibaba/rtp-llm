@@ -1,9 +1,6 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #if USING_ROCM
 #include <hip/hip_runtime.h>
-// torch's ROCm builds ship the c10/cuda allocator headers (HIP-mapped);
-// required for emptyCache/getDeviceStats on MI308X.
-#include <c10/cuda/CUDACachingAllocator.h>
 #else
 #include <c10/cuda/CUDACachingAllocator.h>
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
@@ -174,7 +171,7 @@ void graphMemGetInfo(size_t* free_bytes, size_t* total_bytes) {
 }
 
 size_t graphReservedBytes() {
-#if USING_CUDA || USING_ROCM
+#if USING_CUDA
     return c10::cuda::CUDACachingAllocator::getDeviceStats(at::cuda::current_device()).reserved_bytes[0].current;
 #else
     return 0;
@@ -182,7 +179,7 @@ size_t graphReservedBytes() {
 }
 
 size_t graphAllocatedBytes() {
-#if USING_CUDA || USING_ROCM
+#if USING_CUDA
     return c10::cuda::CUDACachingAllocator::getDeviceStats(at::cuda::current_device()).allocated_bytes[0].current;
 #else
     return 0;
@@ -190,14 +187,22 @@ size_t graphAllocatedBytes() {
 }
 
 void graphEmptyCache() {
-    // torch's ROCm build provides the same c10::cuda::CUDACachingAllocator
-    // entry points (HIP-mapped). Without this, every emptyCache-based memory
-    // recovery — including the per-capture-size cache release that 1M-context
-    // capture depends on — was a silent no-op on MI308X (native-n10c OOMed
-    // identically to n10b: 4GiB pool reservation, 2.90GiB free, 18.40GiB
-    // reserved-but-unallocated).
-#if USING_CUDA || USING_ROCM
+#if USING_CUDA
     c10::cuda::CUDACachingAllocator::emptyCache();
+#elif USING_ROCM
+    // The bazel torch_rocm package cannot expose the c10 allocator header
+    // (its c10/cuda chain includes cuda_runtime_api.h — CI 88760713), so call
+    // the identical allocator entry point through Python, the same pattern
+    // GraphNcclCaptureContext already uses for enter/exit_graph_capture_mode.
+    // Not a no-op fallback: without a working emptyCache, every 1M-context
+    // capture OOMs on graph-pool reservation (n10b/n10c/load46: tried 4GiB,
+    // 2.90GiB free, 18.40GiB reserved-but-unallocated that nothing released).
+    try {
+        py::gil_scoped_acquire gil;
+        py::module_::import("torch").attr("cuda").attr("empty_cache")();
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_WARNING("torch.cuda.empty_cache (python) failed: %s", e.what());
+    }
 #endif
 }
 
