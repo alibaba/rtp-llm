@@ -677,6 +677,16 @@ message WorkerStepMetricsPB {
     double budget_fill_ratio = 8;
 }
 
+message PrefillChunkPB {
+    string engine_epoch = 1;
+    uint64 chunk_id = 2;
+    // Raw input tokens, before per-request cache matching.
+    uint64 input_token_capacity = 3;
+    uint32 request_capacity = 4;
+    // Unix epoch milliseconds; P keeps its later freeze time locally.
+    int64 dispatch_deadline_ms = 5;
+}
+
 message WorkerStatusPB {
     string role = 1;              // 字符串角色名，如 "PREFILL"，向后兼容
     // LocalRpcServer::GetWorkerStatus currently does not populate this field, so
@@ -713,6 +723,8 @@ message WorkerStatusPB {
     int32 cache_match_rollback_blocks = 26;
     WorkerStepMetricsPB last_step_metrics = 27;
     string dp_master_address = 28;
+    PrefillChunkPB prefill_chunk = 29;
+    uint64 prefill_step_token_budget = 30;
 }
 
 message EmbeddingInputPB {

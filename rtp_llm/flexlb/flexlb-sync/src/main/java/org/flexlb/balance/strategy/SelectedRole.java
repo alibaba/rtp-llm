@@ -19,6 +19,7 @@ import java.util.Objects;
 public final class SelectedRole implements AutoCloseable {
 
     private WorkerEndpoint.EndpointHold endpointHold;
+    private Runnable refundUnpublishedChunk;
     private final ServerStatus serverStatus;
     private final long prefillWorkMs;
     private final long placementVersion;
@@ -125,6 +126,16 @@ public final class SelectedRole implements AutoCloseable {
         return serverStatus;
     }
 
+    public void refundChunkOnClose(Runnable refund) {
+        refundUnpublishedChunk = refund;
+    }
+
+    public Runnable takeUnpublishedChunkRefund() {
+        Runnable refund = refundUnpublishedChunk;
+        refundUnpublishedChunk = null;
+        return refund;
+    }
+
     public long prefillWorkMs() {
         if (prefillWorkMs < 0L) {
             throw new IllegalStateException(
@@ -189,8 +200,15 @@ public final class SelectedRole implements AutoCloseable {
     public void close() {
         WorkerEndpoint.EndpointHold owned = endpointHold;
         endpointHold = null;
-        if (owned != null) {
-            owned.close();
+        Runnable refund = takeUnpublishedChunkRefund();
+        try {
+            if (refund != null) {
+                refund.run();
+            }
+        } finally {
+            if (owned != null) {
+                owned.close();
+            }
         }
     }
 }

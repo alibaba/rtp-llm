@@ -256,6 +256,8 @@ public final class MainQueueLoop {
             cleanup.releaseQueueSlot(request);
             return true;
         }
+        // The queue now owns the request; cancellation cannot reuse a committed chunk grant.
+        selected.takeUnpublishedChunkRefund();
         mainQueue.remove(request);
         sendToPrefillQueue.accept(request);
         return true;

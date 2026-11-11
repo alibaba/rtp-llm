@@ -29,12 +29,18 @@ public final class RouteAdmission implements AutoCloseable {
     private DecodeDecideInfo decodeDecideInfo;
     private WorkerEndpoint blockedEndpoint;
     private Ownership ownership = Ownership.PROVISIONAL;
+    private Runnable refundUnpublishedChunk;
 
-    private RouteAdmission(String requestId, Response response, Selection selection, DecodeDecideInfo decodeRequest) {
+    private RouteAdmission(String requestId,
+                           Response response,
+                           Selection selection,
+                           DecodeDecideInfo decodeRequest,
+                           Runnable refundUnpublishedChunk) {
         this.requestId = requestId;
         this.response = response;
         this.selection = selection;
         this.decodeDecideInfo = decodeRequest;
+        this.refundUnpublishedChunk = refundUnpublishedChunk;
         if (!Objects.equals(decodeRequest.requirement().requestId(), requestId)) {
             throw new IllegalArgumentException("Decode admission belongs to another request");
         }
@@ -56,6 +62,7 @@ public final class RouteAdmission implements AutoCloseable {
         WorkerEndpoint.EndpointHold decodeHold = null;
         ServerStatus decodeStatus = null;
         long decodePlacementVersion = 0L;
+        Runnable refundChunk = null;
 
         try {
             for (SelectedRole selected : selectedRoles) {
@@ -80,6 +87,7 @@ public final class RouteAdmission implements AutoCloseable {
                     prefillPlacementVersion = placementVersion;
                     prefillWorkMs = selected.prefillWorkMs();
                     commitTelemetry = selected.takeCommitTelemetry();
+                    refundChunk = selected.takeUnpublishedChunkRefund();
                     continue;
                 }
                 if (role == RoleType.DECODE) {
@@ -105,11 +113,14 @@ public final class RouteAdmission implements AutoCloseable {
             return new RouteAdmission(requestId, response,
                     new Selection(prefillEndpoint, prefillHold, prefillStatus, prefillPlacementVersion, prefillWorkMs,
                             decodeHold, decodePlacementVersion, commitTelemetry),
-                    decodeRequest.withSelection(DecodeSelection.of(decodeStatus, decodeEndpoint, null)));
+                    decodeRequest.withSelection(DecodeSelection.of(decodeStatus, decodeEndpoint, null)), refundChunk);
         } catch (RuntimeException | Error failure) {
             WorkerEndpoint.EndpointHold ownedPrefillHold = prefillHold;
             WorkerEndpoint.EndpointHold ownedDecodeHold = decodeHold;
             try (ownedPrefillHold; ownedDecodeHold) {
+                if (refundChunk != null) {
+                    refundChunk.run();
+                }
                 throw failure;
             }
         }
@@ -268,6 +279,7 @@ public final class RouteAdmission implements AutoCloseable {
     private void markCommitted() {
         requireProvisional();
         ownership = Ownership.COMMITTED;
+        refundUnpublishedChunk = null;
         closeHolds();
         runCommitTelemetry();
     }
@@ -297,7 +309,14 @@ public final class RouteAdmission implements AutoCloseable {
                 decodeEndpoint().release(decodeDecideInfo.reservation(), DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             }
         } finally {
-            closeHolds();
+            try {
+                if (refundUnpublishedChunk != null) {
+                    refundUnpublishedChunk.run();
+                    refundUnpublishedChunk = null;
+                }
+            } finally {
+                closeHolds();
+            }
         }
     }
 

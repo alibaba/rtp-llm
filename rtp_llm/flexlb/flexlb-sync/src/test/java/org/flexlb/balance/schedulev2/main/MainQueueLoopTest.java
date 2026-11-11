@@ -103,6 +103,7 @@ class MainQueueLoopTest {
         assertEquals(4L, request.selectedPrefill().hitCacheTokens());
         assertEquals(30L, request.selectedPrefill().predictedMs());
         verify(hold).close();
+        verify(selected).takeUnpublishedChunkRefund();
         assertEquals(Stage.PREFILL_WAITING, request.stage());
         assertEquals(0, mainQueue.size());
         assertEquals(1, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));

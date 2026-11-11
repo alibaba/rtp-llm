@@ -405,6 +405,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public Runnable applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
         WorkerStatus.StatusObservation observation = prepared.observation();
+        var previousChunk = ws.prefillChunkCapacity().definition();
         WorkerStatusResult result =
                 prefillState.updateFromWorkerStatus(observation, this::predictRepackedBatchMs, () -> {
                             if (!observation.alive()) {
@@ -417,7 +418,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
         reportFinishedBatchesNoFail(result.finishedBatches());
         rethrowPublicationFailure(result.publicationFailure());
         List<WorkerStatusFact> facts = result.schedulerFacts();
-        return () -> endpointEvents.onPrefillStatus(this, observation, facts);
+        boolean chunkChanged = previousChunk != ws.prefillChunkCapacity().definition();
+        return () -> {
+            endpointEvents.onPrefillStatus(this, observation, facts);
+            if (chunkChanged) {
+                signalPlacementCapacityChanged();
+            }
+        };
     }
 
     @Override
