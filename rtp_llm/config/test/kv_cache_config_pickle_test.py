@@ -90,6 +90,9 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertEqual(KVCacheConfig().block_tree_transfer_worker_count, 1)
         self.assertEqual(KVCacheConfig().disk_cache_read_thread_count, 16)
         self.assertEqual(KVCacheConfig().disk_cache_write_thread_count, 16)
+        self.assertEqual(
+            KVCacheConfig().disk_cache_evict_max_pending_bytes, 100 * 1024 * 1024
+        )
         for enabled in (False, True):
             with self.subTest(enabled=enabled):
                 config = KVCacheConfig()
@@ -128,7 +131,7 @@ class KVCacheConfigPickleTest(TestCase):
                 restored.__setstate__(previous)
                 self.assertEqual(restored.block_tree_transfer_worker_count, 7)
                 self.assertEqual(
-                    restored.disk_cache_evict_max_pending_bytes, 64 * 1024 * 1024
+                    restored.disk_cache_evict_max_pending_bytes, 100 * 1024 * 1024
                 )
                 self.assertEqual(
                     restored.kvcm_task_timeout_ms, 20000 if version == 13 else 23000

@@ -2430,6 +2430,7 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
         ASSERT_NE(cache, nullptr);
         EXPECT_EQ(cache->config().business_queue_max_size, 0u);
         EXPECT_EQ(cache->config().transfer_queue_max_size, 0u);
+        EXPECT_EQ(cache->config().disk_cache_evict_max_pending_bytes, 100u * 1024 * 1024);
     }
     for (const auto& invalid_field : {std::string("worker"),
                                       std::string("worker_queue"),

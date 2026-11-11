@@ -18,6 +18,7 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm::block_tree_cache_test {
@@ -467,6 +468,9 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                           std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
     group_sets                       = workLoopTestGroups(std::move(group_sets));
     config.btc_transfer_engine_async = true;
+    if (config.disk_cache_evict_max_pending_bytes == 0) {
+        config.disk_cache_evict_max_pending_bytes = KVCacheConfig{}.disk_cache_evict_max_pending_bytes;
+    }
     // Fixtures bypass the factory; a full-capacity low watermark suppresses automatic eviction.
     for (auto* watermark : {&config.watermark_device, &config.watermark_host, &config.watermark_disk}) {
         if (watermark->low_ratio == 0.0 && watermark->high_ratio == 0.0) {

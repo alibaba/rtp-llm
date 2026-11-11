@@ -77,7 +77,7 @@ struct BlockTreeCacheConfig {
     size_t device_disk_staging_block_count{128};
     // Shared descriptor batching limit for watermark planning and all transfer directions.
     size_t max_descriptors_per_transfer_batch{32};
-    size_t disk_cache_evict_max_pending_bytes{64 * 1024 * 1024};
+    size_t disk_cache_evict_max_pending_bytes{0};
 
     // ---- FULL prefix invariant scanner (diagnostic only) ----
     // The factory zeroes this on ranks that do not own a mutable BlockTree.

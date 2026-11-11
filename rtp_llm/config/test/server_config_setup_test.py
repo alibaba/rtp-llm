@@ -368,6 +368,9 @@ class GenerateConfigTest(TestCase):
             config = setup_args([]).kv_cache_config
             self.assertTrue(config.btc_transfer_engine_async)
             self.assertEqual(config.btc_crc_slot_count, 8)
+            self.assertEqual(
+                config.disk_cache_evict_max_pending_bytes, 100 * 1024 * 1024
+            )
         with patch.dict(
             "os.environ",
             _jit_env(BTC_TRANSFER_ENGINE_ASYNC="true", BTC_CRC_SLOT_COUNT="11"),

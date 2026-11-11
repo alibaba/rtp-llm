@@ -35,6 +35,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
@@ -351,19 +352,21 @@ public:
         bool                              async                     = true) {
         transfer_engine_     = std::make_shared<ScriptedTransferEngine>(tree->groupSets(), false, false, async);
         transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(transfer_engine_, nullptr);
-        return std::make_unique<BlockTreeEvictor>(tree,
-                                                  device_policy,
-                                                  host_policy,
-                                                  disk_policy,
-                                                  transfer_dispatcher_.get(),
-                                                  task_pool,
-                                                  metrics_reporter_,
-                                                  mutex_,
-                                                  BlockTreeTaskPool::kDefaultQueueWaitTimeout.count(),
-                                                  BlockTreeTaskPool::kDefaultQueueWaitTimeout.count(),
-                                                  max_descriptors_per_batch,
-                                                  std::move(is_tier_enabled),
-                                                  [](bool) {});
+        return std::make_unique<BlockTreeEvictor>(
+            tree,
+            device_policy,
+            host_policy,
+            disk_policy,
+            transfer_dispatcher_.get(),
+            task_pool,
+            metrics_reporter_,
+            mutex_,
+            BlockTreeTaskPool::kDefaultQueueWaitTimeout.count(),
+            BlockTreeTaskPool::kDefaultQueueWaitTimeout.count(),
+            max_descriptors_per_batch,
+            std::move(is_tier_enabled),
+            [](bool) {},
+            KVCacheConfig{}.disk_cache_evict_max_pending_bytes);
     }
 
     std::unique_ptr<BlockTreeEvictor> make(BlockTree* tree, BlockTreeTaskPool* task_pool) {
@@ -525,7 +528,8 @@ TEST(BlockTreeEvictorAsyncTest, PendingTransferDoesNotOccupyBusinessWorker) {
         BlockTreeTaskPool::kDefaultQueueWaitTimeout.count(),
         8,
         [](Tier) { return true; },
-        [&](bool) { ++settled_count; });
+        [&](bool) { ++settled_count; },
+        KVCacheConfig{}.disk_cache_evict_max_pending_bytes);
 
     MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group, 1, BlockTreeRefType::CACHE);
     ASSERT_EQ(device_blocks.size(), 1u);
@@ -637,7 +641,8 @@ public:
                     settled_events_.push_back(check_watermark);
                 }
                 settled_cv_.notify_all();
-            });
+            },
+            KVCacheConfig{}.disk_cache_evict_max_pending_bytes);
         return true;
     }
 
@@ -1572,7 +1577,8 @@ void verifyMixedDetachedBatchSettlement(bool transfer_success) {
         [&](bool check_watermark) {
             std::lock_guard<std::mutex> lock(settled_mutex);
             settled_events.push_back(check_watermark);
-        });
+        },
+        KVCacheConfig{}.disk_cache_evict_max_pending_bytes);
 
     const MultiNodeBlocks parent_device_blocks = allocateDeviceBlocksForTest(*group, 1, BlockTreeRefType::CACHE);
     ASSERT_EQ(parent_device_blocks.size(), 1u);
@@ -3444,7 +3450,8 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimMetricsDisabledReporterPreservesSelecti
         1000,
         8,
         [](Tier) { return true; },
-        [](bool) {});
+        [](bool) {},
+        KVCacheConfig{}.disk_cache_evict_max_pending_bytes);
     disabled.onInserted(result);
     const auto expected = evictor_->chooseVictim(0, Tier::DEVICE);
     const auto actual   = disabled.chooseVictim(0, Tier::DEVICE);
