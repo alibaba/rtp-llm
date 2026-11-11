@@ -22,6 +22,11 @@ contains the actual Ray session and NodeIDs, per-node GPU UUIDs, native
 incarnation and port, the model metadata directory, canonical policy
 manifest, refit port and a new output directory.
 
+Qualify the head gateway with a real HTTP health check before a large
+load. If the packaged certifi trust file is absent, configure
+`SSL_CERT_FILE` with a verified CA bundle available in the head container.
+The driver constructs its HTTPX TLS context before creating workers.
+
 Stage the official tokenizer and model metadata in each training container.
 Lock the official safetensors headers and start the bounded checkpoint
 relay only on rollout nodes with the model mount. Train sources are admitted

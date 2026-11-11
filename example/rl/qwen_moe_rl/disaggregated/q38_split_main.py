@@ -177,6 +177,12 @@ def _make_backend(deploy):
 
 
 def _preflight_driver(deploy, recipe, dataset_path):
+    import httpx
+
+    # Build the same verified TLS context the local gateway will use.
+    # Catch missing package CA files before Ray loads model weights.
+    with httpx.Client(trust_env=True):
+        pass
     config = compose(recipe)
     dataset = load_dataset(dataset_path)
     if config.actor_rollout_ref.model.path != deploy.metadata:
