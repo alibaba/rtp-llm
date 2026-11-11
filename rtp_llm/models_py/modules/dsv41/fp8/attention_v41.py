@@ -2746,6 +2746,14 @@ class AttentionV41FP8(AttentionFP8):
         table = self._block_tables_by_type[INDEXER_KV][:B]
         raw_tpb = require_pool_tokens_per_block(self._kv_cache, region=INDEXER_KV)
         logical_entries = raw_tpb // self.compress_ratio
+        # No request can reference entries beyond what its block table covers,
+        # so bound the scoring capacity by the (host-side, capture-static)
+        # table width. Without this the dense-key fallback materializes
+        # [B, rope_max/ratio, dim] per producer layer — at a 1M context that
+        # is ~64 MiB per request per layer even for short synthetic batches
+        # (warmup/capture OOM on 80 GB cards). Masked tail entries carry no
+        # information, so the bound is numerically inert.
+        capacity = min(capacity, max(int(table.shape[1]) * logical_entries, 1))
         if (
             not sharded
             and raw_tpb % self.compress_ratio == 0
