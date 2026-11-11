@@ -6,10 +6,12 @@ import time
 import unittest
 import weakref
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
+from rtp_llm.metrics import GaugeMetrics
 from rtp_llm.multimodal import mm_embedding_cache as cache_module
 from rtp_llm.multimodal.mm_embedding_cache import (
     MMEmbeddingCache,
@@ -230,6 +232,277 @@ class UncachedEntryReadinessTest(unittest.TestCase):
                     self.assertTrue(
                         all(stream.query() for stream in entry.producer_streams)
                     )
+
+
+class EmbeddingCacheTurnoverMetricsTest(unittest.TestCase):
+    metric = GaugeMetrics.VIT_EMBEDDING_CACHE_ESTIMATED_LIFETIME_SECONDS_METRIC
+
+    def setUp(self):
+        self.now = 100.0
+        clock_patch = patch.object(
+            cache_module, "time", SimpleNamespace(monotonic=lambda: self.now)
+        )
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
+        report_patch = patch.object(cache_module.kmonitor, "report")
+        self.report = report_patch.start()
+        self.addCleanup(report_patch.stop)
+
+    def cache(self, gpu_bytes=0, cpu_bytes=16, **kwargs):
+        kwargs.setdefault("report_metrics", True)
+        cache = MMEmbeddingCache(gpu_bytes, cpu_bytes, **kwargs)
+        self.addCleanup(cache.close)
+        return cache
+
+    def put(self, cache, key, *, device="cpu", count=4):
+        state, entry = cache.try_acquire(key)
+        self.assertEqual(state, "miss")
+        self.assertTrue(cache.complete(key, entry, torch.ones(count, device=device)))
+        return entry
+
+    def samples(self):
+        return [
+            call.args[1]
+            for call in self.report.call_args_list
+            if call.args[0] == self.metric
+        ]
+
+    def test_admission_once_per_generation_not_lookup(self):
+        cache = self.cache()
+        _, entry = cache.try_acquire("a")
+        self.assertEqual(cache.try_acquire("a")[0], "in_progress")
+        self.assertEqual(cache._lifetime_metrics._admitted_bytes, 0)
+        cache.complete("a", entry, torch.ones(4))
+        self.assertFalse(cache.complete("a", entry, torch.ones(4)))
+        self.assertEqual(cache.try_acquire("a")[0], "complete")
+        self.assertTrue(torch.equal(entry.wait(), torch.ones(4)))
+        self.assertIs(cache.peek("a"), entry)
+        self.assertEqual(cache.resident_tiers(["a"]), {"a": "cpu"})
+        self.assertEqual(cache._lifetime_metrics._admitted_bytes, 16)
+        self.put(cache, "b")
+        self.put(cache, "a")  # Refill after eviction is new ingress.
+        cache.clear()
+        self.assertEqual(cache._lifetime_metrics._admitted_bytes, 48)
+        self.assertEqual(self.samples(), [])
+        self.now = 160.0
+        self.put(cache, "c")
+        self.assertEqual(self.samples(), [16 * 60 / 64])
+
+    def test_nonresident_entries_do_not_contribute(self):
+        for operation in (
+            "disabled",
+            "pending",
+            "failed",
+            "oversized",
+            "removed",
+            "copy",
+        ):
+            with self.subTest(operation=operation):
+                cache = self.cache(cpu_bytes=0 if operation == "disabled" else 16)
+                _, entry = cache.try_acquire("a")
+                if operation == "failed":
+                    cache.fail("a", entry, ValueError("failed"))
+                elif operation == "pending":
+                    cache.clear()
+                elif operation == "removed":
+                    cache.remove("a")
+                    cache.complete("a", entry, torch.ones(4))
+                elif operation == "copy":
+                    with patch.object(
+                        cache_module, "_pool_result", side_effect=RuntimeError("copy")
+                    ):
+                        cache.complete("a", entry, torch.ones(4))
+                    self.assertTrue(torch.equal(entry.wait(), torch.ones(4)))
+                else:
+                    cache.complete("a", entry, torch.ones(8))
+                self.assertEqual(cache._lifetime_metrics._admitted_bytes, 0)
+                self.assertIsNone(cache._lifetime_metrics._window_start)
+                self.assertEqual(self.samples(), [])
+
+    def test_uses_capacity_not_usage_and_resets_window_on_resize(self):
+        cache = self.cache(cpu_bytes=64)
+        self.put(cache, "a")
+        self.now = 160.0
+        self.put(cache, "b")
+        self.assertEqual(cache.stats()["resident_bytes"], 32)
+        self.assertEqual(self.samples(), [64 * 60 / 32])
+        cache.resize(0, 32)
+        self.assertIsNone(cache._lifetime_metrics._window_start)
+        self.now = 170.0
+        self.put(cache, "c")
+        self.now = 230.0
+        self.put(cache, "d")
+        self.assertEqual(self.samples(), [120.0, 60.0])
+        cache.resize(0, 0)
+        self.assertEqual(cache._lifetime_metrics._capacity_bytes, 0)
+        self.assertEqual(cache._lifetime_metrics._admitted_bytes, 0)
+
+    def test_shards_share_capacity_counter_and_one_metric_sample(self):
+        cache = cache_module.ShardedMMEmbeddingCache(
+            0, 129, shards=4, report_metrics=True
+        )
+        self.addCleanup(cache.close)
+        self.assertTrue(
+            all(s._lifetime_metrics is cache._lifetime_metrics for s in cache._shards)
+        )
+        keys = {}
+        for index in range(1000):
+            key = str(index)
+            keys.setdefault(id(cache._shard(key)), key)
+            if len(keys) == 4:
+                break
+        self.assertEqual(len(keys), 4)
+        keys = list(keys.values())
+        for key in keys:
+            self.put(cache, key)
+        self.assertEqual(cache._lifetime_metrics._admitted_bytes, 64)
+        self.now = 160.0
+        cache.remove(keys[0])
+        self.put(cache, keys[0])
+        self.assertEqual(self.samples(), [129 * 60 / 80])
+        with self.assertRaises(ValueError):
+            cache.resize(0, -1)
+        self.assertEqual(cache._lifetime_metrics._capacity_bytes, 129)
+        cache.resize(0, 257)
+        self.assertIsNone(cache._lifetime_metrics._window_start)
+        self.now = 170.0
+        self.put(cache, keys[0])
+        self.now = 230.0
+        self.put(cache, keys[1])
+        self.assertEqual(self.samples(), [129 * 60 / 80, 257 * 60 / 32])
+
+    def test_window_uses_actual_elapsed_time_and_resets_byte_count(self):
+        cache = self.cache(cpu_bytes=64)
+        self.put(cache, "a")
+        self.now = 159.0
+        self.put(cache, "b", count=8)
+        self.assertEqual(self.samples(), [])
+        self.now = 160.0
+        self.put(cache, "c")
+        self.assertEqual(self.samples(), [60.0])
+        self.now = 220.0
+        self.put(cache, "d")
+        self.assertEqual(self.samples(), [60.0, 240.0])
+        self.now = 820.0
+        self.put(cache, "e")
+        self.assertEqual(self.samples(), [60.0, 240.0, 2400.0])
+
+    def test_zero_ingress_emits_no_sample(self):
+        metrics = cache_module._CacheLifetimeMetrics(64)
+        metrics.record_admission(0)
+        self.now = 1000.0
+        metrics.record_admission(0)
+        self.assertIsNone(metrics._window_start)
+        self.assertEqual(self.samples(), [])
+
+    def test_concurrent_admissions_are_accumulated_once(self):
+        metrics = cache_module._CacheLifetimeMetrics(256)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(metrics.record_admission, [1] * 128))
+        self.assertEqual(metrics._admitted_bytes, 128)
+        self.now = 160.0
+        metrics.record_admission(128)
+        self.assertEqual(self.samples(), [60.0])
+
+    def test_async_publication_counts_only_successful_storage(self):
+        cache = self.cache(async_publication=True, publish_queue_size=1)
+        started, release = threading.Event(), threading.Event()
+        publish = cache._on_complete_sync
+
+        def blocked(*args):
+            started.set()
+            if not release.wait(5):
+                raise TimeoutError("test publication did not resume")
+            return publish(*args)
+
+        try:
+            with patch.object(cache, "_on_complete_sync", side_effect=blocked):
+                self.put(cache, "a")
+                self.assertTrue(started.wait(5))
+                self.put(cache, "b")  # Full publication queue: result not cached.
+                self.assertEqual(cache.try_acquire("a")[0], "complete")
+                self.assertIsNone(cache._lifetime_metrics._window_start)
+                self.now = 150.0
+                release.set()
+                cache.flush()
+            self.assertIsNone(cache.peek("b"))
+            self.assertEqual(cache._lifetime_metrics._admitted_bytes, 16)
+            self.assertEqual(cache._lifetime_metrics._window_start, 150.0)
+            self.now = 210.0
+            self.put(cache, "c")
+            cache.flush()
+            self.assertEqual(self.samples(), [30.0])
+        finally:
+            release.set()
+            cache.flush()
+
+    def test_storage_readmission_does_not_count_as_new_ingress(self):
+        cache = self.cache(cpu_bytes=64)
+        entry = self.put(cache, "a")
+        # Exercise the shared tier-storage path on CPU, not an actual GPU copy.
+        with cache._transfer_lock:
+            with cache._lock:
+                cache._uncharge_locked("a", entry)
+            cache._store_cpu("a", entry, entry.result, entry.ready_events)
+        self.assertIs(cache.peek("a"), entry)
+        self.assertEqual(entry.charge_bytes, 16)
+        self.assertEqual(cache._lifetime_metrics._admitted_bytes, 16)
+        self.assertTrue(torch.equal(entry.wait(), torch.ones(4)))
+        self.now = 160.0
+        self.put(cache, "b")
+        self.assertEqual(self.samples(), [120.0])
+
+    def test_reporting_is_unlocked_and_failure_does_not_change_results(self):
+        cache = self.cache()
+        self.put(cache, "a")
+        locks_available = []
+
+        def report(metric, *_args, **_kwargs):
+            if metric == self.metric:
+                for lock in (
+                    cache._lock,
+                    cache._transfer_lock,
+                    cache._lifetime_metrics._lock,
+                ):
+                    acquired = lock.acquire(blocking=False)
+                    locks_available.append(acquired)
+                    if acquired:
+                        lock.release()
+                raise RuntimeError("metrics unavailable")
+
+        self.report.side_effect = report
+        self.now = 160.0
+        with self.assertLogs(level="ERROR"):
+            entry = self.put(cache, "b")
+        self.assertEqual(locks_available, [True] * 3)
+        self.assertTrue(torch.equal(entry.wait(), torch.ones(4)))
+        self.assertEqual(cache.stats()["resident_entries"], 1)
+
+    def test_no_clock_or_reports_when_disabled(self):
+        cache = self.cache(report_metrics=False)
+        self.assertIsNone(cache._lifetime_metrics)
+        with patch.object(
+            cache_module.time, "monotonic", side_effect=AssertionError("clock")
+        ):
+            self.put(cache, "a")
+            self.assertEqual(cache.try_acquire("a")[0], "complete")
+            self.put(cache, "b")
+        self.report.assert_not_called()
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires actual tier transfers")
+    def test_tier_transfers_do_not_count_as_new_ingress(self):
+        cache = self.cache(gpu_bytes=32, cpu_bytes=64)
+        self.put(cache, "a", device="cuda", count=8)
+        self.put(cache, "b", device="cuda", count=8)
+        self.assertEqual(cache.peek("a").tier, "cpu")
+        self.assertEqual(cache._lifetime_metrics._admitted_bytes, 64)
+        _, entry = cache.try_acquire("a")
+        self.assertTrue(torch.equal(entry.wait().cpu(), torch.ones(8)))
+        self.assertEqual(entry.tier, "gpu")
+        self.assertEqual(cache._lifetime_metrics._admitted_bytes, 64)
+        self.now = 160.0
+        self.put(cache, "c", device="cuda", count=8)
+        self.assertEqual(self.samples(), [60.0])
 
 
 class EmbeddingCapacityTest(unittest.TestCase):
@@ -1176,6 +1449,7 @@ class CacheLockIsolationTest(unittest.TestCase):
 
         with patch.object(torch.Tensor, "clone", new=clone):
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+
                 def put():
                     writer[0] = threading.current_thread()
                     hashes.put("a", [torch.tensor([1])], "old")
@@ -1293,9 +1567,7 @@ class ShardedEmbeddingCacheTest(unittest.TestCase):
     def test_routes_keys_and_aggregates_stats(self):
         from rtp_llm.multimodal.mm_embedding_cache import ShardedMMEmbeddingCache
 
-        cache = ShardedMMEmbeddingCache(
-            gpu_max_bytes=0, cpu_max_bytes=4096, shards=4
-        )
+        cache = ShardedMMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=4096, shards=4)
         self.assertEqual(cache.shard_count, 4)
         keys = ["k%d" % i for i in range(32)]
         for key in keys:
@@ -1321,9 +1593,7 @@ class ShardedEmbeddingCacheTest(unittest.TestCase):
 
         self.assertEqual(_split_budget(10, 3), [4, 3, 3])
         self.assertEqual(sum(_split_budget(10, 3)), 10)
-        cache = ShardedMMEmbeddingCache(
-            gpu_max_bytes=0, cpu_max_bytes=10, shards=3
-        )
+        cache = ShardedMMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=10, shards=3)
         self.assertEqual(cache.stats()["cpu_max_bytes"], 10)
 
 
