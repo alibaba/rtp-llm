@@ -253,8 +253,9 @@ def _insert_global_rows_torch(k, k_cache, slot_mapping):
     rows = _quantize_global_rows_torch(k, slot_mapping)
     flat = k_cache.view(-1, FP4_GLOBAL_ENTRY_BYTES)
     valid = slot_mapping >= 0
-    if bool(valid.any()):
-        flat[slot_mapping[valid].to(torch.int64)] = rows[valid]
+    safe = slot_mapping.clamp_min(0).to(torch.int64)
+    old = flat[safe]
+    flat[safe] = torch.where(valid[:, None], rows, old)
 
 
 def quantize_and_insert_k_cache_fp4(
@@ -359,18 +360,16 @@ def _gather_fp4_rows_torch(pool_3d: torch.Tensor, slots: torch.Tensor) -> torch.
         (rows, FP4_GLOBAL_ENTRY_BYTES), dtype=torch.uint8, device=pool_3d.device
     )
     valid = slots >= 0
-    if not bool(valid.any()):
-        return out
     block_size = int(pool_3d.shape[1])
     block_stride = int(pool_3d.stride(0))
     blocks = pool_3d.as_strided((pool_3d.shape[0], block_stride), (block_stride, 1))
-    chosen = slots[valid]
+    chosen = slots.clamp_min(0)
     block_idx = chosen // block_size
     offset = chosen % block_size
     cols = torch.arange(FP4_GLOBAL_ENTRY_BYTES, device=pool_3d.device)
     gather_cols = offset[:, None] * FP4_GLOBAL_ENTRY_BYTES + cols[None, :]
-    out[valid] = torch.gather(blocks[block_idx], 1, gather_cols)
-    return out
+    gathered = torch.gather(blocks[block_idx], 1, gather_cols)
+    return torch.where(valid[:, None], gathered, out)
 
 
 def _dequantize_fp4_rows_torch(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:

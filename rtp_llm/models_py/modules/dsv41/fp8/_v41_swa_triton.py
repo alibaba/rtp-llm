@@ -69,15 +69,19 @@ def _pool_rows_torch(pool_3d: torch.Tensor, slots: torch.Tensor):
     scales = torch.full(
         (rows, SCALE_BYTES_PER_TOKEN), 127, dtype=torch.uint8, device=pool_3d.device
     )
-    if valid.any():
-        s = slots[valid]
-        block = s // pool_3d.shape[1]
-        position = s % pool_3d.shape[1]
-        base = block * pool_3d.stride(0) + position * (HEAD_DIM + SCALE_BYTES_PER_TOKEN)
-        cols = torch.arange(HEAD_DIM, device=pool_3d.device)
-        payload[valid] = flat[base[:, None] + cols[None, :]]
-        scols = torch.arange(SCALE_BYTES_PER_TOKEN, device=pool_3d.device)
-        scales[valid] = flat[base[:, None] + HEAD_DIM + scols[None, :]]
+    # Fixed-shape masked gather: CUDA graph capture cannot allocate from a
+    # data-dependent boolean index.  Invalid slots read slot 0 and are then
+    # masked to the zero/neutral row.
+    s = slots.clamp_min(0)
+    block = s // pool_3d.shape[1]
+    position = s % pool_3d.shape[1]
+    base = block * pool_3d.stride(0) + position * (HEAD_DIM + SCALE_BYTES_PER_TOKEN)
+    cols = torch.arange(HEAD_DIM, device=pool_3d.device)
+    gathered = flat[base[:, None] + cols[None, :]]
+    payload = torch.where(valid[:, None], gathered, payload)
+    scols = torch.arange(SCALE_BYTES_PER_TOKEN, device=pool_3d.device)
+    gathered_scales = flat[base[:, None] + HEAD_DIM + scols[None, :]]
+    scales = torch.where(valid[:, None], gathered_scales, scales)
     return payload, scales
 
 
@@ -91,18 +95,22 @@ def _dequantize_rows_torch(payload: torch.Tensor, scales: torch.Tensor, dtype):
 def _insert_swa_torch(kv: torch.Tensor, pool_3d: torch.Tensor, slots: torch.Tensor) -> None:
     slots = slots.reshape(-1).to(torch.int64)
     valid = slots >= 0
-    if not valid.any():
-        return
-    payload, scales = _quantize_rows_torch(kv[valid])
+    # Quantize the full fixed-shape batch; no boolean-index allocation is
+    # allowed while a CUDA graph is capturing.
+    payload, scales = _quantize_rows_torch(kv)
     flat = pool_3d.reshape(-1)
-    s = slots[valid]
+    s = slots.clamp_min(0)
     block = s // pool_3d.shape[1]
     position = s % pool_3d.shape[1]
     base = block * pool_3d.stride(0) + position * (HEAD_DIM + SCALE_BYTES_PER_TOKEN)
     cols = torch.arange(HEAD_DIM, device=pool_3d.device)
-    flat[base[:, None] + cols[None, :]] = payload
+    idx = base[:, None] + cols[None, :]
+    old = flat[idx]
+    flat[idx] = torch.where(valid[:, None], payload, old)
     scols = torch.arange(SCALE_BYTES_PER_TOKEN, device=pool_3d.device)
-    flat[base[:, None] + HEAD_DIM + scols[None, :]] = scales
+    sidx = base[:, None] + HEAD_DIM + scols[None, :]
+    sold = flat[sidx]
+    flat[sidx] = torch.where(valid[:, None], scales, sold)
 
 
 def _dequantize_swa_torch(pool_3d, slots, out_dtype):
