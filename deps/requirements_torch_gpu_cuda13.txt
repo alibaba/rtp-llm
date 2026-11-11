@@ -35,6 +35,10 @@ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn/flash_attn-2.8.3.post1%2
 # The HC regression target imports the vendored TileKernels implementation.
 tilelang==0.1.15
 
+# GC MoE (CuTe DSL green-context MoE). Pure Python: kernels JIT on first
+# use, so the single py3-none-any wheel also serves the other arch.
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/gc_moe/gc_moe-0.5.3+c58fd4d.cu132-py3-none-any.whl
+
 # Self-built wheels against torch 2.11+cu130 with gcc-toolset-13.
 # DeepGEMM opt_sm90 + native Hopper block32 dense GEMM at 28cf9c1.
 # Preserves explicit-device SM100 views and sm90_fp8_fp4_mega_moe.
@@ -75,6 +79,9 @@ apache-tvm-ffi==0.1.12
 # CUDA13 runtime kernels; keep these aligned with whl_deps().
 quack-kernels @ https://github.com/Dao-AILab/quack/archive/77a750c0d9548d4a6e23c0f64062d61b3ea420ff.tar.gz#sha256=ebc940da966e88a05be318c3dc3f650a7359a281642f8f2f77c28ba4e9affa05
 flash-attn-4 @ https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/cuda13-x86/20261107/flash_attn_4-4.0.0b21-py3-none-any.whl#sha256=8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949
-nvidia-cutlass-dsl==4.7.1
-nvidia-cutlass-dsl-libs-base==4.7.1
+nvidia-cutlass-dsl==4.8.1
+nvidia-cutlass-dsl-libs-base==4.8.1
+# gc_moe 0.5.3 pins the CUDA runtime bindings it was validated against.
+cuda-python==13.2.0
+cuda-bindings==13.2.0
 torch-c-dlpack-ext==0.1.5
