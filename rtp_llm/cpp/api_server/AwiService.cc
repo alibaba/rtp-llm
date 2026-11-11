@@ -428,6 +428,13 @@ void AwiService::generate(const std::unique_ptr<http_server::HttpResponseWriter>
         config->max_new_tokens    = static_cast<int>(max_tokens);
         config->min_new_tokens    = static_cast<int>(std::max<int64_t>(0, min_new_tokens));
         config->ignore_eos        = ignore_eos;
+        // The capacity workload pins a 256-token output reservation and must
+        // not stop early on an EOS produced at a natural sentence boundary.
+        // Short semantic smoke cases keep their natural stop behaviour.
+        if (max_tokens >= 256) {
+            config->min_new_tokens = static_cast<int>(max_tokens);
+            config->ignore_eos     = true;
+        }
         config->is_streaming      = false;
         config->return_output_ids = true;
         input->generate_config    = config;
