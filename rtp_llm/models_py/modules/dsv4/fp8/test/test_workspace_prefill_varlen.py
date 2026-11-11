@@ -58,6 +58,12 @@ class _StubAttention:
       * ``self._pool_entries_per_block(tag)`` → ``self._eb_by_type``
     """
 
+    # ``_build_workspace_meta`` resolves tags through these two real helpers;
+    # reuse the production implementations so the stub keeps tracking them
+    # instead of silently drifting out of sync.
+    _block_table_for = Attention._block_table_for
+    _resolved_pool_tag = Attention._resolved_pool_tag
+
     def __init__(
         self,
         *,
