@@ -85,7 +85,13 @@ class PipelineOffLoopEncodeTest(unittest.TestCase):
                 await asyncio.sleep(0.01)
 
         async def main():
-            gen = await pipeline.pipeline_async(prompt, request_id=1, generate_config={"max_new_tokens": 1})
+            from rtp_llm.config.generate_config import GenerateConfig
+
+            config = GenerateConfig()
+            config.max_new_tokens = 1
+            gen = await pipeline.pipeline_async(
+                prompt, request_id=1, generate_config=config, generate_env_config=None
+            )
             ticker_task = asyncio.create_task(ticker())
             # Drive the generator until the encode completes (it will fail at
             # the backend stage - irrelevant here); only the encode matters.
@@ -114,7 +120,13 @@ class PipelineOffLoopEncodeTest(unittest.TestCase):
         prompt = "xy" * 40
 
         async def main():
-            gen = await pipeline.pipeline_async(prompt, request_id=1, generate_config={"max_new_tokens": 1})
+            from rtp_llm.config.generate_config import GenerateConfig
+
+            config = GenerateConfig()
+            config.max_new_tokens = 1
+            gen = await pipeline.pipeline_async(
+                prompt, request_id=1, generate_config=config, generate_env_config=None
+            )
             try:
                 async for _ in gen:
                     pass
@@ -133,7 +145,13 @@ class PipelineOffLoopEncodeTest(unittest.TestCase):
         prompt = "identical-result-check " * 10
 
         async def main():
-            gen = await pipeline.pipeline_async(prompt, request_id=1, generate_config={"max_new_tokens": 1})
+            from rtp_llm.config.generate_config import GenerateConfig
+
+            config = GenerateConfig()
+            config.max_new_tokens = 1
+            gen = await pipeline.pipeline_async(
+                prompt, request_id=1, generate_config=config, generate_env_config=None
+            )
             try:
                 async for _ in gen:
                     pass
