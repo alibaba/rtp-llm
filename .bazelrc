@@ -157,9 +157,6 @@ build:cuda13 --copt=-Wno-array-bounds
 build:cuda13 --copt=-Wno-unused-result
 build:cuda13 --copt=-Wno-array-parameter
 build:cuda13 --copt=-Wno-narrowing
-# GCC13 + torch CUDAEvent.h: stabilize std::hardware_destructive_interference_size under -Werror.
-build:cuda13 --cxxopt=--param=destructive-interference-size=64
-
 build:cuda13_ci_gcc12 --repo_env=GCC_HOST_COMPILER_PATH=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
 build:cuda13_ci_gcc12 --repo_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
 # cuda13 owns its own dep chain: torch 2.11+cu130, triton 3.6.0, dedicated
