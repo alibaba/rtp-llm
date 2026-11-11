@@ -360,7 +360,7 @@ void AwiService::generate(const std::unique_ptr<http_server::HttpResponseWriter>
                 fill_input->request_id   = request_counter_->incAndReturn();
                 fill_input->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
                 fill_input->request_info.request_id = request_id;
-                fill_input->input_ids = torch::from_blob(input_ids.data(),
+                fill_input->input_ids = torch::from_blob(const_cast<int*>(input_ids.data()),
                                                          {end},
                                                          torch::kInt32)
                                             .clone();
