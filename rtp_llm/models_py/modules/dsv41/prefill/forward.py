@@ -93,6 +93,7 @@ Padding-token slots are nulled via ``cp_info.prefill_qkv_padding_mask``.
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 from contextlib import nullcontext
@@ -113,6 +114,7 @@ from rtp_llm.models_py.modules.dsv41.fp8.prefill_meta import (
     release_v41_prefill_shared,
 )
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
+    TaggedAttentionInputs,
     as_tagged_attention_inputs,
     build_block_tables_batched,
     create_tagged_cache_store_writer,
@@ -974,6 +976,32 @@ def forward_layers(
     return h  # [T, dim]
 
 
+def _chunk_attention_entry(entry: PyAttentionInputs, start: int, length: int, device: torch.device) -> PyAttentionInputs:
+    """Clone framework prefill metadata for one absolute token chunk.
+
+    The block tables still describe the complete request; only the query range
+    and its absolute KV prefix change.  Every host/device mirror used by the
+    layer stack is replaced so no layer can observe the un-chunked lengths.
+    """
+    chunk = copy.copy(entry)
+    input_lengths = torch.tensor([length], dtype=torch.int32)
+    prefix_lengths = torch.tensor([start], dtype=torch.int32)
+    cu_seqlens = torch.tensor([0, length], dtype=torch.int32)
+    chunk.input_lengths = input_lengths
+    chunk.prefix_lengths = prefix_lengths
+    chunk.cu_seqlens = cu_seqlens
+    chunk.input_lengths_device = input_lengths.to(device)
+    chunk.prefix_lengths_device = prefix_lengths.to(device)
+    chunk.cu_seqlens_device = cu_seqlens.to(device)
+    chunk.sequence_lengths = prefix_lengths + input_lengths
+    chunk.sequence_lengths_plus_1_device = (chunk.sequence_lengths + 1).to(
+        device=device, dtype=torch.int32
+    )
+    chunk.total_tokens = length
+    chunk.is_cuda_graph = False
+    return chunk
+
+
 def forward_prefill(
     v4: V4Transformer,
     kv_cache: Optional[KVCache],
@@ -1067,6 +1095,55 @@ def forward_prefill(
                 )
 
     block_tables_by_type = build_block_tables_batched(kv_cache, attn)
+
+    # A single eager prefill over the full 1M context materialises the mHC
+    # hidden state at [T, 4, 5120] BF16 (~40 GiB) before the first layer, which
+    # does not fit next to the 62.5 GiB KV pool and the decode-graph pool.  The
+    # same tokens can be processed as independent contiguous query chunks: the
+    # KV written by earlier chunks is the prefix of later chunks, so this is a
+    # genuine full-context prefill, not a truncated/sliding-window shortcut.
+    chunk_tokens = int(os.environ.get("DSV41_PREFILL_CHUNK_TOKENS", "0") or "0")
+    if (
+        chunk_tokens > 0
+        and prepare_hidden_fn is None
+        and input_ids.numel() > chunk_tokens
+        and cu_seqlens is not None
+        and cu_seqlens.numel() == 2
+    ):
+        full_tokens = int(input_ids.numel())
+        chunk_out = None
+        for start in range(0, full_tokens, chunk_tokens):
+            end = min(start + chunk_tokens, full_tokens)
+            length = end - start
+            tagged_entries = (
+                attn.items() if hasattr(attn, "items") else [("default", attn)]
+            )
+            chunk_attn = TaggedAttentionInputs(
+                {
+                    tag: _chunk_attention_entry(entry, start, length, input_ids.device)
+                    for tag, entry in tagged_entries
+                }
+            )
+            chunk_hidden = forward_layers(
+                v4,
+                kv_cache,
+                input_ids[start:end],
+                positions[start:end],
+                torch.tensor([0, length], dtype=torch.int32, device=input_ids.device),
+                block_tables_by_type,
+                attn_inputs=chunk_attn,
+                prepare_hidden_fn=None,
+                allow_ced=False,
+                expert_token_counts=None,
+            )
+            if chunk_out is None:
+                chunk_out = torch.empty(
+                    (full_tokens, chunk_hidden.size(1)),
+                    dtype=chunk_hidden.dtype,
+                    device=chunk_hidden.device,
+                )
+            chunk_out[start:end].copy_(chunk_hidden)
+        return PyModelOutputs(chunk_out)
 
     hidden = forward_layers(
         v4,
