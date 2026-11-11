@@ -199,6 +199,9 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
     RTP_LLM_CHECK(max_descriptors_per_batch > 0);
     RTP_LLM_CHECK(transfer_worker_count > 0 && transfer_worker_count <= std::numeric_limits<size_t>::max() / 2);
     RTP_LLM_CHECK(btc_crc_slot_count > 0 && btc_crc_slot_count <= std::numeric_limits<size_t>::max() / 2);
+    RTP_LLM_LOG_INFO("transfer_lifecycle event=worker_init rank=%ld engine=%p group_set=%p",
+                      world_rank, static_cast<const void*>(this),
+                      group_sets_.empty() ? nullptr : static_cast<const void*>(group_sets_.front().get()));
     // Factory selects the backend once after validating the GroupSet layouts.
     async_ = btc_transfer_engine_async;
     std::array<std::shared_ptr<HostStagingBlockPool>, 2> staging;

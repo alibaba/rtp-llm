@@ -192,6 +192,65 @@ TEST(FrozenTaskRecoveryTest, InconsistentOrMismatchedInjectedProofNeverReleasesT
     }
 }
 
+TEST(FrozenTaskRecoveryTest, ConfirmedMissingReleasesAndForgetsEveryParticipantWithoutRemovingBan) {
+    auto pool = makePool();
+    const auto block = hold(pool);
+    auto original = makeTask(uint64_t{92}, pool, block, true);
+    auto cleanup = std::make_shared<TransferCompletionCleanup>();
+    auto task = std::make_shared<FrozenTask>(
+        FrozenTask::prepare(original->execution()), original->failure(),
+        cleanup->prepare({true, {{0, "worker-0"}, {1, "worker-1"}}}, uint64_t{92}));
+    task->freeze();
+    TransferTaskRegistry completed;
+    TransferTaskRegistry banned;
+    ASSERT_TRUE(completed.begin(uint64_t{92}));
+    ASSERT_TRUE(completed.finish(uint64_t{92}, true));
+    ASSERT_EQ(banned.queryAndBlockMissing(std::vector<uint64_t>{92}).front(), State::REJECTED);
+    int mode = 0;
+    FrozenTaskRecovery recovery([&] { return std::vector<std::shared_ptr<FrozenTask>>{task}; },
+        [&](const auto& execution, int) {
+            auto result = proof(execution, State::UNKNOWN);
+            result.all_safe = true;
+            result.ranks.back().admission_closed = mode != 0;
+            if (mode == 1) result.ranks.back().cq_ok = false;
+            if (mode == 2) result.ranks.back().state = State::RUNNING;
+            if (mode == 3) {
+                result.ranks.front().state = State::RUNNING;
+                result.all_safe = false;
+            }
+            return result;
+        });
+    for (; mode < 4; ++mode) {
+        SCOPED_TRACE(mode);
+        EXPECT_EQ(recovery.runOnce(1000).released, 0u);
+        EXPECT_TRUE(pool->isFrozen(block));
+    }
+    EXPECT_EQ(recovery.runOnce(1000).released, 1u);
+    EXPECT_FALSE(pool->isFrozen(block));
+    EXPECT_EQ(cleanup->size(), 1u);
+    size_t forget_calls = 0;
+    cleanup->drain([&](const auto& target, const auto& traces, int) {
+        ++forget_calls;
+        EXPECT_TRUE(target.remote);
+        EXPECT_EQ(target.peers.size(), 2u);
+        EXPECT_EQ(traces, (std::vector<TransferExecutionTrace>{uint64_t{92}}));
+        EXPECT_EQ(completed.forget(uint64_t{92}), TransferTaskRegistry::ForgetResult::DONE);
+        EXPECT_EQ(banned.forget(uint64_t{92}), TransferTaskRegistry::ForgetResult::DONE);
+        TransferCompletionForgetResult result;
+        TransferCompletionForgetEntryResult entry;
+        entry.trace_id = uint64_t{92};
+        entry.all_done = true;
+        result.entries.push_back(std::move(entry));
+        return result;
+    }, 1000);
+    EXPECT_EQ(forget_calls, 1u);
+    EXPECT_EQ(completed.size(), 0u);
+    EXPECT_EQ(banned.queryLocal(std::vector<uint64_t>{92}).front(), State::REJECTED);
+    EXPECT_FALSE(banned.begin(uint64_t{92}));
+    EXPECT_EQ(recovery.runOnce(1000).released, 0u);
+    EXPECT_EQ(cleanup->size(), 0u);
+}
+
 TEST(FrozenTaskRecoveryTest, QueryAndSourceExceptionsDoNotPreventLaterTasksOrPasses) {
     auto pool = makePool();
     std::vector<std::shared_ptr<FrozenTask>> tasks;
@@ -516,6 +575,7 @@ TEST(FrozenTaskRecoveryTest, CleanupRunsBeforeRecoveryAndEitherPhaseMayFailIndep
             EXPECT_EQ(timeout, 75);
             if (cleanup_fails)
                 throw std::runtime_error("cleanup unavailable");
+            return TransferCompletionCleanup::Summary{};
         });
     auto first = recovery.runOnce(75);
     EXPECT_TRUE(first.source_failed);
@@ -529,6 +589,31 @@ TEST(FrozenTaskRecoveryTest, CleanupRunsBeforeRecoveryAndEitherPhaseMayFailIndep
     EXPECT_EQ(second.released, 1u);
     EXPECT_EQ(order, (std::vector<std::string>{"cleanup", "source", "query"}));
     EXPECT_FALSE(pool->isFrozen(block));
+}
+
+TEST(FrozenTaskRecoveryTest, FailedCleanupWithoutFrozenTasksTriggersSummaryLog) {
+    auto cleanup = std::make_shared<TransferCompletionCleanup>();
+    cleanup->prepare({false, {{0, "local"}}}, uint64_t{83}).submit();
+    bool throws = false;
+    FrozenTaskRecovery recovery(
+        [] { return std::vector<std::shared_ptr<FrozenTask>>{}; },
+        FrozenTaskRecovery::Query{},
+        [&](int timeout, const auto& stopped) {
+            return cleanup->drain([&](const auto&, const auto&, int) {
+                if (throws)
+                    throw std::runtime_error("network unavailable");
+                return TransferCompletionForgetResult{};
+            }, timeout, stopped);
+        });
+    for (bool throw_error : {false, true}) {
+        throws = throw_error;
+        recovery.next_pending_log_ = {};
+        auto summary = recovery.runOnce(75);
+        EXPECT_TRUE(summary.cleanup_failed);
+        EXPECT_EQ(summary.pending, 0u);
+        EXPECT_EQ(cleanup->size(), 1u);
+        EXPECT_GT(recovery.next_pending_log_, std::chrono::steady_clock::time_point{});
+    }
 }
 
 TEST(FrozenTaskRecoveryTest, StopDuringForgetJoinsCurrentCallWithoutWaitingForPendingCleanup) {
@@ -546,7 +631,7 @@ TEST(FrozenTaskRecoveryTest, StopDuringForgetJoinsCurrentCallWithoutWaitingForPe
             return std::vector<std::shared_ptr<FrozenTask>>{};
         }, FrozenTaskRecovery::Query{},
         [cleanup, entered, released, calls](int timeout, const auto& stopped) {
-            cleanup->drain([entered, released, calls](const auto&, const auto&, int) {
+            return cleanup->drain([entered, released, calls](const auto&, const auto&, int) {
                 ++*calls;
                 entered->set_value();
                 if (released.wait_for(5s) != std::future_status::ready)

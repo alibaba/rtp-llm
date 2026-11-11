@@ -79,6 +79,43 @@ public:
     std::function<void(const TransferTask&, const std::shared_ptr<TransferBatchAsyncContext>&)> after_start;
 };
 
+TEST(WorkerTransferRegistryTest, RecoveryQueryRejectsLateExecutionWithFreshDeadline) {
+    auto engine = std::make_shared<ControlledProducer>();
+    BlockTransferDispatcher dispatcher(engine);
+    const auto original = task(3);
+    const auto trace = original.traceId();
+    EXPECT_EQ(dispatcher.queryLocalCompletion(trace), State::REJECTED);
+    // The delayed RPC can reconstruct a fresh budget. The trace fence, rather
+    // than its deadline, must reject it before any physical batch is submitted.
+    auto late = task(3);
+    late.setTraceId(trace);
+    ASSERT_FALSE(late.expired());
+    auto context = dispatcher.executePerRank(late);
+    ASSERT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_TRUE(context->result().buffer_safe);
+    EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
+    EXPECT_EQ(engine->submissions, 0u);
+    EXPECT_EQ(state(dispatcher, trace), State::REJECTED);
+    EXPECT_EQ(dispatcher.forgetLocalCompletion(trace), TransferTaskRegistry::ForgetResult::DONE);
+    EXPECT_FALSE(dispatcher.executePerRank(late)->success());
+    EXPECT_EQ(engine->submissions, 0u);
+    EXPECT_EQ(dispatcher.queryLocalCompletion(trace), State::REJECTED);
+}
+
+TEST(WorkerTransferRegistryTest, RecoveryQueryPreservesAlreadyAdmittedExecution) {
+    auto engine = std::make_shared<ControlledProducer>();
+    BlockTransferDispatcher dispatcher(engine);
+    auto execution = task();
+    const auto trace = execution.traceId();
+    auto context = dispatcher.executePerRank(std::move(execution));
+    EXPECT_EQ(dispatcher.queryLocalCompletion(trace), State::RUNNING);
+    ASSERT_EQ(engine->submissions, 1u);
+    engine->producers.front()->complete(result(true));
+    EXPECT_TRUE(context->success());
+    EXPECT_EQ(dispatcher.queryLocalCompletion(trace), State::BUFFER_SAFE);
+}
+
 TEST(WorkerTransferRegistryTest, RegistersOneTraceAndWaitsForEveryPhysicalBatch) {
     auto engine = std::make_shared<ControlledProducer>();
     BlockTransferDispatcher dispatcher(engine);

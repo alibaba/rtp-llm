@@ -92,6 +92,37 @@ kvcm_backend_test_deps = [
     "@havenask//aios/kmonitor:kmonitor_client_cpp",
 ]
 
+# Uses the selected native KVCM SDK against a private local file. Only metadata
+# discovery is a fixture. Small deadlines expire naturally under real I/O load.
+cc_test_wrapper(
+    name = "kvcm_timeout_recovery_smoke_test",
+    testonly = True,
+    visibility = ["//visibility:public"],
+    size = "medium",
+    timeout = "moderate",
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = [
+        "KVCMTimeoutRecoverySmokeTest.cc",
+        "KVCMMockTestBase.h",
+        "MockKVCMClient.h",
+    ],
+    copts = ["-fno-access-control"] + copts(),
+    tags = ["L20_CU13", "exclusive-if-local", "smoke_case", "manual"],
+    target_compatible_with = select({
+        "//:using_remote_kv_cache": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = kvcm_backend_test_deps + [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache:transfer_task_registry",
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:sdk_buffer_safety",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+        "@grpc//:grpc++",
+    ],
+)
+
 cc_test_wrapper(
     name = "kvcm_completion_query_test",
     testonly = True,

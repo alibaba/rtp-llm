@@ -605,6 +605,8 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                                   ErrorInfo::OkStatus() :
                                   ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "storage backend is not accepting reads");
             if (error.ok() && state->request.transfer_task->expired()) {
+                RTP_LLM_LOG_WARNING("storage read deadline exceeded before I/O: trace=%llu target_key_count=%zu",
+                                    static_cast<unsigned long long>(state->trace_id), state->request.handles.size());
                 error = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "storage read deadline exceeded before I/O");
             }
             if (error.ok() && (skip_remote || !remoteCacheEnabled())) {

@@ -328,3 +328,20 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+cc_test(
+    name = "local_timeout_recovery_smoke_test",
+    visibility = ["//visibility:public"],
+    srcs = [
+        "TimeoutRecoverySmokeTest.cc",
+        "WorkLoopWriteQueueTimeoutSmokeTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_transfer_engine_test_utils",
+        "@grpc//:grpc++",
+    ],
+    tags = ["L20_CU13", "smoke_case", "manual"],
+    exec_properties = {"gpu": "L20_CU13"},
+    timeout = "moderate",
+)

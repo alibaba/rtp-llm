@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -186,11 +187,13 @@ public:
     void markDispatchStarted(size_t rank) {
         std::lock_guard<std::mutex> lock(wait_done_mutex_);
         dispatch_states_.at(rank) = BroadcastDispatchState::POSSIBLY_SUBMITTED;
+        logTransferRpcEvent("rpc_dispatch_begin", rank);
     }
 
     void markSubmitted(size_t rank) {
         std::lock_guard<std::mutex> lock(wait_done_mutex_);
         dispatch_states_.at(rank) = BroadcastDispatchState::SUBMITTED;
+        logTransferRpcEvent("rpc_submitted", rank);
     }
 
     // Coordinator-local monotonic timestamps; no cross-host clock subtraction.
@@ -213,6 +216,41 @@ public:
     }
 
 private:
+    // Called under wait_done_mutex_. Only local-cache transfer RPCs are logged;
+    // completion-query polling must not generate one line per poll. These are
+    // client observations, not proof that the worker admitted or finished I/O.
+    void logTransferRpcEvent(const char* event, size_t rank, bool cq_received = false,
+                             bool cq_ok = false, const char* dispatch_error = nullptr) const noexcept {
+        if constexpr (std::is_same_v<RequestPB, FunctionRequestPB>) {
+            try {
+                if (rank >= worker_contexts_.size() || !worker_contexts_[rank]
+                    || !worker_contexts_[rank]->request.has_mem_request()
+                    || !Logger::getEngineLogger().isLevelEnabled(alog::LOG_LEVEL_INFO)) {
+                    return;
+                }
+                const auto& ctx = worker_contexts_[rank];
+                const auto& request = ctx->request.mem_request();
+                const auto observed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                const auto deadline_us = ctx->client_context ? std::chrono::duration_cast<std::chrono::microseconds>(
+                    ctx->client_context->deadline().time_since_epoch()).count() : 0;
+                // Do not read gRPC-owned status until a successful CQ event.
+                const int grpc_code = cq_received && cq_ok ? static_cast<int>(ctx->status.error_code()) : -1;
+                const auto grpc_message = cq_received && cq_ok ? ctx->status.error_message() : std::string{};
+                RTP_LLM_LOG_INFO("transfer_lifecycle event=%s trace=%llu request=%lld rank=%zu addr=%s "
+                                 "mono_us=%lld deadline_wall_us=%lld cq_received=%d cq_ok=%d grpc_code=%d "
+                                 "grpc_message=\"%s\" dispatch_error=\"%s\"",
+                                 event, static_cast<unsigned long long>(request.transfer_trace_id()),
+                                 static_cast<long long>(request.has_transfer_request_id() ? request.transfer_request_id() : -1),
+                                 rank, ctx->server_addr.c_str(), static_cast<long long>(observed_us),
+                                 static_cast<long long>(deadline_us), cq_received, cq_ok, grpc_code,
+                                 grpc_message.c_str(), dispatch_error ? dispatch_error : "");
+            } catch (...) {
+                // Diagnostics cannot change RPC dispatch or completion.
+            }
+        }
+    }
+
     void completeRank(size_t rank, bool cq_received, bool cq_event_ok, const char* dispatch_error) {
         std::vector<DoneCallback> callbacks;
         bool                      report_connect_failure = false;
@@ -222,8 +260,11 @@ private:
                 cq_received_[rank]    = true;
                 cq_ok_[rank]          = cq_event_ok;
                 dispatch_states_[rank] = BroadcastDispatchState::SUBMITTED;
+                // Log even a late CQ event after aggregate dispatch failure.
+                logTransferRpcEvent("rpc_cq_received", rank, true, cq_event_ok);
             }
             if (rank < worker_contexts_.size() && !cq_received && dispatch_error) {
+                logTransferRpcEvent("rpc_dispatch_failed", rank, false, false, dispatch_error);
                 try {
                     dispatch_errors_[rank] = dispatch_error;
                 } catch (...) {

@@ -416,8 +416,8 @@ TEST(FrozenTaskTest, RecoveryQueriesPreserveOriginalFailureAndDoNotReleaseTarget
     EXPECT_EQ(first.last_query, pending_result);
     const auto pending_log = task.debugString();
     for (const auto* field : {"recovery_query_count=1", "last_recovery_query={trace=34,all_safe=false",
-                              "error=\"rank 1 query timed out\"", "state=RUNNING,grpc_code=0",
-                              "state=UNKNOWN,grpc_code=4,error=\"deadline\",cq_received=false,cq_ok=false"}) {
+                              "error=\"rank 1 query timed out\"", "state=RUNNING,admission_closed=false,grpc_code=0",
+                              "state=UNKNOWN,admission_closed=false,grpc_code=4,error=\"deadline\",cq_received=false,cq_ok=false"}) {
         EXPECT_NE(pending_log.find(field), std::string::npos) << field << '\n' << pending_log;
     }
 
@@ -481,7 +481,7 @@ TEST(FrozenTaskTest, ConcurrentRecoveryQueriesRetainCountAndLatestStringTraceObs
     EXPECT_EQ(task.snapshot().state, FrozenTask::State::FROZEN);
     const auto log = task.debugString();
     EXPECT_NE(log.find("last_recovery_query={trace=\"read-35\",all_safe=false"), std::string::npos);
-    EXPECT_NE(log.find("state=UNKNOWN,grpc_code=unknown,error=\"not observed\""), std::string::npos);
+    EXPECT_NE(log.find("state=UNKNOWN,admission_closed=false,grpc_code=unknown,error=\"not observed\""), std::string::npos);
     EXPECT_TRUE(task.unfreeze());
 }
 

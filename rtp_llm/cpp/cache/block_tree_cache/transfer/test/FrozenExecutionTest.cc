@@ -227,6 +227,98 @@ TEST_F(FrozenExecutionTest, SeparateExecutionTracesSharingTargetReleaseOnlyTheir
     dispatcher.waitForTransfers();
 }
 
+TEST_F(FrozenExecutionTest, MixedSafeAndBannedReleaseForgetsEveryRankButPreservesBan) {
+    const auto target = allocateTarget();
+    auto cleanup = std::make_shared<TransferCompletionCleanup>();
+    TransferTaskRegistry completed, banned;
+    const uint64_t trace = 417;
+    ASSERT_TRUE(completed.begin(trace));
+    ASSERT_TRUE(completed.finish(trace, true));
+    ASSERT_EQ(banned.queryAndBlockMissing(std::vector<uint64_t>{trace}).front(),
+              TransferTaskRegistry::State::REJECTED);
+    FrozenTask::ExecutionInfo execution;
+    execution.trace_id = trace;
+    execution.operation = "load";
+    execution.remote = true;
+    execution.expected_rank_count = 2;
+    execution.expected_peers = {{0, "worker-0"}, {1, "worker-1"}};
+    execution.descriptors.push_back({0, 0, Tier::DISK, Tier::HOST, {}, {{host_, target, 0}}});
+    auto frozen = std::make_shared<FrozenTask>(
+        FrozenTask::prepare(std::move(execution)), unknownExecution(),
+        cleanup->prepare({true, {{0, "worker-0"}, {1, "worker-1"}}}, trace));
+    frozen->freeze();
+    host_->decTreeRef(target, BlockTreeRefType::LOAD);
+    EXPECT_TRUE(host_->isFrozen(target));
+    EXPECT_EQ(cleanup->size(), 0u);
+    // The cleanup route includes every participant, independent of diagnostics.
+    EXPECT_EQ(frozen->recoverySnapshot().last_query, nullptr);
+    EXPECT_TRUE(frozen->unfreeze());
+    EXPECT_FALSE(host_->isAllocated(target));
+    EXPECT_FALSE(frozen->unfreeze());
+    EXPECT_EQ(cleanup->size(), 1u);
+    frozen.reset();
+    size_t forget_calls = 0;
+    const auto summary = cleanup->drain([&](const auto& route, const auto& traces, int) {
+        EXPECT_TRUE(route.remote);
+        EXPECT_EQ(route.peers.size(), 2u);
+        EXPECT_EQ(traces, (std::vector<TransferExecutionTrace>{trace}));
+        TransferCompletionForgetEntryResult entry;
+        entry.trace_id = trace;
+        entry.all_done = true;
+        for (const auto& peer : route.peers) {
+            ++forget_calls;
+            auto& registry = peer.rank == 0 ? completed : banned;
+            const auto result = registry.forget(trace);
+            EXPECT_EQ(result, TransferTaskRegistry::ForgetResult::DONE);
+            entry.all_done = entry.all_done && result == TransferTaskRegistry::ForgetResult::DONE;
+        }
+        TransferCompletionForgetResult result;
+        result.entries.push_back(std::move(entry));
+        return result;
+    }, 100);
+    EXPECT_EQ(forget_calls, 2u);
+    EXPECT_EQ(summary.attempted, 1u);
+    EXPECT_EQ(summary.forgotten, 1u);
+    EXPECT_EQ(summary.pending, 0u);
+    EXPECT_FALSE(summary.failed);
+    EXPECT_EQ(completed.queryLocal(std::vector<uint64_t>{trace}).front(), TransferTaskRegistry::State::UNKNOWN);
+    EXPECT_EQ(banned.queryLocal(std::vector<uint64_t>{trace}).front(), TransferTaskRegistry::State::REJECTED);
+    EXPECT_FALSE(banned.begin(trace));
+}
+
+TEST_F(FrozenExecutionTest, OrdinarySafeReleaseStillQueuesForgetExactlyOnce) {
+    const auto target = allocateTarget();
+    auto completion = std::make_shared<ObservableContext>();
+    auto executor = engine({completion});
+    auto cleanup = std::make_shared<TransferCompletionCleanup>();
+    BlockTransferDispatcher dispatcher(executor);
+    dispatcher.setCompletionCleanup(cleanup);
+    dispatcher.runTransfer(parent({target}), [&](TransferResult) {
+        host_->decTreeRef(target, BlockTreeRefType::LOAD);
+    }, "load");
+    completion->deliver(unknownExecution());
+    const auto frozen = dispatcher.frozenTasks();
+    ASSERT_EQ(frozen.size(), 1u);
+    EXPECT_EQ(cleanup->size(), 0u);
+    EXPECT_TRUE(frozen.front()->unfreeze());
+    EXPECT_FALSE(frozen.front()->unfreeze());
+    EXPECT_FALSE(host_->isAllocated(target));
+    EXPECT_EQ(cleanup->size(), 1u);
+    const auto summary = cleanup->drain([&](const auto&, const auto& traces, int) {
+        EXPECT_EQ(traces, (std::vector<TransferExecutionTrace>{frozen.front()->execution().trace_id}));
+        TransferCompletionForgetResult result;
+        TransferCompletionForgetEntryResult entry;
+        entry.trace_id = traces.front();
+        entry.all_done = true;
+        result.entries.push_back(std::move(entry));
+        return result;
+    }, 100);
+    EXPECT_EQ(summary.attempted, 1u);
+    EXPECT_EQ(summary.forgotten, 1u);
+    EXPECT_EQ(summary.pending, 0u);
+    dispatcher.waitForTransfers();
+}
+
 TEST_F(FrozenExecutionTest, KnownBusinessOutcomesWithoutSafetyProofDoNotFreeze) {
     const auto target = allocateTarget();
     for (const auto status : {TransferStatus::OK, TransferStatus::DISK_IO_ERROR, TransferStatus::CRC_MISMATCH}) {

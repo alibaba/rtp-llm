@@ -212,6 +212,50 @@ TEST(TransferCompletionQueryTest, RemoteAllSafeRequiresEveryOriginalRankForBothT
     EXPECT_EQ(second.calls(), 6u);
 }
 
+TEST(TransferCompletionQueryTest, LocalMissingFenceConfirmsSafetyAndRejectsLateAdmission) {
+    TransferTaskRegistry registry;
+    TransferCompletionQuery query(nullptr, [&](const TransferExecutionTrace& trace) {
+        return registry.queryAndBlockMissing(std::vector<uint64_t>{std::get<uint64_t>(trace)}).front();
+    });
+    const auto result = query.query(execution(uint64_t{81}, {"local"}, false), 1000);
+    ASSERT_TRUE(result.all_safe);
+    ASSERT_EQ(result.ranks.size(), 1u);
+    EXPECT_EQ(result.ranks.front().state, State::UNKNOWN);
+    EXPECT_TRUE(result.ranks.front().admission_closed);
+    EXPECT_FALSE(registry.begin(uint64_t{81}));
+}
+
+TEST(TransferCompletionQueryTest, RemoteUnknownRequiresExplicitBanAndSuccessfulTransport) {
+    auto mode = std::make_shared<std::atomic<int>>(0);
+    QueryServer server(0, [mode](size_t rank, const auto& request, auto& response) {
+        const auto current = mode->load();
+        answer(rank, request, response,
+               current == 2 ? TRANSFER_COMPLETION_RUNNING : TRANSFER_COMPLETION_UNKNOWN);
+        response.mutable_completion_query()->mutable_entries(0)->set_admission_closed(current != 0);
+        return current == 3 ? grpc::Status(grpc::StatusCode::UNAVAILABLE, "query failed") : grpc::Status::OK;
+    });
+    ASSERT_TRUE(server.start());
+    auto manager = std::make_shared<BroadcastManager>(std::vector<std::string>{server.address()});
+    ASSERT_TRUE(manager->init());
+    TransferCompletionQuery query(manager);
+    const auto info = execution(uint64_t{82}, {server.address()});
+    for (int current = 0; current < 4; ++current) {
+        SCOPED_TRACE(current);
+        mode->store(current);
+        const auto result = query.query(info, 2000);
+        EXPECT_EQ(result.all_safe, current == 1);
+        ASSERT_EQ(result.ranks.size(), 1u);
+        if (current == 1) {
+            EXPECT_EQ(result.ranks[0].state, State::UNKNOWN);
+            EXPECT_TRUE(result.ranks[0].admission_closed);
+            EXPECT_TRUE(result.error.empty());
+        }
+        if (current >= 2) {
+            EXPECT_FALSE(result.error.empty());
+        }
+    }
+}
+
 TEST(TransferCompletionQueryTest, ParticipantMismatchRejectsBeforeAnyRpcOrLocalFallback) {
     QueryServer server(0, [](size_t rank, const auto& request, auto& response) {
         answer(rank, request, response);

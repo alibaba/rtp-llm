@@ -31,6 +31,12 @@ struct TransferCompletionRankResult {
     std::string                 error;
     bool                        cq_received{false};
     bool                        cq_ok{false};
+    bool                        admission_closed{false};
+
+    bool bufferSafe() const {
+        return state == TransferTaskRegistry::State::BUFFER_SAFE
+               || (state == TransferTaskRegistry::State::UNKNOWN && admission_closed);
+    }
 };
 
 struct TransferCompletionQueryResult {

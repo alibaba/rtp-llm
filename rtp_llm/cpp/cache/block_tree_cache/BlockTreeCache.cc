@@ -143,7 +143,7 @@ TransferTaskRegistry::State BlockTreeCache::localTransferCompletion(uint64_t tra
     if (!transfer_dispatcher_) {
         return TransferTaskRegistry::State::UNKNOWN;
     }
-    return transfer_dispatcher_->taskRegistry().queryLocal(std::vector<uint64_t>{trace_id}).front();
+    return transfer_dispatcher_->queryLocalCompletion(trace_id);
 }
 
 TransferResult BlockTreeCache::executeTransfer(TransferTask task) {

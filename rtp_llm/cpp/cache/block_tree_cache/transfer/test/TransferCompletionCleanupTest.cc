@@ -34,6 +34,27 @@ TransferCompletionForgetResult doneResult(const std::vector<TransferExecutionTra
     return result;
 }
 
+TEST(TransferCompletionCleanupTest, FailureDiagnosticsAreRateLimitedWithoutBlockingRetries) {
+    auto cleanup = std::make_shared<Cleanup>();
+    cleanup->prepare(localTarget(), uint64_t{99}).submit();
+    size_t calls = 0;
+    const Cleanup::Forget forget = [&](const auto&, const auto&, int) -> TransferCompletionForgetResult {
+        ++calls;
+        throw std::runtime_error("network unavailable");
+    };
+    EXPECT_TRUE(cleanup->drain(forget, 100).failed);
+    const auto deadline = cleanup->next_failure_log_;
+    EXPECT_GT(deadline, std::chrono::steady_clock::now());
+    EXPECT_TRUE(cleanup->drain(forget, 100).failed);
+    EXPECT_EQ(cleanup->next_failure_log_, deadline);
+    EXPECT_EQ(calls, 2u);
+    EXPECT_EQ(cleanup->size(), 1u);
+    cleanup->next_failure_log_ = {};
+    EXPECT_TRUE(cleanup->drain(forget, 100).failed);
+    EXPECT_GT(cleanup->next_failure_log_, std::chrono::steady_clock::now());
+    EXPECT_EQ(calls, 3u);
+}
+
 TEST(TransferCompletionCleanupTest, PreparedNodesRequireExplicitSubmissionAndMoveOnlyOnce) {
     static_assert(!std::is_copy_constructible_v<Cleanup::Prepared>);
     static_assert(std::is_nothrow_move_constructible_v<Cleanup::Prepared>);
