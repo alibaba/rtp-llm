@@ -32,6 +32,7 @@ from rtp_llm.models_py.modules.dsv41.bounded_replay import (
 )
 from rtp_llm.models_py.modules.dsv41.chunk_env import (
     FLASH_MLA_SPARSE_Q_CHUNK as _FLASH_MLA_SPARSE_Q_CHUNK,
+    dsv4_chunk_tokens_from_env,
 )
 from rtp_llm.models_py.modules.dsv41.cp import (
     _cp_restore_gathered_full_2d,
@@ -1976,7 +1977,14 @@ class AttentionV41FP8(AttentionFP8):
                 elif fused_indexer:
                     chunk_rows = prefill_indexer.logits_chunk_rows(key_count)
                 else:
-                    chunk_rows = 64
+                    # Reference einsum fallback: logits are [rows, heads,
+                    # key_count] fp32 - PREFIX-scaled (at a 1M prefix, 64
+                    # rows x 64 heads x 524288 keys = 8.6 GiB). Honor the
+                    # same score-chunk env as the fused path so long-context
+                    # boots can bound this transient.
+                    chunk_rows = dsv4_chunk_tokens_from_env(
+                        "DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS", default=64, min_value=1
+                    )
                 request_bounds = None
                 if contiguous and fused_indexer:
                     cache = shared.setdefault("prefill_score_bounds", {})
@@ -2069,7 +2077,11 @@ class AttentionV41FP8(AttentionFP8):
                         logits = torch.einsum(
                             "thd,kd->thk", q[chunk], keys.float()
                         ).relu_()
-                        logits = (logits * weights[chunk, :, None]).sum(1)
+                        # In-place weighting: the [rows, heads, key_count]
+                        # fp32 logits are the peak prefix-scaled transient;
+                        # materializing a second copy doubles it. The einsum
+                        # result dies into the sum either way.
+                        logits = logits.mul_(weights[chunk, :, None]).sum(1)
                         ids = torch.arange(key_count, device=x.device)
                         logits.masked_fill_(ids[None] >= visible[:, None], -torch.inf)
                     candidates = shared.get("candidates")
