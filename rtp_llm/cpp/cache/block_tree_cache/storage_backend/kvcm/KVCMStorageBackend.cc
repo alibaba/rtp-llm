@@ -274,8 +274,13 @@ public:
         const auto& config = client_config_map.at("");
         // Use prefix queries for the instance; payload reuse is filtered locally.
         config->set_default_query_type(default_query_type_);
-        ControlConfig control_config{config->instance_group(), config->instance_id(), config->registerInstanceRequest(),
-                                     config->enable_vipserver(), config->vipserver_domain(), config->addresses()};
+        ControlConfig control_config{config->instance_group(),
+                                     config->instance_id(),
+                                     config->registerInstanceRequest(),
+                                     config->enable_vipserver(),
+                                     config->vipserver_domain(),
+                                     config->addresses(),
+                                     merge_full_specs_};
         if (kv_cache_config_.kvcm_min_replica_count < 0
             || (kv_cache_config_.kvcm_read_backend_type != 0
                 && !isPayloadBackend(kv_cache_config_.kvcm_read_backend_type))) {
@@ -1234,7 +1239,9 @@ private:
                                                             kv_cache_config_.kvcm_get_timeout_ms);
         sdk->parseBackendConfigs(kv_cache_config_.kvcm_model_sdk_config);
         const auto& backends = sdk->sdk_backend_configs();
-        if (runtime_config_.model_name == "DeepSeekV41" && full_group_tags.size() == 3 && backends.size() == 1
+        const bool  legacy_dsv41_specs =
+            runtime_config_.model_name == "DeepSeekV41" || runtime_config_.model_name == "DeepSeekV41DSpark";
+        if (legacy_dsv41_specs && full_group_tags.size() == 3 && backends.size() == 1
             && std::dynamic_pointer_cast<kvcm::TairMempoolSdkConfig>(backends.front())) {
             const auto& first = topology_->group(full_group_tags.front());
             std::set<std::string> names;

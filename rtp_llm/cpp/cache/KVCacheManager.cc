@@ -857,10 +857,12 @@ void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporte
         publisher_config.vipserver_domain     = kv_cache_config_.kvcm_vipserver_domain;
         publisher_config.server_address       = kv_cache_config_.kvcm_server_address;
         std::optional<KVCacheEventPublisherContext> control_context;
+        std::optional<bool>                         control_merge_full_specs;
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
         if (const auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend())) {
             if (const auto control = backend->controlConfig()) {
                 control_context.emplace();
+                control_merge_full_specs                   = control->merge_full_specs;
                 control_context->instance_group = control->instance_group;
                 control_context->instance_id = control->instance_id;
                 control_context->register_instance_request = control->register_instance_request;
@@ -906,17 +908,21 @@ void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporte
             full_group_tags[1] = "csa_kv";
         }
         const auto&                    group_sets       = block_tree_cache_->groupSets();
-        const bool                     merge_full_specs =
-            std::any_of(group_sets.begin(), group_sets.end(), [&](const auto& group_set) {
-                if (group_set->groupType() != CacheGroupType::FULL) {
-                    return false;
-                }
-                const auto& members = group_set->groupTags();
-                return std::all_of(full_group_tags.begin(), full_group_tags.end(), [&](const auto& tag) {
-                    return std::find(reuse_group_tags.begin(), reuse_group_tags.end(), tag) != reuse_group_tags.end()
-                           && std::find(members.begin(), members.end(), tag) != members.end();
+        // Remote payload and HBM publication must use the same effective wire specs.
+        const bool merge_full_specs =
+            control_merge_full_specs.has_value() ?
+                *control_merge_full_specs :
+                std::any_of(group_sets.begin(), group_sets.end(), [&](const auto& group_set) {
+                    if (group_set->groupType() != CacheGroupType::FULL) {
+                        return false;
+                    }
+                    const auto& members = group_set->groupTags();
+                    return std::all_of(full_group_tags.begin(), full_group_tags.end(), [&](const auto& tag) {
+                        return std::find(reuse_group_tags.begin(), reuse_group_tags.end(), tag)
+                                   != reuse_group_tags.end()
+                               && std::find(members.begin(), members.end(), tag) != members.end();
+                    });
                 });
-            });
         if (merge_full_specs) {
             // One representative still requires every member of the shared FULL GroupSet to be resident.
             reuse_group_tags.erase(
