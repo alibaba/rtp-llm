@@ -24,12 +24,12 @@ std::string genLocationSpecName(int                tp_rank,
                                 const std::string& group_name,
                                 const std::string& model_name,
                                 bool               merge_full) {
-    if (merge_full && model_name == "DeepSeekV41"
+    const bool legacy_dsv41_specs = model_name == "DeepSeekV41" || model_name == "DeepSeekV41DSpark";
+    if (merge_full && legacy_dsv41_specs
         && (group_name == "Fglobal_kv_1" || group_name == "Fhca_kv" || group_name == "Fglobal_kv_2"
             || group_name == "Fcsa_kv" || group_name == "Findexer_kv")) {
         return "F_TP" + std::to_string(tp_rank);
     }
-    const bool legacy_dsv41_specs = model_name == "DeepSeekV41" || model_name == "DeepSeekV41DSpark";
     if (group_name == "Fglobal_kv_1" || (legacy_dsv41_specs && group_name == "Fhca_kv")) {
         return "F0_TP" + std::to_string(tp_rank);
     }

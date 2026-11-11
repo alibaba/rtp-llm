@@ -55,6 +55,7 @@ public:
         bool                     enable_vipserver = false;
         std::string              vipserver_domain;
         std::vector<std::string> addresses;
+        bool                     merge_full_specs = false;
     };
     // Immutable snapshot of the effective SDK registration, available after init.
     std::optional<ControlConfig> controlConfig() const;

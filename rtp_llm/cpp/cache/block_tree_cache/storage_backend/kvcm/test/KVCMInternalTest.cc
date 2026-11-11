@@ -192,22 +192,25 @@ TEST(KVCMInternalTest, Dsv41CompactGroupsPreserveSpecsAndWriteSelection) {
     auto all_handles = full_handles;
     all_handles.insert(all_handles.end(), {{tags[3], 1}, {tags[4], 1}});
     GroupPolicy::LocationSpecGroups location_groups;
-    for (const bool merge_full : {false, true}) {
-        SCOPED_TRACE(merge_full);
-        ASSERT_TRUE(policy.buildLocationSpecGroups(1, location_groups, "DeepSeekV41", merge_full));
-        const GroupPolicy::SpecNames full_specs = merge_full ? GroupPolicy::SpecNames{"F_TP0"} :
-                                                               GroupPolicy::SpecNames{"F1_TP0", "F0_TP0", "F2_TP0"};
-        auto all_specs = full_specs;
-        all_specs.insert(all_specs.end(), {"S3_TP0", "S4_TP0"});
-        GroupPolicy::LocationSpecGroups expected{
-            {"F", full_specs}, {"FL", all_specs}, {"L3", {"S3_TP0"}}, {"L4", {"S4_TP0"}}};
-        if (!merge_full) {
-            expected.insert({{"F0", {"F0_TP0"}}, {"F1", {"F1_TP0"}}, {"F2", {"F2_TP0"}}});
+    for (const std::string model_name : {"DeepSeekV41", "DeepSeekV41DSpark"}) {
+        SCOPED_TRACE(model_name);
+        for (const bool merge_full : {false, true}) {
+            SCOPED_TRACE(merge_full);
+            ASSERT_TRUE(policy.buildLocationSpecGroups(1, location_groups, model_name, merge_full));
+            const GroupPolicy::SpecNames full_specs =
+                merge_full ? GroupPolicy::SpecNames{"F_TP0"} : GroupPolicy::SpecNames{"F1_TP0", "F0_TP0", "F2_TP0"};
+            auto all_specs = full_specs;
+            all_specs.insert(all_specs.end(), {"S3_TP0", "S4_TP0"});
+            GroupPolicy::LocationSpecGroups expected{
+                {"F", full_specs}, {"FL", all_specs}, {"L3", {"S3_TP0"}}, {"L4", {"S4_TP0"}}};
+            if (!merge_full) {
+                expected.insert({{"F0", {"F0_TP0"}}, {"F1", {"F1_TP0"}}, {"F2", {"F2_TP0"}}});
+            }
+            EXPECT_EQ(location_groups, expected);
+            std::vector<std::string> selected;
+            ASSERT_TRUE(policy.getNeedWriteGroups(makeStorageRequest({full_handles, all_handles}), 2, selected));
+            EXPECT_EQ(selected, (std::vector<std::string>{"F", "FL"}));
         }
-        EXPECT_EQ(location_groups, expected);
-        std::vector<std::string> selected;
-        ASSERT_TRUE(policy.getNeedWriteGroups(makeStorageRequest({full_handles, all_handles}), 2, selected));
-        EXPECT_EQ(selected, (std::vector<std::string>{"F", "FL"}));
     }
 }
 
