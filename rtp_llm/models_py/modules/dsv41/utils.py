@@ -34,6 +34,11 @@ class V41MXFP8Linear(torch.nn.Module):
         self.weight = weight
         self.N, self.K = weight.shape
         self._reference_gemm = use_reference_gemm_paths()
+        # Host-resident mode: Engram WKV arrives on CPU (the Engram contract
+        # keeps every Engram weight in host RAM). Dequantize on CPU, pin the
+        # BF16 result, and serve GEMMs through the UVA-reading Triton kernel —
+        # no persistent GPU mirror of the weights ever exists.
+        self._host_resident = self._reference_gemm and weight.device.type == "cpu"
         if self._reference_gemm:
             # Pre-Blackwell GPUs cannot run the SM100 DeepGEMM group-32 MXFP8
             # recipe. The projections served by this class are small under TP
@@ -45,6 +50,8 @@ class V41MXFP8Linear(torch.nn.Module):
                     f"Invalid V4.1 FP8 scales: {(self.N, self.K)}, {scales.shape}"
                 )
             self._w_bf16 = fp8_block32_to_bf16(weight, scales)
+            if self._host_resident:
+                self._w_bf16 = self._w_bf16.pin_memory()
             self.weight_scales = None
         else:
             self._w_bf16 = None
@@ -130,9 +137,17 @@ class V41MXFP8Linear(torch.nn.Module):
         if x.numel() == 0:
             return out if out is not None else x.new_empty((*x.shape[:-1], self.N))
         if self._reference_gemm:
-            y = torch.nn.functional.linear(
-                x.to(torch.bfloat16).reshape(-1, self.K), self._w_bf16
-            ).view(*x.shape[:-1], self.N)
+            flat = x.to(torch.bfloat16).reshape(-1, self.K)
+            if self._host_resident:
+                from rtp_llm.models_py.modules.dsv41.sm80_engram_gemm import (
+                    linear_host_weight,
+                )
+
+                y = linear_host_weight(flat, self._w_bf16).view(*x.shape[:-1], self.N)
+            else:
+                y = torch.nn.functional.linear(flat, self._w_bf16).view(
+                    *x.shape[:-1], self.N
+                )
             if out is not None:
                 out.copy_(y)
                 return out

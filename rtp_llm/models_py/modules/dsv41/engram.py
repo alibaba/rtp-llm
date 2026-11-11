@@ -1149,6 +1149,16 @@ def mxfp8_activation_reference(x: torch.Tensor) -> torch.Tensor:
     return values.reshape(x.shape).to(x.dtype)
 
 
+def _engram_inject_gate_ok(value, device):
+    # Gate vectors may live in pinned host memory (Engram host-residency
+    # contract); the inject kernel reads them over UVA like the table
+    # prefetch kernels do.
+    return value.dtype == torch.bfloat16 and value.is_contiguous() and (
+        value.device == device
+        or (value.device.type == "cpu" and value.is_pinned())
+    )
+
+
 def _engram_inject_supported(hidden, q_weight, k_weight, token_mask):
     return (
         not torch.is_grad_enabled()
@@ -1157,12 +1167,10 @@ def _engram_inject_supported(hidden, q_weight, k_weight, token_mask):
         and hidden.numel() > 0
         and hidden.shape[-2:] == (4, 5120)
         and q_weight.shape == k_weight.shape == (4, 5120)
-        and all(
-            value.dtype == torch.bfloat16
-            and value.device == hidden.device
-            and value.is_contiguous()
-            for value in (hidden, q_weight, k_weight)
-        )
+        and hidden.dtype == torch.bfloat16
+        and hidden.is_contiguous()
+        and _engram_inject_gate_ok(q_weight, hidden.device)
+        and _engram_inject_gate_ok(k_weight, hidden.device)
         and (
             token_mask is None
             or (
@@ -1310,11 +1318,13 @@ def _timed_cpu_hash(state, windows, image_token, num_threads, timing):
 class _EngramCPULookupSlot:
     """Fixed host storage; request outputs belong to their allocation stream."""
 
-    def __init__(self, module, capacity):
+    def __init__(self, module, capacity, device=None):
         from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
         self.embedding = module.embed_tokens
-        self.device = module.q_weight.device
+        # Host-resident Engram modules keep q_weight pinned on the CPU; the
+        # compute device then comes from the model instead of the gate vector.
+        self.device = device if device is not None else module.q_weight.device
         self.hash_index = module.layer_hash_index
         self.heads = module.layout.n_hash_cols
         self.capacity = capacity
@@ -1477,10 +1487,14 @@ class EngramCPULookupRuntime:
             max_workers=1, thread_name_prefix="engram-cpu-lookup"
         )
         try:
+            compute_device = model.v4.embed.weight.device
             for layer_id, _ in model._engram_layers:
                 module = model.v4.layers[layer_id].engram
-                if layer_id < 20 and module.q_weight.is_cuda:
-                    self.slots[layer_id] = _EngramCPULookupSlot(module, self.capacity)
+                host_resident = getattr(module.wkv, "_host_resident", False)
+                if layer_id < 20 and (module.q_weight.is_cuda or host_resident):
+                    self.slots[layer_id] = _EngramCPULookupSlot(
+                        module, self.capacity, device=compute_device
+                    )
                     if self.max_rows > self.capacity:
                         self.slots[layer_id].enable_pipeline()
             # Initialize the Python worker, native thread team and H2D stream /
@@ -2164,24 +2178,45 @@ class Engram(nn.Module):
                     scale_group=scale_group,
                     scale_identity=identity,
                 )
-            if target.type == "cuda":
+            from rtp_llm.models_py.modules.dsv41.sm80_support import (
+                use_reference_gemm_paths,
+            )
+
+            if target.type == "cuda" and use_reference_gemm_paths():
+                # Engram contract: every Engram weight stays in host RAM with
+                # no persistent GPU mirror. Pre-SM100 builds keep the WKV
+                # projection and gate vectors pinned on the host; the Triton
+                # WKV GEMM and the inject kernel read them over UVA (the same
+                # mechanism the table prefetch kernels already use).
+                from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+                projection = V41MXFP8Linear(
+                    load("wkv.weight"), load("wkv.scale")
+                )
+                q_weight = load("q_weight").pin_memory()
+                k_weight = load("k_weight").pin_memory()
+            elif target.type == "cuda":
                 with torch.cuda.device(target):
                     from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
                     projection = V41MXFP8Linear(
                         load("wkv.weight").to(target), load("wkv.scale").to(target)
                     )
+                q_weight = load("q_weight").to(target)
+                k_weight = load("k_weight").to(target)
             else:
                 projection = _ReferenceWKV(
                     dequantize_block_weight(load("wkv.weight"), load("wkv.scale"))
                 )
+                q_weight = load("q_weight")
+                k_weight = load("k_weight")
             return cls(
                 layout,
                 layer_hash_index,
                 embedding,
                 projection,
-                load("q_weight").to(target),
-                load("k_weight").to(target),
+                q_weight,
+                k_weight,
                 float(_config_value(config, "rms_norm_eps")),
             )
         except BaseException:

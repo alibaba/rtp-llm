@@ -93,7 +93,15 @@ def fp8_block32_to_bf16(weight_e4m3: torch.Tensor, scales_e8m0: torch.Tensor) ->
     n, k = weight_e4m3.shape
     rows = torch.arange(n, device=scales_e8m0.device) // 32
     cols = torch.arange(k, device=scales_e8m0.device) // 32
-    scale_f = scales_e8m0.to(torch.float32)[rows][:, cols]
+    try:
+        scale_f32 = scales_e8m0.to(torch.float32)
+    except (RuntimeError, NotImplementedError, TypeError):
+        # Host-resident dequant (Engram WKV) may run where the e8m0 CPU cast
+        # is unavailable; UE8M0 is exp2(byte - 127) by definition.
+        scale_f32 = torch.exp2(
+            scales_e8m0.view(torch.uint8).to(torch.float32) - 127.0
+        )
+    scale_f = scale_f32[rows][:, cols]
     return (weight_e4m3.to(torch.float32) * scale_f).to(torch.bfloat16)
 
 

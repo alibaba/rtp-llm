@@ -510,6 +510,26 @@ def warmup_v41_engram_jit(model, *, max_m, device):
                         ),
                         device=device,
                     )
+                if getattr(layer.wkv, "_host_resident", False):
+                    # Host-resident WKV (sm80 Engram contract): compile both
+                    # BM variants of the UVA GEMM before any graph capture.
+                    from rtp_llm.models_py.modules.dsv41.sm80_engram_gemm import (
+                        linear_host_weight,
+                    )
+
+                    w_host = layer.wkv._w_bf16
+                    for warm_rows in (2, 512):
+                        x_warm = torch.zeros(
+                            (warm_rows, w_host.shape[1]),
+                            dtype=torch.bfloat16,
+                            device=device,
+                        )
+                        common._run_triton_warmup_launch_with_retry(
+                            "DSV41 Engram",
+                            f"wkv host gemm rows={warm_rows}",
+                            partial(linear_host_weight, x_warm, w_host),
+                            device=device,
+                        )
     for layer in async_layers:
         layer.prepare_lookup_prefetch()
     for layer in layers:
