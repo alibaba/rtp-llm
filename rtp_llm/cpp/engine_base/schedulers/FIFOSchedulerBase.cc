@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <limits>
 #include <mutex>
 #include <unordered_set>
@@ -76,7 +77,12 @@ void FIFOSchedulerBase::updateSchedulerInfo(const std::string& scheduler_info) {
         // (same one the coordinator drives under capacity pressure): only
         // unreferenced cache entries are dropped, in-flight streams keep their
         // blocks. Runs under the scheduler lock so no engine step interleaves.
-        if (cache_manager_ != nullptr) {
+        // AWI_BARRIER_EVICT=0 disables emptying (diagnostics/bisection only).
+        static const bool evict_on_arm = []() {
+            const char* env = std::getenv("AWI_BARRIER_EVICT");
+            return env == nullptr || std::string(env) != "0";
+        }();
+        if (evict_on_arm && cache_manager_ != nullptr) {
             auto block_tree = cache_manager_->blockTreeCache();
             const auto& coordinator = cache_manager_->coordinatorManager();
             if (block_tree != nullptr && coordinator != nullptr) {
