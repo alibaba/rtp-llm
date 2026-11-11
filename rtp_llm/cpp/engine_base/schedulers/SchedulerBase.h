@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
+#include "rtp_llm/cpp/engine_base/awi_runtime.h"
 
 namespace rtp_llm {
 
@@ -40,6 +41,12 @@ public:
     virtual bool    empty()            = 0;
     virtual int64_t lastScheduleTime() = 0;
     virtual int64_t onflightStreams()  = 0;
+
+    // Real scheduler snapshot for the evaluator resident event.  Implemented
+    // by schedulers that own KV-backed streams.
+    virtual std::vector<awi::SequenceSnapshot> awiResidentSnapshot() {
+        return {};
+    }
 
     virtual std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList() {
         return {};

@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
+#include "rtp_llm/cpp/engine_base/awi_runtime.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <c10/core/InferenceMode.h>
@@ -35,6 +36,8 @@
 
 #if USING_CUDA
 #include "c10/cuda/CUDACachingAllocator.h"
+#endif
+#if (defined(USING_CUDA) && USING_CUDA) || (defined(USING_ROCM) && USING_ROCM)
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #endif
 
@@ -152,6 +155,11 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                    params.parallelism_config.dp_rank * params.parallelism_config.tp_size
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    // Establish rank/world before graph capture warmup records observations.
+    awi::AwiRuntime::instance().setParallel(
+        static_cast<int32_t>(parallelism_config.world_rank >= 0 ? parallelism_config.world_rank
+                                                                : parallelism_config.tp_rank),
+        static_cast<int32_t>(parallelism_config.world_size));
     // Claim before warmup/initExecutor can consume this shared CPU TP channel.
     // A deferred start_loop=false engine owns the session during preparation too.
     if (shouldCoordinateCpuTpShutdown(parallelism_config, ffn_disaggregate_config)) {
@@ -907,6 +915,17 @@ absl::Status NormalEngine::step() try {
     }
 
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    const bool awi_record = awi::AwiRuntime::instance().recordingEnabled() && !streams.empty();
+    std::vector<std::pair<GenerateStreamPtr, bool>> awi_stream_context_before;
+    int64_t                                         awi_step_start_ns = 0;
+    if (awi_record) {
+        awi_stream_context_before.reserve(streams.size());
+        for (const auto& stream : streams) {
+            awi_stream_context_before.emplace_back(stream, stream && stream->isContextStream());
+        }
+        awi_step_start_ns = awi::AwiRuntime::nowNs();
+        awi::beginForwardGraphObservation();
+    }
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
 
@@ -936,6 +955,95 @@ absl::Status NormalEngine::step() try {
         status = executor_->process(streams, tps_schedule_time_us);
         if (propose_params_) {
             step_profiler_.finishStep();
+        }
+    }
+
+    if (awi_record) {
+        std::string graph_backend;
+        bool        graph_replayed = false;
+        const bool  graph_seen     = awi::takeForwardGraphObservation(graph_backend, graph_replayed);
+#if (defined(USING_CUDA) && USING_CUDA) || (defined(USING_ROCM) && USING_ROCM)
+        // Include host/communication and device completion in the measured
+        // scheduler decode step.  This is deliberately scoped to AWI traffic.
+        cuda_graph::graphDeviceSynchronize();
+#endif
+        const int64_t awi_step_end_ns = awi::AwiRuntime::nowNs();
+        auto&         runtime         = awi::AwiRuntime::instance();
+        for (const auto& entry : awi_stream_context_before) {
+            const auto& stream = entry.first;
+            if (!stream) {
+                continue;
+            }
+            std::string request_id = runtime.requestIdForStream(stream->streamId());
+            if (request_id.empty() && stream->generateInput()) {
+                request_id = stream->generateInput()->request_info.request_id;
+            }
+            if (request_id.empty()) {
+                request_id = std::to_string(stream->streamId());
+            }
+            if (entry.second) {
+                const bool final_chunk = !stream->isContextStream();
+                runtime.recordPrefillChunk(request_id,
+                                           stream->inputLength(),
+                                           awi_step_start_ns,
+                                           awi_step_end_ns,
+                                           final_chunk,
+                                           runtime.rank(),
+                                           runtime.worldSize(),
+                                           "NormalEngine::step:executor_->process");
+                if (final_chunk) {
+                    // Always publish the allocator-derived reuse count (zero is
+                    // meaningful evidence that no benchmark prefix was reused).
+                    runtime.recordReuse(request_id,
+                                        stream->initialReuseLength(),
+                                        stream->inputLength(),
+                                        "GenerateStream::initialReuseLength");
+                }
+            } else {
+                const int64_t step = static_cast<int64_t>(stream->outputTokenLen()) - 1;
+                if (step >= 1) {
+                    runtime.recordDecode(request_id,
+                                         step,
+                                         awi_step_end_ns - awi_step_start_ns,
+                                         graph_seen && graph_replayed,
+                                         graph_seen ? graph_backend : awi::AwiRuntime::graphBackend(),
+                                         runtime.rank(),
+                                         runtime.worldSize(),
+                                         "NormalEngine::step:executor_->process");
+                }
+            }
+            if (stream->hasError()) {
+                const auto info = stream->statusInfo();
+                std::string kind;
+                if (info.code() == ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN || info.code() == ErrorCode::MALLOC_FAILED) {
+                    kind = "kv_capacity_exceeded";
+                } else if (info.ToString().find("out of memory") != std::string::npos
+                           || info.ToString().find("OOM") != std::string::npos) {
+                    kind = "device_oom";
+                }
+                if (!kind.empty() && runtime.barrierActive()) {
+                    runtime.recordCapacityFailure(runtime.barrierOperationForObservation(),
+                                                  static_cast<int64_t>(runtime.barrierRequestCount()),
+                                                  runtime.barrierContextTokens(),
+                                                  kind,
+                                                  info.ToString(),
+                                                  "NormalEngine::step:streamError");
+                    // A genuine allocation failure invalidates the residency
+                    // probe; release any held decodes rather than deadlocking.
+                    runtime.clearBarrier();
+                }
+            }
+        }
+        if (runtime.barrierActive() && runtime.consumeResidentSnapshotRequest()) {
+            auto cache_manager = getCacheManager();
+            awi::ResidentSnapshot snapshot;
+            snapshot.sequences        = scheduler_->awiResidentSnapshot();
+            snapshot.free_blocks      = cache_manager ? static_cast<int64_t>(cache_manager->freeBlocksNum()) : 0;
+            snapshot.available_blocks = cache_manager ? static_cast<int64_t>(cache_manager->availableBlocksNum()) : 0;
+            snapshot.total_blocks     = cache_manager ? static_cast<int64_t>(cache_manager->totalBlocksNum()) : 0;
+            snapshot.source           = "FIFOScheduler::awiResidentSnapshot";
+            runtime.recordResident(snapshot, runtime.barrierOperationForObservation(),
+                                   "NormalEngine::step:synchronizedDecodeWindow");
         }
     }
 

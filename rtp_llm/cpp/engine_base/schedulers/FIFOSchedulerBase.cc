@@ -245,6 +245,55 @@ std::unordered_set<GenerateStream*> FIFOSchedulerBase::evaluateWaitingStreams(li
     return admitted_stream_ptrs;
 }
 
+std::vector<awi::SequenceSnapshot> FIFOSchedulerBase::awiResidentSnapshot() {
+    std::lock_guard<mutex> lock(lock_);
+    std::vector<awi::SequenceSnapshot> snapshots;
+    const auto append = [&snapshots](const std::list<GenerateStreamPtr>& streams) {
+        for (const auto& stream : streams) {
+            if (!stream) {
+                continue;
+            }
+            auto& runtime = awi::AwiRuntime::instance();
+            if (runtime.barrierActive() && !runtime.isBarrierRequest(stream->streamId())) {
+                continue;
+            }
+            awi::SequenceSnapshot snapshot;
+            snapshot.request_id = awi::AwiRuntime::instance().requestIdForStream(stream->streamId());
+            if (snapshot.request_id.empty()) {
+                snapshot.request_id = std::to_string(stream->streamId());
+            }
+            snapshot.input_tokens = stream->inputLength();
+            // curBlocksNum()/seqSizePerBlock() is the allocator-backed KV
+            // capacity.  maxTokenNum() is the request's full input+output
+            // horizon; reserved_tokens reports the capacity actually held.
+            const int64_t kv_tokens = static_cast<int64_t>(stream->curBlocksNum()) * stream->seqSizePerBlock();
+            snapshot.kv_tokens      = std::min<int64_t>(kv_tokens, stream->seqLength());
+            snapshot.reserved_tokens = kv_tokens;
+            snapshots.push_back(std::move(snapshot));
+        }
+    };
+    append(waiting_streams_);
+    append(loading_cache_streams_);
+    append(running_streams_);
+    append(new_streams_);
+    for (const auto& stream : awiExtraResidentStreams()) {
+        if (!stream) {
+            continue;
+        }
+        awi::SequenceSnapshot snapshot;
+        snapshot.request_id = awi::AwiRuntime::instance().requestIdForStream(stream->streamId());
+        if (snapshot.request_id.empty()) {
+            snapshot.request_id = std::to_string(stream->streamId());
+        }
+        snapshot.input_tokens    = stream->inputLength();
+        const int64_t kv_tokens  = static_cast<int64_t>(stream->curBlocksNum()) * stream->seqSizePerBlock();
+        snapshot.kv_tokens       = std::min<int64_t>(kv_tokens, stream->seqLength());
+        snapshot.reserved_tokens = kv_tokens;
+        snapshots.push_back(std::move(snapshot));
+    }
+    return snapshots;
+}
+
 size_t FIFOSchedulerBase::countInitedKVCacheStreams() const {
     const auto count_inited = [](const list<GenerateStreamPtr>& streams) {
         size_t count = 0;

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/engine_base/awi_runtime.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cuda_graph/combo_position_ids_validation.h"
 #include "rtp_llm/cpp/cuda_graph/prepared_attention_inputs_guard.h"
@@ -2258,6 +2259,8 @@ void CudaGraphRunner::replayGraph(int key) {
                 }
                 cuda_graph::graphEmptyCache();
             });
+        awi::AwiRuntime::instance().recordGraphForward(
+            awi::AwiRuntime::graphBackend(), true, "CudaGraphRunner::replayGraph");
     } catch (const std::exception& exception) {
         (void)exception;
 #if USING_ROCM
@@ -2427,6 +2430,10 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                          key,
                          graph_pool_delta / 1024 / 1024,
                          post_capture_reserved / 1024 / 1024);
+        // Evaluator observation: this is emitted only after a real capture has
+        // completed and the graph has been instantiated.
+        awi::AwiRuntime::instance().recordCapture(awi::AwiRuntime::graphBackend(),
+                                                  std::string("CudaGraphRunner::captureOneGraphInstance:") + key_type);
     }
 }
 

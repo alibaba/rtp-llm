@@ -58,6 +58,7 @@ bool HttpApiServer::start(py::object model_weights_loader,
                           py::object world_info,
                           py::object tokenizer,
                           py::object render) {
+    weights_loader_ = model_weights_loader;
     tokenizer_.reset(new Tokenizer(tokenizer));
     if (render.is_none() == false) {
         render_.reset(new ChatRender(render));
@@ -111,6 +112,13 @@ bool HttpApiServer::registerServices() {
     // POST: /
     if (!is_embedding_ && !registerInferenceService()) {
         RTP_LLM_LOG_WARNING("HttpApiServer register inference service failed.");
+        return false;
+    }
+
+    // add uri:
+    // POST /tokenize, /awi/generate, /awi/barrier; GET /awi/observations
+    if (!is_embedding_ && !registerAwiService()) {
+        RTP_LLM_LOG_WARNING("HttpApiServer register AWI service failed.");
         return false;
     }
 
@@ -288,6 +296,71 @@ bool HttpApiServer::registerInferenceService() {
 
     return http_server_->RegisterRoute("POST", "/", inference_callback)
            && http_server_->RegisterRoute("POST", "/inference_internal", inference_internal_callback);
+}
+
+bool HttpApiServer::registerAwiService() {
+    if (!http_server_) {
+        RTP_LLM_LOG_WARNING("register AWI service failed, http server is null");
+        return false;
+    }
+    awi_service_.reset(new AwiService(engine_,
+                                      token_processor_,
+                                      request_counter_,
+                                      model_config_,
+                                      parallelism_config_,
+                                      weights_loader_));
+
+    auto tokenize_callback = [admission            = admission_,
+                              active_request_count = active_request_count_,
+                              awi_service          = awi_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                           const http_server::HttpRequest&                  request) -> void {
+        CounterGuard counter_guard(active_request_count, admission);
+        if (!counter_guard.admitted()) {
+            rejectDuringShutdown(writer);
+            return;
+        }
+        awi_service->tokenize(writer, request);
+    };
+
+    auto generate_callback = [admission            = admission_,
+                              active_request_count = active_request_count_,
+                              awi_service          = awi_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                           const http_server::HttpRequest&                  request) -> void {
+        CounterGuard counter_guard(active_request_count, admission);
+        if (!counter_guard.admitted()) {
+            rejectDuringShutdown(writer);
+            return;
+        }
+        awi_service->generate(writer, request);
+    };
+
+    auto barrier_callback = [admission            = admission_,
+                             active_request_count = active_request_count_,
+                             awi_service          = awi_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                          const http_server::HttpRequest&                  request) -> void {
+        CounterGuard counter_guard(active_request_count, admission);
+        if (!counter_guard.admitted()) {
+            rejectDuringShutdown(writer);
+            return;
+        }
+        awi_service->barrier(writer, request);
+    };
+
+    auto observations_callback =
+        [admission = admission_, active_request_count = active_request_count_, awi_service = awi_service_](
+            std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {
+        CounterGuard counter_guard(active_request_count, admission);
+        if (!counter_guard.admitted()) {
+            rejectDuringShutdown(writer);
+            return;
+        }
+        awi_service->observations(writer, request);
+    };
+
+    return http_server_->RegisterRoute("POST", "/tokenize", tokenize_callback)
+           && http_server_->RegisterRoute("POST", "/awi/generate", generate_callback)
+           && http_server_->RegisterRoute("POST", "/awi/barrier", barrier_callback)
+           && http_server_->RegisterRoute("GET", "/awi/observations", observations_callback);
 }
 
 bool HttpApiServer::registerEmbedingService() {

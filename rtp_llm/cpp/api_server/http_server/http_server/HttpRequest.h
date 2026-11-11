@@ -37,6 +37,13 @@ public:
     const std::map<std::string, std::string>& GetUriParams() const {
         return _uriParams;
     }
+    std::string GetHeader(const std::string& name) const {
+        if (!_request) {
+            return {};
+        }
+        const char* value = _request->getHeader(name.c_str());
+        return value == nullptr ? std::string() : std::string(value);
+    }
     int64_t getRecvTime() const {
         return recv_time_us_;
     }

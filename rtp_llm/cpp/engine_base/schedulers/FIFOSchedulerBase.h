@@ -45,6 +45,8 @@ public:
     std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList() override;
     std::vector<EngineScheduleInfo::TaskInfo> runningTaskList() override;
 
+    std::vector<awi::SequenceSnapshot> awiResidentSnapshot() override;
+
     void reportMetrics();
 
     // for test
@@ -65,6 +67,12 @@ protected:
         return 0;
     }
     virtual void fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const {}
+    // Streams held outside the ordinary waiting/running lists (for example the
+    // /awi/barrier decode hold).  They still own allocated KV blocks and must
+    // appear in the resident snapshot.
+    virtual std::vector<GenerateStreamPtr> awiExtraResidentStreams() const {
+        return {};
+    }
 
     bool   checkInputLength(const GenerateStreamPtr& stream);
     void   cancelStreams(std::list<GenerateStreamPtr>& streams);

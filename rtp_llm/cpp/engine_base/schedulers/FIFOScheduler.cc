@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
+#include "rtp_llm/cpp/engine_base/awi_runtime.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -643,6 +644,95 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
     }
 }
 
+absl::Status FIFOScheduler::stop() {
+    auto status = FIFOSchedulerBase::stop();
+    {
+        lock_guard<mutex> lock(lock_);
+        cancelStreams(awi_held_decode_streams_);
+    }
+    return status;
+}
+
+bool FIFOScheduler::empty() {
+    lock_guard<mutex> lock(lock_);
+    return waiting_streams_.empty() && loading_cache_streams_.empty() && running_streams_.empty()
+           && new_streams_.empty() && awi_held_decode_streams_.empty() && !hasExtraStreams();
+}
+
+std::vector<GenerateStreamPtr> FIFOScheduler::awiExtraResidentStreams() const {
+    std::vector<GenerateStreamPtr> candidates(awi_held_decode_streams_.begin(), awi_held_decode_streams_.end());
+    for (const auto& group : waiting_group_queue_) {
+        candidates.insert(candidates.end(), group.begin(), group.end());
+    }
+    for (const auto& group : loading_cache_group_queue_) {
+        candidates.insert(candidates.end(), group.begin(), group.end());
+    }
+    std::vector<GenerateStreamPtr> streams;
+    auto&                          runtime = awi::AwiRuntime::instance();
+    for (const auto& stream : candidates) {
+        if (stream && runtime.isBarrierRequest(stream->streamId())) {
+            streams.push_back(stream);
+        }
+    }
+    return streams;
+}
+
+void FIFOScheduler::restoreAwiHeldDecodes() {
+    if (awi_held_decode_streams_.empty()) {
+        return;
+    }
+    // Preserve the original arrival order so the first prefilled request gets
+    // its decode step first once the operation is resident.
+    running_streams_.insert(running_streams_.end(), awi_held_decode_streams_.begin(), awi_held_decode_streams_.end());
+    awi_held_decode_streams_.clear();
+}
+
+void FIFOScheduler::applyAwiBarrierGate() {
+    auto& runtime = awi::AwiRuntime::instance();
+    if (!runtime.barrierActive()) {
+        if (!awi_held_decode_streams_.empty()) {
+            restoreAwiHeldDecodes();
+        }
+        awi_resident_snapshot_recorded_ = false;
+        return;
+    }
+
+    // An errored held request must be allowed to drain through the normal path.
+    for (const auto& stream : awi_held_decode_streams_) {
+        if (stream && stream->hasError()) {
+            restoreAwiHeldDecodes();
+            return;
+        }
+    }
+
+    if (runtime.barrierReady()) {
+        restoreAwiHeldDecodes();
+        return;
+    }
+
+    for (auto it = running_streams_.begin(); it != running_streams_.end();) {
+        auto& stream = *it;
+        if (stream && !stream->isContextStream() && runtime.isBarrierRequest(stream->streamId())) {
+            const int64_t kv_tokens = static_cast<int64_t>(stream->curBlocksNum()) * stream->seqSizePerBlock();
+            const int64_t materialized = std::min<int64_t>(kv_tokens, stream->seqLength());
+            const bool ready = runtime.observeResidentAndCheckReady(
+                stream->streamId(), stream->inputLength(), materialized, kv_tokens);
+            if (!ready) {
+                awi_held_decode_streams_.push_back(stream);
+                it = running_streams_.erase(it);
+                continue;
+            }
+        }
+        ++it;
+    }
+
+    if (!awi_held_decode_streams_.empty() && (runtime.barrierReady() || !runtime.barrierActive())) {
+        // Either every operation request is resident, or a failed admission
+        // cleared the barrier: holding decodes any longer would deadlock.
+        restoreAwiHeldDecodes();
+    }
+}
+
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
     if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
@@ -660,6 +750,11 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     last_admitted_context_batch_size_ = 0;
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
+
+    // Hold benchmark decodes until every /awi/barrier request has its full
+    // input+output KV horizon resident.  Held streams keep their allocated
+    // blocks; the scheduler is then free to prefill the remaining requests.
+    applyAwiBarrierGate();
 
     evaluateAndUpdateStreams(running_streams_);
 

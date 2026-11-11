@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/api_server/EmbeddingEndpoint.h"
 #include "rtp_llm/cpp/api_server/ChatService.h"
 #include "rtp_llm/cpp/api_server/InferenceService.h"
+#include "rtp_llm/cpp/api_server/AwiService.h"
 #include "rtp_llm/cpp/api_server/EmbeddingService.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
@@ -44,6 +45,7 @@ public:
         mm_processor_(mm_processor),
         addr_(address),
         model_config_(params.model_config_),
+        parallelism_config_(params.parallelism_config),
         token_processor_(new TokenProcessor(token_processor)),
         metrics_reporter_(params.metrics_reporter) {
         is_embedding_ = false;
@@ -57,7 +59,9 @@ public:
                   std::shared_ptr<MultimodalProcessor> mm_processor,
                   const EngineInitParams&              params,
                   py::object                           custom_module):
-        model_config_(params.model_config_), metrics_reporter_(params.metrics_reporter) {
+        model_config_(params.model_config_),
+        parallelism_config_(params.parallelism_config),
+        metrics_reporter_(params.metrics_reporter) {
         is_embedding_       = true;
         embedding_endpoint_ = std::make_shared<EmbeddingEndpoint>(embedding_engine, mm_processor, custom_module);
         active_request_count_.reset(new autil::AtomicCounter());
@@ -95,6 +99,7 @@ private:
     bool registerChatService();
     bool registerInferenceService();
     bool registerEmbedingService();
+    bool registerAwiService();
 
 private:
     std::shared_ptr<HttpAdmissionState>   admission_ = std::make_shared<HttpAdmissionState>();
@@ -108,10 +113,13 @@ private:
     std::string                          addr_;
 
     ModelConfig                            model_config_;
+    ParallelismConfig                      parallelism_config_;
     std::shared_ptr<ConcurrencyController> controller_;
     std::shared_ptr<TokenProcessor>        token_processor_;
 
     std::shared_ptr<EmbeddingEndpoint> embedding_endpoint_;
+    std::shared_ptr<AwiService>        awi_service_;
+    py::object                         weights_loader_;
     std::shared_ptr<Tokenizer>         tokenizer_;
     std::shared_ptr<ChatRender>        render_;
 

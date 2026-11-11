@@ -34,6 +34,8 @@ public:
     enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
+    absl::Status                                 stop() override;
+    bool                                         empty() override;
 
 public:
     // for test. Group-aware shadow of the FIFOSchedulerBase helper so that
@@ -43,6 +45,13 @@ public:
     std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList() override;
 
 private:
+    // /awi/barrier decode hold.  These streams remain fully resident (their KV
+    // blocks are allocated) but are withheld from the execution batch until
+    // every operation request has its full input+output horizon reserved.
+    void applyAwiBarrierGate();
+    void restoreAwiHeldDecodes();
+    std::vector<GenerateStreamPtr> awiExtraResidentStreams() const override;
+
     using StreamGroup      = std::list<GenerateStreamPtr>;
     using StreamGroupQueue = std::list<StreamGroup>;
 
@@ -134,6 +143,9 @@ private:
     bool                         prefer_group_next_            = false;
 
     std::optional<std::chrono::steady_clock::time_point> cache_exposed_wait_start_;
+
+    std::list<GenerateStreamPtr> awi_held_decode_streams_;
+    bool                          awi_resident_snapshot_recorded_ = false;
 
     // TODO @wangyin support different beams run togather
 };

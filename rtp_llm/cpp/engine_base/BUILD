@@ -2,6 +2,17 @@ load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 
+
+# Evaluator /awi runtime instrumentation.  Keep this target dependency-free so
+# the scheduler, stream, model and API server layers can all report into it
+# without creating include cycles.
+cc_library(
+    name = "awi_runtime",
+    hdrs = ["awi_runtime.h"],
+    srcs = ["awi_runtime.cc"],
+    visibility = ["//visibility:public"],
+)
+
 # Weights converter for model weight conversion
 cc_library(
     name = "weights_converter",

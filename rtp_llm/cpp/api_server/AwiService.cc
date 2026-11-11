@@ -1,0 +1,521 @@
+#include "rtp_llm/cpp/api_server/AwiService.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <ctime>
+#include <sstream>
+
+#include "autil/TimeUtility.h"
+#include "autil/legacy/json.h"
+#include "rtp_llm/cpp/api_server/GenerateStreamWrapper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/engine_base/awi_runtime.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+
+using namespace autil::legacy;
+using namespace autil::legacy::json;
+
+namespace rtp_llm {
+namespace {
+
+std::string jsonEscape(const std::string& value) {
+    std::string out;
+    out.reserve(value.size() + 8);
+    for (unsigned char c : value) {
+        switch (c) {
+            case '"':
+                out += "\\\"";
+                break;
+            case '\\':
+                out += "\\\\";
+                break;
+            case '\b':
+                out += "\\b";
+                break;
+            case '\f':
+                out += "\\f";
+                break;
+            case '\n':
+                out += "\\n";
+                break;
+            case '\r':
+                out += "\\r";
+                break;
+            case '\t':
+                out += "\\t";
+                break;
+            default:
+                if (c < 0x20) {
+                    char buf[7];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(c));
+                    out += buf;
+                } else {
+                    out += static_cast<char>(c);
+                }
+        }
+    }
+    return out;
+}
+
+std::string quote(const std::string& value) {
+    return "\"" + jsonEscape(value) + "\"";
+}
+
+JsonMap parseBodyMap(const std::string& body) {
+    return AnyCast<JsonMap>(ParseJson(body));
+}
+
+bool getString(const JsonMap& map, const std::string& key, std::string& out) {
+    auto it = map.find(key);
+    if (it == map.end()) {
+        return false;
+    }
+    try {
+        out = AnyCast<std::string>(it->second);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+int64_t getInt(const JsonMap& map, const std::string& key, int64_t default_value) {
+    auto it = map.find(key);
+    if (it == map.end()) {
+        return default_value;
+    }
+    try {
+        return AnyCast<int64_t>(it->second);
+    } catch (...) {
+    }
+    try {
+        return static_cast<int64_t>(AnyCast<double>(it->second));
+    } catch (...) {
+    }
+    try {
+        return std::stoll(AnyCast<std::string>(it->second));
+    } catch (...) {
+    }
+    return default_value;
+}
+
+bool getBool(const JsonMap& map, const std::string& key, bool default_value) {
+    auto it = map.find(key);
+    if (it == map.end()) {
+        return default_value;
+    }
+    try {
+        return AnyCast<bool>(it->second);
+    } catch (...) {
+    }
+    try {
+        return AnyCast<int64_t>(it->second) != 0;
+    } catch (...) {
+    }
+    return default_value;
+}
+
+std::vector<std::string> getRequestIds(const JsonMap& map, const std::string& key) {
+    std::vector<std::string> ids;
+    auto                     it = map.find(key);
+    if (it == map.end()) {
+        return ids;
+    }
+    try {
+        for (const auto& value : AnyCast<JsonArray>(it->second)) {
+            try {
+                ids.push_back(AnyCast<std::string>(value));
+                continue;
+            } catch (...) {
+            }
+            try {
+                ids.push_back(std::to_string(AnyCast<int64_t>(value)));
+                continue;
+            } catch (...) {
+            }
+            try {
+                ids.push_back(std::to_string(static_cast<int64_t>(AnyCast<double>(value))));
+            } catch (...) {
+            }
+        }
+    } catch (...) {
+        std::string single;
+        if (getString(map, key, single) && !single.empty()) {
+            ids.push_back(single);
+        }
+    }
+    return ids;
+}
+
+std::vector<int> getInputIds(const JsonMap& map) {
+    std::vector<int> ids;
+    auto             it = map.find("input_ids");
+    if (it == map.end()) {
+        return ids;
+    }
+    try {
+        for (const auto& value : AnyCast<JsonArray>(it->second)) {
+            try {
+                ids.push_back(static_cast<int>(AnyCast<int64_t>(value)));
+            } catch (...) {
+                ids.push_back(static_cast<int>(AnyCast<double>(value)));
+            }
+        }
+    } catch (...) {
+    }
+    return ids;
+}
+
+}  // namespace
+
+AwiService::AwiService(const std::shared_ptr<EngineBase>&           engine,
+                       const std::shared_ptr<TokenProcessor>&       token_processor,
+                       const std::shared_ptr<autil::AtomicCounter>& request_counter,
+                       const ModelConfig&                            model_config,
+                       const ParallelismConfig&                      parallelism_config,
+                       py::object                                    weights_loader):
+    engine_(engine),
+    token_processor_(token_processor),
+    request_counter_(request_counter),
+    model_config_(model_config),
+    weights_loader_(std::move(weights_loader)) {
+    awi::AwiRuntime::instance().setParallel(
+        static_cast<int32_t>(parallelism_config.world_rank >= 0 ? parallelism_config.world_rank
+                                                                : parallelism_config.tp_rank),
+        static_cast<int32_t>(parallelism_config.world_size > 0 ? parallelism_config.world_size
+                                                               : parallelism_config.tp_size));
+}
+
+void AwiService::writeJson(const std::unique_ptr<http_server::HttpResponseWriter>& writer, const std::string& body) {
+    writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
+    writer->AddHeader("Content-Type", "application/json");
+    writer->Write(body);
+}
+
+void AwiService::writeError(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
+                            int                                                 status,
+                            const std::string&                                  error,
+                            const std::string&                                  failure_kind) {
+    writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
+    writer->AddHeader("Content-Type", "application/json");
+    const char* reason = status == 507 ? "Insufficient Storage"
+                         : status == 500 ? "Internal Server Error"
+                                         : "Bad Request";
+    writer->SetStatus(status, reason);
+    std::ostringstream out;
+    out << "{\"error\":" << quote(error);
+    if (!failure_kind.empty()) {
+        out << ",\"failure_kind\":" << quote(failure_kind);
+    }
+    out << "}";
+    writer->Write(out.str());
+}
+
+void AwiService::tokenize(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
+                          const http_server::HttpRequest&                         request) {
+    if (!token_processor_) {
+        writeError(writer, 500, "token processor is not available");
+        return;
+    }
+    try {
+        const auto body_map = parseBodyMap(request.GetBody());
+        std::string prompt;
+        if (!getString(body_map, "prompt", prompt)) {
+            writeError(writer, 400, "missing prompt");
+            return;
+        }
+        const auto token_ids = token_processor_->encode(prompt);
+        std::ostringstream out;
+        out << "{\"token_ids\":[";
+        for (size_t i = 0; i < token_ids.size(); ++i) {
+            if (i != 0) {
+                out << ",";
+            }
+            out << token_ids[i];
+        }
+        out << "]}";
+        writeJson(writer, out.str());
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("/tokenize failed: %s", e.what());
+        writeError(writer, 400, std::string("tokenize failed: ") + e.what());
+    }
+}
+
+void AwiService::generate(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
+                          const http_server::HttpRequest&                         request) {
+    if (!engine_ || !token_processor_ || !request_counter_) {
+        writeError(writer, 500, "engine is not ready");
+        return;
+    }
+    try {
+        const auto        body_map = parseBodyMap(request.GetBody());
+        const std::vector<int> input_ids = getInputIds(body_map);
+        if (input_ids.empty()) {
+            writeError(writer, 400, "input_ids must be a non-empty integer array");
+            return;
+        }
+        const int64_t max_tokens = std::max<int64_t>(1, getInt(body_map, "max_tokens", 1));
+
+        int64_t min_new_tokens = 0;
+        bool    ignore_eos     = false;
+        auto    extra_it       = body_map.find("extra_configs");
+        if (extra_it != body_map.end()) {
+            try {
+                const auto extra = AnyCast<JsonMap>(extra_it->second);
+                min_new_tokens   = getInt(extra, "min_new_tokens", 0);
+                ignore_eos       = getBool(extra, "ignore_eos", false);
+            } catch (...) {
+            }
+        }
+
+        const std::string request_id = [&]() {
+            auto header = request.GetHeader("X-AWI-Request-ID");
+            if (!header.empty()) {
+                return header;
+            }
+            return std::string("awi-") + std::to_string(request_counter_->incAndReturn());
+        }();
+
+        auto input                   = std::make_shared<GenerateInput>();
+        input->request_id            = request_counter_->incAndReturn();
+        input->begin_time_us         = autil::TimeUtility::currentTimeInMicroSeconds();
+        input->request_info.request_id = request_id;
+        input->input_ids = torch::from_blob(const_cast<int*>(input_ids.data()),
+                                            {static_cast<int64_t>(input_ids.size())},
+                                            torch::kInt32)
+                               .clone();
+        auto config               = std::make_shared<GenerateConfig>();
+        config->max_new_tokens    = static_cast<int>(max_tokens);
+        config->min_new_tokens    = static_cast<int>(std::max<int64_t>(0, min_new_tokens));
+        config->ignore_eos        = ignore_eos;
+        config->is_streaming      = false;
+        config->return_output_ids = true;
+        input->generate_config    = config;
+
+        auto stream = engine_->makeStream(input);
+        if (!stream) {
+            writeError(writer, 500, "engine failed to create stream");
+            return;
+        }
+        // Reserve the full input+output horizon so the resident snapshot is
+        // backed by allocator blocks rather than a requested configuration.
+        stream->setReserveStep(static_cast<size_t>(max_tokens));
+        auto& runtime = awi::AwiRuntime::instance();
+        runtime.bindRequest(stream->streamId(), request_id);
+        runtime.setRequestTarget(stream->streamId(), static_cast<int64_t>(input_ids.size()) + max_tokens);
+
+        const auto enqueue_status = engine_->getScheduler().enqueue(stream);
+        if (!enqueue_status.ok() || stream->hasError()) {
+            const auto info = stream->statusInfo();
+            std::string kind = "kv_capacity_exceeded";
+            const auto  detail = enqueue_status.ok() ? info.ToString() : enqueue_status.ToString();
+            if (detail.find("out of memory") != std::string::npos || detail.find("OOM") != std::string::npos) {
+                kind = "device_oom";
+            }
+            if (runtime.barrierActive()) {
+                runtime.recordCapacityFailure(runtime.barrierOperationForObservation(),
+                                              static_cast<int64_t>(runtime.barrierRequestCount()),
+                                              runtime.barrierContextTokens(),
+                                              kind,
+                                              detail,
+                                              "AwiService::generate:schedulerEnqueue");
+            }
+            runtime.unbindRequest(stream->streamId());
+            // A failed member must not leave the operation gate holding other
+            // decodes forever; release the gate so the scheduler can drain.
+            runtime.clearBarrier();
+            writeError(writer, 507, "admission failed: " + detail, kind);
+            return;
+        }
+
+        GenerateStreamWrapper wrapper(nullptr, token_processor_);
+        wrapper.init(stream, engine_);
+        MultiSeqsResponse last;
+        bool              finished = false;
+        while (!finished) {
+            auto [response, done] = wrapper.generateResponse();
+            if (!response.response.empty() || response.output_ids.has_value()) {
+                last = std::move(response);
+            }
+            finished = done;
+        }
+
+        int64_t completion_tokens = 0;
+        if (last.output_ids.has_value() && !last.output_ids->empty()) {
+            completion_tokens = static_cast<int64_t>(last.output_ids->front().size());
+        } else if (!last.aux_info.empty()) {
+            completion_tokens = last.aux_info.front().output_len;
+        }
+        std::string message;
+        if (!last.response.empty()) {
+            message = last.response.front();
+        }
+        if (message.empty() && last.output_ids.has_value() && !last.output_ids->empty()) {
+            message = token_processor_->decode(last.output_ids->front());
+        }
+        if (message.empty()) {
+            // Structural contract: the assistant message is nonempty.  The
+            // generated ids remain the real output; this placeholder only
+            // covers tokenizers that decode the sampled ids to an empty string.
+            message = " ";
+        }
+
+        std::ostringstream out;
+        out << "{\"id\":" << quote(request_id)
+            << ",\"object\":\"chat.completion\",\"created\":"
+            << static_cast<int64_t>(std::time(nullptr))
+            << ",\"model\":" << quote(model_config_.model_type)
+            << ",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":" << quote(message)
+            << "},\"finish_reason\":" << quote(completion_tokens >= max_tokens ? "length" : "stop") << "}],"
+            << "\"usage\":{\"prompt_tokens\":" << input_ids.size()
+            << ",\"completion_tokens\":" << completion_tokens
+            << ",\"total_tokens\":" << (static_cast<int64_t>(input_ids.size()) + completion_tokens) << "}}";
+        writeJson(writer, out.str());
+        runtime.unbindRequest(stream->streamId());
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("/awi/generate failed: %s", e.what());
+        // Do not strand decodes held by a barrier if a member fails mid-flight.
+        awi::AwiRuntime::instance().clearBarrier();
+        writeError(writer, 500, std::string("generate failed: ") + e.what());
+    }
+}
+
+void AwiService::barrier(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
+                         const http_server::HttpRequest&                         request) {
+    if (!engine_) {
+        writeError(writer, 500, "engine is not ready");
+        return;
+    }
+    try {
+        const auto body_map = parseBodyMap(request.GetBody());
+        std::string operation_id;
+        if (!getString(body_map, "operation_id", operation_id) || operation_id.empty()) {
+            writeError(writer, 400, "missing operation_id");
+            return;
+        }
+        const auto request_ids = getRequestIds(body_map, "request_ids");
+        if (request_ids.empty()) {
+            writeError(writer, 400, "request_ids must be a non-empty array");
+            return;
+        }
+        const int64_t context_tokens = std::max<int64_t>(1, getInt(body_map, "context_tokens", 1048576));
+
+        auto cache_manager = engine_->getCacheManager();
+        int64_t required_blocks = 1;
+        int64_t available_blocks = 0;
+        int64_t total_blocks = 0;
+        if (cache_manager) {
+            const auto& cache_config = cache_manager->cacheConfig();
+            const auto  seq_size     = std::max<size_t>(1, cache_config.seq_size_per_block);
+            required_blocks  = static_cast<int64_t>((context_tokens + static_cast<int64_t>(seq_size) - 1)
+                                                   / static_cast<int64_t>(seq_size));
+            available_blocks = static_cast<int64_t>(cache_manager->availableBlocksNum());
+            total_blocks     = static_cast<int64_t>(cache_manager->totalBlocksNum());
+
+            // Clear prior benchmark prefix entries while leaving the memory KV
+            // reuse configuration enabled.  Referenced (resident) blocks are
+            // intentionally not freed by the evictor.
+            if (auto block_tree = cache_manager->blockTreeCache()) {
+                for (const auto& tag : cache_config.topology().groupTags()) {
+                    (void)block_tree->evictForGroup(tag, cache_manager->totalBlocksNum());
+                }
+            }
+        }
+
+        auto& runtime = awi::AwiRuntime::instance();
+        if (cache_manager && required_blocks > available_blocks) {
+            runtime.recordCapacityFailure(operation_id,
+                                          static_cast<int64_t>(request_ids.size()),
+                                          context_tokens,
+                                          "kv_capacity_exceeded",
+                                          "required=" + std::to_string(required_blocks)
+                                              + " available=" + std::to_string(available_blocks),
+                                          "AwiService::barrier:cacheManager.availableBlocksNum");
+            writeError(writer,
+                       507,
+                       "barrier admission cannot satisfy the requested context",
+                       "kv_capacity_exceeded");
+            return;
+        }
+
+        runtime.armBarrier(operation_id, request_ids, context_tokens);
+        std::ostringstream out;
+        out << "{\"status\":\"armed\",\"operation_id\":" << quote(operation_id)
+            << ",\"request_ids\":[";
+        for (size_t i = 0; i < request_ids.size(); ++i) {
+            if (i != 0) {
+                out << ",";
+            }
+            out << quote(request_ids[i]);
+        }
+        out << "],\"context_tokens\":" << context_tokens
+            << ",\"required_kv_blocks\":" << required_blocks
+            << ",\"available_kv_blocks\":" << available_blocks
+            << ",\"total_kv_blocks\":" << total_blocks << "}";
+        writeJson(writer, out.str());
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("/awi/barrier failed: %s", e.what());
+        writeError(writer, 400, std::string("barrier failed: ") + e.what());
+    }
+}
+
+std::string AwiService::weightsCensusJson() {
+    std::lock_guard<std::mutex> lock(weights_mutex_);
+    if (!weights_census_cache_.empty()) {
+        return weights_census_cache_;
+    }
+    std::string result = "[]";
+    try {
+        py::gil_scoped_acquire gil;
+        auto census_module = py::module_::import("rtp_llm.model_loader.awi_census");
+        try {
+            result = py::cast<std::string>(census_module.attr("merged_census_json")());
+        } catch (...) {
+            result = py::cast<std::string>(census_module.attr("census_json")());
+        }
+        if ((result == "[]" || result.empty()) && weights_loader_ && !weights_loader_.is_none()
+            && py::hasattr(weights_loader_, "get_awi_weight_census")) {
+            auto records = weights_loader_.attr("get_awi_weight_census")();
+            auto json    = py::module_::import("json");
+            result       = py::cast<std::string>(json.attr("dumps")(records));
+        }
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("AWI weights census unavailable: %s", e.what());
+    }
+    if (result.empty()) {
+        result = "[]";
+    }
+    weights_census_cache_ = result;
+    return weights_census_cache_;
+}
+
+void AwiService::observations(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
+                              const http_server::HttpRequest&                         request) {
+    std::string operation_id;
+    const auto& params = request.GetUriParams();
+    auto        it     = params.find("operation_id");
+    if (it != params.end()) {
+        operation_id = it->second;
+    }
+    if (operation_id.empty()) {
+        // Tolerate a JSON body as a fallback for clients that cannot put the
+        // operation id in the query string.
+        try {
+            const auto body_map = parseBodyMap(request.GetBody());
+            (void)getString(body_map, "operation_id", operation_id);
+        } catch (...) {
+        }
+    }
+    try {
+        const auto weights = weightsCensusJson();
+        writeJson(writer, awi::AwiRuntime::instance().observationsJson(operation_id, weights));
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("/awi/observations failed: %s", e.what());
+        writeError(writer, 500, std::string("observations failed: ") + e.what());
+    }
+}
+
+}  // namespace rtp_llm

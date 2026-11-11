@@ -118,7 +118,19 @@ class ModelLoader:
         self._load_dynamic_weights(weights, device)
         # load eplb weight
         self._init_eplb_weight(weights, device)
+        # Evaluator /awi observations: record the actual placement of every
+        # checkpoint key from the tensors this loader just materialized.
+        try:
+            from rtp_llm.model_loader import awi_census
+
+            awi_census.build_from_model_weights(self, weights, device)
+        except Exception:
+            logging.warning("AWI weights census collection failed", exc_info=True)
         return weights
+
+    def get_awi_weight_census(self):
+        """Return the runtime census captured by the last load_weights()."""
+        return getattr(self, "_awi_weight_census", [])
 
     def load_lora_weights(self, adapter_name: str, lora_path: str, device: str = "cpu"):
         lora_weights = LoRAWeights(self._load_config.num_layers)

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/engine_base/awi_runtime.h"
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/cuda_graph/prepared_attention_inputs_guard.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -1353,6 +1354,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             if (is_generation_prefill_runner) {
                 generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             }
+            awi::observeForwardGraphReplay(awi::AwiRuntime::graphBackend(), true, "PyWrappedModel::forward(cuda_graph)");
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
         } else {
 #if USING_CUDA
@@ -1374,6 +1376,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             }
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
+            awi::observeForwardGraphReplay(awi::AwiRuntime::graphBackend(), false, "PyWrappedModel::forward(eager)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,

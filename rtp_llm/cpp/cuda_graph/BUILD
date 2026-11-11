@@ -75,6 +75,7 @@ cc_library(
     deps = [
         ":dspark_cuda_graph_budget",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/engine_base:awi_runtime",
         "//rtp_llm/models_py/bindings:op_defs",
     ],
     visibility = ["//visibility:public"],
@@ -101,6 +102,7 @@ cc_library(
         ":prepared_attention_inputs_guard",
         ":generation_prefill_cuda_graph_replay_metadata",
         ":cuda_graph_hdrs_lib",
+        "//rtp_llm/cpp/engine_base:awi_runtime",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:core_utils",
