@@ -2170,24 +2170,39 @@ class Engram(nn.Module):
                     scale_group=scale_group,
                     scale_identity=identity,
                 )
+            wkv_weight = load("wkv.weight")
+            wkv_scale = load("wkv.scale")
             if target.type == "cuda":
                 with torch.cuda.device(target):
                     from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
-                    projection = V41MXFP8Linear(
-                        load("wkv.weight").to(target), load("wkv.scale").to(target)
-                    )
+                    wkv_weight = wkv_weight.to(target)
+                    wkv_scale = wkv_scale.to(target)
+                    projection = V41MXFP8Linear(wkv_weight, wkv_scale)
             else:
                 projection = _ReferenceWKV(
-                    dequantize_block_weight(load("wkv.weight"), load("wkv.scale"))
+                    dequantize_block_weight(wkv_weight, wkv_scale)
                 )
+            q_weight = load("q_weight").to(target)
+            k_weight = load("k_weight").to(target)
+            from rtp_llm.awi_telemetry import record_weight_placement
+
+            # The GPU loader deliberately skips Engram-only shards; record the
+            # actual storage chosen by this CPU/host loader so the census still
+            # covers every Engram checkpoint key and any transformed copy.
+            record_weight_placement(prefix + "embed.weight", embedding.weight)
+            record_weight_placement(prefix + "embed.scale", embedding.scales)
+            record_weight_placement(prefix + "wkv.weight", wkv_weight)
+            record_weight_placement(prefix + "wkv.scale", wkv_scale)
+            record_weight_placement(prefix + "q_weight", q_weight)
+            record_weight_placement(prefix + "k_weight", k_weight)
             return cls(
                 layout,
                 layer_hash_index,
                 embedding,
                 projection,
-                load("q_weight").to(target),
-                load("k_weight").to(target),
+                q_weight,
+                k_weight,
                 float(_config_value(config, "rms_norm_eps")),
             )
         except BaseException:

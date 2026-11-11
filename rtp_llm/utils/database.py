@@ -324,8 +324,29 @@ class CkptDatabase(BaseDatabase):
             else:
                 pg = SingleGroup()
 
+            # Engram tables are multi-GiB host-resident checkpoint tensors and
+            # are loaded via Engram.from_checkpoint's CPU safetensors path.  A
+            # whole-shard device copy would otherwise materialize the two
+            # Engram-only shards on GPU before the model discards them.  Those
+            # shards contain no non-Engram key by construction.
+            engram_only_files = {
+                file.file_name
+                for file in self.pretrain_file_list
+                if (names := file.get_tensor_names())
+                and all(".engram." in name for name in names)
+            }
+            if engram_only_files:
+                logging.info(
+                    "Skipping %d Engram-only shard(s) in device loader: %s",
+                    len(engram_only_files),
+                    sorted(engram_only_files),
+                )
             hf_weights_files = sorted(
-                [file.file_name for file in self.pretrain_file_list]
+                [
+                    file.file_name
+                    for file in self.pretrain_file_list
+                    if file.file_name not in engram_only_files
+                ]
             )
             if device == "cuda":
                 device = f"cuda:{pg.rank()}"
