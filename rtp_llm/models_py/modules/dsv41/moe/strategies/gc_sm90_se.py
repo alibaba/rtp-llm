@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import torch
 import torch.distributed as dist
@@ -16,6 +17,12 @@ from .mega_sm90 import SM90MegaMoEStrategy
 # Keep their symmetric workspace and output addresses stable across captures.
 _BUFFERS: dict[tuple, tuple[object, torch.Tensor]] = {}
 _SHARED_RECIPE = (1, 1, 32)
+
+# GC MoE role kernels must launch in the primary CUDA context; the SM split
+# then only sizes the per-role grids. Must be set before gc_moe is imported,
+# which is why it lives at module scope rather than in setup_weights().
+# Same contract as the GLM-5 SM100 integration (rtp-llm 8dd1c025b0).
+os.environ.setdefault("GC_MOE_PRIMARY_CTX", "1")
 
 
 class SM90GCMoESEStrategy(SM90MegaMoEStrategy):
