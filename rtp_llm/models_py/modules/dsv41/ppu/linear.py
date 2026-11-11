@@ -41,6 +41,7 @@ __all__ = [
     "dequant_fp8_block32_ue8m0",
     "PPUResidentBF16Linear",
     "PPUPTPCLinear",
+    "prepare_shared_ptpc_input",
     "FP8_BLOCK_SIZE",
 ]
 
@@ -116,23 +117,78 @@ class PPUPTPCLinear:
             return pack_ptpc_grouped_output(output)
         return torch.stack([part(x[:, i].contiguous()) for i, part in enumerate(self._groups)], 1)
 
-    def forward(self, x):
+    def _validate_input(self, x):
+        if x.layout != torch.strided or x.ndim < 1 or x.shape[-1] <= 0:
+            raise ValueError("PTPC input requires a strided tensor with a nonempty feature dimension")
         if x.shape[-1] != self.weight.shape[1] or x.device != self.weight.device:
             raise ValueError("PTPC input shape/device differs from its weight")
-        shape = (*x.shape[:-1], self.weight.shape[0])
+
+    def quantize_input(self, x):
+        """Prepare the existing whole-row PTPC payload/scales once.
+
+        Leading dimensions are retained in both tensors. Packing the same
+        logical rows as ``forward`` preserves its original quantization order,
+        including callers with a noncontiguous unquantized input.
+        """
+        self._validate_input(x)
         flat = x.reshape(-1, x.shape[-1])
-        output = torch.empty((flat.shape[0], self.weight.shape[0]), device=x.device, dtype=torch.bfloat16)
+        payload, scale = quantize_ptpc_activation(flat)
+        return payload.reshape(x.shape), scale.reshape((*x.shape[:-1], 1))
+
+    def forward_quantized(self, payload, scale):
+        """Consume packed E4M3 rows and FP32 row scales without requantizing.
+
+        Metadata checks retain the native contiguous two-dimensional GEMM ABI;
+        reshaping the validated payload/scales introduces no packing copy.
+        The returned BF16 tensor retains the payload's leading dimensions.
+        """
+        if payload.dtype != torch.float8_e4m3fn or scale.dtype != torch.float32:
+            raise TypeError("PTPC prepared input requires E4M3 payload and FP32 scale")
+        self._validate_input(payload)
+        if scale.layout != torch.strided or tuple(scale.shape) != (*payload.shape[:-1], 1):
+            raise ValueError("PTPC prepared scale shape must match the payload rows")
+        if scale.device != payload.device:
+            raise ValueError("PTPC prepared payload/scale must share the weight device")
+        if not payload.is_contiguous() or not scale.is_contiguous():
+            raise ValueError("PTPC prepared payload/scale must be contiguous")
+        shape = (*payload.shape[:-1], self.weight.shape[0])
+        flat = payload.reshape(-1, payload.shape[-1])
+        row_scale = scale.reshape(-1, 1)
+        output = torch.empty((flat.shape[0], self.weight.shape[0]), device=payload.device, dtype=torch.bfloat16)
         if flat.shape[0] == 0:
             return output.reshape(shape)
-        payload, scale = quantize_ptpc_activation(flat)
-        if x.is_cuda:
-            self._gemm((payload, scale), (self.weight, self.scale), output)
+        if payload.is_cuda:
+            self._gemm((flat, row_scale), (self.weight, self.scale), output)
         else:
             # Portable component oracle only; device execution always uses GEMM.
-            output.copy_((payload.float() @ self.weight.float().T) * scale * self.scale.T)
+            output.copy_((flat.float() @ self.weight.float().T) * row_scale * self.scale.T)
         return output.reshape(shape)
 
+    def forward(self, x):
+        return self.forward_quantized(*self.quantize_input(x))
+
     __call__ = forward
+
+
+def prepare_shared_ptpc_input(x, linears):
+    """Prepare one ephemeral pair for compatible PTPC consumers, or decline.
+
+    Admission only inspects metadata. The caller owns the pair for this one
+    forward/capture; no tensor-address or cross-replay cache is retained here.
+    Legacy modules and an explicit fusion rollback keep their original paths.
+    """
+    if not ptpc_fusion_enabled() or len(linears) < 2:
+        return None
+    if x.layout != torch.strided or x.ndim < 1 or x.numel() == 0:
+        return None
+    if not all(
+        isinstance(op, PPUPTPCLinear)
+        and op.weight.device == x.device
+        and op.weight.shape[1] == x.shape[-1]
+        for op in linears
+    ):
+        return None
+    return linears[0].quantize_input(x)
 
 
 def _ue8m0_scales_to_float(scales: torch.Tensor) -> torch.Tensor:

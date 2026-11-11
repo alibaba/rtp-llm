@@ -6,6 +6,8 @@ filegroup(
         "test_ptpc.py",
         "test_ptpc_quant.py",
         "test_ptpc_norm.py",
+        "test_ptpc_prepared.py",
+        "test_ptpc_input_reuse.py",
         "ptpc_microbench.py",
     ],
 )

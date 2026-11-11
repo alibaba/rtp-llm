@@ -21,6 +21,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy, Sha
 from rtp_llm.models_py.modules.dsv41.ppu.dspark_attention import SharedPPUDSparkBlock, forward_query, project_commit, unsampled_anchor_metadata
 from rtp_llm.models_py.modules.dsv41.ppu.dspark_modes import SharedDSparkMode
 from rtp_llm.models_py.modules.dsv41.ppu.layers import PPUSharedRMSNorm
+from rtp_llm.models_py.modules.dsv41.ppu.linear import prepare_shared_ptpc_input
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import SharedNativeCache
 from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import SharedForwardState
 from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import _Overlay
@@ -112,6 +113,7 @@ class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
         self._private_draft_capture = None
         self._private_draft_armed_ids = None
         self._private_draft_pending = None
+        self._commit_ptpc_input = None
 
     def _load_extra_weights(self, weights):
         views, g = self.shared_weight_views, self.shared_weight_views.geometry
@@ -282,24 +284,51 @@ class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
         self._private_draft_armed_ids = None
         self._private_draft_pending = None
 
+    def commit_feature_rows(
+        self, main_x, context_req_ids, context_positions, committed_ends,
+        inputs, commit_ctx=None,
+    ):
+        """Share one main-feature quantization across this call's draft layers."""
+        if getattr(self, "_commit_ptpc_input", None) is not None:
+            raise RuntimeError("draft commit input is already bound")
+        pair = (
+            prepare_shared_ptpc_input(main_x, tuple(layer.attn.wkv for layer in self.v4.layers))
+            if self._is_decode_role and committed_ends.numel() else None
+        )
+        self._commit_ptpc_input = (main_x, pair) if pair is not None else None
+        try:
+            return super().commit_feature_rows(
+                main_x, context_req_ids, context_positions, committed_ends,
+                inputs, commit_ctx=commit_ctx,
+            )
+        finally:
+            self._commit_ptpc_input = None
+
     def _commit_layer_features(self, layer_idx, main_x, context_req_ids, context_positions,
                                committed_ends, block_table, tokens_per_block, batch_size,
                                gathered_req_ids=None, gathered_positions=None, cp_ctx=None,
                                metadata_by_geometry=None, host_block_table=None, projected_kv=None):
         runtime, g = self.shared_runtime, self.shared_weight_views.geometry
         state = runtime.current
+        bound = getattr(self, "_commit_ptpc_input", None)
+        if bound is not None and bound[0] is not main_x:
+            raise RuntimeError("draft commit input differs from the bound feature rows")
+        pair = bound[1] if bound is not None else None
         if getattr(state, "is_graph_commit", False):
             if cp_ctx is not None or gathered_positions is not None:
                 raise ValueError("Prefill commit stays eager")
             from rtp_llm.models_py.modules.dsv41.ppu.dspark_attention import graph_commit_layer
 
             graph_commit_layer(self, state, layer_idx, main_x, context_req_ids,
-                               context_positions, committed_ends)
+                               context_positions, committed_ends, quantized_input=pair)
             return
         if state.idle:
             return
         attn = self.v4.layers[layer_idx].attn
-        kv = project_commit(attn, main_x, context_positions, runtime.freqs_for(layer_idx))
+        kv = project_commit(
+            attn, main_x, context_positions, runtime.freqs_for(layer_idx),
+            quantized_input=pair,
+        )
         req, pos = context_req_ids, context_positions
         if gathered_positions is not None:
             from rtp_llm.models_py.distributed.collective_torch import Group, all_gather

@@ -43,8 +43,19 @@ class SharedPPUDSparkBlock(SharedPPUBlock):
             super().__init__(views, layer_id, ops, enpm_group=enpm_group)
 
 
-def project_commit(attn, main_x, positions, freqs):
-    return _rope_tail(attn.kv_norm(attn.wkv(main_x)), freqs[positions.long().clamp_min(0)])
+def _project_commit_kv(attn, main_x, quantized_input=None):
+    raw = (
+        attn.wkv(main_x) if quantized_input is None
+        else attn.wkv.forward_quantized(*quantized_input)
+    )
+    return attn.kv_norm(raw)
+
+
+def project_commit(attn, main_x, positions, freqs, *, quantized_input=None):
+    return _rope_tail(
+        _project_commit_kv(attn, main_x, quantized_input),
+        freqs[positions.long().clamp_min(0)],
+    )
 
 
 def _swa_geometry(cache, layer_id):
@@ -52,7 +63,10 @@ def _swa_geometry(cache, layer_id):
     return domain, cache.entries[domain], cache.spans[domain], cache.pool(layer_id, "swa_kv").shape[0]
 
 
-def graph_commit_layer(model, state, layer_idx, main_x, requests, positions, ends):
+def graph_commit_layer(
+    model, state, layer_idx, main_x, requests, positions, ends,
+    *, quantized_input=None,
+):
     """The public commit loop calls this with the actual feature-row map."""
     runtime = model.shared_runtime
     cache = state.cache
@@ -79,7 +93,7 @@ def graph_commit_layer(model, state, layer_idx, main_x, requests, positions, end
             shared["commit_private_rows"] = live.sum()
     req, pos, raw = shared["commit_positions"]
     attn = model.v4.layers[layer_idx].attn
-    values = attn.kv_norm(attn.wkv(main_x))
+    values = _project_commit_kv(attn, main_x, quantized_input)
     table = runtime.freqs_for(layer_idx)
     rope_key = ("commit_rope", id(table))
     if rope_key not in shared:
@@ -161,8 +175,8 @@ def forward_graph_query(model, layer_id, x, positions, prefixes, active):
     if key not in state.shared:
         state.shared[key] = table[positions.reshape(-1).clamp(0, cache.max_seq_len - 1)]
     freqs = state.shared[key]
-    q = attn.wq_b(attn.query_latent(flat)).reshape(-1, g.n_heads, g.head_dim)
-    fresh = attn.kv_norm(attn.wkv(flat))
+    _, q, fresh, _ = attn.project_query_kv(flat, reuse_ptpc=True)
+    q = q.reshape(-1, g.n_heads, g.head_dim)
     packed = try_rotate_q_and_pack_swa(q, fresh, freqs)
     if packed is None:
         q = _rope_tail(q, freqs)
@@ -237,8 +251,9 @@ def forward_query(model, layer_id, x, positions, prefixes, active, indices):
         return torch.zeros_like(x)
     flat = x.reshape(-1, g.hidden_size)
     freqs = runtime.freqs_for(layer_id)[positions.reshape(-1)]
-    q = _rope_tail(attn.wq_b(attn.query_latent(flat)).reshape(-1, g.n_heads, g.head_dim), freqs)
-    fresh = _rope_tail(attn.kv_norm(attn.wkv(flat)), freqs)
+    _, q, fresh, _ = attn.project_query_kv(flat, reuse_ptpc=True)
+    q = _rope_tail(q.reshape(-1, g.n_heads, g.head_dim), freqs)
+    fresh = _rope_tail(fresh, freqs)
     cache = state.cache
     packed = model._shared_ops.encode_kv(fresh, pool_tag="swa_kv")
     local_query = torch.arange(batch, device=x.device).repeat_interleave(width)

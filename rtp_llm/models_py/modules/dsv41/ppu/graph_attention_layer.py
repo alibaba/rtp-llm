@@ -261,13 +261,18 @@ def produce_global(attn, x, state, *, fused_graph=False, verify_rope=False):
     )
 
 
-def select_indices(attn, x, qr, state, freqs, *, fused_graph=False, verify_rope=False):
+def select_indices(
+    attn, x, qr, state, freqs, *, fused_graph=False, verify_rope=False,
+    qr_quantized=None,
+):
     g = attn.geometry
     source = attn.kv_source_layer_id
     ratio = g.ratio(source)
     positions, valid = state.metadata.positions, state.metadata.valid_mask
     query = _rotate_graph_value(
-        attn.index_wq(qr).reshape(-1, g.index_n_heads, g.index_head_dim),
+        attn.project_indexer_query(qr, quantized_input=qr_quantized).reshape(
+            -1, g.index_n_heads, g.index_head_dim
+        ),
         freqs,
         inplace=fused_graph or verify_rope,
         preserve_signed_zero=verify_rope,
@@ -399,9 +404,11 @@ def forward_graph_attention(attn, x, state):
         freqs = state.shared[key]
     else:
         freqs = table[positions]
-    qr = attn.query_latent(x)
-    q = attn.wq_b(qr).reshape(-1, g.n_heads, g.head_dim)
-    kv = attn.kv_norm(attn.wkv(x))
+    qr, q, kv, qr_quantized = attn.project_query_kv(
+        x, prepare_indexer=bool(attn.compress_ratio and attn.is_index_source),
+        reuse_ptpc=verify,
+    )
+    q = q.reshape(-1, g.n_heads, g.head_dim)
     if native_packed:
         swa_slots = packed.swa_write_slots(attn.layer_id, positions, valid, state.shared)
     elif verify_packed:
@@ -440,7 +447,8 @@ def forward_graph_attention(attn, x, state):
     if attn.compress_ratio:
         if attn.is_index_source:
             selected = select_indices(
-                attn, x, qr, state, freqs, fused_graph=ordinary_packed, verify_rope=verify_packed
+                attn, x, qr, state, freqs, fused_graph=ordinary_packed,
+                verify_rope=verify_packed, qr_quantized=qr_quantized,
             )
             state.shared[attn.layer_id] = selected
         else:

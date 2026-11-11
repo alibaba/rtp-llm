@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.base.common.norm import BaseNorm
 from rtp_llm.models_py.modules.dsv41.hc.base import HCUnitBase
 from rtp_llm.models_py.modules.dsv41.ppu.engram import engram_gate_inject, wkv_project
+from rtp_llm.models_py.modules.dsv41.ppu.linear import prepare_shared_ptpc_input
 from rtp_llm.models_py.modules.dsv41.ppu.mhc import PPUStepMix
 from rtp_llm.models_py.modules.dsv41.ppu.moe import (
     combine_routed_and_shared,
@@ -468,6 +469,33 @@ class PPUAttentionProjections(nn.Module):
 
     def query_latent(self, normalized_hidden):
         return self.q_norm(self.wq_a(normalized_hidden))
+
+    def project_query_kv(self, x, *, prepare_indexer=False, reuse_ptpc=False):
+        """Keep projection order while sharing identical PTPC input rows.
+
+        The optional pairs are local to this invocation. Graph capture records
+        their producers before every consumer; replay recomputes their values.
+        """
+        x_pair = (
+            prepare_shared_ptpc_input(x, (self.wq_a, self.wkv))
+            if reuse_ptpc else None
+        )
+        if x_pair is None:
+            qr = self.query_latent(x)
+        else:
+            qr = self.q_norm(self.wq_a.forward_quantized(*x_pair))
+        qr_pair = (
+            prepare_shared_ptpc_input(qr, (self.wq_b, self.index_wq))
+            if reuse_ptpc and prepare_indexer else None
+        )
+        q = self.wq_b(qr) if qr_pair is None else self.wq_b.forward_quantized(*qr_pair)
+        raw_kv = self.wkv(x) if x_pair is None else self.wkv.forward_quantized(*x_pair)
+        return qr, q, self.kv_norm(raw_kv), qr_pair
+
+    def project_indexer_query(self, qr, *, quantized_input=None):
+        if quantized_input is None:
+            return self.index_wq(qr)
+        return self.index_wq.forward_quantized(*quantized_input)
 
     def set_cp_ctx(self, cp_ctx):
         self._cp_ctx = cp_ctx

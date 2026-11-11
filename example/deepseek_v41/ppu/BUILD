@@ -23,6 +23,7 @@ exports_files(["test_functional.sh"])
     for name, gpus in [
         ("contracts", 0), ("device", 1), ("alignment", 0), ("audit", 0), ("layout", 0),
         ("fusion-contracts", 0), ("fusion-device", 1), ("fusion-micro", 1),
+        ("prepared-contracts", 0), ("prepared-device", 1),
     ]
 ]
 
