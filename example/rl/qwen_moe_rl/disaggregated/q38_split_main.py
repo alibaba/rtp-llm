@@ -238,6 +238,7 @@ def run(deploy, recipe, dataset_path, ray_address):
     env["NCCL_NET_GDR_LEVEL"] = "LOC"
     env["NCCL_NET_GDR_C2C"] = "0"
     env["NCCL_DMABUF_ENABLE"] = "0"
+    env["NCCL_PXN_DISABLE"] = "1"
     env["NCCL_SOCKET_IFNAME"] = "=eth0"
     env["GLOO_SOCKET_IFNAME"] = "eth0"
     env["OMP_NUM_THREADS"] = "3"
