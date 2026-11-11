@@ -33,6 +33,9 @@ import torch
 _ROWS: Dict[str, dict] = {}
 # Strong references so ballast tensors are never freed (device residency).
 _BALLAST: List[torch.Tensor] = []
+# Phase-one registration inputs, retained for finalize_registration() once
+# the engine has materialized the model (Engram tables walkable).
+_PENDING_REG = None
 
 _CENSUS_DIR_ENV = "AWI_CENSUS_DIR"
 _DEFAULT_CENSUS_DIR = "/tmp/awi-census"
@@ -469,10 +472,9 @@ def register_from_model(
         # Phases are individually guarded: every rank MUST reach the
         # all_gather_object below (a collective) even if an earlier phase
         # failed on this rank, or the healthy ranks would hang on it.
-        try:
-            record_engram(py_model)
-        except Exception:
-            logging.error("AWI census: engram walk failed", exc_info=True)
+        # The Engram walk is NOT done here: V4Transformer (and with it the
+        # Engram modules) is materialized by the engine's initialize() after
+        # model construction — finalize_registration() records those rows.
         device = f"cuda:{torch.cuda.current_device()}"
         try:
             if checkpoint_dir:
@@ -501,100 +503,165 @@ def register_from_model(
         except Exception:
             logging.error("AWI census: ballast failed", exc_info=True)
 
-        # The evaluator requires the row-name set to EQUAL the checkpoint
-        # manifest: filter out module-level alias names (e.g. stacked MoE
-        # template keys) that no manifest entry corresponds to.
-        index_names = None
-        if checkpoint_dir:
-            try:
-                index_path = os.path.join(
-                    checkpoint_dir, "model.safetensors.index.json"
-                )
-                with open(index_path, "r") as reader:
-                    index_names = set(json.load(reader)["weight_map"].keys())
-            except Exception:
-                logging.warning(
-                    "AWI census: index unreadable; extra-name filter disabled",
-                    exc_info=True,
-                )
-        if index_names is not None:
-            extras = set(_ROWS.keys()) - index_names
-            if extras:
-                logging.warning(
-                    "AWI census: dropping %d non-manifest alias names, sample: %s",
-                    len(extras), sorted(extras)[:5],
-                )
-                for name in extras:
-                    _ROWS.pop(name, None)
-
-        # Each rank registers ONLY its own rows; the query-time RPC fan-out
-        # exposes every rank's partitions to the evaluator ("all resident
-        # partitions/copies ... inspect all ranks"). The all-ranks union is
-        # still computed here once, to verify census completeness against the
-        # checkpoint index before serving starts.
-        rows = [dict(row) for row in _ROWS.values()]
-        if world_size > 1:
-            # All ranks reach this point in their own model construction, so
-            # the object gather cannot deadlock against a sibling that skips
-            # it; ballast rows live on exactly one rank each and the union
-            # reconstructs full coverage.
-            try:
-                import torch.distributed as dist
-
-                gathered: List[Optional[List[str]]] = [None] * world_size
-                dist.all_gather_object(gathered, sorted(_ROWS.keys()))
-                union_names = set()
-                for part in gathered:
-                    union_names.update(part or [])
-            except Exception:
-                logging.warning(
-                    "AWI census: all_gather_object failed; falling back to "
-                    "rank files for the completeness check",
-                    exc_info=True,
-                )
-                write_rank_file(rank)
-                union_names = {
-                    row["name"] for row in merge_rank_files(world_size)
-                } if rank == 0 else {row["name"] for row in rows}
-        else:
-            union_names = {row["name"] for row in rows}
-
-        # Completeness against the checkpoint index (same name universe the
-        # evaluator's manifest enumerates).
-        if index_names is not None:
-            missing = index_names - union_names
-            if missing:
-                logging.error(
-                    "AWI census INCOMPLETE: %d keys missing, sample: %s",
-                    len(missing), sorted(missing)[:10],
-                )
-            else:
-                logging.info(
-                    "AWI census complete: %d checkpoint keys covered "
-                    "(%d rows on this rank)",
-                    len(union_names), len(rows),
-                )
-
-        module = _pybind_module()
-        if module is None:
-            return
-        module.awi_set_rank(rank)
-        module.awi_set_build_info(
-            os.environ.get("AWI_INTERNAL_SHA", ""),
-            os.environ.get("AWI_PUBLIC_SHA", ""),
+        _gather_and_register(
+            rank,
+            world_size,
+            checkpoint_dir,
+            model_config,
+            kv_cache_config,
+            hw_kernel_config,
         )
-        graph_enabled = bool(getattr(hw_kernel_config, "enable_cuda_graph", False))
-        if graph_enabled:
-            graph_backend = "hip" if torch.version.hip else "cuda"
-        else:
-            graph_backend = "none"
-        context_tokens = int(getattr(model_config, "max_seq_len", 0) or 0)
-        memory_kv_reuse = bool(getattr(kv_cache_config, "reuse_cache", False))
-        module.awi_set_configuration(context_tokens, memory_kv_reuse, graph_backend)
-        module.awi_set_weights_placement(json.dumps(rows))
-        logging.info(
-            "AWI census registered: rank=%d rows=%d context=%d reuse=%s graph=%s",
-            rank, len(rows), context_tokens, memory_kv_reuse, graph_backend,
+        # The Engram modules' live tables only exist after the engine's
+        # initialize() materializes V4Transformer; remember the inputs so
+        # finalize_registration() can complete the census post-startup.
+        global _PENDING_REG
+        _PENDING_REG = (
+            py_model,
+            rank,
+            world_size,
+            checkpoint_dir,
+            model_config,
+            kv_cache_config,
+            hw_kernel_config,
         )
     except Exception:
         logging.error("AWI census registration failed", exc_info=True)
+
+
+def finalize_registration() -> None:
+    """Complete the census once the engine has materialized the model.
+
+    Called from the backend rank startup after backend_manager.start():
+    V4Transformer (and the Engram host tables) now exist, so the engram walk
+    records its twelve host-resident keys and the full row set is re-pushed
+    into the registry. No-op for models that never registered phase one.
+    """
+    global _PENDING_REG
+    if _PENDING_REG is None:
+        return
+    (
+        py_model,
+        rank,
+        world_size,
+        checkpoint_dir,
+        model_config,
+        kv_cache_config,
+        hw_kernel_config,
+    ) = _PENDING_REG
+    try:
+        record_engram(py_model)
+        _gather_and_register(
+            rank,
+            world_size,
+            checkpoint_dir,
+            model_config,
+            kv_cache_config,
+            hw_kernel_config,
+        )
+    except Exception:
+        logging.error("AWI census finalize failed", exc_info=True)
+    finally:
+        _PENDING_REG = None
+
+
+def _gather_and_register(
+    rank: int,
+    world_size: int,
+    checkpoint_dir: str,
+    model_config,
+    kv_cache_config,
+    hw_kernel_config,
+) -> None:
+    # The evaluator requires the row-name set to EQUAL the checkpoint
+    # manifest: filter out module-level alias names (e.g. stacked MoE
+    # template keys) that no manifest entry corresponds to.
+    index_names = None
+    if checkpoint_dir:
+        try:
+            index_path = os.path.join(
+                checkpoint_dir, "model.safetensors.index.json"
+            )
+            with open(index_path, "r") as reader:
+                index_names = set(json.load(reader)["weight_map"].keys())
+        except Exception:
+            logging.warning(
+                "AWI census: index unreadable; extra-name filter disabled",
+                exc_info=True,
+            )
+    if index_names is not None:
+        extras = set(_ROWS.keys()) - index_names
+        if extras:
+            logging.warning(
+                "AWI census: dropping %d non-manifest alias names, sample: %s",
+                len(extras), sorted(extras)[:5],
+            )
+            for name in extras:
+                _ROWS.pop(name, None)
+
+    # Each rank registers ONLY its own rows; the query-time RPC fan-out
+    # exposes every rank's partitions to the evaluator ("all resident
+    # partitions/copies ... inspect all ranks"). The all-ranks union is
+    # still computed here once, to verify census completeness against the
+    # checkpoint index before serving starts. All ranks reach this point in
+    # lockstep (model construction, then post-startup finalize), so the
+    # collective cannot deadlock against a sibling that skips it.
+    rows = [dict(row) for row in _ROWS.values()]
+    if world_size > 1:
+        try:
+            import torch.distributed as dist
+
+            gathered: List[Optional[List[str]]] = [None] * world_size
+            dist.all_gather_object(gathered, sorted(_ROWS.keys()))
+            union_names = set()
+            for part in gathered:
+                union_names.update(part or [])
+        except Exception:
+            logging.warning(
+                "AWI census: all_gather_object failed; falling back to "
+                "rank files for the completeness check",
+                exc_info=True,
+            )
+            write_rank_file(rank)
+            union_names = {
+                row["name"] for row in merge_rank_files(world_size)
+            } if rank == 0 else {row["name"] for row in rows}
+    else:
+        union_names = {row["name"] for row in rows}
+
+    # Completeness against the checkpoint index (same name universe the
+    # evaluator's manifest enumerates).
+    if index_names is not None:
+        missing = index_names - union_names
+        if missing:
+            logging.error(
+                "AWI census INCOMPLETE: %d keys missing, sample: %s",
+                len(missing), sorted(missing)[:10],
+            )
+        else:
+            logging.info(
+                "AWI census complete: %d checkpoint keys covered "
+                "(%d rows on this rank)",
+                len(union_names), len(rows),
+            )
+
+    module = _pybind_module()
+    if module is None:
+        return
+    module.awi_set_rank(rank)
+    module.awi_set_build_info(
+        os.environ.get("AWI_INTERNAL_SHA", ""),
+        os.environ.get("AWI_PUBLIC_SHA", ""),
+    )
+    graph_enabled = bool(getattr(hw_kernel_config, "enable_cuda_graph", False))
+    if graph_enabled:
+        graph_backend = "hip" if torch.version.hip else "cuda"
+    else:
+        graph_backend = "none"
+    context_tokens = int(getattr(model_config, "max_seq_len", 0) or 0)
+    memory_kv_reuse = bool(getattr(kv_cache_config, "reuse_cache", False))
+    module.awi_set_configuration(context_tokens, memory_kv_reuse, graph_backend)
+    module.awi_set_weights_placement(json.dumps(rows))
+    logging.info(
+        "AWI census registered: rank=%d rows=%d context=%d reuse=%s graph=%s",
+        rank, len(rows), context_tokens, memory_kv_reuse, graph_backend,
+    )

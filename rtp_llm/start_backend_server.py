@@ -102,6 +102,17 @@ def local_rank_start(
 
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
+        # AWI evaluator instrumentation: the model (and its Engram host
+        # tables) is fully materialized only after engine start, so the
+        # weight-placement census is finalized here — before this rank
+        # reports ready and the frontend begins serving health. No-op unless
+        # the model loader registered a pending census (dsv41 adaptation).
+        try:
+            from rtp_llm.model_loader import awi_placement
+
+            awi_placement.finalize_registration()
+        except Exception:
+            logging.error("AWI census finalization failed", exc_info=True)
         # Defer these handlers until model loading completes.
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
