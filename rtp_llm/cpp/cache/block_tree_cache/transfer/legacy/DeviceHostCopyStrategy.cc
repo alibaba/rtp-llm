@@ -16,7 +16,7 @@ namespace rtp_llm {
 
 StrategyResult GenericMultiCopyDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan& plan,
                                                                   const DeviceHostCopyOptions& /*options*/,
-                                                                  const DeviceHostCopyExecutionContext& context) {
+                                                                  const DeviceHostCopyExecutionContext& context) try {
     std::vector<torch::Tensor> dst_buffers;
     std::vector<torch::Tensor> src_buffers;
 
@@ -48,21 +48,35 @@ StrategyResult GenericMultiCopyDeviceHostCopyStrategy::tryExecute(const DeviceHo
                             plan.device_to_host ? "D2H" : "H2D",
                             reinterpret_cast<void*>(context.stream()),
                             error.what());
+#if USING_CUDA
+        // The explicit-context CUDA helper drains before throwing, or aborts
+        // if completion cannot be proved. Other backends lack this contract.
+        return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR, true);
+#else
         return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
+#endif
     }
-    return StrategyResult::done();
+    // Normal return follows completion of the copy stream.
+    return StrategyResult::done(true);
+} catch (...) {
+#if USING_CUDA
+    // Every concrete CUDA helper drains an attempted operation before throwing.
+    return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR, true);
+#else
+    return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
+#endif
 }
 
 StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan&             plan,
                                                            const DeviceHostCopyOptions&          options,
-                                                           const DeviceHostCopyExecutionContext& context) {
+                                                           const DeviceHostCopyExecutionContext& context) try {
     if (!options.cuda_batch_copy_enabled) {
-        return StrategyResult::notApplicable();
+        return StrategyResult::notApplicable(true);
     }
 
     const int device_index = plan.copy_tiles.front().device_index;
     if (device_index < 0) {
-        return StrategyResult::notApplicable();
+        return StrategyResult::notApplicable(true);
     }
 
     BatchedMemoryCopyParams params;
@@ -85,7 +99,7 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
 
     const auto status = execBatchedMemoryCopy(params, context);
     if (status == BatchedMemoryCopyStatus::NOT_SUPPORTED) {
-        return StrategyResult::notApplicable();
+        return StrategyResult::notApplicable(true);
     }
     if (status == BatchedMemoryCopyStatus::EXECUTION_FAILED) {
         RTP_LLM_LOG_WARNING("batch copy failed group_set=%zu device=%d direction=%s stream=%p",
@@ -93,9 +107,17 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
                             context.deviceIndex(),
                             plan.device_to_host ? "D2H" : "H2D",
                             reinterpret_cast<void*>(context.stream()));
-        return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
+        // A returned failure is pre-submission or follows a checked stream drain.
+        return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR, true);
     }
-    return StrategyResult::done();
+    return StrategyResult::done(true);
+} catch (...) {
+#if USING_CUDA
+    // Every concrete CUDA helper drains an attempted operation before throwing.
+    return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR, true);
+#else
+    return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
+#endif
 }
 
 static constexpr size_t kStagedAlignment = 16;
@@ -114,18 +136,18 @@ StagedSmDeviceHostCopyStrategy::~StagedSmDeviceHostCopyStrategy() {
 
 StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan&    plan,
                                                           const DeviceHostCopyOptions& options,
-                                                          const DeviceHostCopyExecutionContext& /*context*/) {
+                                                          const DeviceHostCopyExecutionContext& /*context*/) try {
     if (!options.staged_sm_copy_enabled) {
-        return StrategyResult::notApplicable();
+        return StrategyResult::notApplicable(true);
     }
 
     if (plan.copy_tiles.size() < options.staged_sm_min_tile_count) {
-        return StrategyResult::notApplicable();
+        return StrategyResult::notApplicable(true);
     }
 
     const int device_index = plan.copy_tiles.front().device_index;
     if (device_index < 0) {
-        return StrategyResult::notApplicable();
+        return StrategyResult::notApplicable(true);
     }
 
     size_t total_bytes = 0;
@@ -134,7 +156,7 @@ StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPl
     }
 
     if (total_bytes < options.staged_sm_min_bytes) {
-        return StrategyResult::notApplicable();
+        return StrategyResult::notApplicable(true);
     }
 
     // Build staged params with compact host segments
@@ -187,10 +209,17 @@ StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPl
 
     bool ok = execStagedMemoryCopy(staged_params, entry.get());
     if (!ok) {
-        // Conservatively fall back to generic
-        return StrategyResult::notApplicable();
+        // False permits fallback only before submission or after a checked drain.
+        return StrategyResult::notApplicable(true);
     }
-    return StrategyResult::done();
+    return StrategyResult::done(true);
+} catch (...) {
+#if USING_CUDA
+    // Every concrete CUDA helper drains an attempted operation before throwing.
+    return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR, true);
+#else
+    return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
+#endif
 }
 
 }  // namespace rtp_llm

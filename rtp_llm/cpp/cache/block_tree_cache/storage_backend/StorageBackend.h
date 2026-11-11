@@ -63,20 +63,36 @@ struct StorageQuarantineCounts {
 // Read/write rows and StorageQuarantineReason columns share one state snapshot.
 using StorageQuarantineBreakdown = std::array<std::array<StorageQuarantineCounts, 5>, 2>;
 
+// Describes who protects local targets after UNKNOWN, not whether I/O is safe.
+// Protected completion ownership always takes precedence over this marker.
+enum class StorageLocalTargetProtection {
+    LEGACY,            // StorageBackend retains its existing freeze behavior.
+    TARGETS_HELD,      // The backend already owns protection for every local target.
+    NO_LOCAL_TARGETS,  // The operation only reads local sources.
+};
+
 // The backend accepted an operation but cannot prove that DMA/RDMA has
-// stopped touching its buffers. StorageBackend replaces request pins with
-// permanent FROZEN references for the lifetime of the block pool.
+// stopped touching its buffers. By default StorageBackend replaces request
+// pins with FROZEN references; a backend may explicitly own target protection.
 class StorageOperationCompletionUnknown: public std::runtime_error {
 public:
-    StorageOperationCompletionUnknown(const std::string& message, StorageQuarantineReason reason):
-        std::runtime_error(message), reason_(reason) {}
+    StorageOperationCompletionUnknown(
+        const std::string& message,
+        StorageQuarantineReason reason,
+        StorageLocalTargetProtection local_target_protection = StorageLocalTargetProtection::LEGACY):
+        std::runtime_error(message), reason_(reason), local_target_protection_(local_target_protection) {}
 
     StorageQuarantineReason reason() const noexcept {
         return reason_;
     }
 
+    StorageLocalTargetProtection localTargetProtection() const noexcept {
+        return local_target_protection_;
+    }
+
 private:
-    StorageQuarantineReason reason_;
+    StorageQuarantineReason      reason_;
+    StorageLocalTargetProtection local_target_protection_;
 };
 
 // The transport reported an explicit timeout. Buffer ownership is still
@@ -296,7 +312,8 @@ private:
     void                                 taskFinished();
     void quarantineTask(const std::shared_ptr<storage_backend_detail::StorageTaskState>& state,
                         bool                                                             is_write,
-                        StorageQuarantineReason                                          reason);
+                        StorageQuarantineReason                                          reason,
+                        StorageLocalTargetProtection local_target_protection = StorageLocalTargetProtection::LEGACY);
     std::shared_ptr<const CacheTopology> topology_;
     std::atomic<bool>                    remote_cache_enabled_{true};
     PoolsByTag                           pools_by_tag_;

@@ -3,6 +3,7 @@
 #include <exception>
 #include <iterator>
 #include <memory>
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/LegacyTransferEngine.h"
 #include <algorithm>
 #include <limits>
@@ -28,9 +29,11 @@ namespace rtp_llm {
 
 namespace {
 
-std::shared_ptr<TransferAsyncContext> invalidTransferContext(size_t block_count) {
+std::shared_ptr<TransferAsyncContext> invalidTransferContext(const TransferTask& task) {
+    TransferResult result(ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid block transfer request"));
+    result.buffer_safe = true;
     return std::make_shared<CompletedTransferAsyncContext>(
-        ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid block transfer request"), block_count);
+        std::move(result), task.descriptors().size(), task.completionProof());
 }
 
 // Metadata follows the same physical allocations as the payload. HOST/DISK
@@ -352,16 +355,20 @@ BlockTreeQueueSizes PerRankBlockTransferEngine::queueSizes() const {
 }
 
 std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(TransferTask task) {
+    const auto proof = task.completionProof();
+    block_tree_cache_detail::ScopeRollback unsubmitted([proof] {
+        if (proof) proof->report(true);
+    });
     auto&        descriptors = task.mutableDescriptorsForPreparation();
     const size_t count       = descriptors.size();
     if (count == 0) {
-        return invalidTransferContext(count);
+        return invalidTransferContext(task);
     }
     if (task.expired()) {
-        return std::make_shared<CompletedTransferAsyncContext>(
-            TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before dispatch"),
-                           CacheCopyError::NOT_EXECUTED),
-            count);
+        TransferResult result(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before dispatch"),
+                              CacheCopyError::NOT_EXECUTED);
+        result.buffer_safe = true;
+        return std::make_shared<CompletedTransferAsyncContext>(std::move(result), count, proof);
     }
 
     struct Group {
@@ -387,6 +394,11 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(Transf
     auto context = std::make_shared<TransferBatchAsyncContext>(count);
     auto state   = std::make_shared<TransferStageState>(
         [context](TransferResult result) { context->complete(std::move(result)); }, count);
+    auto safety = std::make_shared<TransferBufferSafetyTracker>([proof] {
+        if (proof) proof->report(true);
+    });
+    block_tree_cache_detail::ScopeRollback close_submission([safety] { safety->finishSubmitting(); });
+    unsubmitted.dismiss();
     bool any_registered = false;
     for (const auto& group : groups) {
         const size_t limit = batchLimit(group.source, group.target);
@@ -394,6 +406,10 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(Transf
             std::vector<size_t> indices;
             bool                registered = false;
             TransferResult      error;
+            std::shared_ptr<TransferBufferSafety> batch_proof;
+            std::shared_ptr<TransferAsyncContext> child;
+            TransferAsyncContext::DoneCallback complete;
+            bool attempted = false;
             try {
                 const size_t end = begin + std::min(limit, group.indices.size() - begin);
                 indices.assign(group.indices.begin() + begin, group.indices.begin() + end);
@@ -406,55 +422,76 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(Transf
                         batch.push_back(std::move(descriptors[index]));
                     }
                 }
+                batch_proof = safety->addBatch();
+                auto completed = std::make_shared<std::atomic<bool>>(false);
+                complete = [state, indices, completed](TransferResult result) {
+                    if (!completed->exchange(true, std::memory_order_acq_rel))
+                        state->completeBatch(std::move(result), indices);
+                };
+                auto batch_task = whole_task ? std::move(task) : task.subtask(std::move(batch));
+                batch_task.setCompletionProof(batch_proof);
                 state->addBatch();
                 registered = any_registered = true;
-                auto child = executeBatch(whole_task ? std::move(task) : task.subtask(std::move(batch)));
+                attempted = true;
+                child = executeBatch(std::move(batch_task));
                 if (!child) {
                     error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer engine returned a null context");
                 } else {
-                    child->onDone(
-                        [state, indices](TransferResult result) { state->completeBatch(std::move(result), indices); });
+                    child->onDone(complete);
                 }
             } catch (const std::exception& exception) {
+                if (batch_proof && !attempted)
+                    batch_proof->report(true);
                 if (!any_registered) {
                     throw;
                 }
-                error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
+                error = TransferResult::executionException(false, exception.what());
+                if (child)
+                    error.status.setErrorCode(ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
             } catch (...) {
+                if (batch_proof && !attempted)
+                    batch_proof->report(true);
                 if (!any_registered) {
                     throw;
                 }
-                error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer submission exception");
+                error = TransferResult::executionException(false, "unknown transfer submission exception");
+                if (child)
+                    error.status.setErrorCode(ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
             }
             if (!error.ok()) {
                 if (!registered) {
+                    close_submission.run();
                     state->finishSubmitting(std::move(error));
                     return context;
                 }
-                state->completeBatch(std::move(error), indices);
+                complete(std::move(error));
             }
         }
     }
     // Already submitted batches retain their resources until every completion
     // arrives, including when a later batch is rejected or throws.
+    close_submission.run();
     state->finishSubmitting();
     return context;
 }
 
 std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::executeBatch(TransferTask task) {
+    block_tree_cache_detail::ScopeRollback unsubmitted([proof = task.completionProof()] {
+        if (proof) proof->report(true);
+    });
     const auto& descriptors  = task.descriptors();
     const Tier source = descriptors.front().source_tier;
     const Tier target = descriptors.front().target_tier;
     const auto  group_set_id = descriptors.front().group_set_id;
     if (group_set_id >= group_sets_.size() || !group_sets_[group_set_id])
-        return invalidTransferContext(descriptors.size());
+        return invalidTransferContext(task);
     const auto* group_set = group_sets_[group_set_id].get();
     for (const auto& descriptor : descriptors) {
         if (!validDescriptor(descriptor, *group_set))
-            return invalidTransferContext(descriptors.size());
+            return invalidTransferContext(task);
     }
     if ((source == Tier::DISK || target == Tier::DISK) && !enable_disk_cache_)
-        return invalidTransferContext(descriptors.size());
+        return invalidTransferContext(task);
     std::vector<const GroupSet*> group_sets(descriptors.size(), group_set);
     if (async_) {
         TransferWorkLoop::BeforeCompleteCallback before_complete;
@@ -468,6 +505,7 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::executeBatch(T
         auto&      next   = isLoadTransfer(source, target) ? next_load_ : next_evict_;
         const auto worker = loops.size() == 1 ? 0 : next.fetch_add(1, std::memory_order_relaxed) % loops.size();
         std::shared_ptr<TransferAsyncContext> context;
+        unsubmitted.dismiss();
         for (size_t offset = 0; offset < loops.size(); ++offset) {
             bool retryable = false;
             // The last owner returns the final rejection and records it once.
@@ -479,7 +517,10 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::executeBatch(T
         }
         return context;
     }
-    const auto submit = [&] { return legacy_->execute(std::move(task), std::move(group_sets)); };
+    const auto submit = [&] {
+        unsubmitted.dismiss();
+        return legacy_->execute(std::move(task), std::move(group_sets));
+    };
     if (!track_decode_origins_)
         return submit();
     auto origins = prepareOriginTransfers(descriptors, group_sets);
@@ -487,6 +528,8 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::executeBatch(T
         return submit();
     std::shared_ptr<TransferBatchAsyncContext> observed;
     try {
+        // The underlying producer owns the proof; this context only observes
+        // its business result after settling decode-origin metadata.
         observed = std::make_shared<TransferBatchAsyncContext>(descriptors.size());
     } catch (const std::bad_alloc&) {
         // Attribution is optional; the already-cleared destination remains

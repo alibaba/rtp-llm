@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionQuery.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -27,6 +28,8 @@ class BroadcastManager;
 class PrefillCacheHitMetricsReporter;
 class KVCacheAllocationWaitState;
 class KVCacheEventReporter;
+class FrozenTaskRecovery;
+class TransferCompletionCleanup;
 
 class KVCacheManager {
 public:
@@ -135,6 +138,17 @@ public:
     // succeeded; the transfer outcome is reported through mem_response.code.
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
 
+    // One observation of the original execution; does not release frozen references.
+    TransferCompletionQueryResult queryTransferCompletion(const FrozenTask::ExecutionInfo& execution,
+                                                         int timeout_ms) const;
+
+    TransferCompletionForgetResult forgetTransferCompletion(const TransferCompletionTarget& target,
+                                                            const std::vector<TransferExecutionTrace>& traces,
+                                                            int timeout_ms) const;
+
+    // Snapshot both existing owners; taking a snapshot does not transfer custody.
+    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
+
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;
     }
@@ -155,6 +169,10 @@ private:
     void                              reportMetricsLoop();
     void                              reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
+    TransferTaskRegistry::State localTransferCompletion(const TransferExecutionTrace& trace_id) const;
+    TransferTaskRegistry::ForgetResult localForgetTransferCompletion(const TransferExecutionTrace& trace_id) const;
+    bool startFrozenTaskRecovery();
+    void stopFrozenTaskRecovery() noexcept;
 
     // 成员变量
     CacheConfig                config_;
@@ -179,6 +197,9 @@ private:
     std::thread       metrics_reporter_thread_;
 
     BlockTreeCachePtr                           block_tree_cache_;
+    std::shared_ptr<BroadcastManager>           transfer_broadcast_manager_;
+    std::unique_ptr<FrozenTaskRecovery>         frozen_task_recovery_;
+    std::shared_ptr<TransferCompletionCleanup> completion_cleanup_;
     std::shared_ptr<KVCacheAllocationWaitState> allocation_wait_state_;
 
     mutable std::mutex          cache_store_mutex_;

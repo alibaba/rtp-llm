@@ -139,7 +139,7 @@ void IBlockPool::incTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type
         [this, ref_type_index](BlockIdxType block) { incTreeRefNoLock(block, ref_type_index); });
 }
 
-void IBlockPool::incTreeRefNoLock(BlockIdxType block, size_t ref_type_index) {
+void IBlockPool::incTreeRefNoLock(BlockIdxType block, size_t ref_type_index, const char* abort_context) {
     RTP_LLM_CHECK(tree_refcounts_[block] < std::numeric_limits<uint32_t>::max());
     const bool was_active    = isActiveNoLock(block);
     const bool was_available = isAvailableNoLock(block);
@@ -162,13 +162,16 @@ void IBlockPool::incTreeRefNoLock(BlockIdxType block, size_t ref_type_index) {
         const double frozen_ratio  = static_cast<double>(frozen_blocks) / static_cast<double>(total_blocks);
         if (frozen_ratio > effective_frozen_block_abort_ratio_) {
             RTP_LLM_LOG_ERROR(
-                "pool [%s] frozen blocks exceed abort ratio %.17g (lower=%.17g upper=%.17g): frozen=%zu total=%zu",
+                "pool [%s] frozen blocks exceed abort ratio %.17g (lower=%.17g upper=%.17g): frozen=%zu total=%zu "
+                "block=%d context=%s",
                 config_->pool_name.c_str(),
                 effective_frozen_block_abort_ratio_,
                 config_->frozen_block_abort_lower_ratio,
                 config_->frozen_block_abort_upper_ratio,
                 frozen_blocks,
-                total_blocks);
+                total_blocks,
+                block,
+                abort_context ? abort_context : "unavailable");
             fflush(stdout);
             fflush(stderr);
             std::abort();
@@ -176,11 +179,11 @@ void IBlockPool::incTreeRefNoLock(BlockIdxType block, size_t ref_type_index) {
     }
 }
 
-void IBlockPool::freezeBlock(BlockIdxType block) noexcept {
+void IBlockPool::freezeBlock(BlockIdxType block, const char* abort_context) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     checkAllocatedNoLock(block);
-    incTreeRefNoLock(block, treeRefTypeIndex(BlockTreeRefType::FROZEN));
+    incTreeRefNoLock(block, treeRefTypeIndex(BlockTreeRefType::FROZEN), abort_context);
 }
 
 bool IBlockPool::isFrozen(BlockIdxType block) const {
@@ -188,6 +191,56 @@ bool IBlockPool::isFrozen(BlockIdxType block) const {
     checkInitializedNoLock();
     RTP_LLM_CHECK(validBlockNoLock(block));
     return treeRefCountNoLock(block, BlockTreeRefType::FROZEN) != 0;
+}
+
+std::function<void()> IBlockPool::prepareFrozenReferenceRelease(BlockIdList blocks) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    checkUniqueBlocksNoLock(blocks);
+    for (const auto block : blocks) {
+        checkAllocatedNoLock(block);
+    }
+    // All live allocations can eventually be returned without growing this
+    // vector, including when ordinary ownership disappears before unfreeze.
+    reserveAllReleasedBlocksNoLock();
+    auto notify = capacity_change_callback_;
+    return [this, blocks = std::move(blocks), notify = std::move(notify)]() noexcept {
+        releaseFrozenReferences(blocks, notify);
+    };
+}
+
+void IBlockPool::releaseFrozenReferences(const BlockIdList& blocks, const std::function<void()>& notify) noexcept {
+    bool capacity_grew = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto type = treeRefTypeIndex(BlockTreeRefType::FROZEN);
+        // Preparation already checked uniqueness. Validate the whole balance
+        // before changing any block; a violated ownership contract is fatal.
+        for (const auto block : blocks) {
+            checkAllocatedNoLock(block);
+            RTP_LLM_CHECK(tree_refcounts_by_type_[type][block] > 0);
+        }
+        const auto free_before      = availableFreeBlocksNoLock();
+        const auto available_before = available_blocks_num_;
+        for (const auto block : blocks) {
+            const bool was_active    = isActiveNoLock(block);
+            const bool was_available = isAvailableNoLock(block);
+            if (--tree_refcounts_by_type_[type][block] == 0) {
+                --tree_referenced_block_counts_[type];
+            }
+            if (--tree_refcounts_[block] == 0 && onLastTreeRefNoLock(block)) {
+                freeAllocatedBlockNoLock(block);
+            }
+            updateActiveBlocksNumNoLock(block, was_active);
+            updateAvailableBlocksNumNoLock(block, was_available);
+        }
+        capacity_grew = availableFreeBlocksNoLock() > free_before || available_blocks_num_ > available_before;
+    }
+    if (capacity_grew && notify) {
+        try {
+            notify();
+        } catch (...) {}
+    }
 }
 
 void IBlockPool::decTreeRef(BlockIdxType block, BlockTreeRefType ref_type) {

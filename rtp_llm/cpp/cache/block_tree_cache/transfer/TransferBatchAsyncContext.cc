@@ -47,6 +47,11 @@ TransferResult TransferBatchAsyncContext::result() const {
 }
 
 void TransferBatchAsyncContext::complete(TransferResult result) {
+    // Physical evidence is independent of the business result and its one-shot
+    // completion gate. Publish it before any result expansion or user callback.
+    if (completion_proof_) {
+        completion_proof_->report(result.buffer_safe);
+    }
     std::vector<DoneCallback> callbacks;
     {
         std::lock_guard<std::mutex> lock(mutex_);

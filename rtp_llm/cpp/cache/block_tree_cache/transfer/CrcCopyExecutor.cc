@@ -119,28 +119,45 @@ TransferStatus CrcCopyExecutor::statusFor(CrcCopyState state) {
 }
 
 TransferResult CrcCopyExecutor::mapResult(CrcCopyState                           result,
-                                          CrcCopyDirection                       direction,
-                                          const std::vector<TransferDescriptor>& descriptors,
-                                          const std::vector<CrcCopyFailure>&     failures) {
-    TransferResult transfer_result(statusFor(result));
-    transfer_result.expandBlockErrors(descriptors.size());
-    if (result == CrcCopyState::CRC_MISMATCH) {
-        // A failed load may have scattered every item. Keep the whole batch
-        // uncommitted so callers discard its targets, including healthy items.
-        std::fill(transfer_result.block_errors.begin(),
-                  transfer_result.block_errors.end(),
-                  direction == CrcCopyDirection::EVICT ? CacheCopyError::NONE : CacheCopyError::NOT_EXECUTED);
+                                             CrcCopyDirection                       direction,
+                                             const std::vector<TransferDescriptor>& descriptors,
+                                             const std::vector<CrcCopyFailure>&     failures) {
+    const auto status = statusFor(result);
+    TransferResult transfer_result;
+    transfer_result.status.setErrorCode(status == TransferStatus::OK ? ErrorCode::NONE_ERROR :
+                                       status == TransferStatus::INVALID_ARGS ? ErrorCode::INVALID_PARAMS :
+                                                                                ErrorCode::EXECUTION_EXCEPTION);
+    transfer_result.copy_error = cacheCopyErrorFor(status);
+    try {
+        transfer_result.status = transferStatusToErrorInfo(status);
+        transfer_result.expandBlockErrors(descriptors.size());
+        if (result == CrcCopyState::CRC_MISMATCH) {
+            // A failed load may have scattered every item. Keep the whole batch
+            // uncommitted so callers discard its targets, including healthy items.
+            std::fill(transfer_result.block_errors.begin(),
+                      transfer_result.block_errors.end(),
+                      direction == CrcCopyDirection::EVICT ? CacheCopyError::NONE : CacheCopyError::NOT_EXECUTED);
+        }
+        for (const auto& failure : failures) {
+            const auto& descriptor                           = descriptors[failure.item_index];
+            const auto  failure_status                       = statusFor(failure.status);
+            transfer_result.block_errors[failure.item_index] = cacheCopyErrorFor(failure_status);
+            const auto failure_error                         = transferStatusToErrorInfo(failure_status);
+            transfer_result.merge({ErrorInfo(failure_error.code(),
+                                             failure_error.ToString() + ", descriptor_index="
+                                                 + std::to_string(failure.item_index) + ", " + descriptor.debugString()),
+                                   cacheCopyErrorFor(failure_status)});
+        }
+    } catch (...) {
+        // Terminal CUDA evidence survives allocation/formatting failures. A
+        // uniform result is valid when per-block diagnostics cannot be built.
+        transfer_result.block_errors.clear();
     }
-    for (const auto& failure : failures) {
-        const auto& descriptor                           = descriptors[failure.item_index];
-        const auto  failure_status                       = statusFor(failure.status);
-        transfer_result.block_errors[failure.item_index] = cacheCopyErrorFor(failure_status);
-        const auto failure_error                         = transferStatusToErrorInfo(failure_status);
-        transfer_result.merge({ErrorInfo(failure_error.code(),
-                                         failure_error.ToString() + ", descriptor_index="
-                                             + std::to_string(failure.item_index) + ", " + descriptor.debugString()),
-                               cacheCopyErrorFor(failure_status)});
-    }
+    // These states either rejected before CUDA submission or returned after
+    // the workspace completed diagnostics and drained all submitted accesses.
+    // Set the proof after merging diagnostic errors, whose default is unknown.
+    transfer_result.buffer_safe = result == CrcCopyState::OK || result == CrcCopyState::INVALID_ARGS
+                                  || result == CrcCopyState::CRC_MISMATCH || result == CrcCopyState::DEVICE_ERROR;
     return transfer_result;
 }
 
@@ -167,15 +184,34 @@ CrcCopyItem CrcCopyExecutor::makeItem(const HostBufferView&     host,
 }
 
 bool CrcCopyExecutor::trySubmit(const std::vector<HostBufferView>&     hosts,
-                                const std::vector<TransferDescriptor>& descriptors,
-                                const GroupSetPtr&                     group,
-                                DoneCallback                           done) {
-    if (!accepting_) {
-        done(TransferStatus::INVALID_ARGS);
+                                   const std::vector<TransferDescriptor>& descriptors,
+                                   const GroupSetPtr&                     group,
+                                   DoneCallback                           done) {
+    if (!done)
+        throw std::invalid_argument("CRC stage callback is required");
+    const auto reject = [&] {
+        TransferResult result(TransferStatus::INVALID_ARGS);
+        result.buffer_safe = true;  // This request has not submitted any CUDA access.
+        done(std::move(result));
         return true;
+    };
+    if (!accepting_ || !async_ || !group || hosts.empty() || hosts.size() != descriptors.size()) {
+        return reject();
     }
     const bool evict     = descriptors.front().source_tier == Tier::DEVICE;
     const auto direction = evict ? CrcCopyDirection::EVICT : CrcCopyDirection::LOAD;
+    if (!group->crcEnabled() || groups_.find(group.get()) == groups_.end())
+        return reject();
+    for (size_t i = 0; i < descriptors.size(); ++i) {
+        const auto& blocks = descriptors[i].blocksAt(Tier::DEVICE);
+        if ((descriptors[i].source_tier == Tier::DEVICE) != evict
+            || !isValidHostBufferView(hosts[i], group->payloadBytes(), group->storageBytes())
+            || blocks.size() != group->devicePools().size())
+            return reject();
+        for (size_t member = 0; member < blocks.size(); ++member)
+            if (!group->devicePools()[member]->validBlock(blocks[member]))
+                return reject();
+    }
     Slot* slot = nullptr;
     for (auto& candidate : slots_.at(deviceFor(*group)))
         if (!candidate.operation) {
@@ -196,6 +232,9 @@ bool CrcCopyExecutor::trySubmit(const std::vector<HostBufferView>&     hosts,
             const auto& descriptor = operation.descriptors[i];
             items.push_back(makeItem(hosts[i], descriptor, group, true));
         }
+        TransferResult invalid(TransferStatus::INVALID_ARGS);
+        TransferResult failed(TransferStatus::DEVICE_IO_ERROR);
+        invalid.buffer_safe = failed.buffer_safe = true;
         operation.done = std::move(done);
         // The primitive returns only after draining any partial submission error.
         const auto state = slot->copy->trySubmit(items, direction);
@@ -204,8 +243,7 @@ bool CrcCopyExecutor::trySubmit(const std::vector<HostBufferView>&     hosts,
         auto callback = std::move(operation.done);
         slot->operation.reset();
         if (state != CrcCopyState::BUSY)
-            callback(state == CrcCopyState::INVALID_ARGS ? TransferStatus::INVALID_ARGS :
-                                                           TransferStatus::DEVICE_IO_ERROR);
+            callback(state == CrcCopyState::INVALID_ARGS ? std::move(invalid) : std::move(failed));
         return state != CrcCopyState::BUSY;
     } catch (...) {
         slot->operation.reset();
@@ -221,8 +259,8 @@ void CrcCopyExecutor::advance(Slot& slot, bool deliver) {
         const auto state = slot.copy->poll();
         if (state == CrcCopyState::PENDING)
             return;
-        // Construct the result before retiring the terminal workspace.
-        // Allocation failures propagate to the caller.
+        // Construct the result before retiring the terminal workspace. Mapping
+        // preserves terminal safety even if diagnostic allocation fails.
         const auto direction = operation.descriptors.front().source_tier == Tier::DEVICE ? CrcCopyDirection::EVICT :
                                                                                            CrcCopyDirection::LOAD;
         operation.result     = mapResult(state, direction, operation.descriptors, slot.copy->failures());

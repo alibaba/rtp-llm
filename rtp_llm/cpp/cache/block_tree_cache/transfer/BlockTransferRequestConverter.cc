@@ -255,6 +255,7 @@ CacheCopyError BlockTransferRequestConverter::decodeCode(MemoryOperationResponse
 void BlockTransferRequestConverter::encodeTransferResult(MemoryOperationResponsePB& response,
                                                          const TransferResult&      result) {
     response.set_code(encodeCode(result.copy_error));
+    response.set_buffer_safe(result.buffer_safe);
     response.mutable_error_info()->set_error_code(static_cast<int64_t>(result.status.code()));
     response.mutable_error_info()->set_error_message(result.status.ToString());
     response.clear_block_errors();
@@ -271,7 +272,8 @@ TransferResult BlockTransferRequestConverter::decodeTransferResult(const MemoryO
         result.expandBlockErrors(block_count);
         return result;
     }
-    result.copy_error = decodeCode(response.code());
+    result.buffer_safe = response.buffer_safe();
+    result.copy_error  = decodeCode(response.code());
     for (int index = 0; index < response.block_errors_size(); ++index) {
         const auto block_error = decodeCode(response.block_errors(index));
         result.block_errors.push_back(block_error);

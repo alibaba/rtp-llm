@@ -2000,6 +2000,156 @@ TEST(StorageBackendTest, UnknownReadFreezesBeforeCallbackAndReleasesTaskState) {
     }
 }
 
+TEST(StorageBackendTest, HeldReadTargetsSkipLegacyFreezeAndPreserveUnknownResult) {
+    for (const bool timeout : {false, true}) {
+        SCOPED_TRACE(timeout);
+        auto pool = std::make_shared<TestBlockPool>();
+        const auto target = pool->malloc().value();
+        const auto untouched = pool->malloc().value();
+        pool->incRef(target);
+        pool->incRef(untouched);
+        auto executor = std::make_shared<HoldingExecutor>();
+        executor->setDuplicate(true);
+        QuarantineObservingBackend backend(true, executor);
+        ASSERT_TRUE(initBackend(backend, pool));
+        const auto reason = timeout ? StorageQuarantineReason::RPC_TIMEOUT : StorageQuarantineReason::RPC_ERROR;
+        backend.read_action = [pool, target, reason, timeout] {
+            // The backend has protected the actual transfer target before it
+            // hands the UNKNOWN result back to ordinary pin settlement.
+            pool->freezeBlock(target);
+            if (timeout) {
+                throw StorageOperationTimeout("held read target timed out", reason,
+                                               StorageLocalTargetProtection::TARGETS_HELD);
+            }
+            throw StorageOperationCompletionUnknown("held read target completion unknown", reason,
+                                                     StorageLocalTargetProtection::TARGETS_HELD);
+        };
+        auto request = makeRequest(target, 2);
+        request.handles.back().front().block = untouched;
+        std::weak_ptr<const CacheKeysType> request_keys = request.keys;
+        size_t callbacks = 0;
+        backend.read(std::move(request), nullptr, [&](ErrorInfo error) {
+            ++callbacks;
+            EXPECT_EQ(error.code(), timeout ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION);
+            EXPECT_EQ(pool->treeRefCount(target), 1u);
+            EXPECT_EQ(pool->refCount(target), 2u);
+            EXPECT_FALSE(pool->isFrozen(untouched));
+            EXPECT_EQ(pool->refCount(untouched), 1u);
+        });
+        ASSERT_EQ(executor->runAll(), 1u);
+        EXPECT_EQ(callbacks, 1u);
+        EXPECT_TRUE(request_keys.expired());
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+        EXPECT_EQ(backend.quarantine_events, 1u);
+        EXPECT_FALSE(backend.last_quarantine_is_write);
+        EXPECT_EQ(backend.last_quarantine_reason, reason);
+        // Existing accounting records request pins, independently of which
+        // targets the transfer owner actually froze.
+        EXPECT_EQ(backend.last_quarantine_blocks, 2u);
+        EXPECT_EQ(backend.quarantined_tasks, 1u);
+        EXPECT_EQ(backend.quarantined_blocks, 2u);
+        backend.shutdown();
+        EXPECT_EQ(pool->treeRefCount(target), 1u);
+        pool->decRef(target);
+        pool->decRef(untouched);
+        EXPECT_TRUE(pool->isAllocated(target));
+        EXPECT_FALSE(pool->isAllocated(untouched));
+    }
+}
+
+TEST(StorageBackendTest, UnknownWriteWithoutLocalTargetsReleasesPinsButStillCountsFailure) {
+    for (const bool timeout : {false, true}) {
+        SCOPED_TRACE(timeout);
+        auto pool = std::make_shared<TestBlockPool>();
+        const auto block = pool->malloc().value();
+        pool->incRef(block);
+        auto executor = std::make_shared<HoldingExecutor>();
+        executor->setDuplicate(true);
+        QuarantineObservingBackend backend(true, executor);
+        ASSERT_TRUE(initBackend(backend, pool));
+        const auto reason = timeout ? StorageQuarantineReason::RPC_TIMEOUT : StorageQuarantineReason::RPC_ERROR;
+        backend.write_action = [reason, timeout] {
+            if (timeout) {
+                throw StorageOperationTimeout("write timed out without local targets", reason,
+                                               StorageLocalTargetProtection::NO_LOCAL_TARGETS);
+            }
+            throw StorageOperationCompletionUnknown("write completion unknown without local targets", reason,
+                                                     StorageLocalTargetProtection::NO_LOCAL_TARGETS);
+        };
+        auto request = makeRequest(block, 2);
+        std::weak_ptr<const CacheKeysType> request_keys = request.keys;
+        ASSERT_TRUE(backend.write(backend.prepareWrite(std::move(request))));
+        EXPECT_EQ(pool->refCount(block), 2u);
+        ASSERT_EQ(executor->runAll(), 1u);
+        EXPECT_TRUE(request_keys.expired());
+        EXPECT_FALSE(pool->isFrozen(block));
+        EXPECT_EQ(pool->treeRefCount(block), 0u);
+        EXPECT_EQ(pool->refCount(block), 1u);
+        EXPECT_EQ(backend.quarantine_events, 1u);
+        EXPECT_TRUE(backend.last_quarantine_is_write);
+        EXPECT_EQ(backend.last_quarantine_reason, reason);
+        EXPECT_EQ(backend.last_quarantine_blocks, 1u);
+        EXPECT_EQ(backend.quarantined_tasks, 1u);
+        EXPECT_EQ(backend.quarantined_blocks, 1u);
+        backend.shutdown();
+        pool->decRef(block);
+        EXPECT_FALSE(pool->isAllocated(block));
+    }
+}
+
+TEST(StorageBackendTest, ProtectedUnknownIgnoresLocalTargetProtectionMarkers) {
+    for (const auto protection : {StorageLocalTargetProtection::TARGETS_HELD,
+                                  StorageLocalTargetProtection::NO_LOCAL_TARGETS}) {
+        SCOPED_TRACE(static_cast<int>(protection));
+        for (const bool is_write : {false, true}) {
+            SCOPED_TRACE(is_write);
+            auto pool = std::make_shared<TestBlockPool>();
+            const auto block = pool->malloc().value();
+            pool->incRef(block);
+            auto executor = std::make_shared<HoldingExecutor>();
+            ProtectedBackend backend(true, executor);
+            block_tree_cache_detail::ScopeRollback cleanup([&] {
+                backend.proveQuiescence();
+                backend.shutdown();
+            });
+            ASSERT_TRUE(initBackend(backend, pool));
+            auto request = makeRequest(block);
+            std::weak_ptr<const CacheKeysType> request_keys = request.keys;
+            size_t callbacks = 0;
+            if (is_write) {
+                backend.write_action = [protection] {
+                    throw StorageOperationCompletionUnknown("protected write remains unknown",
+                                                             StorageQuarantineReason::RPC_ERROR, protection);
+                };
+                ASSERT_TRUE(backend.write(backend.prepareWrite(std::move(request))));
+            } else {
+                backend.read_action = [protection] {
+                    throw StorageOperationTimeout("protected read remains unknown",
+                                                   StorageQuarantineReason::RPC_TIMEOUT, protection);
+                };
+                backend.read(std::move(request), nullptr, [&](ErrorInfo error) {
+                    ++callbacks;
+                    EXPECT_EQ(error.code(), ErrorCode::DEADLINE_EXCEEDED);
+                    EXPECT_EQ(pool->refCount(block), 2u);
+                });
+            }
+            ASSERT_EQ(executor->runAll(), 1u);
+            EXPECT_EQ(callbacks, is_write ? 0u : 1u);
+            EXPECT_FALSE(request_keys.expired());
+            EXPECT_FALSE(pool->isFrozen(block));
+            EXPECT_EQ(pool->refCount(block), 2u);
+            EXPECT_EQ(backend.quarantine_events, 1u);
+            EXPECT_EQ(backend.last_quarantine_is_write, is_write);
+            EXPECT_EQ(backend.quarantined_tasks, 1u);
+            EXPECT_EQ(backend.quarantined_blocks, 1u);
+            cleanup.run();
+            EXPECT_TRUE(request_keys.expired());
+            EXPECT_EQ(pool->refCount(block), 1u);
+            pool->decRef(block);
+        }
+    }
+}
+
 TEST(StorageBackendTest, RepeatedUnknownWritesKeepFrozenReferencesAcrossShutdown) {
     auto pool  = std::make_shared<TestBlockPool>();
     auto block = pool->malloc().value();

@@ -505,6 +505,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("block_tree_transfer_worker_count", &KVCacheConfig::block_tree_transfer_worker_count)
         .def_readwrite("block_tree_business_queue_max_size", &KVCacheConfig::block_tree_business_queue_max_size)
         .def_readwrite("block_tree_transfer_queue_max_size", &KVCacheConfig::block_tree_transfer_queue_max_size)
+        .def_readwrite("block_tree_frozen_recovery_interval_ms", &KVCacheConfig::block_tree_frozen_recovery_interval_ms)
+        .def_readwrite("block_tree_frozen_recovery_query_timeout_ms",
+                       &KVCacheConfig::block_tree_frozen_recovery_query_timeout_ms)
         .def_readwrite("block_pool_frozen_abort_lower_ratio", &KVCacheConfig::block_pool_frozen_abort_lower_ratio)
         .def_readwrite("block_pool_frozen_abort_upper_ratio", &KVCacheConfig::block_pool_frozen_abort_upper_ratio)
         .def_readwrite("block_tree_device_evict_low_watermark_ratio",
@@ -606,7 +609,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      19,
+                                      20,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -696,7 +699,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.disk_cache_read_thread_count,
                                       self.disk_cache_write_thread_count,
                                       self.block_pool_frozen_abort_upper_ratio,
-                                      self.disk_cache_evict_max_pending_bytes);
+                                      self.disk_cache_evict_max_pending_bytes,
+                                      self.block_tree_frozen_recovery_interval_ms,
+                                      self.block_tree_frozen_recovery_query_timeout_ms);
             },
             [](py::tuple t) {
                 if (t.size() < 2 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
@@ -704,7 +709,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     || !((t.size() == 83 && t[1].cast<int>() == 13) || (t.size() == 84 && t[1].cast<int>() == 14)
                          || (t.size() == 85 && t[1].cast<int>() == 15) || (t.size() == 86 && t[1].cast<int>() == 16)
                          || (t.size() == 90 && t[1].cast<int>() == 17) || (t.size() == 91 && t[1].cast<int>() == 18)
-                         || (t.size() == 92 && t[1].cast<int>() == 19))) {
+                         || (t.size() == 92 && t[1].cast<int>() == 19)
+                         || (t.size() == 94 && t[1].cast<int>() == 20))) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
@@ -804,6 +810,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
                 if (t.size() >= 91) {
                     c.block_pool_frozen_abort_upper_ratio = t[90].cast<double>();
+                }
+                if (t.size() >= 94) {
+                    c.block_tree_frozen_recovery_interval_ms = t[92].cast<int64_t>();
+                    c.block_tree_frozen_recovery_query_timeout_ms = t[93].cast<int64_t>();
+                }
+                if (c.block_tree_frozen_recovery_interval_ms < 0
+                    || c.block_tree_frozen_recovery_interval_ms > std::numeric_limits<int>::max()
+                    || c.block_tree_frozen_recovery_query_timeout_ms <= 0
+                    || c.block_tree_frozen_recovery_query_timeout_ms > std::numeric_limits<int>::max()) {
+                    throw std::runtime_error("invalid KVCacheConfig frozen recovery timing: expected interval in "
+                                             "[0, INT_MAX] and query timeout in [1, INT_MAX]");
                 }
                 if (!std::isfinite(c.block_pool_frozen_abort_lower_ratio)
                     || !std::isfinite(c.block_pool_frozen_abort_upper_ratio)

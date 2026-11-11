@@ -252,6 +252,8 @@ class GenerateConfigTest(TestCase):
             "BLOCK_TREE_BUSINESS_QUEUE_MAX_SIZE": "211",
             "BLOCK_TREE_TRANSFER_QUEUE_MAX_SIZE": "307",
             "DISK_CACHE_EVICT_MAX_PENDING_BYTES": "83886080",
+            "BLOCK_TREE_FROZEN_RECOVERY_INTERVAL_MS": "2500",
+            "BLOCK_TREE_FROZEN_RECOVERY_QUERY_TIMEOUT_MS": "750",
             "BLOCK_TREE_DEVICE_EVICT_LOW_WATERMARK_RATIO": "0.71",
             "BLOCK_TREE_DEVICE_EVICT_HIGH_WATERMARK_RATIO": "0.81",
             "BLOCK_TREE_MEMORY_EVICT_LOW_WATERMARK_RATIO": "0.72",
@@ -284,6 +286,8 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.block_tree_business_queue_max_size, 211)
         self.assertEqual(config.block_tree_transfer_queue_max_size, 307)
         self.assertEqual(config.disk_cache_evict_max_pending_bytes, 80 * 1024 * 1024)
+        self.assertEqual(config.block_tree_frozen_recovery_interval_ms, 2500)
+        self.assertEqual(config.block_tree_frozen_recovery_query_timeout_ms, 750)
         self.assertEqual(config.block_tree_device_evict_low_watermark_ratio, 0.71)
         self.assertEqual(config.block_tree_device_evict_high_watermark_ratio, 0.81)
         self.assertEqual(config.block_tree_memory_evict_low_watermark_ratio, 0.72)
@@ -340,6 +344,8 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.reserve_block_ratio, 5)
         self.assertEqual(config.block_pool_frozen_abort_lower_ratio, 0.3)
         self.assertEqual(config.block_pool_frozen_abort_upper_ratio, 0.4)
+        self.assertEqual(config.block_tree_frozen_recovery_interval_ms, 1000)
+        self.assertEqual(config.block_tree_frozen_recovery_query_timeout_ms, 1000)
         self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 30000)
         self.assertFalse(hasattr(config, "write_cache_sync"))
 
@@ -564,6 +570,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_transfer_queue_max_size = 307
         config.block_pool_frozen_abort_lower_ratio = 0.45
         config.block_pool_frozen_abort_upper_ratio = 0.8
+        config.block_tree_frozen_recovery_interval_ms = 0
+        config.block_tree_frozen_recovery_query_timeout_ms = 750
         config.block_tree_device_evict_low_watermark_ratio = 0.71
         config.block_tree_device_evict_high_watermark_ratio = 0.81
         config.block_tree_memory_evict_low_watermark_ratio = 0.72
@@ -572,8 +580,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 92)
-        self.assertEqual(state[:2], ("KVCacheConfig", 19))
+        self.assertEqual(len(state), 94)
+        self.assertEqual(state[:2], ("KVCacheConfig", 20))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -594,6 +602,8 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(restored.block_tree_transfer_queue_max_size, 307)
         self.assertEqual(restored.block_pool_frozen_abort_lower_ratio, 0.45)
         self.assertEqual(restored.block_pool_frozen_abort_upper_ratio, 0.8)
+        self.assertEqual(restored.block_tree_frozen_recovery_interval_ms, 0)
+        self.assertEqual(restored.block_tree_frozen_recovery_query_timeout_ms, 750)
         self.assertEqual(restored.block_tree_device_evict_low_watermark_ratio, 0.71)
         self.assertEqual(restored.block_tree_device_evict_high_watermark_ratio, 0.81)
         self.assertEqual(restored.block_tree_memory_evict_low_watermark_ratio, 0.72)
@@ -636,6 +646,8 @@ class GenerateConfigTest(TestCase):
             "btc_transfer_engine_async": "bool",
             "block_tree_business_queue_max_size": "int",
             "block_tree_transfer_queue_max_size": "int",
+            "block_tree_frozen_recovery_interval_ms": "int",
+            "block_tree_frozen_recovery_query_timeout_ms": "int",
             "block_pool_frozen_abort_lower_ratio": "float",
             "block_pool_frozen_abort_upper_ratio": "float",
             "block_tree_device_evict_low_watermark_ratio": "float",

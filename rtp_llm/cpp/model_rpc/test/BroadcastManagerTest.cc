@@ -1,3 +1,4 @@
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <thread>
@@ -48,6 +49,103 @@ TEST(BroadcastDiagnosticsTest, CompletionTimesAreRecordedOncePerRankAndOnlyWhenF
     result.finishRank(0, true);
     EXPECT_GE(result.completionTimesUs()[0], times[1]);
     EXPECT_TRUE(result.done());
+}
+
+namespace {
+struct CopyObservedResponse {
+    std::shared_ptr<std::atomic<size_t>> copies;
+    CopyObservedResponse() = default;
+    CopyObservedResponse(const CopyObservedResponse& other): copies(other.copies) {
+        if (copies) {
+            ++*copies;
+        }
+    }
+    CopyObservedResponse& operator=(const CopyObservedResponse& other) {
+        copies = other.copies;
+        if (copies) {
+            ++*copies;
+        }
+        return *this;
+    }
+};
+}  // namespace
+
+TEST(BroadcastDiagnosticsTest, PendingAndLocallyFinishedRanksNeverReadGrpcResponseOrDefaultStatus) {
+    using Result = BroadcastResult<int, CopyObservedResponse>;
+    auto context = std::make_shared<Result::WorkerRpcContext>();
+    auto copies  = std::make_shared<std::atomic<size_t>>(0);
+    context->response.copies = copies;
+    Result result({context});
+    result.markDispatchStarted(0);
+
+    auto pending = result.rankSnapshots();
+    ASSERT_EQ(pending.size(), 1u);
+    EXPECT_EQ(pending[0].dispatch_state, BroadcastDispatchState::POSSIBLY_SUBMITTED);
+    EXPECT_FALSE(pending[0].cq_received);
+    EXPECT_FALSE(pending[0].grpc_code.has_value());
+    EXPECT_FALSE(pending[0].response.has_value());
+    EXPECT_EQ(copies->load(), 0u);
+
+    result.finishDispatchFailure(0, "Finish failed after the RPC may have started");
+    EXPECT_TRUE(result.done());
+    EXPECT_FALSE(result.success());
+    const auto failed = result.rankSnapshots();
+    EXPECT_FALSE(failed[0].cq_received);
+    EXPECT_FALSE(failed[0].grpc_code.has_value());
+    EXPECT_FALSE(failed[0].response.has_value());
+    EXPECT_EQ(failed[0].dispatch_error, "Finish failed after the RPC may have started");
+    EXPECT_EQ(result.responses().size(), 1u);
+    EXPECT_EQ(copies->load(), 0u);
+
+    // A real, late CQ event makes the response readable without reversing the
+    // previously published aggregate failure or mutating an earlier snapshot.
+    result.finishRank(0, true);
+    const auto completed = result.rankSnapshots();
+    EXPECT_TRUE(completed[0].cq_received);
+    EXPECT_TRUE(completed[0].cq_ok);
+    EXPECT_EQ(completed[0].dispatch_state, BroadcastDispatchState::SUBMITTED);
+    ASSERT_TRUE(completed[0].grpc_code.has_value());
+    EXPECT_EQ(*completed[0].grpc_code, grpc::StatusCode::OK);
+    EXPECT_TRUE(completed[0].response.has_value());
+    EXPECT_GT(copies->load(), 0u);
+    EXPECT_FALSE(failed[0].cq_received);
+    EXPECT_FALSE(result.success());
+}
+
+TEST(BroadcastDiagnosticsTest, FailedCqDoesNotInventGrpcOkStatus) {
+    using Result = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    auto context = std::make_shared<Result::WorkerRpcContext>();
+    Result result({context});
+    result.finishRank(0, false);
+    const auto snapshots = result.rankSnapshots();
+    ASSERT_EQ(snapshots.size(), 1u);
+    EXPECT_TRUE(snapshots[0].cq_received);
+    EXPECT_FALSE(snapshots[0].cq_ok);
+    EXPECT_FALSE(snapshots[0].grpc_code.has_value());
+    EXPECT_FALSE(snapshots[0].response.has_value());
+}
+
+TEST(BroadcastDiagnosticsTest, RankSnapshotsKeepEveryRawGrpcFailure) {
+    using Result = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    auto first = std::make_shared<Result::WorkerRpcContext>();
+    auto second = std::make_shared<Result::WorkerRpcContext>();
+    first->server_addr = "worker-0";
+    first->status = grpc::Status(grpc::StatusCode::UNAVAILABLE, "Connect Failed");
+    second->server_addr = "worker-1";
+    second->status = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "slow transfer");
+    Result result({first, second});
+    result.finishRank(1, true);
+    result.finishRank(0, true);
+    const auto snapshots = result.rankSnapshots();
+    ASSERT_EQ(snapshots.size(), 2u);
+    ASSERT_TRUE(snapshots[0].grpc_code.has_value());
+    ASSERT_TRUE(snapshots[1].grpc_code.has_value());
+    EXPECT_EQ(*snapshots[0].grpc_code, grpc::StatusCode::UNAVAILABLE);
+    EXPECT_EQ(snapshots[0].grpc_message, "Connect Failed");
+    EXPECT_EQ(snapshots[0].server_address, "worker-0");
+    EXPECT_EQ(*snapshots[1].grpc_code, grpc::StatusCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(snapshots[1].grpc_message, "slow transfer");
+    EXPECT_TRUE(result.deadlineExceeded());
 }
 
 TEST(BroadcastDiagnosticsTest, OtherRpcFailuresAreNotConnectFailures) {
@@ -684,6 +782,49 @@ std::shared_ptr<FunctionBroadcastResult::WorkerRpcContext> makeIdleContext() {
 }  // namespace
 
 // ---------------------------- completion queue invariants ----------------------------
+
+TEST_F(BroadcastManagerTest, PartialDispatchSeparatesSubmittedUncertainAndUnsubmittedRanks) {
+    auto service = std::make_unique<TestRpcService>();
+    auto server = std::make_unique<TestRpcServer>(std::move(service));
+    ASSERT_TRUE(server->start());
+    const auto address = "127.0.0.1:" + std::to_string(server->listenPort());
+    auto manager = std::make_unique<BroadcastManager>(std::vector<std::string>{address, address, address});
+    ASSERT_TRUE(manager->init());
+    size_t calls = 0;
+    const auto rpc_call = [&](const std::shared_ptr<RpcService::Stub>& stub,
+                              const std::shared_ptr<grpc::ClientContext>& context,
+                              const FunctionRequestPB& request,
+                              grpc::CompletionQueue* cq) -> AsyncFunctionReader {
+        if (calls++ == 1) {
+            throw std::runtime_error("injected dispatch failure");
+        }
+        return stub->AsyncExecuteFunction(context.get(), request, cq);
+    };
+    auto result = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(
+        std::vector<FunctionRequestPB>(3), 1000, rpc_call, std::nullopt, "H2D", false);
+    ASSERT_NE(result, nullptr);
+    ASSERT_TRUE(result->waitDone(5000, false));
+    EXPECT_FALSE(result->success());
+    EXPECT_EQ(calls, 2u);
+    const auto snapshots = result->rankSnapshots();
+    ASSERT_EQ(snapshots.size(), 3u);
+    EXPECT_EQ(snapshots[0].dispatch_state, BroadcastDispatchState::SUBMITTED);
+    EXPECT_TRUE(snapshots[0].cq_received);
+    EXPECT_TRUE(snapshots[0].cq_ok);
+    EXPECT_EQ(snapshots[1].dispatch_state, BroadcastDispatchState::POSSIBLY_SUBMITTED);
+    EXPECT_EQ(snapshots[1].dispatch_error, "injected dispatch failure");
+    EXPECT_FALSE(snapshots[1].cq_received);
+    EXPECT_FALSE(snapshots[1].grpc_code.has_value());
+    EXPECT_EQ(snapshots[2].dispatch_state, BroadcastDispatchState::NOT_SUBMITTED);
+    EXPECT_FALSE(snapshots[2].cq_received);
+    EXPECT_FALSE(snapshots[2].grpc_code.has_value());
+    EXPECT_FALSE(snapshots[2].response.has_value());
+    std::weak_ptr<FunctionBroadcastResult> weak_result = result;
+    result.reset();
+    // Joining the CQ thread also destroys the last completed real RPC tag.
+    manager.reset();
+    EXPECT_TRUE(weak_result.expired());
+}
 
 TEST_F(BroadcastManagerTest, WaitDone_Fatal_CqEventNotOk) {
     auto ctx    = makeIdleContext();
