@@ -46,6 +46,8 @@ enum class ErrorCode {
     OUTPUT_QUEUE_NO_UPDATE = 8105,
     // Retryable grammar resource failure. 8105 is already occupied by OUTPUT_QUEUE_NO_UPDATE.
     GRAMMAR_COMPILE_OVERLOADED = 8106,
+    // Transient strict capture admission rejection, before any reservation or publication is possible.
+    HIDDEN_STATE_CAPTURE_BACKPRESSURE = 8107,
 
     // rpc error
     GET_HOST_FAILED                       = 8200,
@@ -65,6 +67,7 @@ enum class ErrorCode {
     KEEP_ALIVE_TIMEOUT                    = 8214,
     // Broadcast failed or returned no valid completion result; remote I/O may still be running.
     TRANSFER_COMPLETION_UNKNOWN = 8215,
+    SERVICE_UNHEALTHY                     = 8216,
 
     // cache store error
     LOAD_CACHE_TIMEOUT                   = 8300,
@@ -139,6 +142,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "OUTPUT_QUEUE_NO_UPDATE";
         case ErrorCode::GRAMMAR_COMPILE_OVERLOADED:
             return "GRAMMAR_COMPILE_OVERLOADED";
+        case ErrorCode::HIDDEN_STATE_CAPTURE_BACKPRESSURE:
+            return "HIDDEN_STATE_CAPTURE_BACKPRESSURE";
         case ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN:
             return "EXCEEDS_KV_CACHE_MAX_LEN";
         case ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN:
@@ -175,6 +180,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "WAIT_TO_RUN_TIMEOUT";
         case ErrorCode::KEEP_ALIVE_TIMEOUT:
             return "KEEP_ALIVE_TIMEOUT";
+        case ErrorCode::SERVICE_UNHEALTHY:
+            return "SERVICE_UNHEALTHY";
         case ErrorCode::REMOTE_GENERATE_FAILED:
             return "REMOTE_GENERATE_FAILED";
         case ErrorCode::RPC_FINISH_FAILED:

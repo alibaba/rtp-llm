@@ -3,8 +3,10 @@
 import os
 import unittest
 from unittest import mock
+from unittest.mock import Mock, patch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.dsa_kv_chunk_plan import (
+    DsaKVCapacityError,
     plan_dsa_kv_chunks,
     prefill_indexer_score_bytes,
 )
@@ -77,6 +79,174 @@ class DsaKVChunkPlanTest(unittest.TestCase):
             plan(999)
         with self.assertRaisesRegex(ValueError, "one physical KV page"):
             plan(1001)
+
+    def test_fixed_overflow_skips_callbacks_and_block_construction(self):
+        for lengths in ((), (0, 0), (65536,)):
+            for whole_plan in (False, True):
+                with self.subTest(lengths=lengths, whole_plan=whole_plan):
+                    temporary = Mock(
+                        side_effect=AssertionError("must not price a block")
+                    )
+                    plan_temporary = Mock(
+                        side_effect=AssertionError("must not price a plan")
+                    )
+                    with patch(
+                        f"{plan_dsa_kv_chunks.__module__}._blocks",
+                        side_effect=AssertionError("must not construct blocks"),
+                    ) as blocks:
+                        for _ in range(2):
+                            with self.assertRaises(DsaKVCapacityError) as caught:
+                                plan_dsa_kv_chunks(
+                                    lengths,
+                                    page_tokens=64,
+                                    budget_bytes=999,
+                                    fixed_bytes=1000,
+                                    temporary_bytes=temporary,
+                                    plan_temporary_bytes=(
+                                        plan_temporary if whole_plan else None
+                                    ),
+                                )
+                            error = caught.exception
+                            self.assertEqual(error.lower_bound_bytes, 1000)
+                            self.assertIsNone(error.min_required_bytes)
+                            self.assertIsNone(error.min_page_capacity)
+                            self.assertIsNone(error.one_page_required_bytes)
+                            for field in (
+                                "diagnostic_reason=fixed_exceeds_budget,",
+                                "lower_bound_bytes=1000,",
+                                "shortfall_at_least_bytes=1,",
+                                "min_required_bytes=unknown,",
+                                "additional_workspace_bytes=unknown,",
+                                "kv_costs=not_computed,",
+                                "one_page_required_bytes=unknown",
+                            ):
+                                self.assertIn(field, str(error))
+                        blocks.assert_not_called()
+                    temporary.assert_not_called()
+                    plan_temporary.assert_not_called()
+
+    def test_exact_one_page_budget_and_fixed_only_is_not_an_allowance(self):
+        for budget in (1000, 1255, 1256):
+            with self.subTest(budget=budget):
+                kwargs = dict(
+                    page_tokens=64,
+                    budget_bytes=budget,
+                    fixed_bytes=1000,
+                    temporary_bytes=lambda b: b.tokens * 4,
+                )
+                if budget == 1256:
+                    self.assertEqual(
+                        plan_dsa_kv_chunks([128], **kwargs).required_bytes, 1256
+                    )
+                    continue
+                with self.assertRaises(DsaKVCapacityError) as caught:
+                    plan_dsa_kv_chunks([128], **kwargs)
+                error = caught.exception
+                self.assertEqual(error.min_required_bytes, 1256)
+                self.assertEqual(error.one_page_required_bytes, 1256)
+                self.assertEqual(error.min_page_capacity, 1)
+                self.assertIn(
+                    f"remaining_after_fixed_bytes={budget - 1000}", str(error)
+                )
+                self.assertIn(f"shortfall_bytes={1256 - budget}", str(error))
+
+    def test_whole_plan_union_and_metadata_define_exact_capacity(self):
+        # Per-block maxima alone miss the persistent union/metadata. The
+        # additional charge is deliberately non-monotonic across capacities.
+        def whole_plan(blocks):
+            return {1: 500, 2: 200, 3: 300}[len(blocks)]
+
+        kwargs = dict(
+            page_tokens=64,
+            fixed_bytes=1000,
+            temporary_bytes=lambda b: b.tokens,
+            plan_temporary_bytes=whole_plan,
+        )
+        plan = plan_dsa_kv_chunks([192], budget_bytes=1200, **kwargs)
+        self.assertEqual(plan.page_capacity, 2)
+        self.assertEqual(plan.required_bytes, 1200)
+        for budget in (1000, 1199):
+            with self.subTest(budget=budget), self.assertRaises(
+                DsaKVCapacityError
+            ) as caught:
+                plan_dsa_kv_chunks([192], budget_bytes=budget, **kwargs)
+            self.assertEqual(caught.exception.min_required_bytes, 1200)
+            self.assertEqual(caught.exception.min_page_capacity, 2)
+            self.assertEqual(caught.exception.one_page_required_bytes, 1300)
+        with self.assertRaises(DsaKVCapacityError) as caught:
+            plan_dsa_kv_chunks([192], budget_bytes=1200, max_page_capacity=1, **kwargs)
+        self.assertEqual(caught.exception.min_required_bytes, 1300)
+
+    def test_empty_history_failure_includes_resident_phase_bytes(self):
+        with self.assertRaises(DsaKVCapacityError) as caught:
+            plan_dsa_kv_chunks(
+                [0, 0],
+                page_tokens=64,
+                budget_bytes=1100,
+                fixed_bytes=1000,
+                temporary_bytes=lambda b: self.fail("no KV block"),
+                plan_temporary_bytes=lambda blocks: 101,
+            )
+        self.assertEqual(caught.exception.min_required_bytes, 1101)
+        self.assertEqual(caught.exception.min_page_capacity, 0)
+        self.assertIsNone(caught.exception.one_page_required_bytes)
+
+    def test_full_phase_and_kv_caps_must_fit_the_same_nonmonotonic_plan(self):
+        # Full-phase-only chooses 4, KV-only chooses 3, but only capacity 1
+        # satisfies both. A binary search or independent minimum is unsound.
+        total = {4: 90, 3: 120, 2: 80, 1: 100}
+        kv = {4: 60, 3: 40, 2: 55, 1: 50}
+        capacity = lambda blocks: max(b.tokens for b in blocks)
+        plan = plan_dsa_kv_chunks(
+            [4], page_tokens=1, budget_bytes=100, fixed_bytes=10,
+            temporary_bytes=lambda b: 0,
+            plan_temporary_bytes=lambda blocks: total[capacity(blocks)] - 10,
+            kv_budget_bytes=50,
+            kv_temporary_bytes=lambda blocks: kv[capacity(blocks)],
+        )
+        self.assertEqual(plan.page_capacity, 1)
+        self.assertEqual(plan.required_bytes, 100)
+        self.assertEqual(sum(b.tokens for b in plan.blocks), 4)
+
+    def test_dual_budget_failure_reports_the_constraining_scope(self):
+        for total_budget, kv_budget, expected_scope, minimum, capacity in (
+            (1000, 9, "prefill_kv", 10, 1),
+            (99, 10, "phase", 100, 1),
+        ):
+            with self.subTest(scope=expected_scope), self.assertRaises(DsaKVCapacityError) as caught:
+                plan_dsa_kv_chunks(
+                    [2], page_tokens=1, budget_bytes=total_budget, fixed_bytes=10,
+                    temporary_bytes=lambda b: 0,
+                    plan_temporary_bytes=lambda blocks: 90 if len(blocks) == 2 else 20,
+                    kv_budget_bytes=kv_budget,
+                    kv_temporary_bytes=lambda blocks: 10 if len(blocks) == 2 else 20,
+                )
+            self.assertEqual(caught.exception.budget_scope, expected_scope)
+            self.assertEqual(caught.exception.min_required_bytes, minimum)
+            self.assertEqual(caught.exception.min_page_capacity, capacity)
+
+    def test_fixed_overflow_does_not_price_either_budget(self):
+        callback = Mock(side_effect=AssertionError("fixed overflow must short-circuit"))
+        with self.assertRaises(DsaKVCapacityError) as caught:
+            plan_dsa_kv_chunks(
+                [1024], page_tokens=64, budget_bytes=9, fixed_bytes=10,
+                temporary_bytes=callback, plan_temporary_bytes=callback,
+                kv_budget_bytes=1, kv_temporary_bytes=callback,
+            )
+        self.assertEqual(caught.exception.budget_scope, "phase")
+        callback.assert_not_called()
+
+    def test_dual_budget_requires_a_positive_cap_and_matching_callback(self):
+        for options in (
+            {"kv_budget_bytes": 1},
+            {"kv_temporary_bytes": lambda blocks: 0},
+            {"kv_budget_bytes": 0, "kv_temporary_bytes": lambda blocks: 0},
+        ):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                plan_dsa_kv_chunks(
+                    [], page_tokens=64, budget_bytes=1, fixed_bytes=0,
+                    temporary_bytes=lambda block: 0, **options,
+                )
 
     def test_empty_history_preserves_fixed_budget(self):
         plan = plan_dsa_kv_chunks(

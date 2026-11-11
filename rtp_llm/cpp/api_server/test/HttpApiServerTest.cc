@@ -2,6 +2,8 @@
 #include "rtp_llm/cpp/api_server/HttpApiServer.h"
 #include "rtp_llm/cpp/api_server/common/HealthService.h"
 #include "autil/NetUtil.h"
+#include "rtp_llm/cpp/api_server/test/mock/MockEngineBase.h"
+#include "rtp_llm/cpp/api_server/test/mock/MockHttpResponseWriter.h"
 
 namespace rtp_llm {
 
@@ -91,6 +93,42 @@ TEST_F(HttpApiServerTest, testRegisterHealthServiceFailed_RegisterRouteFailed) {
     // 将 http server 的 router 置空, 模拟 RegisterRoute 失败
     server_->http_server_->_router = nullptr;
     EXPECT_FALSE(server_->registerHealthService());
+}
+
+TEST_F(HttpApiServerTest, RegisteredHealthUsesWeakEngineAndSurvivesOwnerExpiration) {
+    class HealthEngine: public MockEngineBase {
+    public:
+        ErrorInfo checkHealth() const override {
+            ++calls;
+            return health;
+        }
+        ErrorInfo   health;
+        mutable int calls{0};
+    };
+    auto engine      = std::make_shared<HealthEngine>();
+    server_->engine_ = engine;
+    ASSERT_TRUE(server_->registerHealthService());
+    const auto               service = server_->health_service_;
+    http_server::HttpRequest request;
+    const auto               probe = [&](int status, const std::string& body) {
+        auto  mock = std::make_unique<http_server::MockHttpResponseWriter>();
+        auto* raw  = mock.get();
+        EXPECT_CALL(*raw, Write(body)).WillOnce(::testing::Return(true));
+        std::unique_ptr<http_server::HttpResponseWriter> writer(std::move(mock));
+        service->healthCheck(writer, request);
+        EXPECT_EQ(raw->_statusCode, status);
+    };
+    probe(200, R"("ok")");
+    engine->health = ErrorInfo(ErrorCode::SERVICE_UNHEALTHY, "serving device unavailable");
+    probe(503, R"({"detail":"inference service is unhealthy"})");
+    EXPECT_EQ(engine->calls, 2);
+    const std::weak_ptr<EngineBase> lifetime(engine);
+    server_->engine_.reset();
+    engine.reset();
+    EXPECT_TRUE(lifetime.expired()) << "health registration must not retain the engine";
+    probe(503, R"({"detail":"inference service is unhealthy"})");
+    service->stop();
+    probe(503, R"({"detail":"this server has been shutdown"})");
 }
 
 TEST_F(HttpApiServerTest, testRegisterHealthServiceSuccess) {

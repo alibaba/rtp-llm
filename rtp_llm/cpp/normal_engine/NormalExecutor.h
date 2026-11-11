@@ -34,6 +34,8 @@ public:
     ~NormalExecutor();
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     void         drainForShutdown() override;
+    ServingDeviceHealthPtr servingDeviceHealth() const override;
+    HiddenStateCaptureAdmissionResult tryReserveHiddenStateCapture(int64_t request_id, int64_t valid_tokens) override;
     void         reportMetrics(const StreamGroups&                        stream_groups,
                                RtpLLMExecutorMetricsCollector&            executor_collector,
                                RtpLLMTokenPSMetricsCollector&             tps_collector,
@@ -110,8 +112,8 @@ private:
     int                   propose_model_index_ = 0;
     int                   tp_rank_             = 0;
     ParallelismConfig     parallelism_config_;
-    int64_t               smoke_forward_step_  = 0;
-    RoleType              role_type_ = RoleType::PDFUSION;
+    int64_t               smoke_forward_step_ = 0;
+    RoleType              role_type_          = RoleType::PDFUSION;
     std::function<void()> profile_step_start_;
     std::function<void()> profile_step_finish_;
 

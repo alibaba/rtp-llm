@@ -8,10 +8,8 @@ import torch
 from torch import nn
 
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
+from rtp_llm.models_py.distributed.collective_torch import Group, _get_group, all_gather
 from rtp_llm.models_py.distributed.collective_torch import (
-    Group,
-    _get_group,
-    all_gather,
     reduce_scatter_bf16 as reduce_scatter,
 )
 from rtp_llm.models_py.model_desc.block_map import (
@@ -24,18 +22,19 @@ from rtp_llm.models_py.model_desc.block_map import (
     select_fmha_impl_for_group,
     select_fmha_impl_for_layer,
 )
-from rtp_llm.models_py.modules import KdaMetadata
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import Embedding, MultimodalEmbeddingInjector, RMSNorm
-from rtp_llm.models_py.modules.factory.linear import LinearFactory
-from rtp_llm.models_py.modules.kimi_k3.attention import (
-    KimiK3KDA,
-    KimiK3MLA,
+from rtp_llm.models_py.modules import (
+    Embedding,
+    KdaMetadata,
+    MultimodalEmbeddingInjector,
+    RMSNorm,
 )
+from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
+from rtp_llm.models_py.modules.kimi_k3.attention import KimiK3KDA, KimiK3MLA
+from rtp_llm.models_py.modules.kimi_k3.dsa_model_adapter import KimiK31ModelAdapter
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
-from rtp_llm.models_py.modules.kimi_k3.dsa_model_adapter import KimiK31ModelAdapter
 from rtp_llm.models_py.triton_kernels.causal_conv1d.paged_short_conv_prefill import (
     prepare_paged_short_conv_metadata,
 )
@@ -84,9 +83,8 @@ class KimiK3DenseMLP(nn.Module):
             partial(reduce_scatter, group=Group.TP) if tp_dense else lambda value: value
         )
         if (
-            (parallelism is None or parallelism.role_type != RoleType.DECODE)
-            and weights[W.ffn_w1].dtype == weights[W.ffn_w3].dtype == torch.bfloat16
-        ):
+            parallelism is None or parallelism.role_type != RoleType.DECODE
+        ) and weights[W.ffn_w1].dtype == weights[W.ffn_w3].dtype == torch.bfloat16:
             gate_weight, up_weight = weights[W.ffn_w1], weights[W.ffn_w3]
             width = gate_weight.shape[1]
             merged = torch.cat((gate_weight.T, up_weight.T), dim=0)
@@ -381,6 +379,16 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
             )
         if parallelism_config.tp_size > 1 and not parallelism_config.enable_sp:
             raise ValueError("K3 TP execution requires sequence parallelism")
+        if (
+            parallelism_config.ffn_sp_size != parallelism_config.tp_size
+            or parallelism_config.ffn_tp_size != 1
+        ):
+            raise ValueError(
+                "K3 requires ffn_sp_size == tp_size and ffn_tp_size == 1; "
+                f"tp_size={parallelism_config.tp_size}, "
+                f"ffn_sp_size={parallelism_config.ffn_sp_size}, "
+                f"ffn_tp_size={parallelism_config.ffn_tp_size}"
+            )
         self.tp_size, self.tp_rank = (
             parallelism_config.tp_size,
             parallelism_config.tp_rank,
@@ -389,7 +397,8 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
         self.prefill_query_cp = (
             getattr(model_config.k3_runtime_config, "dsa", None) is not None
             and parallelism_config.role_type == RoleType.PREFILL
-            and cp.is_enabled() and cp.preserve_tp_layout
+            and cp.is_enabled()
+            and cp.preserve_tp_layout
         )
         self.requires_sequence_parallel_padding = not self.prefill_query_cp
         self.requires_token_position_ids = self.prefill_query_cp
@@ -418,7 +427,9 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
             self.tp_size,
         )
         self.embed_tokens = Embedding(
-            model_config, parallelism_config, weights.get_global_weight(W.embedding),
+            model_config,
+            parallelism_config,
+            weights.get_global_weight(W.embedding),
             replicated=self.prefill_query_cp,
         )
         self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
@@ -449,6 +460,83 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
                 weights.get_global_weight(K3W.OUTPUT_ATTN_RES_PROJ),
                 model_config.layernorm_eps,
             )
+
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_layer(self, hidden, residual):
+        # A gathered tensor already owns its storage; local workspaces may be reused.
+        if self.tp_size > 1 and self._query_layout is None:
+            return hidden
+        return hidden.clone()
+
+    def _capture_layer_output(
+        self, capture, index, hidden, anchors=None, *,
+        mlp_delta=None, mlp_shared_delta=None,
+    ):
+        if capture is None or not capture.enabled or index not in capture.layer_ids:
+            return
+        if anchors is not None and self.num_blocks:
+            if index + 1 == len(self.layers):
+                # Capture the final consumer's existing mixture below the loop.
+                return
+            if capture.wants_layer(index):
+                try:
+                    consumer = self.layers[index + 1]
+                    block_size = consumer.block_size
+                    # AttnRes consumes deferred MLP deltas in place, rounding
+                    # routed + shared before adding the prefix. Use its native
+                    # path on a private prefix; serving must consume them once.
+                    prefix = hidden.clone() if mlp_delta is not None else hidden
+                    hidden = consumer.attention_residual(
+                        prefix,
+                        anchors,
+                        num_blocks=(index + block_size) // block_size,
+                        delta=mlp_delta,
+                        **({"shared_delta": mlp_shared_delta}
+                           if mlp_shared_delta is not None else {}),
+                        block_write_idx=-1,
+                        output_norm_weight=None,
+                    )
+                except Exception as error:
+                    # A failed tap must not affect serving or skip a TP gather.
+                    # The shared policy still propagates fatal device/OOM errors.
+                    capture._record_error(error)
+        # Schedule collectives from the shared plan, never rank-local capture errors.
+        # Keep them outside the helper's recoverable capture-only exception boundary.
+        if anchors is not None and self._outer_layout is not None:
+            # Loop taps are natural SP rows; final serving output is already
+            # zigzag. Preserve the complete shard for the shared CP restore.
+            hidden = self._row_exchange.exchange(
+                hidden, self._routing_plan, "to_zigzag"
+            )
+        if self.tp_size > 1 and self._query_layout is None:
+            hidden = all_gather(hidden, Group.TP)
+        capture.capture_layer(index, hidden)
+
+    def _capture_canonical_final(self, hidden, residual):
+        return self.norm(hidden)
+
+    def _capture_hidden_states_requested(self, inputs):
+        if (
+            not inputs.capture_hidden_states
+            or type(self) is not KimiK3Model
+            or self.parallelism_config.role_type == RoleType.DECODE
+        ):
+            return False
+        primary = get_primary_attention_inputs(inputs, self.kv_cache)
+        return (
+            primary.is_prefill
+            and not primary.is_warmup
+            and not primary.is_target_verify
+            and not primary.is_mtp_draft_update
+            and not primary.is_cuda_graph
+            and not (
+                inputs.input_ids.is_cuda and torch.cuda.is_current_stream_capturing()
+            )
+        )
 
     def initialize(self, init_resource) -> bool:
         ready = super().initialize(init_resource)
@@ -633,12 +721,95 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
         )
         return
 
+    def _prepare_kda_host_metadata(self, inputs):
+        primary = get_primary_attention_inputs(inputs, self.kv_cache)
+        if (
+            not primary.is_prefill
+            or primary.is_target_verify
+            or primary.is_mtp_draft_update
+        ):
+            return
+        linear_layers = [
+            i
+            for i, layer in enumerate(self.layers)
+            if layer.layer_type == HybridAttentionType.LINEAR
+        ]
+        if not linear_layers:
+            return
+
+        # C++ may publish only CUDA metadata. Keep its device tensors intact;
+        # host validation/planning belongs here, not in every KDA layer. Cache
+        # exact views only for this preparation: different group slices can
+        # share storage without representing the same execution block IDs.
+        mirrors = {}
+
+        def host(tensor):
+            if tensor is None or tensor.device.type == "cpu":
+                return tensor
+            key = (
+                tensor.device,
+                tensor.dtype,
+                tensor.data_ptr(),
+                tuple(tensor.shape),
+                tuple(tensor.stride()),
+            )
+            if key not in mirrors:
+                mirrors[key] = tensor.cpu()
+            return mirrors[key]
+
+        tagged = get_attention_inputs_value(inputs)
+        groups = tuple(tagged.values()) if isinstance(tagged, Mapping) else (tagged,)
+        if self.prefill_query_cp:
+            info = primary.context_parallel_info
+            if info is None:
+                raise ValueError("K3.1 requires the shared padded zigzag input plan")
+            prefixes = info.prefill_prefix_lengths_cpu
+            if prefixes.device.type != "cpu":
+                raise ValueError("K3 query CP requires original host prefix lengths")
+            # Rank-local lengths/cu-seqlens must stay local. QueryLayout owns
+            # the separate, original natural-order temporal view consumed by KDA.
+            for group in groups:
+                group.prefix_lengths = prefixes
+        else:
+            lengths = host(primary.input_lengths)
+            prefixes = host(primary.prefix_lengths)
+            cu_seqlens = primary.cu_seqlens
+            if (
+                primary.input_lengths.device.type != "cpu"
+                or cu_seqlens is None
+                or cu_seqlens.device.type != "cpu"
+                or cu_seqlens.numel() != lengths.numel() + 1
+            ):
+                cu_seqlens = torch.empty(
+                    lengths.numel() + 1, dtype=lengths.dtype, device="cpu"
+                )
+                cu_seqlens[0] = 0
+                torch.cumsum(lengths, 0, dtype=lengths.dtype, out=cu_seqlens[1:])
+            for group in groups:
+                group.input_lengths = lengths
+                group.prefix_lengths = prefixes
+                group.cu_seqlens = cu_seqlens
+
+        if isinstance(tagged, Mapping):
+            linear_inputs = (
+                select_attention_inputs_for_tag(tagged, tag)
+                for tag in get_group_tags_for_layers(self.kv_cache, linear_layers)
+            )
+        else:
+            linear_inputs = (tagged,)
+        for group in linear_inputs:
+            # Never substitute CacheStore's physical publication table here.
+            group.kv_cache_kernel_block_id = host(group.kv_cache_kernel_block_id)
+
     def prepare_fmha_impl(
         self, inputs, is_cuda_graph=False, cuda_graph_selection_mode=None
     ):
         self._prepared_kda_prefill = None
         if self.dsa_workspace is not None:
-            fmha_impl = self._prepare_dsa(inputs, is_cuda_graph)
+            fmha_impl = self._prepare_dsa(
+                inputs, is_cuda_graph,
+                prepare_host_metadata=self._prepare_kda_host_metadata,
+            )
             if (
                 not is_cuda_graph
                 and self._query_layout is not None
@@ -664,6 +835,7 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
                     )
                     break
             return fmha_impl
+        self._prepare_kda_host_metadata(inputs)
         from rtp_llm.models_py.modules.factory.attention.attn_factory import get_mla_impl
         from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MlaImpl
 
@@ -672,7 +844,9 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
         )
 
         def create(attention_inputs):
-            attention_inputs.headwise_config = getattr(self.config, "headwise_config", None)
+            attention_inputs.headwise_config = getattr(
+                self.config, "headwise_config", None
+            )
             return get_mla_impl(
                 attention,
                 self.weight,
@@ -739,6 +913,7 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
         fmha_impl,
         sequence_parallel_input=False,
         gather_output=True,
+        capture=None,
     ):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
@@ -753,7 +928,9 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
             # all layers return, even after SP narrows it to local rows.
             # feat/k3_dev releases that storage during the layer loop.
             hidden = self._embed_inputs(inputs)
-        physical_rows = inputs.input_ids.shape[0] if layout is None else layout.physical_rows
+        physical_rows = (
+            inputs.input_ids.shape[0] if layout is None else layout.physical_rows
+        )
         local_rows = physical_rows // self.tp_size
         if layout is not None:
             if hidden.shape[0] != local_rows:
@@ -823,7 +1000,9 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
         for index, layer in enumerate(self.layers):
             if getattr(layer.attention, "indexer", None) is not None:
                 tags = ("full", "indexer_kv")
-                attention_inputs = select_attention_inputs_for_tag(get_attention_inputs_value(inputs), "full")
+                attention_inputs = select_attention_inputs_for_tag(
+                    get_attention_inputs_value(inputs), "full"
+                )
                 fmha = {tag: select_fmha_impl_for_group(fmha_impl, tag) for tag in tags}
                 cache = get_layer_caches_for_groups(self.kv_cache, index, tags) if self.kv_cache else None
             else:
@@ -856,6 +1035,12 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
                 hidden = layer(
                     hidden, anchors, fmha, cache, attention_inputs, metadata, valid_mask
                 )
+            if capture is not None:
+                self._capture_layer_output(
+                    capture, index, hidden, anchors,
+                    **({"mlp_delta": mlp_delta, "mlp_shared_delta": mlp_shared_delta}
+                       if mlp_delta is not None else {}),
+                )
         if self.num_blocks:
             hidden = (
                 self.final_residual(hidden, anchors, delta=mlp_delta, shared_delta=mlp_shared_delta)
@@ -867,6 +1052,8 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
             # consume the complete original Zigzag shard, including padding.
             with profile_scope("RTP::decoder.natural_to_zigzag"):
                 hidden = self._row_exchange.exchange(hidden, self._routing_plan, "to_zigzag")
+        if self.num_blocks:
+            self._capture_layer_output(capture, len(self.layers) - 1, hidden)
         hidden = self._publish_mtp_prefill_hidden(hidden)
         return (
             all_gather(hidden, Group.TP)
@@ -878,5 +1065,12 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
         return self._forward_single(inputs, fmha_impl)
 
     def _forward_single(self, inputs, fmha_impl=None):
-        hidden = self._forward_layers(None, inputs, fmha_impl)
+        capture = self.capture_context(self._capture_hidden_states_requested(inputs))
+        hidden = self._forward_layers(
+            None, inputs, fmha_impl, capture=capture if capture.enabled else None
+        )
+        if capture.enabled:
+            outputs = capture.finalize(hidden)
+            outputs.mtp_target_hidden_states = hidden
+            return outputs
         return PyModelOutputs(self.norm(hidden), hidden)

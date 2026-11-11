@@ -58,6 +58,15 @@ class RequestExtractor:
     def _format_generate_config(
         self, kwargs: Dict[str, Any]
     ) -> Tuple[GenerateConfig, Dict[str, Any]]:
+        try:
+            GenerateConfig._reject_export_hidden_states(kwargs)
+            for key in ("generate_config", "generation_config"):
+                if key in kwargs:
+                    GenerateConfig._reject_export_hidden_states(kwargs[key])
+        except ValueError as e:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_GENERATE_CONFIG_FORMAT, str(e)
+            ) from e
         config_json = kwargs.pop("generate_config", kwargs.pop("generation_config", {}))
         nested_config, remain_config_json = self._partition_generate_config_fields(
             config_json

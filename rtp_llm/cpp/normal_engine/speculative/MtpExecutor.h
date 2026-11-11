@@ -44,15 +44,17 @@ public:
     explicit MtpExecutor(const EngineInitParams&                        params,
                          std::unique_ptr<ProposeModelEngineInitParams>& propose_params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
-                         MlaOpsType                                     mla_ops_type       = MlaOpsType::AUTO,
-                         int32_t                                        kv_cache_group_num = 1,
-                         bool                                           warm_up            = false,
-                         std::function<void()>                          profile_step_start = nullptr,
+                         MlaOpsType                                     mla_ops_type        = MlaOpsType::AUTO,
+                         int32_t                                        kv_cache_group_num  = 1,
+                         bool                                           warm_up             = false,
+                         std::function<void()>                          profile_step_start  = nullptr,
                          std::function<void()>                          profile_step_finish = nullptr);
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     void         drainForShutdown() override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
+    ServingDeviceHealthPtr servingDeviceHealth() const override;
+    HiddenStateCaptureAdmissionResult tryReserveHiddenStateCapture(int64_t request_id, int64_t valid_tokens) override;
 
     void setTargetModel(std::unique_ptr<ModelBase> model) {
         model_ = std::move(model);
@@ -97,7 +99,7 @@ public:
                                                              bool drop_broad_sync,
                                                              bool linear_attention,
                                                              bool cache_snapshot_ready = false);
-    static int selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
+    static int               selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
     static bool              hasLinearCacheSnapshotCapacity(const std::list<GenerateStreamPtr>& streams,
                                                             const CacheConfig&                  cache_config,
                                                             const std::vector<CacheGroupType>&  group_types,
@@ -145,27 +147,27 @@ protected:
     // decodeStep helpers — extracted to keep decodeStep readable. Each helper
     // owns a single phase (prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
-    void            waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
+    void waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
     using PreparedTargetToken = std::future<std::pair<torch::Tensor, std::shared_ptr<torch::Event>>>;
     PreparedTargetToken launchTargetVerifyPrepareAsync(const GptModelInputs&        model_input,
                                                        size_t                       batch_size,
                                                        std::list<GenerateStreamPtr> streams = {});
     void                launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
-    GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
-    absl::Status    runDecodeAlignmentOnly(GptModelInputs& model_input);
-    void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
-                                                         const StreamGroups&   stream_groups) const;
-    void            broadcastPostRejectionInputs(GptModelInputs& model_input);
-    GptModelOutputs runDSparkProposeForward(GptModelInputs& model_input);
-    SamplerOutput   sampleDSparkDraft(const StreamGroups&  stream_groups,
-                                      const torch::Tensor& base_logits,
-                                      const torch::Tensor& anchors);
-    void            runDSparkProposal(GptModelInputs&                                  proposal_input,
-                                      const StreamGroups&                              stream_groups,
-                                      const MtpBatchStreamProcessor::DSparkRoundState& round_state,
-                                      SamplerOutput&                                   draft_sampler_output,
-                                      int64_t&                                         model_forward_us);
-    GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
+    GptModelOutputs     runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
+    absl::Status        runDecodeAlignmentOnly(GptModelInputs& model_input);
+    void                debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
+                                                             const StreamGroups&   stream_groups) const;
+    void                broadcastPostRejectionInputs(GptModelInputs& model_input);
+    GptModelOutputs     runDSparkProposeForward(GptModelInputs& model_input);
+    SamplerOutput       sampleDSparkDraft(const StreamGroups&  stream_groups,
+                                          const torch::Tensor& base_logits,
+                                          const torch::Tensor& anchors);
+    void                runDSparkProposal(GptModelInputs&                                  proposal_input,
+                                          const StreamGroups&                              stream_groups,
+                                          const MtpBatchStreamProcessor::DSparkRoundState& round_state,
+                                          SamplerOutput&                                   draft_sampler_output,
+                                          int64_t&                                         model_forward_us);
+    GptModelOutputs     runDraftPrefillForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
                  buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
                                              const torch::Tensor&                draft_tokens,
@@ -183,10 +185,10 @@ protected:
                                       const torch::Tensor&                         kv_cache_kernel_block_id,
                                       GptModelOutputs                              draft_prefill_model_output,
                                       SamplerOutput                                draft_prefill_sampler_output,
-                                      const std::optional<LinearReplayInputs>&      linear_replay,
+                                      const std::optional<LinearReplayInputs>&     linear_replay,
                                       const std::vector<GenerateStream::LinearReplayRound>& replay_rounds,
-                                      std::shared_ptr<torch::Event>                rejection_event,
-                                      std::shared_ptr<torch::Event>                draft_event);
+                                      std::shared_ptr<torch::Event>                         rejection_event,
+                                      std::shared_ptr<torch::Event>                         draft_event);
 
     void draftModelDecode(GptModelInputs&             model_input,
                           const StreamGroups&         stream_groups,
@@ -220,10 +222,10 @@ protected:
 
     bool useAsyncPrepare() const;
     void recordLinearReplayLastUse(const std::vector<GenerateStream::LinearReplayRound>& rounds);
-    void publishLinearReplayWindows(const StreamGroups& stream_groups,
-                                    const LinearReplayInputs& replay,
+    void publishLinearReplayWindows(const StreamGroups&                                   stream_groups,
+                                    const LinearReplayInputs&                             replay,
                                     const std::vector<GenerateStream::LinearReplayRound>& rounds,
-                                    const torch::Tensor& accept_lengths);
+                                    const torch::Tensor&                                  accept_lengths);
 
     // Opt-in gate to skip the broad sync at decodeStep start.
     // Device state, epoch-guarded clears, and single-slotted workers preserve
@@ -259,11 +261,11 @@ protected:
     void releaseAllModelBuffers(bool defer_reclaim = false);
 
 private:
-    void startProfileStep(bool is_fake_stream);
+    void                  startProfileStep(bool is_fake_stream);
     std::function<void()> profile_step_start_;
     std::function<void()> profile_step_finish_;
-    bool profile_step_started_ = false;
-    static torch::Tensor snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder);
+    bool                  profile_step_started_ = false;
+    static torch::Tensor  snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder);
 
     static bool canEarlyReturnTargetOnlyPrefill(int64_t dp_size, bool enable_ffn_disaggregate);
     static bool shouldSkipEmptyDecode(bool streams_empty, bool enable_ffn_disaggregate);
@@ -275,9 +277,11 @@ private:
                                int64_t              model_forward_us);
 
     GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
-    void recordSmokeForward(const char* event, const GptModelInputs& inputs,
-                            const StreamGroups* streams, bool prefill = false);
-    uint64_t smoke_forward_step_{0};
+    void            recordSmokeForward(const char*           event,
+                                       const GptModelInputs& inputs,
+                                       const StreamGroups*   streams,
+                                       bool                  prefill = false);
+    uint64_t        smoke_forward_step_{0};
 
     std::unique_ptr<ModelBase>                                               model_;
     std::unique_ptr<Sampler>                                                 sampler_;
@@ -350,8 +354,8 @@ private:
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
     AsyncRunner spec_bookkeeping_runner_;
 
-    torch::Stream dspark_cache_store_sync_stream_;
-    torch::Tensor dspark_cache_store_status_;
+    torch::Stream             dspark_cache_store_sync_stream_;
+    torch::Tensor             dspark_cache_store_status_;
     std::function<bool(bool)> dspark_cache_store_status_reducer_for_test_;
 };
 }  // namespace rtp_llm

@@ -23,7 +23,6 @@ namespace rtp_llm {
 
 namespace {
 
-
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
     const bool  on  = (env != nullptr && std::string(env) == "1");
@@ -69,6 +68,18 @@ void NormalExecutor::drainForShutdown() {
     dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
 }
 
+ServingDeviceHealthPtr NormalExecutor::servingDeviceHealth() const {
+    return model_ ? model_->servingDeviceHealth() : nullptr;
+}
+
+HiddenStateCaptureAdmissionResult NormalExecutor::tryReserveHiddenStateCapture(int64_t request_id,
+                                                                               int64_t valid_tokens) {
+    if (!model_) {
+        return {ErrorCode::EXECUTION_EXCEPTION, "hidden-state capture model is unavailable"};
+    }
+    return model_->tryReserveHiddenStateCapture(request_id, valid_tokens);
+}
+
 NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                const std::shared_ptr<KVCacheManager>& cache_manager,
                                bool                                   warm_up,
@@ -91,7 +102,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     profile_step_start_(std::move(profile_step_start)),
     profile_step_finish_(std::move(profile_step_finish)),
     dispatch_runner_(cuda_graph::graphGetStreamFromPool(true)) {
-    has_engram_         = !params.model_config_.attn_config.v41_kv_source_layer_ids.empty();
+    has_engram_ = !params.model_config_.attn_config.v41_kv_source_layer_ids.empty();
     (void)normalSmokeEvidenceEnabled();
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
@@ -155,13 +166,23 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          cache_manager,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.metrics_reporter               = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         is_propose_ ? HiddenStateCaptureModelRole::DRAFT : HiddenStateCaptureModelRole::TARGET,
         role_type_,
         warm_up_,
         params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_max_inflight_samples =
+        params.model_config_.hidden_state_capture_max_inflight_samples;
+    model_init_params.hidden_state_capture_max_inflight_bytes =
+        params.model_config_.hidden_state_capture_max_inflight_bytes;
+    model_init_params.hidden_state_capture_max_inflight_tokens =
+        params.model_config_.hidden_state_capture_max_inflight_tokens;
+    model_init_params.hidden_state_capture_max_pending_batches =
+        params.model_config_.hidden_state_capture_max_pending_batches;
+    model_init_params.hidden_state_capture_poll_interval_ms =
+        params.model_config_.hidden_state_capture_poll_interval_ms;
 #if USING_CUDA || USING_ROCM
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
         const size_t runtime_tokens_per_block = cache_manager->cacheConfig().seq_size_per_block;
@@ -337,15 +358,14 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
         if (normalSmokeEvidenceEnabled() && !warm_up_ && !is_propose_) {
             ++smoke_forward_step_;
-            const auto decode_rows = model_input.sequence_lengths.defined() ?
-                                         model_input.sequence_lengths.numel() : 0;
-            const auto input_rows = model_input.input_lengths.defined() ? model_input.input_lengths.numel() : 0;
+            const auto decode_rows = model_input.sequence_lengths.defined() ? model_input.sequence_lengths.numel() : 0;
+            const auto input_rows  = model_input.input_lengths.defined() ? model_input.input_lengths.numel() : 0;
             if (decode_rows > 0 && decode_rows == input_rows && !model_input.is_target_verify) {
                 // Stream identity is authoritative only on the owner TP root.
                 // Other ranks report synchronized tensor metadata, not a fake
                 // logical batch inferred from SP rows or a CUDA Graph bucket.
-                const bool authoritative = tp_rank_ == 0;
-                const bool real_streams  = authoritative && !model_input.is_fake_stream;
+                const bool  authoritative = tp_rank_ == 0;
+                const bool  real_streams  = authoritative && !model_input.is_fake_stream;
                 std::string ids;
                 if (real_streams) {
                     for (const auto& stream : stream_groups.decodeStreams()) {
@@ -366,10 +386,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                     static_cast<long>(parallelism_config_.dp_rank),
                     tp_rank_,
                     authoritative ? "true" : "false",
-                    real_streams ? static_cast<long>(stream_groups.decodeStreams().size()) :
-                                   (authoritative ? 0L : -1L),
-                    real_streams ? static_cast<long>(stream_groups.totalDecodeBatchSize()) :
-                                   (authoritative ? 0L : -1L),
+                    real_streams ? static_cast<long>(stream_groups.decodeStreams().size()) : (authoritative ? 0L : -1L),
+                    real_streams ? static_cast<long>(stream_groups.totalDecodeBatchSize()) : (authoritative ? 0L : -1L),
                     ids.c_str(),
                     static_cast<long>(input_rows),
                     static_cast<long>(decode_rows),
@@ -385,18 +403,6 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         expert_balancer_->stepForward(*model_, executor_collector);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
-
-    if (auto capture_error = model_->takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {
-        cudaSyncAndCheck();
-        model_->releaseBuffers();
-        for (const auto& stream : streams) {
-            stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *capture_error);
-        }
-        if (profile_step_finish_) {
-            profile_step_finish_();
-        }
-        return absl::OkStatus();
     }
 
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {

@@ -194,13 +194,95 @@ TEST_F(NormalBatchStreamProcessorTest, testDispatchWorkersOnlyCreatedOnOutputRan
     }
 }
 
-TEST_P(OutputDispatchTest, testExecutorUsesGatheredModeAndPreservesCaptureErrors) {
+TEST_P(OutputDispatchTest, testGenerationCaptureDoesNotSkipLmHeadOrSampling) {
+    class CaptureModel: public ModelBase {
+    public:
+        GptModelOutputs forward(const GptModelInputs& inputs) override {
+            ++forward_count;
+            EXPECT_EQ(inputs.capture_hidden_states, expected_capture);
+            EXPECT_FALSE(inputs.skip_lm_head);
+            GptModelOutputs output;
+            output.logits = torch::zeros({inputs.lm_output_indexes.size(0), 128},
+                                         torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            output.logits.select(1, 17).fill_(100.0f);
+            return output;
+        }
+
+        bool expected_capture = false;
+        int  forward_count    = 0;
+    };
+
+    struct TestCase {
+        bool capture;
+        bool reuse;
+        bool admitted;
+    };
+    const TestCase cases[] = {
+        {false, true, false}, {true, false, true}, {true, true, false}, {true, false, false}, {true, true, true}};
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(testing::Message() << "capture=" << test_case.capture << " reuse=" << test_case.reuse
+                                        << " admitted=" << test_case.admitted);
+        auto params                                         = makeExecutorParams(GetParam());
+        params.model_config_.hidden_state_capture_layer_ids = {0};
+        params.pd_sep_config.role_type                      = RoleType::PDFUSION;
+        NormalExecutor executor(params, nullptr);
+        executor.setBatchProcessor(std::make_unique<NormalBatchStreamProcessor>(params.model_config_,
+                                                                                params.pd_sep_config,
+                                                                                params.profiling_debug_logging_config,
+                                                                                CacheConfig(),
+                                                                                /*module_id=*/0,
+                                                                                false,
+                                                                                GetParam()));
+        auto  model             = std::make_unique<CaptureModel>();
+        auto* observed_model    = model.get();
+        model->expected_capture = test_case.capture && !test_case.reuse && test_case.admitted;
+        executor.setModel(std::move(model));
+
+        ResourceContext resource_context;
+        resource_context.role_type                    = RoleType::PDFUSION;
+        auto query                                    = std::make_shared<GenerateInput>();
+        query->input_ids                              = hostIntBuffer({1, 2});
+        query->generate_config                        = std::make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens        = 1;
+        query->generate_config->capture_hidden_states = test_case.capture;
+        query->generate_config->reuse_cache           = test_case.reuse;
+        query->generate_config->top_k                 = 1;
+        auto stream                                   = std::make_shared<NormalGenerateStream>(
+            query, params.model_config_, params.runtime_config, resource_context, nullptr);
+        if (test_case.admitted) {
+            stream->setHiddenStateCaptureReservation(std::make_shared<HiddenStateCaptureReservation>([]() noexcept {}));
+        }
+        ASSERT_FALSE(stream->hasError());
+        stream->generate_status_->status = StreamState::RUNNING;
+
+        ASSERT_TRUE(executor.process({stream}).ok());
+        EXPECT_EQ(observed_model->forward_count, 1);
+        ASSERT_FALSE(stream->hasError());
+        EXPECT_EQ(stream->outputTokenLen(), 1);
+        EXPECT_EQ(stream->seqLength(), 3);
+        auto output = stream->nextOutput();
+        ASSERT_TRUE(output.ok());
+        ASSERT_EQ(output.value().generate_outputs.size(), 1u);
+        EXPECT_TRUE(output.value().generate_outputs[0].finished);
+        EXPECT_EQ(toVec<int32_t>(output.value().generate_outputs[0].output_ids), (std::vector<int32_t>{17}));
+    }
+}
+
+TEST_P(OutputDispatchTest, testExecutorUsesGatheredCaptureAndLmHeadModes) {
     class CaptureModel: public ModelBase {
     public:
         GptModelOutputs forward(const GptModelInputs& inputs) override {
             ++forward_count;
             EXPECT_EQ(inputs.skip_lm_head, expected_prefill_only);
-            EXPECT_EQ(inputs.capture_hidden_states, expected_prefill_only);
+            EXPECT_EQ(inputs.capture_hidden_states, expected_capture_hidden_states);
+            if (check_prefill_geometry) {
+                EXPECT_EQ(inputs.input_lengths.numel(), 2);
+                EXPECT_EQ(inputs.request_id.numel(), 2);
+                EXPECT_EQ(inputs.combo_tokens.numel(), 4);
+            }
+            if (fail_forward) {
+                throw std::runtime_error("canonical model forward failed");
+            }
             GptModelOutputs output;
             output.generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             // No logits at all for target-only prefill: entering the sampler is a regression.
@@ -211,13 +293,12 @@ TEST_P(OutputDispatchTest, testExecutorUsesGatheredModeAndPreservesCaptureErrors
             return output;
         }
 
-        std::optional<std::string> takeDeferredHiddenStateCaptureError() override {
-            return fail_capture ? std::make_optional<std::string>("capture publication failed") : std::nullopt;
-        }
+        bool expected_prefill_only          = true;
+        bool expected_capture_hidden_states = false;
+        bool check_prefill_geometry         = false;
+        bool fail_forward                   = false;
 
-        bool expected_prefill_only = true;
-        bool fail_capture          = false;
-        int  forward_count         = 0;
+        int forward_count = 0;
     };
 
     struct TestCase {
@@ -227,80 +308,231 @@ TEST_P(OutputDispatchTest, testExecutorUsesGatheredModeAndPreservesCaptureErrors
         bool        first_has_error;
         bool        second_is_decode;
         bool        expected_prefill_only;
-        bool        fail_capture;
+        bool        expected_capture_hidden_states;
+        bool        capture_hidden_states;
+        bool        first_is_decode             = false;
+        int         first_num_return_sequences  = 1;
+        int         second_num_return_sequences = 1;
+        bool        admit_capture               = true;
+        bool        capture_configured          = true;
+        bool        fail_forward                = false;
+        bool        reuse_cache                 = false;
+        bool        mixed_capture_requests      = false;
+        bool        warm_up                     = false;
     };
     const std::vector<TestCase> cases = {
-        {"prefill-only", 0, 0, false, false, true, false},
-        {"failed-generation-before-prefill", 1, 0, true, false, true, false},
-        {"failed-prefill-before-generation", 0, 1, true, false, false, false},
-        {"failed-prefill-before-decode-generation", 0, 1, true, true, false, false},
-        {"decode-prefill-precedes-context-generation", 1, 0, false, true, true, false},
-        {"decode-generation-precedes-context-prefill", 0, 1, false, true, false, false},
-        {"capture-failure", 0, 0, false, false, true, true},
-        {"capture-failure-preserves-existing-error", 1, 0, true, false, true, true},
+        {"prefill-only-legacy", 0, 0, false, false, true, true, false},
+        {"prefill-only-required", 0, 0, false, false, true, true, true},
+        {"prefill-only-required-without-admission", 0, 0, false, false, true, false, true, false, 1, 1, false},
+        {"prefill-only-required-in-decode", 0, 0, false, true, true, false, true, true},
+        {"prefill-only-required-warmup",
+         0,
+         0,
+         false,
+         false,
+         true,
+         false,
+         true,
+         false,
+         1,
+         1,
+         true,
+         true,
+         false,
+         false,
+         false,
+         true},
+        {"prefill-only-required-without-global-config",
+         0,
+         0,
+         false,
+         false,
+         true,
+         false,
+         true,
+         false,
+         1,
+         1,
+         true,
+         false},
+        {"generation-context-default", 1, 1, false, false, false, false, false},
+        {"mixed-capture-forced-group",
+         1,
+         1,
+         false,
+         false,
+         false,
+         false,
+         true,
+         false,
+         1,
+         1,
+         true,
+         true,
+         false,
+         false,
+         true},
+        {"generation-context-explicit-capture", 1, 1, false, false, false, true, true},
+        {"generation-context-reuse-conflict",
+         1,
+         1,
+         false,
+         false,
+         false,
+         false,
+         true,
+         false,
+         1,
+         1,
+         true,
+         true,
+         false,
+         true},
+        {"generation-context-without-admission", 1, 1, false, false, false, false, true, false, 1, 1, false},
+        {"generation-context-without-global-config", 1, 1, false, false, false, false, true, false, 1, 1, true, false},
+        {"multi-sequence-generation-context", 1, 1, false, false, false, false, true, false, 1, 2},
+        {"failed-prefill-before-generation", 0, 1, true, false, false, false, true},
+        {"failed-prefill-before-decode-generation", 0, 1, true, true, false, false, true},
+        {"decode-prefill-precedes-context-generation", 1, 0, false, true, true, false, true},
+        {"decode-generation-precedes-context-prefill", 0, 1, false, true, false, false, true},
+        {"errored-context-disables-capture", 1, 0, true, false, true, false, true},
+        {"decode-only-does-not-capture", 1, 1, false, true, false, false, true, true},
+        {"generation-forward-failure", 1, 1, false, false, false, true, true, false, 1, 1, true, true, true},
+        {"prefill-only-forward-failure", 0, 0, false, false, true, true, false, false, 1, 1, true, true, true},
+        {"forward-failure-preserves-existing-error",
+         1,
+         0,
+         true,
+         false,
+         true,
+         false,
+         true,
+         false,
+         1,
+         1,
+         true,
+         true,
+         true},
     };
     for (const auto& test_case : cases) {
         SCOPED_TRACE(test_case.name);
-        auto           params = makeExecutorParams(GetParam());
+        auto params = makeExecutorParams(GetParam());
+        params.model_config_.hidden_state_capture_layer_ids =
+            test_case.capture_configured ? std::vector<int64_t>{0} : std::vector<int64_t>{};
         NormalExecutor executor(params, nullptr);
-        // Reuse the warmup gatherer's fake KV layout, but run normal executor dispatch.
+        // Use the normal gather path so generation-context capture is exercised.
         executor.setBatchProcessor(std::make_unique<NormalBatchStreamProcessor>(params.model_config_,
                                                                                 params.pd_sep_config,
                                                                                 params.profiling_debug_logging_config,
-                                                                                CacheConfig().main_config,
-                                                                                CacheConfig().seq_size_per_block,
-                                                                                true,
+                                                                                CacheConfig(),
+                                                                                /*module_id=*/0,
+                                                                                test_case.warm_up,
                                                                                 GetParam()));
-        auto  model                  = std::make_unique<CaptureModel>();
-        auto* observed_model         = model.get();
-        model->expected_prefill_only = test_case.expected_prefill_only;
-        model->fail_capture          = test_case.fail_capture;
+        auto  model                           = std::make_unique<CaptureModel>();
+        auto* observed_model                  = model.get();
+        model->expected_prefill_only          = test_case.expected_prefill_only;
+        model->expected_capture_hidden_states = test_case.expected_capture_hidden_states;
+        model->check_prefill_geometry = test_case.first_max_new_tokens == 0 && test_case.second_max_new_tokens == 0
+                                        && !test_case.first_is_decode && !test_case.second_is_decode;
+        model->fail_forward = test_case.fail_forward;
+
         executor.setModel(std::move(model));
 
         ResourceContext resource_context;
-        auto            make_stream = [&](int max_new_tokens) {
-            auto query                             = make_shared<GenerateInput>();
-            query->input_ids                       = hostIntBuffer({1, 2});
-            query->generate_config                 = make_shared<GenerateConfig>();
-            query->generate_config->max_new_tokens = max_new_tokens;
-            query->generate_config->top_k          = 1;
-            query->generate_config->aux_info       = true;
-            auto stream                            = make_shared<NormalGenerateStream>(
+        int64_t         next_request_id = 1000;
+        auto            make_stream     = [&](int max_new_tokens, int num_return_sequences) {
+            auto query        = make_shared<GenerateInput>();
+            query->request_id = next_request_id++;
+            if (test_case.mixed_capture_requests) {
+                query->group_id   = 42;
+                query->group_size = 2;
+            }
+            query->input_ids                              = hostIntBuffer({1, 2});
+            query->generate_config                        = make_shared<GenerateConfig>();
+            query->generate_config->max_new_tokens        = max_new_tokens;
+            query->generate_config->capture_hidden_states = test_case.capture_hidden_states;
+            query->generate_config->reuse_cache = test_case.capture_hidden_states ? test_case.reuse_cache : true;
+            query->generate_config->num_return_sequences = num_return_sequences;
+            query->generate_config->top_k                = 1;
+            query->generate_config->aux_info             = true;
+            auto stream                                  = make_shared<NormalGenerateStream>(
                 query, params.model_config_, params.runtime_config, resource_context, nullptr);
             stream->generate_status_->status = StreamState::RUNNING;
             return stream;
         };
-        auto first  = make_stream(test_case.first_max_new_tokens);
-        auto second = make_stream(test_case.second_max_new_tokens);
+        auto first  = make_stream(test_case.first_max_new_tokens, test_case.first_num_return_sequences);
+        auto second = make_stream(test_case.second_max_new_tokens, test_case.second_num_return_sequences);
+        if (test_case.mixed_capture_requests) {
+            second->generateConfig()->capture_hidden_states = false;
+        }
+        auto cancellations = std::make_shared<int>(0);
         if (test_case.first_has_error) {
             first->reportError(ErrorCode::INVALID_PARAMS, "original request error");
         }
+        first->setIsContextStream(!test_case.first_is_decode);
         second->setIsContextStream(!test_case.second_is_decode);
-        ASSERT_TRUE(executor.process({first, second}).ok());
+        // Preset admission isolates the gather/executor gates. Real Engine
+        // makeStream/enqueue admission and publisher lifetime belong to their
+        // respective Engine/publisher fixtures, not this model double.
+        if (test_case.admit_capture && !test_case.first_is_decode) {
+            first->setHiddenStateCaptureReservation(
+                std::make_shared<HiddenStateCaptureReservation>([cancellations]() noexcept { ++*cancellations; }));
+        }
+        if (test_case.admit_capture && !test_case.second_is_decode) {
+            second->setHiddenStateCaptureReservation(
+                std::make_shared<HiddenStateCaptureReservation>([cancellations]() noexcept { ++*cancellations; }));
+        }
+        if (test_case.fail_forward) {
+            EXPECT_THROW((void)executor.process({first, second}), std::runtime_error);
+        } else {
+            ASSERT_TRUE(executor.process({first, second}).ok());
+        }
         EXPECT_EQ(observed_model->forward_count, 1);
+        if (!test_case.expected_capture_hidden_states) {
+            EXPECT_FALSE(first->hasHiddenStateCaptureReservation());
+            EXPECT_FALSE(second->hasHiddenStateCaptureReservation());
+            const int expected_cancellations =
+                test_case.admit_capture ? int(!test_case.first_is_decode) + int(!test_case.second_is_decode) : 0;
+            EXPECT_EQ(*cancellations, expected_cancellations);
+            first->cancelHiddenStateCapture();
+            second->cancelHiddenStateCapture();
+            EXPECT_EQ(*cancellations, expected_cancellations);
+        }
         EXPECT_FALSE(first->hasPendingAsyncBookkeeping());
         EXPECT_FALSE(second->hasPendingAsyncBookkeeping());
         if (test_case.first_has_error) {
             EXPECT_EQ(first->statusInfo().code(), ErrorCode::INVALID_PARAMS);
             EXPECT_EQ(first->stopReason(), "original request error");
         }
-        if (test_case.fail_capture) {
-            EXPECT_EQ(second->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
-            EXPECT_EQ(second->stopReason(), "capture publication failed");
+
+        if (test_case.fail_forward) {
+            EXPECT_FALSE(first->hasOutput());
             EXPECT_FALSE(second->hasOutput());
-        } else if (test_case.second_is_decode && !test_case.first_has_error) {
+        } else if (test_case.first_max_new_tokens != test_case.second_max_new_tokens && !test_case.first_has_error) {
             // Mixed batches still forward for collective alignment, but may not publish success.
             EXPECT_EQ(first->statusInfo().code(), ErrorCode::INVALID_PARAMS);
             EXPECT_EQ(second->statusInfo().code(), ErrorCode::INVALID_PARAMS);
             EXPECT_EQ(second->stopReason(), kMixedExecutionModeBatchError);
             EXPECT_FALSE(first->hasOutput());
             EXPECT_FALSE(second->hasOutput());
+        } else if (second->generateConfig()->requiresHiddenStateCaptureAdmission()
+                   && !test_case.expected_capture_hidden_states) {
+            EXPECT_EQ(second->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+            EXPECT_EQ(second->stopReason(), "required hidden-state capture was disabled by the gathered batch");
+            EXPECT_FALSE(second->hasOutput());
+            EXPECT_FALSE(second->hasHiddenStateCaptureReservation());
+            if (!test_case.first_has_error && first->generateConfig()->requiresHiddenStateCaptureAdmission()) {
+                EXPECT_EQ(first->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+                EXPECT_FALSE(first->hasOutput());
+            }
         } else {
             ASSERT_FALSE(second->hasError());
             auto output = second->nextOutput();
             ASSERT_TRUE(output.ok());
-            ASSERT_EQ(output.value().generate_outputs.size(), 1);
-            EXPECT_TRUE(output.value().generate_outputs[0].finished);
+            ASSERT_EQ(output.value().generate_outputs.size(), static_cast<size_t>(second->maxBatchSize()));
+            for (const auto& generate_output : output.value().generate_outputs) {
+                EXPECT_TRUE(generate_output.finished);
+            }
             EXPECT_EQ(second->outputTokenLen(), test_case.second_max_new_tokens);
             EXPECT_EQ(second->seqLength(), 2 + test_case.second_max_new_tokens);
             if (test_case.expected_prefill_only) {
@@ -527,19 +759,14 @@ TEST_P(NormalBatchStreamProcessorPrefillOnlyTest, prefillOnlySkipsLmHeadAndDispa
     const std::vector<std::pair<std::shared_ptr<RecordingGenerateStream>, size_t>> expected = {
         {stream1, stream1->seqLength()}, {stream2, stream2->seqLength()}};
     StreamGroups               stream_groups({stream1, stream2});
-    NormalBatchStreamProcessor processor(model_config,
-                                         pd_sep_config,
-                                         profiling_debug_logging_config,
-                                         cache_config.main_config,
-                                         cache_config.seq_size_per_block,
-                                         true,
-                                         std::get<0>(GetParam()));
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, /*module_id=*/0, false, std::get<0>(GetParam()));
 
     TensorHolder holder;
     auto         model_input = processor.gatherModelInput(stream_groups, holder);
     ASSERT_TRUE(model_input.ok());
     EXPECT_TRUE(model_input->skip_lm_head);
-    EXPECT_TRUE(model_input->capture_hidden_states);
+    EXPECT_FALSE(model_input->capture_hidden_states);
     EXPECT_EQ(model_input->combo_tokens.numel(), 5);
 
     for (int i = 0; i < 2; ++i) {
@@ -640,8 +867,10 @@ TEST_F(NormalBatchStreamProcessorTest, gatherExecutionModesPreserveFlagsAndError
         {"context-mixed-generation-first", {{true, 1}, {true, 0}}, false, true},
         {"decode-mixed-prefill-first", {{false, 0}, {false, 1}}, true, true},
         {"decode-mixed-generation-first", {{false, 1}, {false, 0}}, false, true},
+
         {"cross-container-decode-generation-first", {{false, 1}, {true, 0}}, false, true},
         {"cross-container-context-prefill-first", {{true, 0}, {false, 1}}, false, true},
+
         {"cross-container-decode-prefill-first", {{false, 0}, {true, 1}}, true, true},
         {"cross-container-context-generation-first", {{true, 1}, {false, 0}}, true, true},
         {"mixed-context-behind-generation-decode", {{false, 1}, {true, 1}, {true, 0}}, false, true},
@@ -667,12 +896,13 @@ TEST_F(NormalBatchStreamProcessorTest, gatherExecutionModesPreserveFlagsAndError
         StreamGroups stream_groups(streams);
         TensorHolder holder;
         auto         model_input = processor.gatherModelInput(stream_groups, holder);
-        // Mixed batches still reach TP sync; flags follow the execution mode
-        // derived from schedulable (non-errored) streams.
+        // Mixed batches still reach TP sync; skip_lm_head follows the execution mode
+        // derived from schedulable (non-errored) streams. This warmup fixture has no
+        // eligible hidden-state capture configuration.
         ASSERT_TRUE(model_input.ok());
         EXPECT_EQ(model_input->combo_tokens.numel(), expected_tokens);
         EXPECT_EQ(model_input->skip_lm_head, test_case.prefill_only);
-        EXPECT_EQ(model_input->capture_hidden_states, test_case.prefill_only);
+        EXPECT_FALSE(model_input->capture_hidden_states);
         for (const auto& stream : streams) {
             if (test_case.existing_error && stream == streams.front()) {
                 EXPECT_EQ(stream->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
@@ -686,6 +916,312 @@ TEST_F(NormalBatchStreamProcessorTest, gatherExecutionModesPreserveFlagsAndError
             }
         }
     }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, gatherCaptureRequiresHomogeneousFirstFullContexts) {
+    struct StreamMode {
+        bool      capture        = true;
+        bool      context        = true;
+        int       max_new_tokens = 4;
+        int       prefix         = 0;
+        bool      failed         = false;
+        bool      admitted       = true;
+        ErrorCode expected_error = ErrorCode::NONE_ERROR;
+    };
+    struct TestCase {
+        const char*             name;
+        std::vector<StreamMode> modes;
+        bool                    capture;
+        bool                    skip_lm_head          = false;
+        bool                    mixed_execution_modes = false;
+        bool                    warmup                = false;
+        bool                    fake_query            = false;
+        bool                    fake_stream           = false;
+        bool                    chunked               = false;
+        bool                    verify                = false;
+        RoleType                role                  = RoleType::PDFUSION;
+    };
+    const std::vector<TestCase> cases = {
+        {"empty", {}, false},
+        {"two-explicit-pdfusion", {{}, {}}, true},
+        {"two-explicit-prefill", {{}, {}}, true, false, false, false, false, false, false, false, RoleType::PREFILL},
+        {"ordinary-context", {{false}, {false}}, false},
+        {"zero-token", {{false, true, 0}, {false, true, 0}}, true, true},
+        // Positive-token capture stays best-effort; only zero/positive execution
+        // mode conflicts reject the batch with INVALID_PARAMS.
+        {"capture-before-ordinary", {{true}, {false}}, false},
+        {"ordinary-before-capture", {{false}, {true}}, false},
+        {"capture-and-zero-token", {{true}, {false, true, 0}}, false, false, true},
+        {"capture-with-decode", {{true}, {true, false}}, false},
+        {"decode-only", {{true, false}, {true, false}}, false},
+        {"capture-with-error-row", {{true}, {true, true, 4, 0, true}}, false},
+        {"error-row-before-capture", {{true, true, 4, 0, true}, {true}}, false},
+        {"all-errored", {{true, true, 4, 0, true}}, false},
+        {"partial-prefix", {{true, true, 4, 1}}, false},
+        {"chunk-window", {{}}, false, false, false, false, false, false, true},
+        {"verify", {{}}, false, false, false, false, false, false, false, true},
+        {"warmup", {{}, {}}, false, false, false, true},
+        {"fake-query", {{}, {}}, false, false, false, false, true},
+        {"fake-stream", {{}, {}}, false, false, false, false, false, true},
+        {"decode-role", {{}}, false, false, false, false, false, false, false, false, RoleType::DECODE},
+        {"generation-without-admission", {{true, true, 4, 0, false, false}}, false},
+        {"bare-zero-without-admission", {{false, true, 0, 0, false, false}}, false, true},
+        {"bare-zero-with-unadmitted-sibling", {{false, true, 0}, {false, true, 0, 0, false, false}}, false, true},
+        {"strict-zero", {{true, true, 0}, {true, true, 0}}, true, true},
+        {"strict-zero-without-admission",
+         {{true, true, 0, 0, false, false, ErrorCode::EXECUTION_EXCEPTION}},
+         false,
+         true},
+        {"strict-with-unadmitted-bare-zero",
+         {{true, true, 0, 0, false, true, ErrorCode::EXECUTION_EXCEPTION}, {false, true, 0, 0, false, false}},
+         false,
+         true},
+        {"strict-with-original-error",
+         {{true, true, 0, 0, false, true, ErrorCode::EXECUTION_EXCEPTION}, {true, true, 0, 0, true}},
+         false,
+         true},
+        {"strict-partial-prefix", {{true, true, 0, 1, false, true, ErrorCode::EXECUTION_EXCEPTION}}, false, true},
+        {"strict-and-positive-token", {{true}, {true, true, 0}}, false, false, true},
+    };
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        ModelConfig model_config;
+        model_config.max_seq_len                    = 128;
+        model_config.vocab_size                     = 128;
+        model_config.input_vocab_size               = 128;
+        model_config.num_layers                     = 1;
+        model_config.hidden_state_capture_layer_ids = {0};
+        ResourceContext resource_context;
+        resource_context.role_type = test_case.role;
+        PDSepConfig pd_sep_config;
+        pd_sep_config.role_type = test_case.role;
+        std::list<GenerateStreamPtr>                  streams;
+        std::vector<HiddenStateCaptureReservationPtr> reservations;
+        auto                                          cancellations   = std::make_shared<size_t>(0);
+        size_t                                        admitted_count  = 0;
+        int64_t                                       expected_tokens = 0;
+        size_t                                        stream_index    = 0;
+        for (const auto& mode : test_case.modes) {
+            auto query = std::make_shared<GenerateInput>();
+            query->input_ids =
+                hostIntBuffer(stream_index++ == 0 ? std::vector<int32_t>{1, 2, 3} : std::vector<int32_t>{4, 5});
+            query->fake_query                             = test_case.fake_query;
+            query->generate_config                        = std::make_shared<GenerateConfig>();
+            query->generate_config->max_new_tokens        = mode.max_new_tokens;
+            query->generate_config->capture_hidden_states = mode.capture;
+            query->generate_config->reuse_cache           = false;
+            auto stream =
+                std::make_shared<NormalGenerateStream>(query, model_config, RuntimeConfig{}, resource_context, nullptr);
+            ASSERT_FALSE(stream->hasError());
+            stream->generate_status_->status = StreamState::RUNNING;
+            stream->setIsContextStream(mode.context);
+            stream->setReuseLength(mode.prefix);
+            stream->setIsFakeStream(test_case.fake_stream);
+            if (test_case.chunked) {
+                stream->setChunkSize(2);
+            }
+            if (test_case.verify) {
+                stream->setScoreLen(2);
+            }
+            if (mode.failed) {
+                stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "original error");
+            }
+            // Match the executor fixture's preset admission, including stale
+            // reservations that gather must cancel when the batch is ineligible.
+            HiddenStateCaptureReservationPtr reservation;
+            if (mode.admitted && (mode.capture || mode.max_new_tokens == 0)) {
+                reservation =
+                    std::make_shared<HiddenStateCaptureReservation>([cancellations]() noexcept { ++*cancellations; });
+                stream->setHiddenStateCaptureReservation(reservation);
+                ASSERT_TRUE(reservation->active());
+                ASSERT_TRUE(stream->hasHiddenStateCaptureReservation());
+                ++admitted_count;
+            }
+            reservations.push_back(std::move(reservation));
+            expected_tokens += mode.context ? stream->contextLength() : 1;
+            streams.push_back(stream);
+        }
+        NormalBatchStreamProcessor processor(
+            model_config, pd_sep_config, ProfilingDebugLoggingConfig{}, CacheConfig{}, /*module_id=*/0, test_case.warmup);
+        TensorHolder       holder;
+        const StreamGroups groups(streams);
+        EXPECT_EQ(*cancellations, 0u);
+        auto result = processor.gatherModelInput(groups, holder);
+        ASSERT_TRUE(result.ok()) << result.status();
+        EXPECT_EQ(result->combo_tokens.numel(), expected_tokens);
+        EXPECT_EQ(result->skip_lm_head, test_case.skip_lm_head);
+        EXPECT_EQ(result->capture_hidden_states, test_case.capture);
+        EXPECT_FALSE(result->is_target_verify);
+        EXPECT_EQ(*cancellations, test_case.capture ? 0u : admitted_count);
+        size_t index = 0;
+        for (const auto& stream : streams) {
+            const auto& mode        = test_case.modes[index];
+            const auto& reservation = reservations[index++];
+            EXPECT_EQ(stream->hasHiddenStateCaptureReservation(), test_case.capture && bool(reservation));
+            if (reservation) {
+                EXPECT_EQ(reservation->active(), test_case.capture);
+            }
+            if (mode.failed) {
+                EXPECT_TRUE(stream->hasError());
+                EXPECT_EQ(stream->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+                EXPECT_EQ(stream->stopReason(), "original error");
+            } else if (test_case.mixed_execution_modes) {
+                EXPECT_TRUE(stream->hasError());
+                EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                EXPECT_EQ(stream->stopReason(), kMixedExecutionModeBatchError);
+            } else {
+                EXPECT_EQ(stream->hasError(), mode.expected_error != ErrorCode::NONE_ERROR);
+                EXPECT_EQ(stream->statusInfo().code(), mode.expected_error);
+                if (mode.expected_error == ErrorCode::EXECUTION_EXCEPTION) {
+                    EXPECT_TRUE(stream->generateConfig()->requiresHiddenStateCaptureAdmission());
+                    EXPECT_EQ(stream->stopReason(), "required hidden-state capture was disabled by the gathered batch");
+                }
+            }
+        }
+        for (const auto& stream : streams) {
+            stream->cancelHiddenStateCapture();
+            stream->cancelHiddenStateCapture();
+            EXPECT_FALSE(stream->hasHiddenStateCaptureReservation());
+        }
+        for (const auto& reservation : reservations) {
+            if (reservation) {
+                EXPECT_FALSE(reservation->active());
+            }
+        }
+        EXPECT_EQ(*cancellations, admitted_count);
+        if (test_case.capture) {
+            EXPECT_EQ(result->sequence_lengths.numel(), 0);
+            EXPECT_EQ(toVec<int32_t>(result->prefix_lengths), (std::vector<int32_t>{0, 0}));
+            EXPECT_EQ(toVec<int32_t>(result->input_lengths), (std::vector<int32_t>{3, 2}));
+            EXPECT_EQ(toVec<int32_t>(result->combo_tokens), (std::vector<int32_t>{1, 2, 3, 4, 5}));
+        }
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, gatherChunkedCapturePreservesStrictAndBestEffortContracts) {
+    for (const bool multimodal : {false, true}) {
+        for (const int chunk_size : {0, 2, 4, 8}) {
+            for (const int max_new_tokens : {0, 4}) {
+                for (const bool capture : {false, true}) {
+                    SCOPED_TRACE(testing::Message() << "multimodal=" << multimodal << " chunk=" << chunk_size
+                                                    << " max_new_tokens=" << max_new_tokens << " capture=" << capture);
+                    ModelConfig model;
+                    model.max_seq_len                    = 128;
+                    model.vocab_size                     = 128;
+                    model.input_vocab_size               = 128;
+                    model.num_layers                     = 1;
+                    model.mm_model_config.is_multimodal  = multimodal;
+                    model.hidden_state_capture_layer_ids = {0};
+                    RuntimeConfig runtime;
+                    runtime.fifo_scheduler_config.prefill_chunk_size = chunk_size;
+                    ResourceContext resource;
+                    resource.role_type = RoleType::PREFILL;
+                    PDSepConfig pd_sep;
+                    pd_sep.role_type = RoleType::PREFILL;
+                    auto query = std::make_shared<GenerateInput>();
+                    query->input_ids = hostIntBuffer(multimodal ? std::vector<int32_t>{1, -1, -1, 2} :
+                                                                  std::vector<int32_t>{1, 2, 3, 4});
+                    query->generate_config = std::make_shared<GenerateConfig>();
+                    query->generate_config->max_new_tokens        = max_new_tokens;
+                    query->generate_config->capture_hidden_states = capture;
+                    query->generate_config->reuse_cache           = false;
+                    if (multimodal) {
+                        query->mm_locs             = hostIntBuffer({1});
+                        query->text_tokens_mask    = hostIntBuffer({1, 0, 0, 1});
+                        query->multimodal_features = std::vector<torch::Tensor>{torch::ones({2, 2})};
+                    }
+                    auto stream = std::make_shared<NormalGenerateStream>(query, model, runtime, resource, nullptr);
+                    ASSERT_FALSE(stream->hasError()) << stream->stopReason();
+                    EXPECT_EQ(stream->chunkedPrefillEnabled(), chunk_size > 0);
+                    const bool requested = max_new_tokens == 0 || capture;
+                    const bool eligible  = requested && chunk_size == 0;
+                    EXPECT_EQ(stream->isHiddenStateCaptureCandidate(), eligible);
+                    EXPECT_EQ(stream->generateConfig()->requiresHiddenStateCaptureAdmission(),
+                              max_new_tokens == 0 && capture);
+                    // Bypass engine admission deliberately: gather must cancel a stale
+                    // reservation, fail strict requests, and leave best-effort serving intact.
+                    if (requested) {
+                        stream->setHiddenStateCaptureReservation(
+                            std::make_shared<HiddenStateCaptureReservation>([]() noexcept {}));
+                    }
+                    stream->generate_status_->status = StreamState::RUNNING;
+                    NormalBatchStreamProcessor processor(
+                        model, pd_sep, ProfilingDebugLoggingConfig{}, CacheConfig{}, /*module_id=*/0, false);
+                    TensorHolder holder;
+                    auto result = processor.gatherModelInput(StreamGroups({stream}), holder);
+                    ASSERT_TRUE(result.ok()) << result.status();
+                    EXPECT_EQ(result->capture_hidden_states, eligible);
+                    EXPECT_EQ(result->skip_lm_head, max_new_tokens == 0);
+                    EXPECT_EQ(stream->hasHiddenStateCaptureReservation(), eligible);
+                    const bool strict_rejected = max_new_tokens == 0 && capture && !eligible;
+                    EXPECT_EQ(stream->hasError(), strict_rejected);
+                    if (strict_rejected) {
+                        EXPECT_EQ(stream->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+                        EXPECT_EQ(stream->stopReason(), "required hidden-state capture was disabled by the gathered batch");
+                    }
+                    stream->cancelHiddenStateCapture();
+                }
+            }
+        }
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, gatherSameCaptureRequestDoesNotRecaptureDecodeOrContextFallback) {
+    ModelConfig model_config;
+    model_config.max_seq_len                    = 128;
+    model_config.vocab_size                     = 128;
+    model_config.input_vocab_size               = 128;
+    model_config.num_layers                     = 1;
+    model_config.hidden_state_capture_layer_ids = {0};
+    ResourceContext resource_context;
+    auto            query                         = std::make_shared<GenerateInput>();
+    query->input_ids                              = hostIntBuffer({1, 2, 3});
+    query->generate_config                        = std::make_shared<GenerateConfig>();
+    query->generate_config->max_new_tokens        = 4;
+    query->generate_config->capture_hidden_states = true;
+    query->generate_config->reuse_cache           = false;
+    auto stream =
+        std::make_shared<NormalGenerateStream>(query, model_config, RuntimeConfig{}, resource_context, nullptr);
+    stream->generate_status_->status = StreamState::RUNNING;
+    auto cancellations               = std::make_shared<int>(0);
+    auto reservation =
+        std::make_shared<HiddenStateCaptureReservation>([cancellations]() noexcept { ++*cancellations; });
+    stream->setHiddenStateCaptureReservation(reservation);
+    ASSERT_TRUE(reservation->active());
+    ASSERT_TRUE(stream->hasHiddenStateCaptureReservation());
+    NormalBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, CacheConfig{}, /*module_id=*/0, false);
+    TensorHolder holder;
+    auto         first = processor.gatherModelInput(StreamGroups({stream}), holder);
+    ASSERT_TRUE(first.ok());
+    EXPECT_TRUE(first->capture_hidden_states);
+    EXPECT_FALSE(first->skip_lm_head);
+    EXPECT_EQ(stream->iterCount(), 1u);
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_TRUE(stream->hasHiddenStateCaptureReservation());
+    EXPECT_TRUE(reservation->active());
+    EXPECT_EQ(*cancellations, 0);
+    stream->setIsContextStream(false);
+    auto decode = processor.gatherModelInput(StreamGroups({stream}), holder);
+    ASSERT_TRUE(decode.ok());
+    EXPECT_FALSE(decode->capture_hidden_states);
+    EXPECT_FALSE(decode->skip_lm_head);
+    EXPECT_EQ(decode->sequence_lengths.numel(), 1);
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_FALSE(stream->hasHiddenStateCaptureReservation());
+    EXPECT_FALSE(reservation->active());
+    EXPECT_EQ(*cancellations, 1);
+    stream->setIsContextStream(true);
+    auto fallback = processor.gatherModelInput(StreamGroups({stream}), holder);
+    ASSERT_TRUE(fallback.ok());
+    EXPECT_FALSE(fallback->capture_hidden_states);
+    EXPECT_FALSE(fallback->skip_lm_head);
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_TRUE(stream->generateConfig()->capture_hidden_states);
+    EXPECT_FALSE(stream->hasHiddenStateCaptureReservation());
+    EXPECT_FALSE(reservation->active());
+    stream->cancelHiddenStateCapture();
+    EXPECT_EQ(*cancellations, 1);
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable) {
@@ -1350,9 +1886,9 @@ class ChunkedPrefillBatchStreamProcessorTest: public NormalBatchStreamProcessorT
 protected:
     void SetUp() override {
         DeviceTestBase::SetUp();
-        model_config_.max_seq_len            = 2048;
-        model_config_.vocab_size             = 2048;
-        model_config_.num_layers             = 1;
+        model_config_.max_seq_len             = 2048;
+        model_config_.vocab_size              = 2048;
+        model_config_.num_layers              = 1;
         model_config_.has_positional_encoding = true;
         initFullCacheConfig(cache_config_, model_config_.num_layers);
         processor_ = make_unique<NormalBatchStreamProcessor>(model_config_,
@@ -1368,8 +1904,8 @@ protected:
         auto query             = make_shared<GenerateInput>();
         query->input_ids       = hostIntBuffer(input_ids);
         query->generate_config = generate_config ? generate_config : make_shared<GenerateConfig>();
-        auto stream = make_shared<NormalGenerateStream>(
-            query, model_config_, RuntimeConfig{}, ResourceContext{}, nullptr);
+        auto stream =
+            make_shared<NormalGenerateStream>(query, model_config_, RuntimeConfig{}, ResourceContext{}, nullptr);
         stream->generate_status_->status = StreamState::RUNNING;
         return stream;
     }
@@ -2852,9 +3388,9 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherUsesTheGrantedWindowF
         }
         EXPECT_EQ(toVec<int>(input.text_tokens_mask), expected_mask);
 
-        vector<int> expected_locations;
+        vector<int>     expected_locations;
         vector<int64_t> expected_spans;
-        size_t      feature_index = 0;
+        size_t          feature_index = 0;
         for (int row = 0; row < 3; ++row) {
             for (size_t i = 0; i < features.size(); ++i) {
                 const int begin = std::max(start, feature_locations[i]);
@@ -3059,8 +3595,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMisalignedMultimodalExtraInputIsRejec
 }
 
 TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillPositionIdsCopyCurrentChunkOnly) {
-    auto chunk_stream =
-        makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
+    auto chunk_stream = makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
     chunk_stream->setReuseLength(8);
 
     StreamGroups stream_groups({chunk_stream});
@@ -3124,9 +3659,9 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testAllAttentionChunkInputsPreser
                                                      false);
                 const bool cyclic =
                     !(reuse && prefix_reuse) && attention.type != CacheGroupType::FULL && !attention.shared;
-                const BlockIndicesType owning = attention.shared ? BlockIndicesType{-1, -1, -1, 41} :
-                                                cyclic           ? BlockIndicesType{-1, 11, 23, 37} :
-                                                                   BlockIndicesType{11, 23, 37, 41};
+                const BlockIndicesType       owning = attention.shared ? BlockIndicesType{-1, -1, -1, 41} :
+                                                      cyclic           ? BlockIndicesType{-1, 11, 23, 37} :
+                                                                         BlockIndicesType{11, 23, 37, 41};
                 std::list<GenerateStreamPtr> streams;
                 for (int row = 0; row < 2; ++row) {
                     std::vector<int32_t> tokens(401);
@@ -3136,7 +3671,8 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testAllAttentionChunkInputsPreser
                     input->input_ids             = hostIntBuffer(tokens);
                     input->generate_config       = std::make_shared<GenerateConfig>();
                     input->need_release_resource = false;  // This test owns IDs, not pool allocations.
-                    auto stream = std::make_shared<NormalGenerateStream>(input, model_config_, runtime, context, nullptr);
+                    auto stream =
+                        std::make_shared<NormalGenerateStream>(input, model_config_, runtime, context, nullptr);
                     stream->generate_status_->status = StreamState::RUNNING;
                     auto row_owning                  = owning;
                     for (auto& block : row_owning) {
@@ -3219,8 +3755,8 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillSamplerInputSki
     auto chunk_config         = make_shared<GenerateConfig>();
     chunk_config->do_sample   = true;
     chunk_config->random_seed = 123;
-    auto chunk_stream = makeMiddleChunkStream(
-        {10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27}, chunk_config);
+    auto chunk_stream =
+        makeMiddleChunkStream({10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27}, chunk_config);
 
     auto plain_config         = make_shared<GenerateConfig>();
     plain_config->do_sample   = true;
@@ -3244,38 +3780,38 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillSamplerInputSki
 
 TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillProbabilityRowsStayAlignedWithDecode) {
     for (const auto mode : {ReturnAllProbsMode::DEFAULT, ReturnAllProbsMode::ORIGINAL}) {
-        auto config = make_shared<GenerateConfig>();
-        config->return_all_probs = mode;
-        config->is_streaming = true;
-        config->max_new_tokens = 2;
-        auto chunk = makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, config);
-        auto plain_config = make_shared<GenerateConfig>();
-        plain_config->is_streaming = true;
+        auto config                  = make_shared<GenerateConfig>();
+        config->return_all_probs     = mode;
+        config->is_streaming         = true;
+        config->max_new_tokens       = 2;
+        auto chunk                   = makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, config);
+        auto plain_config            = make_shared<GenerateConfig>();
+        plain_config->is_streaming   = true;
         plain_config->max_new_tokens = 2;
-        auto plain = makeRunningStream({1, 2, 3}, plain_config);
+        auto plain                   = makeRunningStream({1, 2, 3}, plain_config);
 
         for (int step = 0; step < 2; ++step) {
-            StreamGroups groups({chunk, plain});
+            StreamGroups    groups({chunk, plain});
             GptModelOutputs model_output;
             model_output.logits = torch::zeros({2, model_config_.vocab_size}, torch::kFloat32).cuda();
-            auto gathered = processor_->gatherSamplerInput(groups, GptModelInputs{}, model_output);
+            auto gathered       = processor_->gatherSamplerInput(groups, GptModelInputs{}, model_output);
             ASSERT_TRUE(gathered.ok()) << gathered.status().ToString();
             EXPECT_EQ(gathered->all_probs.sizes().vec(), (vector<int64_t>{2, 2048}));
             EXPECT_EQ(gathered->return_original_all_probs, mode == ReturnAllProbsMode::ORIGINAL);
 
             // After step zero, the plain request is decode and moves before the chunk row.
-            const int chunk_row = step == 0 ? 0 : 1;
-            const int plain_row = 1 - chunk_row;
-            auto tokens = torch::empty({2, 1}, torch::kInt32);
+            const int chunk_row  = step == 0 ? 0 : 1;
+            const int plain_row  = 1 - chunk_row;
+            auto      tokens     = torch::empty({2, 1}, torch::kInt32);
             tokens[chunk_row][0] = 42;
             tokens[plain_row][0] = 43;
-            auto probs = torch::zeros({2, 2048}, torch::kFloat32);
+            auto probs           = torch::zeros({2, 2048}, torch::kFloat32);
             probs[chunk_row][42] = 0.75f;
             probs[chunk_row][99] = 0.25f;
             probs[plain_row][43] = 1.0f;
             MergedOutput outputs;
             outputs.sampler_output.token_ids = tokens.cuda();
-            outputs.sampler_output.success = torch::tensor({true, true}, torch::kBool);
+            outputs.sampler_output.success   = torch::tensor({true, true}, torch::kBool);
             outputs.sampler_output.all_probs = probs.cuda();
             ASSERT_TRUE(processor_->dispatch(groups, outputs).ok());
             EXPECT_EQ(chunk->hasOutput(), step == 1);
@@ -3298,28 +3834,28 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillProbabilityRows
 TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillSamplerMatchesUnchunkedProbabilities) {
     for (const auto mode : {ReturnAllProbsMode::DEFAULT, ReturnAllProbsMode::ORIGINAL}) {
         const auto make_config = [mode]() {
-            auto config = make_shared<GenerateConfig>();
+            auto config              = make_shared<GenerateConfig>();
             config->return_all_probs = mode;
-            config->is_streaming = true;
-            config->max_new_tokens = 2;
-            config->do_sample = true;
-            config->top_k = 2;
-            config->top_p = 1.0f;
-            config->temperature = 1.0f;
-            config->random_seed = 123;
+            config->is_streaming     = true;
+            config->max_new_tokens   = 2;
+            config->do_sample        = true;
+            config->top_k            = 2;
+            config->top_p            = 1.0f;
+            config->temperature      = 1.0f;
+            config->random_seed      = 123;
             return config;
         };
         const vector<int32_t> prompt{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
-        auto chunk = makeMiddleChunkStream(prompt, make_config());
-        auto baseline = makeRunningStream(prompt, make_config());
-        const auto initial_rng_state = chunk->getGenerator().get_state();
-        Sampler sampler(SamplerInitParams{});
-        auto logits = torch::full({2048}, -100.0f, torch::kFloat32);
-        logits[40] = std::log(0.1f);
-        logits[41] = std::log(0.2f);
-        logits[42] = std::log(0.3f);
-        logits[43] = std::log(0.4f);
-        auto expected = torch::zeros({1, 2048}, torch::kFloat32);
+        auto                  chunk             = makeMiddleChunkStream(prompt, make_config());
+        auto                  baseline          = makeRunningStream(prompt, make_config());
+        const auto            initial_rng_state = chunk->getGenerator().get_state();
+        Sampler               sampler(SamplerInitParams{});
+        auto                  logits = torch::full({2048}, -100.0f, torch::kFloat32);
+        logits[40]                   = std::log(0.1f);
+        logits[41]                   = std::log(0.2f);
+        logits[42]                   = std::log(0.3f);
+        logits[43]                   = std::log(0.4f);
+        auto expected                = torch::zeros({1, 2048}, torch::kFloat32);
         if (mode == ReturnAllProbsMode::ORIGINAL) {
             expected[0][40] = 0.1f;
             expected[0][41] = 0.2f;
@@ -3335,10 +3871,10 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillSamplerMatchesU
             if (phase > 0) {
                 streams.push_back(baseline);
             }
-            StreamGroups groups(streams);
+            StreamGroups    groups(streams);
             GptModelOutputs model_output;
             model_output.logits = logits.repeat({static_cast<int64_t>(streams.size()), 1}).cuda();
-            auto gathered = processor_->gatherSamplerInput(groups, GptModelInputs{}, model_output);
+            auto gathered       = processor_->gatherSamplerInput(groups, GptModelInputs{}, model_output);
             ASSERT_TRUE(gathered.ok()) << gathered.status().ToString();
             MergedOutput outputs;
             outputs.sampler_output = sampler.forward(gathered.value());
@@ -3349,11 +3885,11 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillSamplerMatchesU
                 continue;
             }
             EXPECT_TRUE(torch::equal(chunk->getGenerator().get_state(), baseline->getGenerator().get_state()));
-            auto chunk_result = chunk->nextOutput(100);
+            auto chunk_result    = chunk->nextOutput(100);
             auto baseline_result = baseline->nextOutput(100);
             ASSERT_TRUE(chunk_result.ok());
             ASSERT_TRUE(baseline_result.ok());
-            const auto& actual = chunk_result.value().generate_outputs[0];
+            const auto& actual    = chunk_result.value().generate_outputs[0];
             const auto& reference = baseline_result.value().generate_outputs[0];
             EXPECT_TRUE(torch::equal(actual.output_ids, reference.output_ids));
             ASSERT_TRUE(actual.aux_info.all_probs.has_value());
@@ -3366,7 +3902,7 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillSamplerMatchesU
 
 TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkDoesNotAdvanceNormalDeviceState) {
     autil::EnvGuard device_input_env("RTP_LLM_DEVICE_INPUT", "1");
-    auto stream = makeRunningStream({1, 2, 3, 4, 5, 6, 7, 8});
+    auto            stream = makeRunningStream({1, 2, 3, 4, 5, 6, 7, 8});
     stream->setChunkSize(4);
     setKvCacheBlocks(stream, {1});
 
@@ -3411,9 +3947,9 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkDoesNotAdvanceNorm
 }
 
 TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkPreservesNormalDeviceStateAndSamplerRowOrder) {
-    auto middle_stream = makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
-    auto plain_stream  = makeRunningStream({1, 2, 3});
-    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto       middle_stream = makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
+    auto       plain_stream  = makeRunningStream({1, 2, 3});
+    const auto cuda_i32      = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     middle_stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
         .last_sample_token_gpu = torch::full({1}, 41, cuda_i32),
         .next_seq_len_gpu      = torch::full({1}, 10, cuda_i32),
@@ -3425,7 +3961,7 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkPreservesNormalDev
     params.model_config_ = model_config_;
     params.py_model      = py::none();
     NormalExecutor executor(params, nullptr, true);
-    SamplerOutput outputs;
+    SamplerOutput  outputs;
     outputs.token_ids = torch::tensor({42, 43}, torch::kInt32).reshape({2, 1}).cuda();
     executor.publishNormalDeviceState(StreamGroups({middle_stream, plain_stream}), outputs);
 
