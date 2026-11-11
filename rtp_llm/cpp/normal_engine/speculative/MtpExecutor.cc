@@ -1992,7 +1992,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(commit_target_side_state)");
-        auto status = prepareAndCommitSpeculativeTargetState(speculative_sampler_output.accept_len, batch_size);
+        auto status = prepareAndCommitSpeculativeTargetState(
+            speculative_sampler_output.accept_len, batch_size, model_input.is_fake_stream);
         if (!status.ok()) {
             // The helper has already issued the rank-symmetric abort.
             target_commit_guard.dismiss();
@@ -2335,6 +2336,9 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
 
 GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_model_verify)");
+    // Verify rows contain generated text, while the gathered decode mask still
+    // has only one entry per request rather than gamma+1 entries.
+    model_input.text_tokens_mask = torch::Tensor();
     maybePrintModelInput(model_input, "decode target model");
     model_input.is_target_verify = true;
     RTP_LLM_LOG_DEBUG(
@@ -2469,8 +2473,16 @@ absl::Status MtpExecutor::rendezvousSpeculativeTargetSamplingStatus(const absl::
     return rendezvousSpeculativeTargetPhaseStatus(local_status, "sampling/cap");
 }
 
-absl::Status MtpExecutor::prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, size_t batch_size) {
+absl::Status
+MtpExecutor::prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, size_t batch_size, bool is_fake_stream) {
     if (model_ == nullptr || !model_->hasSpeculativeTargetCommitHooks()) {
+        return absl::OkStatus();
+    }
+    if (is_fake_stream) {
+        // DP idle batches must run forward collectives, but their zero block
+        // tables name no persistent state. Release even graph-owned stages on
+        // every TP rank without preparing destination writes.
+        rollbackSpeculativeTargetStateOrFailStop("fake stream");
         return absl::OkStatus();
     }
 

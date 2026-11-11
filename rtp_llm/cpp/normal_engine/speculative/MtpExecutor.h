@@ -134,7 +134,8 @@ protected:
     bool                speculativeTargetTransactionsEnabled() const;
     absl::Status        rendezvousSpeculativeTargetPhaseStatus(const absl::Status& local_status, const char* phase);
     absl::Status        rendezvousSpeculativeTargetSamplingStatus(const absl::Status& local_status);
-    absl::Status        prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, size_t batch_size);
+    absl::Status
+    prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, size_t batch_size, bool is_fake_stream = false);
     void                rollbackSpeculativeTargetStateOrFailStop(const char* phase);
     void                rollbackSpeculativeTargetStateBestEffort(const char* phase) noexcept;
 

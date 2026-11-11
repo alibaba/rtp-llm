@@ -796,6 +796,7 @@ public:
     using MtpExecutor::reduceSpeculativeTargetPrepareStatus;
     using MtpExecutor::rendezvousSpeculativeTargetPhaseStatus;
     using MtpExecutor::rendezvousSpeculativeTargetSamplingStatus;
+    using MtpExecutor::runTargetVerifyForward;
     using MtpExecutor::validateSpeculativeTargetExecutionPolicy;
 };
 
@@ -1924,6 +1925,23 @@ TEST_F(MtpExecutorTest, testDpFakeDecodePreservesDecodeWorkContract) {
     EXPECT_FALSE(fake_decode_stream->generateConfig()->isPrefillOnly());
     ASSERT_NE(fake_decode_stream->getSPOutputBuffer(), nullptr);
     EXPECT_EQ(fake_decode_stream->getSPOutputBuffer()->propose_step, propose_step);
+
+    auto* target_model = components.fake_target_model.get();
+    target_model->enableSpeculativeTargetCommit("fake block tables must not be prepared");
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    size_t reductions                                                = 0;
+    components.executor->speculative_target_status_reducer_for_test_ = [&](bool ok) {
+        ++reductions;
+        return ok;
+    };
+    auto accept_len = torch::tensor({propose_step + 1}, torch::kInt32).to(torch::kCUDA);
+    auto status = components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 1, /*is_fake_stream=*/true);
+    ASSERT_TRUE(status.ok());
+    EXPECT_FALSE(target_model->preparedAcceptLen().defined());
+    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
+    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
+    EXPECT_EQ(target_model->speculativeTargetFinalizeCount(), 0u);
+    EXPECT_EQ(reductions, 1u);
 }
 
 TEST_F(MtpExecutorTest, testDecodeRoleRejectsPrefillOnlyWithoutModelWork) {
@@ -3447,6 +3465,19 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
     EXPECT_EQ((std::vector<int>{5, 5, 5, 6, 6, 6, 7, 7, 7, 8,  8,  8,  9,  9,  9,
                                 7, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10, 10, 11, 11, 11}),
               toVec<int>(model_input.combo_position_ids));
+
+    // Multimodal decode retains a B-row mask; target verification consumes
+    // B * (gamma + 1) generated text rows and must not reuse that mask.
+    model_input.text_tokens_mask = torch::ones({(int64_t)batch_size}, torch::kInt32);
+    components.fake_target_model->setInputs({model_input});
+    components.fake_target_model->setOutputs(
+        {createRandomGptModelOutputs(batch_size * (propose_step + 1), vocab_size, 2)});
+    components.fake_target_model->forward_hook = [](GptModelInputs& inputs) {
+        EXPECT_TRUE(inputs.is_target_verify);
+        EXPECT_FALSE(inputs.text_tokens_mask.defined());
+    };
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    components.executor->runTargetVerifyForward(model_input, stream_groups);
 }
 
 TEST_F(MtpExecutorTest, testDSparkDraftMasksInvalidTemperatureAndUsesProbabilitySampling) {
