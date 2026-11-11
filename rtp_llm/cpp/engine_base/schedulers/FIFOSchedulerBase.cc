@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <mutex>
 #include <unordered_set>
 
 #include "autil/legacy/jsonizable.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 #include "rtp_llm/cpp/awi/AwiObservationRegistry.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -64,15 +66,38 @@ void FIFOSchedulerBase::updateSchedulerInfo(const std::string& scheduler_info) {
     if (!update.has_barrier || update.barrier.operation_id.empty()) {
         return;
     }
+    size_t evicted_blocks = 0;
     {
         std::lock_guard<std::mutex> lock(lock_);
         AwiObservationRegistry::instance().armBarrier(
             update.barrier.operation_id, update.barrier.request_ids, update.barrier.context_tokens);
+        // Protocol: arming empties prior benchmark prefix entries while memory
+        // KV reuse stays enabled. Uses the sanctioned per-group eviction path
+        // (same one the coordinator drives under capacity pressure): only
+        // unreferenced cache entries are dropped, in-flight streams keep their
+        // blocks. Runs under the scheduler lock so no engine step interleaves.
+        if (cache_manager_ != nullptr) {
+            auto block_tree = cache_manager_->blockTreeCache();
+            const auto& coordinator = cache_manager_->coordinatorManager();
+            if (block_tree != nullptr && coordinator != nullptr) {
+                for (const auto& group : coordinator->cacheGroups()) {
+                    if (group == nullptr) {
+                        continue;
+                    }
+                    const int reclaimed =
+                        block_tree->evictForGroup(group->tag(), std::numeric_limits<size_t>::max());
+                    if (reclaimed > 0) {
+                        evicted_blocks += static_cast<size_t>(reclaimed);
+                    }
+                }
+            }
+        }
     }
-    RTP_LLM_LOG_INFO("AWI barrier armed: op=%s requests=%zu context_tokens=%ld",
+    RTP_LLM_LOG_INFO("AWI barrier armed: op=%s requests=%zu context_tokens=%ld evicted_cache_blocks=%zu",
                      update.barrier.operation_id.c_str(),
                      update.barrier.request_ids.size(),
-                     (long)update.barrier.context_tokens);
+                     (long)update.barrier.context_tokens,
+                     evicted_blocks);
 }
 
 bool FIFOSchedulerBase::awiBarrierHold(const GenerateStreamPtr& stream) {

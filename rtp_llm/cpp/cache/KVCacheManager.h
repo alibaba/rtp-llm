@@ -139,6 +139,13 @@ public:
         return block_tree_cache_;
     }
 
+    // AWI barrier arming enumerates cache-group tags through the coordinator
+    // to evict prior benchmark prefix entries with the sanctioned per-group
+    // eviction path.
+    const CoordinatorCacheManagerPtr& coordinatorManager() const {
+        return coordinator_manager_;
+    }
+
     // Increment KV cache reference count for PD separation (connector refcount)
     std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector = true);
