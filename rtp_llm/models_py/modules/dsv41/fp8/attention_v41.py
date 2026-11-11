@@ -2066,51 +2066,74 @@ class AttentionV41FP8(AttentionFP8):
                                 **({"bounds": bounds} if bounds is not None else {}),
                             )
                     else:
-                        logits = torch.einsum(
-                            "thd,kd->thk", q[chunk], keys.float()
-                        ).relu_()
-                        logits = (logits * weights[chunk, :, None]).sum(1)
+                        # The dense fallback materialises [tokens, key_count]
+                        # scores.  At 128K CP-local tokens and an 8K candidate
+                        # window that is >4 GiB, more than the whole runtime
+                        # reserve.  Score fixed-size row blocks and publish
+                        # each block immediately; the mathematical result is
+                        # identical to one full-width top-k.
+                        q_dense = q[chunk]
+                        w_dense = weights[chunk]
+                        rows = int(visible.numel())
+                        row_block = 4096
                         ids = torch.arange(key_count, device=x.device)
-                        logits.masked_fill_(ids[None] >= visible[:, None], -torch.inf)
-                    candidates = shared.get("candidates")
-                    if candidates is not None:
-                        if publish_candidates or (
-                            candidate_source >= 0 and self.layer_id > candidate_source
-                        ):
-                            _apply_prefill_candidates(
-                                shared,
+                        candidates = shared.get("candidates")
+                        k = min(self.index_topk, key_count)
+                        for rs in range(0, rows, row_block):
+                            re = min(rs + row_block, rows)
+                            logits = torch.einsum(
+                                "thd,kd->thk", q_dense[rs:re], keys.float()
+                            ).relu_()
+                            logits = (logits * w_dense[rs:re, :, None]).sum(1)
+                            vis = visible[rs:re]
+                            logits.masked_fill_(
+                                ids[None] >= vis[:, None], -torch.inf
+                            )
+                            out_rows = output_rows[rs:re]
+                            if candidates is not None:
+                                if publish_candidates or (
+                                    candidate_source >= 0
+                                    and self.layer_id > candidate_source
+                                ):
+                                    _apply_prefill_candidates(
+                                        shared,
+                                        logits,
+                                        vis,
+                                        out_rows,
+                                        candidate_size,
+                                        candidate_blocks,
+                                        publish_candidates,
+                                        mask_tail=logits.dtype == torch.bfloat16,
+                                    )
+                            target = out[out_rows, :k] if contiguous else None
+                            selected = prefill_topk.try_select_tokens(
                                 logits,
-                                visible,
-                                output_rows,
-                                candidate_size,
-                                candidate_blocks,
-                                publish_candidates,
-                                mask_tail=logits.dtype == torch.bfloat16,
+                                vis,
+                                k,
+                                bounds=bounds,
+                                out=target,
                             )
-                    k = min(self.index_topk, key_count)
-                    target = out[output_rows, :k] if contiguous else None
-                    selected = prefill_topk.try_select_tokens(
-                        logits,
-                        visible,
-                        k,
-                        bounds=bounds,
-                        out=target,
-                    )
-                    if selected is None:
-                        if logits.dtype == torch.bfloat16:
-                            from ._v41_grouped_prefill_score import _mask_tail_kernel
+                            if selected is None:
+                                if logits.dtype == torch.bfloat16:
+                                    from ._v41_grouped_prefill_score import (
+                                        _mask_tail_kernel,
+                                    )
 
-                            _mask_tail_kernel[(logits.shape[0],)](
-                                logits, visible, logits.shape[1], logits.stride(0), 256
-                            )
-                        scores, selected = logits.topk(k, dim=-1)
-                        selected = torch.where(scores.isfinite(), selected, -1).int()
-                        del scores
-                    if selected is not target:
-                        out[output_rows, :k] = selected
-                    # Same-stream consumers have been enqueued; release the
-                    # score before allocating the next bounded chunk.
-                    del logits, selected, target
+                                    _mask_tail_kernel[(logits.shape[0],)](
+                                        logits,
+                                        vis,
+                                        logits.shape[1],
+                                        logits.stride(0),
+                                        256,
+                                    )
+                                scores, selected = logits.topk(k, dim=-1)
+                                selected = torch.where(
+                                    scores.isfinite(), selected, -1
+                                ).int()
+                                del scores
+                            if selected is not target:
+                                out[out_rows, :k] = selected
+                            del logits, selected, target
         shared["topk"] = {self.layer_id: out}
         return out
 
