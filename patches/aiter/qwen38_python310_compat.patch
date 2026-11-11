@@ -38,3 +38,45 @@ diff --git a/aiter/ops/triton/_triton_kernels/gemm/batched/batched_gemm_a8w8_a_p
  @triton.jit(
      repr=_batched_gemm_a8w8_splitk_reduce_per_token_quant_repr,
      do_not_specialize=["M"],
+diff --git a/aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a16w16.py b/aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a16w16.py
+--- a/aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a16w16.py
++++ b/aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a16w16.py
+@@ -31,14 +31,14 @@
+ )
+ 
+ 
+-@triton.heuristics(
+-    {
++_a16w16_heuristics_1 = {
+         "EVEN_K": lambda args: (args["K"] % (args["SPLITK_BLOCK_SIZE"]) == 0)
+         and (args["SPLITK_BLOCK_SIZE"] % args["BLOCK_SIZE_K"] == 0),
+         "EVEN_MN": lambda args: (args["M"] % args["BLOCK_SIZE_M"] == 0)
+         and (args["N"] % args["BLOCK_SIZE_N"] == 0),
+     }
+-)
++
++@triton.heuristics(_a16w16_heuristics_1)
+ @triton.jit(
+     repr=_gemm_a16w16_repr,
+     do_not_specialize=["M", "N"],
+diff --git a/aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a16w16_persistent.py b/aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a16w16_persistent.py
+--- a/aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a16w16_persistent.py
++++ b/aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a16w16_persistent.py
+@@ -30,14 +30,14 @@
+ )
+ 
+ 
+-@triton.heuristics(
+-    {
++_a16w16_heuristics_1 = {
+         "EVEN_K": lambda args: (args["K"] % (args["SPLITK_BLOCK_SIZE"]) == 0)
+         and (args["SPLITK_BLOCK_SIZE"] % args["BLOCK_SIZE_K"] == 0),
+         "EVEN_MN": lambda args: (args["M"] % args["BLOCK_SIZE_M"] == 0)
+         and (args["N"] % args["BLOCK_SIZE_N"] == 0),
+     }
+-)
++
++@triton.heuristics(_a16w16_heuristics_1)
+ @triton.jit(
+     repr=_gemm_a16w16_repr,
+     do_not_specialize=["M", "N"],
