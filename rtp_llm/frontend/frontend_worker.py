@@ -363,7 +363,6 @@ class FrontendWorker:
         first_yield_ns = None
         last_yield_ns = start_ns
         step = 0
-        capture_recorded = False
         last_response = None
         text_parts: List[str] = []
         stream = self.pipeline.pipeline_async(
@@ -401,22 +400,12 @@ class FrontendWorker:
                 graph_replay = bool(
                     getattr(aux_info, "decode_graph_replay", False)
                 )
-                if graph_replay and not capture_recorded:
-                    capture_recorded = True
-                    telemetry.record(
-                        "capture",
-                        {
-                            "request_id": external_id,
-                            "backend": "cuda",
-                            "capture_source": "first_replayed_decode",
-                        },
-                    )
                 telemetry.record(
                     "decode",
                     {
                         "request_id": external_id,
                         "step": step,
-                        "backend": "cuda",
+                        "backend": telemetry.graph_backend,
                         "graph_replay": graph_replay,
                         "elapsed_ms": (now_ns - last_yield_ns) / 1e6,
                     },

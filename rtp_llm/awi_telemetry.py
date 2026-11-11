@@ -70,6 +70,10 @@ class AwiTelemetry:
         self._started_ns = time.monotonic_ns()
         self._graph_backend = "hip" if os.environ.get("AWI_GRAPH_BACKEND") == "hip" else "cuda"
 
+    @property
+    def graph_backend(self) -> str:
+        return self._graph_backend
+
     def record(self, kind: str, payload: Dict[str, Any]) -> None:
         event = {"type": kind, "t_ns": time.monotonic_ns()}
         event.update(payload)
