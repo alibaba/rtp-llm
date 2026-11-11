@@ -1,12 +1,13 @@
 package org.flexlb.mock.zookeeper;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.InetSocketAddress;
-import java.nio.file.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import org.apache.zookeeper.server.NIOServerCnxnFactory;
 import org.apache.zookeeper.server.ZooKeeperServer;
+import org.flexlb.mock.protocol.JsonWire;
 
 /**
  * A real, runner-owned standalone ZooKeeper; independent of every Master lifecycle.
@@ -29,9 +30,7 @@ public final class ZookeeperNode {
             connections.startup(server);
             Runtime.getRuntime().addShutdownHook(new Thread(connections::shutdown, "mock-zk-close"));
             Path ready = Path.of(System.getenv("MOCK_READY_FILE"));
-            Path temporary = Files.createTempFile(ready.getParent(), ".ready-", ".json");
-            new ObjectMapper().writeValue(temporary.toFile(), Map.of("connect", "127.0.0.1:" + connections.getLocalPort()));
-            Files.move(temporary, ready, StandardCopyOption.ATOMIC_MOVE);
+            JsonWire.writeAtomically(ready, Map.of("connect", "127.0.0.1:" + connections.getLocalPort()));
             new CountDownLatch(1).await();
         } finally {
             connections.shutdown();

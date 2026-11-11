@@ -418,7 +418,8 @@ def test_series_checks_every_point_and_each_instances_history(monkeypatch):
 def test_latency_interval_uses_request_weights_and_merges_histogram_buckets(
     monkeypatch,
 ):
-    from mock_framework.execution.step.client_ttft import LatencyArgs, client_ttft
+    from mock_framework.execution.step._metrics import LatencyArgs
+    from mock_framework.execution.step.client_ttft import client_ttft
 
     ctx = context()
     for node in ctx.nodes:

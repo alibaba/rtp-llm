@@ -2,17 +2,41 @@ package org.flexlb.mock.protocol;
 
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.*;
+import java.io.IOException;
 import java.lang.reflect.*;
 import java.math.BigDecimal;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.*;
 
 /**
- * Derives JSON schemas from Java records and validates and decodes control messages.
+ * Derives schemas for Java control records, validates and decodes messages, and publishes JSON files atomically.
  */
-final class JsonWire {
+public final class JsonWire {
     static final ObjectMapper JSON = new ObjectMapper()
         .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
         .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+
+    private JsonWire() {}
+
+    public static void writeAtomically(Path target, Object value) throws IOException {
+        writeAtomically(target, value, JSON.writer(), false);
+    }
+
+    public static void writeAtomically(Path target, Object value, ObjectWriter writer, boolean replaceExisting) throws IOException {
+        Path temporary = Files.createTempFile(target.toAbsolutePath().getParent(), ".json-", ".tmp");
+        try {
+            writer.writeValue(temporary.toFile(), value);
+            if (replaceExisting) {
+                Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } else {
+                Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE);
+            }
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
+    }
 
     static Map<String, Object> schema(Type type) {
         if (type instanceof ParameterizedType p) {

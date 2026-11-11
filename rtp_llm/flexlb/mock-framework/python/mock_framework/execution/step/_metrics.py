@@ -23,6 +23,11 @@ class MetricArgs(Targets):
 
 
 @dataclass(frozen=True)
+class LatencyArgs(MetricArgs):
+    statistic: Literal["mean", "p95", "p99"] = "mean"
+
+
+@dataclass(frozen=True)
 class QuerySample:
     labels: dict[str, str]
     value: float

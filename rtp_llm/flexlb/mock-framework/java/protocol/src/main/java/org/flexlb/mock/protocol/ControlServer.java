@@ -8,7 +8,7 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 import java.net.*;
-import java.nio.file.*;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
@@ -89,9 +89,7 @@ public final class ControlServer implements AutoCloseable {
     /** Launcher variables are supplied by Python; publish only after initialization and API binding. */
     public void publishReady(Path path) throws IOException {
         if (!started) throw new IllegalStateException("API server is not started");
-        Path temporary = Files.createTempFile(path.toAbsolutePath().getParent(), ".ready-", ".json");
-        Files.write(temporary, JsonWire.JSON.writeValueAsBytes(Map.of("url", url())));
-        Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE);
+        JsonWire.writeAtomically(path, Map.of("url", url()));
     }
 
     public String url() {

@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -17,6 +16,7 @@ import org.flexlb.mock.engine.execution.LLMMockEngine;
 import org.flexlb.mock.engine.vit.VitConfig;
 import org.flexlb.mock.engine.vit.VitNode;
 import org.flexlb.mock.protocol.ConfigInput;
+import org.flexlb.mock.protocol.JsonWire;
 
 /**
  * Foreground single-engine service. The platform owns discovery and process replacement.
@@ -55,25 +55,15 @@ public final class EngineMain {
                     "event", "engine_started", "endpoints", node.endpoints().get(), "effective_config", started.effective())));
                 if (ready != null) {
                     Path output = Path.of(System.getenv("MOCK_OUTPUT_DIR"));
-                    publish(output.resolve("effective-config.json"), started.effective());
-                    publish(output.resolve("endpoints.json"), node.endpoints().get());
-                    publish(ready, Map.of("url", node.endpoints().get().get("control")));
+                    JsonWire.writeAtomically(output.resolve("effective-config.json"), started.effective());
+                    JsonWire.writeAtomically(output.resolve("endpoints.json"), node.endpoints().get());
+                    JsonWire.writeAtomically(ready, Map.of("url", node.endpoints().get().get("control")));
                 }
                 while (!stopped.await(1, TimeUnit.SECONDS)) node.health().run();
             } finally {
                 if (ready != null) Files.deleteIfExists(ready);
                 try { Runtime.getRuntime().removeShutdownHook(hook); } catch (IllegalStateException stopping) { }
             }
-        }
-    }
-
-    private static void publish(Path target, Object value) throws Exception {
-        Path temporary = Files.createTempFile(target.toAbsolutePath().getParent(), ".publish-", ".json");
-        try {
-            new ObjectMapper().writeValue(temporary.toFile(), value);
-            Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE);
-        } finally {
-            Files.deleteIfExists(temporary);
         }
     }
 

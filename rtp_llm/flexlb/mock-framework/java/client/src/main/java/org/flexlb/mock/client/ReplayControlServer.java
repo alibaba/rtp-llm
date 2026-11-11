@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
 import org.flexlb.mock.protocol.ControlServer;
+import org.flexlb.mock.protocol.JsonWire;
 import org.flexlb.mock.client.ClientProtocol.*;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
 
@@ -196,11 +197,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
 
     private static void save(Path path, Object value) throws IOException {
         Files.createDirectories(path.getParent());
-        Path temp = Files.createTempFile(path.getParent(), ".client-", ".json");
-        try {
-            JSON.writerWithDefaultPrettyPrinter().writeValue(temp.toFile(), value);
-            Files.move(temp, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } finally { Files.deleteIfExists(temp); }
+        JsonWire.writeAtomically(path, value, JSON.writerWithDefaultPrettyPrinter(), true);
     }
 
     private JsonNode call(String url, String operation, Object args) throws Exception {
