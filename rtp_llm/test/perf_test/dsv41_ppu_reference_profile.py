@@ -8,7 +8,9 @@ must not be used as clean latency measurements.
 import asyncio
 import json
 from pathlib import Path
+import re
 import sys
+import time
 
 from rtp_llm.test.perf_test import dsv41_ppu_reference as reference
 
@@ -19,6 +21,8 @@ async def load(config):
     if config["case"]["phase"] != "prefill" or not config["node"].get("profile_last_wave"):
         raise ValueError("profile entry requires an explicit Prefill profile deployment")
     expected = config["case"]["warmup_steps"] + config["case"]["measure_steps"]
+    directory = Path(config["node"]["environment"]["TORCH_CUDA_PROFILER_DIR"])
+    directory.mkdir(parents=True, exist_ok=True)
     original = httpx.AsyncClient.post
     waves = 0
     configured = False
@@ -55,6 +59,24 @@ async def load(config):
         httpx.AsyncClient.post = original
     if waves != expected or not configured:
         raise RuntimeError(f"profile did not cover the expected warmed wave: {waves}/{expected}")
+    deadline = time.monotonic() + 180
+    complete = {}
+    while time.monotonic() < deadline:
+        for path in directory.glob("*.json"):
+            match = re.search(r"_wr(\d+)_\d+\.json$", path.name)
+            if match is None or path.name in complete:
+                continue
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if any(event.get("cat") == "kernel" for event in data.get("traceEvents", ())):
+                complete[path.name] = {"rank": int(match[1]), "bytes": path.stat().st_size}
+        if {item["rank"] for item in complete.values()} == set(range(8)):
+            reference.save(Path(config["output"]) / "profile-traces.json", complete)
+            return
+        await asyncio.sleep(1)
+    raise RuntimeError(f"missing complete all-rank GPU traces: {complete}")
 
 
 if __name__ == "__main__":
