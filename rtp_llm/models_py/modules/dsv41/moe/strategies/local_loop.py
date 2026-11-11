@@ -76,7 +76,7 @@ def _get_or_create_local_y(
     return cached
 
 
-_GROUPED_CAPTURE_GROUP = 2
+_GROUPED_CAPTURE_GROUP = 8
 
 
 def _fp4_byte_lut(device: torch.device) -> torch.Tensor:
@@ -118,16 +118,26 @@ def _fp4_group_dequant_bf16(
     if weight.dim() != 2:
         # The strategy passes a group slice [G, out, in/2]; flatten experts
         # into rows for the row-wise FP4 unpack and reshape back by shape.
+        row_chunk = weight.shape[-2]
         weight = weight.reshape(-1, weight.shape[-1])
         scale = scale.reshape(-1, scale.shape[-1])
+    else:
+        row_chunk = min(4096, weight.shape[0])
     rows, packed = weight.shape
     in_dim = packed * 2
+    out = torch.empty((rows, in_dim), dtype=torch.bfloat16, device=weight.device)
     wb = weight.view(torch.uint8)
-    vals = byte_lut[wb.long()].reshape(rows, in_dim)
     sb = scale.contiguous().view(torch.uint8)
-    scales = e8m0_lut[sb.long()].repeat_interleave(32, dim=1)
-    vals.mul_(scales)
-    return vals
+    # Dequantize one expert (or at most 4096 rows) at a time.  A whole
+    # 8-expert slice would need ~235 MiB for the result plus a ~470 MiB
+    # int64 index tensor; on the 44 GiB L20 that competes with graph capture.
+    for r0 in range(0, rows, row_chunk):
+        r1 = min(r0 + row_chunk, rows)
+        vals = byte_lut[wb[r0:r1].long()].reshape(r1 - r0, in_dim)
+        scales = e8m0_lut[sb[r0:r1].long()].repeat_interleave(32, dim=1)
+        vals.mul_(scales)
+        out[r0:r1].copy_(vals)
+    return out
 
 
 def _select_mn_major_scale_for_index(
@@ -435,6 +445,11 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         """
         cfg = self.cfg
         group = _GROUPED_CAPTURE_GROUP
+        if not torch.cuda.is_current_stream_capturing():
+            # Warmup only: release allocator-cached segments before the
+            # bounded per-expert dequant below.  Capture runs after the model
+            # init's empty_cache and must not call the allocator here.
+            torch.cuda.empty_cache()
         T = x.size(0)
         n_local = local_end - local_start
         assert n_local == self._W1_w.shape[0]

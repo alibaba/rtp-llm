@@ -2775,14 +2775,10 @@ class AttentionV41FP8(AttentionFP8):
             INDEXER_KV, read_positions.reshape(-1), read_req.reshape(-1)
         ).view(B, capacity)
         slots = torch.where(ids < (ends // self.compress_ratio)[:, None], slots, -1)
-        if not torch.cuda.is_current_stream_capturing():
-            # The dense fallback materializes [B*capacity, 128] fp32 keys.  On
-            # L20 the 1M-token shape needs 512 MiB; release allocator-cached
-            # blocks from model loading before this one-shot warmup allocation.
-            torch.cuda.empty_cache()
-        keys = dequantize_indexer_k_fp4(index_pool, slots.reshape(-1)).view(
-            B, capacity, self.index_head_dim
-        )
+        # Do not materialize the full [B, capacity, 128] fp32 key matrix: at
+        # 1M tokens it is 512 MiB on top of the device-resident weights.  The
+        # dense fallback is scored in bounded chunks by _select_indices_decode.
+        keys = ("fp4_dense", index_pool, slots)
         self._shared_attention["global"] = {self.layer_id: keys}
 
     def _prepare_indexer_query_decode(
@@ -2887,6 +2883,32 @@ class AttentionV41FP8(AttentionFP8):
             )
         return q, weights, prepared
 
+    def _dense_indexer_logits(
+        self,
+        q: torch.Tensor,
+        pool: torch.Tensor,
+        slots: torch.Tensor,
+        weights: torch.Tensor,
+        capacity: int,
+        *,
+        chunk: int = 65536,
+    ) -> torch.Tensor:
+        """Score dense FP4 indexer keys without a full [capacity, 128] tensor."""
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_fp4_triton as fp4
+
+        logits = torch.empty(
+            (q.shape[0], capacity), dtype=torch.float32, device=q.device
+        )
+        for k0 in range(0, capacity, chunk):
+            k1 = min(k0 + chunk, capacity)
+            keys = fp4.dequantize_indexer_k_fp4(
+                pool, slots[k0:k1], out_dtype=torch.float32
+            )
+            part = torch.einsum("thd,kd->thk", q, keys).relu_()
+            part = (part * weights[:, :, None]).sum(1)
+            logits[:, k0:k1] = part
+        return logits
+
     def _select_indices_decode(
         self,
         x,
@@ -2913,8 +2935,15 @@ class AttentionV41FP8(AttentionFP8):
         )
         from rtp_llm.models_py.modules.dsv41.fp8.indexer import _run_topk_v3
 
+        dense_fp4 = (
+            isinstance(keys, tuple) and len(keys) == 3 and keys[0] == "fp4_dense"
+        )
         paged = isinstance(keys, decode_indexer.DecodeIndexerKeys)
-        capacity = keys.capacity if paged else keys.shape[1]
+        capacity = (
+            keys.capacity
+            if paged
+            else (keys[2].shape[1] if dense_fp4 else keys.shape[1])
+        )
         if prepared_query is None:
             prepared_query = AttentionV41FP8._prepare_indexer_query_decode(
                 self,
@@ -3178,16 +3207,25 @@ class AttentionV41FP8(AttentionFP8):
                     logits = all_logits[start:end]
                 else:
                     request_ids = shared.get("decode_packed_request_ids")
-                    if request_ids is None:
-                        logits = torch.einsum(
-                            "thd,kd->thk", q[start:end], keys[b]
-                        ).relu_()
+                    if dense_fp4:
+                        logits = self._dense_indexer_logits(
+                            q[start:end],
+                            keys[1],
+                            keys[2][b],
+                            weights[start:end],
+                            capacity,
+                        )
                     else:
-                        query_keys = keys.index_select(0, request_ids[start:end].long())
-                        logits = torch.einsum(
-                            "thd,tkd->thk", q[start:end], query_keys
-                        ).relu_()
-                    logits = (logits * weights[start:end, :, None]).sum(1)
+                        if request_ids is None:
+                            logits = torch.einsum(
+                                "thd,kd->thk", q[start:end], keys[b]
+                            ).relu_()
+                        else:
+                            query_keys = keys.index_select(0, request_ids[start:end].long())
+                            logits = torch.einsum(
+                                "thd,tkd->thk", q[start:end], query_keys
+                            ).relu_()
+                        logits = (logits * weights[start:end, :, None]).sum(1)
                 visible = visible_per_token[start:end]
                 if not paged:
                     logits.masked_fill_(columns[None] >= visible[:, None], -torch.inf)
