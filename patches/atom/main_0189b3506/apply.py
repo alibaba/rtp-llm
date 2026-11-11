@@ -18,8 +18,12 @@ def main():
     args = parser.parse_args()
     directory = Path(__file__).resolve().parent
     manifest = json.loads((directory / "manifest.json").read_text())
-    for name in ("atom", "transformers"):
-        expected = manifest[name + "_version"]
+    for key, name in (
+        ("atom", "atom"),
+        ("transformers", "transformers"),
+        ("aiter", "amd-aiter"),
+    ):
+        expected = manifest[key + "_version"]
         actual = importlib.metadata.version(name)
         if actual != expected:
             raise RuntimeError(f"Expected {name} {expected}, found {actual}")
@@ -27,6 +31,9 @@ def main():
     if digest(patch) != manifest["patch_sha256"]:
         raise RuntimeError("Compatibility patch hash mismatch")
     site = Path(importlib.metadata.distribution("atom").locate_file(""))
+    aiter_site = Path(importlib.metadata.distribution("amd-aiter").locate_file(""))
+    if aiter_site.resolve() != site.resolve():
+        raise RuntimeError("ATOM and AITER must be installed in the same runtime")
     before = manifest["source_files_sha256"]
     after = manifest["patched_files_sha256"]
     current = {name: digest(site / name) for name in before}
