@@ -37,6 +37,11 @@ public:
                                 bool terminal) const;
     bool failForwardResponse(uint64_t requestId, const std::string &errorMessage) const;
     void setForwardCancelHandler(const std::function<void(uint64_t)> &handler) const;
+    bool enableObservedExecutionWindowTraining() const;
+    bool recordObservedExecutionSample(const std::vector<NaviSchedRequestStats> &requests,
+                                       double latencyMs, int64_t executionStepCount,
+                                       int64_t globalPaddedTokens,
+                                       int64_t eventTimeUs) const;
     bool recordObservedBatch(
         const std::vector<NaviSchedRequestStats> &requests, double latencyMs,
         int64_t eventTimeUs,

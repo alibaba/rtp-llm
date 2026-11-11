@@ -190,6 +190,7 @@ class VLLMAgentBridge {
 public:
     using BatchRequest = std::tuple<uint64_t, int64_t, int64_t, std::vector<uint64_t>>;
     using RequestStats = std::tuple<uint64_t, int64_t, int64_t>;
+    using ObservedRequestStats = std::tuple<uint64_t, int64_t, int64_t, int64_t>;
 
     struct ForwardRequestTouch {
         uint64_t requestId = 0;
@@ -632,6 +633,29 @@ public:
             requests.emplace_back(request);
         }
         return reporter->finishBatch(requests);
+    }
+
+    bool enableObservedExecutionWindowTraining()
+    {
+        return _agent->enableObservedExecutionWindowTraining();
+    }
+
+    bool recordObservedExecutionSample(const std::vector<ObservedRequestStats> &values,
+                                       double latencyMs, int64_t executionStepCount,
+                                       int64_t globalPaddedTokens, int64_t eventTimeUs)
+    {
+        std::vector<NaviSchedRequestStats> requests;
+        requests.reserve(values.size());
+        for (const auto &value : values) {
+            NaviSchedRequestStats request;
+            request.requestId = std::get<0>(value);
+            request.totalTokenCount = std::get<1>(value);
+            request.cacheHitTokenCount = std::get<2>(value);
+            request.executionExternalReadTokens = std::get<3>(value);
+            requests.emplace_back(request);
+        }
+        return _agent->recordObservedExecutionSample(
+            requests, latencyMs, executionStepCount, globalPaddedTokens, eventTimeUs);
     }
 
     static bool finishBatchWithExecution(
@@ -1122,6 +1146,7 @@ NaviSchedBlockHashesConstPtr blockHashesFromPython(const py::iterable &values)
 void bindNaviSchedData(py::module_ &m)
 {
     m.attr("VLLM_WAITING_REQUEST_IDS_VERSION") = 1;
+    m.attr("VLLM_SHARED_EXECUTION_SAMPLES_VERSION") = 1;
     m.def("native_wire_versions", []() {
         py::dict versions;
         versions["agent_update_protocol"] = NAVI_SCHED_AGENT_UPDATE_VERSION;
@@ -1252,6 +1277,14 @@ void bindNaviSchedData(py::module_ &m)
             py::arg("native_preparation_ms") = 0.0,
             py::arg("execution_finish_time_us") = 0,
             py::call_guard<py::gil_scoped_release>())
+        .def("enable_observed_execution_window_training",
+             &VLLMAgentBridge::enableObservedExecutionWindowTraining,
+             py::call_guard<py::gil_scoped_release>())
+        .def("record_observed_execution_sample",
+             &VLLMAgentBridge::recordObservedExecutionSample, py::arg("values"),
+             py::arg("latency_ms"), py::arg("execution_step_count"),
+             py::arg("global_padded_tokens"), py::arg("event_time_us"),
+             py::call_guard<py::gil_scoped_release>())
         .def_static(
             "finish_batch_with_execution_geometry",
             &VLLMAgentBridge::finishBatchWithExecutionGeometry, py::arg("reporter"),
@@ -1353,11 +1386,9 @@ void bindNaviSchedData(py::module_ &m)
              py::arg("running_decode_remaining_token_budget"),
              py::arg("covered_native_batch_ids") = std::vector<int64_t>(),
              py::arg("waiting_request_ids") = py::none(),
-             py::arg("record_timing") = false,
-             py::call_guard<py::gil_scoped_release>())
-        .def("last_workload_report_duration_ns", [](const VLLMAgentBridge &) {
-            return lastWorkloadReportDurationNs;
-        })
+             py::arg("record_timing") = false, py::call_guard<py::gil_scoped_release>())
+        .def("last_workload_report_duration_ns",
+             [](const VLLMAgentBridge &) { return lastWorkloadReportDurationNs; })
         .def("report_cache_inserted", &VLLMAgentBridge::reportCacheInserted,
              py::arg("hashes"), py::arg("cache_key_type") = 0,
              py::call_guard<py::gil_scoped_release>())

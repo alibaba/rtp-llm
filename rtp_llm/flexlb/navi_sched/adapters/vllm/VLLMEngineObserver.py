@@ -35,6 +35,8 @@ from .VLLMCachePolicy import (
     is_vllm_eagle_block_drop_enabled,
     is_vllm_native_pd_prefill,
 )
+from .VLLMExecutionSample import PrefillExecutionSample, PrefillStepRequest
+from .VLLMExecutionWindow import PrefillExecutionWindowAssembler
 from .VLLMForwardProtocol import forward_outputs_fields, forward_request_type
 from .VLLMImageCacheMap import VLLMImageCacheMap
 
@@ -606,6 +608,7 @@ def _native_pd_latency_model_fingerprint(
         )
         if not projected_execution_geometry_enabled:
             values["training_geometry_origin"] = "observed_runner"
+            values["observed_execution_window_training_version"] = 1
             values["dispatch_geometry_origin"] = "all_cache_resolved_forecast"
         values["execution_cache_source_feature_protocol"] = 1
     values["cache_prediction_version"] = 1
@@ -638,6 +641,9 @@ class _ExecutionStep:
     submitted_ns: int = 0
     future_completed_ns: int = 0
     global_padded_tokens: int | None = None
+    physical_prefill_requests: list[PrefillStepRequest] | None = field(
+        default_factory=list
+    )
     scheduler_output_key: int = 0
     backend_execution_started: bool = False
     backend_completion_recorded: bool = False
@@ -1624,6 +1630,7 @@ class VLLMEngineObserver:
         self._pending_engine_abort_request_ids: list[str] = []
         self._response_lock = threading.Lock()
         self._execution_lock = threading.Lock()
+        self._prefill_execution_windows = PrefillExecutionWindowAssembler()
         # The TPU execute_model future completes before sample_tokens waits for
         # the device output. PD batches finish only after that output is ready.
         self._pd_output_lock = threading.Lock()
@@ -1789,6 +1796,11 @@ class VLLMEngineObserver:
         if self._agent is not None:
             return
         options = dict(self._agent_options)
+        self._observed_execution_window_training = bool(
+            self._native_ingress
+            and self._execution_geometry_enabled
+            and options.get("execution_cache_source_enabled", False)
+        )
         if self._native_ingress:
             options["execution_geometry_enabled"] = self._execution_geometry_enabled
         if self._execution_geometry_enabled:
@@ -1830,6 +1842,21 @@ class VLLMEngineObserver:
         self._bridge = naviSchedModule()._VLLMAgentBridge(
             self._agent, pd_separated=self._native_ingress
         )
+        if self._observed_execution_window_training and (
+            getattr(naviSchedModule(), "VLLM_SHARED_EXECUTION_SAMPLES_VERSION", 0) != 1
+            or not hasattr(self._bridge, "record_observed_execution_sample")
+            or not hasattr(self._bridge, "enable_observed_execution_window_training")
+        ):
+            self.shutdown()
+            raise RuntimeError(
+                "native prefill requires shared-execution sample support"
+            )
+        if (
+            self._observed_execution_window_training
+            and not self._bridge.enable_observed_execution_window_training()
+        ):
+            self.shutdown()
+            raise RuntimeError("failed to select observed execution window training")
         if getattr(self, "_pp_workload_timing_enabled", False) and not hasattr(
             self._bridge, "last_workload_report_duration_ns"
         ):
@@ -2183,6 +2210,7 @@ class VLLMEngineObserver:
             asyncio.run(self._forward_render_batches())
             return
         import msgspec
+
         from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType
         from vllm.v1.serial_utils import MsgpackDecoder
 
@@ -2285,6 +2313,7 @@ class VLLMEngineObserver:
 
     async def _forward_render_batches(self) -> None:
         import msgspec
+
         from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType
         from vllm.v1.serial_utils import MsgpackDecoder
 
@@ -4759,6 +4788,7 @@ class VLLMEngineObserver:
             )
         except Exception:
             self._request_audit_failures += 1
+        self._record_prefill_execution_window(execution_step, completed_ns, success)
         if future.done() and not future.cancelled():
             try:
                 if success:
@@ -4977,6 +5007,31 @@ class VLLMEngineObserver:
                 prefix_cache_hit_source = (
                     "request.num_cached_tokens" if prefix_cache_hits >= 0 else "unknown"
                 )
+            if (
+                getattr(self, "_observed_execution_window_training", False)
+                and execution_step is not None
+                and execution_step.physical_prefill_requests is not None
+            ):
+                try:
+                    if prefix_cache_hits < 0 or external_cache_hits < 0:
+                        raise ValueError("execution cache source is unavailable")
+                    execution_step.physical_prefill_requests.append(
+                        PrefillStepRequest(
+                            request_id,
+                            computed_before_schedule,
+                            prefill_tokens,
+                            (
+                                external_cache_hits
+                                if computed_before_schedule == prefix_cache_hits
+                                else 0
+                            ),
+                            state.batch_id if state is not None else None,
+                            int(request.num_prompt_tokens),
+                            prefix_cache_hits,
+                        )
+                    )
+                except ValueError:
+                    execution_step.physical_prefill_requests = None
             self.on_request_lifecycle_event(
                 {
                     "event": "prefill_cache_observation",
@@ -5149,8 +5204,14 @@ class VLLMEngineObserver:
                 )
         if self._native_ingress and self._v6d_scheduler is not None:
             self._attach_v6d_publication_reporters(publication_reporters)
+        if (
+            getattr(self, "_observed_execution_window_training", False)
+            and execution_step is not None
+        ):
+            self._prefill_execution_windows.register(execution_step.started_ns)
 
     def _abort_execution_step(self, execution_step) -> None:
+        self._record_prefill_execution_window(execution_step, 0, success=False)
         released_states = set()
         for progress in execution_step.batch_progress:
             state = progress.state
@@ -5178,6 +5239,63 @@ class VLLMEngineObserver:
             return False
         state.prefill_complete = True
         return True
+
+    def _record_prefill_execution_window(
+        self, execution_step, completed_ns, success=True
+    ):
+        assembler = getattr(self, "_prefill_execution_windows", None)
+        if not (
+            self._native_ingress
+            and getattr(self, "_observed_execution_window_training", False)
+            and assembler is not None
+        ):
+            return
+        requests = execution_step.physical_prefill_requests
+        sample = None
+        if (
+            success
+            and requests
+            and execution_step.global_padded_tokens is not None
+            and execution_step.decode_tokens == 0
+            and execution_step.decode_request_count == 0
+            and sum(r.compute_tokens for r in requests) == execution_step.prefill_tokens
+        ):
+            try:
+                sample = PrefillExecutionSample(
+                    execution_step.started_ns,
+                    tuple(requests),
+                    execution_step.started_ns,
+                    completed_ns,
+                    execution_step.global_padded_tokens,
+                )
+            except ValueError:
+                logger.exception("invalid observed prefill execution facts")
+        for window in assembler.complete(execution_step.started_ns, sample):
+            try:
+                requests = window.wire_requests()
+                accepted = self._bridge.record_observed_execution_sample(
+                    requests,
+                    window.elapsed_ms,
+                    window.execution_step_count,
+                    window.global_padded_tokens,
+                    time.time_ns() // 1000,
+                )
+                self.on_request_lifecycle_event(
+                    {
+                        "event": "prefill_execution_window_sample",
+                        "event_time_us": time.time_ns() // 1000,
+                        "request_ids": [r[0] for r in requests],
+                        "physical_step_ids": [step.step_id for step in window.steps],
+                        "execution_step_count": window.execution_step_count,
+                        "global_padded_tokens": window.global_padded_tokens,
+                        "elapsed_ms": window.elapsed_ms,
+                        "accepted": bool(accepted),
+                    }
+                )
+                if not accepted:
+                    logger.error("failed to submit observed prefill execution window")
+            except Exception:
+                logger.exception("failed to submit observed prefill execution window")
 
     def _complete_execution_step(
         self, execution_step: _ExecutionStep, future: Future, completed_ns=None

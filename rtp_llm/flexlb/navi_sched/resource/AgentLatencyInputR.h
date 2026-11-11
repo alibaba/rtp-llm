@@ -20,6 +20,7 @@ enum class AgentLatencyInputType {
     BATCH_ABORTED,
     BATCH_REQUESTS_ABORTED,
     OBSERVED_BATCH_FINISHED,
+    OBSERVED_EXECUTION_SAMPLE,
     EXECUTION_LOAD,
 };
 
@@ -145,6 +146,25 @@ public:
                                     int32_t queuedBatchRequests, int32_t runningRequests,
                                     int64_t eventTimeUs,
                                     const NaviSchedLocalBatchInfo &localBatch);
+    // Adapter startup selects physical windows as the sole model-training
+    // source. Batch lifecycle, queue and validation events remain unchanged.
+    void enableObservedExecutionWindowTraining()
+    {
+        _observedExecutionWindowTraining.store(true, std::memory_order_release);
+    }
+    bool shouldTrainInput(AgentLatencyInputType type) const
+    {
+        const bool physical = type == AgentLatencyInputType::OBSERVED_EXECUTION_SAMPLE;
+        const bool windowTraining =
+            _observedExecutionWindowTraining.load(std::memory_order_acquire);
+        return physical ? windowTraining
+                        : !windowTraining &&
+                              (type == AgentLatencyInputType::BATCH_FINISHED ||
+                               type == AgentLatencyInputType::OBSERVED_BATCH_FINISHED);
+    }
+    bool submitObservedExecutionSample(const std::vector<NaviSchedRequestStats> &requests,
+                                       double latencyMs, int64_t executionStepCount,
+                                       int64_t globalPaddedTokens, int64_t eventTimeUs);
     bool submitObservedBatchFinished(const std::vector<NaviSchedRequestStats> &requests,
                                      double latencyMs, int32_t inflightRequests,
                                      int64_t eventTimeUs);
@@ -192,6 +212,7 @@ private:
     uint64_t _inputPipeOwnerGeneration = 0;
     bool _finishRequested = false;
     std::atomic<uint64_t> _inputPipeGeneration{0};
+    std::atomic<bool> _observedExecutionWindowTraining{false};
     std::atomic<uint64_t> _submittedInputCount{0};
     std::atomic<uint64_t> _rejectedInputCount{0};
     std::atomic<uint64_t> _processedInputCount{0};

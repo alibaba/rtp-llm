@@ -715,6 +715,8 @@ const char *AgentLatencyKernel::getLatencyInputTypeName(AgentLatencyInputType ty
             return "batch_finished";
         case AgentLatencyInputType::OBSERVED_BATCH_FINISHED:
             return "observed_batch_finished";
+        case AgentLatencyInputType::OBSERVED_EXECUTION_SAMPLE:
+            return "observed_execution_sample";
         default:
             return "unexpected";
     }
@@ -1041,9 +1043,12 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
     _agentLatencyInputR->take(inputs);
     bool saveNeeded = false;
     for (auto input : inputs) {
+        const bool executionSample =
+            input.type == AgentLatencyInputType::OBSERVED_EXECUTION_SAMPLE;
         const auto featureSnapshot = _latencyModelR->getSnapshot();
         if ((input.type == AgentLatencyInputType::BATCH_FINISHED ||
-             input.type == AgentLatencyInputType::OBSERVED_BATCH_FINISHED) &&
+             input.type == AgentLatencyInputType::OBSERVED_BATCH_FINISHED ||
+             executionSample) &&
             featureSnapshot &&
             NonLinearPrefillModelR::usesCacheSourceForVersion(
                 featureSnapshot->binaryVersion) &&
@@ -1054,7 +1059,8 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
                             input.batchId);
         }
         if ((input.type == AgentLatencyInputType::BATCH_FINISHED ||
-             input.type == AgentLatencyInputType::OBSERVED_BATCH_FINISHED) &&
+             input.type == AgentLatencyInputType::OBSERVED_BATCH_FINISHED ||
+             executionSample) &&
             featureSnapshot &&
             !input.hasCompatibleGeometryFeatureOrigin(featureSnapshot->binaryVersion)) {
             input.latencySampleValid = false;
@@ -1068,7 +1074,7 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
         std::optional<QueueFeatures> completedQueueFeatures;
         const bool observedBatch =
             AgentLatencyInputType::OBSERVED_BATCH_FINISHED == input.type;
-        if (!observedBatch) {
+        if (!observedBatch && !executionSample) {
             updateExecutionState(input);
         }
         const bool batchDerivedUnified = derivesUnifiedWorkloadFromBatches();
@@ -1378,6 +1384,12 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
                                            input.latencySampleValid)) {
                 continue;
             }
+        }
+        // Physical windows replace transport-batch training only. This gate is
+        // after normal completion/queue/validation accounting, so sampling never
+        // retires a request twice or suppresses lifecycle metrics.
+        if (!_agentLatencyInputR->shouldTrainInput(input.type)) {
+            continue;
         }
         std::shared_ptr<const NaviSchedLatencyModelSnapshot> updatedSnapshot;
         bool currentSaveNeeded = false;

@@ -56,6 +56,79 @@ TPUPrefillExecutionPolicyConfig typedRuntimePolicy()
 
 class GeometryIntegrationTest : public TESTBASE {};
 
+TEST_F(GeometryIntegrationTest,
+       testExecutionWindowsReplaceTrainingWithoutChangingValidation)
+{
+    AgentLatencyInputR inputs;
+    EXPECT_TRUE(inputs.shouldTrainInput(AgentLatencyInputType::BATCH_FINISHED));
+    EXPECT_TRUE(inputs.shouldTrainInput(AgentLatencyInputType::OBSERVED_BATCH_FINISHED));
+    EXPECT_FALSE(
+        inputs.shouldTrainInput(AgentLatencyInputType::OBSERVED_EXECUTION_SAMPLE));
+    inputs.enableObservedExecutionWindowTraining();
+    EXPECT_FALSE(inputs.shouldTrainInput(AgentLatencyInputType::BATCH_FINISHED));
+    EXPECT_FALSE(inputs.shouldTrainInput(AgentLatencyInputType::OBSERVED_BATCH_FINISHED));
+    EXPECT_TRUE(
+        inputs.shouldTrainInput(AgentLatencyInputType::OBSERVED_EXECUTION_SAMPLE));
+    EXPECT_TRUE(AgentLatencyKernel::shouldRecordLatencyValidation(
+        AgentLatencyInputType::BATCH_FINISHED, true, true));
+    EXPECT_FALSE(AgentLatencyKernel::shouldRecordLatencyValidation(
+        AgentLatencyInputType::OBSERVED_EXECUTION_SAMPLE, true, true));
+}
+
+TEST_F(GeometryIntegrationTest, testSharedExecutionSampleIsTrainingOnly)
+{
+    AgentLatencyInputR inputs;
+    inputs.enableObservedExecutionWindowTraining();
+    NaviSchedRequestStats first;
+    first.requestId = 10;
+    first.totalTokenCount = 12288;
+    first.cacheHitTokenCount = 8192;
+    first.executionExternalReadTokens = 8192;
+    NaviSchedRequestStats second;
+    second.requestId = 20;
+    second.totalTokenCount = 8192;
+    second.cacheHitTokenCount = 4096;
+    second.executionExternalReadTokens = 0;
+    ASSERT_TRUE(
+        inputs.submitObservedExecutionSample({first, second}, 3.0, 1, 8192, 1000));
+    EXPECT_EQ(0, inputs.getStats().submittedFinishedRequestCount);
+    EXPECT_EQ(0, inputs.getStats().submittedAbortedRequestCount);
+    std::vector<AgentLatencyInput> taken;
+    inputs.take(taken);
+    ASSERT_EQ(1, taken.size());
+    const auto &input = taken.front();
+    EXPECT_EQ(AgentLatencyInputType::OBSERVED_EXECUTION_SAMPLE, input.type);
+    EXPECT_EQ(0, input.completedRequestCount);
+    EXPECT_FALSE(AgentLatencyKernel::shouldRecordLatencyValidation(
+        input.type, input.latencySampleValid, input.latencyValidationValid));
+    const auto sample = input.makeLatencySample();
+    EXPECT_EQ(1, sample.features.getExecutionStepCount());
+    EXPECT_EQ(8192, sample.features.getGlobalPaddedTokens());
+    EXPECT_EQ(12288, sample.features.getCacheHitTokenCount());
+    EXPECT_EQ(8192, sample.features.getCacheMissTokenCount());
+    EXPECT_TRUE(sample.features.hasExecutionCacheSource());
+    EXPECT_DOUBLE_EQ(3.0, sample.latencyMs);
+}
+
+TEST_F(GeometryIntegrationTest, testSharedExecutionSampleRejectsIncompleteFacts)
+{
+    AgentLatencyInputR inputs;
+    inputs.enableObservedExecutionWindowTraining();
+    NaviSchedRequestStats request;
+    request.requestId = 10;
+    request.totalTokenCount = 8192;
+    request.cacheHitTokenCount = 4096;
+    request.executionExternalReadTokens = 4096;
+    EXPECT_FALSE(inputs.submitObservedExecutionSample({request}, 3.0, 0, 8192, 1000));
+    EXPECT_FALSE(inputs.submitObservedExecutionSample({request}, 3.0, 1, 0, 1000));
+    EXPECT_FALSE(inputs.submitObservedExecutionSample({request}, 3.0, 1, 2048, 1000));
+    EXPECT_FALSE(
+        inputs.submitObservedExecutionSample({request, request}, 3.0, 1, 8192, 1000));
+    request.executionExternalReadTokens = -1;
+    EXPECT_FALSE(inputs.submitObservedExecutionSample({request}, 3.0, 1, 8192, 1000));
+    EXPECT_EQ(0, inputs.getPendingInputCount());
+}
+
 TEST_F(GeometryIntegrationTest, testSource34LearningHotUpdateAndRollbackPreserveState)
 {
     navi::NaviResourceHelper helper;

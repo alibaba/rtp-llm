@@ -1623,6 +1623,26 @@ void NaviSchedAgentImpl::setForwardCancelHandler(
     }
 }
 
+bool NaviSchedAgentImpl::enableObservedExecutionWindowTraining() const
+{
+    if (!_agentLatencyInputR || !_pdSeparated || _unifiedLatencyPrediction ||
+        !_executionGeometryEnabled || !_executionCacheSourceEnabled ||
+        _projectedExecutionGeometryEnabled) {
+        return false;
+    }
+    _agentLatencyInputR->enableObservedExecutionWindowTraining();
+    return true;
+}
+
+bool NaviSchedAgentImpl::recordObservedExecutionSample(
+    const std::vector<NaviSchedRequestStats> &requests, double latencyMs,
+    int64_t executionStepCount, int64_t globalPaddedTokens, int64_t eventTimeUs) const
+{
+    return _agentLatencyInputR &&
+           _agentLatencyInputR->submitObservedExecutionSample(
+               requests, latencyMs, executionStepCount, globalPaddedTokens, eventTimeUs);
+}
+
 bool NaviSchedAgentImpl::recordObservedBatch(
     const std::vector<NaviSchedRequestStats> &requests, double latencyMs,
     int64_t eventTimeUs,
@@ -2807,6 +2827,20 @@ void NaviSchedAgent::setForwardCancelHandler(const std::function<void(uint64_t)>
     if (_impl) {
         _impl->setForwardCancelHandler(handler);
     }
+}
+
+bool NaviSchedAgent::enableObservedExecutionWindowTraining() const
+{
+    return _impl && _impl->enableObservedExecutionWindowTraining();
+}
+
+bool NaviSchedAgent::recordObservedExecutionSample(
+    const std::vector<NaviSchedRequestStats> &requests, double latencyMs,
+    int64_t executionStepCount, int64_t globalPaddedTokens, int64_t eventTimeUs) const
+{
+    return _impl &&
+           _impl->recordObservedExecutionSample(requests, latencyMs, executionStepCount,
+                                                globalPaddedTokens, eventTimeUs);
 }
 
 bool NaviSchedAgent::recordObservedBatch(

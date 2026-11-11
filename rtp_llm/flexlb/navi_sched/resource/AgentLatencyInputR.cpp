@@ -371,6 +371,41 @@ bool AgentLatencyInputR::submitBatchRequestsAborted(
     return submit(std::move(input));
 }
 
+bool AgentLatencyInputR::submitObservedExecutionSample(
+    const std::vector<NaviSchedRequestStats> &requests, double latencyMs,
+    int64_t executionStepCount, int64_t globalPaddedTokens, int64_t eventTimeUs)
+{
+    if (!shouldTrainInput(AgentLatencyInputType::OBSERVED_EXECUTION_SAMPLE) ||
+        requests.empty() || !std::isfinite(latencyMs) || latencyMs <= 0.0 ||
+        executionStepCount <= 0 || globalPaddedTokens <= 0 || eventTimeUs <= 0) {
+        return false;
+    }
+    int64_t computeTokens = 0;
+    std::unordered_set<uint64_t> requestIds;
+    for (const auto &request : requests) {
+        if (!request.valid() || request.executionExternalReadTokens < 0 ||
+            request.executionExternalReadTokens > request.cacheHitTokenCount ||
+            !requestIds.insert(request.requestId).second) {
+            return false;
+        }
+        const auto compute = request.totalTokenCount - request.cacheHitTokenCount;
+        if (compute <= 0 || compute > globalPaddedTokens - computeTokens) {
+            return false;
+        }
+        computeTokens += compute;
+    }
+    AgentLatencyInput input;
+    input.type = AgentLatencyInputType::OBSERVED_EXECUTION_SAMPLE;
+    input.queries = requests;
+    input.latencyMs = latencyMs;
+    input.executionStepCount = executionStepCount;
+    input.globalPaddedTokens = globalPaddedTokens;
+    input.eventTimeUs = eventTimeUs;
+    // This observation trains the model; normal batch completion owns all
+    // request, cache, workload and lifecycle accounting.
+    return submit(std::move(input));
+}
+
 bool AgentLatencyInputR::submitObservedBatchFinished(
     const std::vector<NaviSchedRequestStats> &requests, double latencyMs,
     int32_t inflightRequests, int64_t eventTimeUs)

@@ -523,6 +523,8 @@ py_library(
         "navi_sched/adapters/vllm/ExecutionTimingProbe.py",
         "navi_sched/adapters/vllm/VLLMEngineObserver.py",
         "navi_sched/adapters/vllm/VLLMExecutionGeometry.py",
+        "navi_sched/adapters/vllm/VLLMExecutionSample.py",
+        "navi_sched/adapters/vllm/VLLMExecutionWindow.py",
         "navi_sched/adapters/vllm/VLLMEngineTransport.py",
         "navi_sched/adapters/vllm/VLLMForwardProtocol.py",
         "navi_sched/adapters/vllm/VLLMImageCacheMap.py",
@@ -1813,5 +1815,13 @@ py_test(
     env = {
         "LD_LIBRARY_PATH": "/opt/conda310/lib",
     },
+    deps = [":py_sched_lib"],
+)
+
+py_test(
+    name = "navi_sched_vllm_execution_window_integration_test",
+    srcs = ["test/vllm/VLLMExecutionWindowIntegrationTest.py"],
+    main = "test/vllm/VLLMExecutionWindowIntegrationTest.py",
+    python_version = "PY3",
     deps = [":py_sched_lib"],
 )
