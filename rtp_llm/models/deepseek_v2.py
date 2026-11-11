@@ -851,7 +851,7 @@ class DeepSeekV3Mtp(DeepSeekV2):
     @classmethod
     def _post_build_model_config(cls, model_config) -> None:
         super()._post_build_model_config(model_config)
-        from rtp_llm.models.cache_tags import declare_draft_cache_tags
+        from rtp_llm.models_py.utils.kvcache import declare_draft_cache_tags
 
         declare_draft_cache_tags(model_config)
 

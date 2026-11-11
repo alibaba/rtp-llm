@@ -1,7 +1,7 @@
 """Draft modules declare module-scoped cache tags in the Python model description.
 
 Every draft model class (MTP / DSpark / Eagle) calls
-``rtp_llm.models.cache_tags.declare_draft_cache_tags`` from its own
+``rtp_llm.models_py.utils.kvcache.declare_draft_cache_tags`` from its own
 ``_post_build_model_config``.  The published tags are therefore part of the
 model description: the main model keeps the canonical names, a draft module
 publishes ``mtp_<tag>``.  Nothing on the C++ side infers or rewrites them; the
@@ -11,7 +11,10 @@ cache config only validates that two modules never publish the same tag.
 import unittest
 from types import SimpleNamespace
 
-from rtp_llm.models.cache_tags import DRAFT_CACHE_TAG_PREFIX, declare_draft_cache_tags
+from rtp_llm.models_py.utils.kvcache import (
+    DRAFT_CACHE_TAG_PREFIX,
+    declare_draft_cache_tags,
+)
 
 
 class _Desc:

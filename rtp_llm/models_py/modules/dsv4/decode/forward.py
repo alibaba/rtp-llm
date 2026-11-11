@@ -23,7 +23,6 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
-from rtp_llm.models.cache_tags import canonical_cache_tag
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
@@ -44,6 +43,7 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     group_tags as _kv_cache_group_tags,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
+from rtp_llm.models_py.utils.kvcache import canonical_cache_tag
 
 # DSV4 paged (FULL) + fixed/state pool tags, in the probe order the metadata
 # allocator expects. SWA_KV lives on every layer; CSA/HCA/INDEXER only on the

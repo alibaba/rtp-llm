@@ -27,7 +27,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 
-from rtp_llm.models.cache_tags import DRAFT_CACHE_TAG_PREFIX, canonical_cache_tag
+from rtp_llm.models_py.utils.kvcache import DRAFT_CACHE_TAG_PREFIX, canonical_cache_tag
 
 # ---------------------------------------------------------------------------
 # Canonical cache-group tags. These are the *consumer* side of the tags that
@@ -86,7 +86,7 @@ def resolve_dsv4_tag(kv_cache: Optional[Any], tag: str) -> str:
     """Map a canonical DSV4 tag onto the tag the draft module declared.
 
     Draft modules declare their own cache tags from the model description
-    (``rtp_llm.models.cache_tags.declare_draft_cache_tags``, called by each
+    (``rtp_llm.models_py.utils.kvcache.declare_draft_cache_tags``, called by each
     draft class), so a draft publishes ``<prefix><tag>``.  The main module
     publishes the canonical tag unchanged, hence the identity fast path.
 

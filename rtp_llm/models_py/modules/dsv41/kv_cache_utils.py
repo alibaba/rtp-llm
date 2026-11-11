@@ -27,7 +27,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 
-from rtp_llm.models.cache_tags import canonical_cache_tag
+from rtp_llm.models_py.utils.kvcache import canonical_cache_tag
 
 # ---------------------------------------------------------------------------
 # Canonical cache-group tags. These are the *consumer* side of the tags that
