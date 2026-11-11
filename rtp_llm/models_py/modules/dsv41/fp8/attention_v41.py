@@ -2775,6 +2775,11 @@ class AttentionV41FP8(AttentionFP8):
             INDEXER_KV, read_positions.reshape(-1), read_req.reshape(-1)
         ).view(B, capacity)
         slots = torch.where(ids < (ends // self.compress_ratio)[:, None], slots, -1)
+        if not torch.cuda.is_current_stream_capturing():
+            # The dense fallback materializes [B*capacity, 128] fp32 keys.  On
+            # L20 the 1M-token shape needs 512 MiB; release allocator-cached
+            # blocks from model loading before this one-shot warmup allocation.
+            torch.cuda.empty_cache()
         keys = dequantize_indexer_k_fp4(index_pool, slots.reshape(-1)).view(
             B, capacity, self.index_head_dim
         )
