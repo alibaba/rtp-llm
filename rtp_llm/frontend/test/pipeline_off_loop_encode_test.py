@@ -14,7 +14,8 @@ import time
 import unittest
 from types import SimpleNamespace
 
-from rtp_llm.config.generate_config import RoleType
+from rtp_llm.config.generate_config import GenerateConfig, RoleType
+from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.ops import PDSepConfig
 from rtp_llm.pipeline.pipeline import Pipeline
 
@@ -85,12 +86,10 @@ class PipelineOffLoopEncodeTest(unittest.TestCase):
                 await asyncio.sleep(0.01)
 
         async def main():
-            from rtp_llm.config.generate_config import GenerateConfig
-
             config = GenerateConfig()
             config.max_new_tokens = 1
             gen = await pipeline.pipeline_async(
-                prompt, request_id=1, generate_config=config, generate_env_config=None
+                prompt, request_id=1, generate_config=config, generate_env_config=GenerateEnvConfig()
             )
             ticker_task = asyncio.create_task(ticker())
             # Drive the generator until the encode completes (it will fail at
@@ -120,12 +119,10 @@ class PipelineOffLoopEncodeTest(unittest.TestCase):
         prompt = "xy" * 40
 
         async def main():
-            from rtp_llm.config.generate_config import GenerateConfig
-
             config = GenerateConfig()
             config.max_new_tokens = 1
             gen = await pipeline.pipeline_async(
-                prompt, request_id=1, generate_config=config, generate_env_config=None
+                prompt, request_id=1, generate_config=config, generate_env_config=GenerateEnvConfig()
             )
             try:
                 async for _ in gen:
@@ -145,12 +142,10 @@ class PipelineOffLoopEncodeTest(unittest.TestCase):
         prompt = "identical-result-check " * 10
 
         async def main():
-            from rtp_llm.config.generate_config import GenerateConfig
-
             config = GenerateConfig()
             config.max_new_tokens = 1
             gen = await pipeline.pipeline_async(
-                prompt, request_id=1, generate_config=config, generate_env_config=None
+                prompt, request_id=1, generate_config=config, generate_env_config=GenerateEnvConfig()
             )
             try:
                 async for _ in gen:
@@ -159,11 +154,16 @@ class PipelineOffLoopEncodeTest(unittest.TestCase):
                 pass
 
         asyncio.run(main())
+        # Snapshot BEFORE the direct reference call: the pipeline-phase threads
+        # must not include the main thread (the encode ran in the pool).
+        threads_after_pipeline = set(tok.encode_threads)
         expected = tok.encode(prompt)
         # The pipeline called encode exactly once with the same prompt; its
         # internal ids equal the direct synchronous encode of the same text.
         self.assertEqual(tok.encode_calls, 2)  # once in pipeline, once direct
-        self.assertEqual(len(tok.encode_threads & {threading.current_thread().name}), 0)
+        self.assertEqual(
+            threads_after_pipeline & {threading.current_thread().name}, set()
+        )
         self.assertEqual(expected, [ord(c) % 100003 for c in prompt])
         pipeline._encode_executor.shutdown(wait=False)
 
