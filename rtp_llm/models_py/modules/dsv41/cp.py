@@ -817,6 +817,18 @@ def cp_all_gather_full_varlen(
     with record_function_range(f"{profile_name}.launch"):
         gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
     with record_function_range(f"{profile_name}.restore"):
+        if not replay_only:
+            # The gather output and the row-reordered full tensor coexist here.
+            # Release allocator scratch first; long-context A100 prefill has
+            # just enough residual reserve for the second 1 GiB block but not
+            # for both blocks plus a stale allocator cache.
+            import gc
+
+            gc.collect()
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
         full = (
             gathered.index_select(0, cp_ctx.unpad_restore)
             if replay_only
