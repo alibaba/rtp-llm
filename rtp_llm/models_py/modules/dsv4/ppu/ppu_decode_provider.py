@@ -252,8 +252,6 @@ class PpuDecodeProvider(PpuModuleProvider):
         return PpuMtpInputFusion(enorm, hnorm, e_proj, h_proj)
 
     def build_decode_metadata(self, default_factory, *args, **kwargs):
-        if not self._mtp_metadata_graph:
-            return default_factory(*args, **kwargs)
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
             DSv4DecodeFmhaImplFP8,
         )
@@ -262,7 +260,16 @@ class PpuDecodeProvider(PpuModuleProvider):
         )
 
         if default_factory is not DSv4DecodeFmhaImplFP8:
-            raise ValueError("PPU metadata Graph requires the FP8 Decode factory")
+            if self._mtp_metadata_graph:
+                raise ValueError(
+                    "PPU metadata Graph requires the FP8 Decode factory"
+                )
+            return default_factory(*args, **kwargs)
+        config = args[0] if args else kwargs.get("config")
+        if getattr(config, "q_len", 1) != 1 and not self._mtp_metadata_graph:
+            # Verify and draft catch-up use the framework multi-token updater,
+            # whose slot mappings include speculative ring entries.
+            return default_factory(*args, **kwargs)
         tables = {}
         for reference in self._decode_attention_refs:
             attention = reference()
