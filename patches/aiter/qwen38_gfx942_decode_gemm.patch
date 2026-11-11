@@ -1,0 +1,88 @@
+diff --git a/aiter/tuned_gemm.py b/aiter/tuned_gemm.py
+--- a/aiter/tuned_gemm.py
++++ b/aiter/tuned_gemm.py
+@@ -243,6 +243,51 @@
+     return None
+ 
+ 
++# BF16 decode shapes measured on gfx942 with 80 CUs.
++_QWEN38_GFX942_DECODE_GEMM = {(2, 2560, 3072): {'kernelName': 'opus', 'libtype': 'opus', 'solidx': 13, 'splitK': 0},
++ (4, 2560, 3072): {'kernelName': 'opus', 'libtype': 'opus', 'solidx': 13, 'splitK': 0},
++ (6, 48, 2560): {'kernelName': 'opus', 'libtype': 'opus', 'solidx': 12, 'splitK': 0},
++ (6, 320, 10240): {'kernelName': 'opus', 'libtype': 'opus', 'solidx': 12, 'splitK': 0},
++ (6, 513, 2560): {'kernelName': 'opus', 'libtype': 'opus', 'solidx': 12, 'splitK': 0},
++ (6, 640, 2560): {'kernelName': 'opus', 'libtype': 'opus', 'solidx': 12, 'splitK': 0},
++ (6, 2560, 2560): {'kernelName': 'opus', 'libtype': 'opus', 'solidx': 13, 'splitK': 0},
++ (6, 2560, 3072): {'kernelName': 'opus', 'libtype': 'opus', 'solidx': 13, 'splitK': 0},
++ (6, 10240, 320): {'kernelName': 'triton',
++                   'libtype': 'triton',
++                   'solidx': 0,
++                   'triton_config': {'BLOCK_SIZE_K': 64,
++                                     'BLOCK_SIZE_M': 16,
++                                     'BLOCK_SIZE_N': 64,
++                                     'GROUP_SIZE_M': 1,
++                                     'NUM_KSPLIT': 1,
++                                     'SPLITK_BLOCK_SIZE': 320,
++                                     'cache_modifier': None,
++                                     'num_stages': 1,
++                                     'num_warps': 4,
++                                     'waves_per_eu': 0}},
++ (8, 2560, 3072): {'kernelName': 'opus', 'libtype': 'opus', 'solidx': 13, 'splitK': 0},
++ (12, 48, 2560): {'kernelName': 'opus', 'libtype': 'opus', 'solidx': 12, 'splitK': 0},
++ (12, 320, 10240): {'kernelName': 'opus', 'libtype': 'opus', 'solidx': 12, 'splitK': 0},
++ (12, 513, 2560): {'kernelName': 'opus', 'libtype': 'opus', 'solidx': 12, 'splitK': 0},
++ (12, 640, 2560): {'kernelName': 'opus', 'libtype': 'opus', 'solidx': 12, 'splitK': 0},
++ (12, 2560, 2560): {'kernelName': 'opus', 'libtype': 'opus', 'solidx': 13, 'splitK': 0},
++ (12, 2560, 3072): {'kernelName': 'opus', 'libtype': 'opus', 'solidx': 13, 'splitK': 0},
++ (12, 10240, 320): {'kernelName': 'triton',
++                    'libtype': 'triton',
++                    'solidx': 0,
++                    'triton_config': {'BLOCK_SIZE_K': 64,
++                                      'BLOCK_SIZE_M': 16,
++                                      'BLOCK_SIZE_N': 64,
++                                      'GROUP_SIZE_M': 1,
++                                      'NUM_KSPLIT': 1,
++                                      'SPLITK_BLOCK_SIZE': 320,
++                                      'cache_modifier': None,
++                                      'num_stages': 1,
++                                      'num_warps': 4,
++                                      'waves_per_eu': 0}},
++ (16, 2560, 3072): {'kernelName': 'opus', 'libtype': 'opus', 'solidx': 13, 'splitK': 0}}
++
++
+ @functools.lru_cache(maxsize=4096)
+ def get_GEMM_A16W16_config(
+     M: int,
+@@ -258,6 +303,20 @@
+ ):
+     cu_num = get_cu_num() if cu_num is None else cu_num
+     gfx = get_gfx() if gfx is None else gfx
++    if (
++        gfx == "gfx942"
++        and cu_num == 80
++        and str(dtype) == "torch.bfloat16"
++        and str(otype) == "torch.bfloat16"
++        and not bias
++        and not scaleAB
++        and not bpreshuffle
++        and not os.environ.get("AITER_CONFIG_GEMM_BF16")
++    ):
++        # An explicit tuning table retains priority over the measured defaults.
++        tuned_decode = _QWEN38_GFX942_DECODE_GEMM.get((M, N, K))
++        if tuned_decode is not None:
++            return tuned_decode.copy()
+     config = get_GEMM_A16W16_tuned_config(
+         M, N, K, bias, dtype, otype, scaleAB, bpreshuffle, gfx, cu_num
+     )
+@@ -791,7 +850,10 @@
+         scale_a is None and scale_b is None and scale_c is None
+     ), "Triton gemm_a16w16 does not support scaling yet"
+     assert not bpreshuffle, "Triton gemm_a16w16 does not support bpreshuffle yet."
+-    return gemm_a16w16(inp, weights, bias=bias, dtype=otype, y=out)
++    return gemm_a16w16(
++        inp, weights, bias=bias, dtype=otype, y=out,
++        config=config.get("triton_config") if config else None,
++    )
+ 
+ 
+ solMap = {
