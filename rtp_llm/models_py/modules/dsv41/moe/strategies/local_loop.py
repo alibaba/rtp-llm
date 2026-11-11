@@ -76,7 +76,7 @@ def _get_or_create_local_y(
     return cached
 
 
-_GROUPED_CAPTURE_GROUP = 4
+_GROUPED_CAPTURE_GROUP = 2
 
 
 def _fp4_byte_lut(device: torch.device) -> torch.Tensor:
@@ -118,11 +118,11 @@ def _fp4_group_dequant_bf16(
     if weight.dim() != 2:
         # The strategy passes a group slice [G, out, in/2]; flatten experts
         # into rows for the row-wise FP4 unpack and reshape back by shape.
-        row_chunk = weight.shape[-2]
+        row_chunk = weight.shape[0] * weight.shape[1]
         weight = weight.reshape(-1, weight.shape[-1])
         scale = scale.reshape(-1, scale.shape[-1])
     else:
-        row_chunk = min(2048, weight.shape[0])
+        row_chunk = weight.shape[0]
     rows, packed = weight.shape
     in_dim = packed * 2
     out = torch.empty((rows, in_dim), dtype=torch.bfloat16, device=weight.device)
