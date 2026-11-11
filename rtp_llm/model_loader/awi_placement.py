@@ -256,25 +256,47 @@ def load_ballast(
         return unconsumed
     from safetensors import safe_open
 
+    # Weight loading leaves the caching allocator holding large freed
+    # transients (reserved-but-unallocated); release them so ballast is
+    # measured against genuinely free HBM instead of failing on a full card.
+    torch.cuda.empty_cache()
     handles: Dict[str, object] = {}
     loaded_bytes = 0
+    loaded_names: List[str] = []
     try:
-        for name in mine:
-            relative = weight_map[name]
-            handle = handles.get(relative)
-            if handle is None:
-                handle = safe_open(
-                    os.path.join(checkpoint_dir, relative),
-                    framework="pt",
-                    device="cpu",
+        try:
+            for name in mine:
+                relative = weight_map[name]
+                handle = handles.get(relative)
+                if handle is None:
+                    handle = safe_open(
+                        os.path.join(checkpoint_dir, relative),
+                        framework="pt",
+                        device="cpu",
+                    )
+                    handles[relative] = handle
+                tensor = handle.get_tensor(name).to(device)
+                _BALLAST.append(tensor)
+                loaded_names.append(name)
+                loaded_bytes += _gpu_bytes(tensor)
+                record_external(
+                    name, device, "device",
+                    int(tensor.numel()) * int(tensor.element_size()),
                 )
-                handles[relative] = handle
-            tensor = handle.get_tensor(name).to(device)
-            _BALLAST.append(tensor)
-            loaded_bytes += _gpu_bytes(tensor)
-            record_external(
-                name, device, "device", int(tensor.numel()) * int(tensor.element_size())
+        except torch.cuda.OutOfMemoryError:
+            # Never leave partial ballast behind: retained tensors would
+            # starve engine init. Drop everything and let the completeness
+            # check report the missing keys loudly.
+            logging.error(
+                "AWI census ballast OOM on rank %d after %d tensors; "
+                "releasing partial ballast",
+                rank, len(loaded_names), exc_info=True,
             )
+            _BALLAST.clear()
+            for name in loaded_names:
+                _ROWS.pop(name, None)
+            torch.cuda.empty_cache()
+            return unconsumed
     finally:
         for handle in handles.values():
             close = getattr(handle, "close", None)
@@ -283,10 +305,11 @@ def load_ballast(
                     close()
                 except Exception:
                     pass
+    torch.cuda.empty_cache()
     logging.info(
         "AWI census ballast: rank=%d loaded %d/%d unconsumed tensors "
         "(%.2f GiB device-resident)",
-        rank, len(mine), len(unconsumed), loaded_bytes / 2**30,
+        rank, len(loaded_names), len(unconsumed), loaded_bytes / 2**30,
     )
     return unconsumed
 
