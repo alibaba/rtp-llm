@@ -1,5 +1,6 @@
 package org.flexlb.mock.client;
 
+import org.flexlb.mock.protocol.MultimodalProtocol;
 import io.grpc.*;
 import io.grpc.stub.*;
 import java.time.*;
@@ -46,7 +47,7 @@ public final class BackendRpcClient implements AutoCloseable {
     }
 
     public BackendRpcClient(java.util.function.Supplier<List<String>> masters) {
-        this(masters, event -> {}, MediaInput.IMAGE_TOKEN, 0L, 1);
+        this(masters, event -> {}, MultimodalProtocol.IMAGE_TOKEN, 0L, 1);
     }
 
     BackendRpcClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<ObjectNode> events, int imageToken, long seed, int prefillCpSize) {
@@ -127,7 +128,7 @@ public final class BackendRpcClient implements AutoCloseable {
         if (baseBlockSize > 0) {
             var routed = request.toBuilder().setCacheKeyBlockSize(Math.multiplyExact(Math.toIntExact(baseBlockSize), prefillCpSize));
             if (input.getMultimodalInputsCount() == 0) {
-                routed.clearBlockCacheKeys().addAllBlockCacheKeys(routingKeys(MediaInput.text(input), baseBlockSize));
+                routed.clearBlockCacheKeys().addAllBlockCacheKeys(routingKeys(MultimodalProtocol.text(input), baseBlockSize));
             }
             request = routed.build();
         }
@@ -139,9 +140,9 @@ public final class BackendRpcClient implements AutoCloseable {
         return channels.computeIfAbsent(target, t -> ManagedChannelBuilder.forTarget(t).usePlaintext().build());
     }
 
-    private List<Long> routingKeys(MediaInput.Prepared input, long baseBlockSize) {
+    private List<Long> routingKeys(MultimodalProtocol.Prepared input, long baseBlockSize) {
         if (baseBlockSize <= 0) return List.of();
-        return MediaInput.sequence(input, Math.toIntExact(baseBlockSize), cacheKeySeed, prefillCpSize).keys();
+        return MultimodalProtocol.sequence(input, Math.toIntExact(baseBlockSize), cacheKeySeed, prefillCpSize).keys();
     }
 
     private static String message(Status status) {
@@ -240,13 +241,13 @@ public final class BackendRpcClient implements AutoCloseable {
                 scheduledMaster = target.rpc();
                 scheduleAttempt++; pendingSchedule = true;
                 events.accept(event("SCHEDULE_START").put("attempt", scheduleAttempt).put("master", scheduledMaster));
-                boolean visionRoute = MediaInput.present(input) && !visionPrepared;
+                boolean visionRoute = MultimodalProtocol.present(input) && !visionPrepared;
                 if (!visionRoute) scheduleStarted = true;
                 boolean includeInput = !visionRoute && (forceInput || target.requiresGenerateInput());
                 var query = request;
                 if (visionRoute) {
                     query = request.toBuilder().setVitRouteOnly(true).clearSelectedVit().clearGenerateInput().clearBlockCacheKeys()
-                        .clearCacheAffinityKeys().addAllCacheAffinityKeys(input.getMultimodalInputsList().stream().map(MediaInput::key).toList()).build();
+                        .clearCacheAffinityKeys().addAllCacheAffinityKeys(input.getMultimodalInputsList().stream().map(MultimodalProtocol::key).toList()).build();
                 } else if (includeInput && request.getGenerateInput().isEmpty()) {
                     query = request.toBuilder().setGenerateInput(input.toByteString()).build();
                 } else if (!includeInput && !request.getGenerateInput().isEmpty()) {

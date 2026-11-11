@@ -99,7 +99,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             nativeInt(config, "max_inited_kv_cache_streams", 0, 0, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_without_cache", 0, 0, Integer.MAX_VALUE),
             cpSize,
-            config, compute, nativeInt(config, "image_token_id", org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN, 0, Integer.MAX_VALUE),
+            config, compute, nativeInt(config, "image_token_id", org.flexlb.mock.protocol.MultimodalProtocol.IMAGE_TOKEN, 0, Integer.MAX_VALUE),
             ConfigInput.signedLong(config, "cache_key_hash_seed", 0));
     }
 

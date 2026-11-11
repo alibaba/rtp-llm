@@ -9,7 +9,7 @@ import java.nio.file.*;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
-import org.flexlb.mock.protocol.MediaInput;
+import org.flexlb.mock.protocol.MultimodalProtocol;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -23,7 +23,7 @@ class RequestJournalTest {
         var path = directory.resolve("requests.jsonl");
         var journal = new RequestJournal(path, "client-0", plan());
         try (var first = new BackendRpcClientTest.Harness(); var backup = new BackendRpcClientTest.Harness();
-             var client = new BackendRpcClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")), journal::record, MediaInput.IMAGE_TOKEN, 0L, 1)) {
+             var client = new BackendRpcClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")), journal::record, MultimodalProtocol.IMAGE_TOKEN, 0L, 1)) {
             first.scheduleFailure = io.grpc.Status.UNAVAILABLE;
             backup.output = (id, response) -> response.onNext(BackendRpcClientTest.token(id, 1, false));
             var call = client.send(BackendRpcClientTest.request(100), Duration.ofSeconds(8));
@@ -114,7 +114,7 @@ class RequestJournalTest {
             var path = directory.resolve(timeout ? "timeout.jsonl" : "rejection.jsonl");
             var journal = new RequestJournal(path, "client-0", plan());
             try (var master = new BackendRpcClientTest.Harness();
-                 var client = new BackendRpcClient(() -> List.of(master.endpoint().get("rpc")), journal::record, MediaInput.IMAGE_TOKEN, 0L, 1)) {
+                 var client = new BackendRpcClient(() -> List.of(master.endpoint().get("rpc")), journal::record, MultimodalProtocol.IMAGE_TOKEN, 0L, 1)) {
                 if (timeout) master.scheduleDelay = 1000;
                 else master.route = r -> r.toBuilder().setSuccess(false).setCode(429).clearLifecycle().build();
                 var call = client.send(BackendRpcClientTest.request(100), Duration.ofMillis(timeout ? 100 : 3000));

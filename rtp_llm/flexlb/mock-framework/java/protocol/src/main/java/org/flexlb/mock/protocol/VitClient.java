@@ -18,20 +18,20 @@ public final class VitClient implements AutoCloseable {
 
     public VitClient(int imageToken) { this.imageToken = imageToken; }
 
-    public MediaInput.Prepared routingInput(GenerateInputPB input,long deadline) {
+    public MultimodalProtocol.Prepared routingInput(GenerateInputPB input,long deadline) {
         long remaining=deadline-System.nanoTime();
         if(remaining<=0) throw Status.DEADLINE_EXCEEDED.withDescription("Request expired acquiring vision hashes").asRuntimeException();
-        var request=MultimodalHashRequestPB.newBuilder().addAllKeys(input.getMultimodalInputsList().stream().map(MediaInput::key).distinct().toList())
-            .setAcceptMockFeatureSeeds(true).setInputs(MediaInput.media(input)).setTimeoutMs(Math.max(1,TimeUnit.NANOSECONDS.toMillis(remaining))).build();
+        var request=MultimodalHashRequestPB.newBuilder().addAllKeys(input.getMultimodalInputsList().stream().map(MultimodalProtocol::key).distinct().toList())
+            .setAcceptMockFeatureSeeds(true).setInputs(MultimodalProtocol.media(input)).setTimeoutMs(Math.max(1,TimeUnit.NANOSECONDS.toMillis(remaining))).build();
         checkActive();
-        var metadata=MultimodalRpcServiceGrpc.newBlockingStub(channel(MediaInput.address(input))).withDeadlineAfter(remaining,TimeUnit.NANOSECONDS).getMultimodalHashes(request);
+        var metadata=MultimodalRpcServiceGrpc.newBlockingStub(channel(MultimodalProtocol.address(input))).withDeadlineAfter(remaining,TimeUnit.NANOSECONDS).getMultimodalHashes(request);
         checkActive();
-        return MediaInput.applyHashes(input,metadata,imageToken);
+        return MultimodalProtocol.applyHashes(input,metadata,imageToken);
     }
 
-    public MediaInput.Prepared prepare(GenerateInputPB input,long deadline) {
-        if(!MediaInput.present(input)) return MediaInput.text(input);
-        return MediaInput.apply(input,fetch(input,deadline),imageToken);
+    public MultimodalProtocol.Prepared prepare(GenerateInputPB input,long deadline) {
+        if(!MultimodalProtocol.present(input)) return MultimodalProtocol.text(input);
+        return MultimodalProtocol.apply(input,fetch(input,deadline),imageToken);
     }
 
     @Override public void close() {
@@ -45,9 +45,9 @@ public final class VitClient implements AutoCloseable {
         long remaining=deadline==Long.MAX_VALUE?Long.MAX_VALUE:deadline-System.nanoTime();
         if(remaining<=0) throw Status.DEADLINE_EXCEEDED.withDescription("Request expired preparing vision input").asRuntimeException();
         checkActive();
-        var stub=MultimodalRpcServiceGrpc.newBlockingStub(channel(MediaInput.address(input)));
+        var stub=MultimodalRpcServiceGrpc.newBlockingStub(channel(MultimodalProtocol.address(input)));
         if(deadline!=Long.MAX_VALUE) stub=stub.withDeadlineAfter(remaining,TimeUnit.NANOSECONDS);
-        var result=stub.remoteMultimodalEmbedding(MediaInput.media(input).toBuilder().setAcceptMockFeatureSeeds(true).build());
+        var result=stub.remoteMultimodalEmbedding(MultimodalProtocol.media(input).toBuilder().setAcceptMockFeatureSeeds(true).build());
         checkActive();
         return result;
     }

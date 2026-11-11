@@ -74,7 +74,7 @@ class GenerateResponseStreamTest {
     @Test void decodeFinalMarkerDoesNotRepeatThePrefillToken() {
         var tasks = new ArrayDeque<Runnable>(); var observer = new Observer();
         observer.ready = true; observer.received = 1;
-        var output = output(tasks::add); output.startAt(1, false); output.attach(observer, () -> {});
+        var output = output(tasks::add); output.startAt(1); output.attach(observer, () -> {});
         output.advance(7, 42, 1, AuxInfoPB.getDefaultInstance(), true); output.finish(null);
         tasks.remove().run();
         assertEquals(1, observer.received); assertEquals(1, observer.frames);
@@ -88,7 +88,7 @@ class GenerateResponseStreamTest {
             @Override public void onNext(GenerateOutputsPB value) { receivedFrames.add(value); }
         };
         var stream = output(tasks::add);
-        stream.startAt(1, true);
+        stream.startAt(1);
         stream.attach(observer, () -> {});
         stream.advance(7, 42, 4, AuxInfoPB.getDefaultInstance(), false);
         stream.advance(7, 42, 7, AuxInfoPB.getDefaultInstance(), true);
@@ -200,11 +200,15 @@ class GenerateResponseStreamTest {
         int received, frames, finals;
         @Override public void onNext(GenerateOutputsPB value) {
             if (!value.hasFlattenOutput()) return;
-            var flat = value.getFlattenOutput(); int width = Math.toIntExact(flat.getOutputIds().getShape(2));
+            var flat = value.getFlattenOutput();
+            int width = flat.getAuxInfo(0).getStepOutputLen();
+            if (flat.hasOutputIds()) {
+                assertEquals(width, flat.getOutputIds().getShape(2));
+                assertEquals(width * 4, flat.getOutputIds().getInt32Data().size());
+            }
             assertTrue(width <= GenerateResponseStream.MAX_FRAME_TOKENS);
             received += width; frames++;
             assertEquals(received, flat.getAuxInfo(0).getOutputLen());
-            assertEquals(width * 4, flat.getOutputIds().getInt32Data().size());
             if (flat.getFinished(0)) finals++;
         }
         @Override public void onError(Throwable error) { failure = error; }

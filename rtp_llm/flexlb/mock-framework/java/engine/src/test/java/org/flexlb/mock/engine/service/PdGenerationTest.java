@@ -39,7 +39,7 @@ class PdGenerationTest {
             var query=CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build();
             var ps=rpc.getCacheStatus(query);
             var ds=RpcServiceGrpc.newBlockingStub(d.channel).withDeadlineAfter(2,TimeUnit.SECONDS).getCacheStatus(query);
-            var base=org.flexlb.mock.protocol.MediaInput.sequence(org.flexlb.mock.protocol.MediaInput.text(request), 2, 0, 1).keys();
+            var base=org.flexlb.mock.protocol.MultimodalProtocol.sequence(org.flexlb.mock.protocol.MultimodalProtocol.text(request), 2, 0, 1).keys();
             assertEquals(Set.of(base.get(3),base.get(7)),Set.copyOf(ps.getCacheKeyListList()));
             assertTrue(ds.getCacheKeyListList().containsAll(base));
             assertEquals(8,ps.getBlockSize());assertEquals(128,ps.getTotalKvCache());
@@ -48,6 +48,7 @@ class PdGenerationTest {
     }
 
     @Test void localPdBatchAndGroupPrepareEachImageExactlyOnceBeforeScheduling() throws Exception {
+        long featureSeed = 777;
         var calls = new ConcurrentHashMap<Long, Integer>();
         var vision = io.grpc.netty.NettyServerBuilder.forPort(0)
             .addService(new org.flexlb.engine.grpc.MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase() {
@@ -55,8 +56,7 @@ class PdGenerationTest {
                     calls.merge(input.getRequestId(), 1, Integer::sum);
                     response.onNext(MultimodalOutputPB.newBuilder().addSplitSize(1)
                         .setMultimodalEmbedding(TensorPB.newBuilder().setDataType(TensorPB.DataType.BF16).addShape(1).addShape(4))
-                        .setMultimodalFeatureHash(TensorPB.newBuilder().setDataType(TensorPB.DataType.INT32).addShape(1)
-                            .setInt32Data(com.google.protobuf.ByteString.copyFrom(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(777).array())))
+                        .addMockFeatureSeeds(featureSeed)
                         .build());
                     response.onCompleted();
                 }
@@ -85,8 +85,10 @@ class PdGenerationTest {
             }
             // Cache identity must use the prepared hash, not the image placeholder token.
             var prepared = image(input(d, 0, 4, 1, 3000, true), vision.getPort()).toBuilder().clearMultimodalInputs().build();
-            var keys = org.flexlb.mock.protocol.MediaInput.sequence(new org.flexlb.mock.protocol.MediaInput.Prepared(prepared,
-                List.of(MultimodalCacheSpanPB.newBuilder().setOffset(1).addRowHashes(777).build())), 2, 0, 1).keys();
+            int rowHash = org.flexlb.mock.protocol.MultimodalProtocol.expandFeatureHashes(featureSeed, 1)
+                .asReadOnlyByteBuffer().order(ByteOrder.LITTLE_ENDIAN).getInt();
+            var keys = org.flexlb.mock.protocol.MultimodalProtocol.sequence(new org.flexlb.mock.protocol.MultimodalProtocol.Prepared(prepared,
+                List.of(MultimodalCacheSpanPB.newBuilder().setOffset(1).addRowHashes(rowHash).build())), 2, 0, 1).keys();
             var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
             assertTrue(cached.getCacheKeyListList().containsAll(keys));
             assertEquals(6, calls.size());
@@ -223,8 +225,7 @@ class PdGenerationTest {
                         public void onError(Throwable error) { rejected.add(error); }
                         public void onCompleted() { fail("Unsupported input completed"); }
                     });
-                    remote.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE).setClientId("validation")
-                        .setRequestId(request.getRequestId()).setInput(request).build());
+                    remote.onNext(DecodeAdmissionTest.allocate("validation", request.build()));
                     var error = rejected.poll(3, TimeUnit.SECONDS);
                     assertNotNull(error); assertEquals(Status.Code.UNIMPLEMENTED, Status.fromThrowable(error).getCode());
                 }
@@ -278,6 +279,10 @@ class PdGenerationTest {
             var load = new CountDownLatch(1);
             var replies = new java.util.concurrent.atomic.AtomicReference<StreamObserver<GenerateOutputsPB>>();
             var remote = io.grpc.netty.NettyServerBuilder.forPort(0).addService(new RpcServiceGrpc.RpcServiceImplBase() {
+                @Override public void getCacheStatus(CacheVersionPB request, StreamObserver<CacheStatusPB> response) {
+                    response.onNext(CacheStatusPB.newBuilder().setBlockSize(2).setMockDecodeCacheSeed(0).build());
+                    response.onCompleted();
+                }
                 @Override public StreamObserver<GenerateRequestPB> remoteGenerate(StreamObserver<GenerateOutputsPB> response) {
                     replies.set(response);
                     return new StreamObserver<>() {
@@ -753,8 +758,7 @@ class PdGenerationTest {
                     public void onCompleted() { replies.add("completed"); }
                 }));
             var request = input(d, 2500, 3, 3000, 5000, false);
-            stream.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE)
-                .setClientId("p").setRequestId(2500).setInput(request).build());
+            stream.onNext(DecodeAdmissionTest.allocate("p", request));
             assertInstanceOf(GenerateOutputsPB.class, replies.poll(3, TimeUnit.SECONDS));
             stream.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.LOAD).setClientId("p").setRequestId(2500).build());
             assertInstanceOf(GenerateOutputsPB.class, replies.poll(3, TimeUnit.SECONDS));
@@ -893,7 +897,7 @@ class PdGenerationTest {
     private static GenerateInputPB image(GenerateInputPB input, int port) {
         var result = input.toBuilder().addMultimodalInputs(MultimodalInputPB.newBuilder()
             .setMultimodalType(1).setMultimodalUrl("image"))
-            .setTokenIds(1, org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN);
+            .setTokenIds(1, org.flexlb.mock.protocol.MultimodalProtocol.IMAGE_TOKEN);
         result.getGenerateConfigBuilder().addRoleAddrs(RoleAddrPB.newBuilder()
             .setRole(RoleAddrPB.RoleType.VIT).setIp("127.0.0.1").setGrpcPort(port));
         return result.build();

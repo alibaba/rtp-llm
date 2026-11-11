@@ -17,7 +17,7 @@ import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 import java.util.concurrent.locks.ReentrantLock;
 import org.flexlb.mock.protocol.CacheSequence;
-import org.flexlb.mock.protocol.MediaInput;
+import org.flexlb.mock.protocol.MultimodalProtocol;
 
 /**
  * P protocol sessions, input preparation and output delivery. EngineScheduler owns local execution and KV.
@@ -141,10 +141,10 @@ final class PrefillRpcServer implements AutoCloseable {
     }
 
     Session submit(GenerateInputPB input, long rpcDeadline, boolean retained, long started) {
-        return submit(MediaInput.text(input), rpcDeadline, retained, started);
+        return submit(MultimodalProtocol.text(input), rpcDeadline, retained, started);
     }
 
-    Session submit(MediaInput.Prepared prepared, long rpcDeadline, boolean retained, long started) {
+    Session submit(MultimodalProtocol.Prepared prepared, long rpcDeadline, boolean retained, long started) {
         var input = prepared.input();
         validate(input, retained);
         requirePrepared(input);
@@ -152,7 +152,7 @@ final class PrefillRpcServer implements AutoCloseable {
         return submit(session, prepared);
     }
 
-    Session submit(Session session, MediaInput.Prepared prepared) {
+    Session submit(Session session, MultimodalProtocol.Prepared prepared) {
         try {
             requirePrepared(prepared.input());
             var input = schedulerInput(session, prepared);
@@ -281,11 +281,11 @@ final class PrefillRpcServer implements AutoCloseable {
         }
     }
 
-    private EngineScheduler.Input schedulerInput(Session session, MediaInput.Prepared prepared) {
+    private EngineScheduler.Input schedulerInput(Session session, MultimodalProtocol.Prepared prepared) {
         var sequence = session.prefillSequence;
         session.prefillSequence = null;
         if (sequence == null)
-            sequence = MediaInput.sequence(prepared, config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
+            sequence = MultimodalProtocol.sequence(prepared, config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
         return RpcMessages.toSchedulerInput(prepared.input(), Long.toString(session.id), session.started,
             session.deadline, session.retained, sequence);
     }
@@ -302,7 +302,7 @@ final class PrefillRpcServer implements AutoCloseable {
     }
 
     private static void requirePrepared(GenerateInputPB input) {
-        if (org.flexlb.mock.protocol.MediaInput.present(input))
+        if (org.flexlb.mock.protocol.MultimodalProtocol.present(input))
             throw Status.INVALID_ARGUMENT.withDescription("Prepare multimodal input before EngineScheduler submission").asRuntimeException();
     }
 
@@ -491,8 +491,8 @@ final class PrefillRpcServer implements AutoCloseable {
     /**
      * Prepared input and deadline for local admission, with an existing session when already registered.
      */
-    record Submission(MediaInput.Prepared prepared, long deadline, Session session) {
-        Submission(GenerateInputPB input, long deadline) { this(MediaInput.text(input), deadline, null); }
+    record Submission(MultimodalProtocol.Prepared prepared, long deadline, Session session) {
+        Submission(GenerateInputPB input, long deadline) { this(MultimodalProtocol.text(input), deadline, null); }
         GenerateInputPB input() { return prepared.input(); }
     }
 
@@ -518,7 +518,7 @@ final class PrefillRpcServer implements AutoCloseable {
 
         final Context.CancellableContext context;
 
-        org.flexlb.mock.protocol.MediaInput.Prepared media;
+        org.flexlb.mock.protocol.MultimodalProtocol.Prepared media;
 
         final Session source;
 
@@ -588,16 +588,11 @@ final class PrefillRpcServer implements AutoCloseable {
                 if (deadline != Long.MAX_VALUE) stub = stub.withDeadlineAfter(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
                 var stream = stub.remoteGenerate(inbox);
                 var allocation = frame(RemoteStage.ALLOCATE).toBuilder();
-                var allocationInput = input.toBuilder().clearGroupId().clearGroupSize();
-                if (layout.hasMockDecodeCacheSeed()) {
-                    var sequence = MediaInput.sequence(media, Math.toIntExact(layout.getBlockSize()), layout.getMockDecodeCacheSeed(), 1);
-                    allocation.setMockDecodePrompt(sequence.decodePrompt());
-                    allocationInput.clearTokenIds();
-                    if (layout.getBlockSize() == config.blockSize() && layout.getMockDecodeCacheSeed() == config.cacheKeySeed())
-                        source.prefillSequence = sequence.withStride(config.cacheKeyStride());
-                } else {
-                    allocation.addAllMultimodalCacheSpans(media.spans());
-                }
+                var allocationInput = input.toBuilder().clearGroupId().clearGroupSize().clearTokenIds();
+                var sequence = MultimodalProtocol.sequence(media, Math.toIntExact(layout.getBlockSize()), layout.getMockDecodeCacheSeed(), 1);
+                allocation.setMockDecodePrompt(sequence.decodePrompt());
+                if (layout.getBlockSize() == config.blockSize() && layout.getMockDecodeCacheSeed() == config.cacheKeySeed())
+                    source.prefillSequence = sequence.withStride(config.cacheKeyStride());
                 allocationInput.getGenerateConfigBuilder().clearGroupTimeout();
                 if (deadline != Long.MAX_VALUE) allocationInput.getGenerateConfigBuilder().setTimeoutMs((int) Math.min(Integer.MAX_VALUE,
                     Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()))));
@@ -643,7 +638,8 @@ final class PrefillRpcServer implements AutoCloseable {
                 stream.onCompleted();
                 boolean finished = prefillFinished;
                 for (GenerateOutputsPB output; (output = inbox.next()) != null;) {
-                    if (finished || output.getRequestId() != input.getRequestId() || !output.hasFlattenOutput() || output.getFlattenOutput().getFinishedCount() != 1)
+                    if (finished || output.getRequestId() != input.getRequestId() || !output.hasFlattenOutput()
+                            || output.getFlattenOutput().getFinishedCount() != 1 || output.getFlattenOutput().hasOutputIds())
                         throw Status.DATA_LOSS.withDescription("Invalid Decode output stream").asRuntimeException();
                     var merged = output.toBuilder();
                     for (var aux : merged.getFlattenOutputBuilder().getAuxInfoBuilderList()) {
@@ -750,13 +746,11 @@ final class PrefillRpcServer implements AutoCloseable {
                 long budget = Math.min(TimeUnit.SECONDS.toNanos(5), deadline == Long.MAX_VALUE
                     ? Long.MAX_VALUE : deadline - System.nanoTime());
                 if (budget <= 0) throw Status.DEADLINE_EXCEEDED.withDescription("Decode layout query expired").asRuntimeException();
-                try {
-                    layout = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(budget, TimeUnit.NANOSECONDS)
-                        .getCacheStatus(CacheVersionPB.getDefaultInstance());
-                } catch (StatusRuntimeException error) {
-                    if (error.getStatus().getCode() != Status.Code.UNIMPLEMENTED) throw error;
-                    layout = CacheStatusPB.getDefaultInstance();
-                }
+                var status = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(budget, TimeUnit.NANOSECONDS)
+                    .getCacheStatus(CacheVersionPB.getDefaultInstance());
+                if (!status.hasMockDecodeCacheSeed() || status.getBlockSize() < 1)
+                    throw Status.FAILED_PRECONDITION.withDescription("Decode peer requires the compact Mock protocol").asRuntimeException();
+                layout = status;
                 return layout;
             } finally {
                 layoutLock.unlock();

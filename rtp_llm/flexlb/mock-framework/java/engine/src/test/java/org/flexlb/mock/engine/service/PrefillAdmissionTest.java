@@ -217,7 +217,7 @@ class PrefillAdmissionTest {
                 var gate = new CountDownLatch(1);
                 var submit = workers.submit(() -> {
                     gate.await();
-                    try { engine.submit(session, org.flexlb.mock.protocol.MediaInput.text(raw)); }
+                    try { engine.submit(session, org.flexlb.mock.protocol.MultimodalProtocol.text(raw)); }
                     catch (io.grpc.StatusRuntimeException expected) { assertEquals(Status.Code.CANCELLED, expected.getStatus().getCode()); }
                     return null;
                 });
@@ -232,7 +232,7 @@ class PrefillAdmissionTest {
             var fresh = engine.new Session(input(99, 0, true), false, System.nanoTime(), Long.MAX_VALUE);
             old.cancel();
             assertEquals(99, engine.snapshot(0).tasks().getFirst().requestId());
-            engine.submit(fresh, org.flexlb.mock.protocol.MediaInput.text(input(99, 0, true)));
+            engine.submit(fresh, org.flexlb.mock.protocol.MultimodalProtocol.text(input(99, 0, true)));
             assertTrue(fresh.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().isOk());
             assertEquals(32, engine.snapshot(0).finished().size());
             assertEquals(8, cache.snapshot(0, false).availableBlocks());
@@ -248,8 +248,8 @@ class PrefillAdmissionTest {
             var ready = admission.new Session(input(2, 0, true), true, System.nanoTime(), Long.MAX_VALUE);
             cancelled.cancel();
             var batch = admission.submit(List.of(
-                new PrefillRpcServer.Submission(org.flexlb.mock.protocol.MediaInput.text(input(1, 0, true)), Long.MAX_VALUE, cancelled),
-                new PrefillRpcServer.Submission(org.flexlb.mock.protocol.MediaInput.text(input(2, 0, true)), Long.MAX_VALUE, ready)));
+                new PrefillRpcServer.Submission(org.flexlb.mock.protocol.MultimodalProtocol.text(input(1, 0, true)), Long.MAX_VALUE, cancelled),
+                new PrefillRpcServer.Submission(org.flexlb.mock.protocol.MultimodalProtocol.text(input(2, 0, true)), Long.MAX_VALUE, ready)));
             assertEquals(Status.Code.CANCELLED, Status.fromThrowable(batch.get(0).failure()).getCode());
             assertSame(ready, batch.get(1).session());
             assertTrue(ready.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().isOk());
@@ -271,7 +271,7 @@ class PrefillAdmissionTest {
             assertTrue(admission.snapshot(0).tasks().isEmpty());
             assertEquals(1, admission.snapshot(0).finished().size());
             assertThrows(io.grpc.StatusRuntimeException.class,
-                () -> admission.submit(pending, org.flexlb.mock.protocol.MediaInput.text(input(1, 0, true))));
+                () -> admission.submit(pending, org.flexlb.mock.protocol.MultimodalProtocol.text(input(1, 0, true))));
             pending.cancel(); admission.close();
             assertEquals(1, admission.snapshot(0).finished().size());
             assertEquals(8, cache.snapshot(0, false).availableBlocks());

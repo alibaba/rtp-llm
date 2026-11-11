@@ -12,7 +12,7 @@ import java.util.List;
 import java.util.Map;
 import org.flexlb.mock.client.ClientProtocol.*;
 import org.flexlb.mock.client.ReplayControlServer.Session;
-import org.flexlb.mock.protocol.MediaInput;
+import org.flexlb.mock.protocol.MultimodalProtocol;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -55,7 +55,7 @@ class IndexedTrafficReaderTest {
         var plan = new ClientReplayPlan(1, null, path.toString(), 2, 0, 2048, 100, identity, null, 2.0, 1, 4, 1000, 1000);
         var items = new ArrayList<Session.Item>();
         long past = System.nanoTime() - 2_000_000_000;
-        Session.play(plan, past, MediaInput.IMAGE_TOKEN, items::add);
+        Session.play(plan, past, MultimodalProtocol.IMAGE_TOKEN, items::add);
         assertEquals(List.of(100L, 2148L), items.stream().map(Session.Item::requestId).toList());
         assertEquals(List.of(0L, 1_024_000_000L), items.stream().map(item -> {
             try { return Session.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), null, 2.0, null); }
@@ -63,8 +63,8 @@ class IndexedTrafficReaderTest {
         }).toList());
         assertEquals(List.of(924, 924, 924), items.getFirst().entry().expectedImageTokens());
         try (var dataset = new IndexedTrafficReader(path)) {
-            assertEquals(1023, dataset.entry(1023, MediaInput.IMAGE_TOKEN).arrivalMs());
-            assertThrows(IOException.class, () -> dataset.entry(1024, MediaInput.IMAGE_TOKEN));
+            assertEquals(1023, dataset.entry(1023, MultimodalProtocol.IMAGE_TOKEN).arrivalMs());
+            assertThrows(IOException.class, () -> dataset.entry(1024, MultimodalProtocol.IMAGE_TOKEN));
         }
     }
 
@@ -77,7 +77,7 @@ class IndexedTrafficReaderTest {
                 var plan = new ClientReplayPlan(1, null, path.toString(), expected.get(worker).size(), worker, 2,
                     100, input.identity, 100.0, null, 1, 4, 1000, 1000);
                 var times = new ArrayList<Long>();
-                Session.play(plan, past, MediaInput.IMAGE_TOKEN, item -> times.add(assertDoesNotThrow(() ->
+                Session.play(plan, past, MultimodalProtocol.IMAGE_TOKEN, item -> times.add(assertDoesNotThrow(() ->
                     Session.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), plan.qps(), null, null))));
                 assertEquals(expected.get(worker), times);
             }

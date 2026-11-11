@@ -2,7 +2,7 @@ package org.flexlb.mock.engine.vit;
 
 import io.grpc.Status;
 import org.flexlb.engine.grpc.EngineRpcService.*;
-import org.flexlb.mock.protocol.MediaInput;
+import org.flexlb.mock.protocol.MultimodalProtocol;
 
 /**
  * V-owned image geometry, logical output size and simulated feature hashes.
@@ -37,19 +37,19 @@ final class VitGeometry {
     }
 
     static void validate(MultimodalInputsPB input, boolean skipDownload) {
-        if(input.getTimeoutMs()<0) throw MediaInput.invalid("Invalid media timeout");
-        if(input.getMultimodalInputsCount()<1) throw MediaInput.invalid("Expected nonempty image inputs");
+        if(input.getTimeoutMs()<0) throw MultimodalProtocol.invalid("Invalid media timeout");
+        if(input.getMultimodalInputsCount()<1) throw MultimodalProtocol.invalid("Expected nonempty image inputs");
         for(var media:input.getMultimodalInputsList()) {
             if(media.getMultimodalType()!=1 || media.hasMultimodalTensor())
                 throw Status.UNIMPLEMENTED.withDescription("V supports URL image inputs only").asRuntimeException();
-            MediaInput.key(media);
+            MultimodalProtocol.key(media);
             if(skipDownload) dimensions(media.getMmPreprocessConfig().getWidth(),media.getMmPreprocessConfig().getHeight());
         }
     }
 
     static void dimensions(int width,int height) {
         if(width<1 || height<1)
-            throw MediaInput.invalid("Image width/height must be positive; skip-download inputs require explicit dimensions");
+            throw MultimodalProtocol.invalid("Image width/height must be positive; skip-download inputs require explicit dimensions");
     }
 
     /**

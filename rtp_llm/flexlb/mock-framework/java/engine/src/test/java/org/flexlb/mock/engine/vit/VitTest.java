@@ -1,7 +1,6 @@
 package org.flexlb.mock.engine.vit;
 
-import org.flexlb.mock.protocol.MockFeatureHashes;
-import org.flexlb.mock.protocol.MediaInput;
+import org.flexlb.mock.protocol.MultimodalProtocol;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.*;
@@ -130,7 +129,7 @@ class VitTest {
                 assertEquals(List.of(5),output.getSplitSizeList());
                 var hashes=rpc.getMultimodalHashes(MultimodalHashRequestPB.newBuilder()
                     .setTimeoutMs(7200000).setInputs(media)
-                    .addKeys(MediaInput.key(media.getMultimodalInputs(0))).build());
+                    .addKeys(MultimodalProtocol.key(media.getMultimodalInputs(0))).build());
                 assertTrue(hashes.getEntries(0).getHashHit());
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
@@ -152,9 +151,9 @@ class VitTest {
                 assertEquals(List.of(rows), compact.getSplitSizeList());
                 assertFalse(compact.hasMultimodalFeatureHash());
                 long seed = compact.getMockFeatureSeeds(0);
-                assertEquals(nativeOutput.getMultimodalFeatureHash().getInt32Data(), MockFeatureHashes.expand(seed, rows));
+                assertEquals(nativeOutput.getMultimodalFeatureHash().getInt32Data(), MultimodalProtocol.expandFeatureHashes(seed, rows));
                 var routing = rpc.getMultimodalHashes(MultimodalHashRequestPB.newBuilder()
-                    .addKeys(MediaInput.key(media.getMultimodalInputs(0))).setInputs(media).setAcceptMockFeatureSeeds(true).build()).getEntries(0);
+                    .addKeys(MultimodalProtocol.key(media.getMultimodalInputs(0))).setInputs(media).setAcceptMockFeatureSeeds(true).build()).getEntries(0);
                 assertTrue(routing.hasMockFeatureSeed());
                 assertEquals(seed, routing.getMockFeatureSeed());
                 assertTrue(routing.getFeatureHashes().isEmpty());
@@ -201,7 +200,7 @@ class VitTest {
                     assertEquals(20,output.getMultimodalFeatureHash().getInt32Data().size());assertEquals(List.of(5),output.getSplitSizeList());
                 }
                 var metadata=MultimodalRpcServiceGrpc.newBlockingStub(channel).getMultimodalHashes(MultimodalHashRequestPB.newBuilder()
-                    .addKeys(MediaInput.key(input("image-0").getMultimodalInputs(0))).build());
+                    .addKeys(MultimodalProtocol.key(input("image-0").getMultimodalInputs(0))).build());
                 assertTrue(metadata.getEntries(0).getHashHit());assertTrue(metadata.getEntries(0).getEmbeddingHit());
                 String metrics=java.net.http.HttpClient.newHttpClient().send(java.net.http.HttpRequest.newBuilder(java.net.URI.create((String)node.endpoints().get("metrics"))).GET().build(),java.net.http.HttpResponse.BodyHandlers.ofString()).body();
                 assertEquals(1, sample(metrics, "py_rtp_vit_embedding_forward_rt_count"));
@@ -254,24 +253,24 @@ class VitTest {
         var nativeInput=GenerateInputPB.newBuilder().setRequestId(1).addAllTokenIds(List.of(10,-200,20))
             .addAllMultimodalInputs(input("x").getMultimodalInputsList())
             .build();
-        var hashes=MockFeatureHashes.expand(MockFeatureHashes.seed(MediaInput.key(input("x").getMultimodalInputs(0))), 2);
+        long seed = MultimodalProtocol.featureSeed(MultimodalProtocol.key(input("x").getMultimodalInputs(0)));
         var output=MultimodalOutputPB.newBuilder().addSplitSize(2)
             .setMultimodalEmbedding(TensorPB.newBuilder().setDataType(TensorPB.DataType.BF16).addShape(2).addShape(4))
-            .setMultimodalFeatureHash(TensorPB.newBuilder().setDataType(TensorPB.DataType.INT32).addShape(2).setInt32Data(hashes)).build();
-        var prepared=MediaInput.apply(nativeInput,output,MediaInput.IMAGE_TOKEN);assertEquals(10,prepared.input().getTokenIds(0));assertEquals(20,prepared.input().getTokenIds(3));
+            .addMockFeatureSeeds(seed).build();
+        var prepared=MultimodalProtocol.apply(nativeInput,output,MultimodalProtocol.IMAGE_TOKEN);assertEquals(10,prepared.input().getTokenIds(0));assertEquals(20,prepared.input().getTokenIds(3));
         assertNotEquals(nativeInput.getTokenIdsList(),prepared.input().getTokenIdsList());
-        assertThrows(StatusRuntimeException.class,()->MediaInput.apply(nativeInput,output.toBuilder().clearSplitSize().addSplitSize(1).build(),MediaInput.IMAGE_TOKEN));
-        assertThrows(StatusRuntimeException.class,()->MediaInput.apply(nativeInput,output.toBuilder().clearMultimodalFeatureHash().build(),MediaInput.IMAGE_TOKEN));
+        assertThrows(StatusRuntimeException.class,()->MultimodalProtocol.apply(nativeInput,output.toBuilder().clearSplitSize().addSplitSize(1).build(),MultimodalProtocol.IMAGE_TOKEN));
+        assertThrows(StatusRuntimeException.class,()->MultimodalProtocol.apply(nativeInput,output.toBuilder().clearMockFeatureSeeds().build(),MultimodalProtocol.IMAGE_TOKEN));
         assertThrows(StatusRuntimeException.class,()->VitGeometry.validate(MultimodalInputsPB.getDefaultInstance(),true));
     }
 
     @Test void cacheKeyUsesLinuxNativeIdentityAndExcludesTimeout() {
         String[] values={"https://example.com/image.png","中文url"};
         String[] expected={"2000644620635833837","18006779371473338865"};
-        for(int i=0;i<values.length;i++) assertTrue(MediaInput.key(input(values[i]).getMultimodalInputs(0)).startsWith(expected[i]+"_1_"));
+        for(int i=0;i<values.length;i++) assertTrue(MultimodalProtocol.key(input(values[i]).getMultimodalInputs(0)).startsWith(expected[i]+"_1_"));
         var media=input("x").getMultimodalInputs(0);
         var changed=media.toBuilder().setMmPreprocessConfig(media.getMmPreprocessConfig().toBuilder().setMmTimeoutMs(2)).build();
-        assertEquals(MediaInput.key(media),MediaInput.key(changed));
+        assertEquals(MultimodalProtocol.key(media),MultimodalProtocol.key(changed));
     }
 
     @Test void queueOverflowRejectsWorkAndStopCompletesEveryStageWaiter() throws Exception {
@@ -309,7 +308,7 @@ class VitTest {
             var channel=channel(node);
             try {
                 var rpc=MultimodalRpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3,TimeUnit.SECONDS);
-                var request=MultimodalHashRequestPB.newBuilder().addKeys(MediaInput.key(input("x").getMultimodalInputs(0))).setInputs(input("x")).build();
+                var request=MultimodalHashRequestPB.newBuilder().addKeys(MultimodalProtocol.key(input("x").getMultimodalInputs(0))).setInputs(input("x")).build();
                 assertTrue(rpc.getMultimodalHashes(request).getEntries(0).getHashHit());
                 var hit=rpc.getMultimodalHashes(request).getEntries(0);
                 assertTrue(hit.getHashHit());assertFalse(hit.getEmbeddingHit());
@@ -348,7 +347,7 @@ class VitTest {
             });
             try {
                 assertTrue(published.await(2,TimeUnit.SECONDS));
-                assertNotNull(cache.hash(MediaInput.key(input("first").getMultimodalInputs(0))));
+                assertNotNull(cache.hash(MultimodalProtocol.key(input("first").getMultimodalInputs(0))));
                 assertEquals(1,preparation.inflight());
                 assertEquals(Status.Code.RESOURCE_EXHAUSTED,assertThrows(StatusRuntimeException.class,
                     ()->preparation.submit(input("second"))).getStatus().getCode());

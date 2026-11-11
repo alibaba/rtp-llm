@@ -43,7 +43,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
     private volatile boolean closed;
 
     public ReplayControlServer(String id, Path topology, Path directory) throws IOException {
-        this(id, topology, directory, org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN, 0, 0L, 1);
+        this(id, topology, directory, org.flexlb.mock.protocol.MultimodalProtocol.IMAGE_TOKEN, 0, 0L, 1);
     }
 
     private ReplayControlServer(String id, Path topology, Path directory, int imageToken, int blockSize, long seed, int prefillCpSize) throws IOException {
@@ -167,7 +167,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
         if (configuredImageToken != null && (!configuredImageToken.isIntegralNumber()
                 || !configuredImageToken.canConvertToInt() || configuredImageToken.intValue() < 0))
             throw new IllegalArgumentException("Client image_token_id must be nonnegative int32");
-        int imageToken = settings.path("image_token_id").asInt(org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN);
+        int imageToken = settings.path("image_token_id").asInt(org.flexlb.mock.protocol.MultimodalProtocol.IMAGE_TOKEN);
         int blockSize = settings.path("seq_size_per_block").asInt(0);
         if (settings.has("seq_size_per_block") && (!settings.path("seq_size_per_block").isIntegralNumber() || !settings.path("seq_size_per_block").canConvertToInt() || blockSize < 1))
             throw new IllegalArgumentException("Client seq_size_per_block must be positive int32");

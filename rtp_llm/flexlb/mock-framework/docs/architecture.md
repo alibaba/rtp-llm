@@ -129,7 +129,7 @@ flowchart LR
 
 RTP P 默认使用 `RtpFifoScheduler`，由 Scheduler 从单请求自主合批。显式 `group` 模式使用 `RtpPrefillGroupScheduler`，一次提交完整组，保留成员级结果、超时和取消。组在当前轮放不下的成员留待后续调度，D 始终按单请求准入。内部按请求统计 waiting、loading、running、ready。原生状态把 waiting、loading、ready 合并为 waiting，running 包含两轮计算之间仍留在执行集合的 D 请求。[RTP 节点参数](component-reference.md#engine-配置规则)
 
-ViT 使用自己的图片准备与合批循环。`VitPreparation` 管在途任务和发布，`VitScheduler` 执行合批，`VitCache` 管同键共享和驻留淘汰。元数据包含模拟形状和逐行 hash。几何、下载、缓存及负载模型见 [ViT 与输入准备](component-reference.md#vit-配置)。
+ViT 使用自己的图片准备与合批循环。`VitPreparation` 管在途任务和发布，`VitScheduler` 执行合批，`VitCache` 管同键共享和驻留淘汰。Mock 内部使用模拟形状、每张图的 seed 和 split size。真实 Frontend 通过原生 RPC 获取逐行 hash。几何、下载、缓存及负载模型见 [ViT 与输入准备](component-reference.md#vit-配置)。
 
 ### KV 准备、容量与回收
 
@@ -137,7 +137,7 @@ ViT 使用自己的图片准备与合批循环。`VitPreparation` 管在途任�
 
 初始 `KvCacheManager.prepare()` 同步匹配并分配。本地成功返回 `Ready` 和 lease。临时容量不足返回可重试的 `Failed`，由失败对象在容量或索引变化后重试。超过单请求容量则终止，已经进入生成的 D 请求在 KV 增长失败时也终止。D 的 P/D LOAD 是另一项协议依赖，完成前不会进入生成。
 
-成功结束时只发布已经计算的完整块。D 的最后一个仅采样 token 不计入发布前缀。缓存保留与驻留使用逻辑额度，Host 到 Device 的恢复按瞬时处理。KVCM Reporter 消费有效块变更、快照和心跳，处理的是元数据。P/D 交接仍由原生 RPC 驱动。[容量配置](component-reference.md#kv-容量和-prefill-cp) · [KVCM 接线](component-reference.md#dsv41-engine-与-kvcm-接线)
+成功结束时只发布 prompt 的完整块。缓存保留与驻留使用逻辑额度，Host 到 Device 的恢复按瞬时处理。KVCM Reporter 消费有效块变更、快照和心跳，处理的是元数据。P → D 通过原生 RPC 交接输入长度和完整 prompt block keys，D → P 返回生成进度。[容量配置](component-reference.md#kv-容量和-prefill-cp) · [KVCM 接线](component-reference.md#dsv41-engine-与-kvcm-接线)
 
 ### P/D 交接和输出
 

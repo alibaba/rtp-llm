@@ -58,8 +58,7 @@ class AdmissionTest {
                                 public void onError(Throwable failure) { ended.complete(failure); }
                                 public void onCompleted() { ended.completeExceptionally(new AssertionError("Unexpected completion")); }
                             });
-                        stream.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE)
-                            .setClientId("client").setRequestId(1).setInput(input).build());
+                        stream.onNext(DecodeAdmissionTest.allocate("client", input));
                         error = ended.get(3, TimeUnit.SECONDS);
                     }
                     assertEquals(Status.Code.RESOURCE_EXHAUSTED, Status.fromThrowable(error).getCode());

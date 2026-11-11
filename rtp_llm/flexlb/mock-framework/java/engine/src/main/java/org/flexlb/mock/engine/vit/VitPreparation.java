@@ -12,7 +12,7 @@ import java.util.concurrent.*;
 import javax.imageio.ImageIO;
 import javax.imageio.stream.MemoryCacheImageInputStream;
 import org.flexlb.engine.grpc.EngineRpcService.*;
-import org.flexlb.mock.protocol.MediaInput;
+import org.flexlb.mock.protocol.MultimodalProtocol;
 
 /**
  * Owns media admission, prepares inputs and publishes results after Forward completes.
@@ -48,7 +48,7 @@ final class VitPreparation implements AutoCloseable {
     synchronized List<VitCache.Claim> submit(MultimodalInputsPB input) {
         if(closed) throw Status.UNAVAILABLE.withDescription("V preparation stopped").asRuntimeException();
         var media=input.getMultimodalInputsList();
-        var claims=cache.acquire(media.stream().map(MediaInput::key).toList());
+        var claims=cache.acquire(media.stream().map(MultimodalProtocol::key).toList());
         long count=claims.stream().filter(VitCache.Claim::producer).count();
         if(tasks.size()+count>config.queueSize()) {
             var error=Status.RESOURCE_EXHAUSTED.withDescription("V unique media admission full").asRuntimeException();
@@ -158,7 +158,7 @@ final class VitPreparation implements AutoCloseable {
 
         VitGeometry.Image prepare(MultimodalInputPB media, long deadline) throws IOException {
             int width, height;
-            String requestKey=MediaInput.key(media);
+            String requestKey=MultimodalProtocol.key(media);
             String identity=requestKey;
             long started=System.nanoTime(), downloadNanos=0;
             if(config.skipDownload()) {
@@ -194,9 +194,9 @@ final class VitPreparation implements AutoCloseable {
         private byte[] download(String url,long deadline) {
             URI uri;
             try { uri=URI.create(url); }
-            catch(IllegalArgumentException error) { throw MediaInput.invalid("Invalid image URL"); }
+            catch(IllegalArgumentException error) { throw MultimodalProtocol.invalid("Invalid image URL"); }
             if(uri.getHost()==null || (!"http".equalsIgnoreCase(uri.getScheme()) && !"https".equalsIgnoreCase(uri.getScheme())))
-                throw MediaInput.invalid("Image download requires an HTTP(S) URL");
+                throw MultimodalProtocol.invalid("Image download requires an HTTP(S) URL");
             // DSV4.1 load_image_source caps original media at 10 MiB, even when the generic file limit is disabled.
             final long maxBytes=config.maxFileSizeKb()>0 ? Math.min(10L*1024*1024,config.maxFileSizeKb()*1024L) : 10L*1024*1024;
             for(int attempt=0; ; attempt++) {
@@ -210,9 +210,9 @@ final class VitPreparation implements AutoCloseable {
                 var output=new ByteArrayOutputStream();
                 var future=client.sendAsync(message.GET().build(),info->{
                     if(info.headers().firstValueAsLong("Content-Length").orElse(-1)>maxBytes)
-                        throw MediaInput.invalid("Image exceeds download byte limit");
+                        throw MultimodalProtocol.invalid("Image exceeds download byte limit");
                     return HttpResponse.BodySubscribers.ofByteArrayConsumer(chunk->chunk.ifPresent(bytes->{
-                        if(output.size()+(long)bytes.length>maxBytes) throw MediaInput.invalid("Image exceeds download byte limit");
+                        if(output.size()+(long)bytes.length>maxBytes) throw MultimodalProtocol.invalid("Image exceeds download byte limit");
                         output.writeBytes(bytes);
                     }));
                 });
@@ -271,7 +271,7 @@ final class VitPreparation implements AutoCloseable {
             }
             try(var input=new MemoryCacheImageInputStream(new ByteArrayInputStream(bytes))) {
                 var readers=ImageIO.getImageReaders(input);
-                if(!readers.hasNext()) throw MediaInput.invalid("Unsupported or malformed image header");
+                if(!readers.hasNext()) throw MultimodalProtocol.invalid("Unsupported or malformed image header");
                 var reader=readers.next();
                 try { reader.setInput(input,true,true); return new int[]{reader.getWidth(0),reader.getHeight(0)}; }
                 catch(IOException error) { throw Status.INVALID_ARGUMENT.withDescription("Malformed image header").withCause(error).asRuntimeException(); }

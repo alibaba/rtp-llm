@@ -15,7 +15,7 @@ import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.flexlb.mock.engine.scheduler.RequestState;
 import org.flexlb.mock.protocol.CacheSequence;
-import org.flexlb.mock.protocol.MediaInput;
+import org.flexlb.mock.protocol.MultimodalProtocol;
 
 /**
  * Handles the native ALLOCATE/LOAD/GENERATE protocol for Decode.
@@ -67,10 +67,7 @@ final class DecodeRpcServer implements AutoCloseable {
             if (frame.getStage() == RemoteStage.ALLOCATE) {
                 validate(frame);
                 var input = frame.getInput();
-                var sequence = frame.hasMockDecodePrompt()
-                    ? CacheSequence.fromDecodePrompt(frame.getMockDecodePrompt(), config.blockSize())
-                    : MediaInput.sequence(new MediaInput.Prepared(input, frame.getMultimodalCacheSpansList()),
-                        config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
+                var sequence = CacheSequence.fromDecodePrompt(frame.getMockDecodePrompt(), config.blockSize());
                 prepared = RpcMessages.toSchedulerInput(input, frame.getClientId() + "/" + input.getRequestId(), call.started,
                     RpcMessages.deadline(input, call.started, call.rpcDeadline), false, sequence);
             }
@@ -80,7 +77,6 @@ final class DecodeRpcServer implements AutoCloseable {
                 if (call.input == null) {
                     if (prepared == null) throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Expected ALLOCATE frame"), 605);
                     call.input = frame.getInput();
-                    call.compact = frame.hasMockDecodePrompt();
                     call.client = frame.getClientId();
                     call.request = engine.enqueue(prepared, call);
                     return;
@@ -105,9 +101,8 @@ final class DecodeRpcServer implements AutoCloseable {
                     if (call.input.getGenerateConfig().getMaxNewTokens() == 1)
                         throw Status.FAILED_PRECONDITION.withDescription("Single-token request is already complete at Prefill").asRuntimeException();
                     call.stage = Stage.GENERATING;
-                    call.token = frame.getFirstGenerateTokenId();
-                    call.delivery.startAt(1, call.compact);
-                    engine.updateRequest(call.request, new RtpControl.Generate(call.token));
+                    call.delivery.startAt(1);
+                    engine.updateRequest(call.request, new RtpControl.Generate(frame.getFirstGenerateTokenId()));
                 } else {
                     throw Status.FAILED_PRECONDITION.withDescription("Expected ALLOCATE, LOAD, then GENERATE or PREFILL_COMPLETE").asRuntimeException();
                 }
@@ -126,10 +121,9 @@ final class DecodeRpcServer implements AutoCloseable {
             throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid ALLOCATE frame or identity"), 605);
         var input = request.getInput(); var generation = input.getGenerateConfig();
         RpcMessages.supported(input);
-        if (org.flexlb.mock.protocol.MediaInput.present(input))
+        if (MultimodalProtocol.present(input))
             throw Status.FAILED_PRECONDITION.withDescription("Decode ALLOCATE requires the prepared P input").asRuntimeException();
-        if (request.hasMockDecodePrompt() ? input.getTokenIdsCount() != 0 || request.getMultimodalCacheSpansCount() != 0
-                : input.getTokenIdsCount() < 1)
+        if (!request.hasMockDecodePrompt() || input.getTokenIdsCount() != 0 || request.getMultimodalCacheSpansCount() != 0)
             throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid Decode prompt"), 605);
         if (generation.getTimeoutMs() < 0 || generation.getMaxNewTokens() < 1 || generation.getMinNewTokens() < 0
                 || generation.getMinNewTokens() > generation.getMaxNewTokens() || generation.getNumBeams() < 0 || generation.getNumReturnSequences() < 0)
@@ -237,8 +231,6 @@ final class DecodeRpcServer implements AutoCloseable {
         volatile boolean terminal;
         Stage stage = Stage.ALLOCATING;
         SimulatedKvLoad.Execution transfer;
-        int token;
-        boolean compact;
 
         Call(ServerCallStreamObserver<GenerateOutputsPB> response, Context context) {
             this.response = response;
@@ -267,7 +259,7 @@ final class DecodeRpcServer implements AutoCloseable {
                 .setIterCount(progress.iterations() + 1).setPrefixLen(request.reused()).setTotalReuseLen(request.reused())
                 .setLocalReuseLen(request.reused()).setPdSep(true)
                 .setCostTimeUs(elapsedUs).setFirstTokenCostTimeUs(elapsedUs);
-            delivery.advance(input.getRequestId(), token, progress.generated(), info.build(), progress.finished());
+            delivery.advance(input.getRequestId(), 0, progress.generated(), info.build(), progress.finished());
         }
         @Override public void terminal(EngineScheduler.Request request, RequestFailure failure) {
             ended(this, RpcErrors.status(failure), RpcErrors.code(failure));

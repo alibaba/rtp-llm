@@ -96,7 +96,7 @@ vit:
 
 本地匿名图片回放设置 `mock.vit.skip.download: true`，使用数据集记录的宽高。真实 URL 使用默认 false，从 HTTP(S) 图片读取原始尺寸。支持 ImageIO 可读取的格式及 WebP 头尺寸。下载使用 `download_headers`（JSON 字符串）、`mm_image_max_file_size_kb` 和 `mm_timeout_ms`，同时受 DSV4.1 的 10 MiB 文件上限及请求剩余期限约束。
 
-Client 和 P/D 对齐 `image_token_id`。真实 Frontend 接入使用其生效标记。VP 使用 TCP gRPC 交换形状、split size 和逐行 hash 元数据，适配 Mock P。
+Client 和 P/D 对齐 `image_token_id`。真实 Frontend 接入使用其生效标记。Mock Client 和 Prefill 从 ViT 接收每张图的 seed 和 split size，按需展开行 hash。真实 Frontend 仍通过原生 RPC 获取逐行 hash。
 
 ## Compute、Forward、Decode 和 EOS
 

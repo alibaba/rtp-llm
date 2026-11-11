@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
-import org.flexlb.mock.protocol.MediaInput;
+import org.flexlb.mock.protocol.MultimodalProtocol;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.flexlb.mock.client.ClientProtocol.*;
@@ -284,6 +284,6 @@ class PlaybackTest {
     private Session worker(ClientReplayPlan plan, ClientMetrics metrics, BackendRpcClientTest.Harness harness)
             throws Exception {
         return new Session(plan, metrics, topology(harness), directory.resolve(UUID.randomUUID() + ".jsonl"),
-            "client-0", MediaInput.IMAGE_TOKEN, 0, 0L, 1);
+            "client-0", MultimodalProtocol.IMAGE_TOKEN, 0, 0L, 1);
     }
 }

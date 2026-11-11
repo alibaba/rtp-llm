@@ -1,7 +1,7 @@
 package org.flexlb.mock.engine.vit;
 
+import org.flexlb.mock.protocol.MultimodalProtocol;
 import com.google.protobuf.ByteString;
-import org.flexlb.mock.protocol.MockFeatureHashes;
 import io.grpc.*;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.*;
@@ -89,17 +89,17 @@ public final class VitNode implements AutoCloseable {
 
         @Override public void getMultimodalHashes(MultimodalHashRequestPB input,StreamObserver<MultimodalHashResponsePB> response) {
             var context=Context.current(); reply(response,()-> {
-                if(input.getKeysList().stream().anyMatch(String::isBlank)) throw MediaInput.invalid("Empty hash query key");
+                if(input.getKeysList().stream().anyMatch(String::isBlank)) throw MultimodalProtocol.invalid("Empty hash query key");
                 Map<String,VitGeometry.Image> computed=new HashMap<>();
-                if(input.getTimeoutMs()<0) throw MediaInput.invalid("Invalid hash request timeout");
+                if(input.getTimeoutMs()<0) throw MultimodalProtocol.invalid("Invalid hash request timeout");
                 if(input.hasInputs()) {
                     var media=input.getInputs();
                     VitGeometry.validate(media,config.skipDownload());
                     var requested=new LinkedHashSet<>(input.getKeysList());
                     var byKey=new LinkedHashMap<String,MultimodalInputPB>();
                     for(var image:media.getMultimodalInputsList()) {
-                        String key=MediaInput.key(image);
-                        if(!requested.contains(key)) throw MediaInput.invalid("Hash submission inputs differ from requested keys");
+                        String key=MultimodalProtocol.key(image);
+                        if(!requested.contains(key)) throw MultimodalProtocol.invalid("Hash submission inputs differ from requested keys");
                         byKey.put(key,image);
                     }
                     var missing=media.toBuilder().clearMultimodalInputs();
@@ -107,7 +107,7 @@ public final class VitNode implements AutoCloseable {
                         var hit=cache.hash(key);
                         if(hit!=null) computed.put(key,hit);
                         else if(byKey.containsKey(key)) missing.addMultimodalInputs(byKey.get(key));
-                        else throw MediaInput.invalid("Missing image input for hash acquisition");
+                        else throw MultimodalProtocol.invalid("Missing image input for hash acquisition");
                     }
                     if(input.getTimeoutMs()>0 && (media.getTimeoutMs()<=0 || input.getTimeoutMs()<media.getTimeoutMs()))
                         missing.setTimeoutMs(input.getTimeoutMs());
@@ -119,10 +119,10 @@ public final class VitNode implements AutoCloseable {
                     var entry=MultimodalHashEntryPB.newBuilder().setKey(key);String tier=cache.tier(key);
                     entry.setEmbeddingHit(!tier.isEmpty()).setEmbeddingTier(tier);
                     if (image != null) {
-                        long seed = MockFeatureHashes.seed(image.featureIdentity());
+                        long seed = MultimodalProtocol.featureSeed(image.featureIdentity());
                         entry.setHashHit(true).setEntryGeneration(instance+":"+key).addSplitSize(image.rows());
                         if (input.getAcceptMockFeatureSeeds()) entry.setMockFeatureSeed(seed);
-                        else entry.setFeatureHashes(MockFeatureHashes.expand(seed, image.rows()));
+                        else entry.setFeatureHashes(MultimodalProtocol.expandFeatureHashes(seed, image.rows()));
                     }
                     result.addEntries(entry);
                 }
@@ -220,9 +220,9 @@ public final class VitNode implements AutoCloseable {
             var hashes = new ByteArrayOutputStream();
             for (var image : images) {
                 output.addSplitSize(image.rows());
-                long seed = MockFeatureHashes.seed(image.featureIdentity());
+                long seed = MultimodalProtocol.featureSeed(image.featureIdentity());
                 if (compact) output.addMockFeatureSeeds(seed);
-                else MockFeatureHashes.expand(seed, image.rows()).writeTo(hashes);
+                else MultimodalProtocol.expandFeatureHashes(seed, image.rows()).writeTo(hashes);
             }
             if (!compact) output.setMultimodalFeatureHash(TensorPB.newBuilder()
                 .setDataType(TensorPB.DataType.INT32).addShape(rows).setInt32Data(ByteString.copyFrom(hashes.toByteArray())));

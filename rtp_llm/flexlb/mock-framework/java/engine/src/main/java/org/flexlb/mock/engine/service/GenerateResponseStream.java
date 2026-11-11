@@ -66,9 +66,9 @@ final class GenerateResponseStream {
     synchronized boolean expired() { return !attached && System.nanoTime() >= expires; }
 
     // D starts after P has already delivered its first token.
-    synchronized void startAt(int length, boolean compact) {
+    synchronized void startAt(int length) {
         generated = sent = length;
-        this.compact = compact;
+        compact = true;
     }
 
     /** P relays synthetic D frames by retaining only cumulative length and fixed metadata. */
