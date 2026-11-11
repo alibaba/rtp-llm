@@ -226,6 +226,8 @@ class PpuDecodeProvider(PpuModuleProvider):
             fuse_moe_sum=self._decode_fusions,
             fuse_pre_quant=self._decode_fusions
             and not self._bool("DSV4_PPU_DENSE_POW2_SCALE", False),
+            fuse_post=self._decode_fusions
+            and self._bool("DSV4_PPU_HC_POST_TILING", False),
             **kwargs,
         )
 

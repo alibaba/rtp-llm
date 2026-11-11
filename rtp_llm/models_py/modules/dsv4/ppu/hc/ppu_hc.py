@@ -21,6 +21,7 @@ class PpuHCUnit(TileLangHCUnit):
         fuse_norm=False,
         fuse_moe_sum=False,
         fuse_pre_quant=False,
+        fuse_post=False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -32,6 +33,7 @@ class PpuHCUnit(TileLangHCUnit):
         )
         self._fuse_moe_sum = fuse_moe_sum
         self._fuse_pre_quant = fuse_pre_quant
+        self._fuse_post = fuse_post
         # Prefill-only defaults; explicit zero retains the original operators.
         self._prefill_quant = (
             not allow_graph and options.get("DSV4_PPU_PREFILL_HC_QUANT", "1") == "1"
@@ -346,6 +348,14 @@ class PpuHCUnit(TileLangHCUnit):
     def _post_operator(self, x, residual, post, comb, *, hc_mult, out=None):
         if residual.numel() == 0:
             return residual if out is None else out
+        if self._fuse_post:
+            from rtp_llm.models_py.kernels.ppu.hc.ppu_hc_sum import (
+                hc_post,
+                supports_hc_post,
+            )
+
+            if supports_hc_post(x, residual, post, comb, out):
+                return hc_post(x, residual, post, comb, out=out)
         return self._post_kernel(
             x,
             residual,
