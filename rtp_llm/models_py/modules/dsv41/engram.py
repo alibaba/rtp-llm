@@ -786,6 +786,61 @@ class _DeviceScaleCapturePermit:
             raise RuntimeError("Engram GPU-scale capture table generation is not owned")
 
 
+def _engram_tp_size_rank(tp_size=None, tp_rank=None):
+    """Resolve TP sharding, preferring explicit test overrides.
+
+    The real model runs one process per TP rank, so an unspecified size/rank
+    comes from the initialized default process group. A single rank keeps the
+    historical full-table behavior.
+    """
+    distributed = torch.distributed
+    initialized = distributed.is_available() and distributed.is_initialized()
+    if tp_size is None:
+        tp_size = distributed.get_world_size() if initialized else 1
+    if tp_rank is None:
+        tp_rank = distributed.get_rank() if initialized and tp_size > 1 else 0
+    tp_size, tp_rank = int(tp_size), int(tp_rank)
+    if tp_size < 1:
+        raise ValueError(f"Engram tp_size must be positive, got {tp_size}")
+    if not 0 <= tp_rank < tp_size:
+        raise ValueError(f"Engram tp_rank must be in [0, {tp_size}), got {tp_rank}")
+    return tp_size, tp_rank
+
+
+def _shard_row_range(num_rows: int, tp_rank: int, tp_size: int):
+    """Contiguous, floor-partitioned global row block owned by one TP rank."""
+    if num_rows < 0:
+        raise ValueError(f"Engram row count must be nonnegative, got {num_rows}")
+    if tp_size < 1:
+        raise ValueError(f"Engram tp_size must be positive, got {tp_size}")
+    if not 0 <= tp_rank < tp_size:
+        raise ValueError(f"Engram tp_rank must be in [0, {tp_size}), got {tp_rank}")
+    # Integer floor division matches floor(num_rows * rank / tp_size); the
+    # remainder rows stay on the later ranks.
+    return (
+        num_rows * tp_rank // tp_size,
+        num_rows * (tp_rank + 1) // tp_size,
+    )
+
+
+def _checkpoint_tensor_rows(file, name, row_range=None):
+    """Read a checkpoint row block without materializing the other rows."""
+    if row_range is None:
+        return file.get_tensor(name)
+    start, end = row_range
+    return file.get_slice(name)[start:end]
+
+
+def _shard_all_reduce_rows(rows):
+    """Sum each rank's partial BF16 lookup, graph-capturable on ROCm."""
+    from rtp_llm.models_py.distributed.collective_torch import Group
+    from rtp_llm.models_py.modules.dsv41.moe.strategies.rocm_ep import (
+        all_reduce as _capture_all_reduce,
+    )
+
+    return _capture_all_reduce(rows, Group.TP, inplace=False)
+
+
 class HostEngramEmbedding:
     """Native FP8/E8M0 host tensors deliberately not registered as buffers.
 
@@ -802,6 +857,10 @@ class HostEngramEmbedding:
         *,
         scale_group=None,
         scale_identity=None,
+        shard_start=None,
+        shard_end=None,
+        tp_size=1,
+        tp_rank=0,
     ):
         if weight.device.type != "cpu" or scales.device.type != "cpu":
             raise ValueError("Engram embedding tables must remain in host RAM")
@@ -815,6 +874,7 @@ class HostEngramEmbedding:
         self.scales = scales.view(torch.uint8) if scales.element_size() == 1 else scales
         self.block_size = block_size
         self._initialize_lookup_state(pinned=pinned)
+        self._set_shard_range(shard_start, shard_end, tp_size, tp_rank)
         if pinned is not None:
             # ROCm reads the UVA host scales directly. Copying them to device
             # would make part of an Engram checkpoint device-resident, so the
@@ -875,6 +935,72 @@ class HostEngramEmbedding:
         self._quantized_lookup_supported = False
         self._scale_shard_count = 1
         self._legacy_scale_uva = None
+        self.shard_start = None
+        self.shard_end = None
+        self.tp_size = 1
+        self.tp_rank = 0
+        self.sharded = False
+
+    def _set_shard_range(self, shard_start, shard_end, tp_size, tp_rank):
+        """Record the global row block represented by this local table."""
+        tp_size, tp_rank = int(tp_size), int(tp_rank)
+        if tp_size < 1:
+            raise ValueError(f"Engram tp_size must be positive, got {tp_size}")
+        if not 0 <= tp_rank < tp_size:
+            raise ValueError(f"Engram tp_rank must be in [0, {tp_size}), got {tp_rank}")
+        local_rows = int(self.weight.shape[0])
+        if tp_size > 1:
+            if shard_start is None or shard_end is None:
+                raise ValueError(
+                    "Engram TP sharding requires explicit shard_start/shard_end"
+                )
+            shard_start, shard_end = int(shard_start), int(shard_end)
+            if shard_start < 0 or shard_end <= shard_start:
+                raise ValueError(
+                    f"Invalid Engram shard range [{shard_start}, {shard_end})"
+                )
+            if shard_end - shard_start != local_rows:
+                raise ValueError(
+                    "Engram shard range does not match the local table rows"
+                )
+            self.sharded = True
+        else:
+            shard_start = 0 if shard_start is None else int(shard_start)
+            shard_end = local_rows if shard_end is None else int(shard_end)
+            if shard_start != 0 or shard_end != local_rows:
+                raise ValueError(
+                    "Unsharded Engram table must cover all of its local rows"
+                )
+            self.sharded = False
+        self.shard_start, self.shard_end = shard_start, shard_end
+        self.tp_size, self.tp_rank = tp_size, tp_rank
+
+    def shard_local_indices(self, indices):
+        """Map global hash ids to local table rows plus an ownership mask.
+
+        Non-owned ids deliberately gather row zero (a valid local index) and
+        are zeroed after lookup. That keeps the UVA kernel free of negative or
+        out-of-range indices while preserving graph capture.
+        """
+        if not self.sharded:
+            return indices, None
+        rows = self.shard_end - self.shard_start
+        owned = (indices >= self.shard_start) & (indices < self.shard_end)
+        local = (indices - self.shard_start).clamp_(0, rows - 1)
+        local = local.masked_fill(~owned, 0)
+        return local, owned
+
+    @staticmethod
+    def _mask_shard_rows(rows, owned):
+        """Zero non-owned rows along the token axis."""
+        return rows.masked_fill(~owned[..., None], 0)
+
+    def finish_shard_rows(self, rows, owned):
+        """Turn a local bf16 gather into this rank's partial contribution."""
+        if owned is None:
+            return rows
+        rows = self._mask_shard_rows(rows, owned)
+        return _shard_all_reduce_rows(rows)
 
     @contextmanager
     def lookup_guard(self):
@@ -900,7 +1026,13 @@ class HostEngramEmbedding:
                 raise RuntimeError("Engram asynchronous lookup requires a table owner")
 
     def lookup_quantized(self, indices: torch.Tensor, device, *, prepare=False):
-        """Gather native FP8 and packed GPU scales in a single lookup kernel."""
+        """Gather native FP8 and packed GPU scales in a single lookup kernel.
+
+        With row sharding this returns only this rank's partial quantized rows;
+        Engram disables the direct-FP8 path because the TP sum must happen in
+        BF16 before WKV. The local and non-owned rows are zeroed with neutral
+        E8M0 scales so a dequantizing caller sees exact zeros.
+        """
         from rtp_llm.models_py.modules.dsv41 import _engram_quantized_triton
 
         if not self._quantized_lookup_supported or indices.device != torch.device(
@@ -914,13 +1046,21 @@ class HostEngramEmbedding:
             if lease is not None and torch.cuda.is_current_stream_capturing():
                 _DeviceScaleCapturePermit.require(self, lease)
             uva = self._uva
+            local_indices, owned = self.shard_local_indices(indices)
             try:
-                return _engram_quantized_triton.lookup_host_rows(
-                    *uva, indices, self._num_sms, prepare=prepare
+                values, scales = _engram_quantized_triton.lookup_host_rows(
+                    *uva, local_indices, self._num_sms, prepare=prepare
                 )
             finally:
                 # The lease owns future graph replays; cover queued eager reads too.
                 uva[1].record_stream(torch.cuda.current_stream(indices.device))
+            if owned is None:
+                return values, scales
+            # E8M0 127 is the neutral exponent for the required zero FP8 values.
+            return (
+                self._mask_shard_rows(values, owned),
+                scales.masked_fill(~owned[..., None], 0x7F7F7F7F),
+            )
 
     def _device_scale_resources(self):
         lease = self._device_scale_lease
@@ -946,12 +1086,13 @@ class HostEngramEmbedding:
 
         lease = self._device_scale_resources()
         uva = self._uva
+        local_indices, _ = self.shard_local_indices(indices)
         try:
             lookup_scales = (
                 self._legacy_scale_uva if self._legacy_scale_uva is not None else uva[1]
             )
             return warmup_lookup_prefetch_rows(
-                uva[0], lookup_scales, indices, self._num_sms
+                uva[0], lookup_scales, local_indices, self._num_sms
             )
         finally:
             if lease is not None:
@@ -1166,13 +1307,17 @@ class HostEngramEmbedding:
             if lease is not None and torch.cuda.is_current_stream_capturing():
                 _DeviceScaleCapturePermit.require(self, lease)
             uva = self._uva
+            local_indices, owned = self.shard_local_indices(indices)
             try:
                 lookup_scales = (
                     self._legacy_scale_uva
                     if self._legacy_scale_uva is not None
                     else uva[1]
                 )
-                return lookup(uva[0], lookup_scales, indices, self._num_sms)
+                rows = lookup(uva[0], lookup_scales, local_indices, self._num_sms)
+                # Exactly one TP reduction per lookup: each rank contributes
+                # only the rows it owns, so the sum reconstructs full rows.
+                return self.finish_shard_rows(rows, owned)
             finally:
                 if lease is not None:
                     # This covers queued eager uses. The generation lease,
@@ -2075,6 +2220,7 @@ class Engram(nn.Module):
         self._direct_fp8_lookup = False
         if (
             getattr(embedding, "_quantized_lookup_supported", False) is True
+            and getattr(embedding, "sharded", False) is not True
             and layout.n_hash_cols == 24
             and layout.head_dim == 256
             and os.getenv("DSV41_ENGRAM_DIRECT_FP8", "1") == "1"
@@ -2171,18 +2317,25 @@ class Engram(nn.Module):
         *,
         external_storage=None,
         scale_group=None,
+        tp_size=None,
+        tp_rank=None,
     ):
         """Load local projection weights and an explicit legacy/external table.
 
         The caller must attach with a trusted model/checkpoint identity before
         supplying external_storage, and retain it through all model graphs.
         External mode never opens an embedding checkpoint or silently falls back.
+
+        On the local CUDA/HIP path with ``tp_size > 1``, only this rank's
+        contiguous global row block is read from the checkpoint and registered
+        as UVA. External storage and CPU fallback keep whole-table semantics.
         """
         from safetensors import safe_open
 
         layout = EngramLayout(config)
         layer_hash_index = layout.layer_ids.index(layer_id)
         target = torch.device(device)
+        tp_size, tp_rank = _engram_tp_size_rank(tp_size, tp_rank)
         if external_storage is not None:
             if target.type != "cuda":
                 raise ValueError("external Engram storage requires a CUDA model")
@@ -2205,14 +2358,14 @@ class Engram(nn.Module):
             weight_map = json.load(file)["weight_map"]
         prefix = f"layers.{layer_id}.engram."
 
-        def load(suffix):
+        def load(suffix, row_range=None):
             name = prefix + suffix
             if name not in weight_map:
                 raise KeyError(f"V4.1 checkpoint is missing {name}")
             with safe_open(
                 root / weight_map[name], framework="pt", device="cpu"
             ) as file:
-                return file.get_tensor(name)
+                return _checkpoint_tensor_rows(file, name, row_range)
 
         embedding = None
         try:
@@ -2225,19 +2378,41 @@ class Engram(nn.Module):
                     scale_identity=f"{manifest.model_revision}|{manifest.generation}",
                 )
             else:
-                table, scales = load("embed.weight"), load("embed.scale")
                 shape = (layout.num_embeddings[layer_hash_index], layout.head_dim)
-                if tuple(table.shape) != shape:
-                    raise ValueError(
-                        f"Engram table shape {table.shape} does not match {shape}"
+                sharded = target.type == "cuda" and tp_size > 1
+                shard_start = shard_end = None
+                if sharded:
+                    shard_start, shard_end = _shard_row_range(
+                        shape[0], tp_rank, tp_size
                     )
+                    if shard_start >= shard_end:
+                        raise ValueError(
+                            f"Engram TP shard {tp_rank}/{tp_size} has no rows "
+                            f"for table of {shape[0]}"
+                        )
+                    # Slice before materialization: the full 95 GiB table must
+                    # never enter this process's host staging path.
+                    table = load("embed.weight", (shard_start, shard_end))
+                    scales = load("embed.scale", (shard_start, shard_end))
+                    local_shape = (shard_end - shard_start, shape[1])
+                    if tuple(table.shape) != local_shape:
+                        raise ValueError(
+                            f"Engram shard table shape {table.shape} does not "
+                            f"match {local_shape}"
+                        )
+                else:
+                    table, scales = load("embed.weight"), load("embed.scale")
+                    if tuple(table.shape) != shape:
+                        raise ValueError(
+                            f"Engram table shape {table.shape} does not "
+                            f"match {shape}"
+                        )
                 pinned = None
                 identity = None
                 # The HIP host-memory shim supports Portable|Mapped registration
-                # of the shared tmpfs tables; eight ranks on one MI308X host
-                # register both 95 GiB tables concurrently without duplicating
-                # physical pages. Keep the bytes in host RAM and expose a UVA
-                # view so graph replay reads real rows instead of a placeholder.
+                # of the shared tmpfs tables. Each TP rank registers only its
+                # row shard, keeping every checkpoint byte in host RAM while
+                # exposing a UVA view so graph replay reads real rows.
                 if target.type == "cuda":
                     parts = [str(root.resolve()), prefix]
                     for suffix in ("embed.weight", "embed.scale"):
@@ -2250,18 +2425,35 @@ class Engram(nn.Module):
                                 str(stat.st_mtime_ns),
                             ]
                         )
+                    if sharded:
+                        # Distinct tmpfs tables per rank; the full-table
+                        # identity must not be reused for a row shard.
+                        parts.append(
+                            f"shard={tp_rank}/{tp_size}:{shard_start}:{shard_end}"
+                        )
                     identity = "|".join(parts)
                     pinned = _PinnedSharedTable(table, scales, identity, target)
                     table, scales = pinned.weight, pinned.scales
                 else:
                     _prefault_host_tensor(table, prefix + "embed.weight")
                     _prefault_host_tensor(scales, prefix + "embed.scale")
+                shard_kwargs = (
+                    {
+                        "shard_start": shard_start,
+                        "shard_end": shard_end,
+                        "tp_size": tp_size,
+                        "tp_rank": tp_rank,
+                    }
+                    if sharded
+                    else {}
+                )
                 embedding = HostEngramEmbedding(
                     table,
                     scales,
                     pinned=pinned,
                     scale_group=scale_group,
                     scale_identity=identity,
+                    **shard_kwargs,
                 )
             if target.type == "cuda":
                 with torch.cuda.device(target):

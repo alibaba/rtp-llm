@@ -294,6 +294,148 @@ class EngramTest(unittest.TestCase):
             self.assertEqual(output.shape, hidden.shape)
             self.assertTrue(bool(output.isfinite().all()))
 
+    def test_tp_row_blocks_cover_every_row_once(self):
+        for num_rows, tp_size in ((10, 3), (7, 2), (5, 5), (11, 4), (1, 1)):
+            ranges = [
+                engram._shard_row_range(num_rows, rank, tp_size)
+                for rank in range(tp_size)
+            ]
+            self.assertEqual(ranges[0][0], 0)
+            self.assertEqual(ranges[-1][1], num_rows)
+            self.assertEqual(sum(end - start for start, end in ranges), num_rows)
+            for (_, previous_end), (next_start, _) in zip(ranges, ranges[1:]):
+                self.assertEqual(previous_end, next_start)
+            for rank, (start, end) in enumerate(ranges):
+                self.assertEqual(start, num_rows * rank // tp_size)
+                self.assertEqual(end, num_rows * (rank + 1) // tp_size)
+
+    def test_tp_shard_indices_map_owned_rows_and_zero_others(self):
+        num_rows, tp_size = 10, 3
+        ids = torch.arange(num_rows, dtype=torch.int64)[None, :]
+        for rank in range(tp_size):
+            start, end = engram._shard_row_range(num_rows, rank, tp_size)
+            weight = torch.ones(end - start, 32).to(torch.float8_e4m3fn)
+            scales = torch.full((end - start, 1), 127, dtype=torch.uint8)
+            lookup = engram.HostEngramEmbedding(
+                weight,
+                scales,
+                shard_start=start,
+                shard_end=end,
+                tp_size=tp_size,
+                tp_rank=rank,
+            )
+            self.assertTrue(lookup.sharded)
+            local, owned = lookup.shard_local_indices(ids)
+            self.assertEqual(local.shape, ids.shape)
+            self.assertEqual(owned.shape, ids.shape)
+            self.assertEqual(int(owned.sum()), end - start)
+            for hash_id in range(num_rows):
+                if start <= hash_id < end:
+                    self.assertTrue(bool(owned[0, hash_id]))
+                    self.assertEqual(int(local[0, hash_id]), hash_id - start)
+                else:
+                    # Non-owned ids gather a safe local row, then are zeroed.
+                    self.assertFalse(bool(owned[0, hash_id]))
+                    self.assertEqual(int(local[0, hash_id]), 0)
+
+    def test_tp_shard_masks_non_owned_rows_before_single_reduce(self):
+        weight = torch.ones(3, 32).to(torch.float8_e4m3fn)
+        scales = torch.full((3, 1), 127, dtype=torch.uint8)
+        lookup = engram.HostEngramEmbedding(
+            weight,
+            scales,
+            shard_start=3,
+            shard_end=6,
+            tp_size=3,
+            tp_rank=1,
+        )
+        ids = torch.tensor([[3, 5, 6, 2, -1]])
+        _, owned = lookup.shard_local_indices(ids)
+        rows = (
+            torch.arange(1, 1 + 5 * 4, dtype=torch.float32)
+            .reshape(1, 5, 4)
+            .to(torch.bfloat16)
+        )
+        reduced = []
+
+        def fake_reduce(tensor):
+            reduced.append(tensor.clone())
+            return tensor
+
+        with patch.object(engram, "_shard_all_reduce_rows", side_effect=fake_reduce):
+            result = lookup.finish_shard_rows(rows, owned)
+        self.assertEqual(len(reduced), 1)
+        expected = rows.clone().masked_fill_(~owned[..., None], 0)
+        torch.testing.assert_close(reduced[0], expected, rtol=0, atol=0)
+        torch.testing.assert_close(result, expected, rtol=0, atol=0)
+        self.assertEqual(int(result[0, 2].count_nonzero()), 0)
+
+    def test_unsharded_lookup_keeps_full_table_contract(self):
+        weight = torch.ones(4, 32).to(torch.float8_e4m3fn)
+        scales = torch.full((4, 1), 127, dtype=torch.uint8)
+        lookup = engram.HostEngramEmbedding(weight, scales)
+        self.assertFalse(lookup.sharded)
+        self.assertEqual((lookup.shard_start, lookup.shard_end), (0, 4))
+        ids = torch.tensor([[0, 3]])
+        local, owned = lookup.shard_local_indices(ids)
+        self.assertIs(local, ids)
+        self.assertIsNone(owned)
+
+    def test_checkpoint_row_block_reads_only_selected_rows(self):
+        from safetensors import safe_open
+        from safetensors.torch import save_file
+
+        weight = torch.arange(10 * 32).reshape(10, 32).to(torch.uint8)
+        scales = torch.full((10, 1), 127, dtype=torch.uint8)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "slice.safetensors"
+            save_file({"embed.weight": weight, "embed.scale": scales}, path)
+            with safe_open(path, framework="pt", device="cpu") as file:
+                block = engram._checkpoint_tensor_rows(file, "embed.weight", (3, 7))
+                scale_block = engram._checkpoint_tensor_rows(
+                    file, "embed.scale", (3, 7)
+                )
+                full = engram._checkpoint_tensor_rows(file, "embed.weight")
+            self.assertEqual(tuple(block.shape), (4, 32))
+            torch.testing.assert_close(block, weight[3:7])
+            torch.testing.assert_close(scale_block, scales[3:7])
+            torch.testing.assert_close(full, weight)
+
+    def test_cpu_checkpoint_ignores_tp_shard_arguments(self):
+        from safetensors.torch import save_file
+
+        config = {
+            **_config(),
+            "rms_norm_eps": 1e-20,
+        }
+        prefix = "layers.1.engram."
+        tensors = {
+            prefix + "embed.weight": torch.ones(1000, 32).to(torch.float8_e4m3fn),
+            prefix + "embed.scale": torch.full((1000, 1), 127, dtype=torch.uint8),
+            prefix + "wkv.weight": torch.ones(160, 192).to(torch.float8_e4m3fn),
+            prefix + "wkv.scale": torch.full((5, 6), 127, dtype=torch.uint8),
+            prefix + "q_weight": torch.ones(4, 32, dtype=torch.bfloat16),
+            prefix + "k_weight": torch.ones(4, 32, dtype=torch.bfloat16),
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            save_file(tensors, root / "weights.safetensors")
+            (root / "model.safetensors.index.json").write_text(
+                json.dumps(
+                    {"weight_map": {key: "weights.safetensors" for key in tensors}}
+                )
+            )
+            model = engram.Engram.from_checkpoint(
+                config,
+                1,
+                folder,
+                "cpu",
+                tp_size=4,
+                tp_rank=1,
+            )
+            self.assertFalse(model.embed_tokens.sharded)
+            self.assertEqual(model.embed_tokens.table_shape, (1000, 32))
+
 
 class SharedTableLeaseTest(unittest.TestCase):
     """The /dev/shm table must not outlive its readers, even after SIGKILL."""
