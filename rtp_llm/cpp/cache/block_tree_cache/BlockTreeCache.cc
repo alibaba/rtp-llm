@@ -135,6 +135,10 @@ void BlockTreeCache::shutdownLoads() {
     loader_.shutdown();
 }
 
+std::vector<std::shared_ptr<FrozenTask>> BlockTreeCache::frozenTasks() const {
+    return transfer_dispatcher_ ? transfer_dispatcher_->frozenTasks() : std::vector<std::shared_ptr<FrozenTask>>{};
+}
+
 TransferTaskRegistry::State BlockTreeCache::localTransferCompletion(uint64_t trace_id) const {
     if (!transfer_dispatcher_) {
         return TransferTaskRegistry::State::UNKNOWN;

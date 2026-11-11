@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionTypes.h"
 
 #include <chrono>
 #include <iomanip>
@@ -36,6 +37,18 @@ const char* dispatchName(TransferRpcDispatchState state) {
             return "POSSIBLY_SUBMITTED";
         case TransferRpcDispatchState::SUBMITTED:
             return "SUBMITTED";
+    }
+    return "UNKNOWN";
+}
+
+const char* completionStateName(TransferTaskRegistry::State state) {
+    switch (state) {
+        case TransferTaskRegistry::State::UNKNOWN:
+            return "UNKNOWN";
+        case TransferTaskRegistry::State::RUNNING:
+            return "RUNNING";
+        case TransferTaskRegistry::State::BUFFER_SAFE:
+            return "BUFFER_SAFE";
     }
     return "UNKNOWN";
 }
@@ -143,11 +156,11 @@ void FrozenTask::freeze() noexcept {
     state_        = State::FROZEN;
 }
 
-void FrozenTask::unfreeze() noexcept {
+bool FrozenTask::unfreeze() noexcept {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (state_ != State::FROZEN) {
-            return;
+            return false;
         }
         state_ = State::RELEASING;
     }
@@ -161,6 +174,25 @@ void FrozenTask::unfreeze() noexcept {
         released_at_us_ = wallTimeUs();
         state_          = State::RELEASED;
     }
+    return true;
+}
+
+void FrozenTask::recordRecoveryQuery(std::shared_ptr<const TransferCompletionQueryResult> query) noexcept {
+    if (!query) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++recovery_.query_count;
+        recovery_.last_query_at_us = wallTimeUs();
+        recovery_.last_query.swap(query);
+    }
+    // Release the previous observation after dropping the task mutex.
+}
+
+FrozenTask::RecoverySnapshot FrozenTask::recoverySnapshot() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return recovery_;
 }
 
 FrozenTask::Snapshot FrozenTask::snapshot() const noexcept {
@@ -170,6 +202,7 @@ FrozenTask::Snapshot FrozenTask::snapshot() const noexcept {
 
 std::string FrozenTask::debugString() const {
     const auto         current = snapshot();
+    const auto         recovery = recoverySnapshot();
     std::ostringstream out;
     out << std::boolalpha << "FrozenTask{trace=";
     if (const auto* numeric = std::get_if<uint64_t>(&execution_.trace_id)) {
@@ -254,6 +287,31 @@ std::string FrozenTask::debugString() const {
             out << '}';
         }
         out << ']';
+    }
+    out << ",recovery_query_count=" << recovery.query_count
+        << ",last_recovery_query_at_us=" << recovery.last_query_at_us << ",last_recovery_query=";
+    if (!recovery.last_query) {
+        out << "unknown";
+    } else {
+        const auto& query = *recovery.last_query;
+        out << "{trace=";
+        if (const auto* numeric = std::get_if<uint64_t>(&query.trace_id)) {
+            out << *numeric;
+        } else {
+            out << std::quoted(std::get<std::string>(query.trace_id));
+        }
+        out << ",all_safe=" << query.all_safe << ",error=" << std::quoted(query.error) << ",ranks=[";
+        for (size_t i = 0; i < query.ranks.size(); ++i) {
+            if (i != 0)
+                out << ',';
+            const auto& rank = query.ranks[i];
+            out << "{rank=" << rank.rank << ",address=" << std::quoted(rank.server_address)
+                << ",state=" << completionStateName(rank.state) << ",grpc_code=";
+            writeOptional(out, rank.grpc_code);
+            out << ",error=" << std::quoted(rank.error) << ",cq_received=" << rank.cq_received
+                << ",cq_ok=" << rank.cq_ok << '}';
+        }
+        out << "]}";
     }
     out << '}';
     return out.str();

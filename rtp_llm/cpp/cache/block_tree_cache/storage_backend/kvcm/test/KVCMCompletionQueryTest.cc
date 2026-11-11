@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskRecovery.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionQuery.h"
 
 namespace rtp_llm {
@@ -42,6 +43,23 @@ private:
     bool released_{false};
 };
 
+std::shared_ptr<KVCacheManager> makeQueryManager(const BackendEnvironment& environment,
+                                                const std::shared_ptr<KVCMStorageBackend>& backend,
+                                                const ParallelismConfig& parallel,
+                                                std::shared_ptr<BroadcastManager> broadcast = nullptr) {
+    auto manager = std::make_shared<KVCacheManager>(environment.cache_config, false, nullptr,
+                                                   KVCacheConfig{}, parallel);
+    auto full = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{environment.device_pool}, nullptr, nullptr);
+    full->initialize(0, environment.cache_config.topologyPtr(), {"default"});
+    manager->block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full});
+    if (!manager->block_tree_cache_)
+        return nullptr;
+    manager->block_tree_cache_->storage_backend_ = backend;
+    manager->transfer_broadcast_manager_ = std::move(broadcast);
+    return manager;
+}
+
 struct QueryWorker {
     std::shared_ptr<BackendEnvironment> environment;
     std::shared_ptr<MockClientWrapper> client;
@@ -61,16 +79,8 @@ struct QueryWorker {
         backend = std::shared_ptr<KVCMStorageBackend>(std::move(handle.backend));
         if (!initSingleRank(*backend, *environment))
             return false;
-        manager = std::make_shared<KVCacheManager>(environment->cache_config, false, nullptr,
-                                                   KVCacheConfig{}, parallel);
-        auto full = std::make_shared<FullGroupSet>(
-            std::vector<DeviceBlockPoolPtr>{environment->device_pool}, nullptr, nullptr);
-        full->initialize(0, environment->cache_config.topologyPtr(), {"default"});
-        manager->block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full});
-        if (!manager->block_tree_cache_)
-            return false;
-        manager->block_tree_cache_->storage_backend_ = backend;
-        return true;
+        manager = makeQueryManager(*environment, backend, parallel);
+        return manager != nullptr;
     }
 };
 
@@ -239,7 +249,7 @@ TEST(KVCMCompletionQueryTest, QueryNamespacesStaySeparateAndObserveReadCompletio
     }
 }
 
-TEST(KVCMCompletionQueryTest, OriginalRpcParticipantsBecomeSafeWithoutThawingFrozenRead) {
+TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcParticipants) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
     auto worker0 = std::make_shared<QueryWorker>();
@@ -271,12 +281,15 @@ TEST(KVCMCompletionQueryTest, OriginalRpcParticipantsBecomeSafeWithoutThawingFro
     EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _)).Times(0);
     auto parallel = singleRankConfig();
     parallel.tp_size = 2;
-    auto backend = makeBackend(environment, parallel, client, broadcast);
-    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+    auto handle = makeBackend(environment, parallel, client, broadcast);
+    auto backend = std::shared_ptr<KVCMStorageBackend>(std::move(handle.backend));
+    ASSERT_TRUE(initSingleRank(*backend, environment));
+    auto coordinator = makeQueryManager(environment, backend, parallel, broadcast);
+    ASSERT_NE(coordinator, nullptr);
     const kv_cache_manager::Locations locations{{{"tp0_Fdefault", "pace://rank-0"},
                                                  {"tp1_Fdefault", "pace://rank-1"}}};
     EXPECT_CALL(*client, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
-    auto matched = match(*backend.backend, makeStorageRequest(environment));
+    auto matched = match(*backend, makeStorageRequest(environment));
     ASSERT_TRUE(matched.success);
     auto request = makeStorageRequest(environment);
     request.transfer_task.emplace(std::vector<TransferDescriptor>{}, 2s);
@@ -287,21 +300,28 @@ TEST(KVCMCompletionQueryTest, OriginalRpcParticipantsBecomeSafeWithoutThawingFro
     ASSERT_TRUE(gate->waitEntered());
     ASSERT_EQ(completed.wait_for(5s), std::future_status::ready);
     EXPECT_EQ(completed.get().code(), ErrorCode::DEADLINE_EXCEEDED);
-    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-    const auto frozen = backend->frozenTasks();
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend));
+    const auto frozen = coordinator->frozenTasks();
     ASSERT_EQ(frozen.size(), 1u);
     const auto record = frozen.front();
     ASSERT_EQ(record->execution().expected_peers.size(), 2u);
     EXPECT_EQ(std::get<std::string>(record->execution().trace_id), "block_tree_read_1");
-    const auto original = record->debugString();
+    const auto failure_message = record->failure().status.ToString();
+    const auto failure_diagnostics = record->failure().execution_diagnostics;
+    ASSERT_NE(failure_diagnostics, nullptr);
+    const auto original_ranks = failure_diagnostics->ranks;
     const auto references = environment.device_pool->refCount(environment.block_id);
-    TransferCompletionQuery query(broadcast);
+    FrozenTaskRecovery recovery([coordinator] { return coordinator->frozenTasks(); },
+                                [coordinator](const auto& execution, int timeout_ms) {
+                                    return coordinator->queryTransferCompletion(execution, timeout_ms);
+                                });
     for (const bool completed : {false, true}) {
         if (completed) {
             gate->release();
             ASSERT_TRUE(server0.waitReadCompleted());
         }
-        const auto observed = query.query(record->execution(), 2000);
+        const auto before_query = record->debugString();
+        const auto observed = coordinator->queryTransferCompletion(record->execution(), 2000);
         ASSERT_EQ(observed.ranks.size(), 2u);
         EXPECT_TRUE(observed.error.empty()) << observed.error;
         EXPECT_EQ(observed.all_safe, completed);
@@ -315,9 +335,102 @@ TEST(KVCMCompletionQueryTest, OriginalRpcParticipantsBecomeSafeWithoutThawingFro
         EXPECT_EQ(record->snapshot().state, FrozenTask::State::FROZEN);
         EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references);
-        EXPECT_EQ(record->debugString(), original);
-        EXPECT_EQ(backend->frozenTasks().size(), 1u);
+        EXPECT_EQ(record->debugString(), before_query);
+        EXPECT_EQ(coordinator->frozenTasks().size(), 1u);
+        const auto recovered = recovery.runOnce(2000);
+        EXPECT_EQ(recovered.queried, 1u);
+        EXPECT_EQ(recovered.released, completed ? 1u : 0u);
+        EXPECT_EQ(record->snapshot().state, completed ? FrozenTask::State::RELEASED : FrozenTask::State::FROZEN);
+        EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), !completed);
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references - (completed ? 1u : 0u));
     }
+    EXPECT_EQ(record->failure().status.ToString(), failure_message);
+    EXPECT_FALSE(record->failure().buffer_safe);
+    EXPECT_EQ(record->failure().execution_diagnostics, failure_diagnostics);
+    ASSERT_EQ(failure_diagnostics->ranks.size(), original_ranks.size());
+    for (size_t rank = 0; rank < original_ranks.size(); ++rank) {
+        EXPECT_EQ(failure_diagnostics->ranks[rank].grpc_code, original_ranks[rank].grpc_code);
+        EXPECT_EQ(failure_diagnostics->ranks[rank].buffer_safe, original_ranks[rank].buffer_safe);
+        EXPECT_EQ(failure_diagnostics->ranks[rank].worker_transfer_status, original_ranks[rank].worker_transfer_status);
+    }
+    const auto replay = recovery.runOnce(2000);
+    EXPECT_EQ(replay.queried, 0u);
+    EXPECT_EQ(replay.released, 0u);
+    EXPECT_EQ(coordinator->frozenTasks().size(), 1u);
+    for (const auto& worker : {worker0, worker1}) {
+        EXPECT_EQ(worker->backend->taskRegistry().size(), 1u);
+        const auto trace = std::get<std::string>(record->execution().trace_id);
+        const auto duplicate = payloadRequest(*worker->environment, trace);
+        FunctionResponsePB response;
+        ASSERT_TRUE(worker->manager->executeFunction(duplicate, response));
+        EXPECT_EQ(response.remote_response().transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
+        EXPECT_FALSE(response.remote_response().payload_buffer_safe());
+        EXPECT_EQ(worker->backend->taskRegistry().queryLocal(std::vector<std::string>{trace}).front(),
+                  RegistryState::BUFFER_SAFE);
+    }
+}
+
+TEST(KVCMCompletionQueryTest, LocalSdkFailuresRecoverOnlyProvenHoldsOnSharedTargets) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    auto worker = std::make_shared<QueryWorker>();
+    ASSERT_TRUE(worker->init());
+    worker->client->load_status = kv_cache_manager::ClientErrorCode::ER_SDKREAD_ERROR;
+    EXPECT_CALL(*worker->client, loadKvCachesForTag(_, _, _, _)).Times(0);
+    const kv_cache_manager::Locations locations{{{"tp0_Fdefault", "pace://local-sdk-error"}}};
+    EXPECT_CALL(*worker->client, match(_, _, _, _, _, _))
+        .Times(2).WillRepeatedly(Return(std::make_pair(true, locations)));
+    const auto& environment = *worker->environment;
+    const auto original_references = environment.device_pool->refCount(environment.block_id);
+    for (size_t index = 0; index < 2; ++index) {
+        auto matched = match(*worker->backend, makeStorageRequest(environment));
+        ASSERT_TRUE(matched.success);
+        EXPECT_FALSE(readResult(*worker->backend, makeStorageRequest(environment), std::move(matched.match_meta)).ok());
+        ASSERT_TRUE(waitForBackendOperationsForTest(*worker->backend));
+    }
+    const auto records = worker->manager->frozenTasks();
+    ASSERT_EQ(records.size(), 2u);
+    // Independent frozen tree references share one device backing reference.
+    ASSERT_EQ(environment.device_pool->refCount(environment.block_id), original_references + 1);
+    ASSERT_EQ(environment.device_pool->treeRefCount(environment.block_id), 2u);
+    std::vector<std::string> messages;
+    for (const auto& record : records) {
+        EXPECT_FALSE(record->execution().remote);
+        ASSERT_NE(record->failure().execution_diagnostics, nullptr);
+        EXPECT_NE(record->failure().execution_diagnostics->failure_reason, "rpc_error");
+        EXPECT_NE(record->failure().execution_diagnostics->failure_reason, "rpc_timeout");
+        messages.push_back(record->failure().status.ToString());
+    }
+    FrozenTaskRecovery recovery([manager = worker->manager] { return manager->frozenTasks(); },
+                                [manager = worker->manager](const auto& execution, int timeout_ms) {
+                                    return manager->queryTransferCompletion(execution, timeout_ms);
+                                });
+    EXPECT_EQ(recovery.runOnce(2000).released, 0u);
+    for (size_t index = 0; index < records.size(); ++index) {
+        const auto& record = records[index];
+        const auto& trace = std::get<std::string>(record->execution().trace_id);
+        // Test injection of a subsequent explicit safety proof. This does not
+        // claim that the SDK currently exposes a late-completion callback.
+        auto& registry = const_cast<TransferTaskRegistry&>(worker->backend->taskRegistry());
+        ASSERT_TRUE(registry.finish(trace, true));
+        const auto observed = worker->manager->queryTransferCompletion(record->execution(), 2000);
+        EXPECT_TRUE(observed.all_safe);
+        EXPECT_EQ(record->snapshot().state, FrozenTask::State::FROZEN);
+        EXPECT_EQ(recovery.runOnce(2000).released, 1u);
+        EXPECT_EQ(record->snapshot().state, FrozenTask::State::RELEASED);
+        EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), index == 0);
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), original_references + (index == 0 ? 1u : 0u));
+        EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u - index);
+        EXPECT_EQ(record->failure().status.ToString(), messages[index]);
+        EXPECT_FALSE(record->failure().buffer_safe);
+        EXPECT_EQ(registry.queryLocal(std::vector<std::string>{trace}).front(), RegistryState::BUFFER_SAFE);
+    }
+    EXPECT_EQ(worker->manager->frozenTasks().size(), 2u);
+    EXPECT_EQ(worker->backend->taskRegistry().size(), 2u);
+    const auto replay = recovery.runOnce(2000);
+    EXPECT_EQ(replay.queried, 0u);
+    EXPECT_EQ(replay.released, 0u);
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), original_references);
 }
 
 }  // namespace

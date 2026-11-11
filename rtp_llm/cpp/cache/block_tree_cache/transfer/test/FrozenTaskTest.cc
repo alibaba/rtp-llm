@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionTypes.h"
 
 #include <atomic>
 #include <memory>
@@ -74,7 +75,7 @@ TEST(FrozenTaskTest, PreparationDoesNotAcquireReferencesAndOnlyTargetsFreeze) {
 
     FrozenTask task(std::move(prepared), unknownResult());
     EXPECT_EQ(task.snapshot().state, FrozenTask::State::PREPARED);
-    task.unfreeze();
+    EXPECT_FALSE(task.unfreeze());
     task.freeze();
     task.freeze();
     EXPECT_FALSE(source_pool->isFrozen(source));
@@ -88,11 +89,11 @@ TEST(FrozenTaskTest, PreparationDoesNotAcquireReferencesAndOnlyTargetsFreeze) {
     EXPECT_GT(frozen.frozen_at_us, 0);
     EXPECT_EQ(frozen.released_at_us, 0);
 
-    task.unfreeze();
+    EXPECT_TRUE(task.unfreeze());
     const auto released = task.snapshot();
     EXPECT_EQ(released.state, FrozenTask::State::RELEASED);
     EXPECT_GT(released.released_at_us, 0);
-    task.unfreeze();
+    EXPECT_FALSE(task.unfreeze());
     task.freeze();
     EXPECT_EQ(task.snapshot().released_at_us, released.released_at_us);
     EXPECT_EQ(task.snapshot().frozen_at_us, frozen.frozen_at_us);
@@ -140,12 +141,12 @@ TEST(FrozenTaskTest, SharedTargetsKeepIndependentTaskReferencesAcrossBusinessRel
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
 
     pool->decTreeRef(block, BlockTreeRefType::CACHE);
-    first.unfreeze();
-    first.unfreeze();
+    EXPECT_TRUE(first.unfreeze());
+    EXPECT_FALSE(first.unfreeze());
     EXPECT_TRUE(pool->isAllocated(block));
     EXPECT_TRUE(pool->isFrozen(block));
     EXPECT_EQ(pool->treeRefCount(block), 1u);
-    second.unfreeze();
+    EXPECT_TRUE(second.unfreeze());
     EXPECT_FALSE(pool->isAllocated(block));
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
     EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
@@ -214,8 +215,8 @@ TEST(FrozenTaskTest, ThrowingCapacityNotificationsCannotInterruptOrRepeatBatchRe
     task.freeze();
     first_pool->decTreeRef({first, other}, BlockTreeRefType::CACHE);
     second_pool->decTreeRef(second, BlockTreeRefType::CACHE);
-    task.unfreeze();
-    task.unfreeze();
+    EXPECT_TRUE(task.unfreeze());
+    EXPECT_FALSE(task.unfreeze());
     EXPECT_EQ(first_notifications, 1u);
     EXPECT_EQ(second_notifications, 1u);
     EXPECT_EQ(task.snapshot().state, FrozenTask::State::RELEASED);
@@ -233,13 +234,13 @@ TEST(FrozenTaskTest, ReleaseNotificationsCanInspectAndReenterTaskWithoutRepeatin
         ASSERT_NE(observed, nullptr);
         EXPECT_EQ(observed->snapshot().state, FrozenTask::State::RELEASING);
         EXPECT_NE(observed->debugString().find("state=RELEASING"), std::string::npos);
-        observed->unfreeze();
+        EXPECT_FALSE(observed->unfreeze());
         observed->freeze();
     });
     FrozenTask task(FrozenTask::prepare(execution(28, {}, {{pool, block, 0}})), unknownResult());
     observed = &task;
     task.freeze();
-    task.unfreeze();
+    EXPECT_TRUE(task.unfreeze());
     EXPECT_EQ(notifications, 1u);
     EXPECT_EQ(task.snapshot().state, FrozenTask::State::RELEASED);
     EXPECT_EQ(pool->treeRefCount(block), 1u);
@@ -259,14 +260,126 @@ TEST(FrozenTaskTest, ConcurrentRepeatedFreezeAndUnfreezeOwnOneReference) {
         thread.join();
     EXPECT_EQ(pool->treeRefCount(block), 2u);
     threads.clear();
+    std::atomic<size_t> releases{0};
     for (size_t i = 0; i < 8; ++i) {
-        threads.emplace_back([&] { task.unfreeze(); });
+        threads.emplace_back([&] {
+            if (task.unfreeze()) {
+                ++releases;
+            }
+        });
     }
     for (auto& thread : threads)
         thread.join();
     EXPECT_EQ(task.snapshot().state, FrozenTask::State::RELEASED);
     EXPECT_EQ(pool->treeRefCount(block), 1u);
     EXPECT_EQ(notifications.load(), 1u);
+    EXPECT_EQ(releases.load(), 1u);
+}
+
+TEST(FrozenTaskTest, RecoveryQueriesPreserveOriginalFailureAndDoNotReleaseTargets) {
+    auto pool = makePool("recovery-observation");
+    const auto block = heldBlock(pool);
+    auto info = execution(34, {}, {{pool, block, 0}});
+    auto diagnostics = std::make_shared<TransferExecutionDiagnostics>();
+    diagnostics->trace_id = info.trace_id;
+    diagnostics->failure_reason = "worker_completion_unknown";
+    TransferRankSnapshot original_rank;
+    original_rank.rank = 1;
+    original_rank.server_address = "worker-1:100";
+    original_rank.grpc_code = 4;
+    diagnostics->ranks.push_back(original_rank);
+    auto failure = unknownResult();
+    failure.execution_diagnostics = diagnostics;
+    const auto original_error = failure.status.ToString();
+    FrozenTask task(FrozenTask::prepare(std::move(info)), std::move(failure));
+    task.freeze();
+
+    task.recordRecoveryQuery(nullptr);
+    const auto initial = task.recoverySnapshot();
+    EXPECT_EQ(initial.query_count, 0u);
+    EXPECT_EQ(initial.last_query_at_us, 0);
+    EXPECT_EQ(initial.last_query, nullptr);
+
+    TransferCompletionQueryResult pending;
+    pending.trace_id = uint64_t{34};
+    pending.error = "rank 1 query timed out";
+    pending.ranks = {{0, "worker-0:100", TransferTaskRegistry::State::RUNNING, 0, "", true, true},
+                     {1, "worker-1:100", TransferTaskRegistry::State::UNKNOWN, 4, "deadline", false, false}};
+    auto pending_result = std::make_shared<const TransferCompletionQueryResult>(std::move(pending));
+    task.recordRecoveryQuery(pending_result);
+    const auto first = task.recoverySnapshot();
+    EXPECT_EQ(first.query_count, 1u);
+    EXPECT_GT(first.last_query_at_us, 0);
+    EXPECT_EQ(first.last_query, pending_result);
+    const auto pending_log = task.debugString();
+    for (const auto* field : {"recovery_query_count=1", "last_recovery_query={trace=34,all_safe=false",
+                              "error=\"rank 1 query timed out\"", "state=RUNNING,grpc_code=0",
+                              "state=UNKNOWN,grpc_code=4,error=\"deadline\",cq_received=false,cq_ok=false"}) {
+        EXPECT_NE(pending_log.find(field), std::string::npos) << field << '\n' << pending_log;
+    }
+
+    TransferCompletionQueryResult safe;
+    safe.trace_id = uint64_t{34};
+    safe.all_safe = true;
+    safe.ranks = {{0, "worker-0:100", TransferTaskRegistry::State::BUFFER_SAFE, 0, "", true, true},
+                  {1, "worker-1:100", TransferTaskRegistry::State::BUFFER_SAFE, 0, "", true, true}};
+    auto safe_result = std::make_shared<const TransferCompletionQueryResult>(std::move(safe));
+    task.recordRecoveryQuery(safe_result);
+    task.recordRecoveryQuery(nullptr);
+    const auto latest = task.recoverySnapshot();
+    EXPECT_EQ(latest.query_count, 2u);
+    EXPECT_GT(latest.last_query_at_us, 0);
+    EXPECT_EQ(latest.last_query, safe_result);
+    EXPECT_FALSE(first.last_query->all_safe);
+    EXPECT_EQ(first.last_query->error, "rank 1 query timed out");
+    EXPECT_EQ(task.snapshot().state, FrozenTask::State::FROZEN);
+    EXPECT_EQ(pool->treeRefCount(block), 2u);
+    EXPECT_EQ(task.failure().status.ToString(), original_error);
+    EXPECT_FALSE(task.failure().buffer_safe);
+    ASSERT_EQ(task.failure().execution_diagnostics, diagnostics);
+    EXPECT_EQ(task.failure().execution_diagnostics->failure_reason, "worker_completion_unknown");
+    ASSERT_EQ(task.failure().execution_diagnostics->ranks.size(), 1u);
+    EXPECT_EQ(task.failure().execution_diagnostics->ranks.front().grpc_code, 4);
+    const auto safe_log = task.debugString();
+    for (const auto* field : {"recovery_query_count=2", "last_recovery_query={trace=34,all_safe=true",
+                              "state=BUFFER_SAFE", "failure_reason=\"worker_completion_unknown\""}) {
+        EXPECT_NE(safe_log.find(field), std::string::npos) << field << '\n' << safe_log;
+    }
+    EXPECT_TRUE(task.unfreeze());
+    EXPECT_EQ(task.recoverySnapshot().last_query, safe_result);
+}
+
+TEST(FrozenTaskTest, ConcurrentRecoveryQueriesRetainCountAndLatestStringTraceObservation) {
+    auto pool = makePool("concurrent-observation");
+    const auto block = heldBlock(pool);
+    auto info = execution(35, {}, {{pool, block, 0}});
+    info.trace_id = std::string("read-35");
+    FrozenTask task(FrozenTask::prepare(std::move(info)), unknownResult());
+    task.freeze();
+    TransferCompletionQueryResult query;
+    query.trace_id = std::string("read-35");
+    query.ranks = {{0, "", TransferTaskRegistry::State::UNKNOWN, std::nullopt, "not observed", false, false}};
+    auto result = std::make_shared<const TransferCompletionQueryResult>(std::move(query));
+    std::vector<std::thread> threads;
+    for (size_t i = 0; i < 8; ++i) {
+        threads.emplace_back([&] {
+            for (size_t j = 0; j < 8; ++j) {
+                task.recordRecoveryQuery(result);
+                const auto observed = task.recoverySnapshot();
+                EXPECT_GT(observed.query_count, 0u);
+                EXPECT_GT(observed.last_query_at_us, 0);
+                EXPECT_EQ(observed.last_query, result);
+            }
+        });
+    }
+    for (auto& thread : threads)
+        thread.join();
+    EXPECT_EQ(task.recoverySnapshot().query_count, 64u);
+    EXPECT_EQ(task.snapshot().state, FrozenTask::State::FROZEN);
+    const auto log = task.debugString();
+    EXPECT_NE(log.find("last_recovery_query={trace=\"read-35\",all_safe=false"), std::string::npos);
+    EXPECT_NE(log.find("state=UNKNOWN,grpc_code=unknown,error=\"not observed\""), std::string::npos);
+    EXPECT_TRUE(task.unfreeze());
 }
 
 TEST(FrozenTaskTest, InvalidTargetPreparationDoesNotAcquireAnyFrozenHold) {

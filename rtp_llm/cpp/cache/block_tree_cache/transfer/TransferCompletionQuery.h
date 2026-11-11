@@ -2,33 +2,13 @@
 
 #include <functional>
 #include <memory>
-#include <optional>
-#include <string>
-#include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionTypes.h"
 
 namespace rtp_llm {
 
 class BroadcastManager;
-
-struct TransferCompletionRankResult {
-    size_t                      rank{0};
-    std::string                 server_address;
-    TransferTaskRegistry::State state{TransferTaskRegistry::State::UNKNOWN};
-    std::optional<int>           grpc_code;
-    std::string                 error;
-    bool                        cq_received{false};
-    bool                        cq_ok{false};
-};
-
-struct TransferCompletionQueryResult {
-    TransferExecutionTrace                    trace_id{uint64_t{0}};
-    std::vector<TransferCompletionRankResult> ranks;
-    bool                                      all_safe{false};
-    std::string                               error;
-};
 
 // One read-only observation of the execution's original participants. Results
 // are independent of its frozen failure snapshot and never release references.

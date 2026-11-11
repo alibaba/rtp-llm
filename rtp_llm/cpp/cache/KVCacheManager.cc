@@ -736,6 +736,21 @@ KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysT
     return coordinator_manager_->incrKVCacheRef(resource, cache_keys, is_connector);
 }
 
+std::vector<std::shared_ptr<FrozenTask>> KVCacheManager::frozenTasks() const {
+    if (!block_tree_cache_) {
+        return {};
+    }
+    auto tasks = block_tree_cache_->frozenTasks();
+#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
+    auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
+    if (backend) {
+        const auto remote_tasks = backend->frozenTasks();
+        tasks.insert(tasks.end(), remote_tasks.begin(), remote_tasks.end());
+    }
+#endif
+    return tasks;
+}
+
 TransferTaskRegistry::State KVCacheManager::localTransferCompletion(const TransferExecutionTrace& trace_id) const {
     if (!validTransferExecutionTrace(trace_id) || !block_tree_cache_) {
         return TransferTaskRegistry::State::UNKNOWN;

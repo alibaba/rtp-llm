@@ -176,6 +176,19 @@ cc_test(
 )
 
 cc_test(
+    name = "frozen_task_recovery_test",
+    testonly = True,
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = ["FrozenTaskRecoveryTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/block_tree_cache:transfer_task_registry",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
+    ],
+    tags = ["L20_CU13"],
+)
+
+cc_test(
     name = "frozen_task_test",
     exec_properties = {"gpu": "L20_CU13"},
     srcs = ["FrozenTaskTest.cc"],

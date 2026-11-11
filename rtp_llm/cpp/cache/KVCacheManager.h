@@ -140,6 +140,9 @@ public:
     TransferCompletionQueryResult queryTransferCompletion(const FrozenTask::ExecutionInfo& execution,
                                                          int timeout_ms) const;
 
+    // Snapshot both existing owners; taking a snapshot does not transfer custody.
+    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
+
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;
     }

@@ -22,6 +22,7 @@ namespace rtp_llm {
 
 class BlockTreeTaskPool;
 class BlockTransferDispatcher;
+class FrozenTask;
 class FullPrefixInvariantScanner;
 struct CacheStats {
     size_t tree_node_count{0};
@@ -180,6 +181,7 @@ public:
 
     TransferResult executeTransfer(TransferTask task);
     TransferTaskRegistry::State localTransferCompletion(uint64_t trace_id) const;
+    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
 
     // Accessors
     BlockTree* tree() const {

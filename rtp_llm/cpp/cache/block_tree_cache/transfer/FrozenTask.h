@@ -15,6 +15,8 @@
 
 namespace rtp_llm {
 
+struct TransferCompletionQueryResult;
+
 // One coordinator execution trace owns one hold for each distinct target slot.
 // Sources are immutable diagnostics only. No tree node or business settlement
 // callback survives here, and destruction never releases frozen references.
@@ -66,6 +68,12 @@ public:
         size_t  target_block_count{0};
     };
 
+    struct RecoverySnapshot {
+        uint64_t                                             query_count{0};
+        int64_t                                              last_query_at_us{0};
+        std::shared_ptr<const TransferCompletionQueryResult> last_query;
+    };
+
 private:
     struct TargetPool {
         std::shared_ptr<IBlockPool> pool;
@@ -105,8 +113,15 @@ public:
     // Idempotent, single-use lifecycle. freeze after RELEASED is a no-op.
     // Concurrent unfreeze callers do not repeat decrements; RELEASING remains
     // visible until the owner finishes. Notifications run without this mutex.
+    // Only the caller completing FROZEN -> RELEASED returns true.
     void freeze() noexcept;
-    void unfreeze() noexcept;
+    bool unfreeze() noexcept;
+
+    // Construct immutable query results before calling this method. Recording
+    // does not change the original failure or release any target references.
+    // A null result is ignored.
+    void             recordRecoveryQuery(std::shared_ptr<const TransferCompletionQueryResult> query) noexcept;
+    RecoverySnapshot recoverySnapshot() const noexcept;
 
     const ExecutionInfo& execution() const noexcept {
         return execution_;
@@ -127,6 +142,7 @@ private:
     State                         state_{State::PREPARED};
     int64_t                       frozen_at_us_{0};
     int64_t                       released_at_us_{0};
+    RecoverySnapshot              recovery_;
 };
 
 }  // namespace rtp_llm

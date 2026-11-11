@@ -29,6 +29,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionQuery.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskRecovery.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
@@ -2206,7 +2207,8 @@ static void appendValidGroupedTransfer(const std::shared_ptr<KVCacheManager>& ma
 
 class RecordingBatchTransferEngine final: public PerRankBlockTransferEngine {
 public:
-    RecordingBatchTransferEngine(): PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}) {}
+    explicit RecordingBatchTransferEngine(std::vector<GroupSetPtr> groups = {}):
+        PerRankBlockTransferEngine(std::move(groups)) {}
 
     std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         ++submitted_batch_count;
@@ -2217,6 +2219,7 @@ public:
             result.merge({completion_error, error});
         }
         result.buffer_safe = buffer_safe;
+        last_proof = task.completionProof();
         return std::make_shared<CompletedTransferAsyncContext>(
             std::move(result), task.descriptors().size(), task.completionProof());
     }
@@ -2226,7 +2229,63 @@ public:
     std::vector<CacheCopyError> copy_errors;
     ErrorInfo                   completion_error{ErrorInfo::OkStatus()};
     bool                        buffer_safe{false};
+    std::shared_ptr<TransferBufferSafety> last_proof;
 };
+
+TEST_F(KVCacheManagerTest, FrozenTransferRecoveryObservesLateProofWithoutRepeatingBusinessSettlement) {
+    auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    EXPECT_TRUE(manager->frozenTasks().empty());
+    ASSERT_TRUE(manager->init());
+    const auto& groups = manager->blockTreeCache()->groupSets();
+    auto engine = std::make_shared<RecordingBatchTransferEngine>(groups);
+    engine->completion_error = ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "local completion unknown");
+    manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+    const auto pool = groups.front()->hostPool();
+    ASSERT_NE(pool, nullptr);
+    const auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    pool->incTreeRef(*block, BlockTreeRefType::EVICTION);
+    size_t settlements = 0;
+    manager->block_tree_cache_->transfer_dispatcher_->runTransfer(
+        TransferTask({TransferDescriptor::deviceToHost(0, {1}, *block)}, std::chrono::seconds(30)),
+        [&](TransferResult result) {
+            ++settlements;
+            EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+            EXPECT_TRUE(pool->isFrozen(*block));
+            pool->decTreeRef(*block, BlockTreeRefType::EVICTION);
+        }, "evict");
+    ASSERT_EQ(settlements, 1u);
+    const auto records = manager->frozenTasks();
+    ASSERT_EQ(records.size(), 1u);
+    const auto record = records.front();
+    const auto failure = record->failure().status.ToString();
+    const auto diagnostics = record->failure().execution_diagnostics;
+    ASSERT_NE(engine->last_proof, nullptr);
+    EXPECT_FALSE(record->execution().remote);
+    FrozenTaskRecovery recovery([&] { return manager->frozenTasks(); },
+                                [&](const auto& execution, int timeout_ms) {
+                                    return manager->queryTransferCompletion(execution, timeout_ms);
+                                });
+    EXPECT_EQ(recovery.runOnce(1000).released, 0u);
+    EXPECT_TRUE(pool->isFrozen(*block));
+    // The physical producer supplies proof independently of its failed business result.
+    engine->last_proof->report(true);
+    EXPECT_EQ(recovery.runOnce(1000).released, 1u);
+    EXPECT_FALSE(pool->isAllocated(*block));
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+    EXPECT_EQ(record->snapshot().state, FrozenTask::State::RELEASED);
+    EXPECT_EQ(record->failure().status.ToString(), failure);
+    EXPECT_EQ(record->failure().execution_diagnostics, diagnostics);
+    EXPECT_EQ(settlements, 1u);
+    EXPECT_EQ(engine->submitted_batch_count, 1u);
+    EXPECT_EQ(manager->frozenTasks().front(), record);
+    EXPECT_EQ(manager->block_tree_cache_->transfer_dispatcher_->taskRegistry().size(), 1u);
+    EXPECT_EQ(recovery.runOnce(1000).queried, 0u);
+}
 
 TEST_F(KVCacheManagerTest, CompletionQueryWithoutInitializedBackendsReturnsUnknownAndActualRank) {
     auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
