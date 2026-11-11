@@ -8,8 +8,7 @@ import typing
 import librtp_compute_ops
 import libth_transformer_config
 import torch
-import typing
-__all__: list[str] = ['FlashInferMlaAttnParams', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cublas_gemm_bf16_bf16_fp32', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'debug_kernel', 'dispose_communicator', 'dsv4_top_k_per_row_prefill', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fast_topk_v2_variable', 'fill_mla_params', 'fused_add_layernorm', 'fused_qk_rmsnorm', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'scaled_fp4_experts_quant', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send']
+__all__: list[str] = ['FlashInferMlaAttnParams', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cublas_gemm_bf16_bf16_fp32', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'debug_kernel', 'dispose_communicator', 'dsv4_top_k_per_row_prefill', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fast_topk_v2_variable', 'fill_mla_params', 'fused_add_layernorm', 'fused_add_layernorm_quant_fp8', 'fused_multimodal_copy_', 'fused_qk_rmsnorm', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'scaled_fp4_experts_quant', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send']
 
 
 class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
@@ -213,6 +212,8 @@ def cp_gather_indexer_k_quant_cache(kv_cache: torch.Tensor, dst_k: torch.Tensor,
     """
     Gather indexer K quantized cache kernel
     """
+def fused_multimodal_copy_(dst: torch.Tensor, srcs: list[torch.Tensor], row_offsets: list[int]) -> None: ...
+
 def cuda_graph_copy_large2small(input_tensor: torch.Tensor, output_tensor: torch.Tensor, batch_size: torch.Tensor, max_batch_size: int, max_seq_len: int, input_lengths: torch.Tensor, hidden_size: int, cu_seq_len: torch.Tensor) -> None:
     """
     CUDA Graph copy kernel: Large to Small tensor copy
@@ -237,11 +238,11 @@ def dsv4_top_k_per_row_prefill(logits: torch.Tensor, row_starts: torch.Tensor, r
     """
 def embedding(output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, position_ids: torch.Tensor | None = None, token_type_ids: torch.Tensor | None = None, text_tokens_mask: torch.Tensor | None = None) -> None:
     """
-    Embedding lookup kernel
+    Embedding lookup kernel. position_ids and token_type_ids are retained for compatibility and ignored.
     """
-def embedding_bert(output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, combo_position_ids: torch.Tensor, position_encoding: torch.Tensor, combo_tokens_type_ids: torch.Tensor, token_type_embedding: torch.Tensor, input_embedding_scalar: float = 1.0) -> None:
+def embedding_bert(output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, combo_position_ids: torch.Tensor, position_encoding: torch.Tensor, combo_tokens_type_ids: torch.Tensor, token_type_embedding: torch.Tensor, input_embedding_scalar: float = 1.0, text_tokens_mask: torch.Tensor | None = None) -> None:
     """
-    EmbeddingBert lookup kernel
+    EmbeddingBert lookup kernel; text_tokens_mask=0 skips word-embedding lookup for that token
     """
 def fast_topk_transform_fused(score: torch.Tensor, lengths: torch.Tensor, dst_page_table: torch.Tensor, src_page_table: torch.Tensor | None = None, cu_seqlens_q: torch.Tensor, row_starts: torch.Tensor | None = None) -> None:
     """
@@ -263,6 +264,8 @@ def fused_add_layernorm(input: torch.Tensor, residual: torch.Tensor, bias: torch
     """
     Fused Add LayerNorm kernel
     """
+def fused_add_layernorm_quant_fp8(input: torch.Tensor, residual: torch.Tensor, bias: torch.Tensor, weight: torch.Tensor, beta: torch.Tensor, output: torch.Tensor, scales: torch.Tensor, eps: float) -> None:
+    """Fused Add LayerNorm and per-block FP8 UE8M0 quantization."""
 def fused_qk_rmsnorm(IO: torch.Tensor, q_gamma: torch.Tensor, k_gamma: torch.Tensor, layernorm_eps: float, q_group_num: int, k_group_num: int, m: int, n: int, norm_size: int) -> None:
     """
     Fused QK RMSNorm kernel

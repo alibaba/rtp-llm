@@ -158,6 +158,7 @@ private:
     py::object                 py_model_;
     py::object                 py_forward_method_;
     py::object                 held_attn_pyobj_;
+    bool                       requires_host_input_metadata_{false};
     // Per-wrapper ownership, not the process-wide configuration request. Only
     // the normal main-generation wrapper can own this secondary runner.
     const bool                       owns_generation_prefill_cuda_graph_{false};
@@ -355,6 +356,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                  dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                   "forward";
     py_forward_method_         = py_model_.attr(forward_method);
+    if (py::hasattr(py_model_, "requires_host_input_metadata")) {
+        requires_host_input_metadata_ = py_model_.attr("requires_host_input_metadata").cast<bool>();
+    }
     if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
         // No published topology means there is no trustworthy model geometry
         // for any graph role (including prefill warmup). Keep the eager path.

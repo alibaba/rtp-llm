@@ -12,7 +12,9 @@ import torch
 __all__ = [
     "SelectTopkOp",
     "embedding",
+    "fused_multimodal_copy_",
     "fused_add_layernorm",
+    "fused_add_layernorm_quant_fp8",
     "fused_qk_rmsnorm",
     "FlashInferMlaAttnParams",
     "layernorm",
@@ -60,6 +62,25 @@ def fused_add_layernorm(
     """
     Fused Add LayerNorm kernel
     """
+
+def fused_add_layernorm_quant_fp8(
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    bias: torch.Tensor,
+    weight: torch.Tensor,
+    beta: torch.Tensor,
+    output: torch.Tensor,
+    scales: torch.Tensor,
+    eps: float,
+) -> None:
+    """Fused Add LayerNorm and per-block FP8 UE8M0 quantization."""
+
+def fused_multimodal_copy_(
+    dst: torch.Tensor,
+    srcs: list[torch.Tensor],
+    row_offsets: list[int],
+) -> None:
+    """Copy multimodal feature rows into a packed output tensor."""
 
 def fused_qk_rmsnorm(
     IO: torch.Tensor,

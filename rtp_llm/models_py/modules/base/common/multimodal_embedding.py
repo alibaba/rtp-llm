@@ -29,6 +29,10 @@ def reshape_extra_input_to_deepstack(
 class MultimodalEmbeddingInjector(nn.Module):
     """Insert multimodal features into the base embeddings at predefined offsets."""
 
+    def __init__(self, *, enable_fused_copy: bool = False) -> None:
+        super().__init__()
+        self.enable_fused_copy = enable_fused_copy
+
     def forward(
         self,
         embeddings: torch.Tensor,
@@ -52,6 +56,8 @@ class MultimodalEmbeddingInjector(nn.Module):
         locs = multimodal_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
 
         hidden_size = embeddings.size(-1)
+        copy_features: List[torch.Tensor] = []
+        copy_locs: List[int] = []
         for idx, (feature, loc) in enumerate(zip(multimodal_features, locs)):
             if feature is None or feature.numel() == 0:
                 continue
@@ -81,7 +87,45 @@ class MultimodalEmbeddingInjector(nn.Module):
                     f"within embeddings of length {embeddings.size(0)}"
                 )
 
-            embeddings.narrow(0, loc, length).copy_(feature.contiguous())
+            if not self.enable_fused_copy:
+                embeddings.narrow(0, loc, length).copy_(feature.contiguous())
+                continue
+            copy_features.append(feature.contiguous())
+            copy_locs.append(loc)
+
+        if not self.enable_fused_copy:
+            return embeddings
+
+        use_fused_copy = (
+            self.enable_fused_copy
+            and embeddings.is_cuda
+            and embeddings.is_contiguous()
+            and bool(copy_features)
+        )
+        if use_fused_copy:
+            intervals = sorted(
+                (loc, loc + feature.size(0))
+                for feature, loc in zip(copy_features, copy_locs)
+            )
+            use_fused_copy = all(
+                current_start >= previous_end
+                for (_, previous_end), (current_start, _) in zip(
+                    intervals, intervals[1:]
+                )
+            )
+
+        if use_fused_copy:
+            # Batch the small feature copies into one launch. Vision-BERT commonly
+            # has one feature per request item, so the scalar fallback otherwise
+            # creates O(batch_size) D2D launches on the model stream.
+            from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+            rtp_llm_ops.fused_multimodal_copy_(embeddings, copy_features, copy_locs)
+        else:
+            # Sequential copies define last-writer-wins semantics for overlapping
+            # ranges; a parallel fused kernel cannot preserve that ordering.
+            for feature, loc in zip(copy_features, copy_locs):
+                embeddings.narrow(0, loc, feature.size(0)).copy_(feature)
 
         return embeddings
 

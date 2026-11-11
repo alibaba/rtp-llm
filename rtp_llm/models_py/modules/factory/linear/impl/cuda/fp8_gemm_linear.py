@@ -20,6 +20,10 @@ class CudaFp8GEMMLinear(LinearBase):
     FLASHINFER_M_THRESHOLD = CudaFp8FlashinferLinear.FLASHINFER_M_THRESHOLD
     supports_fused_silu_quant = True
 
+    supports_deferred_bias = True
+    supports_prequantized_activation = True
+    fused_activation_quant_format = "fp8_ue8m0_block128_colmajor"
+
     @classmethod
     def can_handle(
         cls,
@@ -73,6 +77,12 @@ class CudaFp8GEMMLinear(LinearBase):
         self.K = self._deepgemm_linear.K
         self.N = self._deepgemm_linear.N
         self.scale_ue8m0 = getattr(self._deepgemm_linear, "scale_ue8m0", False)
+        # The BERT fused LayerNorm produces packed UE8M0, not Hopper's
+        # float32 activation scales. Ordinary forward dispatch is unchanged.
+        self.supports_prequantized_activation = self.scale_ue8m0
+        self.fused_activation_quant_format = (
+            "fp8_ue8m0_block128_colmajor" if self.scale_ue8m0 else None
+        )
         self.cached_scales = getattr(self._deepgemm_linear, "cached_scales", None)
         self.cached_scales_max_len = getattr(
             self._deepgemm_linear, "cached_scales_max_len", 0
@@ -152,3 +162,18 @@ class CudaFp8GEMMLinear(LinearBase):
         if self._should_use_flashinfer(gate_up[:, : self.K]):
             return None
         return self._deepgemm_linear.forward_silu_and_mul_quantized(gate_up)
+
+    def forward_without_bias(self, input: torch.Tensor) -> torch.Tensor:
+        if not self._should_use_flashinfer(input):
+            return self._deepgemm_linear.forward_without_bias(input)
+        return self._flashinfer_linear.forward_without_bias(input)
+
+    def forward_quantized(
+        self,
+        input: torch.Tensor,
+        input_scales: torch.Tensor,
+        apply_bias: bool = True,
+    ) -> torch.Tensor:
+        return self._deepgemm_linear.forward_quantized(
+            input, input_scales, apply_bias=apply_bias
+        )

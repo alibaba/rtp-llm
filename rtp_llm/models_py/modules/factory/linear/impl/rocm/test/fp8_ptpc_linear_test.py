@@ -1,5 +1,6 @@
 import json
 import unittest
+from types import SimpleNamespace
 from unittest import SkipTest, mock
 
 import torch
@@ -507,6 +508,34 @@ class RocmFp8PTPCLinearWithSwizzleTest(unittest.TestCase):
             RocmFp8PTPCLinearWithSwizzle._epilogue_name(False, True, False),
             "none",
         )
+
+    @torch.inference_mode()
+    def test_bert_mlp_preserves_rocm_bias_gelu_dispatch(self):
+        from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
+        from rtp_llm.ops import ActivationType
+
+        up = self._make_linear()
+        down = torch.nn.Linear(
+            self.output_size, self.hidden_size, device=self.device, dtype=torch.bfloat16
+        )
+        down.supports_deferred_bias = False
+        with mock.patch(
+            "rtp_llm.models_py.modules.hybrid.dense_mlp.LinearFactory.create_linear_from_weights",
+            side_effect=[up, down],
+        ):
+            mlp = DenseMLP(
+                ActivationType.Gelu,
+                SimpleNamespace(get_ffn_tp_size=lambda: 1),
+                {},
+                _FP8PTPCQuantConfig(),
+            )
+        expected = mlp(self.input_bf16)
+        with mock.patch.object(aiter, "hipb_mm", wraps=aiter.hipb_mm) as hipb_mm:
+            actual, deferred_bias = mlp.forward_without_output_bias(self.input_bf16)
+        hipb_mm.assert_called_once()
+        self.assertTrue(hipb_mm.call_args.kwargs["use_gelu"])
+        self.assertIsNone(deferred_bias)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def test_forward_with_bias_gelu_matches_gelu_of_biased_forward(self):
         linear = self._make_linear()

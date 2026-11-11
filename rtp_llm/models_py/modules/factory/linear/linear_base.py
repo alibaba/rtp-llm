@@ -20,6 +20,10 @@ class LinearBase(nn.Module, ABC):
     It inherits from nn.Module and implements forward() directly.
     """
 
+    supports_deferred_bias = False
+    supports_prequantized_activation = False
+    fused_activation_quant_format: Optional[str] = None
+
     @classmethod
     @abstractmethod
     def can_handle(
@@ -96,6 +100,22 @@ class LinearBase(nn.Module, ABC):
         The default implementation preserves existing device behavior.
         """
         return F.gelu(self.forward(input))
+
+    def forward_without_bias(self, input: torch.Tensor) -> torch.Tensor:
+        """Forward while deferring bias to a following fused epilogue."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support deferred bias"
+        )
+
+    def forward_quantized(
+        self,
+        input: torch.Tensor,
+        input_scales: torch.Tensor,
+        apply_bias: bool = True,
+    ) -> torch.Tensor:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not accept pre-quantized activations"
+        )
 
     def __repr__(self) -> str:
         """Return string representation of the strategy"""
