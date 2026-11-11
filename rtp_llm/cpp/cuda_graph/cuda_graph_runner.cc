@@ -2218,6 +2218,18 @@ void CudaGraphRunner::initCapture() {
         }
         initCaptureAttentionInputsPost();
         logCudaGraphPoolMemory("before_capture");
+        // Release allocator cache accumulated by weight loading/dequantization
+        // before capturing: at 1M context the capture-time indexer temporaries
+        // (up to GiB-scale per batch size) OOMed while >26GiB sat reserved but
+        // unallocated (load44: "Tried to allocate 2.00 GiB, 206MiB free,
+        // 26.62GiB reserved-unallocated"). Standard practice before graph
+        // capture; the graph pool allocates its own segments afterwards.
+        try {
+            cuda_graph::graphEmptyCache();
+            logCudaGraphPoolMemory("before_capture_empty_cache");
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("empty allocator cache before capture failed (non-fatal): %s", e.what());
+        }
 
         if (is_prefill_cuda_graph_mode_) {
             RTP_LLM_CHECK_WITH_INFO(isEmbeddingStylePrefillCudaGraph() || isMtpDraftPrefillCudaGraph()
