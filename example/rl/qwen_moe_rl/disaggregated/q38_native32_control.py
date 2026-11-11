@@ -23,6 +23,7 @@ class SourceLease:
     sha256_by_rank: tuple
     release: object
     expert_records: tuple = ()
+    dense_records: tuple = ()
 
 
 class Native32Policy:
@@ -129,7 +130,7 @@ class Native32Policy:
                         from qwen38_ep32_transport import ExpertReceived, push_expert_source
                         native_uuids = tuple(x.lower().removeprefix('gpu-')
                                              for group in self.topology.gpu_uuids for x in group)
-                        if (len(lease.expert_records) != WORLD
+                        if (lease.dense_records or len(lease.expert_records) != WORLD
                                 or any(not isinstance(row, ExpertReceived) for row in lease.expert_records)):
                             raise ValueError('expert sources require verified rank-local receive records')
                         for rank,row in enumerate(lease.expert_records):
@@ -148,8 +149,22 @@ class Native32Policy:
                     else:
                         if lease.expert_records or len(set(lease.sha256_by_rank)) != 1:
                             raise ValueError('shared HF source differs across native ranks')
-                        await self.control.push_weight(lease.name, lease.ipc_by_rank)
-                        await lease.release()
+                        if lease.dense_records:
+                            from q38_refit_dense import dense_native_acks, validate_dense_records
+
+                            native_uuids = tuple(x for group in self.topology.gpu_uuids for x in group)
+                            spec = validate_dense_records(
+                                lease.dense_records, native_uuids, self.incarnation,
+                                transaction=transaction, step=step, ordinal=len(received), name=lease.name,
+                            )
+                            if (tuple(record.metadata for record in lease.dense_records) != lease.ipc_by_rank
+                                    or lease.sha256_by_rank != (spec.sha256,) * WORLD):
+                                raise ValueError('dense lease metadata or digest differs from its receive records')
+                            replies = await self.control.push_weight(lease.name, lease.ipc_by_rank)
+                            await lease.release(dense_native_acks(lease.dense_records, replies))
+                        else:
+                            await self.control.push_weight(lease.name, lease.ipc_by_rank)
+                            await lease.release()
                     received[lease.name] = lease.sha256_by_rank
                     self.held_lease = None
                 if set(received) != self.sources:
@@ -181,7 +196,7 @@ class Native32Policy:
             self._next_dp = (self._next_dp+1) % DP
             self._active += 1
         try:
-            result = await client.generate(prompt_ids, sampling, request_id=request_id)
+            result = await client.generate(request_id, prompt_ids, sampling, expected_version=version)
             if (result.model_version != version or result.global_step != step
                     or result.log_probs is None or len(result.log_probs) != len(result.token_ids)):
                 self.poisoned = True

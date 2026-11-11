@@ -67,7 +67,9 @@ class Token:
     def __init__(self, control):
         self.control = control
 
-    async def generate(self, prompt_ids, sampling, *, request_id):
+    async def generate(self, request_id, prompt_ids, sampling, *, expected_version):
+        if expected_version != self.control.version:
+            raise RuntimeError('request is not bound to the committed policy')
         return SimpleNamespace(model_version=self.control.version, global_step=self.control.step,
                                log_probs=[-1.0], token_ids=[request_id])
 
