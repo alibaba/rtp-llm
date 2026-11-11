@@ -20,6 +20,7 @@ import org.flexlb.mock.protocol.*;
  */
 public final class BackendRpcClient implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(BackendRpcClient.class.getName());
+
     private static final int GENERATE_INPUT_REQUIRED = 8409;
     private static final int INVALID_REQUEST = 8406;
 
@@ -87,6 +88,30 @@ public final class BackendRpcClient implements AutoCloseable {
     }
 
     Call send(FlexlbScheduleRequestPB request, GenerateInputPB input, Duration timeout, List<Integer> expectedImageTokens) {
+        return send(prepare(request, input, timeout, expectedImageTokens));
+    }
+
+    Call send(PreparedCall prepared) {
+        var request = prepared.request();
+        Call call;
+        synchronized (this) {
+            if (closed || closing) throw new IllegalStateException("Client closed");
+            if (active.containsKey(request.getRequestId())) throw new IllegalArgumentException("Active request_id already exists");
+            call = new Call(request, prepared.input(), prepared.budget(), prepared.baseBlockSize(), prepared.expectedImageTokens());
+            events.accept(call.event("ISSUED").put("epoch_ms", Long.toString(call.sentAt.toEpochMilli())));
+            active.put(request.getRequestId(), call);
+        }
+        synchronized (call) {
+            if (call.terminal) return call;
+            call.context.addListener(c -> {
+                if (c.getDeadline().isExpired()) call.finish(Status.DEADLINE_EXCEEDED, 0, Outcome.timeout);
+            }, Runnable::run);
+            if (!call.terminal) call.context.run(() -> call.schedule(0));
+        }
+        return call;
+    }
+
+    PreparedCall prepare(FlexlbScheduleRequestPB request, GenerateInputPB input, Duration timeout, List<Integer> expectedImageTokens) {
         Objects.requireNonNull(timeout);
         long budget = timeout.toNanos();
         if (budget <= 0) throw new IllegalArgumentException("Positive request timeout required");
@@ -106,22 +131,7 @@ public final class BackendRpcClient implements AutoCloseable {
             }
             request = routed.build();
         }
-        Call call;
-        synchronized (this) {
-            if (closed || closing) throw new IllegalStateException("Client closed");
-            if (active.containsKey(request.getRequestId())) throw new IllegalArgumentException("Active request_id already exists");
-            call = new Call(request, input, budget, baseBlockSize, List.copyOf(expectedImageTokens));
-            events.accept(call.event("ISSUED").put("epoch_ms", Long.toString(call.sentAt.toEpochMilli())));
-            active.put(request.getRequestId(), call);
-        }
-        synchronized (call) {
-            if (call.terminal) return call;
-            call.context.addListener(c -> {
-                if (c.getDeadline().isExpired()) call.finish(Status.DEADLINE_EXCEEDED, 0, Outcome.timeout);
-            }, Runnable::run);
-            if (!call.terminal) call.context.run(() -> call.schedule(0));
-        }
-        return call;
+        return new PreparedCall(request, input, budget, baseBlockSize, List.copyOf(expectedImageTokens));
     }
 
     private synchronized ManagedChannel channel(String target) {
@@ -144,6 +154,9 @@ public final class BackendRpcClient implements AutoCloseable {
             throw Status.DATA_LOSS.withDescription("Invalid native route address").asRuntimeException();
         return (server.getServerIp().contains(":") ? "[" + server.getServerIp() + "]" : server.getServerIp()) + ":" + server.getGrpcPort();
     }
+
+    record PreparedCall(FlexlbScheduleRequestPB request, GenerateInputPB input, long budget, long baseBlockSize,
+                        List<Integer> expectedImageTokens) {}
 
     public enum Outcome { success, error, cancelled, timeout }
 

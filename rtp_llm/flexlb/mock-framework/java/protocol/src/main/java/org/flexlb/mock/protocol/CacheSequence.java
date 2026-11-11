@@ -23,7 +23,10 @@ public final class CacheSequence {
 
     public CacheSequence(int blockSize, List<Integer> tokens, List<Span> spans, long seed, int keyStride) {
         if (blockSize < 1 || keyStride < 1) throw new IllegalArgumentException("Invalid cache block size");
-        tokens = List.copyOf(tokens); spans = List.copyOf(spans);
+        // Generated messages expose an immutable primitive list. Keep that storage for hashing.
+        tokens = tokens instanceof com.google.protobuf.Internal.IntList ints && !ints.isModifiable()
+            ? ints : List.copyOf(tokens);
+        spans = List.copyOf(spans);
         long previous = 0;
         for (var span : spans) {
             long end = (long) span.offset() + span.rowHashes().size();
@@ -73,10 +76,12 @@ public final class CacheSequence {
         var keys = new ArrayList<>(prefix);
         long hash = prefix.isEmpty() ? seed : prefix.getLast();
         int spanIndex = 0;
+        java.util.function.IntUnaryOperator tokenAt = tokens instanceof com.google.protobuf.Internal.IntList ints
+            ? ints::getInt : tokens::get;
         // Hash at physical block boundaries and retain only complete logical block keys.
         for (int start = prefixTokens; start < completeTokens; start += hashBlockSize) {
             for (int i = start; i < start + hashBlockSize; i++)
-                hash = roll(hash, i < tokens.size() ? tokens.get(i) : outputToken);
+                hash = roll(hash, i < tokens.size() ? tokenAt.applyAsInt(i) : outputToken);
             while (spanIndex < spans.size() && spans.get(spanIndex).offset() + spans.get(spanIndex).rowHashes().size() <= start)
                 spanIndex++;
             for (int j = spanIndex; j < spans.size() && spans.get(j).offset() < start + hashBlockSize; j++) {

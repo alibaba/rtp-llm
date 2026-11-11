@@ -467,6 +467,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                     discovery.check();
                     if (journal.failure() != null) fail(journal.failure());
                     List<BackendRpcClient.Call> cancel = List.of();
+                    Item item = null;
                     synchronized (this) {
                         if (!begun && !stopped && System.nanoTime() >= prepareDeadline) fail("Timed out waiting for begin");
                         if (producerDone && queue.isEmpty() && active.isEmpty()) break;
@@ -474,35 +475,12 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                             fail("Client drain timed out");
                             cancel = List.copyOf(active.values());
                         } else if (begun && !stopped && !queue.isEmpty() && active.size() < plan.concurrency()) {
-                            var item = queue.remove();
-                            var entry = item.entry();
-                            var input = entry.input().toBuilder().setRequestId(item.requestId());
-                            input.getGenerateConfigBuilder().setReuseCache(Boolean.TRUE.equals(plan.reuse_cache()))
-                                .setMaxNewTokens(item.outputLimit()).setIgnoreEos(entry.observedOutputTokens() > 0)
-                                .setCanUsePdSeparation(true).setReturnIncremental(true).setIsStreaming(true);
-                            var generateInput = input.build();
-                            var request = FlexlbScheduleRequestPB.newBuilder().setRequestId(item.requestId())
-                                .setCacheKeyBlockSize(blockSize).setSeqLen(input.getTokenIdsCount())
-                                .setMaxNewTokens(input.getGenerateConfig().getMaxNewTokens()).setPriority(entry.priority())
-                                .build();
-                            var call = client.send(request, generateInput, Duration.ofMillis(plan.request_timeout_ms()), entry.expectedImageTokens());
-                            active.put(item.requestId(), call);
-                            synchronized (stateLock) { issued++; }
-                            metrics.issued();
-                            call.completion().whenComplete((result, error) -> {
-                                synchronized (Session.this) {
-                                    active.remove(item.requestId());
-                                    synchronized (stateLock) {
-                                        finished++;
-                                        if (error == null) outcomes.merge(result.outcome().name(), 1L, Long::sum);
-                                    }
-                                    if (error != null) fail("Request execution failed: " + error);
-                                    else metrics.finished(result);
-                                    LockSupport.unpark(dispatcher);
-                                }
-                            });
-                            continue;
+                            item = queue.remove();
                         }
+                    }
+                    if (item != null) {
+                        issue(item);
+                        continue;
                     }
                     // Native completion callbacks acquire this object's monitor; never cancel while holding it.
                     cancel.forEach(BackendRpcClient.Call::cancel);
@@ -526,6 +504,40 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                 }
                 completion.complete(result);
             }
+        }
+
+        private void issue(Item item) {
+            var entry = item.entry();
+            var input = entry.input().toBuilder().setRequestId(item.requestId());
+            input.getGenerateConfigBuilder().setReuseCache(Boolean.TRUE.equals(plan.reuse_cache()))
+                .setMaxNewTokens(item.outputLimit()).setIgnoreEos(entry.observedOutputTokens() > 0)
+                .setCanUsePdSeparation(true).setReturnIncremental(true).setIsStreaming(true);
+            var generateInput = input.build();
+            var request = FlexlbScheduleRequestPB.newBuilder().setRequestId(item.requestId())
+                .setCacheKeyBlockSize(blockSize).setSeqLen(input.getTokenIdsCount())
+                .setMaxNewTokens(input.getGenerateConfig().getMaxNewTokens()).setPriority(entry.priority())
+                .build();
+            var prepared = client.prepare(request, generateInput, Duration.ofMillis(plan.request_timeout_ms()), entry.expectedImageTokens());
+            BackendRpcClient.Call call;
+            synchronized (this) {
+                if (stopped) return;
+                call = client.send(prepared);
+                active.put(item.requestId(), call);
+                synchronized (stateLock) { issued++; }
+                metrics.issued();
+            }
+            call.completion().whenComplete((result, error) -> {
+                synchronized (Session.this) {
+                    active.remove(item.requestId());
+                    synchronized (stateLock) {
+                        finished++;
+                        if (error == null) outcomes.merge(result.outcome().name(), 1L, Long::sum);
+                    }
+                    if (error != null) fail("Request execution failed: " + error);
+                    else metrics.finished(result);
+                    LockSupport.unpark(dispatcher);
+                }
+            });
         }
 
         private State snapshot(boolean done) {
