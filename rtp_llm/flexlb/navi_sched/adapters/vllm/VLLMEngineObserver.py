@@ -5207,6 +5207,7 @@ class VLLMEngineObserver:
         if (
             getattr(self, "_observed_execution_window_training", False)
             and execution_step is not None
+            and execution_step.prefill_tokens > 0
         ):
             self._prefill_execution_windows.register(execution_step.started_ns)
 
