@@ -2379,6 +2379,19 @@ class AttentionV41FP8(AttentionFP8):
         return meta
 
     def _forward_prefill(self, x, positions, shared_input_quant=None):
+        # Reserve the one full [global + SWA] KV concat buffer before layer
+        # scratch exists.  Allocating it at concat time is too late: the long
+        # context has already consumed the reserve and a fresh 2 GiB block
+        # cannot be carved out even though the same total peak is reachable.
+        shared = self._shared_attention
+        if (
+            shared.get("prefill_kv_buffer") is None
+            and x.is_cuda
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            shared["prefill_kv_buffer"] = torch.empty(
+                2_400_000_000, dtype=torch.uint8, device=x.device
+            )
         prepared = self._prefill_produce(x, positions, shared_input_quant)
         return self._prefill_query(x, *prepared)
 
