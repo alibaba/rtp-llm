@@ -610,11 +610,11 @@ public:
         ASSERT_EQ(cache.task_pool_->pending_tasks_.load(), 0);
         {
             std::lock_guard<std::mutex> lock(cache.mutex_);
-            cache.config_.watermark_host   = {};
-            cache.config_.watermark_disk   = {};
+            cache.config_.watermark_host   = {1.0, 1.0};
+            cache.config_.watermark_disk   = {1.0, 1.0};
             cache.config_.watermark_device = {ratio, std::nextafter(ratio, 1.0)};
             cache.checkWatermark();
-            cache.config_.watermark_device = {};
+            cache.config_.watermark_device = {1.0, 1.0};
         }
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(cache);
         EXPECT_EQ(cache.task_pool_->pending_tasks_.load(), 0);

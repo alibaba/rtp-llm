@@ -32,7 +32,8 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
                                    int                            disk_timeout_ms,
                                    size_t                         max_descriptors_per_batch,
                                    IsTierEnabledFn                is_tier_enabled,
-                                   SettledFn                      settled):
+                                   SettledFn                      settled,
+                                   size_t                         disk_cache_evict_max_pending_bytes):
     tree_(tree),
     task_pool_(task_pool),
     metrics_reporter_(&metrics_reporter),
@@ -42,7 +43,8 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
     task_runner_(std::make_unique<EvictionTaskRunner>(tree->groupSets(), transfer_dispatcher)),
     host_timeout_ms_(host_timeout_ms),
     disk_timeout_ms_(disk_timeout_ms),
-    max_descriptors_per_batch_(max_descriptors_per_batch) {
+    max_descriptors_per_batch_(max_descriptors_per_batch),
+    disk_cache_evict_max_pending_bytes_(disk_cache_evict_max_pending_bytes) {
     // GroupSetFactory has already validated that group_set_id equals the vector
     // position. Own one heap per (group resource, tier).
     heaps_.resize(tree_->groupSets().size());
@@ -428,11 +430,25 @@ bool BlockTreeEvictor::submitEvictionTask(std::vector<TransferDescriptor>     de
         deadline,
         std::move(on_timeout));
     if (!submitted) {
+        const auto& first  = task_ptr->descriptors().front();
+        const auto  queues = task_pool_->queueSizes();
+        RTP_LLM_INTERVAL_LOG(5,
+                             WARN,
+                             "eviction submission rejected: group_set=%zu source=%s target=%s blocks=%zu "
+                             "queue_load=%zu queue_background=%zu queue_completion=%zu",
+                             first.group_set_id,
+                             tierName(first.source_tier),
+                             tierName(first.target_tier),
+                             task_ptr->descriptors().size(),
+                             queues.load,
+                             queues.background,
+                             queues.completion);
         for (const auto& desc : task_ptr->descriptors()) {
             heaps_[desc.group_set_id].pending_timings.erase(desc.node);
         }
         updatePendingRelease(task_ptr->descriptors(), false);
         rollbackTransferLocked(task_ptr->descriptors());
+        metrics_reporter_->reportEvictionFinished(*task_ptr, tree_->groupSets(), false);
         return false;
     }
     return true;
@@ -474,10 +490,27 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
                 /*scheduled_count=*/0};
     }
 
-    auto target_blocks =
-        tree_->groupSets()[group_set_id]->allocateBlocks(descriptors.size(), target_tier, BlockTreeRefType::EVICTION);
+    const auto& group_set     = tree_->groupSets()[group_set_id];
+    auto        target_blocks = group_set->allocateBlocks(descriptors.size(), target_tier, BlockTreeRefType::EVICTION);
     if (!target_blocks.has_value()) {
+        const IBlockPool* pool = target_tier == Tier::HOST ?
+                                     static_cast<const IBlockPool*>(group_set->hostPool().get()) :
+                                     static_cast<const IBlockPool*>(group_set->diskPool().get());
+        RTP_LLM_INTERVAL_LOG(5,
+                             WARN,
+                             "eviction target allocation failed: group_set=%zu source=%s target=%s blocks=%zu "
+                             "target_pool=%s",
+                             group_set_id,
+                             tierName(source_tier),
+                             tierName(target_tier),
+                             descriptors.size(),
+                             pool ? pool->debugString().c_str() : "<null>");
         rollbackTransferLocked(descriptors);
+        metrics_reporter_->reportEvictionFinished(
+            EvictionTransferTask(TransferTask(std::move(descriptors), std::chrono::milliseconds(0)),
+                                 std::move(timings)),
+            tree_->groupSets(),
+            false);
         return {/*direct_progress=*/false,
                 /*async_submitted=*/false,
                 /*scheduled_count=*/0};
@@ -541,68 +574,71 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
     auto observation = CompletionStageContext::forTransfer(*metrics_reporter_, task->transfer_task, "evict", success);
     auto timers      = CompletionStageTimers::create(observation);
     const int64_t queue_begin = currentTimeUs();
-    auto          settle =
-        [this, task = std::move(task), success, observation, timers, queue_begin](bool queued) noexcept {
-            timers.finishQueue(success);
-            block_tree_cache_detail::ScopeRollback finish([&] { timers.finish(success); });
-            CompletionStageScope                   execute(observation, "completion_execute", "business_completion");
-            if (queued) {
-                metrics_reporter_->reportQueueWaitMetric(
-                    true, "business", "evict", Tier::NONE, Tier::NONE, currentTimeUs() - queue_begin);
-            }
-            bool                any_not_detached = false;
-            std::vector<size_t> settled_indices;
+    auto settle = [this, task = std::move(task), success, observation, timers, queue_begin](bool queued) noexcept {
+        timers.finishQueue(success);
+        block_tree_cache_detail::ScopeRollback finish([&] { timers.finish(success); });
+        CompletionStageScope                   execute(observation, "completion_execute", "business_completion");
+        if (queued) {
+            metrics_reporter_->reportQueueWaitMetric(
+                true, "business", "evict", Tier::NONE, Tier::NONE, currentTimeUs() - queue_begin);
+        }
+        bool              any_not_detached = false;
+        std::vector<bool> detached;
+        detached.reserve(task->descriptors().size());
+        {
+            std::unique_lock<std::mutex> lock(*mutex_, std::defer_lock);
             {
-                std::unique_lock<std::mutex> lock(*mutex_, std::defer_lock);
+                CompletionStageScope wait(
+                    observation, "completion_lock_wait", "business_completion", AsyncProfileKind::Wait);
+                lock.lock();
+            }
+            CompletionStageScope tree(observation, "completion_settle", "business_completion");
+            for (const TransferDescriptor& desc : task->descriptors()) {
+                heaps_[desc.group_set_id].pending_timings.erase(desc.node);
+                const bool is_detached = desc.node->group_set_resources[desc.group_set_id].transfer_detached;
+                detached.push_back(is_detached);
+                any_not_detached = any_not_detached || !is_detached;
+            }
+
+            if (success) {
                 {
-                    CompletionStageScope wait(observation, "completion_lock_wait", "business_completion", AsyncProfileKind::Wait);
-                    lock.lock();
-                }
-                CompletionStageScope tree(observation, "completion_settle", "business_completion");
-                std::vector<bool>    detached;
-                detached.reserve(task->descriptors().size());
-                for (const TransferDescriptor& desc : task->descriptors()) {
-                    heaps_[desc.group_set_id].pending_timings.erase(desc.node);
-                    const bool is_detached = desc.node->group_set_resources[desc.group_set_id].transfer_detached;
-                    detached.push_back(is_detached);
-                    any_not_detached = any_not_detached || !is_detached;
-                }
-
-                if (success) {
-                    {
-                        CompletionStageScope update(observation, "completion_tree_update", "business_completion");
-                        completeEvict(task->descriptors());
-                    }
-                    {
-                        CompletionStageScope cleanup(observation, "completion_cleanup", "business_completion");
-                        settleEviction(task->descriptors());
-                    }
-                } else {
-                    CompletionStageScope rollback(observation, "completion_rollback", "business_completion");
-                    rollbackTransferLocked(task->descriptors());
-                }
-                updatePendingRelease(task->descriptors(), false);
-                const auto& descriptor = task->descriptors().front();
-
-                for (size_t desc_index = 0; desc_index < task->descriptors().size(); ++desc_index) {
-                    if (success && !detached[desc_index]) {
-                        settled_indices.push_back(desc_index);
-                    }
+                    CompletionStageScope update(observation, "completion_tree_update", "business_completion");
+                    completeEvict(task->descriptors());
                 }
                 {
-                    CompletionStageScope watermark(observation, "completion_watermark", "business_completion");
-                    settled_(success && any_not_detached);
+                    CompletionStageScope cleanup(observation, "completion_cleanup", "business_completion");
+                    settleEviction(task->descriptors());
+                }
+            } else {
+                CompletionStageScope rollback(observation, "completion_rollback", "business_completion");
+                rollbackTransferLocked(task->descriptors());
+            }
+            updatePendingRelease(task->descriptors(), false);
+            const auto& descriptor = task->descriptors().front();
+
+            {
+                CompletionStageScope watermark(observation, "completion_watermark", "business_completion");
+                const bool is_host_disk = descriptor.source_tier == Tier::HOST && descriptor.target_tier == Tier::DISK;
+                auto&      round =
+                    heaps_[descriptor.group_set_id].watermark_rounds[static_cast<size_t>(descriptor.source_tier)];
+                // Keep the round active while settled_ rechecks watermarks.
+                settled_(success && any_not_detached);
+                if (is_host_disk) {
+                    if (!success) {
+                        round.watermark.reset();
+                    }
+                    scheduleWatermarkEvictionsLocked(Tier::HOST);
+                }
+                if (!is_host_disk || !round.watermark.has_value()) {
                     finishWatermarkRoundLocked(descriptor.group_set_id, descriptor.source_tier);
                 }
             }
-            if (!settled_indices.empty()) {
-                CompletionStageScope metrics(observation, "completion_metrics", "business_completion");
-                for (const size_t index : settled_indices) {
-                    metrics_reporter_->reportEvictedDescriptor(
-                        task->descriptors()[index], task->timings[index], tree_->groupSets(), "watermark");
-                }
-            }
-        };
+        }
+        if (any_not_detached) {
+            CompletionStageScope metrics(observation, "completion_metrics", "business_completion");
+            metrics_reporter_->reportEvictionFinished(*task, tree_->groupSets(), success, detached);
+        }
+    };
 
     bool submitted = false;
     try {
@@ -770,41 +806,89 @@ Tier BlockTreeEvictor::watermarkTargetTier(Tier source_tier) const {
     return Tier::NONE;
 }
 
-size_t BlockTreeEvictor::watermarkLogicalBatchLimit(Tier source_tier, Tier target_tier) const {
-    if ((source_tier == Tier::DEVICE && target_tier == Tier::HOST)
-        || (source_tier == Tier::HOST && target_tier == Tier::DISK)) {
+size_t
+BlockTreeEvictor::watermarkLogicalBatchLimit(const GroupSet& group_set, Tier source_tier, Tier target_tier) const {
+    if (target_tier == Tier::NONE) {
+        return std::numeric_limits<size_t>::max();
+    }
+    if (source_tier != Tier::HOST || target_tier != Tier::DISK || !group_set.diskPool()) {
         return max_descriptors_per_batch_;
     }
-    return std::numeric_limits<size_t>::max();
+    size_t available_bytes = disk_cache_evict_max_pending_bytes_;
+    bool   has_pending     = false;
+    for (const auto& pending_group : tree_->groupSets()) {
+        const size_t count =
+            heaps_[pending_group->groupSetId()].watermark_rounds[static_cast<size_t>(Tier::HOST)].pending_count;
+        if (count == 0) {
+            continue;
+        }
+        has_pending        = true;
+        const size_t bytes = pending_group->diskPool()->strideBytes();
+        if (count > available_bytes / bytes) {
+            return 0;
+        }
+        available_bytes -= count * bytes;
+    }
+    size_t count = available_bytes / group_set.diskPool()->strideBytes();
+    if (count == 0 && !has_pending) {
+        count = 1;
+    }
+    return std::min(count, max_descriptors_per_batch_);
 }
 
 void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier                         tier,
-                                                        const TierWatermark&         tier_watermark,
+                                                        std::optional<TierWatermark> tier_watermark,
                                                         std::optional<TierWatermark> full_watermark) {
-    for (const GroupSetPtr& group_set : tree_->groupSets()) {
-        const TierWatermark& watermark = group_set->groupType() == CacheGroupType::FULL && full_watermark.has_value() ?
-                                             *full_watermark :
-                                             tier_watermark;
-        if (!watermark.enabled()) {
+    const bool   is_host_disk       = tier == Tier::HOST && watermarkTargetTier(tier) == Tier::DISK;
+    const auto&  group_sets         = tree_->groupSets();
+    const size_t first_group        = is_host_disk ? next_disk_evict_group_ : 0;
+    bool         waiting_for_budget = false;
+    for (size_t i = 0; i < group_sets.size(); ++i) {
+        const size_t group_index = (first_group + i) % group_sets.size();
+        const auto&  group_set   = group_sets[group_index];
+        auto&        round       = heaps_[group_set->groupSetId()].watermark_rounds[static_cast<size_t>(tier)];
+        if (tier_watermark.has_value()
+            && (!is_host_disk
+                || (!round.watermark.has_value() && round.required_count == 0 && round.pending_count == 0))) {
+            round.watermark = group_set->groupType() == CacheGroupType::FULL && full_watermark.has_value() ?
+                                  full_watermark :
+                                  tier_watermark;
+        }
+        if (!round.watermark.has_value()) {
             continue;
         }
-        const size_t initial_required_count = computeWatermarkEvictCount(*group_set, tier, watermark);
-        auto&        round = heaps_[group_set->groupSetId()].watermark_rounds[static_cast<size_t>(tier)];
+        const auto& watermark      = *round.watermark;
+        size_t      required_count = computeWatermarkEvictCount(*group_set, tier, watermark);
         if (round.required_count == 0) {
-            round.required_count = initial_required_count;
+            round.required_count = required_count;
         }
-        size_t required_count    = initial_required_count;
-        bool   eviction_reported = false;
-        while (required_count > 0) {
-            const Tier   target_tier      = watermarkTargetTier(tier);
-            const size_t batch_count      = std::min(required_count, watermarkLogicalBatchLimit(tier, target_tier));
+        bool eviction_reported = is_host_disk && round.scheduled_count != 0;
+        while (required_count > 0 && !waiting_for_budget) {
+            const Tier   target_tier = watermarkTargetTier(tier);
+            const size_t batch_count =
+                std::min(required_count, watermarkLogicalBatchLimit(*group_set, tier, target_tier));
+            if (batch_count == 0) {
+                waiting_for_budget = true;
+                // Let pending writes drain so smaller groups cannot starve this block.
+                next_disk_evict_group_ = group_index;
+                break;
+            }
             const BatchEvictResult result = batchEvictLocked(group_set->groupSetId(), tier, batch_count);
             round.scheduled_count += result.scheduled_count;
             if (result.madeProgress() && !eviction_reported) {
                 metrics_reporter_->reportEvictionTriggered(tier, group_set->groupType(), /*force_drop=*/false);
                 eviction_reported = true;
             }
-            if (result.async_submitted || !result.direct_progress) {
+            if (!result.madeProgress()) {
+                if (!is_host_disk || round.pending_count == 0) {
+                    round.watermark.reset();
+                }
+                break;
+            }
+            if (is_host_disk && result.async_submitted) {
+                next_disk_evict_group_ = (group_index + 1) % group_sets.size();
+            }
+            if (result.async_submitted) {
                 break;
             }
 
@@ -814,20 +898,24 @@ void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier                    
             }
             required_count = remaining_count;
         }
-        finishWatermarkRoundLocked(group_set->groupSetId(), tier);
+        if (!is_host_disk || !round.watermark.has_value() || required_count == 0) {
+            finishWatermarkRoundLocked(group_set->groupSetId(), tier);
+        }
     }
 }
 
 void BlockTreeEvictor::finishWatermarkRoundLocked(size_t group_set_id, Tier source_tier) {
     auto& round = heaps_[group_set_id].watermark_rounds[static_cast<size_t>(source_tier)];
-    if (round.required_count == 0 || round.pending_count != 0) {
+    if (round.pending_count != 0) {
         return;
     }
-    metrics_reporter_->reportEvictionBlocks(source_tier,
-                                            tree_->groupSets()[group_set_id]->groupType(),
-                                            /*force_drop=*/false,
-                                            round.required_count,
-                                            round.scheduled_count);
+    if (round.required_count != 0) {
+        metrics_reporter_->reportEvictionBlocks(source_tier,
+                                                tree_->groupSets()[group_set_id]->groupType(),
+                                                /*force_drop=*/false,
+                                                round.required_count,
+                                                round.scheduled_count);
+    }
     round = {};
 }
 
@@ -1366,7 +1454,7 @@ EvictionDropTask BlockTreeEvictor::createDropTask(TransferDescriptor    eviction
         const auto               timing = resource.transfer_state == GroupSetTransferState::DEMOTING ?
                                               heaps_[group_set_id].pending_timings.at(node) :
                                               EvictionTimingSnapshot(resource.candidate_meta);
-        metrics_reporter_->reportEvictedDescriptor(desc, timing, group_sets, trigger_type);
+        metrics_reporter_->reportEvictionDescriptor(desc, timing, group_sets, trigger_type, true);
         resource.transfer_detached = true;
         tree_->refreshPublishedState(node);
     }
@@ -1471,42 +1559,8 @@ void BlockTreeEvictor::selectUpwardCascades(EvictionDropTask&     task,
     }
 }
 
-size_t BlockTreeEvictor::computePoolWatermarkRequired(IBlockPool*          pool,
-                                                      size_t               pending_count,
-                                                      const TierWatermark& watermark,
-                                                      bool&                high_reached) const {
-    const size_t used = pool->usedBlocksNum();
-    if (pending_count > 0) {
-        RTP_LLM_CHECK_WITH_INFO(pending_count <= used,
-                                "pending eviction releases exceed used blocks: "
-                                "pool=%s address=%p pending=%zu used=%zu total=%zu low_ratio=%f high_ratio=%f",
-                                pool->poolName().c_str(),
-                                static_cast<void*>(pool),
-                                pending_count,
-                                used,
-                                pool->totalBlocksNum(),
-                                watermark.low_ratio,
-                                watermark.high_ratio);
-    }
-    const size_t effective_used = used - pending_count;
-    const size_t high_used_blocks =
-        static_cast<size_t>(std::ceil(static_cast<double>(pool->totalBlocksNum()) * watermark.high_ratio));
-    const size_t low_used_blocks =
-        static_cast<size_t>(std::floor(static_cast<double>(pool->totalBlocksNum()) * watermark.low_ratio));
-    high_reached = high_reached || effective_used >= high_used_blocks;
-    return effective_used > low_used_blocks ? effective_used - low_used_blocks : 0;
-}
-
 size_t
 BlockTreeEvictor::computeWatermarkEvictCount(const GroupSet& group_set, Tier tier, const TierWatermark& watermark) {
-    RTP_LLM_CHECK_WITH_INFO(watermark.low_ratio > 0.0 && watermark.low_ratio < watermark.high_ratio
-                                && watermark.high_ratio <= 1.0,
-                            "watermark ratios must satisfy 0 < low < high <= 1: "
-                            "group_set=%zu tier=%s low_ratio=%f high_ratio=%f",
-                            group_set.groupSetId(),
-                            tierName(tier),
-                            watermark.low_ratio,
-                            watermark.high_ratio);
     if (tier != Tier::DEVICE && tier != Tier::HOST && tier != Tier::DISK) {
         return 0;
     }
@@ -1522,27 +1576,45 @@ BlockTreeEvictor::computeWatermarkEvictCount(const GroupSet& group_set, Tier tie
         pools.push_back(group_set.diskPool().get());
     }
 
-    std::vector<size_t> pending_counts(pools.size(), 0);
-    {
-        std::lock_guard<std::mutex> lock(pending_release_mutex_);
-        for (size_t pool_index = 0; pool_index < pools.size(); ++pool_index) {
-            const auto pending = pending_release_counts_.find(pools[pool_index]);
-            if (pending != pending_release_counts_.end()) {
-                pending_counts[pool_index] = pending->second;
-            }
-        }
-    }
-
-    bool&  triggered      = heaps_[group_set.groupSetId()].watermark_triggered[static_cast<size_t>(tier)];
+    bool   has_pending    = false;
     bool   high_reached   = false;
     size_t required_count = 0;
-    for (size_t pool_index = 0; pool_index < pools.size(); ++pool_index) {
-        required_count = std::max(
-            required_count,
-            computePoolWatermarkRequired(pools[pool_index], pending_counts[pool_index], watermark, high_reached));
+    for (IBlockPool* pool : pools) {
+        size_t pending_count = 0;
+        {
+            std::lock_guard<std::mutex> lock(pending_release_mutex_);
+            const auto                  pending = pending_release_counts_.find(pool);
+            if (pending != pending_release_counts_.end()) {
+                pending_count = pending->second;
+            }
+        }
+        const size_t used  = pool->usedBlocksNum();
+        const size_t total = pool->totalBlocksNum();
+        if (pending_count > 0) {
+            RTP_LLM_CHECK_WITH_INFO(pending_count <= used,
+                                    "pending eviction releases exceed used blocks: "
+                                    "pool=%s address=%p pending=%zu used=%zu total=%zu low_ratio=%f high_ratio=%f",
+                                    pool->poolName().c_str(),
+                                    static_cast<void*>(pool),
+                                    pending_count,
+                                    used,
+                                    total,
+                                    watermark.low_ratio,
+                                    watermark.high_ratio);
+        }
+        const size_t effective_used = used - pending_count;
+        const size_t high_used_blocks =
+            static_cast<size_t>(std::ceil(static_cast<double>(total) * watermark.high_ratio));
+        const size_t low_used_blocks =
+            static_cast<size_t>(std::floor(static_cast<double>(total) * watermark.low_ratio));
+        has_pending  = has_pending || pending_count != 0;
+        high_reached = high_reached || effective_used >= high_used_blocks;
+        required_count =
+            std::max(required_count, effective_used > low_used_blocks ? effective_used - low_used_blocks : 0);
     }
 
-    if (required_count == 0) {
+    bool& triggered = heaps_[group_set.groupSetId()].watermark_triggered[static_cast<size_t>(tier)];
+    if (required_count == 0 && !has_pending) {
         triggered = false;
     } else if (high_reached) {
         triggered = true;
