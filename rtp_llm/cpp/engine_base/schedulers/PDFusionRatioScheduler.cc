@@ -197,8 +197,8 @@ bool PDFusionRatioScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>
 }
 
 bool PDFusionRatioScheduler::waitPredicate() {
-    return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !loading_cache_streams_.empty()
-           || !running_streams_.empty() || !pending_decode_streams_.empty();
+    return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !cache_ready_streams_.empty()
+           || !loading_cache_streams_.empty() || !running_streams_.empty() || !pending_decode_streams_.empty();
 }
 
 absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
@@ -220,11 +220,12 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
     const RoundType round = chooseRound();
 
     if (round == RoundType::PREFILL) {
-        const size_t prev_waiting_size = waiting_streams_.size();
+        const size_t prev_waiting_size = cache_ready_streams_.size() + waiting_streams_.size();
         // Build once for this in-flight snapshot, then update for accepted candidates.
         admission_peak_state_.reset();
         const auto admitted_streams = evaluateWaitingStreams(waiting_streams_, /*include_running_mode=*/false);
         admission_peak_state_.reset();
+        made_progress |= evaluateAndUpdateStreams(cache_ready_streams_, &admitted_streams) > 0;
         made_progress |= evaluateAndUpdateStreams(waiting_streams_, &admitted_streams) > 0;
         if (!new_streams_.empty()) {
             list<GenerateStreamPtr> prefill_batch(new_streams_.begin(), new_streams_.end());
@@ -232,7 +233,7 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
             new_streams_.clear();
             decode_since_prefill_ = 0;
             prefill_since_decode_ += 1;
-            if (waiting_streams_.size() < prev_waiting_size) {
+            if (cache_ready_streams_.size() + waiting_streams_.size() < prev_waiting_size) {
                 schedule_trigger_ = true;
             }
             reportMetrics();
@@ -247,10 +248,11 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
         decode_since_prefill_ += 1;
         prefill_since_decode_ = 0;
     }
-    if (!pending_decode_streams_.empty() || (made_progress && !waiting_streams_.empty())) {
+    if (!pending_decode_streams_.empty()
+        || (made_progress && (!cache_ready_streams_.empty() || !waiting_streams_.empty()))) {
         schedule_trigger_ = true;
     }
-    if (running_streams_.empty() && !made_progress && !waiting_streams_.empty()) {
+    if (running_streams_.empty() && !made_progress && (!cache_ready_streams_.empty() || !waiting_streams_.empty())) {
         cond_.wait_for(lock, kNoProgressScheduleGap, [this] {
             return stop_ || schedule_trigger_ || !loading_cache_streams_.empty() || !running_streams_.empty()
                    || !pending_decode_streams_.empty();
@@ -263,7 +265,7 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
 }
 
 PDFusionRatioScheduler::RoundType PDFusionRatioScheduler::chooseRound() {
-    if (waiting_streams_.empty()) {
+    if (cache_ready_streams_.empty() && waiting_streams_.empty()) {
         return RoundType::DECODE;
     }
     if (running_streams_.empty() && pending_decode_streams_.empty()) {
@@ -282,7 +284,7 @@ PDFusionRatioScheduler::RoundType PDFusionRatioScheduler::chooseRound() {
 void PDFusionRatioScheduler::buildAdmissionPeakState() {
     auto state = std::make_unique<AdmissionPeakState>();
     state->streams.reserve(loading_cache_streams_.size() + running_streams_.size() + pending_decode_streams_.size()
-                           + waiting_streams_.size());
+                           + cache_ready_streams_.size() + waiting_streams_.size());
     auto append_stream = [&](const GenerateStreamPtr& s) {
         state->streams.push_back({s, remainingKVAllocationSteps(s)});
         state->initial_need_blocks += estimateInitialNeedBlocks(s);
@@ -296,9 +298,11 @@ void PDFusionRatioScheduler::buildAdmissionPeakState() {
     for (const auto& s : pending_decode_streams_) {
         append_stream(s);
     }
-    for (const auto& s : waiting_streams_) {
-        if (isAdmittedWaitingStream(s)) {
-            append_stream(s);
+    for (const auto* candidates : {&cache_ready_streams_, &waiting_streams_}) {
+        for (const auto& stream : *candidates) {
+            if (isAdmittedWaitingStream(stream)) {
+                append_stream(stream);
+            }
         }
     }
     std::sort(state->streams.begin(), state->streams.end(), longerLifetimeFirst);
@@ -362,19 +366,21 @@ bool PDFusionRatioScheduler::tryAdmitKVForPrefill(const GenerateStreamPtr& new_s
 
 size_t PDFusionRatioScheduler::reapErroredWaitingStreams() {
     size_t reaped_count = 0;
-    for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
-        auto& stream = *it;
-        if (stream->hasError()) {
-            auto new_state = stream->moveToNext();
-            if (new_state != StreamState::FINISHED) {
-                RTP_LLM_LOG_ERROR("Unexpected state %d when reaping errored waiting stream [%ld]",
-                                  static_cast<int>(new_state),
-                                  stream->streamId());
+    for (auto* candidates : {&cache_ready_streams_, &waiting_streams_}) {
+        for (auto it = candidates->begin(); it != candidates->end();) {
+            auto& stream = *it;
+            if (stream->checkTimeoutAndHasError()) {
+                auto new_state = stream->moveToNext();
+                if (new_state != StreamState::FINISHED) {
+                    RTP_LLM_LOG_ERROR("Unexpected state %d when reaping errored waiting stream [%ld]",
+                                      static_cast<int>(new_state),
+                                      stream->streamId());
+                }
+                it = candidates->erase(it);
+                ++reaped_count;
+            } else {
+                ++it;
             }
-            it = waiting_streams_.erase(it);
-            ++reaped_count;
-        } else {
-            ++it;
         }
     }
     return reaped_count;

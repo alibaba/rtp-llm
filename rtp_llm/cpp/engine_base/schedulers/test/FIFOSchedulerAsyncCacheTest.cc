@@ -512,36 +512,40 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorPending_St
     EXPECT_EQ(free_calls_, 0);
 }
 
-TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleOrdering_LoadDoneRestoresEnqueueOrder) {
-    auto scheduler        = createScheduler(/*max_generate_batch_size=*/1);
-    auto completed_stream = createStream({1, 2}, /*reuse_cache=*/true);
-    auto later_waiter     = createStream({3, 4}, /*reuse_cache=*/false);
+TEST_F(FIFOSchedulerAsyncCacheTest, testCacheReadyPrecedesWaiting) {
+    auto scheduler        = createScheduler(1);
+    auto earlier_waiter   = createStream({1, 2}, false);
+    auto completed_stream = createStream({3, 4}, true);
     auto context          = makeControlledAllocatorContext();
-    completed_stream->recordSchedulerEnqueueTime(1);
-    later_waiter->recordSchedulerEnqueueTime(2);
+    ASSERT_TRUE(scheduler->enqueue(earlier_waiter).ok());
     ASSERT_TRUE(scheduler->enqueue(completed_stream).ok());
-    ASSERT_TRUE(scheduler->enqueue(later_waiter).ok());
     installReadinessAllocator([context, completed_stream](const MallocInfo& info) {
         return info.request_id == completed_stream->streamId() ? context : nullptr;
     });
+    EXPECT_CALL(*mock_allocator_, initMallocForCommonLen(testing::_))
+        .WillOnce(testing::Invoke([this, earlier_waiter](const MallocInfo& info) {
+            EXPECT_EQ(info.request_id, earlier_waiter->streamId());
+            ++initial_malloc_calls_;
+            return MallocResult{false, 0, 0, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
+        }))
+        .WillRepeatedly(testing::DoDefault());
 
     auto first = scheduler->schedule();
     ASSERT_TRUE(first.ok());
+    ASSERT_TRUE(first->empty());
+    ASSERT_EQ(earlier_waiter->getStatus(), StreamState::WAITING);
     ASSERT_EQ(completed_stream->getStatus(), StreamState::LOADING_CACHE);
-    EXPECT_TRUE(context->completeTransfers(1, true));
+    ASSERT_TRUE(context->completeTransfers(1, true));
 
     auto second = scheduler->schedule();
     ASSERT_TRUE(second.ok());
     ASSERT_EQ(second.value().size(), 1);
     EXPECT_EQ(second.value().front(), completed_stream);
     EXPECT_EQ(completed_stream->getStatus(), StreamState::RUNNING);
-    EXPECT_EQ(later_waiter->getStatus(), StreamState::WAITING);
-    EXPECT_FALSE(later_waiter->hasEvent(StreamEvents::CanRun));
-    EXPECT_EQ(completed_stream->streamCacheResource().allocator_load_context_, nullptr);
-    ASSERT_EQ(scheduler->waiting_streams_.size(), 1);
-    EXPECT_EQ(scheduler->waiting_streams_.front(), later_waiter);
-    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 0);
-    EXPECT_EQ(scheduler->runningStreamsSize(), 1);
+    EXPECT_EQ(earlier_waiter->getStatus(), StreamState::WAITING);
+    EXPECT_TRUE(scheduler->cache_ready_streams_.empty());
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 1);
+    EXPECT_EQ(initial_malloc_calls_, 2);
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingGroupDoesNotBlockOrdinaryWaitingStreams) {
@@ -960,6 +964,9 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPrefillQuotaUsesFinalReuseAfterSimultane
         stream->reportEvent(StreamEvents::GenerateDone);
     }
     EXPECT_EQ(streams.back()->getStatus(), StreamState::WAITING);
+    ASSERT_EQ(scheduler->cache_ready_streams_.size(), 1);
+    EXPECT_EQ(scheduler->cache_ready_streams_.front(), streams.back());
+    EXPECT_TRUE(scheduler->waiting_streams_.empty());
     auto third = scheduler->schedule();
     ASSERT_TRUE(third.ok());
     ASSERT_EQ(third->size(), 1);

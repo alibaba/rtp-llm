@@ -1453,7 +1453,6 @@ TEST_F(FIFOSchedulerTest, testFIFOAsyncLoadAdmissionStillSelectsExecutionMode) {
     generation->generateConfig()->reuse_cache         = true;
     generation->generateConfig()->enable_memory_cache = true;
     auto prefill_only = makeStream({3, 4}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
-    prefill_only->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds() - 1);
     ASSERT_TRUE(enqueueIndividually(scheduler, {generation, prefill_only}));
     auto loading = scheduler.schedule();
     ASSERT_TRUE(loading.ok());
@@ -1464,23 +1463,24 @@ TEST_F(FIFOSchedulerTest, testFIFOAsyncLoadAdmissionStillSelectsExecutionMode) {
     EXPECT_FALSE(prefill_only->hasEvent(StreamEvents::CanRun));
     EXPECT_EQ(prefill_only->curBlocksNum(), 0);
 
-    // After requeue, the earlier-timestamped waiter selects the next round's mode.
     ASSERT_TRUE(load_context->settle(true));
     auto prefill = scheduler.schedule();
     ASSERT_TRUE(prefill.ok());
     ASSERT_EQ(prefill->size(), 1);
-    EXPECT_EQ(prefill->front(), prefill_only);
-    EXPECT_EQ(generation->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(prefill->front(), generation);
+    EXPECT_EQ(prefill_only->getStatus(), StreamState::WAITING);
+    EXPECT_FALSE(prefill_only->hasEvent(StreamEvents::CanRun));
     ASSERT_EQ(scheduler.waiting_streams_.size(), 1);
-    EXPECT_EQ(scheduler.waiting_streams_.front(), generation);
+    EXPECT_EQ(scheduler.waiting_streams_.front(), prefill_only);
+    EXPECT_TRUE(scheduler.cache_ready_streams_.empty());
 
-    prefill_only->reportEvent(StreamEvents::GenerateDone);
+    generation->reportEvent(StreamEvents::GenerateDone);
     auto loaded = scheduler.schedule();
     ASSERT_TRUE(loaded.ok());
     ASSERT_EQ(loaded->size(), 1);
-    EXPECT_EQ(loaded->front(), generation);
-    EXPECT_EQ(generation->getStatus(), StreamState::RUNNING);
-    EXPECT_FALSE(generation->hasError());
+    EXPECT_EQ(loaded->front(), prefill_only);
+    EXPECT_EQ(prefill_only->getStatus(), StreamState::RUNNING);
+    EXPECT_FALSE(prefill_only->hasError());
     EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
 }
 
@@ -1552,7 +1552,6 @@ TEST_F(FIFOSchedulerTest, testFIFORetryableKVShortageDoesNotBlockLoadedOppositeM
 
     // A fits alone but cannot allocate its three blocks until B releases its two blocks.
     auto prefill_only = makeStream({3, 4, 5}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
-    prefill_only->recordSchedulerEnqueueTime(generation->schedulerEnqueueTimeUs() - 1);
     ASSERT_TRUE(scheduler.enqueue(prefill_only).ok());
     auto blocked = scheduler.schedule();
     ASSERT_TRUE(blocked.ok());
@@ -1566,7 +1565,6 @@ TEST_F(FIFOSchedulerTest, testFIFORetryableKVShortageDoesNotBlockLoadedOppositeM
     ASSERT_EQ(scheduler.waiting_streams_.size(), 1);
     ASSERT_EQ(scheduler.waiting_streams_.front(), prefill_only);
 
-    // The real loading transition returns B to waiting [A, B]. A's retryable failure must not lock the mode.
     ASSERT_TRUE(load_context->settle(true));
     auto ready = scheduler.schedule();
     ASSERT_TRUE(ready.ok());
@@ -1591,7 +1589,7 @@ TEST_F(FIFOSchedulerTest, testFIFORetryableKVShortageDoesNotBlockLoadedOppositeM
     EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
 }
 
-TEST_F(FIFOSchedulerTest, testPDFusionLoadedOppositeModeWaitsForItsOwnPrefillRound) {
+TEST_F(FIFOSchedulerTest, testPDFusionCacheReadySelectsModeBeforeOrdinaryWaiter) {
     auto [cache_manager, resource_context, model_config, runtime_config] =
         makeReadinessResources(16, 1, RoleType::PDFUSION, 4);
     ASSERT_TRUE(cache_manager->init());
@@ -1617,38 +1615,37 @@ TEST_F(FIFOSchedulerTest, testPDFusionLoadedOppositeModeWaitsForItsOwnPrefillRou
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
 
     auto prefill_only = makeStream({3, 4}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
-    prefill_only->recordSchedulerEnqueueTime(generation->schedulerEnqueueTimeUs() - 1);
     ASSERT_TRUE(scheduler.enqueue(prefill_only).ok());
     ASSERT_EQ(scheduler.waiting_streams_.size(), 1);
     ASSERT_EQ(scheduler.waiting_streams_.front(), prefill_only);
     ASSERT_FALSE(prefill_only->hasEvent(StreamEvents::CanRun));
 
-    // B returns behind A with LoadInitiated intact, but CanRun cleared for fresh admission.
     ASSERT_TRUE(load_context->settle(true));
     auto prefill = scheduler.schedule();
     ASSERT_TRUE(prefill.ok());
     ASSERT_EQ(prefill->size(), 1) << "Completed cache loading must not bypass this round's execution-mode filter";
-    EXPECT_EQ(prefill->front(), prefill_only);
-    EXPECT_TRUE(prefill->front()->generateConfig()->isPrefillOnly());
+    EXPECT_EQ(prefill->front(), generation);
+    EXPECT_FALSE(prefill->front()->generateConfig()->isPrefillOnly());
     EXPECT_TRUE(scheduler.loading_cache_streams_.empty());
     EXPECT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
     EXPECT_EQ(scheduler.runningStreamsSize(), 0);
     ASSERT_EQ(scheduler.waiting_streams_.size(), 1);
-    EXPECT_EQ(scheduler.waiting_streams_.front(), generation);
-    EXPECT_EQ(generation->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(scheduler.waiting_streams_.front(), prefill_only);
+    EXPECT_EQ(generation->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(generation->curBlocksNum(), 2);
-    EXPECT_FALSE(generation->hasEvent(StreamEvents::CanRun));
-    EXPECT_TRUE(generation->hasEvent(StreamEvents::LoadInitiated));
+    EXPECT_FALSE(prefill_only->hasEvent(StreamEvents::CanRun));
+    EXPECT_FALSE(prefill_only->hasEvent(StreamEvents::LoadInitiated));
+    EXPECT_TRUE(scheduler.cache_ready_streams_.empty());
     EXPECT_FALSE(generation->hasError());
 
-    prefill_only->reportEvent(StreamEvents::GenerateDone);
+    generation->reportEvent(StreamEvents::GenerateDone);
     auto next_prefill = scheduler.schedule();
     ASSERT_TRUE(next_prefill.ok());
     ASSERT_EQ(next_prefill->size(), 1);
-    EXPECT_EQ(next_prefill->front(), generation);
-    EXPECT_FALSE(next_prefill->front()->generateConfig()->isPrefillOnly());
-    EXPECT_EQ(prefill_only->getStatus(), StreamState::FINISHED);
-    EXPECT_EQ(generation->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(next_prefill->front(), prefill_only);
+    EXPECT_TRUE(next_prefill->front()->generateConfig()->isPrefillOnly());
+    EXPECT_EQ(generation->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(prefill_only->getStatus(), StreamState::RUNNING);
     EXPECT_FALSE(generation->hasError());
     EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
     EXPECT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
@@ -1736,33 +1733,32 @@ TEST_F(FIFOSchedulerTest, testPDFusionCompletedLoadRespectsTokenAdmission) {
 
         auto first                           = makeStream({3, 4}, model_config, runtime_config, resource_context);
         first->generateConfig()->reuse_cache = false;
-        first->recordSchedulerEnqueueTime(loaded->schedulerEnqueueTimeUs() - 1);
         ASSERT_TRUE(scheduler.enqueue(first).ok());
         ASSERT_TRUE(load_context->settle(true));
         auto result = scheduler.schedule();
         ASSERT_TRUE(result.ok());
         // Both requests have the same mode. The existing token gate is strict: 2 * 2 < budget.
         ASSERT_EQ(result->size(), token_budget == 4 ? 1 : 2);
-        EXPECT_EQ(result->front(), first);
+        EXPECT_EQ(result->front(), loaded);
         EXPECT_TRUE(scheduler.loading_cache_streams_.empty());
         EXPECT_FALSE(first->hasError());
         EXPECT_FALSE(loaded->hasError());
         if (token_budget == 4) {
-            EXPECT_EQ(loaded->getStatus(), StreamState::WAITING);
-            EXPECT_EQ(loaded->curBlocksNum(), 2);
-            EXPECT_FALSE(loaded->hasEvent(StreamEvents::CanRun));
-            EXPECT_TRUE(loaded->hasEvent(StreamEvents::LoadInitiated));
+            EXPECT_EQ(first->getStatus(), StreamState::WAITING);
+            EXPECT_EQ(first->curBlocksNum(), 0);
+            EXPECT_FALSE(first->hasEvent(StreamEvents::CanRun));
+            EXPECT_FALSE(first->hasEvent(StreamEvents::LoadInitiated));
             ASSERT_EQ(scheduler.waiting_streams_.size(), 1);
-            EXPECT_EQ(scheduler.waiting_streams_.front(), loaded);
-            first->reportEvent(StreamEvents::GenerateDone);
+            EXPECT_EQ(scheduler.waiting_streams_.front(), first);
+            loaded->reportEvent(StreamEvents::GenerateDone);
             result = scheduler.schedule();
             ASSERT_TRUE(result.ok());
             ASSERT_EQ(result->size(), 1);
-            EXPECT_EQ(result->front(), loaded);
+            EXPECT_EQ(result->front(), first);
         } else {
-            EXPECT_EQ(result->back(), loaded);
+            EXPECT_EQ(result->back(), first);
         }
-        EXPECT_EQ(loaded->getStatus(), StreamState::RUNNING);
+        EXPECT_EQ(first->getStatus(), StreamState::RUNNING);
         EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
     }
 }
@@ -1774,13 +1770,24 @@ TEST_F(FIFOSchedulerTest, testPDFusionReapsTimedOutLoadedWaiterRejectedByAdmissi
             makeReadinessResources(16, 1, RoleType::PDFUSION, 2, reject_by_mode ? 8192 : 4);
         ASSERT_TRUE(cache_manager->init());
         const auto             free_blocks_before = cache_manager->freeBlocksNum();
-        auto                   load_context       = setupPendingCacheLoad(cache_manager);
+        auto                   first_load_context = setupPendingCacheLoad(cache_manager);
         PDSepConfig            pd_sep_config      = makePDFusionPDSepConfig();
         ParallelismConfig      parallelism_config;
         ModelSpecificConfig    model_specific_config;
         PDFusionRatioScheduler scheduler(
             runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
+        const int waiter_max_new_tokens = reject_by_mode ? 0 : 1;
+        auto      first = makeStream({3, 4}, model_config, runtime_config, resource_context, waiter_max_new_tokens);
+        first->generateConfig()->reuse_cache         = false;
+        first->generateConfig()->enable_memory_cache = true;
+        ASSERT_TRUE(scheduler.enqueue(first).ok());
+        auto first_loading = scheduler.schedule();
+        ASSERT_TRUE(first_loading.ok());
+        ASSERT_TRUE(first_loading->empty());
+        ASSERT_EQ(first->getStatus(), StreamState::LOADING_CACHE);
+
+        auto load_context                             = setupPendingCacheLoad(cache_manager);
         auto loaded                           = makeStream({1, 2}, model_config, runtime_config, resource_context);
         loaded->generateConfig()->reuse_cache = true;
         loaded->generateConfig()->enable_memory_cache = true;
@@ -1792,23 +1799,19 @@ TEST_F(FIFOSchedulerTest, testPDFusionReapsTimedOutLoadedWaiterRejectedByAdmissi
         ASSERT_EQ(loaded->getStatus(), StreamState::LOADING_CACHE);
         ASSERT_EQ(loaded->curBlocksNum(), 2);
 
-        const int waiter_max_new_tokens = reject_by_mode ? 0 : 1;
-        auto      first  = makeStream({3, 4}, model_config, runtime_config, resource_context, waiter_max_new_tokens);
-        auto      second = makeStream({5, 6}, model_config, runtime_config, resource_context, waiter_max_new_tokens);
-        first->generateConfig()->reuse_cache  = false;
+        auto second = makeStream({5, 6}, model_config, runtime_config, resource_context, waiter_max_new_tokens);
         second->generateConfig()->reuse_cache = false;
-        first->recordSchedulerEnqueueTime(loaded->schedulerEnqueueTimeUs() - 2);
-        second->recordSchedulerEnqueueTime(loaded->schedulerEnqueueTimeUs() - 1);
-        ASSERT_TRUE(enqueueIndividually(scheduler, {first, second}));
+        ASSERT_TRUE(scheduler.enqueue(second).ok());
+        ASSERT_TRUE(first_load_context->settle(true));
         ASSERT_TRUE(load_context->settle(true));
         auto selected = scheduler.schedule();
         ASSERT_TRUE(selected.ok());
         ASSERT_EQ(selected->size(), 1);
         ASSERT_EQ(selected->front(), first);
-        // Loading returns behind both waiters; the in-flight batch cap admits only the first.
-        ASSERT_EQ(scheduler.waiting_streams_.size(), 2);
+        ASSERT_EQ(scheduler.waiting_streams_.size(), 1);
         ASSERT_EQ(scheduler.waiting_streams_.front(), second);
-        ASSERT_EQ(scheduler.waiting_streams_.back(), loaded);
+        ASSERT_EQ(scheduler.cache_ready_streams_.size(), 1);
+        ASSERT_EQ(scheduler.cache_ready_streams_.front(), loaded);
         ASSERT_TRUE(scheduler.loading_cache_streams_.empty());
         ASSERT_EQ(loaded->getStatus(), StreamState::WAITING);
         ASSERT_EQ(loaded->curBlocksNum(), 2);
@@ -1821,8 +1824,6 @@ TEST_F(FIFOSchedulerTest, testPDFusionReapsTimedOutLoadedWaiterRejectedByAdmissi
         loaded->generateConfig()->timeout_ms = 10;
         loaded->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds() - 100 * 1000);
         ASSERT_FALSE(loaded->hasError());
-        // No consumer polls the stream. Only schedule() can publish the expired deadline and
-        // release KV, even though the second waiter makes loaded fail admission again this round.
         auto reaped = scheduler.schedule();
         ASSERT_TRUE(reaped.ok());
         ASSERT_EQ(reaped->size(), 1);
@@ -1833,6 +1834,7 @@ TEST_F(FIFOSchedulerTest, testPDFusionReapsTimedOutLoadedWaiterRejectedByAdmissi
         EXPECT_FALSE(loaded->getTimeInfo().running_started);
         EXPECT_EQ(loaded->getTimeInfo().running_started_time_us, 0);
         EXPECT_TRUE(scheduler.waiting_streams_.empty());
+        EXPECT_TRUE(scheduler.cache_ready_streams_.empty());
         EXPECT_TRUE(scheduler.loading_cache_streams_.empty());
         EXPECT_EQ(scheduler.onflightStreams(), 1);
         EXPECT_EQ(second->curBlocksNum(), 2);

@@ -288,7 +288,7 @@ size_t FIFOScheduler::countInitedKVCacheStreams() const {
     };
 
     size_t count = count_inited(waiting_streams_) + count_inited(loading_cache_streams_)
-                   + count_inited(running_streams_) + count_inited(new_streams_);
+                   + count_inited(cache_ready_streams_) + count_inited(running_streams_) + count_inited(new_streams_);
     for (const auto& group : waiting_group_queue_) {
         count += count_inited(group);
     }
@@ -330,14 +330,7 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     last_admitted_context_batch_size_ = 0;
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
-    if (!waiting_streams.empty()) {
-        auto oldest_enqueue_time_us =
-            (*std::min_element(waiting_streams.begin(), waiting_streams.end(), [](const auto& lhs, const auto& rhs) {
-                return lhs->schedulerEnqueueTimeUs() < rhs->schedulerEnqueueTimeUs();
-            }))->schedulerEnqueueTimeUs();
-        last_waiting_oldest_age_us_ =
-            std::max<int64_t>(0, autil::TimeUtility::currentTimeInMicroSeconds() - oldest_enqueue_time_us);
-    }
+    const auto   now_us               = autil::TimeUtility::currentTimeInMicroSeconds();
     const size_t inited_kv_streams = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
 
     // Explicit groups are scheduled through enqueueGroup() and the dedicated group
@@ -378,91 +371,97 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
         }
     }
 
-    for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
-        auto  current = it++;
-        auto& stream  = *current;
+    for (auto* candidates : {&cache_ready_streams_, &waiting_streams}) {
+        for (auto it = candidates->begin(); it != candidates->end();) {
+            auto  current = it++;
+            auto& stream  = *current;
+            last_waiting_oldest_age_us_ =
+                std::max(last_waiting_oldest_age_us_, now_us - stream->schedulerEnqueueTimeUs());
 
-        if (stream->hasError()) {
-            auto state     = stream->getStatus();
-            auto new_state = stream->moveToNext();
-            if (new_state != state) {
-                addStreamToNewState(stream, new_state);
-                waiting_streams.erase(current);
+            if (stream->checkTimeoutAndHasError()) {
+                auto state     = stream->getStatus();
+                auto new_state = stream->moveToNext();
+                if (new_state != state) {
+                    addStreamToNewState(stream, new_state);
+                    candidates->erase(current);
+                }
+                continue;
             }
-            continue;
-        }
 
-        const bool prefill_only = isPrefillOnly(stream);
-        if (has_execution_mode && scheduling_prefill_only != prefill_only) {
-            continue;
-        }
-
-        // Stop admitting new work once the executable prefill batch reaches the uncached
-        // token quota. Pending cache loads and waiters do not consume this quota.
-        // Keep scanning so errored streams behind it can still be finalized.
-        if (max_batch_tokens_without_cache_ > 0
-            && schedule_runtime.forward_prefill_token_size_without_cache >= max_batch_tokens_without_cache_) {
-            continue;
-        }
-
-        // Check admission capacity and memory constraints.
-        //
-        // Some PD decode streams already carry CanRun before entering FIFO: DecodeRpcServer uses
-        // CanRun to drive the pre-enqueue KV allocation path. CanRun is a permanent event, so it
-        // cannot be used as proof that FIFO has admitted this stream in the current scheduling
-        // round. Always run FIFO capacity checks and only advance streams admitted here.
-        const bool already_inited_kv = stream->curBlocksNum() > 0;
-        if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
-            && inited_kv_streams + schedule_runtime.newly_inited_kv_streams >= max_inited_kv_cache_streams_) {
-            continue;
-        }
-
-        if (!evaluateRunningBatch(schedule_runtime, stream)) {
-            continue;
-        }
-
-        const auto state                 = stream->getStatus();
-        const bool load_initiated_before = stream->hasEvent(StreamEvents::LoadInitiated);
-        if (!stream->hasEvent(StreamEvents::CanRun)) {
-            stream->reportEvent(StreamEvents::CanRun);
-        }
-
-        const auto new_state           = stream->moveToNext();
-        const bool kv_initialized      = !already_inited_kv && stream->curBlocksNum() > 0;
-        const bool load_initiated      = !load_initiated_before && stream->hasEvent(StreamEvents::LoadInitiated);
-        const bool scheduling_progress = new_state == StreamState::RUNNING || new_state == StreamState::LOADING_CACHE
-                                         || (new_state == StreamState::WAITING && (kv_initialized || load_initiated));
-
-        if (scheduling_progress) {
-            // A failed KV allocation owns no work this round and must not pin its execution mode.
-            if (!has_execution_mode) {
-                has_execution_mode      = true;
-                scheduling_prefill_only = prefill_only;
+            const bool prefill_only = isPrefillOnly(stream);
+            if (has_execution_mode && scheduling_prefill_only != prefill_only) {
+                continue;
             }
-            // Admission limits cover every stream that made progress in this
-            // round, including an async cache load. Otherwise multiple pending
-            // loads can oversubscribe max_generate_batch_size before any one of
-            // them reaches RUNNING.
-            ++schedule_runtime.admitted_stream_count;
-            schedule_runtime.admitted_prefill_token_size_with_cache += prefillTokenCostWithCache(stream);
-            schedule_runtime.admitted_prefill_max_seq_len_with_cache =
-                std::max(schedule_runtime.admitted_prefill_max_seq_len_with_cache, prefillSeqLenWithCache(stream));
-            schedule_runtime.admitted_prefill_sequence_count += static_cast<size_t>(stream->currentBatchSize());
-            if (kv_initialized) {
-                ++schedule_runtime.newly_inited_kv_streams;
+
+            // Stop admitting new work once the executable prefill batch reaches the uncached
+            // token quota. Pending cache loads and waiters do not consume this quota.
+            // Keep scanning so errored streams behind it can still be finalized.
+            if (max_batch_tokens_without_cache_ > 0
+                && schedule_runtime.forward_prefill_token_size_without_cache >= max_batch_tokens_without_cache_) {
+                continue;
             }
-            if (stream->isContextStream()) {
-                ++last_admitted_context_batch_size_;
-                last_admitted_context_token_size_ += stream->contextLength();
-                if (new_state == StreamState::RUNNING) {
-                    schedule_runtime.forward_prefill_token_size_without_cache += prefillTokenCostWithoutCache(stream);
+
+            // Check admission capacity and memory constraints.
+            //
+            // Some PD decode streams already carry CanRun before entering FIFO: DecodeRpcServer uses
+            // CanRun to drive the pre-enqueue KV allocation path. CanRun is a permanent event, so it
+            // cannot be used as proof that FIFO has admitted this stream in the current scheduling
+            // round. Always run FIFO capacity checks and only advance streams admitted here.
+            const bool already_inited_kv = stream->curBlocksNum() > 0;
+            if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
+                && inited_kv_streams + schedule_runtime.newly_inited_kv_streams >= max_inited_kv_cache_streams_) {
+                continue;
+            }
+
+            if (!evaluateRunningBatch(schedule_runtime, stream)) {
+                continue;
+            }
+
+            const auto state                 = stream->getStatus();
+            const bool load_initiated_before = stream->hasEvent(StreamEvents::LoadInitiated);
+            if (!stream->hasEvent(StreamEvents::CanRun)) {
+                stream->reportEvent(StreamEvents::CanRun);
+            }
+
+            const auto new_state      = stream->moveToNext();
+            const bool kv_initialized = !already_inited_kv && stream->curBlocksNum() > 0;
+            const bool load_initiated = !load_initiated_before && stream->hasEvent(StreamEvents::LoadInitiated);
+            const bool scheduling_progress =
+                new_state == StreamState::RUNNING || new_state == StreamState::LOADING_CACHE
+                || (new_state == StreamState::WAITING && (kv_initialized || load_initiated));
+
+            if (scheduling_progress) {
+                // A failed KV allocation owns no work this round and must not pin its execution mode.
+                if (!has_execution_mode) {
+                    has_execution_mode      = true;
+                    scheduling_prefill_only = prefill_only;
+                }
+                // Admission limits cover every stream that made progress in this
+                // round, including an async cache load. Otherwise multiple pending
+                // loads can oversubscribe max_generate_batch_size before any one of
+                // them reaches RUNNING.
+                ++schedule_runtime.admitted_stream_count;
+                schedule_runtime.admitted_prefill_token_size_with_cache += prefillTokenCostWithCache(stream);
+                schedule_runtime.admitted_prefill_max_seq_len_with_cache =
+                    std::max(schedule_runtime.admitted_prefill_max_seq_len_with_cache, prefillSeqLenWithCache(stream));
+                schedule_runtime.admitted_prefill_sequence_count += static_cast<size_t>(stream->currentBatchSize());
+                if (kv_initialized) {
+                    ++schedule_runtime.newly_inited_kv_streams;
+                }
+                if (stream->isContextStream()) {
+                    ++last_admitted_context_batch_size_;
+                    last_admitted_context_token_size_ += stream->contextLength();
+                    if (new_state == StreamState::RUNNING) {
+                        schedule_runtime.forward_prefill_token_size_without_cache +=
+                            prefillTokenCostWithoutCache(stream);
+                    }
                 }
             }
-        }
 
-        if (new_state != state) {
-            addStreamToNewState(stream, new_state);
-            waiting_streams.erase(current);
+            if (new_state != state) {
+                addStreamToNewState(stream, new_state);
+                candidates->erase(current);
+            }
         }
     }
 }
@@ -649,7 +648,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
         || !waiting_group_queue_.empty()) {
         cond_.wait_for(lock, poll_interval_, [this] { return waitPredicate(); });
-    } else if (!waiting_streams_.empty()) {
+    } else if (!waiting_streams_.empty() || !cache_ready_streams_.empty()) {
         // No running work can release capacity. Poll PD-held block releases without turning a
         // large retryable queue into a tight malloc/eviction loop.
         cond_.wait_for(lock, std::chrono::milliseconds(100), [this] { return waitPredicate(); });
@@ -714,7 +713,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
             }
         }
 
-        const bool has_normal_waiting = !waiting_streams_.empty();
+        const bool has_normal_waiting = !cache_ready_streams_.empty() || !waiting_streams_.empty();
 
         if (!new_streams_.empty()) {
             // The completed ordinary loads above own this execution boundary.
@@ -777,8 +776,8 @@ void FIFOScheduler::updateCacheExposedWait() {
         const auto observation_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         // When ordinary or group waiters also remain, an empty batch has more
         // than one possible blocker; do not attribute that interval to cache.
-        const bool cache_only_stall =
-            waiting_for_cache && waiting_streams_.empty() && waiting_group_queue_.empty() && !need_fill_fake_stream_;
+        const bool cache_only_stall = waiting_for_cache && cache_ready_streams_.empty() && waiting_streams_.empty()
+                                      && waiting_group_queue_.empty() && !need_fill_fake_stream_;
         const auto observe_stream = [cache_only_stall, observation_time_us](const GenerateStreamPtr& stream) {
             if (!stream->isContextStream() || stream->getStatus() != StreamState::LOADING_CACHE) {
                 return;
@@ -821,20 +820,23 @@ void FIFOScheduler::updateCacheExposedWait() {
 
 int64_t FIFOScheduler::waitingStreamsSize() {
     std::lock_guard<mutex> lock(lock_);
-    return waiting_streams_.size() + groupQueueStreamsSize(waiting_group_queue_);
+    return cache_ready_streams_.size() + waiting_streams_.size() + groupQueueStreamsSize(waiting_group_queue_);
 }
 
 std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::waitingTaskList() {
     std::lock_guard<mutex> lock(lock_);
     waiting_task_list_.clear();
-    waiting_task_list_.reserve(waiting_streams_.size() + groupQueueStreamsSize(waiting_group_queue_));
-    for (const auto& stream : waiting_streams_) {
-        EngineScheduleInfo::TaskInfo task_info;
-        task_info.request_id    = stream->streamId();
-        task_info.prefix_length = stream->prefixLength();
-        task_info.input_length  = stream->inputLength();
-        task_info.batch_id      = stream->groupId();
-        waiting_task_list_.push_back(task_info);
+    waiting_task_list_.reserve(cache_ready_streams_.size() + waiting_streams_.size()
+                               + groupQueueStreamsSize(waiting_group_queue_));
+    for (const auto* candidates : {&cache_ready_streams_, &waiting_streams_}) {
+        for (const auto& stream : *candidates) {
+            EngineScheduleInfo::TaskInfo task_info;
+            task_info.request_id    = stream->streamId();
+            task_info.prefix_length = stream->prefixLength();
+            task_info.input_length  = stream->inputLength();
+            task_info.batch_id      = stream->groupId();
+            waiting_task_list_.push_back(task_info);
+        }
     }
     for (const auto& group : waiting_group_queue_) {
         for (const auto& stream : group) {
