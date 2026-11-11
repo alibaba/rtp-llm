@@ -10,6 +10,7 @@ import logging
 from rtp_llm.models.dsv4_kv_cache import (
     CSA_KV_TAG,
     HCA_KV_TAG,
+    INDEXER_KV_TAG,
     _make_dsv4_desc,
     _use_host_pinned_memory,
     apply_dsv4_explicit_pool_blocks,
@@ -122,7 +123,22 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
         int(kv_cache_config.dsv4_fixed_pool_blocks or 0) if kv_cache_config else 0
     )
     if fixed_blocks > 0:
-        for tag in ("csa_state", "swa_kv", "decoder_swa_kv"):
+        # Every pool that can be addressed by a full-context request must be
+        # sized for the same block index space.  Capping only the host-resident
+        # fixed pools leaves the device-resident compressed/indexer pools on
+        # the generic ``KV_CACHE_MEM_MB`` budget, which hands them far more
+        # blocks than a 1,048,576-token sequence can ever use and pins ~1 GiB
+        # of HBM that decode graph instantiation needs.  Pin the global pools
+        # to the same exact count; compression changes bytes per block, never
+        # the 256-token block granularity.
+        for tag in (
+            "csa_state",
+            "swa_kv",
+            "decoder_swa_kv",
+            CSA_KV_TAG,
+            HCA_KV_TAG,
+            INDEXER_KV_TAG,
+        ):
             apply_dsv4_explicit_pool_blocks(descs, tag, fixed_blocks)
     decoder_blocks = (
         int(kv_cache_config.dsv41_decoder_swa_pool_blocks) if kv_cache_config else 0

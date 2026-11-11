@@ -75,7 +75,11 @@ class Dsv41KvCacheConfigTest(TestCase):
                 self.assertEqual(capacity(by_tag["csa_state"]), 768)
                 self.assertEqual(capacity(by_tag["decoder_swa_kv"]), 128)
                 self.assertFalse(by_tag["decoder_swa_kv"].reuse.enable_prefix_reuse)
-                self.assertIsNone(capacity(by_tag["hca_kv"]))
+                # Global device pools share the same block index space as the
+                # host fixed pools; leaving them budget-sized wastes HBM.
+                self.assertEqual(capacity(by_tag["hca_kv"]), 768)
+                self.assertEqual(capacity(by_tag["csa_kv"]), 768)
+                self.assertEqual(capacity(by_tag["indexer_kv"]), 768)
 
     def test_explicit_config_can_replace_defaults_and_fallback_is_idempotent(self):
         with patch.dict(os.environ, {"DSV41_SWA_BOUNDED_REPLAY": "1"}, clear=True):
@@ -101,15 +105,28 @@ class Dsv41KvCacheConfigTest(TestCase):
                             self.assertFalse(
                                 by_tag[tag].capacity.charge_to_paged_budget
                             )
+                    for tag in ("hca_kv", "csa_kv", "indexer_kv"):
+                        if tag in by_tag:
+                            self.assertEqual(capacity(by_tag[tag]), 64)
+                            self.assertEqual(
+                                by_tag[tag].memory.placement,
+                                CacheMemoryPlacement.DEVICE,
+                            )
                     settings.dsv41_decoder_swa_pool_blocks = 0
                     settings.dsv4_fixed_pool_use_memory = False
                     DeepSeekV41._apply_kv_cache_config(config, settings)
                     self.assertEqual(
                         capacity(descriptors(config)["decoder_swa_kv"]), 64
                     )
+                    if "csa_kv" in descriptors(config):
+                        self.assertEqual(
+                            capacity(descriptors(config)["csa_kv"]), 64
+                        )
                     settings.dsv4_fixed_pool_blocks = 0
                     DeepSeekV41._apply_kv_cache_config(config, settings)
                     self.assertIsNone(capacity(descriptors(config)["decoder_swa_kv"]))
+                    if "csa_kv" in descriptors(config):
+                        self.assertIsNone(capacity(descriptors(config)["csa_kv"]))
 
     def test_single_pool_override_without_shared_fixed_count(self):
         with patch.dict(os.environ, {"DSV41_SWA_BOUNDED_REPLAY": "1"}, clear=True):
