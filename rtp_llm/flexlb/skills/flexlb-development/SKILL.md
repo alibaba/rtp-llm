@@ -10,6 +10,15 @@ description: FlexLB 开发、缺陷修复、重构和代码审核规范。适用
 
 本技能仅在用户明确启用时使用。
 
+## 统一术语与命名
+
+新增、修改或审核类名、方法名、字段名、状态名及架构说明时，读取
+[FlexLB 开发术语与命名约定](references/terminology.md)，按业务含义选择术语。
+重点区分调度、选址、路由发布、交付、抢占、取消、资源释放和请求清理，不能互相替代。
+同一个概念使用同一个词；不同含义使用不同名称，不用 `Placement` 等宽泛词统称多个步骤。
+术语表中的现有类名是定位示例，不是新增抽象的要求；旧名迁移只处理当前授权范围，
+不能机械替换无关的缓存淘汰、外部协议字段、配置键或监控指标。
+
 ## 开始修改前
 
 本技能及相关开发技能统一维护在 FlexLB 的 `skills/`，以仓库版本为准。
@@ -111,12 +120,12 @@ description: FlexLB 开发、缺陷修复、重构和代码审核规范。适用
 
 按改动风险验证，使用当前模块配置中的真实类名和测试工具：
 
-- FlexLB Java 检查在提交时运行。从仓库根目录提前检查暂存内容时，运行
-  `python3 -m pre_commit run flexlb-java-conventions --hook-stage pre-commit`，检查暂存内容。
+- Git 提交会自动运行已安装的 pre-commit hook，检查规则按暂存文件匹配。
+  从仓库根目录提前运行同一组检查时，使用 `python3 -m pre_commit run --hook-stage pre-commit`。
 - FlexLB Java 钩子检查输入文件的成员顺序及本次新增、修改类的 Javadoc 是否存在、
   有用途或流程摘要并采用多行格式。无自定义行为的简单 record、纯字段 DTO 和简单枚举
   免于强制类注释；结构简单不保证语义自解释，隐含约束仍须审核。未触及的旧类不追溯补齐。
-  钩子在隔离的 Python 环境安装解析器，不依赖个人目录。Spotless 通过本分支的 Maven profile 单独运行。
+  钩子在隔离的 Python 环境安装解析器，不依赖个人目录。暂存 FlexLB Java 文件时，hook 也会运行 Maven reactor 的 Spotless 检查。
 - 类说明是否准确、是否简短、是否覆盖真实流程仍须 AI 和人工审核；不能声称
   pre-commit 可以理解业务语义或完全阻止绕过本地 Git 钩子的提交。
 

@@ -65,6 +65,8 @@ repos:
     hooks:
       - id: prettier
         name: Format FlexLB web files, configs and Markdown
+        # Pin Node so nodeenv uses a stable release when initializing the hook.
+        language_version: "24.16.0"
         entry: bash -c 'prettier --write --ignore-unknown --plugin "$NODE_PATH/@prettier/plugin-xml/src/plugin.js" "$@"' --
         files: ^rtp_llm/flexlb/.*\.(m?js|html|json|xml|ya?ml|md)$
         additional_dependencies:
