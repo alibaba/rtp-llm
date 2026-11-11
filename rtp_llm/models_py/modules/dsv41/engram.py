@@ -874,6 +874,25 @@ class HostEngramEmbedding:
                 and self.scales.dtype == torch.uint8
                 and block_size == 32
             )
+            if torch.version.hip is not None:
+                # On ROCm the UVA gather kernel runs ONLY inside graph
+                # capture (eager runs take the host gather), so its first
+                # launch would otherwise happen during capture - Triton JIT
+                # compilation and module loading are illegal there. Warm it
+                # up eagerly with a tiny probe.
+                try:
+                    from rtp_llm.models_py.modules.dsv41 import _engram_triton
+
+                    probe = torch.zeros(
+                        (2, 2), dtype=torch.int64, device=pinned.device
+                    )
+                    _engram_triton.lookup_host_rows(
+                        self._uva[0], self._uva[1], probe, self._num_sms
+                    )
+                    torch.cuda.synchronize(pinned.device)
+                    logger.info("Engram UVA lookup kernel warmed up eagerly")
+                except Exception:  # noqa: BLE001
+                    logger.exception("Engram UVA lookup warmup failed")
 
     def _initialize_lookup_state(self, *, pinned=None, storage=None):
         """Common reader state for both checkpoint and external constructors."""
