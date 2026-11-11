@@ -2,6 +2,7 @@ import pickle
 import unittest
 
 from rtp_llm.ops import (
+    FIFOSchedulerConfig,
     GrammarConfig,
     HWKernelConfig,
     MoeConfig,
@@ -37,6 +38,21 @@ class DecodeGraphConfigPickleTest(unittest.TestCase):
         result.__setstate__(previous)
         self.assertTrue(result.enable_decode_cascade_attention)
         self.assertEqual(result.decode_capture_batch_sizes, [])
+
+
+class FIFOSchedulerConfigPickleTest(unittest.TestCase):
+    def test_chunk_batch_tokens_round_trip_and_legacy_default(self):
+        config = FIFOSchedulerConfig()
+        config.prefill_chunk_batch_tokens = 2048
+
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertEqual(restored.prefill_chunk_batch_tokens, 2048)
+
+        state = restored.__getstate__()
+        legacy = FIFOSchedulerConfig.__new__(FIFOSchedulerConfig)
+        legacy.__setstate__(state[:8])
+        self.assertEqual(legacy.prefill_chunk_batch_tokens, 0)
 
 
 def _new_grammar_config():

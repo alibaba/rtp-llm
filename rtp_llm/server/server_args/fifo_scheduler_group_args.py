@@ -84,3 +84,13 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         "请增大 prefill_chunk_size 或减小 num_return_sequences；预算建议至少为最大返回序列数×seq_size_per_block。"
         "使用 force_batch、beam、logits、loss、hidden_states、all_probs 或多模态输入的请求将被拒绝。",
     )
+    fifo_scheduler_group.add_argument(
+        "--prefill_chunk_batch_tokens",
+        env_name="PREFILL_CHUNK_BATCH_TOKENS",
+        bind_to=[(fifo_scheduler_config, "prefill_chunk_batch_tokens")],
+        type=int,
+        default=0,
+        help="chunked prefill 全 batch 的独立计算 token 预算；0 沿用 prefill_chunk_size。"
+        "正数要求启用 chunk，且介于 prefill_chunk_size 与 max_batch_tokens_size 之间，"
+        "按 KV block 向下对齐；每个 stream 仍受 prefill_chunk_size 限制。",
+    )
