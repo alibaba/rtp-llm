@@ -481,6 +481,7 @@ py_library(
         "kernels/cuda/qwen4_ple/gate.py",
         "kernels/cuda/qwen4_ple/page_quant.py",
         "kernels/cuda/fp8_input_quant.py",
+        "modules/qwen4_exp/ple/ple_decode_plan_triton.py",
         "modules/qwen4_exp/ple/ple_page_projection.py",
     ],
     data = [

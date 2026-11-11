@@ -1528,7 +1528,7 @@ class StepPlanWriterGeometryIntegrationTest(unittest.TestCase):
             exact_head_rms_norm,
         )
         from rtp_llm.models_py.modules.qwen4_exp.qsa import indexer_prefill_triton
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_triton import (
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill import (
             prefix_reuse_fused_stats,
         )
 

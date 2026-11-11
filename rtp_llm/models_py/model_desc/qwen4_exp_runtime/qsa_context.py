@@ -40,6 +40,7 @@ from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from . import qsa_decode, qsa_geometry, qsa_prefill, qsa_target
 from .qsa_cache_views import _same_tensor_metadata
 from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
+from .qsa_step_plan import host_input_mirror
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,14 @@ class Qwen4ExpQSARuntimeContext:
         return DeviceChecks() if checks is None else checks
 
     def host_values(self, tensor: torch.Tensor) -> list[int]:
+        if (
+            tensor.is_cuda
+            and getattr(self.main_inputs, "is_prefill", False)
+            and not getattr(self.main_inputs, "is_cuda_graph", False)
+        ):
+            for name in ("input_lengths", "prefix_lengths"):
+                if tensor is getattr(self.main_inputs, name, None):
+                    return host_input_mirror(self.main_inputs, name).tolist()
         # This cache belongs to one forward invocation, never a graph buffer's
         # address across steps. Keep the tensor owner alongside the host values.
         cache = self.metadata_cache

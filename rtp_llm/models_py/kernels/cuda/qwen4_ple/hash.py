@@ -80,7 +80,7 @@ def try_hashed_ngram_ids(
             t.device == history.device and t.dtype == torch.int64 and t.is_contiguous()
             for t in (vocab_sizes, offsets, multipliers)
         )
-        and torch.cuda.get_device_capability(history.device) == (12, 0)
+        and torch.cuda.get_device_capability(history.device) in ((9, 0), (12, 0))
     ):
         return None
     out = torch.empty(

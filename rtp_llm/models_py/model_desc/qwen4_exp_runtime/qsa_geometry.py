@@ -315,15 +315,6 @@ def _draft_incremental_prefill_geometry(
     position_state = self.positions(ratio, checks)
     if position_state is not None:
         rope_cos, rope_sin = position_state.rope(rope_config, group=True)
-    else:
-        block_starts = logical_positions - logical_positions.remainder(ratio)
-        rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
-            block_starts,
-            rope_config,
-            token_count=token_count,
-            dtype=torch.bfloat16,
-            device=device,
-        )
 
     checks.verify()
     step = get_prefill_step_plan(
@@ -335,6 +326,8 @@ def _draft_incremental_prefill_geometry(
         draft=draft,
         draft_prefix_reuse=draft_prefix_reuse,
     )
+    if position_state is None:
+        rope_cos, rope_sin = step.rope_cos, step.rope_sin
     return IncrementalPrefillPlan(
         **{
             "lengths": lengths,
@@ -343,8 +336,8 @@ def _draft_incremental_prefill_geometry(
             "head_num": head_num,
             "ratio": ratio,
             "token_budget": token_budget,
-            "prefixes": prefixes,
-            "cu_seqlens": expected_cu,
+            "prefixes": step.prefixes_i64,
+            "cu_seqlens": step.cu_seqlens,
             "current_cos": current_cos,
             "current_sin": current_sin,
             "visible_lengths": visible_lengths,

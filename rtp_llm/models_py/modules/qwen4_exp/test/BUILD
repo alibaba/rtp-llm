@@ -78,6 +78,24 @@ models_py_test(
 )
 
 models_py_test(
+    name = "ple_bf16_prefill_test",
+    src = "ple_bf16_prefill_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
+    name = "ple_decode_fusion_test",
+    src = "ple_decode_fusion_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
+    name = "ple_decode_expansion_test",
+    src = "ple_decode_expansion_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
     name = "ple_metadata_sync_test",
     src = "ple_metadata_sync_test.py",
     gpu = "H20_CU13",

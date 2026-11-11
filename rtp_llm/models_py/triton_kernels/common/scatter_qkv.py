@@ -4,13 +4,19 @@
 # torch.split + view triggers when the slice stride doesn't match the target
 # contig stride.
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.common.offset import linear_offset_64
+
+try:
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as gl
+except ImportError:
+    gluon = None
 
 
 @triton.jit
@@ -95,5 +101,70 @@ def scatter_qkv(
         BLK_QK=BLK_QK,
         BLK_V=BLK_V,
         num_warps=4,
+    )
+    return q, k, v
+
+
+if gluon is not None:
+
+    @gluon.jit(do_not_specialize=["m"])
+    def _scatter_qkv_l2norm_sm90_multi_head(
+        packed, q_out, k_out, v_out, m, H: gl.constexpr
+    ):
+        # Four warps own the 128 columns of each head, preserving the 1D
+        # reference reduction tree. An eight-warp CTA tiles four Q/K pairs
+        # (not necessarily a whole token); each pair also copies three V heads.
+        layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [2, 4], [1, 0])
+        heads = gl.program_id(0) * 4 + gl.arange(0, 4, layout=gl.SliceLayout(1, layout))
+        col = gl.arange(0, 128, layout=gl.SliceLayout(0, layout))
+        token = (heads // H).to(gl.int64)
+        head = heads % H
+        row_width: gl.constexpr = 5 * H * 128
+        src = token[:, None] * row_width + head[:, None] * 128 + col[None, :]
+        dst = heads[:, None].to(gl.int64) * 128 + col[None, :]
+        valid = heads[:, None] < m * H
+        q = gl.load(packed + src, valid, other=0).to(gl.float32)
+        k = gl.load(packed + src + H * 128, valid, other=0).to(gl.float32)
+        qi = 1.0 / gl.sqrt(gl.sum(q * q, axis=1) + 1e-6)
+        ki = 1.0 / gl.sqrt(gl.sum(k * k, axis=1) + 1e-6)
+        gl.store(q_out + dst, q * qi[:, None], valid)
+        gl.store(k_out + dst, k * ki[:, None], valid)
+        for part in gl.static_range(3):
+            v_col = (head * 3 + part)[:, None] * 128 + col[None, :]
+            v = gl.load(packed + token[:, None] * row_width + 2 * H * 128 + v_col, valid, other=0)
+            gl.store(v_out + token[:, None] * (3 * H * 128) + v_col, v, valid)
+
+
+def try_scatter_qkv_l2norm_sm90(
+    packed: torch.Tensor,
+    num_k_heads: int,
+    num_v_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Return normalized Q/K and raw V for qualified Qwen4 prefill geometry."""
+    if not (
+        gluon is not None
+        # TP1/2/4/8 keeps three consecutive V heads per Q/K head. The
+        # four-head CTA indexing depends on this ratio, not on the TP size.
+        and (num_k_heads, num_v_heads) in ((16, 48), (8, 24), (4, 12), (2, 6))
+        and head_k_dim == head_v_dim == 128
+        and packed.ndim == 2
+        and 2048 <= packed.shape[0] <= 32768
+        and packed.shape[1] == (2 * num_k_heads + num_v_heads) * 128
+        and packed.is_cuda
+        and packed.is_contiguous()
+        and packed.dtype == torch.bfloat16
+        and packed.data_ptr() % 16 == 0
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability(packed.device) == (9, 0)
+    ):
+        return None
+    m = packed.shape[0]
+    q = packed.new_empty((1, m, num_k_heads, 128))
+    k = torch.empty_like(q)
+    v = packed.new_empty((1, m, num_v_heads, 128))
+    _scatter_qkv_l2norm_sm90_multi_head[(triton.cdiv(m * num_k_heads, 4),)](
+        packed, q, k, v, m, H=num_k_heads, num_warps=8, num_stages=1
     )
     return q, k, v

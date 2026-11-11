@@ -486,7 +486,7 @@ class IndexerDecodeTritonTest(unittest.TestCase):
         from types import SimpleNamespace
         from unittest.mock import patch
 
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
             is_supported,
         )
 

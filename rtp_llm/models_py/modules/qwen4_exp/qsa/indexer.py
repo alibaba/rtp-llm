@@ -471,7 +471,9 @@ def build_qsa_rope(
                 device=device,
             )
         if first_axis is not None:
-            from .rope_triton import try_build_text_rope
+            from rtp_llm.models_py.kernels.cuda.qsa.rope_triton import (
+                try_build_text_rope,
+            )
 
             fused = try_build_text_rope(
                 first_axis,
