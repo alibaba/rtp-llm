@@ -4,7 +4,9 @@
 #include <stdexcept>
 #include <tuple>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
 
 namespace rtp_llm {
@@ -304,8 +306,11 @@ TEST(KVCMFrozenTaskTest, DistinctReadTracesOwnIndependentHoldsOnTheSameTarget) {
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), before + 1);
         EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), i + 1);
     }
-    const auto records = backend->frozenTasks();
+    auto records = backend->frozenTasks();
     ASSERT_EQ(records.size(), 2u);
+    const std::weak_ptr<FrozenTask> first = records[0];
+    const std::weak_ptr<FrozenTask> second = records[1];
+    const auto first_failure = records[0]->failure().status.ToString();
     EXPECT_NE(std::get<std::string>(records[0]->execution().trace_id),
               std::get<std::string>(records[1]->execution().trace_id));
     records[0]->unfreeze();
@@ -314,6 +319,14 @@ TEST(KVCMFrozenTaskTest, DistinctReadTracesOwnIndependentHoldsOnTheSameTarget) {
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), before + 1);
     EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
     EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        const auto retained = backend->frozenTasks();
+        ASSERT_EQ(retained.size(), 1u);
+        EXPECT_EQ(retained.front(), records[1]);
+        EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
+    }
+    // Removing table ownership does not invalidate an earlier observer's snapshot.
+    EXPECT_EQ(records[0]->failure().status.ToString(), first_failure);
     records[0]->unfreeze();
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), before + 1);
     EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
@@ -321,7 +334,72 @@ TEST(KVCMFrozenTaskTest, DistinctReadTracesOwnIndependentHoldsOnTheSameTarget) {
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), before);
     EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 0u);
     EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
-    EXPECT_EQ(backend->frozenTasks().size(), 2u);
+    EXPECT_TRUE(backend->frozenTasks().empty());
+    EXPECT_TRUE(backend->frozenTasks().empty());
+    EXPECT_EQ(backend->taskRegistry().size(), 2u);
+    records.clear();
+    EXPECT_TRUE(first.expired());
+    EXPECT_TRUE(second.expired());
+}
+
+TEST(KVCMFrozenTaskTest, EnumerationKeepsReleasingRecordUntilCapacityNotificationFinishes) {
+    using block_tree_cache_test::BoundedThread;
+    using namespace std::chrono_literals;
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    auto environment = std::make_shared<BackendEnvironment>(makeBackendEnvironment("kvcm_releasing_snapshot"));
+    auto client = std::make_shared<MockClientWrapper>();
+    EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client, shutdown()).Times(1);
+    auto backend = std::make_shared<BackendHandle>(makeBackend(*environment, singleRankConfig(), client));
+    ASSERT_TRUE(initSingleRank(*backend->backend, *environment));
+    auto entered = std::make_shared<std::promise<void>>();
+    auto entered_future = entered->get_future();
+    auto proceed = std::make_shared<std::promise<void>>();
+    const auto proceed_future = proceed->get_future().share();
+    // FrozenTask captures this callback during preparation, before any release.
+    environment->device_pool->setCapacityChangeCallback([entered, proceed_future] {
+        entered->set_value();
+        EXPECT_EQ(proceed_future.wait_for(5s), std::future_status::ready);
+    });
+    block_tree_cache_detail::ScopeRollback unblock([proceed] { proceed->set_value(); });
+    auto meta = matchOne(*backend->backend, *environment, *client);
+    ASSERT_NE(meta, nullptr);
+    client->load_status = SdkCode::ER_SDKREAD_ERROR;
+    EXPECT_FALSE(readResult(*backend->backend, makeStorageRequest(*environment), std::move(meta)).ok());
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend->backend));
+    auto records = backend->backend->frozenTasks();
+    ASSERT_EQ(records.size(), 1u);
+    auto record = records.front();
+    const std::weak_ptr<FrozenTask> observed = record;
+    records.clear();
+    // Leave only the frozen hold so unfreeze actually grows pool capacity.
+    environment->device_pool->decRef(environment->block_id);
+    BoundedThread<bool> releasing([record, environment, backend] {
+        (void)environment;
+        (void)backend;
+        return record->unfreeze();
+    });
+    ASSERT_EQ(entered_future.wait_for(5s), std::future_status::ready);
+    EXPECT_EQ(record->snapshot().state, FrozenState::RELEASING);
+    BoundedThread<std::vector<std::shared_ptr<FrozenTask>>> enumerate([environment, backend] {
+        (void)environment;
+        return backend->backend->frozenTasks();
+    });
+    ASSERT_EQ(enumerate.waitFor(2s), std::future_status::ready);
+    auto retained = enumerate.get();
+    ASSERT_EQ(retained.size(), 1u);
+    EXPECT_EQ(retained.front(), record);
+    retained.clear();
+    unblock.run();
+    ASSERT_EQ(releasing.waitFor(5s), std::future_status::ready);
+    EXPECT_TRUE(releasing.get());
+    EXPECT_EQ(record->snapshot().state, FrozenState::RELEASED);
+    EXPECT_TRUE(backend->backend->frozenTasks().empty());
+    EXPECT_TRUE(backend->backend->frozenTasks().empty());
+    EXPECT_EQ(backend->backend->taskRegistry().size(), 1u);
+    record.reset();
+    EXPECT_TRUE(observed.expired());
 }
 
 TEST(KVCMFrozenTaskTest, ShutdownAndDestructionNeverAutomaticallyReleaseFrozenTargets) {

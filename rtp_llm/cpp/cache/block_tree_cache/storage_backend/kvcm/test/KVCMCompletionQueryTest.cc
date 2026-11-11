@@ -369,7 +369,7 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
     const auto replay = recovery.runOnce(2000);
     EXPECT_EQ(replay.queried, 0u);
     EXPECT_EQ(replay.released, 0u);
-    EXPECT_EQ(coordinator->frozenTasks().size(), 1u);
+    EXPECT_TRUE(coordinator->frozenTasks().empty());
     for (const auto& worker : {worker0, worker1}) {
         EXPECT_EQ(worker->backend->taskRegistry().size(), 1u);
         const auto trace = std::get<std::string>(record->execution().trace_id);
@@ -437,8 +437,9 @@ TEST(KVCMCompletionQueryTest, LocalSdkFailuresRecoverOnlyProvenHoldsOnSharedTarg
         EXPECT_EQ(record->failure().status.ToString(), messages[index]);
         EXPECT_FALSE(record->failure().buffer_safe);
         EXPECT_EQ(registry.queryLocal(std::vector<std::string>{trace}).front(), RegistryState::BUFFER_SAFE);
+        EXPECT_EQ(worker->manager->frozenTasks().size(), records.size() - index - 1);
     }
-    EXPECT_EQ(worker->manager->frozenTasks().size(), 2u);
+    EXPECT_TRUE(worker->manager->frozenTasks().empty());
     EXPECT_EQ(worker->backend->taskRegistry().size(), 2u);
     const auto replay = recovery.runOnce(2000);
     EXPECT_EQ(replay.queried, 0u);
@@ -542,7 +543,7 @@ TEST(KVCMCompletionQueryTest, BackgroundRecoveryWaitsForProofAndStopKeepsLatePro
             EXPECT_EQ(environment.device_pool->refCount(environment.block_id), original_references);
         }
         EXPECT_EQ(settlements->load(), 1u);
-        EXPECT_EQ(coordinator->frozenTasks().size(), 1u);
+        EXPECT_EQ(coordinator->frozenTasks().size(), stop_before_safe ? 1u : 0u);
         EXPECT_EQ(record->failure().status.ToString(), failure_message);
         EXPECT_FALSE(record->failure().buffer_safe);
         EXPECT_EQ(record->failure().execution_diagnostics, diagnostics);

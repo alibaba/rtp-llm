@@ -315,8 +315,21 @@ void BlockTransferDispatcher::retainFrozenTask(std::list<std::shared_ptr<FrozenT
 }
 
 std::vector<std::shared_ptr<FrozenTask>> BlockTransferDispatcher::frozenTasks() const {
-    std::lock_guard<std::mutex> lock(frozen_mutex_);
-    return {frozen_tasks_.begin(), frozen_tasks_.end()};
+    // Keep retired owners alive until the list lock is released, including if
+    // snapshot allocation throws. Existing snapshots still own their diagnostics.
+    std::list<std::shared_ptr<FrozenTask>>   retired;
+    std::vector<std::shared_ptr<FrozenTask>> tasks;
+    {
+        std::lock_guard<std::mutex> lock(frozen_mutex_);
+        for (auto it = frozen_tasks_.begin(); it != frozen_tasks_.end();) {
+            const auto current = it++;
+            if ((*current)->snapshot().state == FrozenTask::State::RELEASED) {
+                retired.splice(retired.end(), frozen_tasks_, current);
+            }
+        }
+        tasks.assign(frozen_tasks_.begin(), frozen_tasks_.end());
+    }
+    return tasks;
 }
 
 void BlockTransferDispatcher::runTransfer(TransferTask         task,

@@ -277,8 +277,21 @@ public:
     }
 
     std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const {
-        std::lock_guard<std::mutex> lock(frozen_mutex_);
-        return {frozen_tasks_.begin(), frozen_tasks_.end()};
+        std::list<std::shared_ptr<FrozenTask>>   retired;
+        std::vector<std::shared_ptr<FrozenTask>> tasks;
+        {
+            std::lock_guard<std::mutex> lock(frozen_mutex_);
+            for (auto it = frozen_tasks_.begin(); it != frozen_tasks_.end();) {
+                const auto current = it++;
+                if ((*current)->snapshot().state == FrozenTask::State::RELEASED) {
+                    retired.splice(retired.end(), frozen_tasks_, current);
+                }
+            }
+            tasks.assign(frozen_tasks_.begin(), frozen_tasks_.end());
+        }
+        // Retired tasks may own the last pool reference. Destroy them only
+        // after dropping the table mutex; RELEASING records stay registered.
+        return tasks;
     }
 
     enum class TransferResult {
@@ -2828,7 +2841,7 @@ private:
     std::shared_ptr<TransferTaskRegistry>                 read_registry_{std::make_shared<TransferTaskRegistry>()};
     mutable std::atomic<size_t>                           next_registry_warning_{4096};
     mutable std::mutex                                   frozen_mutex_;
-    std::list<std::shared_ptr<FrozenTask>>                frozen_tasks_;
+    mutable std::list<std::shared_ptr<FrozenTask>>        frozen_tasks_;
     // TP1 shares its local pool. Multi-rank payloads use it for reads and a separate pool for writes.
     std::unique_ptr<BlockTreeTaskPool>                   local_payload_pool_;
     std::unique_ptr<BlockTreeTaskPool>                   rank_write_pool_;

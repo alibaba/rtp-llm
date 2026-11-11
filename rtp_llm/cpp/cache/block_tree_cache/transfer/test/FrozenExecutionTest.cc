@@ -1,21 +1,26 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <atomic>
 #include <deque>
+#include <future>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionTypes.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 
 namespace rtp_llm {
 namespace {
 
 using namespace block_transfer_engine_test;
+using block_tree_cache_test::BoundedThread;
 
 TransferResult unknownExecution() {
     return TransferResult(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "execution completion unknown"),
@@ -76,6 +81,7 @@ public:
     std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         submitted_traces.push_back(task.traceId());
         submitted_descriptors.push_back(task.descriptors());
+        submitted_proofs.push_back(task.completionProof());
         if (contexts_.empty()) {
             throw std::runtime_error("unexpected extra execution");
         }
@@ -86,6 +92,7 @@ public:
 
     std::vector<uint64_t>                        submitted_traces;
     std::vector<std::vector<TransferDescriptor>> submitted_descriptors;
+    std::vector<std::shared_ptr<TransferBufferSafety>> submitted_proofs;
 
 private:
     std::deque<std::shared_ptr<TransferAsyncContext>> contexts_;
@@ -173,6 +180,9 @@ TEST_F(FrozenExecutionTest, ActualExecutionTraceOwnsDeduplicatedTargetsBeforeBus
     EXPECT_EQ(host_->treeRefCount(target), 1u);
     frozen[0]->unfreeze();
     EXPECT_FALSE(host_->isAllocated(target));
+    EXPECT_TRUE(dispatcher.frozenTasks().empty());
+    EXPECT_TRUE(dispatcher.frozenTasks().empty());
+    EXPECT_EQ(dispatcher.taskRegistry().size(), 1u);
     dispatcher.waitForTransfers();
 }
 
@@ -205,9 +215,15 @@ TEST_F(FrozenExecutionTest, SeparateExecutionTracesSharingTargetReleaseOnlyTheir
     frozen[0]->unfreeze();
     EXPECT_TRUE(host_->isFrozen(target));
     EXPECT_EQ(host_->treeRefCount(target), 1u);
+    const auto remaining = dispatcher.frozenTasks();
+    ASSERT_EQ(remaining.size(), 1u);
+    EXPECT_EQ(remaining.front(), frozen[1]);
     frozen[1]->unfreeze();
     EXPECT_FALSE(host_->isAllocated(target));
     EXPECT_EQ(host_->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+    EXPECT_TRUE(dispatcher.frozenTasks().empty());
+    EXPECT_TRUE(dispatcher.frozenTasks().empty());
+    EXPECT_EQ(dispatcher.taskRegistry().size(), 2u);
     dispatcher.waitForTransfers();
 }
 
@@ -330,10 +346,12 @@ TEST_F(FrozenExecutionTest, RegistrationFailureFreezesBeforeRollbackAndLateDeliv
     EXPECT_EQ(host_->treeRefCount(target), 1u);
     frozen[0]->unfreeze();
     ASSERT_FALSE(host_->isAllocated(target));
+    EXPECT_TRUE(dispatcher.frozenTasks().empty());
     context->deliver(unknownExecution());
     EXPECT_EQ(completions, 1u);
     EXPECT_FALSE(host_->isAllocated(target));
     EXPECT_EQ(frozen[0]->snapshot().state, FrozenTask::State::RELEASED);
+    EXPECT_TRUE(dispatcher.frozenTasks().empty());
     dispatcher.waitForTransfers();
 }
 
@@ -381,6 +399,105 @@ TEST_F(FrozenExecutionTest, WorkerLocalExecutionDoesNotCreateAnotherCoordinatorH
     EXPECT_EQ(host_->treeRefCount(target), 1u);
     host_->decTreeRef(target, BlockTreeRefType::LOAD);
     dispatcher.waitForTransfers();
+}
+
+
+TEST_F(FrozenExecutionTest, ReleasedEnumerationDestroysManagedRecordOutsideTheDispatcherLock) {
+    const auto target = allocateTarget();
+    auto context = std::make_shared<ObservableContext>();
+    auto executor = engine({context});
+    auto dispatcher = std::make_shared<BlockTransferDispatcher>(executor);
+    dispatcher->runTransfer(parent({target}), [](TransferResult result) {
+        EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+    });
+    context->deliver(unknownExecution());
+    auto records = dispatcher->frozenTasks();
+    ASSERT_EQ(records.size(), 1u);
+    auto record = records.front();
+    records.clear();
+    const auto trace = std::get<uint64_t>(record->execution().trace_id);
+    ASSERT_EQ(executor->submitted_proofs.size(), 1u);
+    ASSERT_NE(executor->submitted_proofs.front(), nullptr);
+    executor->submitted_proofs.front()->report(true);
+
+    auto destroyed = std::make_shared<std::atomic<size_t>>(0);
+    std::weak_ptr<BlockTransferDispatcher> weak_dispatcher = dispatcher;
+    // The retained diagnostic's destructor reenters enumeration. Erasing a
+    // last-owned record while holding the dispatcher lock would deadlock here.
+    record->recordRecoveryQuery(std::shared_ptr<const TransferCompletionQueryResult>(
+        new TransferCompletionQueryResult,
+        [weak_dispatcher, destroyed](const TransferCompletionQueryResult* query) {
+            if (auto owner = weak_dispatcher.lock()) {
+                EXPECT_TRUE(owner->frozenTasks().empty());
+            }
+            ++*destroyed;
+            delete query;
+        }));
+    std::weak_ptr<FrozenTask> weak_record = record;
+    EXPECT_TRUE(record->unfreeze());
+    record.reset();
+    EXPECT_FALSE(weak_record.expired());
+    BoundedThread<bool> cleanup([dispatcher] { return dispatcher->frozenTasks().empty(); });
+    ASSERT_EQ(cleanup.waitFor(std::chrono::seconds(3)), std::future_status::ready);
+    EXPECT_TRUE(cleanup.get());
+    EXPECT_TRUE(weak_record.expired());
+    EXPECT_EQ(destroyed->load(), 1u);
+    EXPECT_TRUE(dispatcher->frozenTasks().empty());
+    EXPECT_EQ(dispatcher->taskRegistry().size(), 1u);
+    EXPECT_EQ(dispatcher->taskRegistry().queryLocal(std::vector<uint64_t>{trace}).front(),
+              TransferTaskRegistry::State::BUFFER_SAFE);
+    host_->decTreeRef(target, BlockTreeRefType::LOAD);
+    dispatcher->waitForTransfers();
+}
+
+TEST_F(FrozenExecutionTest, ConcurrentEnumerationKeepsReleasingRecordUntilCapacityNotificationReturns) {
+    const auto target = allocateTarget();
+    auto entered = std::make_shared<std::promise<void>>();
+    auto notifying = entered->get_future();
+    auto release = std::make_shared<std::promise<void>>();
+    auto released = release->get_future().share();
+    host_->setCapacityChangeCallback([entered, released] {
+        entered->set_value();
+        EXPECT_EQ(released.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    });
+    auto context = std::make_shared<ObservableContext>();
+    auto executor = engine({context});
+    auto dispatcher = std::make_shared<BlockTransferDispatcher>(executor);
+    dispatcher->runTransfer(parent({target}), [](TransferResult result) {
+        EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+    });
+    context->deliver(unknownExecution());
+    auto records = dispatcher->frozenTasks();
+    ASSERT_EQ(records.size(), 1u);
+    auto record = records.front();
+    host_->decTreeRef(target, BlockTreeRefType::LOAD);
+    BoundedThread<bool> unfreeze([record] { return record->unfreeze(); });
+    ASSERT_EQ(notifying.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    EXPECT_EQ(record->snapshot().state, FrozenTask::State::RELEASING);
+    BoundedThread<bool> enumerate([dispatcher, record] {
+        for (size_t i = 0; i < 20; ++i) {
+            const auto active = dispatcher->frozenTasks();
+            if (active.size() != 1 || active.front() != record
+                || active.front()->snapshot().state != FrozenTask::State::RELEASING)
+                return false;
+        }
+        return true;
+    });
+    ASSERT_EQ(enumerate.waitFor(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_TRUE(enumerate.get());
+    EXPECT_FALSE(record->unfreeze());
+    release->set_value();
+    ASSERT_EQ(unfreeze.waitFor(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_TRUE(unfreeze.get());
+    EXPECT_EQ(record->snapshot().state, FrozenTask::State::RELEASED);
+    EXPECT_TRUE(dispatcher->frozenTasks().empty());
+    EXPECT_TRUE(dispatcher->frozenTasks().empty());
+    EXPECT_FALSE(host_->isAllocated(target));
+    EXPECT_EQ(dispatcher->taskRegistry().size(), 1u);
+    // The external snapshot continues to own usable diagnostics after pruning.
+    EXPECT_EQ(records.front(), record);
+    EXPECT_EQ(record->failure().status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+    dispatcher->waitForTransfers();
 }
 
 }  // namespace

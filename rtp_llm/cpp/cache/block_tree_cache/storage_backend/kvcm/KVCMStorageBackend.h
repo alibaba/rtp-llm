@@ -58,7 +58,8 @@ public:
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
     // Local READ completion evidence; this accessor does not issue a query RPC.
     const TransferTaskRegistry& taskRegistry() const;
-    // Retained non-protected READ targets. No query or automatic thaw runs here.
+    // Retained non-protected READ targets; enumeration removes only RELEASED
+    // records. It never queries completion or releases frozen references.
     std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
 
     // Optional EOS publication; true means handled/skipped, not committed.

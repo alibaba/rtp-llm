@@ -51,7 +51,8 @@ public:
     // queued business settlement must be drained separately afterwards.
     void waitForTransfers() const;
 
-    // Local diagnostics/explicit release access. No polling or automatic release.
+    // Snapshot retained records, retiring RELEASED owners outside the list lock.
+    // FROZEN and RELEASING records remain; enumeration never unfreezes blocks.
     std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
 
     // Worker-local evidence only; no query RPC or recovery loop.

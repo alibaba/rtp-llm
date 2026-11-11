@@ -167,6 +167,7 @@ cc_test_wrapper(
     deps = kvcm_backend_test_deps + [
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:sdk_buffer_safety",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
     ],
 )
 

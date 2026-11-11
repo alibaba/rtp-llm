@@ -2283,8 +2283,11 @@ TEST_F(KVCacheManagerTest, FrozenTransferRecoveryObservesLateProofWithoutRepeati
     EXPECT_EQ(record->failure().execution_diagnostics, diagnostics);
     EXPECT_EQ(settlements, 1u);
     EXPECT_EQ(engine->submitted_batch_count, 1u);
-    EXPECT_EQ(manager->frozenTasks().front(), record);
+    EXPECT_TRUE(manager->frozenTasks().empty());
+    EXPECT_TRUE(manager->frozenTasks().empty());
+    EXPECT_EQ(record->snapshot().state, FrozenTask::State::RELEASED);
     EXPECT_EQ(manager->block_tree_cache_->transfer_dispatcher_->taskRegistry().size(), 1u);
+    EXPECT_TRUE(manager->queryTransferCompletion(record->execution(), 1000).all_safe);
     EXPECT_EQ(recovery.runOnce(1000).queried, 0u);
 }
 
@@ -2318,20 +2321,37 @@ TEST_F(KVCacheManagerTest, BackgroundRecoveryReclaimsLocalTargetsAndPublishesCap
             EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
             pool->decTreeRef(*block, BlockTreeRefType::EVICTION);
         }, "evict");
-    const auto records = manager->frozenTasks();
+    auto records = manager->frozenTasks();
     ASSERT_EQ(records.size(), 1u);
     ASSERT_NE(engine->last_proof, nullptr);
     engine->last_proof->report(true);
     ASSERT_TRUE(manager->startFrozenTaskRecovery());
-    EXPECT_EQ(ready.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    manager->stopFrozenTaskRecovery();
-    EXPECT_EQ(records.front()->snapshot().state, FrozenTask::State::RELEASED);
+    ASSERT_EQ(ready.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    const auto release_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (records.front()->snapshot().state != FrozenTask::State::RELEASED
+           && std::chrono::steady_clock::now() < release_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(records.front()->snapshot().state, FrozenTask::State::RELEASED);
     EXPECT_FALSE(pool->isAllocated(*block));
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
     EXPECT_EQ(settlements, 1u);
     EXPECT_EQ(engine->submitted_batch_count, 1u);
     EXPECT_EQ(records.front()->failure().status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
-    EXPECT_EQ(manager->block_tree_cache_->transfer_dispatcher_->taskRegistry().size(), 1u);
+    const auto trace = std::get<uint64_t>(records.front()->execution().trace_id);
+    std::weak_ptr<FrozenTask> weak_record = records.front();
+    records.clear();
+    // Only the next background enumeration may prune the managed record; this
+    // wait deliberately does not call frozenTasks() from the test thread.
+    const auto prune_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!weak_record.expired() && std::chrono::steady_clock::now() < prune_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(weak_record.expired());
+    manager->stopFrozenTaskRecovery();
+    const auto& registry = manager->block_tree_cache_->transfer_dispatcher_->taskRegistry();
+    EXPECT_EQ(registry.size(), 1u);
+    EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{trace}).front(), TransferTaskRegistry::State::BUFFER_SAFE);
 }
 
 TEST_F(KVCacheManagerTest, FrozenRecoveryStartsOnlyForEnabledAllocatorOwner) {
