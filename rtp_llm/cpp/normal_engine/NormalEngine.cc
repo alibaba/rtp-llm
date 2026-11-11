@@ -742,6 +742,12 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
     const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
     config.finalizeBlockNums(confirmed_block_num, runtime_config);
+#if USING_CUDA
+    // Warmup and graph-capture transients can still sit in the caching
+    // allocator here (17.5 GiB reserved-but-unallocated observed at a 1M
+    // context); the raw pool allocation below needs driver-visible memory.
+    c10::cuda::CUDACachingAllocator::emptyCache();
+#endif
     auto cache_manager = make_shared<KVCacheManager>(config,
                                                      false,
                                                      metrics_reporter_,
