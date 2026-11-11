@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <c10/core/InferenceMode.h>
@@ -2380,6 +2382,31 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 dspark_confidence_hidden_logits.copy_(outputs.dspark_confidence_hidden_logits);
             }
             graph.capture_end();
+        }
+        {
+            // Genuine capture receipt for the AWI telemetry reader.  This is
+            // written only after capture_end() returns successfully.
+            const char* dir = std::getenv("AWI_WEIGHT_CENSUS_DIR");
+            if (dir == nullptr || *dir == '\0') {
+                dir = "/tmp/awi";
+            }
+            const char* rank_env = std::getenv("AWI_RANK");
+            if (rank_env == nullptr || *rank_env == '\0') {
+                rank_env = std::getenv("LOCAL_RANK");
+            }
+            const std::string path = std::string(dir) + "/captures-" +
+                                     (rank_env == nullptr ? "0" : rank_env) + ".jsonl";
+            std::ofstream receipt(path, std::ios::app);
+            if (receipt) {
+#if USING_ROCM
+                const char* backend = "hip";
+#else
+                const char* backend = "cuda";
+#endif
+                receipt << "{\"backend\":\"" << backend
+                        << "\",\"t_ns\":" << std::chrono::steady_clock::now().time_since_epoch().count()
+                        << "}\n";
+            }
         }
 #if USING_CUDA && ((TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 9))
         auto& instance = graph_instances_[key];

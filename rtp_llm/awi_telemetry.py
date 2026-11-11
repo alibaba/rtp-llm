@@ -110,14 +110,48 @@ class AwiTelemetry:
                 by_name[str(entry["name"])] = entry
         return [by_name[name] for name in sorted(by_name)]
 
+    def load_capture_receipts(self) -> List[Dict[str, Any]]:
+        """Read capture receipts written by the real CUDA/HIP graph hooks."""
+        events: List[Dict[str, Any]] = []
+        for path in sorted(glob.glob("/tmp/awi/captures-*.jsonl")):
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        item = json.loads(line)
+                        events.append(
+                            {
+                                "type": "capture",
+                                "backend": str(item.get("backend", "unknown")),
+                                "t_ns": int(item.get("t_ns", 0)),
+                                "capture_phase": "startup",
+                            }
+                        )
+            except (OSError, ValueError):
+                continue
+        return events
+
     def observations(self, operation_id: Optional[str] = None) -> Dict[str, Any]:
         with self._lock:
             events = list(self._events)
             op = self._operations.get(operation_id or "")
+        captures = self.load_capture_receipts()
+        if captures:
+            backends = {e["backend"] for e in captures if e.get("backend")}
+            if backends:
+                self._graph_backend = "hip" if "hip" in backends else "cuda"
         weights = self.load_weight_census()
         if op is not None:
             ids = set(op["request_ids"])
-            events = [e for e in events if str(e.get("request_id")) in ids]
+            events = [
+                e
+                for e in events
+                if "request_id" not in e or str(e.get("request_id")) in ids
+            ]
+        # Capture receipts are startup-wide, not request-scoped.
+        events.extend(captures)
         source = {
             "internal": os.environ.get("AWI_SOURCE_INTERNAL", ""),
             "public": os.environ.get("AWI_SOURCE_PUBLIC", ""),
@@ -125,8 +159,11 @@ class AwiTelemetry:
         return {
             "build": {"source": source},
             "configuration": {
-                "context_tokens": 1048576,
-                "memory_kv_reuse": True,
+                "context_tokens": int(os.environ.get("AWI_CONTEXT_TOKENS", "1048576")),
+                "memory_kv_reuse": (
+                    os.environ.get("REUSE_CACHE") == "1"
+                    and os.environ.get("ENABLE_MEMORY_CACHE") == "1"
+                ),
                 "graph_backend": self._graph_backend,
             },
             "startup_network_fetches": _NETWORK_FETCHES,
