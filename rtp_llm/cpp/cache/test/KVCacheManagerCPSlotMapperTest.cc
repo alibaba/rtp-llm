@@ -41,7 +41,7 @@ static CompleteTokenIdsPtr makeTokenIds(int batch_size, int seq_len, int block_s
 static BatchKVCacheResourcePtr makeResource(int batch_size, const CacheConfig& config) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(batch_size);
-    res->initGroups(config.topologyPtr());
+    res->initGroups(config);
     return res;
 }
 

@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include <chrono>
+#include <exception>
 #include <thread>
 
 namespace rtp_llm {
@@ -116,7 +117,8 @@ std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext> P2PConnector::asyncWrite(c
 std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext>
 P2PConnector::asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) {
     auto resource = std::make_shared<KVCacheResource>(layer_context->kvCacheResource());
-    worker_->writeByLayer(layer_id, resource, layer_context->requestId(), layer_context->attentionEvent());
+    worker_->writeByLayer(
+        layer_id, resource, layer_context->requestId(), layer_context->attentionEvent(), layer_context->moduleId());
     return std::make_shared<P2PConnectorAsyncWriteByLayerContext>(resource);
 }
 
@@ -276,7 +278,24 @@ bool P2PConnector::executeRead(int64_t                                 request_i
         const auto  layer_id  = static_cast<int>(layer_block_pb.layer_id());
         const auto& cache_tag = layer_block_pb.cache_tag();
         RTP_LLM_CHECK_WITH_INFO(!cache_tag.empty(), "P2P layer block requires cache_tag for layer=%d", layer_id);
-        auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, cache_tag);
+        size_t module_id = 0;
+        try {
+            module_id = layer_block_converter_->moduleOfTag(cache_tag);
+        } catch (const std::exception& e) {
+            const std::string error_msg =
+                "P2P layer block tag=" + cache_tag + " is not owned by any cache module: " + e.what();
+            RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
+            setP2PResponse(response, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, error_msg));
+            return false;
+        }
+        if (!layer_block_converter_->tagOwnsLayer(cache_tag, layer_id)) {
+            const std::string error_msg = "P2P layer block tag=" + cache_tag + " does not own local layer="
+                                          + std::to_string(layer_id) + " (module=" + std::to_string(module_id) + ")";
+            RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
+            setP2PResponse(response, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, error_msg));
+            return false;
+        }
+        auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, cache_tag, module_id);
         auto cache_keys         = layer_block_pb.cache_keys();
         auto block_ids          = layer_block_pb.block_ids();
         RTP_LLM_CHECK_WITH_INFO(cache_keys.size() == block_ids.size(),

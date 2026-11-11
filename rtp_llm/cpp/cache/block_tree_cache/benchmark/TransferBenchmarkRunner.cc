@@ -311,20 +311,20 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
         is_swa |= member->type == CacheGroupType::SWA;
     }
 
-    auto topology = BenchmarkFixture::createTopology(
+    auto cache_config = BenchmarkFixture::createCacheConfig(
         group_specs, layer_strides, profile_.tokens_per_block, layer_counts, sliding_windows);
     if (is_swa) {
         setup.group_set = BenchmarkFixture::createSWAGroupSet(setup.device_pools,
                                                               host_pool,
                                                               disk_pool,
                                                               0,
-                                                              topology,
+                                                              cache_config,
                                                               group_tags,
                                                               gs_info.sliding_window_size,
                                                               profile_.tokens_per_block);
     } else {
         setup.group_set =
-            BenchmarkFixture::createFullGroupSet(setup.device_pools, host_pool, disk_pool, 0, topology, group_tags);
+            BenchmarkFixture::createFullGroupSet(setup.device_pools, host_pool, disk_pool, 0, cache_config, group_tags);
     }
 
     std::vector<GroupSetPtr> engine_group_sets{setup.group_set};
@@ -357,24 +357,24 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
                                                        pool_prefix + "capacity_" + member->tag,
                                                        profile_.tokens_per_block));
             }
-            auto         capacity_topology = BenchmarkFixture::createTopology(capacity_specs,
-                                                                      capacity_strides,
-                                                                      profile_.tokens_per_block,
-                                                                      capacity_layer_counts,
-                                                                      capacity_sliding_windows);
-            const size_t group_set_id      = engine_group_sets.size();
+            auto         capacity_config = BenchmarkFixture::createCacheConfig(capacity_specs,
+                                                                       capacity_strides,
+                                                                       profile_.tokens_per_block,
+                                                                       capacity_layer_counts,
+                                                                       capacity_sliding_windows);
+            const size_t group_set_id    = engine_group_sets.size();
             if (capacity_info.group_type == CacheGroupType::SWA) {
                 engine_group_sets.push_back(BenchmarkFixture::createSWAGroupSet(capacity_device_pools,
                                                                                 nullptr,
                                                                                 nullptr,
                                                                                 group_set_id,
-                                                                                capacity_topology,
+                                                                                capacity_config,
                                                                                 capacity_group_tags,
                                                                                 capacity_info.sliding_window_size,
                                                                                 profile_.tokens_per_block));
             } else {
                 engine_group_sets.push_back(BenchmarkFixture::createFullGroupSet(
-                    capacity_device_pools, nullptr, nullptr, group_set_id, capacity_topology, capacity_group_tags));
+                    capacity_device_pools, nullptr, nullptr, group_set_id, capacity_config, capacity_group_tags));
             }
         }
     }

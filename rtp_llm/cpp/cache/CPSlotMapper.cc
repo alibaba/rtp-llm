@@ -28,7 +28,7 @@ CPSlotMapper::CPSlotMapper(int cp_rank, int cp_size, int block_size):
     virtual_block_size_ = block_size * cp_size;
 }
 
-CpGroupLayout CPSlotMapper::layoutForGroup(const CacheConfig& config, std::string_view tag) const {
+CpGroupLayout CPSlotMapper::layoutForGroup(const CacheModuleConfig& config, std::string_view tag) const {
     CpGroupLayout layout;
     const auto&   group       = config.topology().group(tag);
     const auto&   policy      = group.policy;
@@ -44,11 +44,13 @@ CpGroupLayout CPSlotMapper::layoutForGroup(const CacheConfig& config, std::strin
 }
 
 bool CPSlotMapper::blockRoundRobinGroup(const CacheConfig& config, std::string_view tag) const {
-    return layoutForGroup(config, tag).mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    return layoutForGroup(config.moduleConfig(config.moduleOfTag(tag)), tag).mapping
+           == CpBlockMappingMode::BLOCK_ROUND_ROBIN;
 }
 
 bool CPSlotMapper::compactLastRankGroup(const CacheConfig& config, std::string_view tag) const {
-    return layoutForGroup(config, tag).mapping == CpBlockMappingMode::COMPACT_LAST_RANK;
+    return layoutForGroup(config.moduleConfig(config.moduleOfTag(tag)), tag).mapping
+           == CpBlockMappingMode::COMPACT_LAST_RANK;
 }
 
 int CPSlotMapper::localBlockCount(int seq_len) const {
@@ -77,7 +79,7 @@ size_t CPSlotMapper::logicalSeqSizePerBlock(const CacheConfig& config, std::stri
     if (blockRoundRobinGroup(config, tag)) {
         return static_cast<size_t>(virtual_block_size_);
     }
-    return config.topology().group(tag).seqSizePerBlock();
+    return config.groupByTagGlobal(tag).seqSizePerBlock();
 }
 
 int CPSlotMapper::reuseBlockTokens(const CacheConfig& config) const {
@@ -116,7 +118,7 @@ std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(const CacheConfig&
                                                               size_t             total_logical_blocks,
                                                               size_t             reuse_block_size,
                                                               bool               use_hybrid) const {
-    auto policy = config.topology().group(tag).policy;
+    auto policy = config.groupByTagGlobal(tag).policy;
     if (!isSharded()) {
         policy.cp_mapping = CpBlockMappingMode::NONE;
     }
@@ -137,10 +139,10 @@ std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(const CacheGroupPo
     return buildCacheStorePlan(policy, total_logical_blocks, reuse_block_size, use_hybrid, cp_rank_, cp_size_);
 }
 
-std::vector<BlockInfo> CPSlotMapper::sliceBlockForPeer(const CacheConfig&     config,
-                                                       std::string_view       tag,
-                                                       std::vector<BlockInfo> parts,
-                                                       size_t                 peer_idx) const {
+std::vector<BlockInfo> CPSlotMapper::sliceBlockForPeer(const CacheModuleConfig& config,
+                                                       std::string_view         tag,
+                                                       std::vector<BlockInfo>   parts,
+                                                       size_t                   peer_idx) const {
     const auto layout = layoutForGroup(config, tag);
     if (!isSharded() || layout.slice == CpBlockSliceMode::NONE) {
         return parts;

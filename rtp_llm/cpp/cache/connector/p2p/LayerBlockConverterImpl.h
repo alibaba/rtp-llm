@@ -17,14 +17,32 @@ public:
     explicit LayerBlockConverterImpl(const std::shared_ptr<CoordinatorCacheManager>& coordinator_manager):
         coordinator_manager_(coordinator_manager) {}
 
-    std::vector<BlockInfo> convertIndexToBuffer(
-        int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
-        return filterValid(
-            coordinator_manager_->convertIndexToBuffer(layer_id, tag, block_id, partition_count, partition_id));
+    std::vector<BlockInfo> convertIndexToBuffer(int                layer_id,
+                                                const std::string& tag,
+                                                int                block_id,
+                                                int                partition_count,
+                                                int                partition_id,
+                                                size_t             module_id = 0) const override {
+        const size_t owner_module_id = coordinator_manager_->moduleOfTag(tag);
+        RTP_LLM_CHECK_WITH_INFO(owner_module_id == module_id,
+                                "P2P tag %s belongs to module %zu but module %zu was requested",
+                                tag.c_str(),
+                                owner_module_id,
+                                module_id);
+        return filterValid(coordinator_manager_->convertIndexToBuffer(
+            layer_id, tag, block_id, partition_count, partition_id, owner_module_id));
+    }
+
+    size_t moduleOfTag(const std::string& tag) const override {
+        return coordinator_manager_->moduleOfTag(tag);
+    }
+
+    bool tagOwnsLayer(const std::string& tag, int layer_id) const override {
+        return coordinator_manager_->tagOwnsLayer(tag, layer_id);
     }
 
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
-        const auto                                layout = coordinator_manager_->allLayerCacheBase();
+        const auto                                layouts = coordinator_manager_->allModuleLayouts();
         std::vector<std::pair<BlockInfo, size_t>> result;
         using BufferKey = std::tuple<uintptr_t, size_t, bool, int32_t, int32_t>;
         std::set<BufferKey> seen;
@@ -49,14 +67,16 @@ public:
             }
             result.push_back({info, aligned});
         };
-        for (const auto& [tag, group_layout] : layout.groups()) {
-            (void)tag;
-            if (group_layout.empty()) {
-                continue;
-            }
-            for (const auto& layer : group_layout.layers()) {
-                append_tensor(layer.kv_addr);
-                append_tensor(layer.kv_scale_addr);
+        for (const auto& module_layout : layouts) {
+            for (const auto& [tag, group_layout] : module_layout.groups()) {
+                (void)tag;
+                if (group_layout.empty()) {
+                    continue;
+                }
+                for (const auto& layer : group_layout.layers()) {
+                    append_tensor(layer.kv_addr);
+                    append_tensor(layer.kv_scale_addr);
+                }
             }
         }
         return result;

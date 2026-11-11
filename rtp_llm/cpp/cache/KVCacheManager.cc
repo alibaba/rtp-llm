@@ -139,52 +139,6 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     metrics_reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&pool_tags, &pool_collector);
 }
 
-std::shared_ptr<const CacheTopology> projectTopology(const CacheTopology&       source,
-                                                     const std::vector<size_t>& global_layer_ids) {
-    std::vector<GroupBase> groups = source.groups();
-
-    std::vector<LayerBase> layers;
-    layers.reserve(global_layer_ids.size());
-    for (size_t local_layer_id = 0; local_layer_id < global_layer_ids.size(); ++local_layer_id) {
-        const auto& source_layer = source.layer(static_cast<int>(global_layer_ids[local_layer_id]));
-        LayerBase   layer;
-        layer.layer_id   = static_cast<int>(local_layer_id);
-        layer.group_tags = source_layer.group_tags;
-        layers.push_back(std::move(layer));
-    }
-    return CacheTopology::create(std::move(groups), std::move(layers));
-}
-
-GroupedCacheLayerLayout projectLayout(const GroupedCacheLayerLayout&       source,
-                                      std::shared_ptr<const CacheTopology> target_topology,
-                                      const std::vector<size_t>&           global_layer_ids) {
-    RTP_LLM_CHECK_WITH_INFO(target_topology != nullptr, "cache layout projection requires a target topology");
-    RTP_LLM_CHECK_WITH_INFO(target_topology->layers().size() == global_layer_ids.size(),
-                            "cache layout projection topology layers=%zu mapping size=%zu",
-                            target_topology->layers().size(),
-                            global_layer_ids.size());
-
-    GroupedCacheLayerLayout::GroupLayouts groups;
-    for (const auto& target_group : target_topology->groups()) {
-        std::vector<BlockBufferPtrInfo> layers(global_layer_ids.size());
-        const auto&                     source_group = source.group(target_group.tag);
-        for (int local_layer_id : target_topology->layerIdsForGroup(target_group.tag)) {
-            RTP_LLM_CHECK_WITH_INFO(local_layer_id >= 0
-                                        && static_cast<size_t>(local_layer_id) < global_layer_ids.size(),
-                                    "cache layout projection tag=%s invalid local layer=%d",
-                                    target_group.tag.c_str(),
-                                    local_layer_id);
-            const auto local  = static_cast<size_t>(local_layer_id);
-            const auto global = global_layer_ids[local];
-            if (source_group.hasLayer(global)) {
-                layers[local] = source_group.at(global);
-            }
-        }
-        groups.emplace(target_group.tag, CacheLayerLayout(std::move(layers)));
-    }
-    return GroupedCacheLayerLayout(std::move(target_topology), std::move(groups));
-}
-
 void reportCacheOperation(const kmonitor::MetricsReporterPtr&          metrics_reporter,
                           RtpLLMCacheOperationMetricsCollector::OpType operation_type,
                           int64_t                                      begin_time_us) {
@@ -223,8 +177,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
         RTP_LLM_CHECK_WITH_INFO(group.block_num > 0, "cache manager requires capacity-complete cache groups");
     }
     for (const auto& child : config_.mtp_sub_configs) {
-        RTP_LLM_CHECK_WITH_INFO(child != nullptr, "null MTP cache configuration");
-        for (const auto& group : child->topology().groups()) {
+        for (const auto& group : child.topology().groups()) {
             RTP_LLM_CHECK_WITH_INFO(group.block_num > 0, "cache manager requires capacity-complete MTP cache groups");
         }
     }
@@ -255,7 +208,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     }
 
     RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_size=%dB, seq_size_per_block=%zu",
-                     config_.layer_num,
+                     config_.layer_num(),
                      config_.totalGroupBlockSizeBytes(),
                      config_.seq_size_per_block);
 }
@@ -379,14 +332,12 @@ const CacheConfig& KVCacheManager::cacheConfig() const {
     return config_;
 }
 
-const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) const {
+const CacheModuleConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) const {
     RTP_LLM_CHECK_WITH_INFO(mtp_module_id >= 0 && static_cast<size_t>(mtp_module_id) < config_.mtp_sub_configs.size(),
                             "Invalid mtp_module_id: %d, must be in range [0, %zu)",
                             mtp_module_id,
                             config_.mtp_sub_configs.size());
-    RTP_LLM_CHECK_WITH_INFO(
-        config_.mtp_sub_configs[mtp_module_id] != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
-    return *config_.mtp_sub_configs[mtp_module_id];
+    return config_.mtp_sub_configs[mtp_module_id];
 }
 
 // 显存管理和缓存分配
@@ -574,43 +525,49 @@ bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cach
 
 // 地址转换和缓冲区访问
 
-BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id) const {
-    return coordinator_manager_->convertIndexToAddr(layer_id, block_index);
+BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id, size_t module_id) const {
+    return coordinator_manager_->convertIndexToAddr(layer_id, block_index, module_id);
 }
 
-std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(int block_index, int layer_id) const {
-    return coordinator_manager_->convertIndexToBuffer(layer_id, block_index);
-}
-
-std::vector<BlockInfo>
-KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const {
-    return coordinator_manager_->convertIndexToBuffer(layer_id, block_index, partition_count, partition_id);
-}
-
-BlockAddrInfo KVCacheManager::convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id) const {
-    return coordinator_manager_->convertIndexToAddr(layer_id, group_tag, block_id);
-}
-
-std::vector<BlockInfo>
-KVCacheManager::convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const {
-    return coordinator_manager_->convertIndexToBuffer(layer_id, group_tag, block_id);
+std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, size_t module_id) const {
+    return coordinator_manager_->convertIndexToBuffer(layer_id, block_index, module_id);
 }
 
 std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(
-    int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const {
-    return coordinator_manager_->convertIndexToBuffer(layer_id, group_tag, block_id, partition_count, partition_id);
+    int block_index, int layer_id, int partition_count, int partition_id, size_t module_id) const {
+    return coordinator_manager_->convertIndexToBuffer(layer_id, block_index, partition_count, partition_id, module_id);
 }
 
-GroupedCacheLayerLayout KVCacheManager::allLayerCacheBase() const {
-    return coordinator_manager_->allLayerCacheBase();
+BlockAddrInfo
+KVCacheManager::convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id, size_t module_id) const {
+    return coordinator_manager_->convertIndexToAddr(layer_id, group_tag, block_id, module_id);
+}
+
+std::vector<BlockInfo>
+KVCacheManager::convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id, size_t module_id) const {
+    return coordinator_manager_->convertIndexToBuffer(layer_id, group_tag, block_id, module_id);
+}
+
+std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(int                layer_id,
+                                                            const std::string& group_tag,
+                                                            int                block_id,
+                                                            int                partition_count,
+                                                            int                partition_id,
+                                                            size_t             module_id) const {
+    return coordinator_manager_->convertIndexToBuffer(
+        layer_id, group_tag, block_id, partition_count, partition_id, module_id);
+}
+
+GroupedCacheLayerLayout KVCacheManager::getModuleGroupedCacheLayerLayout(size_t module_id) const {
+    RTP_LLM_CHECK_WITH_INFO(module_id < config_.moduleCount(),
+                            "Invalid module_id: %zu, must be in range [0, %zu)",
+                            module_id,
+                            config_.moduleCount());
+    return coordinator_manager_->getModuleLayout(module_id);
 }
 
 GroupedCacheLayerLayout KVCacheManager::getMainModelGroupedCacheLayerLayout() const {
-    const auto          all_layout = coordinator_manager_->allLayerCacheBase();
-    std::vector<size_t> global_layer_ids(config_.layer_num);
-    std::iota(global_layer_ids.begin(), global_layer_ids.end(), 0);
-    auto main_topology = projectTopology(all_layout.topology(), global_layer_ids);
-    return projectLayout(all_layout, std::move(main_topology), global_layer_ids);
+    return getModuleGroupedCacheLayerLayout(0);
 }
 
 GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const {
@@ -618,24 +575,7 @@ GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int 
                             "Invalid mtp_module_id: %d, must be in range [0, %zu)",
                             mtp_module_id,
                             config_.mtp_sub_configs.size());
-
-    const auto& mtp_sub_config = config_.mtp_sub_configs[mtp_module_id];
-    RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
-    const uint32_t      mtp_layer_num = mtp_sub_config->layer_num;
-    std::vector<size_t> global_layer_ids;
-    global_layer_ids.reserve(mtp_layer_num);
-    for (uint32_t local_layer_id = 0; local_layer_id < mtp_layer_num; ++local_layer_id) {
-        const auto global_layer_id = CacheConfig::mtpGlobalLayerId(
-            config_.layer_num, mtp_module_id, mtp_layer_num, static_cast<int>(local_layer_id));
-        RTP_LLM_CHECK_WITH_INFO(global_layer_id != std::numeric_limits<uint32_t>::max(),
-                                "invalid MTP global layer: main=%u module=%d module_layers=%u local=%u",
-                                config_.layer_num,
-                                mtp_module_id,
-                                mtp_layer_num,
-                                local_layer_id);
-        global_layer_ids.push_back(global_layer_id);
-    }
-    return projectLayout(coordinator_manager_->allLayerCacheBase(), mtp_sub_config->topologyPtr(), global_layer_ids);
+    return getModuleGroupedCacheLayerLayout(static_cast<size_t>(mtp_module_id) + 1);
 }
 
 // 资源统计和信息查询
@@ -777,10 +717,14 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
 }
 
 bool KVCacheManager::hasTailSparseReuseGroup() const {
-    const auto& groups = config_.groups();
-    return std::any_of(groups.begin(), groups.end(), [](const GroupBase& group) {
-        return group.policy.enable_prefix_reuse && group.policy.active_tail_blocks != 0;
-    });
+    for (size_t module_id = 0; module_id < config_.moduleCount(); ++module_id) {
+        for (const auto& group : config_.groups(module_id)) {
+            if (group.policy.enable_prefix_reuse && group.policy.active_tail_blocks != 0) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 void KVCacheManager::initCacheEventPublisher() {
@@ -822,17 +766,20 @@ void KVCacheManager::initCacheEventPublisher() {
         }
         std::vector<int64_t>     group_block_size_bytes;
         std::vector<std::string> reuse_group_tags;
-        for (const auto& group : config_.topology().groups()) {
-            if (!cacheGroupPublishesPrefixChain(group.policy)) {
-                continue;
+        for (size_t module_id = 0; module_id < config_.moduleCount(); ++module_id) {
+            for (const auto& group : config_.groups(module_id)) {
+                if (!cacheGroupPublishesPrefixChain(group.policy)) {
+                    continue;
+                }
+                if (group.policy.memory_placement != CacheMemoryPlacement::DEVICE) {
+                    RTP_LLM_LOG_WARNING(
+                        "KV cache event publisher disabled because publishing non-DEVICE cache groups are unsupported");
+                    return;
+                }
+                reuse_group_tags.push_back(group.tag);
+                group_block_size_bytes.push_back(
+                    static_cast<int64_t>(config_.blockSizeBytesForGroup(group.tag, module_id)));
             }
-            if (group.policy.memory_placement != CacheMemoryPlacement::DEVICE) {
-                RTP_LLM_LOG_WARNING(
-                    "KV cache event publisher disabled because publishing non-DEVICE cache groups is unsupported");
-                return;
-            }
-            reuse_group_tags.push_back(group.tag);
-            group_block_size_bytes.push_back(static_cast<int64_t>(config_.blockSizeBytesForGroup(group.tag)));
         }
         if (reuse_group_tags.empty()) {
             RTP_LLM_LOG_ERROR("KV cache event publisher disabled because no cache group participates in prefix reuse");
@@ -854,7 +801,7 @@ void KVCacheManager::initCacheEventPublisher() {
         publisher_context.instance_id       = kv_cache_config_.kv_cache_event_instance_id;
         publisher_context.host_ip_port      = kv_cache_config_.kv_cache_event_host_ip_port;
         publisher_context.model_name        = runtime_config_.model_name;
-        publisher_context.dtype             = getDataTypeStr(config_.dtype);
+        publisher_context.dtype             = getDataTypeStr(config_.dtype());
         publisher_context.spec_name         = "rtp_llm_hbm_" + std::to_string(config_.seq_size_per_block);
         publisher_context.location_uri      = "rtp-llm://" + publisher_context.host_ip_port + "/hbm";
         publisher_context.block_size_tokens = static_cast<int32_t>(config_.seq_size_per_block);
@@ -866,7 +813,7 @@ void KVCacheManager::initCacheEventPublisher() {
         publisher_context.dp_size = static_cast<int32_t>(parallelism_config_.dp_size);
         publisher_context.pp_size = static_cast<int32_t>(parallelism_config_.pp_size);
         publisher_context.dp_rank = static_cast<int32_t>(parallelism_config_.dp_rank);
-        publisher_context.use_mla = config_.use_mla;
+        publisher_context.use_mla = config_.use_mla();
 
         std::weak_ptr<BlockTreeCache> weak_shared_cache = block_tree_cache_;
         auto                          snapshot_provider = [weak_shared_cache]() {

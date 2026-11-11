@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <atomic>
 #include <condition_variable>
 #include <iterator>
@@ -22,8 +23,10 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -290,7 +293,7 @@ public:
     int  currentChunkLen() const;  // tokens to compute in the current chunk
     bool isLastChunk() const;      // current chunk reaches seqLength()
     bool isMiddleChunk() const;    // chunked + context + !last → no sample / no output row
-    void advanceChunk();  // reuse_length_ += currentChunkLen()
+    void advanceChunk();           // reuse_length_ += currentChunkLen()
     bool hasAdvancedChunk() const {
         return chunk_advanced_;
     }
@@ -661,6 +664,10 @@ public:
         // kernel-granularity table.
         torch::Tensor next_kv_cache_block_id_gpu;
         torch::Tensor next_kv_cache_kernel_block_id_gpu;
+        // Row tags for the paired cache tables above, in the tables' own row
+        // order. Published and cleared with both tensors so consumers remap by
+        // tag instead of assuming a config-owned order.
+        std::vector<std::string> next_kv_cache_row_tags;
         // Main-thread mirrors used when DROP_BROAD_SYNC lets the next step run
         // before worker-side specUpdate has written sp_output_buffer fields.
         torch::Tensor last_hidden_states_gpu;
@@ -751,7 +758,14 @@ public:
         };
         const auto& physical = state.next_kv_cache_block_id_gpu;
         const auto& kernel   = state.next_kv_cache_kernel_block_id_gpu;
-        return valid(physical) && valid(kernel) && physical.size(0) == kernel.size(0);
+        if (!valid(physical) || !valid(kernel) || physical.size(0) != kernel.size(0)) {
+            return false;
+        }
+        RTP_LLM_CHECK_WITH_INFO(state.next_kv_cache_row_tags.size() == static_cast<size_t>(physical.size(0)),
+                                "MTP cache snapshot tag count %zu differs from table rows %ld",
+                                state.next_kv_cache_row_tags.size(),
+                                physical.size(0));
+        return true;
     }
     bool hasMtpCacheSnapshot() const {
         return hasMtpCacheSnapshot(getMtpAsyncDeviceState());
@@ -760,6 +774,7 @@ public:
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         mtp_async_state_.next_kv_cache_block_id_gpu        = torch::Tensor();
         mtp_async_state_.next_kv_cache_kernel_block_id_gpu = torch::Tensor();
+        mtp_async_state_.next_kv_cache_row_tags.clear();
     }
     torch::Tensor getLastHiddenStatesGpu() const {
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);

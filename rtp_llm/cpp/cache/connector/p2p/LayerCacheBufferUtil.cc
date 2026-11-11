@@ -24,7 +24,8 @@ std::optional<TransferWindow> getTransferWindow(const KVCacheResource& resource,
                                                 int                    start_block_idx,
                                                 int                    block_count,
                                                 int                    cp_rank,
-                                                int                    cp_size) {
+                                                int                    cp_size,
+                                                size_t                 module_id = 0) {
     if (start_block_idx < 0 || block_count == 0 || block_count < -1 || cp_size < 1 || cp_rank < 0
         || cp_rank >= cp_size) {
         RTP_LLM_LOG_WARNING(
@@ -33,7 +34,7 @@ std::optional<TransferWindow> getTransferWindow(const KVCacheResource& resource,
     }
 
     const auto& cache_keys                = resource.cacheKeys();
-    const auto& block_ids                 = resource.blocksForLayer(layer_id, cache_tag);
+    const auto& block_ids                 = resource.blocksForLayer(layer_id, cache_tag, module_id);
     const auto  rank                      = static_cast<size_t>(cp_rank);
     const auto  world_size                = static_cast<size_t>(cp_size);
     size_t      max_local_blocks_for_keys = cache_keys.size();
@@ -61,12 +62,14 @@ std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(
     KVCacheResource& resource, int batch_id, int start_block_idx, int block_count, int cp_rank, int cp_size) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
 
-    for (int layer_id = 0; layer_id < resource.layerNum(); ++layer_id) {
-        for (const auto& tag : resource.groupTagsForLayer(layer_id)) {
-            auto buffer =
-                convertLayer(resource, batch_id, layer_id, tag, start_block_idx, block_count, cp_rank, cp_size);
-            if (buffer) {
-                layer_cache_buffers.push_back(std::move(buffer));
+    for (size_t module_id = 0; module_id < resource.moduleNum(); ++module_id) {
+        for (int layer_id = 0; layer_id < resource.layerNum(module_id); ++layer_id) {
+            for (const auto& tag : resource.groupTagsForLayer(layer_id, module_id)) {
+                auto buffer = convertLayer(
+                    resource, batch_id, layer_id, tag, start_block_idx, block_count, cp_rank, cp_size, module_id);
+                if (buffer) {
+                    layer_cache_buffers.push_back(std::move(buffer));
+                }
             }
         }
     }
@@ -87,7 +90,8 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheReso
                         start_block_idx,
                         block_count,
                         cp_rank,
-                        cp_size);
+                        cp_size,
+                        0);
 }
 
 std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheResource&   resource,
@@ -97,15 +101,16 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheReso
                                                                      int                start_block_idx,
                                                                      int                block_count,
                                                                      int                cp_rank,
-                                                                     int                cp_size) {
+                                                                     int                cp_size,
+                                                                     size_t             module_id) {
     (void)batch_id;
     const auto window =
-        getTransferWindow(resource, layer_id, cache_tag, start_block_idx, block_count, cp_rank, cp_size);
+        getTransferWindow(resource, layer_id, cache_tag, start_block_idx, block_count, cp_rank, cp_size, module_id);
     if (!window.has_value()) {
         return nullptr;
     }
 
-    auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, cache_tag);
+    auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, cache_tag, module_id);
     for (size_t i = 0; i < window->count; ++i) {
         const size_t local_idx   = window->begin + i;
         const size_t logical_idx = window->cp_rank + local_idx * window->cp_size;
@@ -126,9 +131,10 @@ bool LayerCacheBufferUtil::hasTransferableBlocks(const KVCacheResource& resource
                                                  int                    start_block_idx,
                                                  int                    block_count,
                                                  int                    cp_rank,
-                                                 int                    cp_size) {
+                                                 int                    cp_size,
+                                                 size_t                 module_id) {
     const auto window =
-        getTransferWindow(resource, layer_id, cache_tag, start_block_idx, block_count, cp_rank, cp_size);
+        getTransferWindow(resource, layer_id, cache_tag, start_block_idx, block_count, cp_rank, cp_size, module_id);
     if (!window.has_value()) {
         return false;
     }
@@ -151,11 +157,12 @@ LayerCacheBufferUtil::buildKeyBlockInfos(const std::shared_ptr<LayerBlockConvert
                                          int                                         partition_count,
                                          int                                         partition_id) {
     transfer::KeyBlockInfoMap key_block_infos;
-    int                       layer_id = layer_cache_buffer->getLayerId();
+    int                       layer_id  = layer_cache_buffer->getLayerId();
+    size_t                    module_id = layer_cache_buffer->moduleId();
 
     for (const auto& [cache_key, block_id] : layer_cache_buffer->blockIdMap()) {
         auto block_infos = converter->convertIndexToBuffer(
-            layer_id, layer_cache_buffer->cacheTag(), block_id, partition_count, partition_id);
+            layer_id, layer_cache_buffer->cacheTag(), block_id, partition_count, partition_id, module_id);
 
         transfer::KeyBlockInfo kbi;
         kbi.cache_key              = cache_key;
