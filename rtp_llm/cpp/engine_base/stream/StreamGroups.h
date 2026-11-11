@@ -22,6 +22,8 @@ public:
     };
     using TokenCountsByPriority = std::map<int32_t, TokenCounts>;
 
+    StreamGroups() = default;
+
     StreamGroups(const std::list<GenerateStreamPtr>& streams) {
         for (auto& stream : streams) {
             // A cache snapshot is published only for an established decode
@@ -102,8 +104,8 @@ public:
             }
             const int    snapshot_seq_len = mtp_state.next_seq_len_upper_bound;
             const size_t seq_len = use_mtp_snapshot && snapshot_seq_len > 0 ? static_cast<size_t>(snapshot_seq_len) :
-                                                                              static_cast<size_t>(stream->seqLength());
-            max_seq_len_         = std::max(max_seq_len_, seq_len);
+                                                static_cast<size_t>(stream->seqLength());
+            max_seq_len_                  = std::max(max_seq_len_, seq_len);
             total_score_batch_size_ += stream->scoreLen();
             adapter_names.push_back(stream->adapterName());
             gen_timeline_ |=
@@ -333,7 +335,7 @@ public:
 
     void updateStreams(const std::vector<StreamSpecUpdateInfo>& spec_update_infos,
                        const std::shared_ptr<RecordedBatch>&    recorded_batch = nullptr) const {
-        int    stream_idx = 0;
+        int stream_idx = 0;
         size_t timing_idx = 0;
         auto   slice      = [&](const GenerateStreamPtr& stream) {
             RecordedTokenTiming* timings = nullptr;
@@ -345,12 +347,14 @@ public:
         };
         for (auto& stream : decode_streams_) {
             auto* timings = slice(stream);
-            stream->specUpdate(spec_update_infos[stream_idx], timings, timings ? stream->currentBatchSize() : 0);
+            stream->specUpdate(
+                spec_update_infos[stream_idx], true, timings, timings ? stream->currentBatchSize() : 0);
             stream_idx++;
         }
         for (auto& stream : context_streams_) {
             auto* timings = slice(stream);
-            stream->specUpdate(spec_update_infos[stream_idx], timings, timings ? stream->currentBatchSize() : 0);
+            stream->specUpdate(
+                spec_update_infos[stream_idx], true, timings, timings ? stream->currentBatchSize() : 0);
             stream_idx++;
         }
     }

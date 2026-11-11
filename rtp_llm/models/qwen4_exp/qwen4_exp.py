@@ -44,6 +44,9 @@ class Qwen4Exp(Qwen35Moe):
     def get_weight_cls():
         return Qwen4ExpWeight
 
+    def support_pp(self) -> bool:
+        return False
+
     def support_cuda_graph(self) -> bool:
         # Capability only; common graph settings decide capture.
         # CPU PLE rows are prepared before capture/replay.

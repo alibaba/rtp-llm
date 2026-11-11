@@ -1,6 +1,7 @@
 #pragma once
 
 #include "absl/status/statusor.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
@@ -17,7 +18,12 @@ namespace rtp_llm {
 class Executor {
 public:
     Executor() {};
-    virtual absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) = 0;
+    virtual absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) = 0;
+
+    /** Complete pending work on the engine loop thread before executor teardown. */
+    virtual absl::Status finish() {
+        return absl::OkStatus();
+    }
 
     // Batch-recording helpers shared by executors. They cannot live in
     // rtp_llm/cpp/observability: engine_base/stream already depends on that

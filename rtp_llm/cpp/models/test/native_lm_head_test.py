@@ -225,7 +225,7 @@ def _tp_worker(rank, rendezvous):
         local = dest[rank * size : (rank + 1) * size].clone()
         dist.all_gather_into_tensor(dest, local)
 
-    _extension.register_comm_ops(unexpected, unexpected, gather)
+    _extension.register_comm_ops(unexpected, unexpected, gather, unexpected, unexpected)
     try:
         for dtype in (
             torch.bfloat16,

@@ -30,7 +30,7 @@ public:
     std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
     enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
 
-    absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
+    absl::StatusOr<ScheduleOutput> schedule() override;
 
 public:
     // for test. Group-aware shadow of the FIFOSchedulerBase helper so that

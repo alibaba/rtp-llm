@@ -1607,6 +1607,7 @@ class BackendTest(JitCacheTestBase):
             for name in (
                 "copy_gemm_config",
                 "set_parallelism_config",
+                "finalize_rank_local_deepep_internode",
                 "setup_cuda_device_and_accl_env",
                 "set_global_controller",
                 "setproctitle",

@@ -297,12 +297,23 @@ class ModelConfig(CppModelConfig):
         return self.mm_model_config.is_multimodal
 
     def eval_model_weight_size(self) -> float:
+        non_expert_size, expert_size = self.eval_model_weight_size_parts(
+            self.num_layers, len(self.moe_layer_index), 2
+        )
+        return non_expert_size + expert_size
+
+    def eval_model_weight_size_parts(
+        self,
+        layer_count: int,
+        moe_layer_count: int,
+        vocab_weight_count: int,
+    ) -> tuple[float, float]:
         """
-        Evaluate total model size including weights, KV cache, and runtime buffers.
+        Evaluate non-expert and routed-expert weight sizes for a pipeline stage.
         All required parameters (quant_algo, task_type, vocab_size) are obtained from self.
 
         Returns:
-            Total model size in bytes
+            Non-expert and routed-expert weight sizes in bytes.
         """
         quant_algo = self.quant_algo
         vocab_size = self.vocab_size
@@ -376,21 +387,22 @@ class ModelConfig(CppModelConfig):
                     "(unquantized dense) or 'fp8'/'int8' (8-bit dense)"
                 )
 
-        layer_param_count = self.layer_weight_param_count()
-        moe_param_count = self.moe_weight_param_count()
-        model_size = (
-            self.word_emb_param_count(vocab_size) * 2
+        layer_param_count = self.layer_weight_param_count(layer_count, moe_layer_count)
+        moe_param_count = self.moe_weight_param_count(moe_layer_count)
+        non_expert_size = (
+            self.word_emb_param_count(vocab_size) * 2 * vocab_weight_count
             + max(layer_param_count - moe_param_count, 0) * dense_param_bytes
-            + moe_param_count * expert_param_bytes
-            + self.word_emb_param_count(vocab_size) * 2
         )  # maybe some model donot have lm_head
+        expert_size = moe_param_count * expert_param_bytes
 
         if (
             self.mm_model_config.is_multimodal
             and not getattr(self, "is_mtp", False)
             and self.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE
         ):
-            model_size += get_multimodal_mixin_cls(self.model_type).eval_mm_model_size(
+            non_expert_size += get_multimodal_mixin_cls(
+                self.model_type
+            ).eval_mm_model_size(
                 self.mm_related_params, self.extra_data_path, self.local_extra_data_path
             )
 
@@ -398,8 +410,8 @@ class ModelConfig(CppModelConfig):
         # attention/FFN formulas above. Keep their already-byte-sized estimate
         # separate so non-quantized tables (for example qwen4 PLE BF16) are not
         # accidentally scaled by the model's main weight bit width.
-        model_size += self._extra_weight_bytes
-        return model_size
+        non_expert_size += self._extra_weight_bytes
+        return non_expert_size, expert_size
 
     def eval_model_weight_size_per_rank(self, tp_size: int, ep_size: int) -> float:
         """Estimate the resident device weight bytes for one loader rank.
@@ -496,7 +508,7 @@ class ModelConfig(CppModelConfig):
         vocab_size = self.vocab_size
         param_count = (
             self.word_emb_param_count(vocab_size) * 2
-            + self.layer_weight_param_count()
+            + self.layer_weight_param_count(self.num_layers, len(self.moe_layer_index))
             + self.hidden_size
         )
 
@@ -525,9 +537,13 @@ class ModelConfig(CppModelConfig):
         """
         return vocab_size * self.hidden_size
 
-    def layer_weight_param_count(self) -> int:
+    def layer_weight_param_count(
+        self,
+        layer_count: int,
+        moe_layer_count: int,
+    ) -> int:
         """
-        Calculate layer weight parameter count.
+        Calculate layer weight parameter count for all layers or a pipeline stage.
 
         Returns:
             Layer weight parameter count
@@ -539,8 +555,8 @@ class ModelConfig(CppModelConfig):
         # qkv
         layer_weight_param_count = (
             layer_weight_param_count
-            + self.num_layers * hidden_size * hidden_size
-            + self.num_layers
+            + layer_count * hidden_size * hidden_size
+            + layer_count
             * hidden_size
             * (self.attn_config.kv_head_num * self.attn_config.size_per_head)
             * 2
@@ -548,7 +564,7 @@ class ModelConfig(CppModelConfig):
 
         # attn_o_w
         layer_weight_param_count = (
-            layer_weight_param_count + self.num_layers * hidden_size * hidden_size
+            layer_weight_param_count + layer_count * hidden_size * hidden_size
         )
 
         # ffn w1, w2, w3
@@ -559,8 +575,7 @@ class ModelConfig(CppModelConfig):
             # Routed-only MoE models may still have dense layers before (or
             # between) their routed layers.  Count each set with its own
             # intermediate width instead of treating every layer as MoE.
-            moe_layer_count = len(self.moe_layer_index)
-            dense_layer_count = self.num_layers - moe_layer_count
+            dense_layer_count = layer_count - moe_layer_count
             dense_inter_size = self.dense_inter_size or self.inter_size
             layer_weight_param_count = (
                 layer_weight_param_count
@@ -581,15 +596,12 @@ class ModelConfig(CppModelConfig):
             # Shared experts use inter_size
             layer_weight_param_count = (
                 layer_weight_param_count
-                + len(self.moe_layer_index)
-                * self.inter_size
-                * hidden_size
-                * ffn_w_count
+                + moe_layer_count * self.inter_size * hidden_size * ffn_w_count
             )
             # Routed experts use moe_inter_size
             layer_weight_param_count = (
                 layer_weight_param_count
-                + len(self.moe_layer_index)
+                + moe_layer_count
                 * self.moe_inter_size
                 * hidden_size
                 * ffn_w_count
@@ -599,16 +611,16 @@ class ModelConfig(CppModelConfig):
             # No MOE: all layers use regular FFN with inter_size
             layer_weight_param_count = (
                 layer_weight_param_count
-                + self.num_layers * self.inter_size * hidden_size * ffn_w_count
+                + layer_count * self.inter_size * hidden_size * ffn_w_count
             )
 
         # other small tensor
         layer_weight_param_count = (
-            layer_weight_param_count + self.num_layers * hidden_size * 11
+            layer_weight_param_count + layer_count * hidden_size * 11
         )
         return layer_weight_param_count
 
-    def moe_weight_param_count(self) -> int:
+    def moe_weight_param_count(self, moe_layer_count: int) -> int:
         """Calculate parameter count for MoE expert weights only (routed experts).
 
         Returns:
@@ -625,7 +637,7 @@ class ModelConfig(CppModelConfig):
             # Routed-only models can retain dense layers outside
             # ``moe_layer_index``; only count routed expert weights here.
             return (
-                len(self.moe_layer_index)
+                moe_layer_count
                 * self.moe_inter_size
                 * hidden_size
                 * ffn_w_count
@@ -634,7 +646,7 @@ class ModelConfig(CppModelConfig):
         elif self.moe_style == 2:
             # Hybrid MOE: only routed expert weights (not shared experts)
             return (
-                len(self.moe_layer_index)
+                moe_layer_count
                 * self.moe_inter_size
                 * hidden_size
                 * ffn_w_count

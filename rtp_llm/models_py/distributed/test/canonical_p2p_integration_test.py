@@ -40,7 +40,7 @@ def _worker():
     from types import SimpleNamespace
 
     collective._group_map[collective.Group.TP] = group
-    collective._group_map[collective.Group.DP_AND_TP] = group
+    collective._group_map[collective.Group.WORLD] = group
     collective._initialized = True
     pc = ParallelismConfig()
     pc.tp_size = pc.ep_size = pc.world_size = pc.local_world_size = 8

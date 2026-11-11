@@ -163,3 +163,14 @@ alias(
     name = "qwen4_exp_mtp_test",
     actual = "//rtp_llm/models_py/model_desc/test/qwen4_exp:mtp_test",
 )
+
+py_test(
+    name = "pp_stage_construction_test",
+    srcs = ["pp_stage_construction_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)

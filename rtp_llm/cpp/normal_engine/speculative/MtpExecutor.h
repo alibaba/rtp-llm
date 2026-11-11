@@ -1,6 +1,5 @@
 #pragma once
 
-#include <functional>
 #include <list>
 #include <map>
 #include <memory>
@@ -46,7 +45,7 @@ public:
                          int32_t                                        kv_cache_group_num = 1,
                          bool                                           warm_up            = false);
 
-    absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
+    absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
 
     void setModelForwardCallbacks(std::function<void()> before, std::function<void()> after) {
@@ -113,20 +112,8 @@ protected:
     };
 
     bool isTpRank0() const;
-    bool reduceDSparkCacheStoreStatus(bool local_ok);
     bool finishDSparkPrefillCachePublication(const GptModelInputs&               model_input,
                                              const std::list<GenerateStreamPtr>& streams);
-
-    void maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
-                                              ModelBase&      source,
-                                              bool            request_actual_rows = false);
-    // Normalize the model's optional pre-output-projection MTP buffer into the
-    // forward result. Callers then use the regular all_hidden_states ->
-    // last_hidden_states hand-off. hidden_rows == 0 means "use the tensor's own
-    // row count"; target verify passes the explicit combo row count because a
-    // graph replay does not advance the Python-side row counter.
-    void
-    maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source, int64_t hidden_rows = 0);
 
     bool                reduceSpeculativeTargetPrepareStatus(bool local_ok);
     static bool         asyncPrepareAllowed(bool requested, bool target_commit_hooks);
@@ -173,11 +160,11 @@ protected:
     SamplerOutput   sampleDSparkDraft(const StreamGroups&  stream_groups,
                                       const torch::Tensor& base_logits,
                                       const torch::Tensor& anchors);
-    void            runDSparkProposal(GptModelInputs&                                  proposal_input,
-                                      const StreamGroups&                              stream_groups,
-                                      const MtpBatchStreamProcessor::DSparkRoundState& round_state,
-                                      SamplerOutput&                                   draft_sampler_output,
-                                      int64_t&                                         model_forward_us);
+    void            runDSparkProposal(GptModelInputs&              proposal_input,
+                                      const StreamGroups&          stream_groups,
+                                      const mtp::DSparkRoundState& round_state,
+                                      SamplerOutput&               draft_sampler_output,
+                                      int64_t&                     model_forward_us);
     GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
                  buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,

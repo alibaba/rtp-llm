@@ -2,7 +2,7 @@ import gc
 import logging
 import os
 from collections import OrderedDict
-from typing import Dict, List, Mapping, NamedTuple, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
 
 import safetensors
 import torch
@@ -71,6 +71,7 @@ class ModelLoader:
 
         # Get is_attn_model flag from weights_info (calculated in ModelDeployWeightInfo constructor)
         self._is_attn_model = weights_info.is_attn_model
+        # Initial expert placement is needed to construct LoadConfig.
         self._py_eplb, self._phy2log = self.create_eplb()
         self._load_config: LoadConfig = self._weights_info.create_load_config(
             compute_dtype=compute_dtype,
@@ -149,7 +150,7 @@ class ModelLoader:
         if self._weights_info.weight_style == WeightStyle.RTP_LLM_STYLE:
             raise ValueError("load_lora_weights only support non-ft-style weight")
 
-        for id in range(self._load_config.num_layers):
+        for id in self._load_config.layer_range:
             result = self._load_layer_lora_weights(adapter_name, id, device)
             for name, tensor in result.items():
                 lora_weights.set_layer_weight(False, id, name, tensor)
@@ -162,6 +163,10 @@ class ModelLoader:
         check_with_info(
             not self._load_config.is_ft_style_weight,
             "dump_weight_as_ft_style only support non-ft-style weight",
+        )
+        check_with_info(
+            self._load_config.layer_range == range(self._load_config.num_layers),
+            "dump_weight_as_ft_style does not support pipeline-parallel stage-local weights",
         )
         tp_rank = self._load_config.tp_rank
         dp_rank = self._load_config.dp_rank
@@ -248,8 +253,18 @@ class ModelLoader:
         resident_devices = self._resident_weight_devices()
         source_device = "cpu" if resident_devices else device
         # 重新构建权重
+        prefixes = tuple(
+            f"{layer_weight_prefix}{layer_id}."
+            for layer_id in self._load_config.layer_range
+        ) + tuple(
+            name
+            for name in self._load_config.database.get_pretrain_tensor_names()
+            if name.startswith(global_weight_prefix)
+            and name[len(global_weight_prefix) :] not in self._global_weight_aliases
+            and self.is_global_weight_local(name[len(global_weight_prefix) :])
+        )
         all_tensors = self._load_config.database.load_tensors_by_prefix(
-            (layer_weight_prefix, global_weight_prefix),
+            prefixes,
             source_device,
             direct_io=direct_io and source_device == device,
         )
@@ -268,7 +283,10 @@ class ModelLoader:
                 )
             elif key.startswith(global_weight_prefix):
                 name = key[len(global_weight_prefix) :]
-                if name in self._global_weight_aliases:
+                if (
+                    name in self._global_weight_aliases
+                    or not self.is_global_weight_local(name)
+                ):
                     continue
                 check_with_info(len(tensor) == 1, f"{name} have {len(tensor)} tensor)")
                 value = tensor[0].to(
@@ -328,53 +346,70 @@ class ModelLoader:
             for component in descriptor.get_components()
         )
 
+    def _local_layer_counts(self) -> tuple[int, int]:
+        local_layers = set(self._load_config.layer_range)
+        local_moe_layers = local_layers & set(
+            self._weights_info.model_config.moe_layer_index
+        )
+        return len(local_layers), len(local_moe_layers)
+
+    def _eval_local_model_weight_size_parts(self) -> tuple[float, float]:
+        model_config = self._weights_info.model_config
+        layer_count, moe_layer_count = self._local_layer_counts()
+        owns_embedding = self.is_global_weight_local(W.embedding)
+        owns_lm_head = self.is_global_weight_local(W.lm_head)
+        vocab_weight_count = int(owns_embedding) + int(owns_lm_head)
+        return model_config.eval_model_weight_size_parts(
+            layer_count, moe_layer_count, vocab_weight_count
+        )
+
+    def _eval_local_model_weight_memory(self) -> tuple[float, float]:
+        non_expert_size, expert_size = self._eval_local_model_weight_size_parts()
+        non_expert_parallel_size = max(
+            1, min(self._load_config.tp_size, self._load_config.ffn_tp_size)
+        )
+        expert_parallel_size = (
+            self._load_config.tp_size
+            if self._load_config.ep_size == 1
+            else self._load_config.ep_size
+        )
+        model_config = self._weights_info.model_config
+        return (
+            (non_expert_size - model_config._extra_weight_bytes)
+            / non_expert_parallel_size
+            + model_config._replicated_extra_weight_bytes,
+            expert_size / expert_parallel_size,
+        )
+
     def _is_memory_enough_for_fastsafetensor(self):
+        non_expert_mem, expert_mem = self._eval_local_model_weight_memory()
         device_mem_info = self._load_config.exported_device.get_mem_info()
         max_file_size = self._load_config.database.get_max_file_size()
         if device_mem_info is None:
             return False
         else:
             free_mem = device_mem_info.free / (1024.0**2)
-        model_mem = self._weights_info.model_config.eval_model_weight_size_per_rank(
-            self._load_config.tp_size, self._load_config.ep_size
-        ) / (1024.0**2)
         if self._is_online_ptpc():
             # Online PTPC with inline FP8: MoE expert weights are quantized
             # per-expert during loading (no BF16 peak for MoE), but dense
             # weights (attention, embedding, shared experts) still load as
             # BF16 then quantize to FP8, requiring ~2x peak for that portion.
-            moe_params = self._weights_info.model_config.moe_weight_param_count()
-            total_layer_params = (
-                self._weights_info.model_config.layer_weight_param_count()
+            model_mem_bytes = non_expert_mem * 2 + expert_mem
+            logging.info(
+                "online PTPC with inline FP8: non-expert weights use a 2x "
+                "BF16 conversion peak; routed experts are quantized inline"
             )
-            if total_layer_params > 0 and moe_params > 0:
-                # dense_ratio: fraction of layer weights that are NOT inline-quantized MoE
-                dense_ratio = 1.0 - (moe_params / total_layer_params)
-                # Dense weights need 2x (BF16 loaded + FP8 quantized simultaneously),
-                # MoE weights only need 1x (quantized inline per-expert).
-                # Overall multiplier: dense_ratio * 2 + moe_ratio * 1
-                mem_multiplier = dense_ratio * 2.0 + (1.0 - dense_ratio) * 1.0
-                model_mem *= mem_multiplier
-                logging.info(
-                    f"online PTPC with inline FP8: MoE ratio={1.0 - dense_ratio:.2%}, "
-                    f"dense ratio={dense_ratio:.2%}, "
-                    f"memory multiplier={mem_multiplier:.2f}x (dense needs BF16 peak)"
-                )
-            else:
-                # No MoE weights detected, treat as full online quant
-                model_mem *= 2
-                logging.info(
-                    f"online PTPC but no MoE weights detected, "
-                    f"doubling model_mem estimate conservatively"
-                )
         elif self._is_online_quant_without_inline():
             # Non-inline online quantization: BF16 checkpoint loaded then
             # quantized to FP8, so peak memory is roughly 2x FP8 model size.
-            model_mem *= 2
+            model_mem_bytes = (non_expert_mem + expert_mem) * 2
             logging.info(
                 f"online quantization detected (BF16 checkpoint -> FP8), "
                 f"doubling model_mem estimate for fastsafetensor memory check"
             )
+        else:
+            model_mem_bytes = non_expert_mem + expert_mem
+        model_mem = model_mem_bytes / (1024.0**2)
         max_file_mem = max_file_size / (1024.0**2)
         logging.info(
             f"fastsafetensor memory check: free_mem={free_mem:.0f}MB, "
@@ -384,21 +419,36 @@ class ModelLoader:
         return (free_mem - model_mem) > (3 * max_file_mem)
 
     @staticmethod
-    def _build_stacked_key_config(weight_info_list) -> dict:
-        """Build mapping: stacked ckpt key -> per-expert name template."""
+    def _build_stacked_key_config(
+        model_weights_info: ModelWeightInfo,
+        misc_weights_info: Iterable[WeightModule] = (),
+    ) -> Dict[str, str]:
+        """Use full-model descriptors so all PP stages share the same split rules."""
         stacked_key_config = {}
-        for wi in weight_info_list:
-            for moe_weight in iter_stacked_moe_weights(wi.weight):
+
+        def add_weight(weight: WeightModule, layer_id: Optional[int]):
+            for moe_weight in iter_stacked_moe_weights(weight):
                 for idx, ckpt_weight in enumerate(moe_weight.weights):
                     if ckpt_weight.merge_fun is not identity:
                         continue
-                    stacked_key = ckpt_weight.tensor_name(wi.layer_id)
+                    stacked_key = ckpt_weight.tensor_name(layer_id)
                     template = moe_weight._expert_key_pattern(idx).format(
-                        i=str(wi.layer_id),
+                        i=str(layer_id),
                         expert_id="{expert_id}",
                     )
                     if stacked_key not in stacked_key_config:
                         stacked_key_config[stacked_key] = template
+
+        for layer_id, layer_weights in enumerate(model_weights_info.layer_weights):
+            if isinstance(layer_weights, WeightModule):
+                layer_weights = [layer_weights]
+            for weight in layer_weights:
+                for component in weight.get_components():
+                    add_weight(component, layer_id)
+        for weight in model_weights_info.weights:
+            add_weight(weight, None)
+        for weight in misc_weights_info:
+            add_weight(weight, None)
         return stacked_key_config
 
     def _is_online_ptpc(self) -> bool:
@@ -435,13 +485,20 @@ class ModelLoader:
     def _load_from_fastsafetensor(self, device: str):
         logging.info(f"load weight by device: {device}")
         model_weights = self._create_model_weights(device)
-        tensor_to_weight_map, weight_info_list = self._generate_weight_info()
 
-        stacked_key_config = self._build_stacked_key_config(weight_info_list)
+        # All PP stages must use the same split rules for WORLD-wide broadcasts.
+        stacked_key_config = self._build_stacked_key_config(
+            self._model_weights_info, self._misc_weights_info
+        )
         if stacked_key_config:
             logging.info(
                 f"fastsafetensors per-expert split enabled for {len(stacked_key_config)} stacked keys"
             )
+
+        # Collect and load only the weights needed by this PP stage.
+        tensor_to_local_weight_map, local_weight_info_list = (
+            self._generate_weight_info()
+        )
 
         inline_fp8 = self._is_online_ptpc()
         if inline_fp8:
@@ -464,9 +521,9 @@ class ModelLoader:
         _inline_count = 0
         _total_count = 0
         for key, loaded_tensor in all_tensors:
-            if key not in tensor_to_weight_map:
+            if key not in tensor_to_local_weight_map:
                 continue
-            weight_info = tensor_to_weight_map[key]
+            weight_info = tensor_to_local_weight_map[key]
             _total_count += 1
 
             if inline_fp8 and self._should_inline_fp8_quantize(weight_info):
@@ -515,7 +572,7 @@ class ModelLoader:
                     gc.collect()
 
         _fallback_count = 0
-        for weight_info in weight_info_list:
+        for weight_info in local_weight_info_list:
             weight_info.collector.clear()
             if weight_info.collector.is_collection_complete():
                 continue
@@ -542,7 +599,7 @@ class ModelLoader:
 
     def prepare_weights(self, device: str):
         if not self._is_attn_model:
-            for id in range(self._load_config.num_layers):
+            for id in self._load_config.layer_range:
                 results = self._load_layer_weights(id, device)
                 for name, tensor in results.items():
                     yield (id, name, tensor)
@@ -575,7 +632,7 @@ class ModelLoader:
         tensor_to_weight_map: Dict[str, WeightInfo] = {}
         weight_info_list: List[WeightInfo] = []
         if self._model_weights_info.layer_weights != []:
-            for layer_id in range(self._load_config.num_layers):
+            for layer_id in self._load_config.layer_range:
                 layer_weights = self._model_weights_info.layer_weights[layer_id]
                 if isinstance(layer_weights, WeightModule):
                     # For CompositeWeight (e.g. MoeWithSharedWeight), split into
@@ -623,9 +680,17 @@ class ModelLoader:
     def _maybe_skip_weight(self, weight: WeightModule):
         if weight.name in self._global_weight_aliases:
             return True
-        if self._task_type == TaskType.LANGUAGE_MODEL:
-            return False
-        return weight.name in [W.lm_head]
+        if self._task_type != TaskType.LANGUAGE_MODEL and weight.name in [W.lm_head]:
+            return True
+        return not self.is_global_weight_local(weight.name)
+
+    def is_global_weight_local(self, name: str) -> bool:
+        """Place boundary globals by layer range so full-range drafts keep both ends."""
+        if name in (W.embedding, W.positional_embedding):
+            return 0 in self._load_config.layer_range
+        if name in (W.lm_head, W.lm_head_b) or name.startswith("final_layernorm."):
+            return self._load_config.num_layers - 1 in self._load_config.layer_range
+        return True
 
     @staticmethod
     def force_clean_cuda_memory():
@@ -710,15 +775,14 @@ class ModelLoader:
         if self._load_config.force_cpu_load_weights:
             logging.warning("force_cpu_load_weights is enabled, load weights to cpu")
             return "cpu"
+        non_expert_mem, expert_mem = self._eval_local_model_weight_memory()
         device_mem_info = self._load_config.exported_device.get_mem_info()
         if device_mem_info is None:
             logging.warning("device_mem_info is None, load weights to cpu")
             return "cpu"
         else:
             free_mem = device_mem_info.free / (1024.0**3)
-        model_mem = self._weights_info.model_config.eval_model_weight_size_per_rank(
-            self._load_config.tp_size, self._load_config.ep_size
-        ) / (1024.0**3)
+        model_mem = (non_expert_mem + expert_mem) / (1024.0**3)
         device = current_device if free_mem * 0.9 > model_mem else "cpu"
         logging.info(
             f"free_mem: {free_mem:.2f}GB, estimated model_mem: {model_mem:.2f}GB, use device: {device}"
@@ -823,15 +887,16 @@ class ModelLoader:
             )
 
         if self._task_type == TaskType.LANGUAGE_MODEL:
-            lm_head_w = weight.steal_global_weight(W.lm_head)
-            if lm_head_w == None:
-                lm_head_w = weight.global_weights[W.embedding]
-            if self._weights_info.model_config.normalize_lm_head_weight:
-                lm_head_w = F.normalize(lm_head_w)
-            logit_scale = self._weights_info.model_config.logit_scale
-            if logit_scale != 1.0:
-                lm_head_w = logit_scale * lm_head_w
-            weight.set_global_weight(W.lm_head, lm_head_w)
+            if self.is_global_weight_local(W.lm_head):
+                lm_head_w = weight.steal_global_weight(W.lm_head)
+                if lm_head_w == None:
+                    lm_head_w = weight.global_weights[W.embedding]
+                if self._weights_info.model_config.normalize_lm_head_weight:
+                    lm_head_w = F.normalize(lm_head_w)
+                logit_scale = self._weights_info.model_config.logit_scale
+                if logit_scale != 1.0:
+                    lm_head_w = logit_scale * lm_head_w
+                weight.set_global_weight(W.lm_head, lm_head_w)
         else:
             # Some LLM can be used for other tasks, e.g. classification, in which case lm_head is not needed
             weight.steal_global_weight(W.lm_head)
@@ -886,8 +951,17 @@ class ModelLoader:
         ep_lb_database = CkptDatabase(model_path)
         compute_dtype = self.model_config.compute_dtype
 
+        moe_layer_index = [
+            layer_id
+            for layer_id in weights_info.moe_layer_index_
+            if layer_id in weights_info.layer_range
+        ]
         py_eplb = None
-        if weights_info.enable_eplb_:
+        if (
+            weights_info.enable_eplb_
+            and weights_info.moe_style_ != 0
+            and moe_layer_index
+        ):
             py_eplb = ExpertBalancer(
                 weights_info=weights_info,
                 compute_dtype=compute_dtype,
@@ -898,19 +972,26 @@ class ModelLoader:
         return py_eplb, phy2log
 
     def _init_eplb_weight(self, weight: ModelWeights, device: str):
+        weights_info = self._weights_info
         expert_num = self._load_config.expert_num
         redundant_expert = self._load_config.phy_exp_num - expert_num
-        layer_num = self._load_config.num_layers
         phy2log = self._load_config.phy2log
 
-        if expert_num == 0 or (
-            not self._weights_info.enable_eplb_ and redundant_expert == 0
+        if (
+            weights_info.moe_style_ == 0
+            or expert_num == 0
+            or (not weights_info.enable_eplb_ and redundant_expert == 0)
         ):
             logging.info("don't need to init eplb weight, skip...")
             return
 
+        moe_layer_index = [
+            layer_id
+            for layer_id in weights_info.moe_layer_index_
+            if layer_id in self._load_config.layer_range
+        ]
         # init logic_expert_cnt and log2phy
-        for layer_id in range(layer_num):
+        for layer_id in moe_layer_index:
             logic_expert_cnt = torch.zeros((expert_num,), dtype=torch.int32)
             log2phy = torch.empty(
                 (expert_num, redundant_expert + 1), dtype=torch.int32

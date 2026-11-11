@@ -135,9 +135,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                        params.model_config_.num_layers,
                                                        moe_inter_size,
                                                        params.model_config_.hidden_size,
-                                                       params.parallelism_config.ep_rank,
-                                                       params.parallelism_config.ep_size,
-                                                       params.parallelism_config.world_size,
+                                                       params.parallelism_config,
+                                                       std::pair<int64_t, int64_t>{0, params.model_config_.num_layers},
                                                        params.py_eplb,
                                                        moe_weight_type,
                                                        params.model_config_.quant_algo,
@@ -241,7 +240,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     cudaProfilerBegin();
 }
 
-absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
+absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int64_t schedule_time_us) {
+    const auto&   streams               = schedule_output.streams;
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     if (schedule_time_us <= 0) {
         schedule_time_us = process_start_time_us;

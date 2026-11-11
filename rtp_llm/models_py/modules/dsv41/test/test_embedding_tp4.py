@@ -27,8 +27,10 @@ def _worker(rank, rendezvous):
     )
     control = dist.new_group(backend="gloo", timeout=timedelta(seconds=60))
     collective._group_map[collective.Group.TP] = dist.group.WORLD
-    collective._group_map[collective.Group.DP_AND_TP] = dist.group.WORLD
-    collective._parallelism_config = SimpleNamespace(tp_size=4, dp_size=1, world_size=4)
+    collective._group_map[collective.Group.WORLD] = dist.group.WORLD
+    collective._parallelism_config = SimpleNamespace(
+        tp_size=4, dp_size=1, pp_size=1, world_size=4
+    )
     collective._initialized = True
     try:
         weight = (

@@ -55,7 +55,15 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         communicator_module = MagicMock()
         communicator_module.get_canonical_p2p.return_value = None
         group = object()
-        config = SimpleNamespace(tp_size=2, local_rank=0, local_world_size=2)
+        config = SimpleNamespace(
+            tp_size=2,
+            dp_size=1,
+            pp_size=1,
+            world_size=2,
+            world_rank=0,
+            local_rank=0,
+            local_world_size=2,
+        )
 
         with (
             patch.object(

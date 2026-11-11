@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 
 using namespace std;
 namespace th = torch;
@@ -479,7 +480,8 @@ void RtpLLMOp::stop() {
             model_rpc_service_->beginShutdown();
         }
         if (grpc_server_) {
-            auto begin_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            auto                         begin_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            pybind11::gil_scoped_release release;
             while (auto onflight_request = model_rpc_service_->onflightRequestNum()) {
                 RTP_LLM_LOG_INFO("rpc service has [%lu] onflight request, waiting 1s, stop_timeout_ms=%ld",
                                  onflight_request,
@@ -492,6 +494,7 @@ void RtpLLMOp::stop() {
             }
             RTP_LLM_LOG_INFO("Server shutdowning");
             grpc_server_->Shutdown();
+            pybind11::gil_scoped_acquire acquire;
             grpc_server_.reset();
         }
         if (model_rpc_service_) {
@@ -508,6 +511,8 @@ void RtpLLMOp::stop() {
         // bounded flush of remaining spans; never blocks process exit
         {
             pybind11::gil_scoped_release release;
+            /** Release the grammar reporter before KMonitor shutdown to avoid use-after-free at static destruction. */
+            LogitsProcessorFactory::shutdown();
             telemetry::TelemetryRuntime::shutdown();
         }
         stopKmonitorFactory();

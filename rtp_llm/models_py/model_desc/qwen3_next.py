@@ -1540,8 +1540,13 @@ class Qwen3NextModel(GptModelBase):
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
         )
-        self.embed_tokens = Embedding(
-            model_config, parallelism_config, weights.get_global_weight(W.embedding)
+        layer_ids = self.layer_ids()
+        self.embed_tokens = (
+            Embedding(
+                model_config, parallelism_config, weights.get_global_weight(W.embedding)
+            )
+            if 0 in layer_ids
+            else None
         )
         # Get enable_cuda_graph from py_hw_kernel_config
         enable_cuda_graph = (
@@ -1561,7 +1566,7 @@ class Qwen3NextModel(GptModelBase):
                     enable_cuda_graph,
                     hw_kernel_config=py_hw_kernel_config,
                 )
-                for idx in range(self.layer_num)
+                for idx in layer_ids
             ]
         )
         self._build_output_head(model_config, weights)
@@ -1569,8 +1574,13 @@ class Qwen3NextModel(GptModelBase):
     def _build_output_head(
         self, model_config: ModelConfig, weights: ModelWeights
     ) -> None:
-        self.norm = RMSResNorm(
-            weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
+        self.norm = (
+            RMSResNorm(
+                weights.get_global_weight(W.final_ln_gamma),
+                eps=model_config.layernorm_eps,
+            )
+            if self.layer_num - 1 in self.layer_ids()
+            else None
         )
         self._init_capture_context(
             self._capture_canonical_layer,
@@ -1632,6 +1642,26 @@ class Qwen3NextModel(GptModelBase):
             replay = _QwenGdnGraphDelegate(bounds_by_tag, anchor, impls.get(anchor))
             return _QwenGraphAttentionImpls({**impls, anchor: replay}, replay)
         return _QwenGdnGraphDelegate(bounds_by_tag, "", impls)
+
+    def make_empty_intermediate_tensors(
+        self, hidden_template: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        """Build the same stage inputs used by runtime, without communication.
+
+        Fused add-norm keeps hidden and residual separate across the boundary;
+        dropping residual changes downstream results. The auxiliary prefix
+        contains only configured layer boundaries preceding this stage.
+        """
+        tensors = {
+            "hidden_states": hidden_template,
+            "residual": torch.zeros_like(hidden_template),
+        }
+        previous_parts, _ = self._aux_hidden_capture_parts()
+        if previous_parts:
+            tensors["mtp_aux_hidden_states"] = hidden_template.new_zeros(
+                (hidden_template.shape[0], previous_parts * hidden_template.shape[1])
+            )
+        return tensors
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
         if self.kv_cache is None:
@@ -1847,7 +1877,12 @@ class Qwen3NextModel(GptModelBase):
             fmha_impl, (_QwenGraphAttentionImpls, _QwenGdnGraphDelegate)
         ):
             fmha_impl.bind_graph_inputs(inputs)
-        hidden_states = self.word_embedding(inputs)
+        if self.embed_tokens is not None:
+            hidden_states = self.word_embedding(inputs)
+            residual = torch.zeros_like(hidden_states)
+        else:
+            hidden_states = inputs.pp_intermediates["hidden_states"]
+            residual = inputs.pp_intermediates["residual"]
 
         is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
         attn_meta = self._build_attn_meta(inputs, hidden_states.device, is_cuda_graph)
@@ -1856,35 +1891,51 @@ class Qwen3NextModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
-        residual = torch.zeros_like(hidden_states)
         capture_aux_hidden = bool(self._mtp_aux_capture_layer_ids)
         if capture_aux_hidden:
-            self.begin_aux_hidden_capture(hidden_states, attn_meta.is_target_verify)
+            self.begin_aux_hidden_capture(
+                hidden_states,
+                attn_meta.is_target_verify,
+                upstream_hidden=inputs.pp_intermediates.get("mtp_aux_hidden_states"),
+            )
 
-        for i, decoder_layer in enumerate(self.layers):
+        layer_ids = self.layer_ids()
+        for local_idx, decoder_layer in enumerate(self.layers):
             layer_attention_inputs = select_attention_inputs_for_layer(
-                inputs, self.kv_cache, i
+                inputs, self.kv_cache, local_idx
             )
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 residual,
-                self._layer_fmha_impl(decoder_layer, fmha_impl, i),
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                self._layer_fmha_impl(decoder_layer, fmha_impl, local_idx),
+                kv_cache=(
+                    self.kv_cache.get_layer_cache(local_idx) if self.kv_cache else None
+                ),
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
-            if i in self._mtp_aux_capture_layer_id_set:
-                self.capture_aux_hidden(i, hidden_states, residual)
-            capture.capture_layer(i, hidden_states, residual)
-
+            global_layer_id = layer_ids[local_idx]
+            if global_layer_id in self._mtp_aux_capture_layer_id_set:
+                self.capture_aux_hidden(global_layer_id, hidden_states, residual)
+            capture.capture_layer(global_layer_id, hidden_states, residual)
         if capture_aux_hidden:
             self.finish_aux_hidden_capture()
 
-        hidden_states, residual = self.norm(hidden_states, residual)
-        outputs = capture.finalize(hidden_states)
-        if capture_aux_hidden:
-            assert self._mtp_target_hidden_states is not None
-            outputs.mtp_target_hidden_states = self._mtp_target_hidden_states
+        if self.norm is not None:
+            hidden_states, residual = self.norm(hidden_states, residual)
+            outputs = capture.finalize(hidden_states)
+            if capture_aux_hidden:
+                assert self._mtp_target_hidden_states is not None
+                outputs.mtp_target_hidden_states = self._mtp_target_hidden_states
+            return outputs
+        outputs = PyModelOutputs(hidden_states)
+        intermediates = {
+            "hidden_states": hidden_states,
+            "residual": residual,
+        }
+        if capture_aux_hidden and self._mtp_aux_capture_buffer is not None:
+            intermediates["mtp_aux_hidden_states"] = self._mtp_aux_capture_buffer
+        outputs.pp_intermediates = intermediates
         return outputs
 
 

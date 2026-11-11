@@ -109,7 +109,7 @@ class CollectiveInitializationTest(unittest.TestCase):
         self.initialized.return_value = False
 
     def create_groups(self, *_args):
-        collective._group_map[collective.Group.DP_AND_TP] = self.group
+        collective._group_map[collective.Group.WORLD] = self.group
 
     def initialize(self, **kwargs):
         collective.init_distributed_environment(

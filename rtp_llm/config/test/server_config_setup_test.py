@@ -726,6 +726,46 @@ class GenerateConfigTest(TestCase):
             py_env_configs.parallelism_config.prefill_cp_config.prefill_cp_size, 4
         )
 
+    def test_rejects_world_size_that_cannot_cover_its_groups(self):
+        for world_size, pp_size, dp_size, tp_size in (
+            (4, 1, 1, 1),
+            (4, 1, 1, 2),
+            (2, 1, 2, 2),
+            (8, 2, 1, 2),
+            (16, 2, 2, 2),
+            (4, 2, 1, 4),
+        ):
+            with self.subTest(world=world_size, pp=pp_size, dp=dp_size, tp=tp_size):
+                config = PyEnvConfigs().parallelism_config
+                config.world_size = world_size
+                config.pp_size = pp_size
+                config.dp_size = dp_size
+                config.tp_size = tp_size
+                config.ep_size = 0
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"Rank layout requires WORLD_SIZE = PP_SIZE \* DP_SIZE \* TP_SIZE",
+                ):
+                    set_parallelism_config(config)
+
+    def test_pipeline_derives_last_rank_for_complete_groups(self):
+        for pp_size, dp_size, tp_size in ((2, 1, 1), (2, 1, 2), (2, 2, 2)):
+            with self.subTest(pp=pp_size, dp=dp_size, tp=tp_size):
+                config = PyEnvConfigs().parallelism_config
+                config.pp_size = pp_size
+                config.dp_size = dp_size
+                config.tp_size = tp_size
+                config.world_size = pp_size * dp_size * tp_size
+                config.ep_size = 0
+
+                set_parallelism_config(config, world_rank=config.world_size - 1)
+
+                self.assertEqual(
+                    (config.pp_rank, config.dp_rank, config.tp_rank),
+                    (pp_size - 1, dp_size - 1, tp_size - 1),
+                )
+
     @patch.dict(
         "os.environ",
         {
@@ -852,7 +892,7 @@ class GenerateConfigTest(TestCase):
             "TP_SIZE": "4",
             "PP_SIZE": "1",
             "WORLD_SIZE": "4",
-            "WORLD_RANK": "4",
+            "WORLD_RANK": "2",
             "LOCAL_WORLD_SIZE": "2",
             "CONCURRENCY_LIMIT": "32",
             "START_PORT": "20000",
@@ -867,7 +907,7 @@ class GenerateConfigTest(TestCase):
         set_parallelism_config(py_env_configs.parallelism_config)
         pc = py_env_configs.parallelism_config
         self.assertIsNotNone(pc.world_rank)
-        self.assertEqual(pc.world_rank, 4)
+        self.assertEqual(pc.world_rank, 2)
 
     @patch.dict(
         "os.environ",

@@ -276,6 +276,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
                                                           !mm_process_engine.is_none(),
                                                           maga_init_params.pd_sep_config.role_type,
                                                           maga_init_params.parallelism_config.tp_rank,
+                                                          maga_init_params.parallelism_config.pp_rank,
                                                           maga_init_params.model_config_.model_type,
                                                           "LocalRpcServer");
     const auto mm_kind     = mm_decision.kind;
@@ -1095,7 +1096,9 @@ grpc::Status LocalRpcServer::authorizeTorchAllocatorDumpInternal(grpc::ServerCon
     if (!authorization.ok()) {
         return authorization;
     }
-    if (maga_init_params_.parallelism_config.tp_size <= 1 || !isTorchAllocatorDumpInternalPeer(context)) {
+    const auto& parallelism_config = maga_init_params_.parallelism_config;
+    if ((parallelism_config.tp_size <= 1 && parallelism_config.pp_size <= 1)
+        || !isTorchAllocatorDumpInternalPeer(context)) {
         return grpc::Status(grpc::StatusCode::PERMISSION_DENIED, "allocator dump internal fanout denied");
     }
     return grpc::Status::OK;
@@ -1205,7 +1208,8 @@ TorchAllocatorDumpResultPB LocalRpcServer::dumpTorchAllocatorOnCurrentProcess(co
 
 grpc::Status LocalRpcServer::executeAdmittedTorchAllocatorDump(const TorchAllocatorDumpRequestPB& request,
                                                                TorchAllocatorDumpResponsePB*      response) {
-    if (maga_init_params_.parallelism_config.tp_size <= 1) {
+    const auto& parallelism_config = maga_init_params_.parallelism_config;
+    if (parallelism_config.tp_size <= 1 && parallelism_config.pp_size <= 1) {
         return aggregateTorchAllocatorDumpResults(
             request.dump_id(), {dumpTorchAllocatorOnCurrentProcess(request.dump_id())}, response);
     }
