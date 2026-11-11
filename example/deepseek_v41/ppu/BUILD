@@ -4,7 +4,7 @@ exports_files(["test_functional.sh"])
 
 [
     sh_test(
-        name = "ptpc_" + name + "_test",
+        name = "ptpc_" + name.replace("-", "_") + "_test",
         srcs = ["test_functional.sh"],
         args = ["ptpc-" + name],
         data = [
@@ -20,7 +20,10 @@ exports_files(["test_functional.sh"])
             "//conditions:default": ["@platforms//:incompatible"],
         }),
     )
-    for name, gpus in [("contracts", 0), ("device", 1), ("alignment", 0), ("audit", 0), ("layout", 0)]
+    for name, gpus in [
+        ("contracts", 0), ("device", 1), ("alignment", 0), ("audit", 0), ("layout", 0),
+        ("fusion-contracts", 0), ("fusion-device", 1), ("fusion-micro", 1),
+    ]
 ]
 
 [

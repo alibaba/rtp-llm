@@ -19,6 +19,18 @@ if [[ "$v41_role" == s5-kernel-surface ]]; then
     exec "$v41_python" -B rtp_llm/models_py/modules/dsv41/ppu/test/test_mhc_mega_probe.py --mode surface
 fi
 "$v41_python" -B -c 'from rtp_llm.models_py.modules.dsv41.ppu.pd_handoff import runtime_identity; print(runtime_identity())'
+if [[ "$v41_role" == ptpc-fusion-contracts || "$v41_role" == ptpc-fusion-device ]]; then
+    export RTP_V41_PPU_PTPC_FUSION=1
+    if [[ "$v41_role" == ptpc-fusion-device ]]; then export RTP_V41_TEST_PTPC_DEVICE=1; fi
+    exec "$v41_python" -B -m unittest \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc_quant \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_ptpc_norm
+fi
+if [[ "$v41_role" == ptpc-fusion-micro ]]; then
+    export RTP_V41_PPU_PTPC_FUSION=1
+    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.ptpc_microbench
+fi
 if [[ "$v41_role" == ptpc-contracts || "$v41_role" == ptpc-device ]]; then
     if [[ "$v41_role" == ptpc-device ]]; then export RTP_V41_TEST_PTPC_DEVICE=1; fi
     exec "$v41_python" -B -m unittest \

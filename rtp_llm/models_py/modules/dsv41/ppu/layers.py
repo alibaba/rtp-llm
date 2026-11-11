@@ -149,11 +149,11 @@ class PPUSharedRMSNorm(BaseNorm):
         self.calls += 1
         if self._ptpc:
             # A one-ULP BF16 norm difference can cross the following FP8
-            # quantization boundary. Freeze the same FP32 operation sequence
-            # for eager, CP Prefill and Graph in this quantization profile.
-            x = hidden_states.float()
-            inv = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.variance_epsilon)
-            return (x * inv * self.weight.float()).to(hidden_states.dtype)
+            # boundary. Keep ATen's reduction and separate FP32 rounds while
+            # reusing the existing fused square/epilogue on supported inputs.
+            from rtp_llm.models_py.modules.dsv41.ppu.ptpc_norm import ptpc_rms_norm
+
+            return ptpc_rms_norm(hidden_states, self.weight, self.variance_epsilon)
         runtime = getattr(self, "runtime", None)
         state = runtime.current if runtime is not None else None
         graph_runtime = getattr(self, "_full_graph_runtime", runtime)

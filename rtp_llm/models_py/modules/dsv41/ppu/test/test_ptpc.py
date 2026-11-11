@@ -35,6 +35,15 @@ class Source(TensorSource):
 
 
 class PTPCContracts(unittest.TestCase):
+    def test_grouped_rebind_clears_provider_selection(self):
+        weight = torch.ones(64, 128).to(torch.float8_e4m3fn)
+        op = PPUPTPCLinear(weight, torch.ones(64, 1))
+        op.prepare_grouped(2, 32)
+        op._group_gemm = object()
+        op.prepare_grouped(4, 16)
+        self.assertIsNone(op._group_gemm)
+        self.assertEqual(len(op._groups), 4)
+
     def test_backend_u16_receipt_preserves_packed_bytes(self):
         from rtp_llm.models_py.modules.dsv41.ppu.quant_conversion import audit_loaded_tensor
 
@@ -191,6 +200,66 @@ class PTPCContracts(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("RTP_V41_TEST_PTPC_DEVICE") == "1", "explicit PPU execution only")
 class PTPCDevice(unittest.TestCase):
+    @torch.no_grad()
+    def test_grouped_native_and_changed_input_graph_are_exact(self):
+        torch.manual_seed(4119)
+        groups, width, rank = 8, 4096, 1024
+        weight = torch.randn(groups * rank, width, device="cuda", dtype=torch.bfloat16).to(torch.float8_e4m3fn)
+        scales = torch.full((groups * rank, 1), 0.01, device="cuda", dtype=torch.float32)
+        op = PPUPTPCLinear(weight, scales)
+        op.prepare_grouped(groups, rank)
+
+        def original(value, owner=op):
+            outputs = []
+            for index, part in enumerate(owner._groups):
+                values = value[:, index].contiguous().float()
+                maximum = values.abs().amax(-1, keepdim=True).clamp_min(1e-10)
+                scale = maximum * 0.0022321429569274187
+                quant = (values * (448.0 / maximum)).clamp(-448, 448).to(torch.float8_e4m3fn)
+                out = torch.empty((value.shape[0], part.weight.shape[0]), dtype=torch.bfloat16, device=value.device)
+                part._gemm((quant, scale), (part.weight, part.scale), out)
+                outputs.append(out)
+            return torch.stack(outputs, 1)
+
+        def assert_grouped_exact(actual, expected, label):
+            actual_bits, expected_bits = actual.view(torch.int16), expected.view(torch.int16)
+            if not torch.equal(actual_bits, expected_bits):
+                position = tuple((actual_bits != expected_bits).nonzero()[0].tolist())
+                self.fail(
+                    f"{label} at {position}: actual=0x{int(actual_bits[position].item()) & 0xffff:04x}, "
+                    f"expected=0x{int(expected_bits[position].item()) & 0xffff:04x}"
+                )
+
+        for rows in (1, 3, 4, 8, 16, 24, 32, 72, 144, 288, 2048, 4096, 8192):
+            value = torch.randn(rows, groups, width, device="cuda", dtype=torch.bfloat16)
+            assert_grouped_exact(op.forward_grouped(value), original(value), f"wo_a M{rows}")
+        for rows in (24, 32, 72):
+            value = torch.randn(rows, groups, width, device="cuda", dtype=torch.bfloat16)
+            op.forward_grouped(value)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                output = op.forward_grouped(value)
+            for magnitude in (0.0, 0.125, 2.0):
+                value.copy_(torch.randn_like(value) * magnitude)
+                graph.replay()
+                assert_grouped_exact(output, original(value), f"wo_a Graph M{rows} magnitude{magnitude}")
+        self.assertEqual(op.forward_grouped(value[:0]).shape, (0, groups, rank))
+        fallback = PPUPTPCLinear(
+            torch.randn(128, 128, device="cuda", dtype=torch.bfloat16).to(torch.float8_e4m3fn),
+            torch.full((128, 1), 0.01, device="cuda", dtype=torch.float32),
+        )
+        fallback.prepare_grouped(2, 64)
+        self.assertIsNone(fallback._group_gemm)
+        small = torch.randn(4, 2, 128, device="cuda", dtype=torch.bfloat16)
+        fallback.forward_grouped(small)
+        fallback_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(fallback_graph):
+            fallback_output = fallback.forward_grouped(small)
+        for magnitude in (0.0, 0.125, 2.0):
+            small.copy_(torch.randn_like(small) * magnitude)
+            fallback_graph.replay()
+            assert_grouped_exact(fallback_output, original(small, fallback), "wo_a fallback Graph")
+
     def test_native_gemm_and_graph_changed_inputs(self):
         from rtp_llm.models_py.modules.dsv41.ppu.layers import PPUSharedRMSNorm
 
@@ -220,6 +289,49 @@ class PTPCDevice(unittest.TestCase):
             error = (actual.cpu().float() - ref.float()).square().sum()
             energy = ref.float().square().sum().clamp_min(1e-20)
             self.assertLess((error / energy).item(), 5e-5)
+
+    @torch.no_grad()
+    def test_production_norm_linear_changed_input_graph_is_exact(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.layers import PPUSharedRMSNorm
+
+        for width in (1280, 5120):
+            gamma = torch.randn(width, device="cuda", dtype=torch.bfloat16)
+            norm = PPUSharedRMSNorm(gamma)
+            self.assertTrue(norm._ptpc)
+            weight = torch.randn(1280, width, device="cuda", dtype=torch.bfloat16).to(torch.float8_e4m3fn)
+            scales = torch.full((1280, 1), 0.01, device="cuda", dtype=torch.float32)
+            op = PPUPTPCLinear(weight, scales)
+
+            def original(value):
+                values = value.float()
+                inverse = torch.rsqrt(values.square().mean(-1, keepdim=True) + 1e-6)
+                normalized = (values * inverse * gamma.float()).to(torch.bfloat16).float()
+                maximum = normalized.abs().amax(-1, keepdim=True).clamp_min(1e-10)
+                scale = maximum * 0.0022321429569274187
+                payload = (normalized * (448.0 / maximum)).clamp(-448, 448).to(torch.float8_e4m3fn)
+                out = torch.empty((value.shape[0], 1280), device="cuda", dtype=torch.bfloat16)
+                op._gemm((payload, scale), (op.weight, op.scale), out)
+                return out
+
+            for rows in (24, 32):
+                value = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
+                op(norm(value))
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    output = op(norm(value))
+                for magnitude in (0.0, 0.125, 2.0):
+                    value.copy_(torch.randn_like(value) * magnitude)
+                    gamma.copy_(torch.randn_like(gamma))
+                    graph.replay()
+                    expected = original(value)
+                    actual_bits, expected_bits = output.view(torch.int16), expected.view(torch.int16)
+                    if not torch.equal(actual_bits, expected_bits):
+                        position = tuple((actual_bits != expected_bits).nonzero()[0].tolist())
+                        self.fail(
+                            f"norm+linear Graph M{rows}/K{width} at {position}: "
+                            f"actual=0x{int(actual_bits[position].item()) & 0xffff:04x}, "
+                            f"expected=0x{int(expected_bits[position].item()) & 0xffff:04x}"
+                        )
 
 
 if __name__ == "__main__":

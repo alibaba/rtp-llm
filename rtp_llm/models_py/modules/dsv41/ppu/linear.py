@@ -30,7 +30,12 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.dsv41.ppu.quant_conversion import FP8_INV_MAX
+from rtp_llm.models_py.modules.dsv41.ppu.ptpc_quant import (
+    pack_ptpc_grouped_output,
+    ptpc_fusion_enabled,
+    quantize_ptpc_activation,
+    quantize_ptpc_grouped_activation,
+)
 
 __all__ = [
     "dequant_fp8_block32_ue8m0",
@@ -40,15 +45,6 @@ __all__ = [
 ]
 
 FP8_BLOCK_SIZE = 32  # UE8M0 scale block for dense V4.1 weights (32 x 32)
-
-
-def quantize_ptpc_activation(x):
-    """Dynamic symmetric whole-row E4M3, one FP32 scale per token."""
-    values = x.float()
-    amax = values.abs().amax(-1, keepdim=True).clamp_min(1e-10)
-    scale = amax * FP8_INV_MAX
-    payload = (values * (448.0 / amax)).clamp(-448, 448).to(torch.float8_e4m3fn)
-    return payload.contiguous(), scale.contiguous()
 
 
 class PPUPTPCLinear:
@@ -66,6 +62,7 @@ class PPUPTPCLinear:
         self.quantization = "fp8_per_channel_per_token"
         self._groups = None
         self._gemm = None
+        self._group_gemm = None
         if weight.is_cuda:
             from rtp_llm.models_py.kernels.ppu.runtime import install_deep_gemm_build_lock, require_symbol
 
@@ -73,16 +70,50 @@ class PPUPTPCLinear:
             install_deep_gemm_build_lock()
 
     def prepare_grouped(self, groups, rank):
-        if self.weight.shape[0] != groups * rank:
+        if groups <= 0 or rank <= 0 or self.weight.shape[0] != groups * rank:
             raise ValueError("grouped PTPC wo_a rows disagree with model geometry")
+        self._group_gemm = None
         self._groups = tuple(
             PPUPTPCLinear(self.weight[i * rank:(i + 1) * rank], self.scale[i * rank:(i + 1) * rank])
             for i in range(groups)
         )
+        if self.weight.is_cuda:
+            import deep_gemm
+
+            # Same channelwise batched ABI used by SGLang's PPU wo_a.
+            # These are views of the existing resident weight and scale.
+            if (groups, rank, self.weight.shape[1]) == (8, 1024, 4096):
+                self._group_gemm = getattr(deep_gemm, "fp8_einsum", None)
+            self._group_weight = self.weight.view(groups, rank, self.weight.shape[1])
+            self._group_scale = self.scale.view(groups, rank, 1)
 
     def forward_grouped(self, x):
         if self._groups is None or x.ndim != 3 or x.shape[1] != len(self._groups):
             raise ValueError("PTPC grouped projection must be prepared before forward")
+        if x.shape[-1] != self.weight.shape[1] or x.device != self.weight.device:
+            raise ValueError("PTPC input shape/device differs from its weight")
+        if x.is_cuda and ptpc_fusion_enabled():
+            groups, rows = len(self._groups), x.shape[0]
+            rank = self._groups[0].weight.shape[0]
+            if rows == 0:
+                return torch.empty((0, groups, rank), dtype=torch.bfloat16, device=x.device)
+            if self._group_gemm is not None:
+                payload, scale = quantize_ptpc_activation(x)
+                output = torch.empty((rows, groups, rank), dtype=torch.bfloat16, device=x.device)
+                self._group_gemm(
+                    "bhr,hdr->bhd", (payload, scale),
+                    (self._group_weight, self._group_scale), output,
+                    recipe=(1, 1, self.weight.shape[1]),
+                )
+                return output
+            # Gather directly into each GEMM's packed activation layout once.
+            # The native per-channel GEMM requires contiguous output, so retain
+            # its original arithmetic and pack all group outputs in one launch.
+            payload, scale = quantize_ptpc_grouped_activation(x)
+            output = torch.empty((groups, rows, rank), dtype=torch.bfloat16, device=x.device)
+            for index, part in enumerate(self._groups):
+                part._gemm((payload[index], scale[index]), (part.weight, part.scale), output[index])
+            return pack_ptpc_grouped_output(output)
         return torch.stack([part(x[:, i].contiguous()) for i, part in enumerate(self._groups)], 1)
 
     def forward(self, x):

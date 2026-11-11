@@ -34,6 +34,7 @@ py_library(
     name = "v41_ppu_moe",
     srcs = [
         "modules/dsv41/ppu/linear.py",
+        "modules/dsv41/ppu/ptpc_quant.py",
         "modules/dsv41/ppu/quant_conversion.py",
         "modules/dsv41/ppu/moe.py",
     ],
@@ -51,6 +52,7 @@ _DSV41_PPU_SHARED_MODULES = [
     "modules/dsv41/ppu/transformer.py",
     "modules/dsv41/ppu/block.py",
     "modules/dsv41/ppu/layers.py",
+    "modules/dsv41/ppu/ptpc_norm.py",
     "modules/dsv41/ppu/attention_layer.py",
     "modules/dsv41/ppu/prefill_runtime.py",
     "modules/dsv41/ppu/ced.py",

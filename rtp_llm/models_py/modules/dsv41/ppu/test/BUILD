@@ -2,7 +2,12 @@ package(default_visibility = ["//visibility:public"])
 
 filegroup(
     name = "ptpc_sources",
-    srcs = ["test_ptpc.py"],
+    srcs = [
+        "test_ptpc.py",
+        "test_ptpc_quant.py",
+        "test_ptpc_norm.py",
+        "ptpc_microbench.py",
+    ],
 )
 
 filegroup(
