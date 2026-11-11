@@ -1905,8 +1905,9 @@ class AttentionV41FP8(AttentionFP8):
                 if fused_indexer:
                     q_fp4, q_sf = prefill_indexer.quantize_indexer_q(q)
                     weights = weights.to(torch.bfloat16)
-                else:
-                    q = fp8_roundtrip(q)
+                # Dense indexer quantizes q per scoring chunk below; doing it
+                # for all local tokens first allocates a second full-context
+                # float32 copy.
             dense_weights = weights
             pending = shared.pop("prefill_pool_ready", None)
             if pending is not None:
@@ -2071,7 +2072,7 @@ class AttentionV41FP8(AttentionFP8):
                         # is already several GiB per layer.  Stream key blocks
                         # and merge per-block top-k exactly, so peak memory is
                         # bounded by one block regardless of context length.
-                        q_dense = q[chunk]
+                        q_dense = fp8_roundtrip(q[chunk])
                         w_dense = weights[chunk]
                         n_rows = int(visible.numel())
                         k = min(self.index_topk, key_count)
