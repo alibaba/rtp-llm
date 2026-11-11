@@ -52,8 +52,8 @@ PTPC_WOA_DIRECT_ENV = "RTP_V41_PPU_PTPC_WOA_DIRECT"
 
 
 def ptpc_woa_direct_enabled():
-    """Opt in to the prepacked provider while its device gate is qualified."""
-    return os.environ.get(PTPC_WOA_DIRECT_ENV, "0") == "1"
+    """Use the qualified Prefill provider; explicit zero retains einsum."""
+    return os.environ.get(PTPC_WOA_DIRECT_ENV, "1") == "1"
 
 
 def _load_direct_woa_gemm():

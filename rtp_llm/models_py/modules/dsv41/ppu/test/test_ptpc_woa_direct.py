@@ -41,10 +41,10 @@ def make_woa():
 
 
 class PTPCWoaDirectCPU(unittest.TestCase):
-    def test_candidate_opt_in_and_rollback(self):
+    def test_qualified_default_and_rollback(self):
         with patch.dict(os.environ):
             os.environ.pop(linear_module.PTPC_WOA_DIRECT_ENV, None)
-            self.assertFalse(linear_module.ptpc_woa_direct_enabled())
+            self.assertTrue(linear_module.ptpc_woa_direct_enabled())
         for value, expected in (("0", False), ("1", True)):
             with patch.dict(os.environ, {linear_module.PTPC_WOA_DIRECT_ENV: value}):
                 self.assertEqual(linear_module.ptpc_woa_direct_enabled(), expected)
