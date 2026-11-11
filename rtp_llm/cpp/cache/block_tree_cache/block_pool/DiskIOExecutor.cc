@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskIOExecutor.h"
 
 #include <algorithm>
-#include <cstring>
 #include <exception>
 #include <limits>
 #include <mutex>
@@ -79,9 +78,6 @@ struct DiskIOExecutor::State {
                 std::sort(requests.begin(), requests.end(), [](const DiskWrite& lhs, const DiskWrite& rhs) {
                     return lhs.offset < rhs.offset;
                 });
-                for (const auto& request : requests)
-                    if (request.padding_bytes)
-                        std::memset(request.padding, 0, request.padding_bytes);
                 const auto result = io.write(requests);
                 if (result != DiskBlockIOStatus::OK) {
                     fail(result);
@@ -114,7 +110,6 @@ struct DiskIOExecutor::State {
         }
 
         void finish() {
-            Callback          done;
             DiskBlockIOStatus result;
             {
                 std::lock_guard<std::mutex> lock(mutex);
@@ -122,10 +117,9 @@ struct DiskIOExecutor::State {
                     return;
                 }
                 result = status;
-                done   = std::move(callback);
             }
             try {
-                done(result);
+                callback(result);
             } catch (const std::exception& e) {
                 RTP_LLM_LOG_ERROR("async disk callback threw: %s", e.what());
             } catch (...) {

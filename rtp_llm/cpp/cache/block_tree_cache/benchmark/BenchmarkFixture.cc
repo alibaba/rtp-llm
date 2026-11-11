@@ -127,16 +127,16 @@ std::shared_ptr<HostBlockPool> BenchmarkFixture::createHostPool(size_t          
     return pool;
 }
 
-BlockTreeDiskBlockPoolPtr BenchmarkFixture::createDiskPool(size_t             payload_bytes,
-                                                           size_t             usable_count,
-                                                           const std::string& work_dir,
-                                                           const std::string& pool_name,
-                                                           bool               buffered_io,
-                                                           bool               enable_crc) {
+DiskBlockPoolPtr BenchmarkFixture::createDiskPool(size_t             payload_bytes,
+                                                  size_t             usable_count,
+                                                  const std::string& work_dir,
+                                                  const std::string& pool_name,
+                                                  bool               buffered_io,
+                                                  bool               enable_crc) {
     const size_t stride_bytes =
         alignUp(enable_crc ? CrcCopyWorkspace::encodedBytes(payload_bytes) : payload_bytes, kPoolAlignment);
 
-    auto config             = std::make_shared<BlockTreeDiskBlockPoolConfig>();
+    auto config             = std::make_shared<DiskBlockPoolConfig>();
     config->pool_type       = BlockPoolType::DISK;
     config->pool_name       = pool_name;
     config->work_dir        = work_dir;
@@ -147,14 +147,14 @@ BlockTreeDiskBlockPoolPtr BenchmarkFixture::createDiskPool(size_t             pa
     config->stride_bytes    = stride_bytes;
     config->buffered_io     = buffered_io;
 
-    auto pool = std::make_shared<BlockTreeDiskBlockPool>(config, nullptr);
+    auto pool = std::make_shared<DiskBlockPool>(config, nullptr);
     RTP_LLM_CHECK(pool->init());
     return pool;
 }
 
 GroupSetPtr BenchmarkFixture::createFullGroupSet(std::vector<DeviceBlockPoolPtr>      device_pools,
                                                  std::shared_ptr<HostBlockPool>       host_pool,
-                                                 BlockTreeDiskBlockPoolPtr            disk_pool,
+                                                 DiskBlockPoolPtr                     disk_pool,
                                                  size_t                               group_set_id,
                                                  std::shared_ptr<const CacheTopology> topology,
                                                  const std::vector<std::string>&      group_tags,
@@ -171,7 +171,7 @@ GroupSetPtr BenchmarkFixture::createFullGroupSet(std::vector<DeviceBlockPoolPtr>
 
 GroupSetPtr BenchmarkFixture::createSWAGroupSet(std::vector<DeviceBlockPoolPtr>      device_pools,
                                                 std::shared_ptr<HostBlockPool>       host_pool,
-                                                BlockTreeDiskBlockPoolPtr            disk_pool,
+                                                DiskBlockPoolPtr                     disk_pool,
                                                 size_t                               group_set_id,
                                                 std::shared_ptr<const CacheTopology> topology,
                                                 const std::vector<std::string>&      group_tags,
@@ -268,8 +268,7 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
                                                                config.btc_crc_slot_count,
                                                                config.btc_transfer_engine_async);
     RTP_LLM_CHECK(engine->asyncEnabled());
-    auto dispatcher =
-        std::make_unique<BlockTransferDispatcher>(engine, nullptr, config.max_descriptors_per_transfer_batch);
+    auto dispatcher = std::make_unique<BlockTransferDispatcher>(engine, nullptr);
     auto task_pool =
         std::make_unique<BlockTreeTaskPool>(config.task_pool_size, 1000, "BlockTreeCacheBenchmarkTaskPool");
     auto tree = std::make_unique<BlockTree>(group_sets);

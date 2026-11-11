@@ -66,7 +66,6 @@ DeviceDiskTransferExecutor::DeviceDiskTransferExecutor(DeviceHostTransferExecuto
                                                        int64_t                                        world_rank):
     device_host_executor_(device_host_executor),
     host_disk_executor_(host_disk_executor),
-    transfer_task_pool_(transfer_task_pool),
     load_task_pool_(load_task_pool == nullptr ? &transfer_task_pool : load_task_pool),
     max_descriptors_per_batch_(max_descriptors_per_batch),
     metrics_reporter_(std::move(metrics_reporter)),
@@ -111,30 +110,12 @@ void DeviceDiskTransferExecutor::cancelPendingTransfers() {
 std::shared_ptr<TransferAsyncContext>
 DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const GroupSet*>& group_sets) {
     auto        context     = std::make_shared<TransferBatchAsyncContext>(task.descriptors().size());
-    const auto& descriptors = task.descriptors();
-    if (descriptors.empty() || descriptors.size() != group_sets.size() || !group_sets.front()) {
-        context->complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid device-disk batch"));
-        return context;
-    }
+    const auto&           descriptors   = task.descriptors();
     const Tier source = descriptors.front().source_tier;
-    const Tier target = descriptors.front().target_tier;
-    const bool load   = source == Tier::DISK && target == Tier::DEVICE;
-    if ((!load && !(source == Tier::DEVICE && target == Tier::DISK))
-        || std::any_of(descriptors.begin(), descriptors.end(), [source, target](const TransferDescriptor& descriptor) {
-               return descriptor.source_tier != source || descriptor.target_tier != target;
-           })) {
-        context->complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid device-disk direction"));
-        return context;
-    }
-    const char*          transfer_name = load ? "disk-to-device" : "device-to-disk";
+    const Tier            target        = descriptors.front().target_tier;
+    const char*           transfer_name = "disk-to-device";
     const auto           identity      = CacheStageContext::local(source, target);
-    const CacheGroupType group_type = group_sets.front()->groupType();
-    if (std::any_of(group_sets.begin(), group_sets.end(), [group_type](const GroupSet* group_set) {
-            return group_set == nullptr || group_set->groupType() != group_type;
-        })) {
-        context->complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "mixed device-disk cache group types"));
-        return context;
-    }
+    const CacheGroupType  group_type    = group_sets.front()->groupType();
     HostStagingBlockPool* pool     = stagingPool(group_type);
     const size_t          capacity = std::min(batchCapacity(group_type), max_descriptors_per_batch_);
     if (pool == nullptr || capacity == 0) {
@@ -189,7 +170,6 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
              batch_timer,
              staging_timer,
              deadline,
-             load,
              transfer_name,
              source,
              target,
@@ -247,9 +227,8 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
                                        CacheCopyError::NOT_EXECUTED),
                         indices);
                 };
-                auto&      task_pool = load ? *load_task_pool_ : transfer_task_pool_;
-                const bool accepted  = task_pool.submit(
-                    load ? BlockTreeTaskClass::LOAD : BlockTreeTaskClass::BACKGROUND,
+                const bool accepted = load_task_pool_->submit(
+                    BlockTreeTaskClass::LOAD,
                     [this,
                      stage_state,
                      indices,
@@ -263,7 +242,6 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
                      queue_timer,
                      batch_timer,
                      queue_begin,
-                     load,
                      transfer_name,
                      source,
                      target,
@@ -283,9 +261,8 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
                             }
 
                             TransferResult result;
-                            for (const bool disk_stage : {load, !load}) {
-                                const char* stage =
-                                    disk_stage ? (load ? "disk_read" : "disk_write") : (load ? "h2d" : "d2h");
+                            for (const bool disk_stage : {true, false}) {
+                                const char*        stage = disk_stage ? "disk_read" : "h2d";
                                 TransferStageTimer timer(metrics_reporter_,
                                                          stage,
                                                          request_id,
@@ -301,9 +278,7 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
                                 timer.finish(result.ok());
                                 if (!result.ok()) {
                                     batch_timer.finish(false);
-                                    const char* failed_stage =
-                                        load ? (disk_stage ? "disk-to-staging" : "staging-to-device") :
-                                               (disk_stage ? "staging-to-disk" : "device-to-staging");
+                                    const char* failed_stage = disk_stage ? "disk-to-staging" : "staging-to-device";
                                     logBatchFailure(sub_descriptors, begin, transfer_name, failed_stage);
                                     stage_state->completeBatch(
                                         transferError(std::move(result), begin, end, transfer_name, failed_stage),

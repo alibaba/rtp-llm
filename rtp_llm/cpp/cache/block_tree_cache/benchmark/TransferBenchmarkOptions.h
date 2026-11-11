@@ -12,7 +12,7 @@ struct TransferOptions {
     std::string group_set{"full_context"};  // "full_context" or "swa"
 
     // Transfer directions (comma separated, e.g. "d2h,h2d" mixes both in one case)
-    std::vector<std::string> transfer_directions{"d2h"};  // d2h, h2d, d2disk, disk2d, h2disk, disk2h
+    std::vector<std::string> transfer_directions{"d2h"};  // d2h, h2d, h2disk, disk2d
 
     // Operation count and concurrency
     size_t transfer_operation_count{1024};

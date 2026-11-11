@@ -25,8 +25,7 @@ struct CachePoolMetricsSnapshot {
     size_t      pd_connector_ref_blocks     = 0;
     size_t      block_cache_ref_blocks     = 0;
     size_t      load_ref_blocks            = 0;
-    size_t      eviction_target_ref_blocks = 0;
-    size_t      store_ref_blocks           = 0;
+    size_t      eviction_target_ref_blocks  = 0;
     size_t      frozen_ref_blocks          = 0;
     float       used_ratio                 = 0.0f;
 

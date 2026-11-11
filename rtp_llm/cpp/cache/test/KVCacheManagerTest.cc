@@ -1880,7 +1880,7 @@ public:
         barrier_ = barrier;
     }
 
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         std::shared_ptr<block_tree_cache_test::CallbackBarrier> barrier;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1889,7 +1889,7 @@ public:
         if (barrier) {
             barrier->enterAndWait();
         }
-        return ScriptedPerRankBlockTransferEngine::execute(std::move(task));
+        return ScriptedPerRankBlockTransferEngine::executeBatch(std::move(task));
     }
 
 private:
@@ -2215,7 +2215,7 @@ class RecordingBatchTransferEngine final: public PerRankBlockTransferEngine {
 public:
     RecordingBatchTransferEngine(): PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}) {}
 
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         ++submitted_batch_count;
         submitted_descriptor_count += task.descriptors().size();
         TransferResult result(completion_error);

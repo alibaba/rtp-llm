@@ -518,11 +518,11 @@ TEST_F(BlockTreeCacheTest, ReportTransferFinishedAcceptsSuccessfulDescriptors) {
     BlockTreeCacheMetricsReporter reporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
 
     const int64_t begin_time_us =
-        reporter.reportTransferStarted(CacheTransferOperation::STORE, Tier::DEVICE, Tier::HOST);
+        reporter.reportTransferStarted(CacheTransferOperation::EVICT, Tier::DEVICE, Tier::HOST);
     reporter.reportTransferFinished(
-        CacheTransferOperation::STORE, Tier::DEVICE, Tier::HOST, descs.size(), begin_time_us, true, descs, group_sets);
+        CacheTransferOperation::EVICT, Tier::DEVICE, Tier::HOST, descs.size(), begin_time_us, true, descs, group_sets);
 
-    const size_t operation_index = static_cast<size_t>(CacheTransferOperation::STORE);
+    const size_t operation_index = static_cast<size_t>(CacheTransferOperation::EVICT);
     const size_t direction_index =
         static_cast<size_t>(BlockTreeCacheMetricsReporter::transferDirectionIndex(Tier::DEVICE, Tier::HOST));
     EXPECT_EQ(reporter.transfer_in_flight_[operation_index][direction_index].load(), 0);
@@ -654,7 +654,6 @@ TEST(BlockTreeCacheMetricsTest, FrozenMetricIsOwnerOnlyAndIncludesZeroForEveryTi
     }
     EXPECT_EQ(metricSeriesCount(metrics->frozen_ref_blocks_metric), 3u);
     EXPECT_EQ(metricSeriesCount(metrics->eviction_target_ref_blocks_metric), 0u);
-    EXPECT_EQ(metricSeriesCount(metrics->store_ref_blocks_metric), 3u);
 }
 
 TEST(BlockTreeCacheMetricsTest, FrozenSnapshotsTrackReferencesAcrossAllTiers) {
@@ -675,16 +674,15 @@ TEST(BlockTreeCacheMetricsTest, FrozenSnapshotsTrackReferencesAcrossAllTiers) {
                              static_cast<IBlockPool*>(disk.get())}) {
         auto block = pool->malloc();
         ASSERT_TRUE(block.has_value());
-        pool->incTreeRef(*block, BlockTreeRefType::STORE);
+        pool->incTreeRef(*block, BlockTreeRefType::EVICTION);
         pool->freezeBlock(*block);
         pool->freezeBlock(*block);
-        pool->decTreeRef(*block, BlockTreeRefType::STORE);
+        pool->decTreeRef(*block, BlockTreeRefType::EVICTION);
     }
     const auto after = reporter.collectPoolMetricsSnapshots(groups);
     ASSERT_EQ(after.size(), 3u);
     for (const auto& snapshot : after) {
         EXPECT_EQ(snapshot.frozen_ref_blocks, 1u);
-        EXPECT_EQ(snapshot.store_ref_blocks, 0u);
         EXPECT_EQ(snapshot.load_ref_blocks, 0u);
         EXPECT_EQ(snapshot.eviction_target_ref_blocks, 0u);
     }
@@ -868,7 +866,7 @@ TEST_F(BlockTreeCacheTest, InsertReplacesIdleLowerTierFullRefillsSwaAndRefreshes
         auto        cache        = makeBlockTreeCacheForTest({full, swa}, config, nullptr, nullptr, reporter);
         IBlockPool* pool         = tier == Tier::HOST ? static_cast<IBlockPool*>(full->hostPool().get()) :
                                                         static_cast<IBlockPool*>(full->diskPool().get());
-        const auto  old_blocks   = full->allocateBlocks(2, tier, BlockTreeRefType::STORE);
+        const auto  old_blocks   = full->allocateBlocks(2, tier, BlockTreeRefType::EVICTION);
         ASSERT_TRUE(old_blocks.has_value());
         std::vector<std::vector<GroupSetResource>> original(2, std::vector<GroupSetResource>(2));
         for (size_t index = 0; index < 2; ++index) {
@@ -877,7 +875,7 @@ TEST_F(BlockTreeCacheTest, InsertReplacesIdleLowerTierFullRefillsSwaAndRefreshes
         const auto seeded = cache->tree()->insertNode({100, 200}, original, true, false);
         ASSERT_EQ(seeded.path.size(), 2u);
         cache->evictor_.onInserted(seeded);
-        full->releaseBlocks(tier, *old_blocks, BlockTreeRefType::STORE);
+        full->releaseBlocks(tier, *old_blocks, BlockTreeRefType::EVICTION);
         EXPECT_EQ(cache->evictor_.candidateCount(0, tier), 1u);
         auto before = cache->match({100, 200});
         EXPECT_EQ(before.matched_device_blocks, 0u);
@@ -934,9 +932,9 @@ TEST_F(BlockTreeCacheTest, InsertClearsOnlyReplacedFullSourceTierCandidates) {
     config.enable_host_cache = true;
     config.enable_disk_cache = true;
     auto       cache         = makeBlockTreeCacheForTest({full, swa}, config);
-    const auto full_host     = full->allocateBlocks(2, Tier::HOST, BlockTreeRefType::STORE);
-    const auto full_disk     = full->allocateBlocks(1, Tier::DISK, BlockTreeRefType::STORE);
-    const auto swa_host      = swa->allocateBlocks(1, Tier::HOST, BlockTreeRefType::STORE);
+    const auto full_host     = full->allocateBlocks(2, Tier::HOST, BlockTreeRefType::EVICTION);
+    const auto full_disk     = full->allocateBlocks(1, Tier::DISK, BlockTreeRefType::EVICTION);
+    const auto swa_host      = swa->allocateBlocks(1, Tier::HOST, BlockTreeRefType::EVICTION);
     ASSERT_TRUE(full_host.has_value());
     ASSERT_TRUE(full_disk.has_value());
     ASSERT_TRUE(swa_host.has_value());
@@ -950,9 +948,9 @@ TEST_F(BlockTreeCacheTest, InsertClearsOnlyReplacedFullSourceTierCandidates) {
     sibling_resource.host_block = (*full_host)[1];
     const auto sibling          = cache->tree()->insertNode({300}, {{sibling_resource, {}}}, true, false);
     cache->evictor_.onInserted(sibling);
-    full->releaseBlocks(Tier::HOST, *full_host, BlockTreeRefType::STORE);
-    full->releaseBlocks(Tier::DISK, *full_disk, BlockTreeRefType::STORE);
-    swa->releaseBlocks(Tier::HOST, *swa_host, BlockTreeRefType::STORE);
+    full->releaseBlocks(Tier::HOST, *full_host, BlockTreeRefType::EVICTION);
+    full->releaseBlocks(Tier::DISK, *full_disk, BlockTreeRefType::EVICTION);
+    swa->releaseBlocks(Tier::HOST, *swa_host, BlockTreeRefType::EVICTION);
     ASSERT_EQ(seeded.path.size(), 2u);
     ASSERT_EQ(sibling.path.size(), 1u);
     EXPECT_FALSE(seeded.path[0]->children.empty());
@@ -1527,6 +1525,11 @@ TEST(BlockTreeCacheMetricsTest, CopyErrorMetricKeepsLegacyNameDirectionsAndDiagn
     auto                          metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", common_tags);
     BlockTreeCacheMetricsReporter reporter(metrics_reporter);
     const ErrorInfo               failure(ErrorCode::EXECUTION_EXCEPTION, "copy failed");
+    auto                          removed_device_to_disk = TransferDescriptor::deviceToHost(0, {1}, 2);
+    removed_device_to_disk.target_tier                   = Tier::DISK;
+    auto removed_disk_to_host                            = TransferDescriptor::hostToDisk(0, 1, 2);
+    std::swap(removed_disk_to_host.source_tier, removed_disk_to_host.target_tier);
+    std::swap(removed_disk_to_host.source_blocks, removed_disk_to_host.target_blocks);
     for (const auto error : {CacheCopyError::COPY_FAILED,
                              CacheCopyError::INVALID_REQUEST,
                              CacheCopyError::IO_FAILED,
@@ -1534,10 +1537,10 @@ TEST(BlockTreeCacheMetricsTest, CopyErrorMetricKeepsLegacyNameDirectionsAndDiagn
                              CacheCopyError::CRC_MISMATCH}) {
         for (auto descriptor : {TransferDescriptor::deviceToHost(0, {1}, 2),
                                 TransferDescriptor::hostToDevice(0, 2, {1}),
-                                TransferDescriptor::deviceToDisk(0, {1}, 2),
+                                removed_device_to_disk,
                                 TransferDescriptor::diskToDevice(0, 2, {1}),
                                 TransferDescriptor::hostToDisk(0, 1, 2),
-                                TransferDescriptor::diskToHost(0, 2, 1)}) {
+                                removed_disk_to_host}) {
             reporter.maybeReportCopyError(descriptor.source_tier, descriptor.target_tier, {failure, error});
         }
     }
@@ -1661,9 +1664,7 @@ TEST_F(BlockTreeCacheTest, EvictionLifetimeStopsAtSelectionForEachSourceTier) {
         timing.tier_enter_time_us  = 100000;
         timing.last_access_time_us = 120000;
         timing.selected_time_us    = 150000;
-        EvictionTransferTask task(TransferTask({desc}, std::chrono::seconds(30)), {timing});
-
-        reporter.reportEvictionFinished(task, cache_->groupSets());
+        reporter.reportEvictedDescriptor(desc, timing, cache_->groupSets(), "watermark");
         auto* metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
         ASSERT_NE(metrics, nullptr);
         kmonitor::MetricsTags tags("tier", tierName(direction.first));
@@ -2467,7 +2468,7 @@ TEST_F(BlockTreeCacheTest, WatermarkDirectDropPreservesDeviceBlockWithTreeOperat
 
     const size_t initial_free = pool->freeBlocksNum();
     const auto   version      = cache_->getKeySnapshot().version;
-    for (const BlockTreeRefType type : {BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION, BlockTreeRefType::STORE}) {
+    for (const BlockTreeRefType type : {BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION}) {
         pool->incTreeRef(42, type);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
         EXPECT_EQ(pool->freeBlocksNum(), initial_free);
@@ -2536,7 +2537,7 @@ TEST_F(BlockTreeCacheTest, ForceDropSkipsDeviceBlockWithTreeOperationReference) 
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
     cache_->insert({100}, resources, Tier::DEVICE);
-    for (const BlockTreeRefType type : {BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION, BlockTreeRefType::STORE}) {
+    for (const BlockTreeRefType type : {BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION}) {
         pool->incTreeRef(42, type);
         const size_t initial_free = pool->freeBlocksNum();
         EXPECT_EQ(cache_->evictForGroup("group0", 1), 0);
@@ -2678,7 +2679,6 @@ void expectSameJointLifecycleMetrics(const BlockTreePoolMetricsSnapshot& expecte
     EXPECT_EQ(actual.block_cache_ref_blocks, expected.block_cache_ref_blocks) << context;
     EXPECT_EQ(actual.load_ref_blocks, expected.load_ref_blocks) << context;
     EXPECT_EQ(actual.eviction_target_ref_blocks, expected.eviction_target_ref_blocks) << context;
-    EXPECT_EQ(actual.store_ref_blocks, expected.store_ref_blocks) << context;
     EXPECT_EQ(actual.frozen_ref_blocks, expected.frozen_ref_blocks) << context;
 }
 
@@ -2732,7 +2732,6 @@ TEST_F(BlockTreeCacheTest, MultiMemberPoolMetricsStayAlignedThroughJointEviction
             EXPECT_EQ(snapshot->active_blocks, expected.active_blocks) << context;
             EXPECT_EQ(snapshot->load_ref_blocks, 0u) << context;
             EXPECT_EQ(snapshot->eviction_target_ref_blocks, 0u) << context;
-            EXPECT_EQ(snapshot->store_ref_blocks, 0u) << context;
             EXPECT_EQ(snapshot->frozen_ref_blocks, 0u) << context;
             if (first == nullptr) {
                 first = snapshot;

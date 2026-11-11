@@ -70,7 +70,7 @@ void TransferOptions::printHelp() {
         << "Transfer benchmark options:\n"
         << "  --group-set=NAME             full_context | swa (default: full_context)\n"
         << "  --transfer-directions=DIRS   comma list, e.g. d2h,h2d mixes both in one case\n"
-        << "                               (d2h|h2d|d2disk|disk2d|h2disk|disk2h, default: d2h)\n"
+        << "                               (d2h|h2d|h2disk|disk2d, default: d2h)\n"
         << "  --transfer-operation-count=N Number of transfer operations (default: 1024)\n"
         << "  --transfer-concurrency=N     Concurrent endpoint lanes per wave (default: 1)\n"
         << "  --business-concurrency=N     Concurrent independent business requests (0 = legacy wave mode)\n"

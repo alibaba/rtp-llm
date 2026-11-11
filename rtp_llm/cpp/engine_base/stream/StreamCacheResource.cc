@@ -150,8 +150,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 
     if (total_blocks > 0) {
         if (reuseCache() && !stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED) {
-            const Tier target_tier = storeTarget();
-            RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d, target_tier=%s",
+            const Tier target_tier = insertTarget();
+            RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, inserting cache, curBlocksNum=%d, target_tier=%s",
                               stream_->streamId(),
                               total_blocks,
                               tierName(target_tier));
@@ -162,11 +162,12 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             }
         } else {
-            RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, NOT storing cache, reuseCache=%d, hasError=%d, status=%s",
-                              stream_->streamId(),
-                              reuseCache(),
-                              stream_->hasErrorWithoutLock(),
-                              StreamStateToString(stream_->getStatus()).c_str());
+            RTP_LLM_LOG_DEBUG(
+                "tryReleaseKVBlock: stream=%ld, NOT inserting cache, reuseCache=%d, hasError=%d, status=%s",
+                stream_->streamId(),
+                reuseCache(),
+                stream_->hasErrorWithoutLock(),
+                StreamStateToString(stream_->getStatus()).c_str());
         }
 
         FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
@@ -634,18 +635,12 @@ bool StreamCacheResource::enableCacheLookup() const {
     return reuseCache() && any_global_tier;
 }
 
-Tier StreamCacheResource::storeTarget() const {
+Tier StreamCacheResource::insertTarget() const {
     if (!reuseCache()) {
         return Tier::NONE;
     }
     if (enableDeviceCache()) {
         return Tier::DEVICE;
-    }
-    if (enableMemoryCache()) {
-        return Tier::HOST;
-    }
-    if (enableDiskCache()) {
-        return Tier::DISK;
     }
     return Tier::NONE;
 }
