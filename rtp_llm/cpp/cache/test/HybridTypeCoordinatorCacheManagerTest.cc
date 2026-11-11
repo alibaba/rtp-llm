@@ -1570,13 +1570,10 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PreparedLoadReclaimsIndependentPoo
     auto config = makeTinyHybridConfig();
     setGroupBlockCounts(config, 5, 5);
     auto          allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
-    KVCacheConfig tree_config;
-    // Exercise on-demand reclamation, without background watermark eviction
-    // removing the seeded path before the capacity check begins.
-    tree_config.block_tree_device_evict_low_watermark_ratio  = 0;
-    tree_config.block_tree_device_evict_high_watermark_ratio = 0;
-    allocator->setBlockTreeCacheConfigForTest(tree_config);
     ASSERT_TRUE(allocator->init());
+    // Keep the seeded path until the on-demand capacity check.
+    block_tree_cache_test::BlockTreeCacheTestPeer::setTierWatermarkForTest(
+        *allocator->blockTreeCacheOwner(), Tier::DEVICE, 1.0, 1.0);
     allocator->setReserveBlocksNum(0);
 
     const auto seeded = seedCompleteBlockTreePath(allocator, CacheKeysType{100, 101, 102, 103});

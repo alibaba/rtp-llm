@@ -467,6 +467,12 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                           std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
     group_sets                       = workLoopTestGroups(std::move(group_sets));
     config.btc_transfer_engine_async = true;
+    // Fixtures bypass the factory; a full-capacity low watermark suppresses automatic eviction.
+    for (auto* watermark : {&config.watermark_device, &config.watermark_host, &config.watermark_disk}) {
+        if (watermark->low_ratio == 0.0 && watermark->high_ratio == 0.0) {
+            *watermark = {1.0, 1.0};
+        }
+    }
     if (!config.enable_remote_cache) {
         storage_backend = nullptr;
     }
@@ -586,7 +592,8 @@ void BlockTreeCacheTestPeer::setTierWatermarkForTest(BlockTreeCache& cache,
                                                      double          low_ratio,
                                                      double          high_ratio) {
     std::lock_guard<std::mutex> lock(cache.mutex_);
-    const TierWatermark         watermark{low_ratio, high_ratio};
+    const TierWatermark         watermark =
+        low_ratio == 0.0 && high_ratio == 0.0 ? TierWatermark{1.0, 1.0} : TierWatermark{low_ratio, high_ratio};
     switch (tier) {
         case Tier::DEVICE:
             cache.config_.watermark_device = watermark;
