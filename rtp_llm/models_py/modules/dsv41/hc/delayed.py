@@ -100,7 +100,8 @@ def collapse_delayed(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
     if chunk_rows <= 0 or n <= chunk_rows:
         return (x.float() * pre_mix.unsqueeze(-1)).sum(dim=-2).to(x.dtype)
     xf = x.reshape(n, *x.shape[-2:])
-    pf = pre_mix.reshape(n, *pre_mix.shape[-2:])
+    # pre_mix is [..., hc_mult] — one trailing dim fewer than x.
+    pf = pre_mix.reshape(n, pre_mix.shape[-1])
     outs = []
     for i in range(0, n, chunk_rows):
         j = min(i + chunk_rows, n)
