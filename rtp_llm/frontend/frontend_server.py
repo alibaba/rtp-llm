@@ -850,6 +850,25 @@ class FrontendServer(object):
                 text = self._frontend_worker.pipeline.tokenizer.decode(output_ids)
             prompt_tokens = int(aux.input_len) if aux else len(input_ids)
             completion_tokens = int(aux.output_len) if aux else len(output_ids)
+            # Measured timing block for long-context probes: engine-reported
+            # first-token/total costs and iteration count straight from the
+            # stream's AuxInfo (no client-side inference), so prefill TPS and
+            # mean decode step time can be derived from a single request.
+            aux_payload = None
+            if aux is not None:
+                aux_payload = {
+                    name: getattr(aux, name, None)
+                    for name in (
+                        "cost_time",
+                        "iter_count",
+                        "first_token_cost_time",
+                        "input_len",
+                        "output_len",
+                        "reuse_len",
+                        "prefix_len",
+                        "wait_time",
+                    )
+                }
             return ORJSONResponse(
                 {
                     "choices": [
@@ -864,6 +883,7 @@ class FrontendServer(object):
                         "completion_tokens": completion_tokens,
                         "total_tokens": prompt_tokens + completion_tokens,
                     },
+                    "aux_info": aux_payload or {},
                     "awi_request_id": headers.get("x-awi-request-id", ""),
                 }
             )
