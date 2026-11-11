@@ -894,8 +894,19 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     // TODO: merge hidden states in one tensor
     torch::Tensor hidden_states;
     if (!micro_batch_plan.enable) {
-        RTP_LLM_CHECK_WITH_INFO(py_model_outputs[0].hidden_states.size(0) == inputs.combo_tokens.size(0),
-                                "py_model_outputs[0].hidden_states.size(0):%d != inputs.combo_tokens.size(0):%d",
+        // Python models may return COMPACTED context hidden states: exactly the
+        // lm_output_indexes-selected rows (one per request, in batch order)
+        // instead of the full [combo_tokens] height. Long-context chunked
+        // prefill uses this to avoid materializing a stream-sized hidden
+        // tensor whose unread rows would never be touched anyway (the LM head
+        // runs on the selected rows only). forwardPostLayers detects the same
+        // condition and skips its index_select.
+        const auto hidden_rows = py_model_outputs[0].hidden_states.size(0);
+        RTP_LLM_CHECK_WITH_INFO(hidden_rows == inputs.combo_tokens.size(0)
+                                    || (inputs.lm_output_indexes.defined()
+                                        && hidden_rows == inputs.lm_output_indexes.size(0)),
+                                "py_model_outputs[0].hidden_states.size(0):%d != inputs.combo_tokens.size(0):%d "
+                                "(and != lm_output_indexes.size(0))",
                                 py_model_outputs[0].hidden_states.size(0),
                                 inputs.combo_tokens.size(0));
         hidden_states = py_model_outputs[0].hidden_states;
@@ -1650,7 +1661,13 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         torch::Tensor last_hidden;
         if (has_context_request && !need_all_logits) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(index_select_last_hidden)");
-            last_hidden = torch::index_select(hidden, 0, lm_output_indexes_device.to(torch::kLong));
+            // Compacted hidden already holds exactly the selected rows, in
+            // lm_output_indexes order (see forwardMicroBatched). Row-count
+            // equality also covers the degenerate all-unit-length context
+            // batch, where index_select would be the identity anyway.
+            last_hidden = hidden.size(0) == lm_output_indexes.size(0) ?
+                              hidden :
+                              torch::index_select(hidden, 0, lm_output_indexes_device.to(torch::kLong));
         } else {
             last_hidden = hidden;
         }

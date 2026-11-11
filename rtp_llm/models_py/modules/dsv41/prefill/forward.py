@@ -977,7 +977,26 @@ def forward_layers(
 
 
 _PREFILL_CHUNK_ROWS_CACHE: Optional[int] = None
+_PREFILL_COMPACT_HIDDEN_CACHE: Optional[bool] = None
 _CHUNK_GATE_LOGGED = False
+
+
+def _prefill_compact_hidden() -> bool:
+    """Return only lm_output_indexes-selected rows from chunked prefill.
+
+    Requires the paired PyWrappedModel contract (hidden.size(0) may equal
+    lm_output_indexes.size(0)); keep OFF on images built before that change.
+    Removes the full-height [T_total, dim] hidden tensor entirely - at a
+    joint 2x1M-token prefill that tensor alone is 21.5 GiB and cannot fit
+    beside the weights on 80 GiB cards.
+    """
+    global _PREFILL_COMPACT_HIDDEN_CACHE
+    if _PREFILL_COMPACT_HIDDEN_CACHE is None:
+        _PREFILL_COMPACT_HIDDEN_CACHE = (
+            os.environ.get("DSV41_COMPACT_PREFILL_HIDDEN", "0").strip()
+            not in ("", "0")
+        )
+    return _PREFILL_COMPACT_HIDDEN_CACHE
 
 
 def _prefill_chunk_rows() -> int:
@@ -1085,6 +1104,7 @@ def _forward_prefill_chunked(
     prepare_hidden_fn: Optional[Any],
     chunk_rows: int,
     expert_token_counts: Optional[torch.Tensor] = None,
+    compact_output: bool = False,
 ) -> PyModelOutputs:
     """Prefill as consecutive row-chunks of the flat combo batch.
 
@@ -1228,6 +1248,17 @@ def _forward_prefill_chunked(
         raise RuntimeError(
             f"chunked prefill lost final rows: have {sorted(finals)}, need {n_req}"
         )
+    if compact_output:
+        # Compacted contract: one row per request, in batch order, matching
+        # lm_output_indexes; PyWrappedModel skips its index_select and runs
+        # the LM head on these rows directly.
+        rows = torch.empty(
+            (n_req, last_h.shape[-1]), dtype=last_h.dtype, device=last_h.device
+        )
+        for ri in range(n_req):
+            _, chunk_h, local_row = finals[ri]
+            rows[ri] = chunk_h[local_row]
+        return PyModelOutputs(rows)
     hidden = torch.empty(
         (total, last_h.shape[-1]), dtype=last_h.dtype, device=last_h.device
     )
@@ -1358,6 +1389,11 @@ def forward_prefill(
                 prepare_hidden_fn,
                 chunk_rows,
                 expert_token_counts=getattr(inputs, "expert_token_counts", None),
+                # Compacted rows are only safe when the step consumes just the
+                # selected rows (permits_ced mirrors need_all_logits ==
+                # need_all_hidden_states == False) and the engine build carries
+                # the paired contract.
+                compact_output=_prefill_compact_hidden() and permits_ced(inputs),
             )
         global _CHUNK_GATE_LOGGED
         if not _CHUNK_GATE_LOGGED:
