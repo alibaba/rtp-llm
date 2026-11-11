@@ -2069,7 +2069,14 @@ class AttentionV41FP8(AttentionFP8):
                         logits = torch.einsum(
                             "thd,kd->thk", q[chunk], keys.float()
                         ).relu_()
-                        logits = (logits * weights[chunk, :, None]).sum(1)
+                        # Apply the per-head weights in place. The eager
+                        # product below allocated a second [queries, heads,
+                        # keys] FP32 tile (~130 MiB at key_count=65536),
+                        # which is exactly the last allocation a near-full
+                        # L20 can afford during 1M prefill. logits is a
+                        # private temporary here, so in-place is equivalent.
+                        logits.mul_(weights[chunk, :, None].to(logits.dtype))
+                        logits = logits.sum(1)
                         ids = torch.arange(key_count, device=x.device)
                         logits.masked_fill_(ids[None] >= visible[:, None], -torch.inf)
                     candidates = shared.get("candidates")
