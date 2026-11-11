@@ -2398,6 +2398,12 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             instance.prepare_replay_.node = addCudaGraphPrepareNode(graph.raw_cuda_graph());
             instance.metadata_replay_.node =
                 addAttentionInputMetadataNode(graph.raw_cuda_graph(), instance.prepare_replay_.node);
+            // graphExec instantiation needs its own device allocation on
+            // top of the capture pool. Warmup/capture still leave cached
+            // allocator segments behind; on a near-full 44GB L20 the free
+            // headroom is tens of MiB while several hundred MiB is cached.
+            // Release only cached (not live/pool) segments first.
+            cuda_graph::graphEmptyCache();
             graph.instantiate();
             instance.prepare_replay_.exec = instance.metadata_replay_.exec = graph.raw_cuda_graph_exec();
             disableCudaGraphPrepareReplay(instance.prepare_replay_);
