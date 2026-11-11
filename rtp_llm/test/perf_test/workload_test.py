@@ -182,6 +182,37 @@ class TrafficBatchTest(unittest.TestCase):
                 load_resolved_config(root / "config.json").workload_fingerprint,
             )
 
+    def test_rectangle_budget_caps_input_length_per_batch_size(self):
+        raw = traffic_batch_config()
+        raw["workload"]["workspace_tokens"] = 300
+        spec = raw["workload"]["traffic_request_batches"]
+        spec.update(num_cases=2, batch_sizes=[1, 2], max_input_tokens=199)
+        parsed = parse_config(raw)
+        sample = sample_traffic_batches(
+            parsed.workload,
+            parsed.engine,
+            parse_length_distribution(traffic_distribution_payload()),
+            dp_size=1,
+        )
+        for batch in sample.batches:
+            limit = 300 // len(batch.request_groups)
+            for group in batch.request_groups:
+                self.assertLessEqual(group.input_len, limit)
+
+    def test_rectangle_budget_below_min_input_fails_fast(self):
+        raw = traffic_batch_config()
+        raw["workload"]["workspace_tokens"] = 199
+        spec = raw["workload"]["traffic_request_batches"]
+        spec.update(num_cases=1, batch_sizes=[2], max_input_tokens=199)
+        parsed = parse_config(raw)
+        with self.assertRaisesRegex(PlanningError, "admits no input lengths"):
+            sample_traffic_batches(
+                parsed.workload,
+                parsed.engine,
+                parse_length_distribution(traffic_distribution_payload()),
+                dp_size=1,
+            )
+
     def test_budget_limits_and_retry_exhaustion(self):
         for field, value in [
             ("max_batch_tokens", 200),

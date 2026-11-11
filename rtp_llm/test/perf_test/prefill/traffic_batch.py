@@ -38,12 +38,28 @@ def sample_traffic_batches(workload, engine, distribution, *, dp_size):
     maximum = min(
         spec.max_input_tokens or engine.max_seq_len - 1, engine.max_seq_len - 1
     )
-    try:
-        sampler = LengthSampler(
-            distribution, spec.min_input_tokens, maximum, workload.seed
-        )
-    except ValueError as error:
-        raise PlanningError(str(error)) from error
+    # Production prefill admission (FIFOScheduler::fitsPrefillTokenLimits)
+    # charges a batch as a padded rectangle: longest sequence times batch
+    # size against the token budget. Mirror that rule per batch size by
+    # capping each size's sampler at workspace_tokens // size. Truncating
+    # the sampler range is distribution-equivalent to batch-level rejection
+    # but cannot exhaust the retry limit.
+    samplers = {}
+    for size in spec.batch_sizes:
+        size_maximum = min(maximum, workload.workspace_tokens // size)
+        if size_maximum < spec.min_input_tokens:
+            raise PlanningError(
+                f"batch size {size} admits no input lengths: rectangle budget "
+                f"workspace_tokens={workload.workspace_tokens} allows at most "
+                f"{size_maximum} tokens per request, below min_input_tokens "
+                f"{spec.min_input_tokens}"
+            )
+        try:
+            samplers[size] = LengthSampler(
+                distribution, spec.min_input_tokens, size_maximum, workload.seed + size
+            )
+        except ValueError as error:
+            raise PlanningError(f"batch size {size}: {error}") from error
     batches = []
     draws = rejected = projected = 0
     per_size = {str(size): 0 for size in spec.batch_sizes}
@@ -53,7 +69,7 @@ def sample_traffic_batches(workload, engine, distribution, *, dp_size):
     for index in range(spec.num_cases):
         size = spec.batch_sizes[index % len(spec.batch_sizes)]
         for _ in range(spec.retry_limit):
-            pairs = [sampler.draw() for _ in range(size)]
+            pairs = [samplers[size].draw() for _ in range(size)]
             draws += size
             groups = []
             for length, reuse in pairs:
@@ -127,7 +143,10 @@ def sample_traffic_batches(workload, engine, distribution, *, dp_size):
         tuple(batches),
         {
             "source_rows": distribution.source_rows,
-            "eligible_source_fraction": sampler.eligible_source_fraction,
+            "eligible_source_fraction": {
+                str(size): sampler.eligible_source_fraction
+                for size, sampler in samplers.items()
+            },
             "draw_count": draws,
             "rejected_batches": rejected,
             "cases_per_batch_size": per_size,

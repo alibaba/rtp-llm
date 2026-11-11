@@ -19,7 +19,7 @@
       "fp8_kv_cache": 1,
       "reserver_runtime_mem_mb": 81920,
       "memory_cache_size_mb": 100000,
-      "enable_memory_cache": 1,
+      "enable_memory_cache": 0,
       "cp_force_single_prefill": 0,
       "frontend_server_count": 1,
       "think_start_tag": "<think>",
@@ -51,7 +51,7 @@
     "commit_tail_tokens": 1024,
     "probe_block_size": 1024,
     "measure_runs": 2,
-    "workspace_tokens": 6600000,
+    "workspace_tokens": 1048576,
     "seed": 2026,
     "traffic_request_batches": {
       "distribution_file": "req_distribution.json",

@@ -34,6 +34,86 @@ from rtp_llm.test.perf_test.test_support import (
 
 class SshPrefillTest(unittest.TestCase):
 
+    def test_waiter_reads_explicit_or_process_environment_without_class_attributes(
+        self,
+    ):
+        script = Path(__file__).parent / "multi_node/local_server_runner.py"
+        function = next(
+            n
+            for n in ast.parse(script.read_text()).body
+            if isinstance(n, ast.FunctionDef) and n.name == "wait_master_done"
+        )
+        parsed = Mock(side_effect=RuntimeError("gang parsed"))
+        namespace = dict(
+            vars(typing),
+            os=os,
+            PyEnvConfigs=type("NoClassConfig", (), {}),
+            members_from_test_env=parsed,
+        )
+        exec(
+            compile(ast.Module(body=[function], type_ignores=[]), str(script), "exec"),
+            namespace,
+        )
+        for supplied, expected in (
+            ({"GANG_CONFIG_STRING": "explicit"}, "explicit"),
+            ({}, "process"),
+            (None, "process"),
+        ):
+            with self.subTest(supplied=supplied), patch.dict(
+                os.environ, {"GANG_CONFIG_STRING": "process"}
+            ):
+                with self.assertRaisesRegex(RuntimeError, "gang parsed"):
+                    namespace["wait_master_done"](supplied)
+                parsed.assert_called_with(expected)
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "no gang config"):
+                namespace["wait_master_done"]()
+
+    def test_external_prefill_uses_same_deadline_for_http_and_dashsc(self):
+        from rtp_llm.test.perf_test.execution.runtime import HttpPrefillClient
+
+        for options, seconds in (({}, 900), ({"timeout_seconds": 1234}, 1234)):
+            with self.subTest(options=options):
+                post = Mock(
+                    return_value=SimpleNamespace(
+                        status_code=200, json=lambda: {"aux_info": {}}
+                    )
+                )
+
+                def http(endpoint, **kwargs):
+                    return HttpPrefillClient(endpoint, post=post, **kwargs)
+
+                with patch.object(
+                    prefill_runtime, "HttpPrefillClient", side_effect=http
+                ), patch(
+                    "rtp_llm.test.perf_test.prefill.dashsc_transport.DashScPrefillClient"
+                ) as dashsc:
+                    session = prefill_runtime.ExternalPrefillSession(
+                        "http://localhost:18000",
+                        topology={},
+                        transport="http_text",
+                        **options,
+                    )
+                    session.client.request(
+                        phase="probe",
+                        case_id="probe",
+                        request_index=0,
+                        run_index=0,
+                        prompt="hello",
+                        input_ids=[1],
+                        output_length=1,
+                    )
+                    self.assertEqual(seconds, post.call_args.kwargs["timeout"])
+                    prefill_runtime.ExternalPrefillSession(
+                        "http://localhost:18000",
+                        topology={},
+                        transport="dashsc_input_ids",
+                        **options,
+                    )
+                    self.assertEqual(
+                        seconds, dashsc.call_args.kwargs["timeout_seconds"]
+                    )
+
     def test_ssh_main_projects_engine_contract_before_host_startup(self):
         from rtp_llm.test.perf_test.execution.runtime import build_engine_launch_spec
         from rtp_llm.test.perf_test.multi_node.decode_runtime import (

@@ -45,10 +45,12 @@ from rtp_llm.utils.fuser import fetch_remote_file_to_local
 # uvloop_setup()
 
 
-def wait_master_done(env_dict: Dict[str, str] = {}, world_rank: int = 0) -> None:
+def wait_master_done(
+    env_dict: Optional[Dict[str, str]] = None, world_rank: int = 0
+) -> None:
     # Get gang_config_string from environment variable or env_dict
-    dist_config_str = env_dict.get(
-        "GANG_CONFIG_STRING", PyEnvConfigs.distribute_config.gang_config_string
+    dist_config_str = (env_dict or {}).get("GANG_CONFIG_STRING") or os.environ.get(
+        "GANG_CONFIG_STRING", ""
     )
     if not dist_config_str:
         raise RuntimeError("no gang config string, unexpected!")

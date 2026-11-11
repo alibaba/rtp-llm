@@ -12,18 +12,21 @@ enter_work_dir() {
 }
 
 kill_processes() {
-  # Kill all running processes related to rtp_llm and conda310
+  # Kill all running processes related to rtp_llm and conda310.
+  # Local (uncommitted) adaptation: exclude sub2api platform processes
+  # (/opt/sub2api/bin/dev-machine-start runs via /opt/conda310/bin/python and
+  # supervises the container; killing it triggers a container recreation).
   echo "[$(date)] Starting process termination on $HOSTNAME";
-  (ps axuww | grep rtp_llm_rank | grep -v run_worker.sh | awk '{print $2}' | xargs kill -9) || true;
-  (ps axuww | grep rtp_llm_backend_server | grep -v run_worker.sh | awk '{print $2}' | xargs kill -9) || true;
-  (ps axuww | grep rtp_llm_frontend_server_ | grep -v run_worker.sh | awk '{print $2}' | xargs kill -9) || true;
-  (ps axuww | grep /opt/conda310/bin/python | grep -v run_worker.sh | grep -v multi_benchmark.py | awk '{print $2}' | xargs kill -9) || true;
+  (ps axuww | grep rtp_llm_rank | grep -v run_worker.sh | grep -v sub2api | awk '{print $2}' | xargs kill -9) || true;
+  (ps axuww | grep rtp_llm_backend_server | grep -v run_worker.sh | grep -v sub2api | awk '{print $2}' | xargs kill -9) || true;
+  (ps axuww | grep rtp_llm_frontend_server_ | grep -v run_worker.sh | grep -v sub2api | awk '{print $2}' | xargs kill -9) || true;
+  (ps axuww | grep /opt/conda310/bin/python | grep -v run_worker.sh | grep -v multi_benchmark.py | grep -v sub2api | awk '{print $2}' | xargs kill -9) || true;
   # Verify processes have been terminated
   echo "[$(date)] Verifying processes have been terminated on $HOSTNAME";
   (ps axuww | grep rtp_llm_rank | grep -v grep | grep -v run_worker.sh) || true;
   (ps axuww | grep rtp_llm_backend_server | grep -v grep | grep -v run_worker.sh) || true;
   (ps axuww | grep rtp_llm_frontend_server_ | grep -v grep | grep -v run_worker.sh) || true;
-  (ps axuww | grep /opt/conda310/bin/python | grep -v run_worker.sh | grep -v multi_benchmark.py | awk '{print $2}' | xargs kill -9) || true;
+  (ps axuww | grep /opt/conda310/bin/python | grep -v run_worker.sh | grep -v multi_benchmark.py | grep -v sub2api | awk '{print $2}' | xargs kill -9) || true;
 }
 
 checkout_code() {
@@ -105,6 +108,12 @@ build_code() {
     (ln -sf ../../../../bazel-out/${bazel_subdir}/bin/rtp_llm/cpp/model_rpc/proto/flexlb_schedule_service_pb2_grpc.py rtp_llm/cpp/model_rpc/proto/) || exit 1;
     (ln -sf ../../../../bazel-out/${bazel_subdir}/bin/rtp_llm/cpp/model_rpc/proto/flexlb_schedule_service_pb2.py rtp_llm/cpp/model_rpc/proto/) || exit 1;
     (ln -sf ../../../../bazel-out/${bazel_subdir}/bin/rtp_llm/cpp/cuda/deep_gemm/cutlass_hdr rtp_llm/cpp/cuda/deep_gemm/cutlass_hdr) || exit 1;
+    # Local (uncommitted) adaptation: generate and link dash_sc python protos
+    # (predict_v2_pb2 etc. are build artifacts, not tracked in git).
+    (bazelisk --batch --output_user_root=$WORK_DIR/bazel_cache build //rtp_llm/dash_sc/proto:predict_v2_py ${BAZEL_BUILD_ARGS}) || exit 1;
+    for f in __init__.py model_config_pb2.py model_config_pb2_grpc.py predict_v2_pb2.py predict_v2_pb2_grpc.py; do
+      (ln -sf "../../../bazel-out/${bazel_subdir}/bin/rtp_llm/dash_sc/proto/${f}" "rtp_llm/dash_sc/proto/${f}") || exit 1;
+    done
     (/opt/conda310/bin/python -m pip install bazel-bin/rtp_llm/rtp_llm_deep_gemm-0.2.0-py3-none-any.whl ) || exit 1;
   fi
 }
@@ -114,7 +123,9 @@ configure_env() {
   export PYTHONPATH="./";
   export PYTHON_BIN="/opt/conda310/bin/python";
     export NCCL_TOPO_DUMP_FILE="/tmp/nccl_topo.xml";
-  export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/lib64:/usr/local/nvidia/lib64/:/usr/local/cuda/lib64/:/usr/local/cuda/extras/CUPTI/lib64/";
+  # Local (uncommitted) adaptation: system libstdc++ is too old for the
+  # fastsafetensors wheel (needs GLIBCXX_3.4.29); conda ships a new one.
+  export LD_LIBRARY_PATH="/opt/conda310/lib:${LD_LIBRARY_PATH}:/usr/lib64:/usr/local/nvidia/lib64/:/usr/local/cuda/lib64/:/usr/local/cuda/extras/CUPTI/lib64/";
   # Set CUDA_VISIBLE_DEVICES based on LOCAL_WORLD_SIZE if not already set
   if [ -z "$CUDA_VISIBLE_DEVICES" ] && [ -n "$LOCAL_WORLD_SIZE" ]; then
     CUDA_DEVICES=""

@@ -124,18 +124,23 @@ class ExternalPrefillSession:
         *,
         topology: Dict[str, int],
         transport: str = DEFAULT_PREFILL_TRANSPORT,
+        timeout_seconds: float = 900,
     ):
         self.endpoint = endpoint.rstrip("/")
         self.topology = dict(topology)
         if transport not in ("http_text", "dashsc_input_ids"):
             raise ValueError(f"unsupported prefill transport: {transport}")
-        self._client = HttpPrefillClient(self.endpoint)
+        # First-use kernel compilation can outlast the clients' default 300s.
+        # Apply the same request budget to HTTP and gRPC.
+        self._client = HttpPrefillClient(self.endpoint, timeout_seconds=timeout_seconds)
         if transport == "dashsc_input_ids":
             from rtp_llm.test.perf_test.prefill.dashsc_transport import (
                 DashScPrefillClient,
             )
 
-            self._client = DashScPrefillClient(self._client)
+            self._client = DashScPrefillClient(
+                self._client, timeout_seconds=timeout_seconds
+            )
             try:
                 self._client.wait_ready(600)
             except BaseException:
