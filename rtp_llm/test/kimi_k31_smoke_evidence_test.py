@@ -25,15 +25,32 @@ class SmokeEvidenceTest(unittest.TestCase):
 
     def test_completed_metadata_has_actual_chunk_count(self):
         import json
-        params=SimpleNamespace(is_warmup=False,is_prefill=True,shard_rank=3,shard_size=8,
-            query_cp=True,indexer_execution=SimpleNamespace(fp8_indexer=True))
-        with patch.object(evidence,'_ENABLED',True),patch.object(evidence.logging,'getLogger') as logger:
-            evidence.completed_dsa_chunks('indexer',params,3,8192)
-            value=json.loads(logger.return_value.info.call_args.args[1])
-        self.assertEqual(value['completed_chunks'],3)
-        self.assertEqual(value['local_query_rows'],8192)
-        self.assertEqual(value['shard_rank'],3)
-        self.assertTrue(value['fp8_indexer'])
+        for phase in ("indexer", "sfa"):
+            for fp8 in (False, True):
+                with self.subTest(phase=phase, fp8=fp8):
+                    params = SimpleNamespace(
+                        is_warmup=False,
+                        is_prefill=True,
+                        shard_rank=3,
+                        shard_size=8,
+                        query_cp=True,
+                        workspace_owner=SimpleNamespace(indexer_use_fp8=fp8),
+                        indexer_execution=(
+                            SimpleNamespace(fp8_indexer=fp8)
+                            if phase == "indexer"
+                            else None
+                        ),
+                    )
+                    with patch.object(evidence, "_ENABLED", True), patch.object(
+                        evidence.logging, "getLogger"
+                    ) as logger:
+                        evidence.completed_dsa_chunks(phase, params, 3, 8192)
+                        value = json.loads(logger.return_value.info.call_args.args[1])
+                    self.assertEqual(value["phase"], phase)
+                    self.assertEqual(value["completed_chunks"], 3)
+                    self.assertEqual(value["local_query_rows"], 8192)
+                    self.assertEqual(value["shard_rank"], 3)
+                    self.assertEqual(value["fp8_indexer"], fp8)
 
 
 if __name__=='__main__':

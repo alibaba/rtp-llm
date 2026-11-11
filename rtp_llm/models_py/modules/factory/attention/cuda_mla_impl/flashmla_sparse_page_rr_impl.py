@@ -81,7 +81,6 @@ class PageRRSparseMlaOp(SparseMlaOp):
 
     def plan(self, params, block_table, attn_inputs=None):
         self.params = params
-        self.execute = self._prefill if params.is_prefill else self._decode
         if self._decode_fp8_backend() == "sched":
             from rtp_llm.models_py.utils.flash_mla_legacy import get_mla_metadata
 
@@ -259,12 +258,14 @@ class PageRRSparseMlaOp(SparseMlaOp):
         execution = params.sfa_execution
         workspace = execution.begin()
         heads = self.communicator.heads
-        if prepared_query or (params.is_prefill and params.query_cp and q.shape[1] == self.kernel_heads):
+        if prepared_query or (
+            params.is_prefill and params.query_cp and q.shape[1] == self.kernel_heads
+        ):
             # The producer has already built the kernel's final layout (Prefill query CP,
             # SparseMlaPageRRImpl.decode_query).
             query = q
         else:
-            query = self.execute(q)
+            query = self._prefill(q) if params.is_prefill else self._decode(q)
             query = F.pad(query, (0, 0, 0, self._pad_heads - heads)).contiguous()
         rows, value_dim = query.shape[0], self.workspace_owner.value_dim
         if not execution.blocks:
@@ -375,8 +376,12 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
         fmha_config,
         is_cuda_graph,
         *,
-        workspace_owner=None
+        workspace_owner=None,
+        execution_phase=None,
     ):
+        if execution_phase not in (None, "indexer", "sfa"):
+            raise ValueError(f"Unknown DSA execution phase: {execution_phase}")
+        self.execution_phase = execution_phase
         if workspace_owner is None:
             from .dsa_kv_workspace import DsaWorkspaceOwner
 
@@ -497,9 +502,15 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
         self.page_rr_params.prepare(inputs, forbid_realloc=forbid_realloc)
         # Reserve the small Decode SFA arena before freezing the Graph
         # Indexer's history capacity. Actual execution still runs Indexer first.
-        phases = ("sfa", "indexer") if (
-            self.page_rr_params.is_cuda_graph and not self.page_rr_params.is_prefill
-        ) else ("indexer", "sfa")
+        phases = (
+            ("sfa", "indexer")
+            if (
+                self.page_rr_params.is_cuda_graph and not self.page_rr_params.is_prefill
+            )
+            else ("indexer", "sfa")
+        )
+        if self.execution_phase is not None and self.page_rr_params.is_prefill:
+            phases = (self.execution_phase,)
         for phase in phases:
             self.page_rr_params.prepare_execution(phase)
         self.attn_inputs = inputs

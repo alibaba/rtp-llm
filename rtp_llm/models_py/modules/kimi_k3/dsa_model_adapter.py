@@ -189,14 +189,20 @@ class KimiK31ModelAdapter:
             storages[storage.data_ptr()] = storage.nbytes()
         owner.layout_bytes = sum(storages.values())
 
-        def create(attention_inputs):
+        def create(attention_inputs, phase=None):
             parallel = self.parallelism_config
             if self._query_layout is not None:
                 parallel = copy.deepcopy(parallel)
                 parallel.prefill_cp_config.preserve_tp_layout = False
             return SparseMlaPageRRImpl(
-                self.config, parallel, self.weight, attention_inputs,
-                self.fmha_config, is_cuda_graph, workspace_owner=owner,
+                self.config,
+                parallel,
+                self.weight,
+                attention_inputs,
+                self.fmha_config,
+                is_cuda_graph,
+                workspace_owner=owner,
+                execution_phase=phase,
             )
 
         tagged = get_attention_inputs_value(inputs)
@@ -204,7 +210,10 @@ class KimiK31ModelAdapter:
             tags = self._get_fmha_group_tags()
             tags = tuple(tagged if tags is None else tags)
             owner.graph_cache_groups = len(tags)
-            return {tag: create(tagged[tag]) for tag in tags}
+            return {
+                tag: create(tagged[tag], "indexer" if tag == "indexer_kv" else "sfa")
+                for tag in tags
+            }
         return create(tagged)
 
 

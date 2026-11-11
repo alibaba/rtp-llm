@@ -24,7 +24,7 @@ def completed_dsa_chunks(phase, params, count, rows):
     logging.getLogger(__name__).info("[K3_SMOKE_EVENT] %s", json.dumps({
         "event": "dsa_kv_chunks_completed", "phase": phase,
         "shard_rank": params.shard_rank, "shard_size": params.shard_size,
-        "fp8_indexer": bool(params.indexer_execution.fp8_indexer),
+        "fp8_indexer": bool(params.workspace_owner.indexer_use_fp8),
         "query_cp": bool(params.query_cp), "local_query_rows": rows,
         "completed_chunks": count, "time_ns": time.time_ns(),
     }, separators=(",", ":")))

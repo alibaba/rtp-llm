@@ -706,6 +706,7 @@ py_test(
         "kimi_k31_fp8_indexer_policy_test", "kimi_k31_graph_workspace_test",
         "kimi_k31_kv_chunk_plan_test", "kimi_k31_query_layout_test",
         "kimi_k31_kda_metadata_test",
+        "kimi_k31_attention_lifetime_test",
         "kimi_k31_flash_mla_policy_test",
         "kimi_k31_routes_test", "kimi_k31_smoke_evidence_test",
         "kimi_k31_warmup_slots_test", "speculative_acceptance_test",

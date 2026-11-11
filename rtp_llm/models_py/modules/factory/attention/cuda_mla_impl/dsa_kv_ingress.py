@@ -12,10 +12,11 @@ from ..mla_prefill_plan import prefill_kv_workspace_budget_bytes
 
 class DsaKVIngress:
     def __init__(self, params, phase, features):
-        self.params, self.phase, self.features = params, phase, features
+        self.phase, self.features = phase, features
         owner, layout = params.workspace_owner, params.producer_layout
         self.workspace = owner.phase(phase + "_ingress")
-        rows, shards = layout.local_rows, params.shard_size
+        self.rows = rows = layout.local_rows
+        shards = params.shard_size
         # Charge routing metadata and pack/gather scratch. The projected KV
         # rows already produced by the model follow the scheduler's token budget.
         fixed = layout.physical_rows * 24 + 64 * 1024 * 1024
@@ -56,7 +57,7 @@ class DsaKVIngress:
         self.ready.record(torch.cuda.current_stream(owner.device))
 
     def run(self, values, writer):
-        if values.shape != (self.params.producer_layout.local_rows, self.features):
+        if values.shape != (self.rows, self.features):
             raise ValueError("DSA ingress requires complete local producer KV values")
         stream = torch.cuda.current_stream(values.device)
         stream.wait_event(self.ready)
