@@ -111,7 +111,16 @@ def hash_token_windows(
     return (hashes, token_mask) if token_mask is not None else hashes
 
 
-@triton.jit
+# ``rows`` and ``grid_stride`` must NOT participate in Triton's value
+# specialization (==1 / %16 divisibility cache keys), and the grid extent is a
+# runtime argument instead of a constexpr: on HIP this kernel runs ONLY inside
+# graph capture (eager decode takes the host-gather path), so every fresh
+# specialization would JIT-compile during capture — observed as a sticky
+# hipErrorInvalidConfiguration at rows%16==0 batch sizes (bs 8/32/48) and a
+# capture hang at bs=4 on the pre-warmup build. A single compiled variant for
+# all batch sizes keeps the construction-time probe warmup in engram.py
+# sufficient for any DECODE_CAPTURE_CONFIG.
+@triton.jit(do_not_specialize=["rows", "grid_stride"])
 def _lookup_host_kernel(
     weight,
     scales,
@@ -121,14 +130,14 @@ def _lookup_host_kernel(
     table_rows,
     ids_stride_t,
     ids_stride_h,
+    grid_stride,
     HEADS: tl.constexpr,
     DIM: tl.constexpr,
     QUANT_BLOCK: tl.constexpr,
     BLOCK_R: tl.constexpr,
-    GRID: tl.constexpr,
 ):
     columns = tl.arange(0, DIM)
-    for base in tl.range(tl.program_id(0) * BLOCK_R, rows, GRID * BLOCK_R):
+    for base in tl.range(tl.program_id(0) * BLOCK_R, rows, grid_stride * BLOCK_R):
         row = base + tl.arange(0, BLOCK_R)
         token = row // HEADS
         head = row % HEADS
@@ -234,11 +243,11 @@ def _lookup_host_rows(
         weight_uva.shape[0],
         indices.stride(0),
         indices.stride(1),
+        grid,
         HEADS=heads,
         DIM=dim,
         QUANT_BLOCK=32,
         BLOCK_R=block_rows,
-        GRID=grid,
         num_warps=num_warps,
     )
     if prepare and _prepare_prefetch_kernel(kernel):

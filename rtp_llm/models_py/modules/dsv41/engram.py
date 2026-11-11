@@ -883,12 +883,18 @@ class HostEngramEmbedding:
                 try:
                     from rtp_llm.models_py.modules.dsv41 import _engram_triton
 
-                    probe = torch.zeros(
-                        (2, 2), dtype=torch.int64, device=pinned.device
-                    )
-                    _engram_triton.lookup_host_rows(
-                        self._uva[0], self._uva[1], probe, self._num_sms
-                    )
+                    # The kernel carries do_not_specialize for rows/grid_stride
+                    # (_engram_triton.py), so these two probes — grid extent 1
+                    # and 2 — warm the single compiled variant shared by every
+                    # captured batch size. Fresh JIT compilation during capture
+                    # is illegal and was the bs==max capture blocker.
+                    for probe_shape in ((2, 2), (16, 2)):
+                        probe = torch.zeros(
+                            probe_shape, dtype=torch.int64, device=pinned.device
+                        )
+                        _engram_triton.lookup_host_rows(
+                            self._uva[0], self._uva[1], probe, self._num_sms
+                        )
                     torch.cuda.synchronize(pinned.device)
                     logger.info("Engram UVA lookup kernel warmed up eagerly")
                 except Exception:  # noqa: BLE001
