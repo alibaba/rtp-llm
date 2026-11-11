@@ -111,6 +111,54 @@ void logReleased(const FrozenTask& task) noexcept {
 FrozenTaskRecovery::FrozenTaskRecovery(TaskSource source, Query query):
     source_(std::move(source)), query_(std::move(query)) {}
 
+FrozenTaskRecovery::~FrozenTaskRecovery() {
+    stop();
+}
+
+bool FrozenTaskRecovery::start(int interval_ms, int query_timeout_ms) noexcept {
+    if (interval_ms <= 0 || query_timeout_ms <= 0 || start_attempted_
+        || stop_requested_.load(std::memory_order_acquire))
+        return false;
+    start_attempted_ = true;
+    try {
+        worker_ = std::thread([this, interval_ms, query_timeout_ms] { backgroundLoop(interval_ms, query_timeout_ms); });
+        return true;
+    } catch (...) {
+        stop_requested_.store(true, std::memory_order_release);
+        return false;
+    }
+}
+
+void FrozenTaskRecovery::stop() noexcept {
+    {
+        // Pair the predicate change with the wait mutex so a notification
+        // cannot be lost between checking the flag and entering the wait.
+        std::lock_guard<std::mutex> lock(wait_mutex_);
+        stop_requested_.store(true, std::memory_order_release);
+    }
+    wait_cv_.notify_all();
+    if (worker_.joinable())
+        worker_.join();
+}
+
+void FrozenTaskRecovery::backgroundLoop(int interval_ms, int query_timeout_ms) noexcept {
+    try {
+        const auto stopped = [this] { return stop_requested_.load(std::memory_order_acquire); };
+        while (!stopped()) {
+            (void)runOnce(query_timeout_ms, stopped);
+            std::unique_lock<std::mutex> lock(wait_mutex_);
+            if (wait_cv_.wait_for(lock, std::chrono::milliseconds(interval_ms), stopped))
+                break;
+        }
+    } catch (...) {
+        stop_requested_.store(true, std::memory_order_release);
+        try {
+            RTP_LLM_LOG_WARNING("FrozenTask recovery background worker stopped after an unexpected exception");
+        } catch (...) {
+        }
+    }
+}
+
 FrozenTaskRecovery::Summary
 FrozenTaskRecovery::runOnce(int query_timeout_ms, const std::function<bool()>& should_stop) noexcept {
     Summary summary;

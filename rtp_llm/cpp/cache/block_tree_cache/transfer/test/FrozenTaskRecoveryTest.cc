@@ -351,5 +351,144 @@ TEST(FrozenTaskRecoveryTest, InvalidTimeoutAndNonFrozenRecordsNeverInvokeQuery) 
     EXPECT_EQ(prepared->snapshot().state, FrozenTask::State::PREPARED);
 }
 
+
+template<typename Predicate>
+bool waitForRecoveryCondition(Predicate predicate) {
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    while (!predicate()) {
+        if (std::chrono::steady_clock::now() >= deadline)
+            return false;
+        std::this_thread::sleep_for(1ms);
+    }
+    return true;
+}
+
+TEST(FrozenTaskRecoveryTest, BackgroundRetriesFailureAndRunningUntilSafeWithoutRepeatingRelease) {
+    auto pool = makePool();
+    const auto block = hold(pool);
+    auto task = makeTask(std::string("background-read"), pool, block);
+    task->freeze();
+    auto calls = std::make_shared<std::atomic<size_t>>(0);
+    auto recovery = std::make_shared<FrozenTaskRecovery>(
+        [task] { return std::vector<std::shared_ptr<FrozenTask>>{task}; },
+        [calls](const auto& execution, int timeout) {
+            EXPECT_EQ(timeout, 200);
+            const auto attempt = calls->fetch_add(1);
+            if (attempt == 0)
+                throw std::runtime_error("transient query failure");
+            return proof(execution, attempt == 1 ? State::RUNNING : State::BUFFER_SAFE);
+        });
+    ASSERT_TRUE(recovery->start(10, 200));
+    ASSERT_TRUE(waitForRecoveryCondition([&] { return task->snapshot().state == FrozenTask::State::RELEASED; }));
+    recovery->stop();
+    EXPECT_EQ(calls->load(), 3u);
+    EXPECT_EQ(task->recoverySnapshot().query_count, 3u);
+    EXPECT_EQ(pool->treeRefCount(block), 1u);
+    EXPECT_EQ(task->failure().status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+    EXPECT_FALSE(task->failure().buffer_safe);
+    EXPECT_FALSE(task->unfreeze());
+}
+
+TEST(FrozenTaskRecoveryTest, BackgroundEmptySourceWaitIsInterruptibleAndStartIsSingleUse) {
+    auto calls = std::make_shared<std::atomic<size_t>>(0);
+    auto queried = std::make_shared<std::atomic<size_t>>(0);
+    auto entered = std::make_shared<std::promise<void>>();
+    auto first_pass = entered->get_future();
+    auto recovery = std::make_shared<FrozenTaskRecovery>(
+        [calls, entered] {
+            if (calls->fetch_add(1) == 0)
+                entered->set_value();
+            return std::vector<std::shared_ptr<FrozenTask>>{};
+        },
+        [queried](const auto& execution, int) { ++*queried; return proof(execution); });
+    EXPECT_FALSE(recovery->start(0, 1000));
+    EXPECT_FALSE(recovery->start(-1, 1000));
+    EXPECT_FALSE(recovery->start(10, 0));
+    EXPECT_FALSE(recovery->start(10, -1));
+    EXPECT_EQ(calls->load(), 0u);
+    ASSERT_TRUE(recovery->start(60000, 1000));
+    EXPECT_FALSE(recovery->start(10, 1000));
+    ASSERT_EQ(first_pass.wait_for(2s), std::future_status::ready);
+    // A stop also covers the gap between finishing a pass and entering wait.
+    BoundedThread<void> stopped([recovery] { recovery->stop(); });
+    ASSERT_EQ(stopped.waitFor(1s), std::future_status::ready);
+    stopped.get();
+    recovery->stop();
+    EXPECT_FALSE(recovery->start(10, 1000));
+    EXPECT_EQ(calls->load(), 1u);
+    EXPECT_EQ(queried->load(), 0u);
+
+    FrozenTaskRecovery never_started([] { return std::vector<std::shared_ptr<FrozenTask>>{}; }, {});
+    never_started.stop();
+    never_started.stop();
+    EXPECT_FALSE(never_started.start(10, 1000));
+}
+
+TEST(FrozenTaskRecoveryTest, StopDuringQueryWaitsForExitAndDiscardsSafeReleasePermission) {
+    auto pool = makePool();
+    const auto block = hold(pool);
+    auto task = makeTask(uint64_t{51}, pool, block);
+    task->freeze();
+    auto entered = std::make_shared<std::promise<void>>();
+    auto in_query = entered->get_future();
+    auto release = std::make_shared<std::promise<void>>();
+    auto released = release->get_future().share();
+    auto calls = std::make_shared<std::atomic<size_t>>(0);
+    auto recovery = std::make_shared<FrozenTaskRecovery>(
+        [task] { return std::vector<std::shared_ptr<FrozenTask>>{task}; },
+        [entered, released, calls](const auto& execution, int) {
+            ++*calls;
+            entered->set_value();
+            if (released.wait_for(5s) != std::future_status::ready)
+                throw std::runtime_error("test query gate timed out");
+            return proof(execution);
+        });
+    ASSERT_TRUE(recovery->start(10, 1000));
+    ASSERT_EQ(in_query.wait_for(2s), std::future_status::ready);
+    BoundedThread<void> stopped([recovery] { recovery->stop(); });
+    // Observe only the stop barrier to make this race deterministic; the
+    // behavioral assertion is that a later complete proof cannot release.
+    ASSERT_TRUE(waitForRecoveryCondition([&] { return recovery->stop_requested_.load(); }));
+    EXPECT_EQ(stopped.waitFor(20ms), std::future_status::timeout);
+    EXPECT_TRUE(pool->isFrozen(block));
+    release->set_value();
+    ASSERT_EQ(stopped.waitFor(2s), std::future_status::ready);
+    stopped.get();
+    EXPECT_EQ(calls->load(), 1u);
+    EXPECT_EQ(task->snapshot().state, FrozenTask::State::FROZEN);
+    EXPECT_EQ(pool->treeRefCount(block), 2u);
+    const auto snapshot = task->recoverySnapshot();
+    ASSERT_NE(snapshot.last_query, nullptr);
+    EXPECT_TRUE(snapshot.last_query->all_safe);
+    EXPECT_EQ(snapshot.query_count, 1u);
+    recovery->stop();
+    EXPECT_EQ(task->snapshot().state, FrozenTask::State::FROZEN);
+}
+
+TEST(FrozenTaskRecoveryTest, DestructionJoinsSleepingWorkerBeforeReleasingCallbackDependencies) {
+    auto dependency = std::make_shared<int>(7);
+    std::weak_ptr<int> weak_dependency = dependency;
+    auto entered = std::make_shared<std::promise<void>>();
+    auto first_pass = entered->get_future();
+    auto calls = std::make_shared<std::atomic<size_t>>(0);
+    auto recovery = std::make_unique<FrozenTaskRecovery>(
+        [dependency, entered, calls] {
+            EXPECT_EQ(*dependency, 7);
+            if (calls->fetch_add(1) == 0)
+                entered->set_value();
+            return std::vector<std::shared_ptr<FrozenTask>>{};
+        },
+        [](const auto& execution, int) { return proof(execution); });
+    dependency.reset();
+    ASSERT_TRUE(recovery->start(60000, 1000));
+    ASSERT_EQ(first_pass.wait_for(2s), std::future_status::ready);
+    EXPECT_FALSE(weak_dependency.expired());
+    BoundedThread<void> destroyed([recovery = std::move(recovery)]() mutable { recovery.reset(); });
+    ASSERT_EQ(destroyed.waitFor(1s), std::future_status::ready);
+    destroyed.get();
+    EXPECT_TRUE(weak_dependency.expired());
+    EXPECT_EQ(calls->load(), 1u);
+}
+
 }  // namespace
 }  // namespace rtp_llm

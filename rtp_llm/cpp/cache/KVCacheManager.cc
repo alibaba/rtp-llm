@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskRecovery.h"
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
 #include <algorithm>
@@ -277,6 +278,9 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
 }
 
 KVCacheManager::~KVCacheManager() {
+    // Queries and capacity notifications must finish while the cache, RPC
+    // manager and allocation wait state are still alive. Never join under a lock.
+    stopFrozenTaskRecovery();
     {
         std::lock_guard<std::mutex> lock(allocation_wait_state_->mutex);
         allocation_wait_state_->stopped.store(true, std::memory_order_release);
@@ -299,6 +303,14 @@ bool KVCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(!coordinator_manager_ && !block_tree_cache_ && !metrics_reporter_thread_.joinable(),
                             "KVCacheManager::init called more than once");
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
+    if (kv_cache_config_.block_tree_frozen_recovery_interval_ms < 0
+        || kv_cache_config_.block_tree_frozen_recovery_interval_ms > std::numeric_limits<int>::max()
+        || kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms <= 0
+        || kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms > std::numeric_limits<int>::max()) {
+        RTP_LLM_LOG_ERROR("invalid frozen recovery interval/query timeout; interval must be in [0, INT_MAX] "
+                          "and query timeout in [1, INT_MAX]");
+        return false;
+    }
     if (kv_cache_config_.enable_remote_cache && kv_cache_config_.kvcm_asyncwrapper_thread_num == 0) {
         RTP_LLM_LOG_ERROR("remote cache executor thread count must be positive");
         return false;
@@ -372,7 +384,45 @@ bool KVCacheManager::init() {
         metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
     }
 
-    return true;
+    return startFrozenTaskRecovery();
+}
+
+bool KVCacheManager::startFrozenTaskRecovery() {
+    if (parallelism_config_.tp_rank != 0 || kv_cache_config_.block_tree_frozen_recovery_interval_ms == 0) {
+        return true;
+    }
+    if (!block_tree_cache_) {
+        return false;
+    }
+    if (frozen_task_recovery_) {
+        return true;
+    }
+    try {
+        auto recovery = std::make_unique<FrozenTaskRecovery>(
+            [this] { return frozenTasks(); },
+            [this](const FrozenTask::ExecutionInfo& execution, int timeout_ms) {
+                return queryTransferCompletion(execution, timeout_ms);
+            });
+        if (!recovery->start(static_cast<int>(kv_cache_config_.block_tree_frozen_recovery_interval_ms),
+                             static_cast<int>(kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms))) {
+            RTP_LLM_LOG_ERROR("failed to start frozen task recovery thread");
+            return false;
+        }
+        frozen_task_recovery_ = std::move(recovery);
+        return true;
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_ERROR("failed to initialize frozen task recovery: %s", error.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("failed to initialize frozen task recovery");
+    }
+    return false;
+}
+
+void KVCacheManager::stopFrozenTaskRecovery() noexcept {
+    if (frozen_task_recovery_) {
+        frozen_task_recovery_->stop();
+        frozen_task_recovery_.reset();
+    }
 }
 
 std::shared_ptr<BroadcastManager> KVCacheManager::createMultiRankBlockTransferManager() const {

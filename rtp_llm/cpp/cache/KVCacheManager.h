@@ -28,6 +28,7 @@ class BroadcastManager;
 class PrefillCacheHitMetricsReporter;
 class KVCacheAllocationWaitState;
 class KVCacheEventReporter;
+class FrozenTaskRecovery;
 
 class KVCacheManager {
 public:
@@ -164,6 +165,8 @@ private:
     void                              reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
     TransferTaskRegistry::State localTransferCompletion(const TransferExecutionTrace& trace_id) const;
+    bool startFrozenTaskRecovery();
+    void stopFrozenTaskRecovery() noexcept;
 
     // 成员变量
     CacheConfig                config_;
@@ -189,6 +192,7 @@ private:
 
     BlockTreeCachePtr                           block_tree_cache_;
     std::shared_ptr<BroadcastManager>           transfer_broadcast_manager_;
+    std::unique_ptr<FrozenTaskRecovery>         frozen_task_recovery_;
     std::shared_ptr<KVCacheAllocationWaitState> allocation_wait_state_;
 
     mutable std::mutex          cache_store_mutex_;

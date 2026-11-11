@@ -2,9 +2,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
@@ -12,8 +15,8 @@
 
 namespace rtp_llm {
 
-// A single recovery pass. The caller owns scheduling and shutdown; this class
-// never starts a thread, removes records, or changes the original failure.
+// Explicit recovery passes, with an optional background worker. Recovery never
+// removes records or changes the original business failure.
 class FrozenTaskRecovery {
 public:
     using TaskSource = std::function<std::vector<std::shared_ptr<FrozenTask>>()>;
@@ -32,6 +35,18 @@ public:
     };
 
     FrozenTaskRecovery(TaskSource source, Query query);
+    ~FrozenTaskRecovery();
+
+    // The owner serializes start/stop/destruction outside the recovery thread.
+    // Nonpositive parameters are rejected without consuming the start attempt.
+    // A valid attempt is single-use, including thread-creation failure; stop
+    // also prevents a later start. Failure returns false without throwing.
+    bool start(int interval_ms, int query_timeout_ms) noexcept;
+    // Wake interval waits and join after any current query returns. No further
+    // background callbacks or releases run after stop returns. Does not force unfreeze.
+    // The owner must finish any concurrent explicit runOnce calls before stop
+    // or destruction; stop only joins the worker owned by this instance.
+    void stop() noexcept;
 
     // Only FROZEN tasks are queried. Stop is checked before/after each query and
     // immediately before release; a throwing stop predicate stops this pass.
@@ -40,6 +55,7 @@ public:
     Summary runOnce(int query_timeout_ms, const std::function<bool()>& should_stop = {}) noexcept;
 
 private:
+    void backgroundLoop(int interval_ms, int query_timeout_ms) noexcept;
     void logPending(const Summary& summary) noexcept;
 
     TaskSource source_;
@@ -47,6 +63,11 @@ private:
     std::atomic<bool> running_{false};
     // Accessed only by the successful running_ claimant.
     std::chrono::steady_clock::time_point next_pending_log_{};
+    bool                      start_attempted_{false};
+    std::atomic<bool>         stop_requested_{false};
+    std::mutex                wait_mutex_;
+    std::condition_variable  wait_cv_;
+    std::thread               worker_;
 };
 
 }  // namespace rtp_llm
