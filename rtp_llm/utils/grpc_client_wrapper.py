@@ -32,6 +32,9 @@ class GrpcClientWrapper:
         self._dp_channels: Dict[str, Any] = {}
         self._dp_stubs: Dict[str, Any] = {}
         self._client_config = client_config or {}
+        # Dedicated large-message channel for AWI observation payloads.
+        self._awi_channel = None
+        self._awi_stub = None
 
     async def _ensure_connection(self):
         """Ensure gRPC channel and stub are created"""
@@ -57,6 +60,13 @@ class GrpcClientWrapper:
             await self.channel.close()
             self.channel = None
             self.stub = None
+        if self._awi_channel is not None:
+            try:
+                await self._awi_channel.close()
+            except Exception as e:
+                logging.warning(f"Failed to close AWI channel: {e}")
+            self._awi_channel = None
+            self._awi_stub = None
         for address, channel in self._dp_channels.items():
             try:
                 await channel.close()
@@ -295,22 +305,31 @@ class GrpcClientWrapper:
             return {"error": f"Failed to update scheduler info: {str(e)}"}
 
     async def awi_query_observations(self, req: Any) -> Dict[str, Any]:
-        """Query AWI instrumentation observations from the local backend (tp_rank 0).
+        """Query AWI instrumentation observations from tp_rank 0 + all workers.
 
-        Only tp_rank 0 schedules streams, so its registry holds the complete
-        observation set; the response JSON is passed through verbatim.
+        The merged payload carries every rank's weight partitions and graph
+        capture/replay evidence, so it can far exceed the default 4 MiB gRPC
+        message limit; use a dedicated channel with unlimited receive size.
         """
         try:
             if isinstance(req, str):
                 req = json.loads(req)
             operation_id = str((req or {}).get("operation_id", "") or "")
             rpc_request = pb2.AwiQueryObservationsRequestPB(operation_id=operation_id)
-            await self._ensure_connection()
-            response = await self.stub.AwiQueryObservations(rpc_request, timeout=30)
+            if self._awi_channel is None:
+                options = [(k, v) for k, v in self._client_config.items()]
+                options = [
+                    (k, v) for k, v in options if k != "grpc.max_receive_message_length"
+                ]
+                options.append(("grpc.max_receive_message_length", -1))
+                self._awi_channel = grpc.aio.insecure_channel(self.address, options=options)
+                self._awi_stub = RpcServiceStub(self._awi_channel)
+            response = await self._awi_stub.AwiQueryObservations(rpc_request, timeout=120)
             return {
                 "status": "ok",
                 "world_rank": response.world_rank,
                 "observations_json": response.observations_json,
+                "all_ranks_json": list(response.all_ranks_json),
             }
         except Exception as e:
             logging.error(f"AWI observations query failed: {e}")

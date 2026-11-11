@@ -381,42 +381,48 @@ def register_from_model(
         elif not checkpoint_dir:
             logging.warning("AWI census: checkpoint dir unknown; ballast skipped")
 
+        # Each rank registers ONLY its own rows; the query-time RPC fan-out
+        # exposes every rank's partitions to the evaluator ("all resident
+        # partitions/copies ... inspect all ranks"). The all-ranks union is
+        # still computed here once, to verify census completeness against the
+        # checkpoint index before serving starts.
         rows = [dict(row) for row in _ROWS.values()]
         if world_size > 1:
             # All ranks reach this point in their own model construction, so
             # the object gather cannot deadlock against a sibling that skips
             # it; ballast rows live on exactly one rank each and the union
-            # reconstructs full coverage on every rank.
+            # reconstructs full coverage.
             try:
                 import torch.distributed as dist
 
-                gathered: List[Optional[List[dict]]] = [None] * world_size
-                dist.all_gather_object(gathered, rows)
-                merged: Dict[str, dict] = {}
+                gathered: List[Optional[List[str]]] = [None] * world_size
+                dist.all_gather_object(gathered, sorted(_ROWS.keys()))
+                union_names = set()
                 for part in gathered:
-                    for row in part or []:
-                        merged.setdefault(row["name"], row)
-                rows = list(merged.values())
+                    union_names.update(part or [])
             except Exception:
                 logging.warning(
                     "AWI census: all_gather_object failed; falling back to "
-                    "rank files",
+                    "rank files for the completeness check",
                     exc_info=True,
                 )
                 write_rank_file(rank)
-                if rank == 0:
-                    rows = merge_rank_files(world_size)
+                union_names = {
+                    row["name"] for row in merge_rank_files(world_size)
+                } if rank == 0 else {row["name"] for row in rows}
+        else:
+            union_names = {row["name"] for row in rows}
 
         # Completeness against the checkpoint index (same name universe the
         # evaluator's manifest enumerates).
-        if rank == 0 and checkpoint_dir:
+        if checkpoint_dir:
             try:
                 index_path = os.path.join(
                     checkpoint_dir, "model.safetensors.index.json"
                 )
                 with open(index_path, "r") as reader:
                     index_names = set(json.load(reader)["weight_map"].keys())
-                missing = index_names - {row["name"] for row in rows}
+                missing = index_names - union_names
                 if missing:
                     logging.error(
                         "AWI census INCOMPLETE: %d keys missing, sample: %s",
@@ -424,7 +430,9 @@ def register_from_model(
                     )
                 else:
                     logging.info(
-                        "AWI census complete: %d checkpoint keys recorded", len(rows)
+                        "AWI census complete: %d checkpoint keys covered "
+                        "(%d rows on this rank)",
+                        len(union_names), len(rows),
                     )
             except Exception:
                 logging.warning("AWI census: index check failed", exc_info=True)

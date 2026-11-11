@@ -632,6 +632,10 @@ message AwiQueryObservationsRequestPB {
 message AwiQueryObservationsResponsePB {
     int64 world_rank = 1;
     string observations_json = 2;
+    // Entry-RPC only: per-worker registry payloads (broadcast order), so the
+    // frontend can inspect every rank's weights partitions and capture/replay
+    // evidence as the protocol requires.
+    repeated string all_ranks_json = 3;
 }
 
 message CheckHealthResponsePB {
@@ -1127,6 +1131,7 @@ service RpcService {
     rpc DumpTorchAllocator(TorchAllocatorDumpRequestPB) returns (TorchAllocatorDumpResponsePB);
     rpc DumpTorchAllocatorInternal(TorchAllocatorDumpRequestPB) returns (TorchAllocatorDumpResultPB);
     rpc AwiQueryObservations(AwiQueryObservationsRequestPB) returns (AwiQueryObservationsResponsePB);
+    rpc AwiQueryObservationsInternal(AwiQueryObservationsRequestPB) returns (AwiQueryObservationsResponsePB);
     rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
 
     rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);

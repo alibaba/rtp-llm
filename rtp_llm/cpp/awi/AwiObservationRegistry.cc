@@ -321,6 +321,11 @@ std::string AwiObservationRegistry::queryJson(const std::string& operation_id) c
     out.reserve(4096);
     out += "{\"rank\":";
     out += std::to_string(rank_world_rank_);
+    // Per-rank graph replay evidence: every rank replays its shard graphs in
+    // lockstep, so cross-rank totals let the reviewer detect an eager fallback
+    // on any participating rank (decode events aggregate on the scheduling rank).
+    out += ",\"graph_replay_total\":";
+    out += std::to_string(graph_replay_count_.load(std::memory_order_relaxed));
     out += ",\"build\":{\"source\":{\"internal\":\"" + jsonEscape(internal_sha_) + "\",\"public\":\""
            + jsonEscape(public_sha_) + "\"}}";
     out += ",\"configuration\":{\"context_tokens\":" + std::to_string(cfg_context_tokens_)

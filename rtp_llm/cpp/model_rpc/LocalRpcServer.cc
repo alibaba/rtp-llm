@@ -854,9 +854,57 @@ grpc::Status LocalRpcServer::UpdateSchedulerInfo(grpc::ServerContext*           
 grpc::Status LocalRpcServer::AwiQueryObservations(grpc::ServerContext*                 context,
                                                   const AwiQueryObservationsRequestPB* request,
                                                   AwiQueryObservationsResponsePB*      response) {
-    // Served from this process's registry. The frontend addresses tp_rank 0,
-    // the only rank whose scheduler admits streams, so its registry holds the
-    // complete observation set (events are recorded on the scheduling rank).
+    // Entry RPC (frontend addresses tp_rank 0). Scheduler-side events live on
+    // this rank; weight partitions, graph captures and replay evidence exist
+    // on every rank, so fan out to the TP workers (same broadcast machinery
+    // as DumpTorchAllocator) and hand the frontend every rank's payload.
+    auto& registry = AwiObservationRegistry::instance();
+    response->set_world_rank(registry.rank());
+    response->set_observations_json(registry.queryJson(request->operation_id()));
+    if (maga_init_params_.parallelism_config.tp_size <= 1) {
+        return grpc::Status::OK;
+    }
+    if (maga_init_params_.parallelism_config.tp_rank != 0) {
+        // Workers only answer the internal fan-out; direct entry calls are a
+        // routing error rather than silently returning partial data.
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "awi_query_observations must be sent to tp_rank 0");
+    }
+    if (!tp_broadcaster_) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "tp broadcaster unavailable for awi observations");
+    }
+    std::vector<AwiQueryObservationsRequestPB> requests(tp_broadcaster_->workerNum(), *request);
+    auto                                       rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& context,
+                       const AwiQueryObservationsRequestPB&        internal_request,
+                       grpc::CompletionQueue*                      completion_queue) {
+        return stub->AsyncAwiQueryObservationsInternal(context.get(), internal_request, completion_queue);
+    };
+    auto broadcast_result = tp_broadcaster_->broadcast<AwiQueryObservationsRequestPB, AwiQueryObservationsResponsePB>(
+        requests, /*timeout_ms=*/60000, rpc_call);
+    if (!broadcast_result) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "failed to broadcast awi observations to tp group");
+    }
+    try {
+        broadcast_result->waitDone();
+    } catch (const std::exception& exception) {
+        RTP_LLM_LOG_WARNING("awi observations broadcast failed op=%s: %s",
+                            request->operation_id().c_str(),
+                            exception.what());
+        return grpc::Status(grpc::StatusCode::INTERNAL, "awi observations broadcast failed");
+    }
+    if (!broadcast_result->success()) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "awi observations broadcast to tp group failed");
+    }
+    for (const auto& worker_response : broadcast_result->responses()) {
+        response->add_all_ranks_json(worker_response.observations_json());
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::AwiQueryObservationsInternal(grpc::ServerContext*                 context,
+                                                          const AwiQueryObservationsRequestPB* request,
+                                                          AwiQueryObservationsResponsePB*      response) {
+    // Per-rank worker side: answer strictly from this process's registry.
     auto& registry = AwiObservationRegistry::instance();
     response->set_world_rank(registry.rank());
     response->set_observations_json(registry.queryJson(request->operation_id()));

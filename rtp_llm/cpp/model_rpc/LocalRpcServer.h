@@ -84,6 +84,10 @@ public:
                                       const AwiQueryObservationsRequestPB* request,
                                       AwiQueryObservationsResponsePB*      response);
 
+    grpc::Status AwiQueryObservationsInternal(grpc::ServerContext*                 context,
+                                              const AwiQueryObservationsRequestPB* request,
+                                              AwiQueryObservationsResponsePB*      response);
+
     KVCacheInfo getCacheStatusInfo(int64_t latest_cache_version, bool need_cache_keys);
 
     WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version);

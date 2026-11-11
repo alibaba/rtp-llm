@@ -982,9 +982,11 @@ class FrontendApp(object):
             }
             return await self.grpc_client.post_request("update_scheduler_info", payload)
 
-        # AWI evaluator contract: read-only telemetry query. tp_rank 0 is the
-        # only rank whose scheduler admits streams, so its registry holds the
-        # complete observation set; its JSON is passed through verbatim.
+        # AWI evaluator contract: read-only telemetry query. tp_rank 0 owns the
+        # scheduler-side events (prefill/decode/resident/reuse/capacity are
+        # recorded once, on the scheduling rank); worker ranks contribute their
+        # weight partitions, graph captures and replay totals. The frontend
+        # aggregates the per-rank payloads into one observations document.
         @app.get("/awi/observations")
         async def awi_observations(request: Request):
             check_not_draining(request)
@@ -999,11 +1001,45 @@ class FrontendApp(object):
                 )
             try:
                 observations = json.loads(result["observations_json"])
+                rank_payloads = [observations]
+                for raw in result.get("all_ranks_json") or []:
+                    rank_payloads.append(json.loads(raw))
             except (TypeError, ValueError) as exc:
                 return ORJSONResponse(
                     {"error": f"malformed observations payload: {exc}"},
                     status_code=503,
                 )
+            weights = []
+            events = []
+            ranks_evidence = []
+            for index, payload in enumerate(rank_payloads):
+                # Every rank's partition rows are kept: the protocol requires
+                # all resident partitions/copies across all ranks.
+                weights.extend(payload.get("weights") or [])
+                payload_events = payload.get("events") or []
+                if index == 0:
+                    events.extend(payload_events)
+                else:
+                    # Workers hold no scheduler streams; their only events are
+                    # real local graph captures.
+                    events.extend(
+                        e for e in payload_events if e.get("kind") == "capture"
+                    )
+                ranks_evidence.append(
+                    {
+                        "rank": payload.get("rank"),
+                        "graph_replay_total": payload.get("graph_replay_total", 0),
+                        "startup_network_fetches": payload.get(
+                            "startup_network_fetches", 0
+                        ),
+                    }
+                )
+            observations["weights"] = weights
+            observations["events"] = events
+            observations["ranks_evidence"] = ranks_evidence
+            observations["startup_network_fetches"] = sum(
+                r["startup_network_fetches"] for r in ranks_evidence
+            )
             return ORJSONResponse(observations)
 
         if self.frontend_server.is_embedding:
