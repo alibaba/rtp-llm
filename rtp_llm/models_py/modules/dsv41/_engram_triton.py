@@ -190,11 +190,63 @@ def _prepare_prefetch_kernel(kernel):
     return True
 
 
+def _needs_reference_lookup(device) -> bool:
+    """SM80/ROCm Triton has no ``float8e4nv`` load/store type.
+
+    The host tables stay in their native FP8/E8M0 bytes; only the selected
+    rows are staged to the device, decoded, and written as BF16.
+    """
+    if getattr(torch.version, "hip", None) is not None:
+        return True
+    try:
+        return torch.cuda.get_device_capability(device)[0] < 9
+    except Exception:
+        return True
+
+
+def _lookup_host_rows_reference(weight_uva, scales_uva, indices):
+    """Graph-safe selected-row fallback for pre-SM90 devices.
+
+    Rows are gathered from the CUDA-registered host table in bounded chunks.
+    This is a staging read of selected rows, not a persistent GPU copy.
+    """
+    tokens, heads = indices.shape
+    dim = int(weight_uva.shape[1])
+    output = torch.empty(
+        (tokens, heads, dim), dtype=torch.bfloat16, device=indices.device
+    )
+    rows = tokens * heads
+    if rows == 0:
+        return output
+    table_rows = int(weight_uva.shape[0])
+    chunk_rows = max(1, min(8192, rows))
+    flat_out = output.view(rows, dim)
+    for base in range(0, rows, chunk_rows):
+        end = min(base + chunk_rows, rows)
+        ids = indices.reshape(-1)[base:end].to(torch.int64)
+        valid = (ids >= 0) & (ids < table_rows)
+        safe = torch.where(valid, ids, torch.zeros_like(ids))
+        raw = weight_uva.index_select(0, safe)
+        if raw.dtype != torch.uint8:
+            raw = raw.view(torch.uint8)
+        value = raw.view(torch.float8_e4m3fn).float()
+        exponent = scales_uva.index_select(0, safe).to(torch.int32)
+        scale = (exponent << 23).view(torch.float32).repeat_interleave(32, 1)
+        staged = (value * scale[:, :dim]).to(torch.bfloat16)
+        staged = torch.where(valid[:, None], staged, torch.zeros_like(staged))
+        flat_out[base:end].copy_(staged)
+    return output
+
+
 def lookup_host_rows(weight_uva, scales_uva, indices, num_sms):
+    if _needs_reference_lookup(indices.device):
+        return _lookup_host_rows_reference(weight_uva, scales_uva, indices)
     return _lookup_host_rows(weight_uva, scales_uva, indices, num_sms, 16, 4)
 
 
 def lookup_prefetch_rows(weight_uva, scales_uva, indices, num_sms):
+    if _needs_reference_lookup(indices.device):
+        return _lookup_host_rows_reference(weight_uva, scales_uva, indices)
     return _lookup_host_rows(
         weight_uva, scales_uva, indices, num_sms, *PREFETCH_LOOKUP_CONFIG
     )
