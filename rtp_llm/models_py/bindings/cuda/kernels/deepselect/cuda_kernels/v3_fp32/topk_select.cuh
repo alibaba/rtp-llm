@@ -763,7 +763,6 @@ void run_topk_select_kernel(const TopkSelectArgs& args) {
     auto             kernel    = topk_kernel<Kernel>;
     constexpr size_t smem_size = sizeof(typename Kernel::SharedMemoryPlanFP32);
     KU_ASSERT(smem_size * Kernel::TARGET_OCCUPANCY <= args.shared_memory_size_per_sm);
-    KU_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
 
     KU_ASSERT(args.stride_input_batch % 4 == 0, "stride_input_batch must be 16B-aligned");
     typename Kernel::TmaParams tma_params = {Kernel::make_topk_tensor_map(args)};
