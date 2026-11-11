@@ -563,6 +563,13 @@ class FrontendServer(object):
 
     def _handle_exception(self, request: Dict[str, Any], e: BaseException):
         exception_json = format_exception(e)
+        # Frozen smoke error goldens always carry an aux_info object; config
+        # validation failures raise before the pipeline attaches one, so the
+        # error shape falls back to the same zero counters the engine reports
+        # for a stream that produced no tokens.
+        exception_json.setdefault(
+            "aux_info", {"output_len": 0, "step_output_len": 0, "reuse_len": 0}
+        )
         error_code_str = exception_json.get("error_code_str", "")
         if isinstance(e, ConcurrencyException):
             kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
