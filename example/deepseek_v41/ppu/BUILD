@@ -255,6 +255,20 @@ sh_test(
 ]
 
 sh_test(
+    name = "cp8_local_reference_perf_test",
+    srcs = ["test_reference_local.sh"],
+    args = ["prefill"],
+    # The control process uses no devices. reference.serve owns DeviceResource(8).
+    env = {"GPU_COUNT": "0"},
+    tags = ["manual", "PPU-ZW890P"],
+    timeout = "eternal",
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+sh_test(
     name = "megamoe_decode_perf_test",
     srcs = ["test_perf.sh"],
     env = {"GPU_COUNT": "8"},
