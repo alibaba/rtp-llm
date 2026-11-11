@@ -272,6 +272,7 @@ class PpuFp8Linear(nn.Module):
         share_input_quantization: bool = False,
         quantization: str = "auto",
         scale_is_prepared: bool = False,
+        pow2_scales: bool = False,
     ):
         super().__init__()
         _validate_fp8_quantization(quantization)
@@ -284,6 +285,11 @@ class PpuFp8Linear(nn.Module):
             raise TypeError(f"weight must be torch.float8_e4m3fn, got {weight.dtype}")
         _require_m890p(weight, "weight")
         self.n, self.k = (int(weight.shape[0]), int(weight.shape[1]))
+        if not isinstance(pow2_scales, bool):
+            raise TypeError("pow2_scales must be bool")
+        if pow2_scales and self.k % 256:
+            raise ValueError("PPU power-of-two quantization requires K aligned to 256")
+        self.pow2_scales = pow2_scales
         if scale_is_prepared:
             if self.n <= 0 or self.k <= 0 or self.n % 128 or self.k % 128:
                 raise ValueError(
@@ -311,6 +317,7 @@ class PpuFp8Linear(nn.Module):
         self.register_buffer("weight_scale", weight_scale, persistent=False)
         self._gemm = _resolve_deep_gemm_symbol(_DENSE_SYMBOL)
         self._decode_attention_gemm = False
+        self._decode_projection_gemm = False
 
         self._share_input_quantization = share_input_quantization
 
@@ -328,6 +335,7 @@ class PpuFp8Linear(nn.Module):
             and self.k == other.k
             and self.weight.device == other.weight.device
             and self.quantization == other.quantization
+            and self.pow2_scales == other.pow2_scales
         )
 
     def _validate_input(self, x: torch.Tensor) -> None:
@@ -348,6 +356,13 @@ class PpuFp8Linear(nn.Module):
         self._validate_input(x)
         if x.ndim != 2:
             raise ValueError(f"shared quantization input must be 2D, got {x.ndim}D")
+        if self.pow2_scales:
+            from rtp_llm.models_py.kernels.ppu.moe.ppu_a8_moe import quantize_a8
+
+            payload, scale = quantize_a8(x.contiguous())
+            if self.quantization != "v2_column":
+                scale = scale.contiguous()
+            return payload, scale
         return quantize_ppu_fp8_activation(x, quantization=self.quantization)
 
     def forward_quantized(
@@ -406,21 +421,24 @@ class PpuFp8Linear(nn.Module):
 
         x_2d = x.view(m, self.k)
         output_2d = output.view(m, self.n)
-        x_fp8, x_scale = quantize_ppu_fp8_activation(
-            x_2d, quantization=self.quantization
-        )
+        x_fp8, x_scale = self.quantize_input(x_2d)
         self._run_gemm(x_fp8, x_scale, output_2d)
         return output
 
     def _run_gemm(
         self, x_fp8: torch.Tensor, x_scale: torch.Tensor, output: torch.Tensor
     ) -> None:
-        if self._decode_attention_gemm:
+        if self._decode_attention_gemm or self._decode_projection_gemm:
             from rtp_llm.models_py.kernels.ppu.attention.ppu_attention_gemm import (
                 decode_attention_gemm_config,
+                decode_projection_gemm_config,
             )
 
-            config = decode_attention_gemm_config(x_fp8.shape[0], self.n, self.k)
+            config = None
+            if self._decode_projection_gemm:
+                config = decode_projection_gemm_config(x_fp8.shape[0], self.n, self.k)
+            if config is None and self._decode_attention_gemm:
+                config = decode_attention_gemm_config(x_fp8.shape[0], self.n, self.k)
             if config is not None:
                 from deep_gemm.jit_kernels.gemm_fp8 import gemm_fp8_fp8_bf16_nt
 
@@ -463,6 +481,7 @@ def concatenate_ppu_fp8_linears(linears: Sequence[PpuFp8Linear]) -> PpuFp8Linear
             part.k != first.k
             or part.weight.device != first.weight.device
             or part.quantization != first.quantization
+            or part.pow2_scales != first.pow2_scales
         ):
             raise ValueError("FP8 projections must share K, device, quantization")
     weight = torch.cat([part.weight.view(torch.uint8) for part in linears], dim=0).view(
@@ -481,4 +500,5 @@ def concatenate_ppu_fp8_linears(linears: Sequence[PpuFp8Linear]) -> PpuFp8Linear
             part._share_input_quantization for part in linears
         ),
         quantization=first.quantization,
+        pow2_scales=first.pow2_scales,
     )

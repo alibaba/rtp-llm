@@ -124,6 +124,7 @@ class PpuModuleProvider:
         return PpuFp8Linear(
             *args,
             share_input_quantization=self._bool("DSV4_PPU_SHARED_QKV_QUANT", False),
+            pow2_scales=self._bool("DSV4_PPU_DENSE_POW2_SCALE", False),
             **kwargs,
         )
 
@@ -134,7 +135,8 @@ class PpuModuleProvider:
         from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_wo_a import PpuWoAFp8Linear
 
         return PpuWoAFp8Linear(
-            *args, sglang_layout=self._bool("DSV4_PPU_SGLANG_WO_A", False), **kwargs
+            *args, sglang_layout=self._bool("DSV4_PPU_SGLANG_WO_A", False),
+            bf16_input=self._bool("DSV4_PPU_WO_A_BF16", False), **kwargs
         )
 
     def run_bf16_fp32_linear(
@@ -178,7 +180,9 @@ class PpuModuleProvider:
     def build_attention(self, default_factory, *args, **kwargs):
         from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_fp4_indexer import PpuFP4Attention
 
-        return self._build_with_provider("attention", PpuFP4Attention, *args, **kwargs)
+        attention = self._build_with_provider("attention", PpuFP4Attention, *args, **kwargs)
+        attention._prefill_kv_qat = self._bool("DSV4_PPU_PREFILL_KV_QAT", False)
+        return attention
 
     def build_moe(self, default_factory, *args, **kwargs):
         if kwargs.get("ep_size") == 1:

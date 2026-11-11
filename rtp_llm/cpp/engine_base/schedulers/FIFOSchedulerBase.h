@@ -21,6 +21,11 @@ namespace rtp_llm {
 
 int64_t computeChunkGrant(int64_t budget, int64_t rows, int64_t remaining, int64_t block_size);
 
+// Final-window alignment for DSV4 Flash prefix reuse: keep the last prefill
+// chunk on a full KV block instead of mixing a partial tail into the forward.
+// Returns the input grant unchanged unless it is the whole remaining window.
+int64_t alignFinalChunkGrant(int64_t grant, int64_t remaining, int64_t block_size);
+
 class FIFOSchedulerBase: public SchedulerBase {
 public:
     explicit FIFOSchedulerBase(const RuntimeConfig&                   runtime_config,
@@ -92,6 +97,9 @@ protected:
     size_t                          max_generate_batch_size_ = 1;
     size_t                          max_inited_kv_cache_streams_ = 0;
     int64_t                         prefill_chunk_size_      = 0;
+    int64_t                         prefill_chunk_batch_tokens_ = 0;
+    // PPU DeepSeek V4 Flash prefix reuse keeps every KV write block-aligned.
+    bool                            align_final_suffix_      = false;
     bool                            need_fill_fake_stream_   = false;
     std::atomic<bool>               stop_                    = false;
     bool                            schedule_trigger_        = false;

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <list>
+#include <string>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -111,6 +112,8 @@ private:
     void    fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const override;
     void    appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const override;
     bool    partitionChunkContinuations();
+    std::string decodeEndpoint(const GenerateStreamPtr& stream) const;
+    void        balancePdPrefillWaitingStreams(std::list<GenerateStreamPtr>& waiting_streams);
 
     // Explicit request groups (enqueueGroup). Each group is admitted as a whole
     // to an isolated execution boundary; a partially admitted group keeps its
@@ -125,6 +128,8 @@ private:
     // excluded). 0 disables it.
     const size_t max_batch_tokens_without_cache_ = 0;
     const size_t prefill_cp_size_                = 1;
+    const bool   balance_pd_prefill_decode_rank_ = false;
+    std::string  last_admitted_decode_endpoint_;
 
     // Consumed (exchanged to 0) from the const fillExtraMetrics() reporting hook.
     mutable std::atomic<int64_t> pending_group_fallback_count_ = 0;

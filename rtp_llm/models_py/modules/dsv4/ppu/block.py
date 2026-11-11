@@ -1,32 +1,34 @@
 """PPU overrides; unchanged behavior is inherited from the shared DSV4 implementation."""
 
 from __future__ import annotations
-from rtp_llm.models_py.modules.dsv4.block import (
-    _PrefillFastHCImpls,
-    _MOE_WEIGHT_NAMES,
-)
+
 import logging
 import os
 from typing import Callable, Dict, Optional, Tuple
+
 import torch
 import torch.nn as nn
+
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4 import _profiler
-from rtp_llm.models_py.modules.dsv4.ppu.chunk_env import chunked_moe_enabled
+from rtp_llm.models_py.modules.dsv4.block import _MOE_WEIGHT_NAMES
+from rtp_llm.models_py.modules.dsv4.block import Block as _BaseBlock
+from rtp_llm.models_py.modules.dsv4.block import _PrefillFastHCImpls
 from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.attention import (
     AttentionFP8,
     CommitOnlyAttentionFP8,
 )
+from rtp_llm.models_py.modules.dsv4.ppu.chunk_env import chunked_moe_enabled
 from rtp_llm.models_py.modules.dsv4.ppu.hc.factory import build_hc_unit
+from rtp_llm.models_py.modules.dsv4.ppu.tp_norm import tp_rms_norm
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     ChunkedFp8Fp4MoeLayer,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.weight_adapter import (
     adapt_split_moe_weights,
 )
-from rtp_llm.models_py.modules.dsv4.ppu.tp_norm import tp_rms_norm
 from rtp_llm.utils.model_weight import W
-from rtp_llm.models_py.modules.dsv4.block import Block as _BaseBlock
+
 
 def build_baseline_moe(*, tp_size=1, tp_rank=0, platform_provider=None, **kwargs):
     # PPU builders receive the untouched checkpoint dictionary and therefore
@@ -45,6 +47,7 @@ def build_baseline_moe(*, tp_size=1, tp_rank=0, platform_provider=None, **kwargs
         moe_w1_layout="gate_up",
         **kwargs,
     )
+
 
 def _prefill_fast_norm(
     norm: nn.Module,
@@ -75,6 +78,7 @@ def _prefill_fast_norm(
         return norm(x, output=x)
     return norm(x)
 
+
 def _prefill_fast_hc_pre_norm(
     hc: nn.Module,
     pre_impl: Callable,
@@ -92,8 +96,11 @@ def _prefill_fast_hc_pre_norm(
     x_pre, post, comb = pre_impl(x)
     return (x_pre, post, comb), False
 
+
 class Block(_BaseBlock):
-    def _hc_pre_norm(self, hc, x, norm, *, tp_size, tp_rank, dbg_tag=None):
+    def _hc_pre_norm(
+        self, hc, x, norm, *, tp_size, tp_rank, dbg_tag=None, hc_prepare_q3=False
+    ):
         x_pre, post, comb = hc.pre(x, dbg_tag=dbg_tag)
         shape = x_pre.shape
         return norm(x_pre.reshape(-1, shape[-1])).view(shape), post, comb
@@ -193,7 +200,11 @@ class Block(_BaseBlock):
             tp_size=tp_size,
             tp_rank=tp_rank,
         )
-        self.attn = platform_provider.build_attention(attn_cls, **attn_kwargs)
+        self.attn = (
+            attn_cls(platform_provider=platform_provider, **attn_kwargs)
+            if commit_only
+            else platform_provider.build_attention(attn_cls, **attn_kwargs)
+        )
         self._cp_sync_after_attn_done = False
         if commit_only:
             self.ffn = None
@@ -231,10 +242,8 @@ class Block(_BaseBlock):
             observer_factory=self._moe_observer,
             record_function_scope=_profiler.moe_record_function_scope,
         )
-        self.ffn = (
-            platform_provider.build_moe(
-                build_baseline_moe, tp_rank=tp_rank, **moe_kwargs
-            )
+        self.ffn = platform_provider.build_moe(
+            build_baseline_moe, tp_rank=tp_rank, **moe_kwargs
         )
 
         # Framework loader already casts norms to bf16 (compute_dtype) and
@@ -287,7 +296,9 @@ class Block(_BaseBlock):
 
         if int(self.attn.compress_ratio) != COMPRESS_RATIO:
             return
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.mega_csa_adapter import MegaCSAAdapter
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.mega_csa_adapter import (
+            MegaCSAAdapter,
+        )
 
         # Packed Mega weights add GPU memory; keep the original weights for
         # prefill and decode shapes that use the ordinary attention path.
@@ -301,7 +312,9 @@ class Block(_BaseBlock):
 
         if int(self.attn.compress_ratio) != HCA_COMPRESS_RATIO:
             return
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.mega_hca_adapter import MegaHCAAdapter
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.mega_hca_adapter import (
+            MegaHCAAdapter,
+        )
 
         self._mega_hca_adapter = MegaHCAAdapter(self, layer_weights, runtime)
 
@@ -362,6 +375,7 @@ class Block(_BaseBlock):
         input_ids: torch.Tensor,  # [B, 1]
         kv_cache=None,
         attn_fn=None,
+        hc_prepare_q3=False,
     ) -> torch.Tensor:
         """Decode-only block forward — mirrors prefill ``forward`` but
         delegates attention to ``Attention.forward_decode``. Prefill
@@ -406,10 +420,17 @@ class Block(_BaseBlock):
                     self.attn_norm,
                     tp_size=self.tp_size,
                     tp_rank=self.tp_rank,
-                    dbg_tag=f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None,
+                    dbg_tag=(
+                        f"L{self.layer_id:02d}_decode_attn_hc_pre"
+                        if _dbg_layer
+                        else None
+                    ),
+                    hc_prepare_q3=hc_prepare_q3,
                 )
                 if _dbg_layer:
-                    _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
+                    _rt.record_if_level(
+                        2, f"L{self.layer_id:02d}_decode_attn_in", x_pre
+                    )
                 if attn_fn is not None:
                     attn_out = attn_fn(x_pre)
                 else:
@@ -419,7 +440,9 @@ class Block(_BaseBlock):
                         kv_cache=kv_cache,
                     )
             if _dbg_layer:
-                _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_out", attn_out)
+                _rt.record_if_level(
+                    2, f"L{self.layer_id:02d}_decode_attn_out", attn_out
+                )
             x = self.attn_hc.post(attn_out, residual, post, comb)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_residual", x)
@@ -429,25 +452,30 @@ class Block(_BaseBlock):
         fused_ffn_pre = getattr(self.ffn, "forward_with_hc_pre", None)
         if not _dbg_layer and callable(fused_ffn_pre):
             fused = fused_ffn_pre(
-                x, input_ids, self.ffn_hc, self.ffn_norm,
+                x,
+                input_ids,
+                self.ffn_hc,
+                self.ffn_norm,
                 active_token_mask=getattr(attn_metadata, "active_token_mask", None),
             )
             if fused is not None:
                 return fused
         x_pre, post, comb = self._hc_pre_norm(
-                    self.ffn_hc,
+            self.ffn_hc,
             x,
             self.ffn_norm,
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
             dbg_tag=f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None,
+            hc_prepare_q3=hc_prepare_q3,
         )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
         active_token_mask = getattr(attn_metadata, "active_token_mask", None)
         ffn_kwargs = (
             {"active_token_mask": active_token_mask}
-            if active_token_mask is not None else {}
+            if active_token_mask is not None
+            else {}
         )
         fused_ffn_hc = getattr(self.ffn, "forward_with_hc", None)
         if not _dbg_layer and callable(fused_ffn_hc):
@@ -489,13 +517,16 @@ class Block(_BaseBlock):
         ) = self._prefill_fast_hc_impls()
 
         residual = x
-        from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import PpuFp8Linear
+        from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import (
+            PpuFp8Linear,
+        )
 
         quant_pre = getattr(self.attn_hc, "prefill_fast_pre_norm_quantized", None)
         quant_result = None
         if (
             callable(quant_pre)
             and type(self.attn.wq_a) is PpuFp8Linear
+            and not self.attn.wq_a.pow2_scales
             and type(self.attn.wkv) is PpuFp8Linear
             and self.attn.wq_a.quantization in ("auto", "v2_row")
             and self.attn.wkv.quantization == self.attn.wq_a.quantization
@@ -718,5 +749,14 @@ class Block(_BaseBlock):
 
 
 class PpuBlock(Block):
-    def _hc_pre_norm(self, hc, x, norm, *, tp_size, tp_rank, dbg_tag=None):
-        return hc.pre_norm(x, norm, tp_size=tp_size, tp_rank=tp_rank, dbg_tag=dbg_tag)
+    def _hc_pre_norm(
+        self, hc, x, norm, *, tp_size, tp_rank, dbg_tag=None, hc_prepare_q3=False
+    ):
+        return hc.pre_norm(
+            x,
+            norm,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            dbg_tag=dbg_tag,
+            hc_prepare_q3=hc_prepare_q3,
+        )

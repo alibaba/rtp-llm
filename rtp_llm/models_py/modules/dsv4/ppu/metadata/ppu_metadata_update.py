@@ -13,12 +13,12 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
     DSv4DecodeAttnMetadataFP8,
-    _build_start_pos_from_attention_inputs,
     _build_position_ids_2d,
-    _update_topk_lengths_in_place,
+    _build_start_pos_from_attention_inputs,
+    _compressed_domain_tokens_per_block,
     _resolve_paged_pool_tokens_per_block,
     _update_compressor_state_slot_mappings,
-    _compressed_domain_tokens_per_block,
+    _update_topk_lengths_in_place,
 )
 
 
@@ -32,6 +32,7 @@ def update_decode_metadata_in_place_ppu(
     paged_pool_tokens_per_block: Optional[Dict[str, int]] = None,
     capture_full_width_lengths: bool = False,
     compressor_state_slot_updater=None,
+    commit_valid_rows=None,
 ) -> None:
     """Recompute every metadata buffer IN PLACE for new attention inputs.
 
@@ -66,11 +67,15 @@ def update_decode_metadata_in_place_ppu(
         attention_inputs,
         device,
         meta.max_seq_len,
-        q_len,
+        q_len if commit_valid_rows is None else 1,
     )
     bs = int(start_pos.shape[0])
     position_ids_2d = _build_position_ids_2d(start_pos, q_len, device)
     position_ids_flat = position_ids_2d.reshape(-1).contiguous()
+    if commit_valid_rows is not None:
+        # Valid commit tokens fit in the sequence. A padding column can run
+        # past the RoPE table when only part of the last query fits.
+        position_ids_flat = position_ids_flat.masked_fill(~commit_valid_rows, 0)
     if paged_pool_entries_per_block:
         if paged_pool_tokens_per_block is None:
             raise ValueError("paged_pool_tokens_per_block is required for paged pools")

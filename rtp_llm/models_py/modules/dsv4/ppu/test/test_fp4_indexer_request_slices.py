@@ -58,6 +58,7 @@ class PpuFP4IndexerRequestSlicesTest(unittest.TestCase):
         indexer.weights_proj = torch.empty((2, 3))
         indexer.freqs_cis = torch.zeros((32, 1), dtype=torch.complex64)
         indexer._prefill_score_chunk_rows = 0
+        indexer._native_score_order = True
         indexer._propagate_pool_to_nested = Mock()
         indexer._clear_nested_pool = Mock()
         indexer._compute_indexer_q = Mock(
@@ -98,7 +99,8 @@ class PpuFP4IndexerRequestSlicesTest(unittest.TestCase):
                 (q_pair[0].shape[0], k_pair[0].shape[0]), dtype=torch.bfloat16
             )
 
-        def fake_topk(logits, starts, ends, out):
+        def fake_topk(logits, starts, ends, out, *, topk):
+            self.assertEqual(topk, indexer.index_topk)
             topk_calls.append((logits.shape, starts.clone(), ends.clone()))
             out.fill_(0)
             return out
@@ -118,7 +120,7 @@ class PpuFP4IndexerRequestSlicesTest(unittest.TestCase):
             "rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_fp4_indexer.gather_k",
             return_value=(gathered_k, gathered_scale),
         ) as gather, patch(
-            "rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_fp4_indexer.topk_bf16",
+            "rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_fp4_indexer.native_topk",
             side_effect=fake_topk,
         ):
             result = indexer.forward(x, qr, meta, workspace=object())

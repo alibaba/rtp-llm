@@ -1,11 +1,18 @@
 """PPU-owned runtime buffer sizes and operator binding."""
 
+import os
+
 import torch
 
-from rtp_llm.models_py.model_desc.deepseek_v4_ppu.base_model import DeepSeekV4Model, Dsv4SharedRuntimeBufferStore, Dsv4MtpHiddenBufferSpec
-from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import resolve_moe_max_tokens_per_rank
-
+from rtp_llm.models_py.model_desc.deepseek_v4_ppu.base_model import (
+    DeepSeekV4Model,
+    Dsv4MtpHiddenBufferSpec,
+    Dsv4SharedRuntimeBufferStore,
+)
 from rtp_llm.models_py.modules.dsv4.ppu.manifest import build_provider
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+    resolve_moe_max_tokens_per_rank,
+)
 
 
 def tp_local_prefill_q_dim(n_heads: int, head_dim: int, tp_size: int) -> int:
@@ -13,23 +20,44 @@ def tp_local_prefill_q_dim(n_heads: int, head_dim: int, tp_size: int) -> int:
     n_heads = int(n_heads)
     head_dim = int(head_dim)
     tp_size = int(tp_size)
-    assert tp_size > 0 and n_heads % tp_size == 0, (
-        f"n_heads={n_heads} not divisible by tp_size={tp_size}"
-    )
+    assert (
+        tp_size > 0 and n_heads % tp_size == 0
+    ), f"n_heads={n_heads} not divisible by tp_size={tp_size}"
     return (n_heads // tp_size) * head_dim
 
 
 class PpuDeepSeekV4Model(DeepSeekV4Model):
-    def __init__(self, model_config, parallelism_config, weights, moe_config, max_generate_batch_size, **kwargs):
+    def __init__(
+        self,
+        model_config,
+        parallelism_config,
+        weights,
+        moe_config,
+        max_generate_batch_size,
+        **kwargs,
+    ):
         provider = kwargs.pop("platform_provider", None)
         if provider is None:
-            provider = build_provider(model_config, parallelism_config, moe_config, max_generate_batch_size)
-        super().__init__(model_config, parallelism_config, weights, moe_config, max_generate_batch_size,
-                         platform_provider=provider, **kwargs)
-        self._prefill_scheduler_chunked = (getattr(model_config, "_ppu_prefill_chunk_size", 0) or 0) > 0
+            provider = build_provider(
+                model_config, parallelism_config, moe_config, max_generate_batch_size
+            )
+        super().__init__(
+            model_config,
+            parallelism_config,
+            weights,
+            moe_config,
+            max_generate_batch_size,
+            platform_provider=provider,
+            **kwargs,
+        )
+        self._prefill_scheduler_chunked = (
+            getattr(model_config, "_ppu_prefill_chunk_size", 0) or 0
+        ) > 0
         cap = getattr(model_config, "moe_prefill_max_tokens_per_rank", None)
         max_seq_len = int(getattr(model_config, "max_seq_len", 0) or 0)
-        self._prefill_scheduler_token_capacity = int(cap if cap is not None else (max_seq_len or 4096))
+        self._prefill_scheduler_token_capacity = int(
+            cap if cap is not None else (max_seq_len or 4096)
+        )
 
     def _resolve_shared_token_capacity(self) -> int:
         if not self._is_decode_role:
@@ -81,6 +109,27 @@ class PpuDeepSeekV4Model(DeepSeekV4Model):
 
     def _bind_runtime_buffers(self, device: torch.device) -> None:
         assert self.v4 is not None
+        args = self._v4_args
+        if (
+            os.environ.get("DSV4_PPU_PREFILL_HC_PAIR") == "1"
+            and type(self) is PpuDeepSeekV4Model
+            and not self._is_decode_role
+            and self._prefill_cp_size == 1
+            and args.world_size == args.tp_size == 8
+            and args.dp_size == 1
+            and self._execution_options.get("DSV4_MHC_PRE_GEMM_BACKEND") == "fp32"
+            and torch.cuda.get_device_name(device) == "ZW-M890P"
+        ):
+            dist = torch.distributed
+            assert dist.is_initialized() and dist.get_world_size() == 8
+            rank = dist.get_rank()
+            assert rank == args.tp_rank
+            # All ranks register the four communicators in the same order.
+            for low in range(4):
+                pair = (low, low + 4)
+                group = dist.new_group(ranks=list(pair), backend="nccl")
+                if rank in pair:
+                    self.v4._prefill_hc_pair = (group, rank // 4)
         mtp_hidden = None
         mtp_last_hidden_capacity = None
         mtp_hidden_enabled = self._is_speculative

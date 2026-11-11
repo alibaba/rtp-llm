@@ -259,6 +259,7 @@ struct ChunkSchedulerTestConfig {
     int         seq_size_per_block    = 4;
     int         max_batch_tokens_size = 1024;
     int         prefill_chunk_size    = 16;
+    int         prefill_chunk_batch_tokens = 0;
     std::string decode_prefill_ratio;
 };
 
@@ -278,6 +279,7 @@ public:
         runtime_config.max_generate_batch_size                     = 16;
         runtime_config.fifo_scheduler_config.max_batch_tokens_size = config.max_batch_tokens_size;
         runtime_config.fifo_scheduler_config.prefill_chunk_size    = config.prefill_chunk_size;
+        runtime_config.fifo_scheduler_config.prefill_chunk_batch_tokens = config.prefill_chunk_batch_tokens;
         if (!config.decode_prefill_ratio.empty()) {
             runtime_config.fifo_scheduler_config.decode_prefill_ratio = config.decode_prefill_ratio;
         }
@@ -5619,6 +5621,65 @@ static void runShortAndLongPrefillRounds(SchedulerBase&           scheduler,
     long_stream->update(makeSingleTokenUpdate(104));
 }
 
+TEST_F(FIFOSchedulerTest, testChunkedPrefillSeparateBatchBudgetAdmitsFourShortStreams) {
+    for (const int batch_budget : {0, 16}) {
+        ChunkSchedulerTestConfig config;
+        config.prefill_chunk_size = 8;
+        config.prefill_chunk_batch_tokens = batch_budget;
+        ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+        ASSERT_TRUE(env.init());
+        auto a = env.makeStream({1, 2, 3, 4});
+        auto b = env.makeStream({5, 6, 7, 8});
+        auto c = env.makeStream({9, 10, 11, 12});
+        auto d = env.makeStream({13, 14, 15, 16});
+        ASSERT_TRUE(enqueueIndividually(env.scheduler(), {a, b, c, d}));
+        auto batch = env.scheduler().schedule();
+        if (batch_budget == 0) {
+            ASSERT_TRUE(expectPrefillBatch(batch, {a, b}, {4, 4}));
+        } else {
+            ASSERT_TRUE(expectPrefillBatch(batch, {a, b, c, d}, {4, 4, 4, 4}));
+        }
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillSeparateBatchBudgetRetainsChunkCapAndDecodeParking) {
+    ChunkSchedulerTestConfig config;
+    config.role_type = RoleType::PDFUSION;
+    config.seq_size_per_block = 2;
+    config.prefill_chunk_size = 4;
+    config.prefill_chunk_batch_tokens = 8;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto short_stream = env.makeStream({1, 2}, 4);
+    auto long_stream = env.makeStream({3, 4, 5, 6, 7, 8, 9, 10}, 4);
+    ASSERT_TRUE(enqueueIndividually(env.scheduler(), {short_stream, long_stream}));
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {short_stream, long_stream}, {2, 4}));
+    short_stream->update(makeSingleTokenUpdate(101));
+    long_stream->update(makeSingleTokenUpdate(102));
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {long_stream}, {4}));
+    long_stream->update(makeSingleTokenUpdate(103));
+    auto decode = env.scheduler().schedule();
+    ASSERT_TRUE(decode.ok());
+    ASSERT_EQ(decode->size(), 2);
+    for (const auto& stream : *decode) {
+        ASSERT_FALSE(stream->isContextStream());
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillSeparateBatchBudgetAlignsRemainder) {
+    ChunkSchedulerTestConfig config;
+    config.prefill_chunk_size = 8;
+    config.prefill_chunk_batch_tokens = 12;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto a = env.makeStream({1, 2, 3, 4, 5, 6});
+    auto b = env.makeStream({7, 8, 9, 10, 11, 12, 13, 14, 15});
+    ASSERT_TRUE(enqueueIndividually(env.scheduler(), {a, b}));
+    // The first final chunk uses six tokens. The six remaining tokens can
+    // grant only four aligned tokens to the second stream, never six or eight.
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {a, b}, {6, 4}));
+}
+
 TEST_F(FIFOSchedulerTest, testChunkedPrefillNeverReturnsMixedContextAndDecodeBatch) {
     ChunkSchedulerTestConfig config;
     config.role_type          = RoleType::PDFUSION;
@@ -6184,6 +6245,18 @@ TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetValidatesFanoutReuseAndShortFinal
     ASSERT_TRUE(unaligned_stream->hasError());
     ASSERT_TRUE(unaligned_stream->isFinished());
     ASSERT_EQ(short_stream->currentBatchSize(), 8);
+}
+
+TEST(FIFOSchedulerChunkGrantTest, testAlignedFinalSuffixGrant) {
+    ASSERT_EQ(computeChunkGrant(4096, 1, 2140, 256), 2140);
+    ASSERT_EQ(alignFinalChunkGrant(computeChunkGrant(4096, 1, 2140, 256), 2140, 256), 2048);
+    ASSERT_EQ(alignFinalChunkGrant(computeChunkGrant(4096, 1, 92, 256), 92, 256), 92);
+    ASSERT_EQ(alignFinalChunkGrant(computeChunkGrant(4096, 1, 2048, 256), 2048, 256), 2048);
+    ASSERT_EQ(alignFinalChunkGrant(computeChunkGrant(4096, 1, 1704, 256), 1704, 256), 1536);
+    ASSERT_EQ(alignFinalChunkGrant(computeChunkGrant(4096, 2, 1704, 256), 1704, 256), 1536);
+    ASSERT_EQ(alignFinalChunkGrant(computeChunkGrant(256, 1, 1704, 256), 1704, 256), 256);
+    // Budget-limited grants are already block-aligned and must not shrink.
+    ASSERT_EQ(alignFinalChunkGrant(computeChunkGrant(512, 1, 1704, 256), 1704, 256), 512);
 }
 
 }  // namespace rtp_llm

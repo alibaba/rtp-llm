@@ -35,12 +35,16 @@ class PpuWoAFp8Linear(nn.Module):
         k_local: int,
         sglang_layout: Optional[bool] = None,
         quantization: str = "auto",
+        bf16_input: bool = False,
     ):
         super().__init__()
         _validate_fp8_quantization(quantization)
         if quantization == "v2_column":
             raise ValueError("PPU wo_a fused permutation requires row-major scales")
         self.quantization = quantization
+        if not isinstance(bf16_input, bool):
+            raise TypeError("bf16_input must be bool")
+        self.bf16_input = bf16_input
         self.sglang_layout = (
             (os.environ.get("DSV4_PPU_SGLANG_WO_A", "0") == "1")
             if sglang_layout is None
@@ -83,6 +87,9 @@ class PpuWoAFp8Linear(nn.Module):
                 f"{weight.device} and {scale_fp32.device}"
             )
 
+        # Keep the selected request layout fixed throughout Graph capture and replay.
+        self._request_local = os.environ.get("DSV4_PPU_WOA_REQUEST_LOCAL", "0") == "1"
+        self._request_grid = os.environ.get("DSV4_PPU_WOA_REQUEST_GRID", "0") == "1"
         self.groups = groups
         self.rank = rank
         self.k_local = k_local
@@ -100,13 +107,35 @@ class PpuWoAFp8Linear(nn.Module):
             ),
             persistent=False,
         )
+        # Official inference uses BF16 activations and dequantized BF16 weights
+        # for this projection. Materialize weights once, never per token.
+        bf16_weight = None
+        if bf16_input:
+            bf16_weight = (
+                self.weight.float()
+                * self.weight_scale.repeat_interleave(128, 1).repeat_interleave(128, 2)
+            ).bfloat16()
+        self.register_buffer("bf16_weight", bf16_weight, persistent=False)
+        # TP Prefill must retain the official eight-group BMM dispatch. Cache
+        # the transposed local weights for its stride-zero group views.
+        self.register_buffer(
+            "bf16_prefill_weight",
+            (
+                bf16_weight.transpose(1, 2).contiguous()
+                if bf16_input and groups < 8
+                else None
+            ),
+            persistent=False,
+        )
         self._einsum = _resolve_deep_gemm_symbol("fp8_einsum")
         self._decode_attention_gemm = False
 
     def _decode_config(self, m):
         if not self._decode_attention_gemm:
             return None
-        from rtp_llm.models_py.kernels.ppu.attention.ppu_attention_gemm import decode_attention_gemm_config
+        from rtp_llm.models_py.kernels.ppu.attention.ppu_attention_gemm import (
+            decode_attention_gemm_config,
+        )
 
         return decode_attention_gemm_config(
             m, self.rank, self.k_local, groups=self.groups
@@ -115,7 +144,8 @@ class PpuWoAFp8Linear(nn.Module):
     def forward_permuted(self, payload, scales):
         """Consume the fused producer's group-major FP8/FP32 pair."""
         if (
-            not self.sglang_layout
+            self.bf16_input
+            or not self.sglang_layout
             or self.quantization != "v2_row"
             or payload.ndim != 3
             or payload.shape[0] != self.groups
@@ -159,6 +189,8 @@ class PpuWoAFp8Linear(nn.Module):
         self,
         x: torch.Tensor,
         out: Optional[torch.Tensor] = None,
+        *,
+        prefill: bool = False,
     ) -> torch.Tensor:
         if x.ndim < 3 or tuple(x.shape[-2:]) != (self.groups, self.k_local):
             raise ValueError(
@@ -179,10 +211,67 @@ class PpuWoAFp8Linear(nn.Module):
             out,
             output_shape,
             x.device,
-            (x, self.weight, self.weight_scale),
+            (x, self.weight, self.weight_scale)
+            + ((self.bf16_weight,) if self.bf16_input else ()),
         )
         m = x.numel() // (self.groups * self.k_local)
         if m == 0:
+            return output
+
+        if self.bf16_input:
+            if self._request_grid:
+                from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_wo_a_request_grid import (
+                    request_grid_eligible,
+                    request_grid_woa,
+                )
+
+                if request_grid_eligible(
+                    x,
+                    self.bf16_weight,
+                    output,
+                    prefill=prefill,
+                    request_local=self._request_local,
+                ):
+                    return request_grid_woa(x, self.bf16_weight, output)
+            grouped = x.reshape(m, self.groups, self.k_local).transpose(0, 1)
+            if prefill and self.groups < 8:
+                # Local-group BMM rounds differently from the native G8
+                # Prefill. Broadcast each real group without padding a full
+                # G8 input; preserve Decode's existing dispatch below.
+                grouped = grouped.contiguous()
+                token_output = output.view(m, self.groups, self.rank)
+                for group in range(self.groups):
+                    lhs = grouped[group].unsqueeze(0).expand(8, -1, -1)
+                    rhs = self.bf16_prefill_weight[group].unsqueeze(0).expand(8, -1, -1)
+                    projected = torch.bmm(lhs, rhs)
+                    token_output[:, group].copy_(projected[0])
+                    del projected
+                return output
+            if (
+                self._request_local
+                and not prefill
+                and x.ndim == 4
+                and x.shape[0] > 1
+                and x.shape[1] == 3
+                and self.groups == 8
+            ):
+                # Preserve G8/M3, token-major strides and one shared weight.
+                # Applies to every actual Decode Q3 caller, including draft Q3.
+                token_output = output.view(m, self.groups, self.rank)
+                for request in range(x.shape[0]):
+                    start = request * x.shape[1]
+                    end = start + x.shape[1]
+                    torch.bmm(
+                        grouped[:, start:end],
+                        self.bf16_weight.transpose(1, 2),
+                        out=token_output[start:end].transpose(0, 1),
+                    )
+                return output
+            torch.bmm(
+                grouped,
+                self.bf16_weight.transpose(1, 2),
+                out=output.view(m, self.groups, self.rank).transpose(0, 1),
+            )
             return output
 
         # Quantization retains the token-major arithmetic and block scales.

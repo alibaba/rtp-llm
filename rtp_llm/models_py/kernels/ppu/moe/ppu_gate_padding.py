@@ -9,6 +9,7 @@ import triton.language as tl
 def _gate_padded(
     scores,
     bias,
+    activations,
     indices,
     weights,
     mask,
@@ -28,7 +29,9 @@ def _gate_padded(
     finite = tl.sum(((experts < E) & (~finite_raw | ~finite_bias)).to(tl.int32), 0) == 0
     raw = tl.where(finite_raw, raw, 0.0)
     correction = tl.where(finite_bias, correction, 0.0)
-    active = tl.sqrt(tl.where(raw > 20.0, raw, tl.log(1.0 + tl.exp(raw))))
+    # Preserve small negative-score contributions that can change biased top-k.
+    active = tl.load(activations + row * E + experts, experts < E, 0)
+    active = tl.where(finite_raw, active, 0.0)
     ranking = tl.where(experts < E, active + correction, -float("inf"))
     slots = tl.arange(0, PAD)
     selected_weights = tl.full((PAD,), 0.0, tl.float32)
@@ -41,7 +44,8 @@ def _gate_padded(
             slots == k, tl.where(finite, idx, k).to(tl.int64), selected_indices
         )
         ranking = tl.where(experts == idx, -float("inf"), ranking)
-    normalized = selected_weights / (tl.sum(selected_weights, 0) + 1.0e-12) * SCALE
+    # Route-weight ULPs can cross the expert activation's BF16 boundary.
+    normalized = tl.div_rn(selected_weights, tl.sum(selected_weights, 0) + 1.0e-12) * SCALE
     normalized = tl.where(finite, normalized, SCALE / K)
     normalized = tl.where(slots < K, normalized, 0.0)
     if HAS_MASK:
@@ -62,7 +66,7 @@ def is_supported(scores, bias, topk):
         and bias.dtype == torch.float32
         and bias.shape == (scores.shape[1],)
         and bias.is_contiguous()
-        and 1 <= topk <= min(16, scores.shape[1])
+        and 1 <= topk <= min(32, scores.shape[1])
     )
 
 
@@ -76,7 +80,7 @@ def supports_active_mask(scores, mask):
 
 
 def gate_with_padding(scores, bias, topk, route_scale=1.0, *, active_token_mask=None):
-    """Same ordered routes and FP32 bits, with exactly -1/0 inactive slots."""
+    """Stable softplus routing, with exactly -1/0 inactive slots."""
     if not is_supported(scores, bias, topk):
         raise ValueError("PPU padded gate requires contiguous FP32 scores/bias")
     if not supports_active_mask(scores, active_token_mask):
@@ -86,9 +90,11 @@ def gate_with_padding(scores, bias, topk, route_scale=1.0, *, active_token_mask=
     indices = torch.empty((m, pad), device=scores.device, dtype=torch.int64)
     weights = torch.empty((m, pad), device=scores.device, dtype=torch.float32)
     if m:
+        active = torch.nn.functional.softplus(scores).sqrt()
         _gate_padded[(m,)](
             scores,
             bias,
+            active,
             indices,
             weights,
             active_token_mask,
@@ -102,3 +108,11 @@ def gate_with_padding(scores, bias, topk, route_scale=1.0, *, active_token_mask=
             num_stages=2,
         )
     return weights, indices
+
+
+def stable_sqrtsoftplus_gate(scores, bias, topk, route_scale=1.0, norm_eps=1e-12):
+    """Unpadded PPU routing with the same stable activation as Decode."""
+    if norm_eps != 1e-12:
+        raise ValueError("PPU routing requires norm_eps=1e-12")
+    weights, indices = gate_with_padding(scores, bias, topk, route_scale)
+    return weights[:, :topk].contiguous(), indices[:, :topk].contiguous()

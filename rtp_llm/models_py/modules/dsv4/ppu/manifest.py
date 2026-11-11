@@ -11,6 +11,8 @@ class SupportResult(NamedTuple):
 
 def _check_execution_options(options, required):
     for key, expected in required.items():
+        if key == "DSV4_MHC_PRE_GEMM_BACKEND" and options.get(key) == "fp32":
+            continue
         if options.get(key) != expected:
             return SupportResult(False, f"requires {key}={expected}")
     return SupportResult(True)
@@ -74,7 +76,11 @@ def build_provider(model_config, parallelism, moe_config, max_generate_batch_siz
     if role == "DECODE":
         from rtp_llm.models_py.modules.dsv4.ppu.ppu_decode_provider import PpuDecodeProvider
 
-        return PpuDecodeProvider(options)
+        provider = PpuDecodeProvider(options)
+        provider._gate_rowwise = (
+            options.get("DSV4_PPU_DECODE_GATE_ROWWISE") == "1"
+        )
+        return provider
     from rtp_llm.models_py.modules.dsv4.ppu.ppu_module_provider import PpuModuleProvider
 
     return PpuModuleProvider(options)
@@ -110,7 +116,7 @@ DECODE_EXECUTION_OPTIONS = {
     "DSV4_SHARED_EXPERT_MODE": "overlap",
     "DSV4_PPU_DECODE_SHARED_SCHEDULE": "before_route",
     "DSV4_PPU_DECODE_MOE_OUTPUT": "bf16",
-    "DSV4_PPU_DECODE_METADATA": "reference",
-    "DSV4_PPU_DECODE_ROPE": "reference",
+    "DSV4_PPU_DECODE_METADATA": "graph_fused",
+    "DSV4_PPU_DECODE_ROPE": "shared",
     "DSV4_PPU_DECODE_MOE_HINT": "capacity",
 }

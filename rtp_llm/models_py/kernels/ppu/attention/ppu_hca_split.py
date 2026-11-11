@@ -73,9 +73,11 @@ def _hca_normalize_store(compressed, positions, weight, cache_cs, slots, cache,
         _trap_invalid_kv_access(TRAP)
     cols = tl.arange(0, 512)
     value = tl.load(compressed + token * 512 + cols)
+    value = value.to(tl.bfloat16).to(tl.float32)
     w = tl.load(weight + cols)
     variance = tl.sum(value * value, axis=0) / 512
     norm = value * (1.0 / tl.sqrt(variance + EPS)) * w
+    norm = norm.to(tl.bfloat16).to(tl.float32)
     offset = slot % KV_BLOCK
     fp8_ptr = cache + block.to(tl.int64) * KV_STRIDE + offset * 576
     scale_ptr = cache + block.to(tl.int64) * KV_STRIDE + KV_BLOCK * 576 + offset * 8

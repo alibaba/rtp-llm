@@ -5,6 +5,7 @@ _PPU_CONTRACT_TESTS = [
     "mtp_weights", "mtp_hidden", "compressor_norm_dispatch", "mtp_swa_ring_page",
     "chunked_moe", "deepep_graph_dispatch", "ppu_deep_gemm_layout_compat",
     "strategy_select", "tp_norm", "v4_router_contract", "v4_tp_reduce_contract",
+    "hc_post", "sparse_triton_gate",
 ]
 
 # Model contracts use the PPU dependency closure and test workers.
@@ -34,7 +35,7 @@ _PPU_CONTRACT_TESTS = [
     deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"] + select({"@//:using_ppu": [":ppu_test_runtime"], "//conditions:default": []}),
 ) for name in [
     "isolated_metadata", "rich_contract", "chunk_options", "platform_provider",
-    "prefill_communication", "tp_prefill_workspace_dims",
+    "prefill_communication", "tp_prefill_workspace_dims", "prefill_warmup",
 ]]
 
 
@@ -65,7 +66,7 @@ py_test(
         "@//:using_ppu": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-) for name in ["mega_moe_contract", "mtp_input", "decode_metadata_graph", "decode_state_slots"]]
+) for name in ["mega_moe_contract", "mtp_input", "decode_metadata_graph", "decode_state_slots", "a8_moe", "gate_precision", "fp4_mqa_logits"]]
 
 py_test(
     name = "decode_fusions_test",
@@ -255,6 +256,7 @@ test_suite(
         ":decode_moe_hint_test", ":decode_shared_schedule_test",
         ":ppu_tp_shared_weights_test", ":ppu_hc_head_options_test",
         ":prefill_defaults_test",
+        ":mtp_commit_layout_cpu_test",
     ],
 )
 
@@ -546,4 +548,12 @@ test_suite(
         ":topk_padding_test",
         ":prefill_optimizations_test",
     ],
+)
+
+py_test(
+    name = "mtp_commit_layout_cpu_test",
+    srcs = ["test_mtp_commit_layout_cpu.py"],
+    main = "test_mtp_commit_layout_cpu.py",
+    data = ["//rtp_llm/models_py:ppu_sources"],
+    deps = ["//rtp_llm:torch"],
 )

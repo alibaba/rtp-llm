@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
 @triton.jit
 def _qkv_norm(
     X,
+    KV_MEAN_SQUARE,
     WQ,
     WK,
     FREQ,
@@ -62,7 +63,7 @@ def _qkv_norm(
         base = X + row * STRIDE + QD
         k_x = tl.load(base + k_col).to(tl.float32)
         k_w = tl.load(WK + k_col).to(tl.float32)
-        k_inv = tl.rsqrt(tl.sum(k_x * k_x, 0) / KD + EPS)
+        k_inv = tl.rsqrt(tl.load(KV_MEAN_SQUARE + row) + EPS)
         tl.store(KV + row * KD + k_col, k_x * k_inv * k_w, k_col < KD - RD)
         pair = tl.arange(0, RD // 2)
         real_col = KD - RD + 2 * pair
@@ -77,10 +78,16 @@ def _qkv_norm(
             * k_inv
             * tl.load(WK + imag_col).to(tl.float32)
         )
+        # Official weighted RMSNorm rounds before the rotary multiplication.
+        real = real.to(tl.bfloat16).to(tl.float32)
+        imag = imag.to(tl.bfloat16).to(tl.float32)
         cosine = tl.load(FREQ + row * RD + pair * 2)
         sine = tl.load(FREQ + row * RD + pair * 2 + 1)
-        tl.store(KV + row * KD + real_col, real * cosine - imag * sine)
-        tl.store(KV + row * KD + imag_col, real * sine + imag * cosine)
+        # Match the native complex multiply's contraction order at BF16 ties.
+        rope_real = tl.fma(real, cosine, -(imag * sine))
+        rope_imag = tl.fma(imag, cosine, real * sine)
+        tl.store(KV + row * KD + real_col, rope_real)
+        tl.store(KV + row * KD + imag_col, rope_imag)
         if WRITE_CACHE:
             slot = tl.load(SLOTS + row).to(tl.int64)
             if slot != -1:
@@ -108,8 +115,8 @@ def _qkv_norm(
                     scales + groups, tl.where(groups < 7, encoded_scale, 0).to(tl.uint8)
                 )
                 rope = (data + 448).to(tl.pointer_type(tl.bfloat16))
-                tl.store(rope + pair * 2, real * cosine - imag * sine)
-                tl.store(rope + pair * 2 + 1, real * sine + imag * cosine)
+                tl.store(rope + pair * 2, rope_real)
+                tl.store(rope + pair * 2 + 1, rope_imag)
 
 
 def normalize_decode_qkv(
@@ -130,8 +137,8 @@ def normalize_decode_qkv(
     Optional SWA output writes the packed cache in the KV program, skipping
     slot -1 and preserving the standalone writer's invalid-access checks.
     """
-    if raw.ndim != 3 or raw.shape[1] not in (1, 2, 3, 4) or raw.shape[2] != 1536:
-        raise ValueError("Merged Decode QKV must have shape [B,Q,1536], Q=1/2/3/4")
+    if raw.ndim != 3 or raw.shape[1] not in (1, 2, 3, 4, 6) or raw.shape[2] != 1536:
+        raise ValueError("Merged Decode QKV must have shape [B,Q,1536], Q=1/2/3/4/6")
     batch, queries = raw.shape[:2]
     rows = batch * queries
     tensors = (raw, q_weight, kv_weight, freqs)
@@ -197,6 +204,7 @@ def normalize_decode_qkv(
     if rows:
         _qkv_norm[(rows, 2)](
             raw,
+            raw[..., 1024:].float().square().mean(-1).contiguous(),
             q_weight,
             kv_weight,
             torch.view_as_real(freqs),
@@ -219,6 +227,7 @@ def normalize_decode_qkv(
             RD=64,
             EPS=eps,
             num_warps=4,
+            enable_fp_fusion=False,
         )
     if quantize_q:
         return q, kv, (q_fp8, q_scale)

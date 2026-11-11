@@ -20,9 +20,15 @@ class CompressorNormDispatchTest(unittest.TestCase):
                     positions = torch.tensor([3], dtype=torch.int64)
                     with (
                         patch.object(compressor, kernel_name) as kernel,
+                        patch.object(compressor, "_main_score_gather", create=True) as prepass,
                         patch.object(compressor, "validate_slot_mapping"),
                         patch.object(compressor, "_validate_fused_state_block_table"),
                     ):
+                        # Dispatch-only CPU test: initialize the real CPU scratch
+                        # without launching Triton; Torch softmax remains real.
+                        prepass.__getitem__.return_value.side_effect = (
+                            lambda *args, **kwargs: kwargs["native_probabilities_ptr"].zero_()
+                        )
                         compressor.run_fused_compress_kv_write(
                             state_cache=torch.zeros(1, 16, 4 * head_dim),
                             token_to_req_indices=torch.zeros(1, dtype=torch.int32),
@@ -44,6 +50,11 @@ class CompressorNormDispatchTest(unittest.TestCase):
                             overlap=True,
                             state_tokens_per_block=256,
                         )
+                    if compressor is ppu_compressor and head_dim == 512:
+                        prepass.__getitem__.assert_called_once_with((1,))
+                        prepass.__getitem__.return_value.assert_called_once()
+                    else:
+                        prepass.__getitem__.assert_not_called()
                     kernel.__getitem__.assert_called_once_with((1,))
                     launch = kernel.__getitem__.return_value
                     launch.assert_called_once()

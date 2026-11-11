@@ -8,6 +8,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op import 
     SparseAttnV4DecodeFp8Op,
 )
 
+
 def attn_fp8_swa_paged(
     *,
     q: torch.Tensor,  # [B, 1, H, D] bf16
@@ -49,6 +50,7 @@ def attn_fp8_swa_paged(
         topk_length=topk_length,
     )
 
+
 def attn_fp8_dual_paged(
     *,
     q: torch.Tensor,  # [B, 1, H, D] bf16
@@ -65,6 +67,7 @@ def attn_fp8_dual_paged(
     platform_provider=None,
     topk_length: Optional[torch.Tensor] = None,  # [B] int32 SWA effective length
     extra_topk_length: Optional[torch.Tensor] = None,  # [B] int32 cmp effective length
+    compact_start_pos: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Dual-pool (SWA + compressed) FP8 FlashMLA — returns ``[B, 1, H, D_v]``.
 
@@ -89,6 +92,33 @@ def attn_fp8_dual_paged(
     validate = getattr(platform_provider, "validate_dual_pool", None)
     if validate is not None:
         validate(q=q, swa_pool_3d=swa_pool_3d, swa_topk_3d=swa_topk_3d, cmp_pool_3d=cmp_pool_3d, cmp_topk_3d=cmp_topk_3d, attn_sink=attn_sink, topk_length=topk_length, extra_topk_length=extra_topk_length, compress_ratio=compress_ratio, cmp_tokens_per_block=cmp_tokens_per_block)
+    if compact_start_pos is not None:
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_flash_mla import (
+            PpuSparseAttnV4DecodeFp8Op,
+        )
+
+        if (
+            type(fp8_op) is PpuSparseAttnV4DecodeFp8Op
+            and fp8_op.softmax_scale == 512**-0.5
+        ):
+            from rtp_llm.models_py.kernels.ppu.attention.ppu_sparse_attention import (
+                try_materialized_compact_q3,
+            )
+
+            output = try_materialized_compact_q3(
+                q,
+                swa_pool_3d,
+                cmp_pool_3d,
+                attn_sink,
+                swa_topk_3d,
+                cmp_topk_3d,
+                topk_length,
+                extra_topk_length,
+                compact_start_pos,
+                compress_ratio,
+            )
+            if output is not None:
+                return output
     return fp8_op.forward(
         q,
         swa_pool_3d,

@@ -491,6 +491,19 @@ class ModelFactory:
         propose_model_args.model_type = sp_config.model_type
         propose_model_args.act_type = model_args.act_type
         propose_model_args.enable_fp32_lm_head = model_args.enable_fp32_lm_head
+        # The selected ordinary-MTP draft head uses BF16 weights.
+        if os.environ.get("DSV4_PPU_MTP_DRAFT_BF16_HEAD", "0") == "1":
+            from rtp_llm.device.device_type import is_ppu
+
+            if (
+                sp_config.type != SpeculativeType.MTP
+                or sp_config.model_type != "deepseek_v4_mtp"
+                or not is_ppu()
+            ):
+                raise ValueError(
+                    "draft BF16 head requires PPU ordinary DeepSeek-V4 MTP"
+                )
+            propose_model_args.enable_fp32_lm_head = False
 
         # Create propose ModelConfig using _create_config
         propose_model_cls = ModelFactory.get_model_cls(sp_config.model_type)

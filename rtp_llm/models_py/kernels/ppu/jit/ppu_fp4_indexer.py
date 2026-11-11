@@ -45,6 +45,7 @@ def _module(kind, arch, parameter=0, canonical_topk=False):
     filename, symbol = choices[kind]
     source = f"csrc/deepseek_v4/{filename}"
     if kind in (
+        "q",
         "store",
         "topk",
         "topk_checked",
@@ -290,10 +291,11 @@ def _identity_page(device):
     return torch.zeros((1, 1), dtype=torch.int32, device=device)
 
 
-def topk_decode(scores, lengths, out, *, canonical_in_kernel=False):
+def topk_decode(scores, lengths, out, *, canonical_in_kernel=False, score_order=False):
     """SG FP32 Decode selection, returning logical compressed-token indices."""
     from rtp_llm.models_py.kernels.ppu.attention.ppu_bf16_radix_topk import (
         canonicalize_topk_indices,
+        order_selected_by_score,
     )
 
     if scores.dtype != torch.float32 or lengths.dtype != torch.int32:
@@ -307,14 +309,17 @@ def topk_decode(scores, lengths, out, *, canonical_in_kernel=False):
         "topk_decode",
         torch.cuda.get_device_capability(scores.device),
         out.shape[1],
-        canonical_in_kernel,
+        canonical_in_kernel and not score_order,
     ).forward(scores, lengths, pages, out, 2**31, None)
+    if score_order:
+        return order_selected_by_score(scores, out)
     return out if canonical_in_kernel else canonicalize_topk_indices(out)
 
 
-def topk_bf16(scores, starts, ends, out):
+def topk_bf16(scores, starts, ends, out, *, score_order=False):
     from rtp_llm.models_py.kernels.ppu.attention.ppu_bf16_radix_topk import (
         canonicalize_topk_indices,
+        order_selected_by_score,
     )
 
     if scores.dtype != torch.bfloat16 or scores.shape[1] >= 2**31:
@@ -324,7 +329,7 @@ def topk_bf16(scores, starts, ends, out):
     # The vendor launcher also selects its streaming kernel by row stride.
     if scores.shape[1] > 16384 or scores.stride(0) > 32768:
         _checked_bf16_topk(scores, starts, ends, out)
-        return canonicalize_topk_indices(out)
+        return order_selected_by_score(scores, out) if score_order else canonicalize_topk_indices(out)
     if not scores.shape[0]:
         return out
     pages = _identity_page(scores.device).expand(scores.shape[0], 1)
@@ -333,7 +338,7 @@ def topk_bf16(scores, starts, ends, out):
     ).forward(scores, starts, ends, pages, out, 2**31, None)
     # Atomic scatter preserves the set but not its order. Sparse attention's
     # finite-precision reduction must see a repeatable candidate order.
-    return canonicalize_topk_indices(out)
+    return order_selected_by_score(scores, out) if score_order else canonicalize_topk_indices(out)
 
 
 def _checked_bf16_topk(scores, starts, ends, out):

@@ -5,9 +5,12 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "autil/EnvUtil.h"
 
 #include <algorithm>
 #include <chrono>
+#include <deque>
+#include <map>
 #include <mutex>
 
 using namespace std;
@@ -28,20 +31,24 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                       metrics_reporter),
     cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
                              && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
-    max_batch_tokens_without_cache_(static_cast<size_t>(
-        std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
+    max_batch_tokens_without_cache_(
+        static_cast<size_t>(std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
     prefill_cp_size_(parallelism_config.prefill_cp_config.is_enabled() ?
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
-                         1) {
+                         1),
+    balance_pd_prefill_decode_rank_(
+        autil::EnvUtil::getEnv("RTP_PD_PREFILL_BALANCE_DECODE_RANK", false)) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
                      "max_batch_tokens_without_cache is [%zu], cp_force_single_prefill is [%d], "
-                     "prefill_cp_size is [%zu], max_inited_kv_cache_streams is [%zu]",
+                     "prefill_cp_size is [%zu], max_inited_kv_cache_streams is [%zu], "
+                     "balance_pd_prefill_decode_rank is [%d]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_,
                      max_batch_tokens_without_cache_,
                      cp_force_single_prefill_,
                      prefill_cp_size_,
-                     max_inited_kv_cache_streams_);
+                     max_inited_kv_cache_streams_,
+                     balance_pd_prefill_decode_rank_);
 }
 
 FIFOScheduler::~FIFOScheduler() {
@@ -203,8 +210,7 @@ bool FIFOScheduler::evaluateRunningBatch(const std::list<GenerateStreamPtr>& str
         admitted_count, admitted_tokens, admitted_max_seq_len, admitted_sequence_count, new_stream);
 }
 
-bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
-                                          const GenerateStreamPtr&       new_stream) {
+bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) {
     // FIFOScheduler's own scheduling loop uses the counter-based evaluateRunningBatch();
     // this list-based FIFOSchedulerBase entry point delegates to the list overload so
     // both paths agree.
@@ -334,17 +340,16 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
     if (!waiting_streams.empty()) {
-        auto oldest_enqueue_time_us = (*std::min_element(waiting_streams.begin(),
-                                                         waiting_streams.end(),
-                                                         [](const auto& lhs, const auto& rhs) {
-                                                             return lhs->schedulerEnqueueTimeUs()
-                                                                    < rhs->schedulerEnqueueTimeUs();
-                                                         }))
-                                          ->schedulerEnqueueTimeUs();
+        auto oldest_enqueue_time_us =
+            (*std::min_element(waiting_streams.begin(), waiting_streams.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs->schedulerEnqueueTimeUs() < rhs->schedulerEnqueueTimeUs();
+            }))->schedulerEnqueueTimeUs();
         last_waiting_oldest_age_us_ =
             std::max<int64_t>(0, autil::TimeUtility::currentTimeInMicroSeconds() - oldest_enqueue_time_us);
     }
     const size_t inited_kv_streams = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
+
+    balancePdPrefillWaitingStreams(waiting_streams);
 
     // Explicit groups are scheduled through enqueueGroup() and the dedicated group
     // queues. group_id/group_size on a stream in waiting_streams are status metadata;
@@ -454,6 +459,12 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
             schedule_runtime.admitted_prefill_max_seq_len_with_cache =
                 std::max(schedule_runtime.admitted_prefill_max_seq_len_with_cache, prefillSeqLenWithCache(stream));
             schedule_runtime.admitted_prefill_sequence_count += static_cast<size_t>(stream->currentBatchSize());
+            if (new_state == StreamState::RUNNING) {
+                const auto endpoint = decodeEndpoint(stream);
+                if (!endpoint.empty()) {
+                    last_admitted_decode_endpoint_ = endpoint;
+                }
+            }
             if (kv_initialized) {
                 ++schedule_runtime.newly_inited_kv_streams;
             }
@@ -469,6 +480,63 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
             waiting_streams.erase(current);
         }
     }
+}
+
+std::string FIFOScheduler::decodeEndpoint(const GenerateStreamPtr& stream) const {
+    if (!stream || !stream->queryPdSep()) {
+        return {};
+    }
+    for (const auto& role_addr : stream->generateConfig()->role_addrs) {
+        if (role_addr.role == RoleType::DECODE) {
+            return role_addr.ip + ":" + std::to_string(role_addr.grpc_port);
+        }
+    }
+    return {};
+}
+
+void FIFOScheduler::balancePdPrefillWaitingStreams(list<GenerateStreamPtr>& waiting_streams) {
+    if (!balance_pd_prefill_decode_rank_ || pd_sep_config_.role_type != RoleType::PREFILL
+        || waiting_streams.size() < 2) {
+        return;
+    }
+
+    // Preserve FIFO order within each Decode endpoint, then interleave endpoints.
+    // If any request does not carry a Decode route, leave the whole queue untouched;
+    // mixed PD/non-PD admission must retain the normal FIFO contract.
+    std::map<std::string, std::deque<GenerateStreamPtr>> endpoint_queues;
+    for (const auto& stream : waiting_streams) {
+        const auto endpoint = decodeEndpoint(stream);
+        if (endpoint.empty()) {
+            return;
+        }
+        endpoint_queues[endpoint].push_back(stream);
+    }
+    if (endpoint_queues.size() < 2) {
+        return;
+    }
+
+    auto first = endpoint_queues.upper_bound(last_admitted_decode_endpoint_);
+    if (first == endpoint_queues.end()) {
+        first = endpoint_queues.begin();
+    }
+
+    list<GenerateStreamPtr> balanced;
+    size_t                  remaining = waiting_streams.size();
+    while (remaining > 0) {
+        auto current = first;
+        do {
+            if (!current->second.empty()) {
+                balanced.push_back(std::move(current->second.front()));
+                current->second.pop_front();
+                --remaining;
+            }
+            ++current;
+            if (current == endpoint_queues.end()) {
+                current = endpoint_queues.begin();
+            }
+        } while (current != first);
+    }
+    waiting_streams.swap(balanced);
 }
 
 void FIFOScheduler::advanceLoadingGroup(StreamGroup& group) {
@@ -644,7 +712,18 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
     if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
         || !waiting_group_queue_.empty()) {
-        cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
+        int poll_ms = 10;
+#if USE_PPU
+        // Only pace idle Decode ranks participating in fake DP/EP rounds.
+        if (pd_sep_config_.role_type == RoleType::DECODE && need_fill_fake_stream_ && running_streams_.empty()
+            && pending_decode_streams_.empty() && waiting_streams_.empty() && loading_cache_streams_.empty()
+            && loading_cache_group_queue_.empty() && waiting_group_queue_.empty()) {
+            static const int fake_poll_ms =
+                std::clamp(autil::EnvUtil::getEnv("RTP_FIFO_FAKE_STREAM_POLL_MS", 10), 1, 100);
+            poll_ms = fake_poll_ms;
+        }
+#endif
+        cond_.wait_for(lock, std::chrono::milliseconds(poll_ms), [this] { return waitPredicate(); });
     } else if (!waiting_streams_.empty()) {
         // No running work can release capacity. Poll PD-held block releases without turning a
         // large retryable queue into a tight malloc/eviction loop.
@@ -671,6 +750,13 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
                return stream->hasEvent(StreamEvents::CanRun) && stream->hasEvent(StreamEvents::LoadInitiated)
                       && stream->chunkedPrefillEnabled() && stream->isContextStream();
            });
+    if (has_requeued_prefill_stream && waiting_size_before_cache_update > 0) {
+        // A cache-loaded chunked prefill must regain the scheduling boundary ahead of
+        // streams that were already waiting; otherwise it can be starved by newcomers.
+        auto first_requeued = waiting_streams_.begin();
+        std::advance(first_requeued, waiting_size_before_cache_update);
+        waiting_streams_.splice(waiting_streams_.begin(), waiting_streams_, first_requeued, waiting_streams_.end());
+    }
     // Release terminal deferred streams before any decode KV growth in this round.
     refreshAndReapTerminalStreams(pending_decode_streams_);
     if (has_requeued_prefill_stream) {
