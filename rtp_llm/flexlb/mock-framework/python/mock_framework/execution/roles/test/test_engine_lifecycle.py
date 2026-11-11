@@ -154,7 +154,7 @@ def test_initial_engine_start_shares_slots_across_roles(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     from mock_framework.execution.environment import EndpointRegistry
-    from mock_framework.execution.processes import ProcessSupervisor
+    from mock_framework.execution.processes import ProcessIdentity, ProcessSupervisor
     from mock_framework.execution.roles.engine import (
         INITIAL_START_CONCURRENCY,
         ROLES,
@@ -193,6 +193,7 @@ def test_initial_engine_start_shares_slots_across_roles(tmp_path, monkeypatch):
             slot = ROLES.index(role) * count + index
             control = f"http://localhost:{10000 + slot}"
             return (
+                ProcessIdentity(role, index),
                 slot,
                 control,
                 {

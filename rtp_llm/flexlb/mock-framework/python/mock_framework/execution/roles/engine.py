@@ -6,7 +6,8 @@ from itertools import zip_longest
 
 from ...config.validation import duration
 from .. import ExecutionError
-from ..processes import launch_component
+from ..processes import ProcessIdentity, launch_component
+from . import register_ready_instance
 
 ROLES = ("prefill", "decode", "vit")
 INITIAL_START_CONCURRENCY = 32
@@ -23,7 +24,6 @@ class EngineRole:
             monitoring,
         )
         self.counters = {}
-        self.processes = set()
         self.used_ports = set()
         self.lock = asyncio.Lock()
 
@@ -39,15 +39,13 @@ class EngineRole:
         raise ExecutionError("Cannot allocate a fresh Engine listener port")
 
     async def _start_instance(self, role, index):
-        instance_id = f"{role}-{index}"
+        identity = ProcessIdentity(role, index)
         rpc_port, control_port = self._port(), self._port()
-        self.processes.add(instance_id)
         child, control, endpoint = await launch_component(
             self.supervisor,
             self.records,
             self.environment,
-            role,
-            index,
+            identity,
             self.recipes[role],
             configure=lambda _: {
                 "MOCK_BIND_HOST": "127.0.0.1",
@@ -57,7 +55,7 @@ class EngineRole:
             },
         )
         expected = {
-            "id": instance_id,
+            "id": identity.instance_id,
             "role": role,
             "rpc": f"127.0.0.1:{rpc_port}",
             "control": f"http://127.0.0.1:{control_port}",
@@ -70,23 +68,19 @@ class EngineRole:
             raise ExecutionError(
                 "Engine endpoints differ from the assigned identity and listeners"
             )
-        return child.pid, control, endpoint
+        return identity, child.pid, control, endpoint
 
-    def _register_instance(self, pid, control, endpoint):
-        node, role, rpc = endpoint["id"], endpoint["role"], endpoint["rpc"]
-        self.topology.register(node, role, control, endpoint)
-        self.records.emit(
-            event="instance_started",
-            node=node,
+    def _register_instance(self, identity, pid, control, endpoint):
+        register_ready_instance(
+            self.topology,
+            self.monitoring,
+            self.records,
+            identity,
+            control,
+            endpoint,
             pid=pid,
-            rpc=rpc,
-            role=role,
-            instance_id=node,
-            generation=0,
         )
-        if self.monitoring:
-            self.monitoring.discover(node, self.records.directory / "components" / node)
-        return rpc
+        return endpoint["rpc"]
 
     async def scale_out(self, role, count):
         return await self._start_instances({role: count}, concurrency=1)
@@ -126,13 +120,13 @@ class EngineRole:
                 await self.monitoring.final_scrape([item["id"] for item in selected])
             for item in selected:
                 node = item["id"]
+                child = self.supervisor.child(node)
                 errors = await self.supervisor.stop_intentionally(node)
+                if child.returncode is not None:
+                    ready = self.records.directory / "components" / node / "ready.json"
+                    ready.unlink(missing_ok=True)
                 if errors:
                     raise ExecutionError("; ".join(errors))
-                (self.records.directory / "components" / node / "ready.json").unlink(
-                    missing_ok=True
-                )
-                self.processes.remove(node)
                 self.topology.retire(node)
                 if self.monitoring:
                     self.monitoring.retire(node)
@@ -217,12 +211,13 @@ class EngineRole:
             return result
 
     async def close(self):
-        names = [name for name, _ in self.supervisor.children if name in self.processes]
+        processes = self.supervisor.owned_processes(*ROLES)
         # All Engine JVMs shut down concurrently, including in full-scale Cases.
-        errors = await self.supervisor.stop(names, 15)
-        active = {name for name, _ in self.supervisor.children}
-        for node in self.processes - active:
-            (self.records.directory / "components" / node / "ready.json").unlink(
-                missing_ok=True
-            )
+        errors = await self.supervisor.stop([process.name for process in processes], 15)
+        remaining = set(self.supervisor.owned_processes(*ROLES))
+        for process in processes:
+            if process not in remaining:
+                (process.directory(self.records.directory) / "ready.json").unlink(
+                    missing_ok=True
+                )
         return errors

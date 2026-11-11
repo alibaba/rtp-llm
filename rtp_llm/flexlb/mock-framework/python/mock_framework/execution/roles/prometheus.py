@@ -11,6 +11,7 @@ import yaml
 
 from ...config.validation import duration
 from .. import ExecutionError
+from ..processes import ProcessIdentity
 from ..step_trace import timestamp, write_json
 
 
@@ -75,7 +76,7 @@ class PrometheusRole:
         self.metadata["command"] = command
         self._save()
         self.child = await self.supervisor.spawn(
-            "prometheus",
+            ProcessIdentity("prometheus"),
             command,
             str(self.directory),
             dict(os.environ),

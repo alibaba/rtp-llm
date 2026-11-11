@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
-from ..execution.processes import ProcessSupervisor
+from ..execution.processes import ProcessIdentity, ProcessSupervisor
 from .grafana import annotations, instance_filters, provision
 from .records import load_experiment_view, read_json
 
@@ -147,7 +147,7 @@ check_for_plugin_updates = false
             encoding="utf-8",
         )
         await supervisor.spawn(
-            "prometheus",
+            ProcessIdentity("prometheus"),
             [
                 str(prometheus),
                 "--config.file=" + str(output / "prometheus/config.yaml"),

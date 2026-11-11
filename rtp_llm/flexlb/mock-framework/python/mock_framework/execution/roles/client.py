@@ -7,9 +7,10 @@ from typing import Annotated
 
 from ...config.validation import validate
 from .. import ExecutionError
-from ..processes import launch_component
+from ..processes import ProcessIdentity, launch_component
 from ..step.step_registry import Bounds, schema
 from ..transport import post
+from . import register_ready_instance
 
 
 @dataclass(frozen=True)
@@ -47,27 +48,27 @@ class ClientRole:
             monitoring,
         )
         self.pending, self.stop_timeout = False, 30
-        self._owned = []
 
     async def start(self):
         if self.component is None:
             return
         for index in range(self.component["deployment"]["replicas"]):
-            name = f"client-{index}"
-            self._owned.append(name)
+            identity = ProcessIdentity("client", index)
             _, control, endpoint = await launch_component(
                 self.supervisor,
                 self.records,
                 self._configuration,
-                "client",
-                index,
+                identity,
                 self.recipe,
             )
-            self.topology.register(name, "client", control, endpoint)
-            if self.monitoring:
-                self.monitoring.discover(
-                    name, self.records.directory / "components" / name
-                )
+            register_ready_instance(
+                self.topology,
+                self.monitoring,
+                self.records,
+                identity,
+                control,
+                endpoint,
+            )
 
     def _coordinator(self):
         nodes = [
@@ -149,4 +150,5 @@ class ClientRole:
         return {by_address[url]: value for url, value in result["clients"].items()}
 
     async def close(self):
-        return await self.supervisor.stop(self._owned, 3)
+        names = [process.name for process in self.supervisor.owned_processes("client")]
+        return await self.supervisor.stop(names, 3)

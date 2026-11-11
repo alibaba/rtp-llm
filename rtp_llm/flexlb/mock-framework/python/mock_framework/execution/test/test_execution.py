@@ -429,7 +429,7 @@ def test_intentional_stop_retains_unreaped_process_for_final_cleanup(
 ):
     from types import SimpleNamespace
 
-    from mock_framework.execution.processes import ProcessSupervisor
+    from mock_framework.execution.processes import ProcessIdentity, ProcessSupervisor
 
     async def exercise():
         p = ProcessSupervisor(SimpleNamespace(emit=lambda **event: None))
@@ -440,7 +440,8 @@ def test_intentional_stop_retains_unreaped_process_for_final_cleanup(
                 raise TimeoutError()
 
         child = SimpleNamespace(returncode=None, pid=123, wait=wait)
-        p._children["engine-prefill-0"] = child
+        process = ProcessIdentity("prefill", 0)
+        p._children[process.name] = (process, child)
         monkeypatch.setattr(
             "mock_framework.execution.processes.os.killpg",
             lambda *args: setattr(child, "returncode", exit_code),
@@ -451,10 +452,10 @@ def test_intentional_stop_retains_unreaped_process_for_final_cleanup(
             return await original(names, 0)
 
         p.stop = stop
-        errors = await p.stop_intentionally("engine-prefill-0")
-        assert bool(p.children) == (exit_code is None)
+        errors = await p.stop_intentionally(process.name)
+        assert p.owned_processes("prefill") == ((process,) if exit_code is None else ())
         assert bool(errors) == (exit_code is None)
-        assert "engine-prefill-0" in p._expected
+        assert process.name in p._expected
 
     asyncio.run(exercise())
 

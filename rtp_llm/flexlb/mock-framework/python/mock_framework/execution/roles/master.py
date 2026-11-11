@@ -8,14 +8,14 @@ import os
 import secrets
 import socket
 import uuid
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import replace
 from urllib.parse import urlsplit
 
 from .. import ExecutionError
-from ..processes import launch_component
+from ..processes import ProcessIdentity, launch_component
 from ..step_trace import write_json
 from ..transport import post
+from . import register_ready_instance
 
 
 def _environment(config, topology, directory, *, require_engines):
@@ -97,15 +97,6 @@ def refresh_discovery(config, topology, directory):
         _environment(config, topology, directory, require_engines=False)
 
 
-@dataclass
-class _MasterInstance:
-    index: int
-    attempt: int
-    process: str
-    directory: Path
-    name: str
-
-
 class MasterRole:
     def __init__(
         self,
@@ -123,7 +114,7 @@ class MasterRole:
         self.supervisor, self.topology = supervisor, topology
         self._configuration = environment
         self.records, self.monitoring = records, monitoring
-        self.environment, self._owned = {}, []
+        self.environment = {}
         self._next = 0
         self._instances = {}
         self._lock = asyncio.Lock()
@@ -184,51 +175,42 @@ class MasterRole:
             )
 
     def publish_discovery(self, snapshot):
-        if self.component is not None:
-            for node in snapshot:
-                if node["role"] == "master":
-                    instance = self._instances.get(node["rpc"])
-                    directory = (
-                        instance.directory
-                        if instance
-                        else self.records.directory / "components" / node["id"]
-                    )
-                    refresh_discovery(self.component["config"], snapshot, directory)
+        if self.component is None:
+            return
+        processes = {
+            process.instance_id: process
+            for process in self.supervisor.owned_processes("master")
+        }
+        for node in snapshot:
+            if node["role"] == "master":
+                directory = processes[node["id"]].directory(self.records.directory)
+                refresh_discovery(self.component["config"], snapshot, directory)
 
-    async def _launch(self, index, attempt=0):
-        name = f"master-{index}"
-        process = name if attempt == 0 else f"{name}-restart-{attempt}"
-        directory = self.records.directory / "components" / name
-        if attempt:
-            directory = directory / f"restart-{attempt}"
-        self._owned.append(process)
-        if attempt:
-            address = next(
-                address
-                for address, item in self._instances.items()
-                if item.index == index
-            )
-            self._instances[address].directory = directory
+    async def _launch(self, identity, *, expected_address=None):
         _, control, endpoint = await launch_component(
             self.supervisor,
             self.records,
             self._configuration,
-            "master",
-            index,
+            identity,
             self.recipe,
-            configure=lambda directory: self._environment(index, directory),
-            attempt=attempt,
+            configure=lambda directory: self._environment(identity.index, directory),
         )
         if endpoint is None and self.environment:
             raise ExecutionError("Native Master did not publish endpoints")
+        if expected_address is not None and (
+            endpoint is None or endpoint["rpc"] != expected_address
+        ):
+            raise ExecutionError("Restarted Master changed its service address")
         if endpoint is not None:
-            self._validate(name, index, endpoint, control)
-        self.topology.register(name, "master", control, endpoint)
-        if self.monitoring:
-            self.monitoring.discover(name, directory)
-            if self.monitoring.baselined:
-                await self.monitoring.baseline([name])
-        return endpoint, _MasterInstance(index, attempt, process, directory, name)
+            self._validate(identity.instance_id, identity.index, endpoint, control)
+        register_ready_instance(
+            self.topology, self.monitoring, self.records, identity, control, endpoint
+        )
+        if self.monitoring and self.monitoring.baselined:
+            await self.monitoring.baseline([identity.instance_id])
+        if endpoint is not None:
+            self._instances[endpoint["rpc"]] = identity
+        return endpoint
 
     async def start(self, count=None):
         if count is None:
@@ -244,9 +226,8 @@ class MasterRole:
             for _ in range(count):
                 index = self._next
                 self._next += 1
-                endpoint, instance = await self._launch(index)
+                endpoint = await self._launch(ProcessIdentity("master", index))
                 if endpoint is not None:
-                    self._instances[endpoint["rpc"]] = instance
                     result.append(endpoint["rpc"])
             return result
 
@@ -325,7 +306,7 @@ class MasterRole:
             addresses = self._selected(targets, active=True)
             selected = [self._instances[address] for address in addresses]
             if any(
-                self.supervisor.child(item.process).returncode is not None
+                self.supervisor.child(item.name).returncode is not None
                 for item in selected
             ):
                 raise ExecutionError("Selected Master is not running")
@@ -336,25 +317,27 @@ class MasterRole:
                 mode=mode,
             )
             if self.monitoring:
-                await self.monitoring.final_scrape([item.name for item in selected])
+                await self.monitoring.final_scrape(
+                    [item.instance_id for item in selected]
+                )
             for item in selected:
-                child = self.supervisor.child(item.process)
+                child = self.supervisor.child(item.name)
                 errors = await self.supervisor.stop_intentionally(
-                    item.process, mode=mode, grace=self._stop_grace()
+                    item.name, mode=mode, grace=self._stop_grace()
                 )
                 if child.returncode is not None:
-                    (item.directory / "ready.json").unlink(missing_ok=True)
-                    self.topology.retire(item.name)
+                    (item.directory(self.records.directory) / "ready.json").unlink(
+                        missing_ok=True
+                    )
+                    self.topology.retire(item.instance_id)
                     self.records.emit(
                         event="instance_stopped",
-                        node=item.name,
-                        role="master",
-                        instance_id=item.name,
-                        generation=item.attempt,
-                        process=item.process,
+                        node=item.instance_id,
+                        process=item.name,
+                        **item.event_fields(),
                     )
                     if self.monitoring:
-                        self.monitoring.retire(item.name)
+                        self.monitoring.retire(item.instance_id)
                 if errors:
                     raise ExecutionError("; ".join(errors))
             return addresses
@@ -364,11 +347,10 @@ class MasterRole:
             addresses = self._selected(targets, active=False)
             for address in addresses:
                 item = self._instances[address]
-                item.attempt += 1
-                endpoint, replacement = await self._launch(item.index, item.attempt)
-                if endpoint is None or endpoint["rpc"] != address:
-                    raise ExecutionError("Restarted Master changed its service address")
-                self._instances[address] = replacement
+                await self._launch(
+                    replace(item, generation=item.generation + 1),
+                    expected_address=address,
+                )
             return addresses
 
     def _stop_grace(self):
@@ -378,8 +360,10 @@ class MasterRole:
     async def close(self):
         errors = []
         # Keep peers and ZooKeeper alive until each Master has completed its shutdown.
-        for process in reversed(self._owned):
-            errors.extend(await self.supervisor.stop([process], self._stop_grace()))
+        for process in reversed(self.supervisor.owned_processes("master")):
+            errors.extend(
+                await self.supervisor.stop([process.name], self._stop_grace())
+            )
         return errors
 
 

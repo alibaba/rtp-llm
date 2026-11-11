@@ -4,6 +4,7 @@ import os
 
 from ...config.validation import duration
 from .. import ExecutionError
+from ..processes import ProcessIdentity
 
 
 class ZooKeeperRole:
@@ -17,8 +18,9 @@ class ZooKeeperRole:
         directory = self.records.directory / "zookeeper"
         directory.mkdir()
         ready = directory / "ready.json"
+        identity = ProcessIdentity("zookeeper")
         await self.supervisor.spawn(
-            "zookeeper",
+            identity,
             recipe["command"],
             recipe["cwd"],
             {
@@ -44,11 +46,9 @@ class ZooKeeperRole:
         )
         self.records.emit(
             event="process_ready",
-            node="zookeeper",
+            node=identity.name,
             connect=connect,
-            role="zookeeper",
-            instance_id="zookeeper",
-            generation=0,
+            **identity.event_fields(),
         )
         return connect
 

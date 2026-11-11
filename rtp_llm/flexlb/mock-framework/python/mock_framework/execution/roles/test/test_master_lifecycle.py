@@ -10,7 +10,7 @@ import yaml
 from mock_framework.config import compile_case
 from mock_framework.execution import ExecutionError
 from mock_framework.execution.launch import local_launch, prepare_launch
-from mock_framework.execution.processes import ProcessSupervisor
+from mock_framework.execution.processes import ProcessIdentity, ProcessSupervisor
 from mock_framework.execution.roles.master import master_port
 from mock_framework.execution.runner import run_case
 from mock_framework.execution.step.step_registry import StepRegistry, register_step
@@ -195,11 +195,12 @@ while True: time.sleep(1)
             monitoring=None,
         )
         try:
-            for name in ("master-0", "master-1"):
+            names = ("master-0", "master-1")
+            for index, name in enumerate(names):
                 directory = output / name
                 directory.mkdir()
                 await supervisor.spawn(
-                    name,
+                    ProcessIdentity("master", index),
                     [sys.executable, str(peer)],
                     tmp_path,
                     {
@@ -209,11 +210,10 @@ while True: time.sleep(1)
                     },
                     directory,
                 )
-                group._owned.append(name)
                 await supervisor.guard(_wait_file(directory / "ready"), 5)
             async with asyncio.timeout(15):
                 assert await group.close() == []
-            assert all((output / name / "exited").exists() for name in group._owned)
+            assert all((output / name / "exited").exists() for name in names)
             assert not supervisor.children
         finally:
             await supervisor.close()
@@ -630,6 +630,9 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(
         if item["event"] == "process_started" and item["node"].startswith("master-")
     ]
     assert len(process) == 2 and process[0]["pid"] != process[1]["pid"]
+    assert [
+        (item["node"], item["instance_id"], item["generation"]) for item in process
+    ] == [("master-0", "master-0", 0), ("master-0-restart-1", "master-0", 1)]
     assert_reaped(output)
 
 

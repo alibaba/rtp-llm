@@ -4,10 +4,41 @@ import asyncio
 import json
 import os
 import signal
+from dataclasses import dataclass
 
 from ..config.validation import duration
 from . import ExecutionError
 from .step_trace import write_json
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    role: str
+    index: int | None = None
+    generation: int = 0
+
+    @property
+    def instance_id(self):
+        return self.role if self.index is None else f"{self.role}-{self.index}"
+
+    @property
+    def name(self):
+        if self.generation:
+            return f"{self.instance_id}-restart-{self.generation}"
+        return self.instance_id
+
+    def directory(self, run_directory):
+        directory = run_directory / "components" / self.instance_id
+        return (
+            directory / f"restart-{self.generation}" if self.generation else directory
+        )
+
+    def event_fields(self):
+        return {
+            "role": self.role,
+            "instance_id": self.instance_id,
+            "generation": self.generation,
+        }
 
 
 class ProcessSupervisor:
@@ -20,10 +51,17 @@ class ProcessSupervisor:
 
     @property
     def children(self):
-        return tuple(self._children.items())
+        return tuple((name, child) for name, (_, child) in self._children.items())
 
     def child(self, name):
-        return self._children[name]
+        return self._children[name][1]
+
+    def owned_processes(self, *roles):
+        return tuple(
+            identity
+            for identity, _ in self._children.values()
+            if identity is not None and identity.role in roles
+        )
 
     def fail(self, message):
         if not self.closing and not self.failure.done():
@@ -50,37 +88,27 @@ class ProcessSupervisor:
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-    def _process_event(self, event, process_name, **fields):
-        instance_id, _, generation = process_name.partition("-restart-")
-        role = instance_id.split("-", 1)[0]
-        if role in (
-            "master",
-            "prefill",
-            "decode",
-            "vit",
-            "client",
-            "zookeeper",
-            "prometheus",
-        ):
-            fields.update(
-                role=role, instance_id=instance_id, generation=int(generation or "0")
-            )
-        self.records.emit(event=event, node=process_name, **fields)
+    def _process_event(self, event, name, identity, **fields):
+        if identity is not None:
+            fields.update(identity.event_fields())
+        self.records.emit(event=event, node=name, **fields)
 
     async def spawn(
-        self, name, command, cwd, env, directory, *, describe=None, zero_exit=False
+        self, process, command, cwd, env, directory, *, describe=None, zero_exit=False
     ):
+        identity = process if isinstance(process, ProcessIdentity) else None
+        name = process if identity is None else identity.name
         if name in self._children or name in self._expected:
             raise ExecutionError(f"Process identity has already been used: {name}")
 
         def retain(child):
-            self._children[name] = child
+            self._children[name] = (identity, child)
             if zero_exit:
                 self._zero_exit.add(name)
             self._monitors.append(
                 asyncio.create_task(self._monitor(name, child, describe))
             )
-            self._process_event("process_started", name, pid=child.pid)
+            self._process_event("process_started", name, identity, pid=child.pid)
 
         with (directory / "stdout.log").open("wb") as out, (
             directory / "stderr.log"
@@ -104,7 +132,7 @@ class ProcessSupervisor:
         return child
 
     async def stop_intentionally(self, name, *, mode="terminate", grace=3):
-        child = self._children[name]
+        identity, child = self._children[name]
         if child.returncode is not None:
             raise ExecutionError(f"{name} already exited before intentional {mode}")
         if mode not in ("terminate", "kill"):
@@ -127,21 +155,21 @@ class ProcessSupervisor:
                     f"{name}: unexpected exit status during kill: {child.returncode}"
                 )
             del self._children[name]
-            self._record_stop(name, child.returncode, errors)
+            self._record_stop(name, identity, child.returncode, errors)
         return errors
 
     async def stop(self, names, grace):
         children = [
-            (name, self._children[name]) for name in names if name in self._children
+            (name, *self._children[name]) for name in names if name in self._children
         ]
         errors = [
             f"{name}: exited unexpectedly before stop with code {child.returncode}"
-            for name, child in children
+            for name, _, child in children
             if child.returncode is not None and name not in self._expected
         ]
-        self._expected.update(name for name, _ in children)
+        self._expected.update(name for name, _, _ in children)
         # Kill only owned process groups, including grandchildren after their leader exits.
-        for name, child in reversed(children):
+        for name, _, child in reversed(children):
             try:
                 os.killpg(child.pid, signal.SIGTERM)
             except ProcessLookupError:
@@ -150,11 +178,11 @@ class ProcessSupervisor:
                 errors.append(f"{name}: {error}")
         deadline = asyncio.get_running_loop().time() + grace
         while (
-            any(child.returncode is None for _, child in children)
+            any(child.returncode is None for _, _, child in children)
             and asyncio.get_running_loop().time() < deadline
         ):
             await asyncio.sleep(0.02)
-        for name, child in reversed(children):
+        for name, identity, child in reversed(children):
             killed = False
             try:
                 os.killpg(child.pid, signal.SIGKILL)
@@ -185,12 +213,12 @@ class ProcessSupervisor:
                 )
             if child.returncode is not None:
                 del self._children[name]
-            self._record_stop(name, child.returncode, errors)
+            self._record_stop(name, identity, child.returncode, errors)
         return errors
 
-    def _record_stop(self, name, code, errors):
+    def _record_stop(self, name, identity, code, errors):
         try:
-            self._process_event("process_stopped", name, code=code)
+            self._process_event("process_stopped", name, identity, code=code)
         except OSError as error:
             errors.append(f"{name}: record process_stopped: {error}")
 
@@ -205,28 +233,25 @@ class ProcessSupervisor:
 
 
 async def launch_component(
-    supervisor, records, environment, role, index, recipe, *, configure=None, attempt=0
+    supervisor, records, environment, identity, recipe, *, configure=None
 ):
-    instance_id = f"{role}-{index}"
-    directory = records.directory / "components" / instance_id
-    process_name = instance_id if attempt == 0 else f"{instance_id}-restart-{attempt}"
-    if attempt:
-        directory = directory / f"restart-{attempt}"
+    instance_id = identity.instance_id
+    directory = identity.directory(records.directory)
     directory.mkdir(parents=True)
     config, ready = directory / "config.json", directory / "ready.json"
     write_json(
         config,
         {
-            "component_role": role,
-            "component": environment[role],
+            "component_role": identity.role,
+            "component": environment[identity.role],
             "environment": environment,
-            "index": index,
+            "index": identity.index,
             "id": instance_id,
         },
     )
     env = {} if configure is None else configure(directory)
     child = await supervisor.spawn(
-        process_name,
+        identity,
         recipe["command"],
         recipe["cwd"],
         {
@@ -255,11 +280,9 @@ async def launch_component(
     )
     records.emit(
         event="process_ready",
-        node=process_name,
+        node=identity.name,
         url=control,
-        role=role,
-        instance_id=instance_id,
-        generation=attempt,
+        **identity.event_fields(),
     )
     path = directory / "endpoints.json"
     endpoint = json.loads(path.read_text()) if path.is_file() else None
