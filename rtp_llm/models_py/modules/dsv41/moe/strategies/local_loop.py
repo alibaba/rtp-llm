@@ -480,20 +480,19 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
                 up = torch.clamp(up, -cfg.swiglu_limit, cfg.swiglu_limit)
                 gate = torch.clamp(gate, max=cfg.swiglu_limit)
             # Pure torch SiLU avoids a Triton JIT specialization (N=group*T)
-            # being compiled inside cudaStreamCapture.  Same math as the
-            # fused Expert path; the extra elementwise nodes are negligible
-            # against the removed per-expert loop.
-            h = (torch.nn.functional.silu(gate) * up).to(torch.bfloat16)
+            # being compiled inside cudaStreamCapture.  Apply the router
+            # weight on the activation (before w2) and cast to bf16, exactly
+            # as Expert.forward does, then bmm the whole group.
+            gw = local_w[:, a:b].transpose(0, 1).unsqueeze(-1)
+            h = ((torch.nn.functional.silu(gate) * up) * gw).to(torch.bfloat16)
             w2 = _fp4_group_dequant_bf16(
                 self._W2_w[a:b],
                 self._W2_s[a:b],
                 self._fp4_byte_lut,
                 self._e8m0_byte_lut,
             ).reshape(group, self._W2_w.shape[1], self._W2_w.shape[2] * 2)
-            down = torch.bmm(h, w2.transpose(1, 2)).float()
+            y.add_(torch.bmm(h, w2.transpose(1, 2)).float().sum(dim=0))
             del w2
-            gw = local_w[:, a:b].transpose(0, 1).unsqueeze(-1)
-            y.add_((down * gw).sum(dim=0))
         return y
 
     def _forward_topk_bs1(
