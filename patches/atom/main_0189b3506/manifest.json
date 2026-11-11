@@ -3,7 +3,7 @@
   "source_commit": "0189b35066e8ceac6446fac19cd8ba77671d1848",
   "wheel_sha256": "021920395fa6e95e7d3fe75631d0f8c93083c90f5c1ae3f4a4d46a93d940cbcc",
   "transformers_version": "5.16.1",
-  "patch_sha256": "dc442a0098f3140e6dab69654d8902163737d9412ac68119e12ea5b48eee7262",
+  "patch_sha256": "b7dc88fedb9347d7fcf8e000927687bd64676bb0fb16329cdb686a93b9a50f14",
   "source_files_sha256": {
     "atom/model_ops/attention_gdn.py": "445af0bdfb84603faee2ec892836b56a8a2686608628db152de89d793c099cc9",
     "atom/model_ops/fla_ops/gdn_flydsl.py": "bdd7df6992d1b7541ccc769dca8ab0c156844276df6383566c85bd6b9eab7b1b",
@@ -14,7 +14,10 @@
     "atom/plugin/rtpllm/models/qwen4_exp.py": "8191fa2260d7ac182ede966dd2a9389bc557c9851558ccab6ee883b5e04a01bf",
     "atom/plugin/rtpllm/utils/qwen4_exp_context.py": "f8346a7ba0c03d25eec2e15153436292dbe4002a81f42f5989a11e27a54bd42b",
     "atom/plugin/rtpllm/utils/replay_hybrid.py": null,
-    "atom/plugin/rtpllm/utils/replay_policy.py": null
+    "atom/plugin/rtpllm/utils/replay_policy.py": null,
+    "atom/model_ops/moe.py": "3a6a93620a909b050668b1534997db1028a9e437c25aeb000819dba01fd314f0",
+    "atom/model_ops/qwen38_moe_dispatch.py": null,
+    "aiter/ops/flydsl/fused_moe_gfx942.py": "77bdebc757671e7b931bdefd88aa019aad052bbbc12a1f3de7cf966b835a401b"
   },
   "patched_files_sha256": {
     "atom/model_ops/attention_gdn.py": "60c72940d3bc2d3a89533f8d4b8441801818fffca1209a02e30435967e6d2c4a",
@@ -26,6 +29,11 @@
     "atom/plugin/rtpllm/models/qwen4_exp.py": "56066cbd680a0810d6c6e29919d52a41bbfad5f834aa9c02046d1d3b44de0942",
     "atom/plugin/rtpllm/utils/qwen4_exp_context.py": "9d6818c73aee2992ffa37185a265fad03e0aaaeb5d5277490f53692bbd212dc7",
     "atom/plugin/rtpllm/utils/replay_hybrid.py": "8864542e137735d8b8a13f694bc00b2aa2d7cb9dc63a4cde0f689cd20d42a19c",
-    "atom/plugin/rtpllm/utils/replay_policy.py": "fb498cf76628a4cb2b6743cd4c6288b0835d526e2967fc842e52ccd99fcdfa2a"
-  }
+    "atom/plugin/rtpllm/utils/replay_policy.py": "fb498cf76628a4cb2b6743cd4c6288b0835d526e2967fc842e52ccd99fcdfa2a",
+    "atom/model_ops/moe.py": "583c6de161d380732c9526e6da49d70d7768373d70f87b733f7fcfa7396b39ea",
+    "atom/model_ops/qwen38_moe_dispatch.py": "be07ed0431ccd91c3927206023b0a70a5be0863327cdd8979797471c16e649b6",
+    "aiter/ops/flydsl/fused_moe_gfx942.py": "2620dbfeebca8a250c7a2a5c006502c5b00678186477879d1f93e67c1148c432"
+  },
+  "aiter_version": "0.1.29+rocm7.2.0.git97d2389",
+  "aiter_wheel_sha256": "738225cdcb034addb8f571cbd3b4e1187128c8bfc88f8abd597f5e37de953c01"
 }
