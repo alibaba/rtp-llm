@@ -127,5 +127,14 @@ class PTPCNormDevice(unittest.TestCase):
                 assert_bf16_bits(self, output, canonical_norm(value, gamma, 1e-6))
 
 
+def load_tests(loader, tests, pattern):
+    # Keep the experimental tree-preserving producer inside the existing
+    # component entry; it is not selected by production norm dispatch yet.
+    from rtp_llm.models_py.modules.dsv41.ppu.test import test_ptpc_norm_quant
+
+    tests.addTests(loader.loadTestsFromModule(test_ptpc_norm_quant))
+    return tests
+
+
 if __name__ == "__main__":
     unittest.main()
