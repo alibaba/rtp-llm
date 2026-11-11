@@ -2075,7 +2075,7 @@ class AttentionV41FP8(AttentionFP8):
                         q_dense = q[chunk]
                         w_dense = weights[chunk]
                         rows = int(visible.numel())
-                        row_block = 4096
+                        row_block = 512
                         ids = torch.arange(key_count, device=x.device)
                         candidates = shared.get("candidates")
                         k = min(self.index_topk, key_count)

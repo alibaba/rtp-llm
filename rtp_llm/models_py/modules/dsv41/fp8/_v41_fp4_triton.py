@@ -491,7 +491,15 @@ def dequantize_k_cache_bytes_fp4(
     if N == 0:
         return out
     if not _torch_codec_supported():
-        out.copy_(_dequantize_fp4_rows_torch(raw_bytes, out.dtype).view_as(out))
+        # The A100 reference path materialises several float32 temporaries per
+        # row.  A 1M-token CP gather can contain >1M entries, so dequantize in
+        # bounded row blocks directly into the caller's output.
+        block = 4096
+        for start in range(0, N, block):
+            end = min(start + block, N)
+            out[start:end].copy_(
+                _dequantize_fp4_rows_torch(raw_bytes[start:end], out.dtype)
+            )
         return out
     pool_view = raw_bytes.view(N, 1, FP4_GLOBAL_ENTRY_BYTES)
     _OUT_DTYPE = {
