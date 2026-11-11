@@ -1025,6 +1025,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                         FlexlbTrace.setScheduleAttribute(traceContext, FlexlbTrace.PREFILL_ADDRESS, address);
                     } else if (RoleType.DECODE.getCode().equals(server.getRole())) {
                         FlexlbTrace.setScheduleAttribute(traceContext, FlexlbTrace.DECODE_ADDRESS, address);
+                    } else if (RoleType.VIT.getCode().equals(server.getRole()) && !isAdmissionRequest(ctx)) {
+                        FlexlbTrace.setScheduleAttribute(traceContext, FlexlbTrace.VIT_ADDRESS,
+                                server.getServerIp() + ":" + server.getGrpcPort());
                     }
                 }
             } else {
