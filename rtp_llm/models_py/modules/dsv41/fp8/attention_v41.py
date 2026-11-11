@@ -2868,6 +2868,17 @@ class AttentionV41FP8(AttentionFP8):
             INDEXER_KV, read_positions.reshape(-1), read_req.reshape(-1)
         ).view(B, width)
         slots = torch.where(ids < (ends // self.compress_ratio)[:, None], slots, -1)
+        # Release other source layers' keys BEFORE allocating. Producers run in
+        # strict layer order and every consumer of a source layer's keys runs
+        # between that producer and the next one, so at most one gather buffer
+        # needs to be live; without this release the next producer's allocation
+        # overlaps the stale buffer and doubles the peak (measured: 256MiB
+        # request OOMing at 185.88MiB free with exactly one 256MiB stale buffer
+        # resident on the vision-hosting rank).
+        prior = self._shared_attention.get("global")
+        if isinstance(prior, dict):
+            for stale in [k for k in prior if k != self.layer_id]:
+                del prior[stale]
         # bf16 halves the capture-static pool-wide rectangle (256MiB instead of
         # 512MiB at a 1M-token pool, ratio 2) so tight-HBM ranks can hold it
         # beside the weights inside a CUDA graph pool. Value-exact: dequantized
