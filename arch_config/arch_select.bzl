@@ -240,7 +240,7 @@ def whl_deps():
             # Keep the ROCm ATOM/AITER/FlyDSL pins synchronized with
             # deps/requirements{,_lock}_rocm.txt.
             "amd-aiter==0.1.29+rocm7.2.0.git97d2389",
-            "atom==0.1.8+g9af739efc",
+            "atom==0.1.1.dev1+g0189b3506",
             "flydsl==0.4.2",
             "triton==3.8.0+amd.rocm7.2.0.git111ff227",
             "triton-kernels==1.0.0+amd.rocm7.2.0.git111ff227",
@@ -273,6 +273,13 @@ def ml_pin_reqs():
     the lock of the environment the wheel is installed into.
     """
     return select({
+        "@rtp_llm//:using_rocm": [
+            "transformers==5.16.1",
+            "tokenizers==0.23.3",
+            "sentence-transformers==5.2.0",
+            "pyarrow==14.0.0",
+            "xgrammar==0.2.5",
+        ],
         "@rtp_llm//:using_ppu": [
             "transformers==4.57.1",
             "sentence-transformers==2.7.0",

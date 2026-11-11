@@ -1,4 +1,5 @@
 -r requirements_base.txt
+transformers==5.2.0
 opentelemetry-sdk==1.44.0
 opentelemetry-exporter-otlp-proto-http==1.15.0
 
