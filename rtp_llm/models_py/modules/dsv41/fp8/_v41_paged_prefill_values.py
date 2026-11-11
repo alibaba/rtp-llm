@@ -63,13 +63,21 @@ def paged_sparse_device_eligible(device) -> bool:
 
 
 class PagedGlobalValues:
-    """Lazy replacement for the dense dequantized globals ``g``."""
+    """Lazy replacement for the dense dequantized globals ``g``.
 
-    __slots__ = ("attn", "region", "ratio", "count", "device")
+    The slot table is precomputed at publish time — inside the producer's
+    ``bind_attn_cache`` window, the only scope where the layer's block tables
+    are bound (load54probe: lazy ``_slots`` at consumption time saw the
+    restored ``None`` binding from a different layer's scope). Slots are plain
+    ints and the pool view survives the forward, so consumption is
+    binding-independent.
+    """
 
-    def __init__(self, attn, region, ratio: int, count: int, device):
-        self.attn = attn
-        self.region = region
+    __slots__ = ("pool", "slots", "ratio", "count", "device")
+
+    def __init__(self, pool, slots: torch.Tensor, ratio: int, count: int, device):
+        self.pool = pool
+        self.slots = slots
         self.ratio = int(ratio)
         self.count = int(count)
         self.device = device
@@ -83,11 +91,7 @@ class PagedGlobalValues:
 
     def gather(self, idx: torch.Tensor) -> torch.Tensor:
         """Dequantize the compressed rows named by ``idx`` ([N] long, >=0)."""
-        pool = self.attn._source_pool(self.region)
-        positions = (idx + 1) * self.ratio - 1
-        req_ids = torch.zeros_like(positions)
-        slots = self.attn._slots(self.region, positions, req_ids)
-        raw = gather_k_cache_bytes_fp4(pool, slots)
+        raw = gather_k_cache_bytes_fp4(self.pool, self.slots[idx])
         return dequantize_k_cache_bytes_fp4(raw)
 
 
@@ -170,11 +174,12 @@ def publish_paged_globals(attn, main_pool, index_pool, indexer_region, ends, rat
             return False
         positions = (torch.arange(count, device=device, dtype=torch.long) + 1) * ratio - 1
         req_ids = torch.zeros(count, device=device, dtype=torch.long)
-        slots = attn._slots(indexer_region, positions, req_ids)
-        if slots is None:
+        slots_k = attn._slots(indexer_region, positions, req_ids)
+        slots_g = attn._slots(attn._global_region(), positions, req_ids)
+        if slots_k is None or slots_g is None:
             return False
-        paged_g = PagedGlobalValues(attn, attn._global_region(), ratio, count, device)
-        lazy_k = LazyIndexerKeys(index_pool, slots, count)
+        paged_g = PagedGlobalValues(main_pool, slots_g, ratio, count, device)
+        lazy_k = LazyIndexerKeys(index_pool, slots_k, count)
         attn._shared_attention["global"] = {attn.layer_id: [(paged_g, lazy_k)]}
         attn._shared_attention.pop("prefill_chunk_meta", None)
         attn._shared_attention.pop("prefill_kv_workspace", None)
