@@ -125,15 +125,27 @@ def recorded_names() -> set:
 
 
 def _module_placement(module) -> tuple:
-    """(device, storage, gpu_bytes) over a module's live tensors."""
+    """(device, storage, gpu_bytes) over a module's live tensors.
+
+    Includes plain-tensor instance attributes: reference-path modules (e.g.
+    V41MXFP8Linear._w_bf16, QuantizedLinear.weight) hold converted or raw
+    checkpoint tensors that are not registered parameters/buffers.
+    """
     device = storage = None
     gpu_bytes = 0
     tensors = list(module.parameters(recurse=True)) + list(
         module.buffers(recurse=True)
     )
+    for value in vars(module).values():
+        if isinstance(value, torch.Tensor):
+            tensors.append(value)
+    seen = set()
     for tensor in tensors:
         if tensor is None or not isinstance(tensor, torch.Tensor):
             continue
+        if id(tensor) in seen:
+            continue
+        seen.add(id(tensor))
         d, s = _classify(tensor)
         if device is None or (device == "cpu" and d != "cpu"):
             device, storage = d, s
