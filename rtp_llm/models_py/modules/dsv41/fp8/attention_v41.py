@@ -3164,28 +3164,33 @@ class AttentionV41FP8(AttentionFP8):
                 )
         score_capacity = capacity
         keys_dense = keys
-        if (
-            not paged
-            and candidate_blocks <= 0
-            and candidate_size <= 0
-            and shared.get("candidates") is None
-            and T > 0
-            and not torch.cuda.is_current_stream_capturing()
-        ):
+        if not paged and T > 0 and not torch.cuda.is_current_stream_capturing():
             # The dense fallback scores a [slice, heads, capacity] fp32
             # rectangle whose capacity is the pool-wide compressed slot count
-            # (e.g. 32768 columns for a 1M-token FULL pool), independent of the
-            # request's visible span. On devices whose post-weight free HBM is
-            # measured in MiB, that pool-wide rectangle (64MiB) OOMs the first
-            # decode step even for few-hundred-token contexts. Columns at or
-            # beyond the maximum visible length are unconditionally masked to
-            # -inf, so clamping the rectangle and the keys gather to that span
-            # cannot change the selected indices; the short-context ascending
-            # shortcut below is width-independent. Graph capture keeps the
-            # static capacity shape (data-dependent shapes are not capturable).
+            # (524288 columns for a 1M-token FULL pool at ratio 2), independent
+            # of the request's visible span. On devices whose post-weight free
+            # HBM is measured in MiB, that pool-wide rectangle (64MiB for one
+            # row) OOMs the first decode step even for few-hundred-token
+            # contexts. Columns at or beyond the maximum visible length are
+            # unconditionally masked to -inf, so clamping the rectangle and the
+            # keys gather to that span cannot change the selected indices; the
+            # short-context ascending shortcut below is width-independent.
+            # The candidate machinery stays consistent because both its
+            # functions derive nblocks from the passed logits width: keeping
+            # the clamp at or above candidate_blocks * candidate_size means
+            # select_candidate_blocks always sees enough columns, and every
+            # layer of one forward derives the same clamped width from the
+            # same visible span (identical ratios) or the floor (short
+            # contexts). At full span the clamp is the identity, preserving
+            # today's per-layer capacity semantics exactly. Graph capture
+            # keeps static capacity shapes (data-dependent shapes are not
+            # capturable).
             span = int(visible_per_token.max().item())
             span = ((min(max(span, 1), capacity) + 255) // 256) * 256
-            score_capacity = min(max(span, 256), capacity)
+            floor = 256
+            if candidate_size > 0 and candidate_blocks > 0:
+                floor = max(floor, candidate_size * candidate_blocks)
+            score_capacity = min(max(span, floor), capacity)
             keys_dense = keys.narrow(1, 0, score_capacity)
         output = torch.full(
             (T, self.index_topk), -1, dtype=torch.int32, device=x.device
