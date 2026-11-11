@@ -83,9 +83,7 @@ public final class EngineLoop implements AutoCloseable {
     public EngineScheduler.Status status(long latestFinishedVersion) {
         synchronized (lock) {
             checkFailure();
-            var counts = scheduler.queues();
-            var tasks = scheduler.tasks();
-            return finished.snapshot(latestFinishedVersion, tasks, counts.waiting(), counts.running());
+            return finished.snapshot(latestFinishedVersion, scheduler.tasks());
         }
     }
 

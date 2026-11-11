@@ -25,24 +25,24 @@ class TaskHistoryTest {
         logger.addHandler(handler);
         try {
             var active = List.of(task(2000));
-            var snapshot = history.snapshot(0, active, 1, 0);
-            assertEquals(active, snapshot.tasks()); assertEquals(1, snapshot.waiting());
+            var snapshot = history.snapshot(0, active);
+            assertEquals(active, snapshot.tasks());
             assertEquals(1024, snapshot.finished().size()); assertEquals(2, snapshot.finished().getFirst().requestId());
             assertEquals(1025, snapshot.finishedVersion());
             assertTrue(warnings.isEmpty()); history.reportGaps();
             assertEquals(List.of("finished_history_gap requested_version=0 dropped_through=1 latest_version=1025 retained=1024"), warnings);
-            assertTrue(history.snapshot(snapshot.finishedVersion(), active, 1, 0).finished().isEmpty());
-            assertEquals(1024, history.snapshot(1, active, 1, 0).finished().size());
-            history.snapshot(0, active, 1, 0); history.reportGaps();
+            assertTrue(history.snapshot(snapshot.finishedVersion(), active).finished().isEmpty());
+            assertEquals(1024, history.snapshot(1, active).finished().size());
+            history.snapshot(0, active); history.reportGaps();
             assertEquals(1, warnings.size());
         } finally { logger.removeHandler(handler); }
     }
 
     @Test void anAheadCursorNeverMovesBackwardsIncludingAnEmptyEngine() {
         var history = new TaskHistory();
-        assertEquals(99, history.snapshot(99, List.of(), 0, 0).finishedVersion());
+        assertEquals(99, history.snapshot(99, List.of()).finishedVersion());
         history.add(task(1));
-        var snapshot = history.snapshot(99, List.of(), 0, 0);
+        var snapshot = history.snapshot(99, List.of());
         assertEquals(99, snapshot.finishedVersion()); assertTrue(snapshot.finished().isEmpty());
     }
 

@@ -149,7 +149,7 @@ public interface EngineScheduler extends AutoCloseable {
     /**
      * Captures active and finished request state for Master polling.
      */
-    record Status(List<Task> tasks, List<Task> finished, long finishedVersion, int waiting, int running) {
+    record Status(List<Task> tasks, List<Task> finished, long finishedVersion) {
         public Status { tasks = List.copyOf(tasks); finished = List.copyOf(finished); }
     }
 

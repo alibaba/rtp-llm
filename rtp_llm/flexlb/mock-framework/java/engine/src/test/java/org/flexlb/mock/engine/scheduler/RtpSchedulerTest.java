@@ -322,7 +322,7 @@ class RtpSchedulerTest {
             long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
             while (!request.snapshot().terminating()) { assertTrue(System.nanoTime() < until); Thread.sleep(2); }
             assertEquals(20, request.snapshot().generated()); assertFalse(listener.terminal.isDone());
-            assertEquals(0, engine.status(0).running()); assertEquals(64, cache.snapshot(0, false).availableBlocks());
+            assertTrue(engine.status(0).tasks().isEmpty()); assertEquals(64, cache.snapshot(0, false).availableBlocks());
             engine.checkHealthy(); release.countDown(); assertNull(listener.terminal.get(2, TimeUnit.SECONDS));
         } finally { release.countDown(); }
     }
@@ -368,7 +368,7 @@ class RtpSchedulerTest {
             loop.enqueue(input(1, false), listener);
             assertTrue(entered.await(2, TimeUnit.SECONDS));
             var status = loop.status(0);
-            assertTrue(status.tasks().isEmpty()); assertEquals(0, status.running()); assertEquals(0, status.waiting());
+            assertTrue(status.tasks().isEmpty());
             assertEquals(1, status.finishedVersion()); assertEquals(1, status.finished().getFirst().requestId());
             assertThrows(UnsupportedOperationException.class, () -> status.finished().clear());
             assertTrue(loop.status(status.finishedVersion()).finished().isEmpty());
@@ -466,7 +466,7 @@ class RtpSchedulerTest {
             scheduler.abort(c, new RequestFailure(RequestFailure.Reason.CANCELLED, "test")); drain(scheduler);
             assertEquals(7, cache.snapshot(0, false).freeBlocks());
             assertTrue(scheduler.requests().isEmpty());
-            assertEquals(3, finishedLog.snapshot(0, List.of(), 0, 0).finished().size());
+            assertEquals(3, finishedLog.snapshot(0, List.of()).finished().size());
         }
     }
 

@@ -17,6 +17,8 @@ import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.flexlb.mock.engine.scheduler.EngineScheduler.ReportedPhase.RECEIVED;
+import static org.flexlb.mock.engine.scheduler.EngineScheduler.ReportedPhase.RUNNING;
 
 /**
  * Checks Prefill request admission and cancellation before scheduling.
@@ -77,7 +79,7 @@ class PrefillAdmissionTest {
             var result = queued.completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
             assertEquals(Status.Code.DEADLINE_EXCEEDED, result.status().getCode()); assertEquals(603, result.engineCode());
             assertEquals(5, cache.snapshot(-1, false).availableBlocks());
-            assertEquals(1, engine.snapshot(0).running()); assertEquals(0, engine.snapshot(0).waiting());
+            assertEquals(List.of(RUNNING), engine.snapshot(0).tasks().stream().map(EngineScheduler.Task::phase).toList());
             var rpcBound = engine.submit(input(3, 0, true), System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(25));
             assertEquals(Status.Code.DEADLINE_EXCEEDED, rpcBound.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
             assertEquals(5, cache.snapshot(-1, false).availableBlocks());
@@ -93,7 +95,7 @@ class PrefillAdmissionTest {
             assertEquals(0, cache.snapshot(-1, true).keys().length);
             var fresh = engine.submit(input(1, 0, true)); old.cancel();
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-            while (engine.snapshot(0).running() == 0) {
+            while (engine.snapshot(0).tasks().stream().noneMatch(task -> task.phase() == RUNNING)) {
                 assertTrue(System.nanoTime() < deadline); Thread.sleep(1);
             }
             fresh.cancel();
@@ -127,7 +129,8 @@ class PrefillAdmissionTest {
             assertEquals(8, cache.snapshot(-1, false).availableBlocks());
             try (var owner = cache.acquire(6L * config.blockSize(), List.of()).lease()) {
                 var waiting = engine.submit(input(2, 0, true)).completion().toCompletableFuture();
-                assertFalse(waiting.isDone()); assertEquals(1, engine.snapshot(0).waiting());
+                assertFalse(waiting.isDone());
+                assertEquals(List.of(RECEIVED), engine.snapshot(0).tasks().stream().map(EngineScheduler.Task::phase).toList());
                 owner.close();
                 assertEquals(Status.Code.INTERNAL, waiting.get(2, TimeUnit.SECONDS).status().getCode());
             }
@@ -196,7 +199,7 @@ class PrefillAdmissionTest {
             assertEquals(Status.Code.ALREADY_EXISTS, duplicate.getStatus().getCode());
             for (int i = 1; i <= 1024; i++) engine.submit(input(i, 0, true));
             assertEquals(5, cache.snapshot(-1, false).availableBlocks());
-            assertEquals(1024, engine.snapshot(0).waiting());
+            assertEquals(1024, engine.snapshot(0).tasks().stream().filter(task -> task.phase() == RECEIVED).count());
             engine.close(); assertEquals(8, cache.snapshot(-1, false).availableBlocks());
         }
     }

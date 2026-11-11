@@ -137,6 +137,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             long version = statusVersion.updateAndGet(previous -> Math.max(previous + 1, micros));
             var tasks = prefill == null ? decode.snapshot(request.getLatestFinishedVersion()) : prefill.snapshot(request.getLatestFinishedVersion());
             long collected = System.nanoTime();
+            finished.reportGaps();
             var result = WorkerStatusPB.newBuilder().setRole("RoleType." + role)
                 .setRoleType(RoleTypePB.valueOf("ROLE_TYPE_" + role)).setAlive(true).setKvCacheGroupMode(KvCacheGroupModePB.KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY)
                 .setDpSize(1).setDpRank(0).setTpSize(config.cacheKeyStride()).setPrecision("FP16")
@@ -189,7 +190,6 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             var result = read.get(); value = result.value(); completed = result.collected();
         } catch (RuntimeException error) { failure = error; completed = System.nanoTime(); }
         long elapsed = completed - started;
-        finished.reportGaps();
         rpcMetrics.increment("rtp_llm_rpc_" + kind + "_qps");
         rpcMetrics.observe("rtp_llm_rpc_" + kind + "_total_rt_us", elapsed / 1000.0);
         if (failure != null) {
