@@ -3,7 +3,10 @@ import os
 import unittest
 from unittest.mock import patch
 
-from rtp_llm.models_py.kernels.ppu.attention.ppu_attention_gemm import decode_attention_gemm_config
+from rtp_llm.models_py.kernels.ppu.attention.ppu_attention_gemm import (
+    decode_attention_gemm_config,
+    decode_projection_gemm_config,
+)
 
 
 class AttentionGemmConfigTest(unittest.TestCase):
@@ -68,3 +71,25 @@ class AttentionGemmConfigTest(unittest.TestCase):
     def test_different_sm_allocation_keeps_original_dispatcher(self, _):
         with patch.dict(os.environ, {"EP_SIZE": "32"}):
             self.assertIsNone(decode_attention_gemm_config(4, 4096, 8192))
+
+    @patch("deep_gemm.jit_kernels.utils.get_num_sms", return_value=39)
+    def test_projection_tiles_only_for_qualified_shapes(self, _):
+        expected = {
+            (8, 1536, 4096): (16, 64, 128, 16, 16, 4),
+            (24, 4096, 4096): (16, 64, 128, 16, 16, 4),
+            (8, 4096, 2048): (16, 128, 128, 16, 32, 4),
+            (24, 8192, 1024): (32, 64, 128, 16, 32, 4),
+        }
+        for (m, n, k), tile in expected.items():
+            self.assertEqual(decode_projection_gemm_config(m, n, k)[1:7], tile)
+        for m, n, k in (
+            (2, 4096, 4096),
+            (3, 1536, 4096),
+            (8, 1024, 4096),
+            (8, 4096, 8192),
+        ):
+            self.assertIsNone(decode_projection_gemm_config(m, n, k))
+
+    @patch("deep_gemm.jit_kernels.utils.get_num_sms", return_value=20)
+    def test_projection_tiles_fall_back_on_other_sm_counts(self, _):
+        self.assertIsNone(decode_projection_gemm_config(8, 4096, 4096))
