@@ -33,23 +33,23 @@ int64_t elapsedNs(Clock::time_point start, Clock::time_point end) {
 }
 
 bool touchesDevice(const std::string& direction) {
-    return direction == "d2h" || direction == "h2d" || direction == "d2disk" || direction == "disk2d";
+    return direction == "d2h" || direction == "h2d" || direction == "disk2d";
 }
 
 bool touchesHost(const std::string& direction) {
-    return direction == "d2h" || direction == "h2d" || direction == "h2disk" || direction == "disk2h";
+    return direction == "d2h" || direction == "h2d" || direction == "h2disk";
 }
 
 bool touchesDisk(const std::string& direction) {
-    return direction == "d2disk" || direction == "disk2d" || direction == "h2disk" || direction == "disk2h";
+    return direction == "disk2d" || direction == "h2disk";
 }
 
 bool readsDisk(const std::string& direction) {
-    return direction == "disk2d" || direction == "disk2h";
+    return direction == "disk2d";
 }
 
 bool writesDisk(const std::string& direction) {
-    return direction == "d2disk" || direction == "h2disk";
+    return direction == "h2disk";
 }
 
 }  // namespace
@@ -201,7 +201,7 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
                                             const std::string&             pool_prefix,
                                             bool                           need_device,
                                             std::shared_ptr<HostBlockPool> host_pool,
-                                            BlockTreeDiskBlockPoolPtr      disk_pool) {
+                                            DiskBlockPoolPtr               disk_pool) {
     TransferSetup setup;
     for (const auto& tag : gs_info.member_tags) {
         const auto* group = profile_.findGroup(tag);
@@ -370,12 +370,12 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
         const auto& pool = setup.engine->load_loops_.front()->staging_.pool;
         if (pool) {
             const auto workers        = setup.engine->transferWorkerCount();
-            const auto offload_blocks = setup.engine->offload_loops_.front()->staging_.pool->capacity();
+            const auto evict_blocks   = setup.engine->evict_loops_.front()->staging_.pool->capacity();
             writer_.addResolvedConfigInt("staging_load_blocks", pool->capacity() * workers);
-            writer_.addResolvedConfigInt("staging_offload_blocks", offload_blocks * workers);
+            writer_.addResolvedConfigInt("staging_evict_blocks", evict_blocks * workers);
             writer_.addResolvedConfigInt("staging_stride_bytes", pool->stride_bytes_);
             writer_.addResolvedConfigInt("staging_data_bytes",
-                                         (pool->capacity() + offload_blocks) * workers * pool->stride_bytes_);
+                                         (pool->capacity() + evict_blocks) * workers * pool->stride_bytes_);
             writer_.addResolvedConfigInt("disk_to_device_batch_capacity",
                                          std::min(max_descriptors_per_task, pool->capacity()));
         }
@@ -392,7 +392,7 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
         throw std::runtime_error("Unknown group set: " + options_.group_set);
     }
 
-    static const std::vector<std::string> kValidDirections = {"d2h", "h2d", "d2disk", "disk2d", "h2disk", "disk2h"};
+    static const std::vector<std::string> kValidDirections = {"d2h", "h2d", "disk2d", "h2disk"};
     for (const auto& direction : options_.transfer_directions) {
         if (std::find(kValidDirections.begin(), kValidDirections.end(), direction) == kValidDirections.end()) {
             throw std::runtime_error("Unknown transfer direction: " + direction);
@@ -459,7 +459,7 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
     writer_.addResolvedConfig("disk_access_pattern", options_.disk_access_pattern);
 
     std::shared_ptr<HostBlockPool> host_pool;
-    BlockTreeDiskBlockPoolPtr      disk_pool;
+    DiskBlockPoolPtr               disk_pool;
     if (host_block_count > 0) {
         host_pool =
             BenchmarkFixture::createHostPool(payload_bytes, host_block_count, "benchmark_host", options_.enable_crc);
@@ -791,12 +791,12 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
         }
     }
     for (const auto block : host_blocks) {
-        host_pool->incTreeRef(block, BlockTreeRefType::STORE);
-        host_pool->decTreeRef(block, BlockTreeRefType::STORE);
+        host_pool->incTreeRef(block, BlockTreeRefType::EVICTION);
+        host_pool->decTreeRef(block, BlockTreeRefType::EVICTION);
     }
     for (const auto block : disk_blocks) {
-        disk_pool->incTreeRef(block, BlockTreeRefType::STORE);
-        disk_pool->decTreeRef(block, BlockTreeRefType::STORE);
+        disk_pool->incTreeRef(block, BlockTreeRefType::EVICTION);
+        disk_pool->decTreeRef(block, BlockTreeRefType::EVICTION);
     }
 
     const bool strategy_ok = options_.copy_strategy == "auto" || actual_strategy == options_.copy_strategy;
@@ -821,13 +821,11 @@ TransferDescriptor TransferBenchmarkRunner::createDescriptor(const std::string& 
         return TransferDescriptor::deviceToHost(0, member_blocks, host_blocks[host_index]);
     if (direction == "h2d")
         return TransferDescriptor::hostToDevice(0, host_blocks[host_index], member_blocks);
-    if (direction == "d2disk")
-        return TransferDescriptor::deviceToDisk(0, member_blocks, disk_blocks[working_set_index]);
     if (direction == "disk2d")
         return TransferDescriptor::diskToDevice(0, disk_blocks[working_set_index], member_blocks);
     if (direction == "h2disk")
         return TransferDescriptor::hostToDisk(0, host_blocks[host_index], disk_blocks[working_set_index]);
-    return TransferDescriptor::diskToHost(0, disk_blocks[working_set_index], host_blocks[host_index]);
+    throw std::invalid_argument("unsupported transfer direction: " + direction);
 }
 
 TransferBenchmarkRunner::BatchResult
@@ -891,7 +889,9 @@ TransferBenchmarkRunner::runTransferBatch(const std::shared_ptr<PerRankBlockTran
             if (descriptors.empty()) {
                 continue;
             }
-            const size_t direction_batch_size = std::min(descriptor_batch_size, engine->batchLimit());
+            const size_t direction_batch_size =
+                std::min(descriptor_batch_size,
+                         engine->batchLimit(descriptors.front().source_tier, descriptors.front().target_tier));
             if (options_.business_concurrency > 0) {
                 RTP_LLM_CHECK(business_pool != nullptr);
                 const size_t                business_size  = options_.descriptors_per_business;

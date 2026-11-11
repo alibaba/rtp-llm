@@ -18,7 +18,7 @@ cc_library(
         "DeviceDiskTransferExecutor.cc",
         "DeviceHostCopyStrategy.cc",
         "LegacyTransferEngine.cc",
-        "CrcTransferServiceSync.cc",
+        "CrcCopyExecutorSync.cc",
     ],
     hdrs = [
         "TransferExecutor.h",

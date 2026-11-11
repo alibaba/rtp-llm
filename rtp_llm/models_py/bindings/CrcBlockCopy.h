@@ -61,7 +61,7 @@ struct CrcCopyFailure {
 using CrcSnapshotCapture = std::function<CrcCopyFailure()>;
 
 enum class CrcCopyDirection {
-    STORE,
+    EVICT,
     LOAD
 };
 
@@ -70,10 +70,10 @@ struct CrcCopyMemoryUsage {
     size_t host_bytes{0};
 };
 // Bounded, single-operation CRC32C workspace. max_tiles limits the entire batch.
-// store/load require ordered, gap-free tiles covering exactly payload_bytes.
+// evict/load require ordered, gap-free tiles covering exactly payload_bytes.
 // load additionally requires device target spans across items to be disjoint:
 // two items aliasing the same target would race in the scatter instead of
-// failing. store only reads device sources, so aliasing source spans are safe.
+// failing. evict only reads device sources, so aliasing source spans are safe.
 // max_payload_bytes must be <= UINT32_MAX: the kernel's byte counters are
 // 32-bit, so larger capacities are rejected at construction.
 // Host storage must have encodedBytes(payload) capacity.
@@ -88,7 +88,7 @@ struct CrcCopyMemoryUsage {
 // drains or aborts before releasing any metadata. Idle teardown is best-effort.
 // A post-scatter DEVICE_ERROR can lose the per-item verdict; treat the whole
 // batch as uncommitted in that case.
-// A failed store may have written host bytes: callers must not publish them.
+// A failed eviction may have written host bytes: callers must not publish them.
 // A failed load may have scattered corrupted bytes into device tiles: callers
 // discard failed items through the reported status instead of adopting them.
 class CrcCopyWorkspace {
@@ -120,7 +120,7 @@ public:
     size_t hostMemoryBytes() const;
 
     // Clears failures on entry, then records per-item CRC mismatches.
-    CrcCopyState store(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>& failures);
+    CrcCopyState evict(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>& failures);
     CrcCopyState load(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>& failures);
 
     // BUSY/INVALID_ARGS reject without submitted CUDA accesses. DEVICE_ERROR

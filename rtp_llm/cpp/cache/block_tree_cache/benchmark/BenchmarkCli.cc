@@ -17,7 +17,7 @@ void validateTransferOptions(const TransferOptions& options) {
         throw std::runtime_error("copy-strategy options require --btc-transfer-engine-async=false");
     const bool device_route =
         std::any_of(options.transfer_directions.begin(), options.transfer_directions.end(), [](const auto& direction) {
-            return direction == "d2h" || direction == "h2d" || direction == "d2disk" || direction == "disk2d";
+            return direction == "d2h" || direction == "h2d" || direction == "disk2d";
         });
     if (options.enable_crc && options.copy_strategy != "auto")
         throw std::runtime_error("copy-strategy requires --enable-crc=false");

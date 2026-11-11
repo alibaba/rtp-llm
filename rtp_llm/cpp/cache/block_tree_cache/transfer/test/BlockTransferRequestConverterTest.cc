@@ -13,6 +13,19 @@
 namespace rtp_llm {
 namespace {
 
+TransferDescriptor removedDiskToHost(size_t group, BlockIdxType disk, BlockIdxType host) {
+    auto desc = TransferDescriptor::hostToDisk(group, host, disk);
+    std::swap(desc.source_tier, desc.target_tier);
+    std::swap(desc.source_blocks, desc.target_blocks);
+    return desc;
+}
+
+TransferDescriptor removedDeviceToDisk(size_t group, std::vector<BlockIdxType> device, BlockIdxType disk) {
+    auto desc        = TransferDescriptor::deviceToHost(group, std::move(device), disk);
+    desc.target_tier = Tier::DISK;
+    return desc;
+}
+
 using block_transfer_engine_test::makeTestGroupBase;
 using block_transfer_engine_test::makeTestGroupSet;
 using block_transfer_engine_test::makeTestTopology;
@@ -37,12 +50,12 @@ std::vector<GroupSetPtr> makeGroupSets(bool with_host = true, bool with_disk = t
     host_config->physical_block_count = 128;
     auto host_pool                    = std::make_shared<HostBlockPool>(host_config);
 
-    auto disk_config             = std::make_shared<BlockTreeDiskBlockPoolConfig>();
+    auto disk_config             = std::make_shared<DiskBlockPoolConfig>();
     disk_config->pool_type       = BlockPoolType::DISK;
     disk_config->pool_name       = "converter_disk";
     disk_config->stride_bytes    = 4096;
     disk_config->disk_size_bytes = 128 * disk_config->stride_bytes;
-    auto disk_pool               = std::make_shared<BlockTreeDiskBlockPool>(disk_config);
+    auto disk_pool               = std::make_shared<DiskBlockPool>(disk_config);
 
     std::vector<TestGroupConfig> groups(7, makeTestGroupBase());
     for (auto& group : groups) {
@@ -116,8 +129,8 @@ TEST(TransferDescriptorTest, IsExecutableRequiresResolvedEndpointsPerDirection) 
     EXPECT_TRUE(TransferDescriptor::deviceToHost(0, {1, 2}, 3).isExecutable());
     EXPECT_TRUE(TransferDescriptor::hostToDevice(0, 3, {1, 2}).isExecutable());
     EXPECT_TRUE(TransferDescriptor::hostToDisk(0, 1, 2).isExecutable());
-    EXPECT_TRUE(TransferDescriptor::diskToHost(0, 1, 2).isExecutable());
-    EXPECT_TRUE(TransferDescriptor::deviceToDisk(0, {1}, 2).isExecutable());
+    EXPECT_FALSE(removedDiskToHost(0, 1, 2).isExecutable());
+    EXPECT_FALSE(removedDeviceToDisk(0, {1}, 2).isExecutable());
     EXPECT_TRUE(TransferDescriptor::diskToDevice(0, 2, {1}).isExecutable());
 
     EXPECT_FALSE(TransferDescriptor{}.isExecutable());
@@ -125,14 +138,14 @@ TEST(TransferDescriptorTest, IsExecutableRequiresResolvedEndpointsPerDirection) 
     EXPECT_FALSE(TransferDescriptor::hostToDevice(0, 3, {}).isExecutable());
     EXPECT_FALSE(TransferDescriptor::deviceToHost(0, {1}, NULL_BLOCK_IDX).isExecutable());
     EXPECT_FALSE(TransferDescriptor::hostToDisk(0, NULL_BLOCK_IDX, 2).isExecutable());
-    EXPECT_FALSE(TransferDescriptor::deviceToDisk(0, {1}, NULL_BLOCK_IDX).isExecutable());
+    EXPECT_FALSE(removedDeviceToDisk(0, {1}, NULL_BLOCK_IDX).isExecutable());
     EXPECT_FALSE(TransferDescriptor::diskToDevice(0, 2, {NULL_BLOCK_IDX}).isExecutable());
 
-    // Host↔Disk must not carry device blocks: this is the only single-layer constraint.
+    // Host-to-disk must not carry device blocks.
     TransferDescriptor host_to_disk = TransferDescriptor::hostToDisk(0, 1, 2);
     host_to_disk.source_blocks      = {1, 3};
     EXPECT_FALSE(host_to_disk.isExecutable());
-    TransferDescriptor disk_to_host = TransferDescriptor::diskToHost(0, 1, 2);
+    TransferDescriptor disk_to_host = removedDiskToHost(0, 1, 2);
     disk_to_host.target_blocks      = {2, 3};
     EXPECT_FALSE(disk_to_host.isExecutable());
 }
@@ -165,14 +178,6 @@ TEST(BlockTransferRequestConverterTest, DiagnosticIdentitySurvivesSubtasksAndWir
     auto         child = task.subtask({descriptor});
     EXPECT_EQ(child.traceId(), task.traceId());
     EXPECT_NE(child.traceId(), 0u);
-    auto rpc_first  = task.rpcSubtask({descriptor});
-    auto rpc_second = task.rpcSubtask({descriptor});
-    EXPECT_NE(rpc_first.traceId(), rpc_second.traceId());
-    EXPECT_NE(rpc_first.traceId(), task.traceId());
-    EXPECT_EQ(rpc_first.workflowId(), task.workflowId());
-    EXPECT_EQ(rpc_first.parentTraceId(), task.traceId());
-    EXPECT_EQ(rpc_first.subtask({descriptor}).parentTraceId(), task.traceId());
-    EXPECT_EQ(rpc_first.subtask({descriptor}).traceId(), rpc_first.traceId());
     MemoryOperationRequestPB request;
     ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(request, child, groupSets()));
     MemoryOperationRequestPB parsed;
@@ -263,59 +268,23 @@ TEST(BlockTransferRequestConverterTest, DecodesHostToDiskUsingTierSpecificFields
     EXPECT_EQ(output.target_tier, Tier::DISK);
 }
 
-TEST(BlockTransferRequestConverterTest, ConvertsDiskToHost) {
-    const TransferDescriptor input = TransferDescriptor::diskToHost(4, 71, 81);
-    MemoryOperationRequestPB request;
-
-    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(request, makeTransferTask({input}), groupSets()));
-    const auto& item = request.copy_items(0);
-    EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::DISK2H);
-    EXPECT_EQ(wireGroupTags(item), (std::vector<std::string>{"group6"}));
-    EXPECT_EQ(item.disk_block(), 71);
-    EXPECT_EQ(item.mem_block(), 81);
-    EXPECT_EQ(item.group_blocks_size(), 0);
-
-    const auto output = decodeSingleTransfer(request);
-    ASSERT_TRUE(output.isExecutable());
-    EXPECT_EQ(output.group_set_id, 4);
-    EXPECT_EQ(output.source_tier, Tier::DISK);
-    EXPECT_EQ(output.target_tier, Tier::HOST);
-    EXPECT_EQ(output.singleBlockAt(Tier::DISK), 71);
-    EXPECT_EQ(output.singleBlockAt(Tier::HOST), 81);
-}
-
-TEST(BlockTransferRequestConverterTest, DecodesDiskToHostUsingTierSpecificFields) {
-    MemoryOperationRequestPB request;
-    request.set_copy_direction(MemoryOperationRequestPB::DISK2H);
-    auto* item = request.add_copy_items();
-    item->add_group_tags("group6");
-    item->set_mem_block(81);
-    item->set_disk_block(71);
-
-    const auto output = decodeSingleTransfer(request);
-    ASSERT_TRUE(output.isExecutable());
-    EXPECT_EQ(output.source_tier, Tier::DISK);
-    EXPECT_EQ(output.target_tier, Tier::HOST);
-}
-
-TEST(BlockTransferRequestConverterTest, ConvertsDeviceToDisk) {
-    const TransferDescriptor input = TransferDescriptor::deviceToDisk(3, {51}, 61);
-    MemoryOperationRequestPB request;
-
-    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(request, makeTransferTask({input}), groupSets()));
-    const MemoryOperationRequestPB::CopyItem& item = request.copy_items(0);
-    EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::D2DISK);
-    EXPECT_EQ(wireGroupTags(item), (std::vector<std::string>{"group5"}));
-    EXPECT_EQ(item.disk_block(), 61);
-    EXPECT_EQ(wireBlocks(item), (std::unordered_map<std::string, BlockIdxType>{{"group5", 51}}));
-
-    const auto output = decodeSingleTransfer(request);
-    ASSERT_TRUE(output.isExecutable());
-    EXPECT_EQ(output.group_set_id, 3);
-    EXPECT_EQ(output.source_tier, Tier::DEVICE);
-    EXPECT_EQ(output.target_tier, Tier::DISK);
-    EXPECT_EQ(output.singleBlockAt(Tier::DISK), 61);
-    EXPECT_EQ(output.blocksAt(Tier::DEVICE), (std::vector<BlockIdxType>{51}));
+TEST(BlockTransferRequestConverterTest, RejectsRemovedDirectionsOnEncodeAndDecode) {
+    const std::vector<std::pair<TransferDescriptor, MemoryOperationRequestPB::CopyDirection>> removed{
+        {removedDiskToHost(4, 71, 81), MemoryOperationRequestPB::DISK2H},
+        {removedDeviceToDisk(3, {51}, 61), MemoryOperationRequestPB::D2DISK},
+    };
+    for (const auto& [descriptor, direction] : removed) {
+        MemoryOperationRequestPB request;
+        EXPECT_FALSE(
+            BlockTransferRequestConverter::encodeTransfer(request, makeTransferTask({descriptor}), groupSets()));
+        request.Clear();
+        request.set_copy_direction(direction);
+        auto* item = request.add_copy_items();
+        item->add_group_tags("group5");
+        item->set_mem_block(51);
+        item->set_disk_block(61);
+        expectDecodeFailure(request);
+    }
 }
 
 TEST(BlockTransferRequestConverterTest, ConvertsDiskToDevice) {
@@ -361,8 +330,6 @@ TEST(BlockTransferRequestConverterTest, DecodeRequiresOnlyPoolsUsedByTheDirectio
         TransferDescriptor::deviceToHost(0, {1}, 2),
         TransferDescriptor::hostToDevice(0, 2, {1}),
         TransferDescriptor::hostToDisk(0, 2, 3),
-        TransferDescriptor::diskToHost(0, 3, 2),
-        TransferDescriptor::deviceToDisk(0, {1}, 3),
         TransferDescriptor::diskToDevice(0, 3, {1}),
     };
     for (const bool with_host : {false, true}) {
@@ -455,10 +422,10 @@ TEST(BlockTransferRequestConverterTest, DecodeIgnoresDeviceBlocksForHostDiskDire
     EXPECT_TRUE(decodeSingleTransfer(request).isExecutable());
 }
 
-TEST(BlockTransferRequestConverterTest, DecodeIgnoresMemoryBlockForDeviceDiskDirection) {
+TEST(BlockTransferRequestConverterTest, DecodeIgnoresMemoryBlockForDiskToDeviceDirection) {
     MemoryOperationRequestPB request;
     ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
-        request, makeTransferTask({TransferDescriptor::deviceToDisk(0, {1}, 2)}), groupSets()));
+        request, makeTransferTask({TransferDescriptor::diskToDevice(0, 2, {1})}), groupSets()));
     request.mutable_copy_items(0)->set_mem_block(3);
 
     EXPECT_TRUE(decodeSingleTransfer(request).isExecutable());
@@ -567,15 +534,12 @@ TEST(BlockTransferRequestConverterTest, CrcTransfersUseOrdinaryDirections) {
         TransferDescriptor::hostToDevice(0, 2, {1}),
         TransferDescriptor::deviceToHost(0, {1}, 2),
         TransferDescriptor::hostToDisk(0, 1, 2),
-        TransferDescriptor::diskToHost(0, 1, 2),
-        TransferDescriptor::deviceToDisk(0, {1}, 2),
         TransferDescriptor::diskToDevice(0, 2, {1}),
     };
     for (size_t index = 0; index < inputs.size(); ++index) {
         MemoryOperationRequestPB request;
         ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
             request, makeTransferTask({inputs[index]}), protected_groups));
-        EXPECT_EQ(static_cast<int>(request.copy_direction()), index);
         std::vector<TransferDescriptor> decoded;
         ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, decoded, protected_groups));
         ASSERT_EQ(decoded.size(), 1);
@@ -605,7 +569,6 @@ TEST(BlockTransferRequestConverterTest, CrcRoutesReorderedGroupSetsAndMembersByT
     const std::vector<TransferDescriptor> inputs{
         TransferDescriptor::deviceToHost(2, {11, 12}, 21),
         TransferDescriptor::hostToDevice(2, 21, {11, 12}),
-        TransferDescriptor::deviceToDisk(2, {11, 12}, 21),
         TransferDescriptor::diskToDevice(2, 21, {11, 12}),
     };
     for (const auto& input : inputs) {

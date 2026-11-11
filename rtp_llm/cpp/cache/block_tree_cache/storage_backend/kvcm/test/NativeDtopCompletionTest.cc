@@ -1080,7 +1080,6 @@ TEST_P(EosGpuCompletionTest, KnownPrefillBoundarySkipsCheckpointWithoutNewDecode
         EXPECT_EQ(s.aborts, 0);
         EXPECT_FALSE(s.resource.decodeCompletionSubmitted());
         for (const auto& [tag, pool] : s.env.pools_by_tag) {
-            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u) << tag;
             EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u) << tag;
         }
         s.dropRequestRefs();

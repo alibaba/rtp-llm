@@ -127,7 +127,7 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, BatchFreePreservesOtherRequestAn
         resource->setBatchBlocks(beam, config.groupTags().front(), {blocks[0], blocks[1], NULL_BLOCK_IDX});
     }
     pool->incRef(blocks[0]);  // another request
-    pool->incTreeRef(blocks[1], BlockTreeRefType::STORE);
+    pool->incTreeRef(blocks[1], BlockTreeRefType::EVICTION);
     int notifications = 0;
     pool->setCapacityChangeCallback([&] {
         ++notifications;
@@ -138,11 +138,11 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, BatchFreePreservesOtherRequestAn
     EXPECT_EQ(resource->curBlocksNum(), 0);
     EXPECT_EQ(pool->refCount(blocks[0]), 1u);
     EXPECT_EQ(pool->refCount(blocks[1]), 1u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::STORE), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 1u);
     EXPECT_EQ(notifications, 1);
     pool->setCapacityChangeCallback({});
     pool->decRef(blocks[0]);
-    pool->decTreeRef(blocks[1], BlockTreeRefType::STORE);
+    pool->decTreeRef(blocks[1], BlockTreeRefType::EVICTION);
     EXPECT_EQ(pool->freeBlocksNum(), 4u);
 }
 
@@ -337,11 +337,8 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, UpdateKVBlockDoesNotTransferExte
     pool->incRef(blocks[1]);
     expect_tail_preserved();
     pool->decRef(blocks[1]);
-    for (const auto owner : {BlockTreeRefType::CACHE,
-                             BlockTreeRefType::LOAD,
-                             BlockTreeRefType::EVICTION,
-                             BlockTreeRefType::STORE,
-                             BlockTreeRefType::FROZEN}) {
+    for (const auto owner :
+         {BlockTreeRefType::CACHE, BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION, BlockTreeRefType::FROZEN}) {
         SCOPED_TRACE(static_cast<int>(owner));
         pool->incTreeRef(blocks[1], owner);
         expect_tail_preserved();

@@ -35,12 +35,12 @@ public:
     explicit PausableHybridPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
         PerRankBlockTransferEngine(groups) {}
 
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ++submit_count_;
             if (released_) {
-                return PerRankBlockTransferEngine::execute(std::move(task));
+                return PerRankBlockTransferEngine::executeBatch(std::move(task));
             }
             auto context = std::make_shared<TransferBatchAsyncContext>();
             entered_     = true;
@@ -68,7 +68,7 @@ public:
                 submit.context->complete(error);
                 continue;
             }
-            auto context = PerRankBlockTransferEngine::execute(std::move(submit.task));
+            auto context = PerRankBlockTransferEngine::executeBatch(std::move(submit.task));
             context->waitDone();
             submit.context->complete(context->result());
         }

@@ -31,7 +31,7 @@ template<typename Operation>
 void applyToResourcePools(const MultiNodeResource&               resource,
                           const std::vector<DeviceBlockPoolPtr>& device_pools,
                           const std::shared_ptr<HostBlockPool>&  host_pool,
-                          const BlockTreeDiskBlockPoolPtr&       disk_pool,
+                          const DiskBlockPoolPtr&                disk_pool,
                           Operation&&                            operation) {
     if (resource.tier == Tier::DEVICE) {
         const auto blocks_by_pool = collectDeviceBlocks(resource, device_pools.size());
@@ -49,7 +49,7 @@ void applyToResourcePools(const MultiNodeResource&               resource,
 
 GroupSet::GroupSet(std::vector<DeviceBlockPoolPtr> device_pools,
                    std::shared_ptr<HostBlockPool>  host_pool,
-                   BlockTreeDiskBlockPoolPtr       disk_pool):
+                   DiskBlockPoolPtr                disk_pool):
     device_pools_(std::move(device_pools)), host_pool_(std::move(host_pool)), disk_pool_(std::move(disk_pool)) {}
 
 void GroupSet::initialize(size_t                               group_set_id,

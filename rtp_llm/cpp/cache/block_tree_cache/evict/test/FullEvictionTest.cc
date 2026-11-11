@@ -37,7 +37,7 @@ protected:
 struct TieredFullCache {
     DeviceBlockPoolPtr                      device_pool;
     std::shared_ptr<HostBlockPool>          host_pool;
-    std::shared_ptr<BlockTreeDiskBlockPool> disk_pool;
+    std::shared_ptr<DiskBlockPool>          disk_pool;
     std::shared_ptr<FullGroupSet>           full;
     std::unique_ptr<BlockTreeCache>         cache;
 };

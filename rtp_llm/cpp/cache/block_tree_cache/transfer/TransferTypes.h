@@ -22,13 +22,12 @@ struct TreeNode;
 // Transfer lanes describe cache movement, independently of business priority.
 enum class TransferDirection {
     LOAD,
-    OFFLOAD,
+    EVICT,
 };
 
-// Cache promotion is Disk -> Host -> Device; keep backend routing consistent.
+// Disk -> Device uses host staging internally without exposing Disk -> Host.
 inline bool isLoadTransfer(Tier source, Tier target) {
-    return (source == Tier::DISK && (target == Tier::HOST || target == Tier::DEVICE))
-           || (source == Tier::HOST && target == Tier::DEVICE);
+    return (source == Tier::DISK && target == Tier::DEVICE) || (source == Tier::HOST && target == Tier::DEVICE);
 }
 
 enum class TransferStatus {
@@ -225,27 +224,6 @@ struct TransferDescriptor {
         return desc;
     }
 
-    static TransferDescriptor diskToHost(size_t group_set_id, BlockIdxType disk_block, BlockIdxType host_block) {
-        TransferDescriptor desc;
-        desc.group_set_id  = group_set_id;
-        desc.source_tier   = Tier::DISK;
-        desc.target_tier   = Tier::HOST;
-        desc.source_blocks = {disk_block};
-        desc.target_blocks = {host_block};
-        return desc;
-    }
-
-    static TransferDescriptor
-    deviceToDisk(size_t group_set_id, std::vector<BlockIdxType> device_blocks, BlockIdxType disk_block) {
-        TransferDescriptor desc;
-        desc.group_set_id  = group_set_id;
-        desc.source_tier   = Tier::DEVICE;
-        desc.target_tier   = Tier::DISK;
-        desc.source_blocks = std::move(device_blocks);
-        desc.target_blocks = {disk_block};
-        return desc;
-    }
-
     static TransferDescriptor
     diskToDevice(size_t group_set_id, BlockIdxType disk_block, std::vector<BlockIdxType> device_blocks) {
         TransferDescriptor desc;
@@ -271,9 +249,9 @@ struct TransferDescriptor {
 
     bool isExecutable() const {
         const bool supported_direction =
-            (source_tier == Tier::DEVICE && (target_tier == Tier::HOST || target_tier == Tier::DISK))
+            (source_tier == Tier::DEVICE && target_tier == Tier::HOST)
             || (source_tier == Tier::HOST && (target_tier == Tier::DEVICE || target_tier == Tier::DISK))
-            || (source_tier == Tier::DISK && (target_tier == Tier::DEVICE || target_tier == Tier::HOST));
+            || (source_tier == Tier::DISK && target_tier == Tier::DEVICE);
         return supported_direction && endpointResolved(source_tier, source_blocks)
                && endpointResolved(target_tier, target_blocks);
     }
@@ -314,10 +292,10 @@ private:
     }
 };
 
-// Shared task description across preparation, RPC grouping and local batching.
+// Shared task description across preparation, RPC transport and local batching.
 // Builders resolve descriptors before submission; execution entrances validate
 // their batch constraints. Executors own their copy and do not mutate it.
-// Results use the current descriptor order; the dispatcher owns parent-index maps.
+// Results use the current descriptor order; PerRank owns the parent-index maps.
 class TransferTask {
 public:
     using Clock = std::chrono::steady_clock;
@@ -384,26 +362,17 @@ public:
     }
 
     TransferTask subtask(std::vector<TransferDescriptor> descriptors) const {
-        auto task      = TransferTask(std::move(descriptors), deadline_, request_id_);
-        task.trace_id_ = trace_id_;
-        task.workflow_id_     = workflow_id_;
-        task.parent_trace_id_ = parent_trace_id_;
-        return task;
-    }
-
-    // A separately submitted RPC batch needs its own identity. Nested worker
-    // batches retain that identity and use their local descriptor ranges.
-    TransferTask rpcSubtask(std::vector<TransferDescriptor> descriptors) const {
-        auto task = TransferTask(std::move(descriptors), deadline_, request_id_);
-        task.setWorkflow(workflow_id_, trace_id_);
-        return task;
+        return TransferTask(std::move(descriptors), *this);
     }
 
 private:
-    TransferTask(std::vector<TransferDescriptor> descriptors,
-                 Clock::time_point               deadline,
-                 std::optional<int64_t>          request_id):
-        descriptors_(std::move(descriptors)), deadline_(deadline), request_id_(request_id) {}
+    TransferTask(std::vector<TransferDescriptor> descriptors, const TransferTask& parent):
+        descriptors_(std::move(descriptors)),
+        deadline_(parent.deadline_),
+        request_id_(parent.request_id_),
+        trace_id_(parent.trace_id_),
+        workflow_id_(parent.workflow_id_),
+        parent_trace_id_(parent.parent_trace_id_) {}
 
     std::vector<TransferDescriptor>     descriptors_;
     Clock::time_point                   deadline_;

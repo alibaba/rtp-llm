@@ -15,10 +15,10 @@ Transfer 支持 `--btc-crc-slot-count`（每个异步 CRC service 在每 GPU 上
 WorkLoop Device copy 的 `actual_copy_strategy=crc`，不把旧策略计时伪装成 CRC kernel 计时。
 Host/Disk 初始数据由真实 CRC store 预填后再测量；主路径与 legacy 结果按实现分别解释。
 
-WorkLoop staging 按 owner 和 load/offload 方向隔离，同方向 FULL/SWA 共用一个池。
+WorkLoop staging 按 owner 和 load/evict 方向隔离，同方向 FULL/SWA 共用一个池。
 每对 loops 的 N 个槽位按方向各分 N/2；统一 stride 覆盖参与 group 的 CRC storage 与实际 Disk stride，
 按 4096 B 对齐。有效 batch 上限为 `min(M, N/2)`，没有 Device/Disk staging 时为 M。
-`resolved_config` 的 `staging_load_blocks/staging_offload_blocks` 汇总所有 owner，
+`resolved_config` 的 `staging_load_blocks/staging_evict_blocks` 汇总所有 owner，
 `staging_stride_bytes/staging_data_bytes` 报告共享槽位大小及实际数据内存，不再按 FULL/SWA 重复计数。
 Disk executor 使用默认读写线程数；异步队列由 PerRank 按 Q 和有效 batch 上限 B 统一推导：
 读队列为 `Q * min(B, read_threads)`，写队列为 Q，不随 owner 或 backing file 数量增加。

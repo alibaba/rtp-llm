@@ -310,7 +310,7 @@ __device__ __forceinline__ uint32_t applyShift(const uint32_t* __restrict__ powe
 // Messages are msg_offset + blockIdx.x, power-of-two slices within a message
 // are blockIdx.y. Every block participates in the arrival counter; the last one
 // folds all slice partials through per-message fold matrices, then seals the
-// record (store) or renders the footer verdict (load) in the same thread, so
+// record (evict) or renders the footer verdict (load) in the same thread, so
 // no second kernel launch is needed. arrived must be zero before launch.
 __global__ void crc32cBatchedKernel(unsigned char* __restrict__ staging,
                                     size_t stride,
@@ -318,7 +318,7 @@ __global__ void crc32cBatchedKernel(unsigned char* __restrict__ staging,
                                     size_t       msg_offset,
                                     Result*      results,
                                     bool*        failed,
-                                    bool         store,
+                                    bool         evict,
                                     void* const* host_records,
                                     const uint32_t* __restrict__ crc_tables,
                                     const uint32_t* __restrict__ shift_powers,
@@ -478,11 +478,11 @@ __global__ void crc32cBatchedKernel(unsigned char* __restrict__ staging,
                 // and final_consts[msg] is the precomputed shift_len(~0).
                 const uint32_t checksum = ~(final_consts[msg] ^ fold_state);
                 // The message's bytes are final exactly when the fold completes,
-                // so the seal (store) or footer verdict (load) happens here
+                // so the seal (evict) or footer verdict (load) happens here
                 // instead of in a second kernel launch.
                 const size_t   footer_offset = ((len + 19) & ~size_t(15)) - 4;
                 unsigned char* base          = staging + msg * stride;
-                if (store) {
+                if (evict) {
                     // Padding is outside the CRC domain. Clear it while sealing
                     // instead of submitting one tiny memset per backing.
                     for (size_t offset = len; offset < footer_offset; ++offset)
@@ -522,7 +522,7 @@ cudaError_t launchCrc32cBatched(unsigned char*  staging,
                                 size_t          msg_offset,
                                 Result*         results,
                                 bool*           failed,
-                                bool            store,
+                                bool            evict,
                                 void* const*    host_records,
                                 const uint32_t* crc_tables,
                                 const uint32_t* shift_powers,
@@ -540,7 +540,7 @@ cudaError_t launchCrc32cBatched(unsigned char*  staging,
                                                           msg_offset,
                                                           results,
                                                           failed,
-                                                          store,
+                                                          evict,
                                                           host_records,
                                                           crc_tables,
                                                           shift_powers,
@@ -590,7 +590,7 @@ struct CrcCopyWorkspace::Impl {
     std::condition_variable                       idle;
     std::shared_ptr<CrcDumpWriter>                dump_writer;
     CrcCopyState                                  state{CrcCopyState::IDLE};
-    CrcCopyDirection                              direction{CrcCopyDirection::STORE};
+    CrcCopyDirection                              direction{CrcCopyDirection::EVICT};
     std::vector<CrcCopyItem>                      batch;
     std::vector<CrcCopyFailure>                   failures;
     bool                                          diagnostic_cuda_error{false};
@@ -867,10 +867,10 @@ struct CrcCopyWorkspace::Impl {
     }
 
     // Binds the workspace-owned buffers in one place; only the message range,
-    // direction, and optional host alias array vary between the store, serial
+    // direction, and optional host alias array vary between the evict, serial
     // load, and wave load sites.
     void
-    launchCrc(const PreparedBatch& prepared, size_t count, size_t msg_offset, bool store, void* const* host_records) {
+    launchCrc(const PreparedBatch& prepared, size_t count, size_t msg_offset, bool evict, void* const* host_records) {
         checkCuda(crc_block_copy_internal::launchCrc32cBatched(staging.as<unsigned char>(),
                                                                stride,
                                                                packDeviceAt<size_t>(lengths_offset),
@@ -878,7 +878,7 @@ struct CrcCopyWorkspace::Impl {
                                                                msg_offset,
                                                                results.as<Result>(),
                                                                device_failed,
-                                                               store,
+                                                               evict,
                                                                host_records,
                                                                crc_tables.as<uint32_t>(),
                                                                shift_powers.as<uint32_t>(),
@@ -939,7 +939,7 @@ struct CrcCopyWorkspace::Impl {
         return true;
     }
 
-    void enqueueStore(const PreparedBatch& prepared) {
+    void enqueueEvict(const PreparedBatch& prepared) {
         checkCuda(
             launchCopyTiles(packDeviceAt<CopyTile>(tiles_offset), prepared.tile_count, staging.pointer, false, stream));
         checkCuda(cudaEventRecord(gather_done, stream));
@@ -953,11 +953,11 @@ struct CrcCopyWorkspace::Impl {
                 aliases.pointer, host_aliases.pointer, prepared.count * sizeof(void*), cudaMemcpyHostToDevice, stream));
             host_records = aliases.as<void*>();
         }
-        checkpoint("store_crc");
+        checkpoint("evict_crc");
         launchCrc(prepared, prepared.count, 0, true, host_records);
         if (mapped) {
             checkCuda(cudaStreamWaitEvent(copy_stream, gather_done));
-            checkpoint("store_dma");
+            checkpoint("evict_dma");
             for (size_t index = 0; index < prepared.count; ++index)
                 checkCuda(cudaMemcpyAsync(batch[index].host,
                                           staging.as<unsigned char>() + index * stride,
@@ -1023,7 +1023,7 @@ struct CrcCopyWorkspace::Impl {
         std::optional<PreparedBatch> prepared;
         try {
             prepared = prepareBatch(items);
-            if (!prepared || (operation != CrcCopyDirection::STORE && operation != CrcCopyDirection::LOAD))
+            if (!prepared || (operation != CrcCopyDirection::EVICT && operation != CrcCopyDirection::LOAD))
                 return CrcCopyState::INVALID_ARGS;
             checkCuda(cudaSetDevice(device));
             if (!prepareHostAliases(items, require_pinned))
@@ -1052,8 +1052,8 @@ struct CrcCopyWorkspace::Impl {
                                       cudaMemcpyHostToDevice,
                                       stream));
             checkpoint("metadata");
-            if (direction == CrcCopyDirection::STORE)
-                enqueueStore(*prepared);
+            if (direction == CrcCopyDirection::EVICT)
+                enqueueEvict(*prepared);
             else
                 enqueueLoad(*prepared);
         } catch (...) {
@@ -1171,8 +1171,8 @@ CrcCopyWorkspace::CrcCopyWorkspace(
 
 CrcCopyWorkspace::~CrcCopyWorkspace() = default;
 
-CrcCopyState CrcCopyWorkspace::store(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>& failures) {
-    return impl_->synchronous(items, CrcCopyDirection::STORE, failures);
+CrcCopyState CrcCopyWorkspace::evict(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>& failures) {
+    return impl_->synchronous(items, CrcCopyDirection::EVICT, failures);
 }
 
 CrcCopyState CrcCopyWorkspace::load(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>& failures) {

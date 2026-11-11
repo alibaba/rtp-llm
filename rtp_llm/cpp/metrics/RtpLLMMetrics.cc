@@ -24,7 +24,6 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMCachePoolMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheTransferMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheEvictionMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheInsertMetrics);
-AUTIL_LOG_SETUP(rtp_llm, RtpLLMTierStoreMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheReuseMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMTokenPSMetrics);
@@ -726,7 +725,6 @@ bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(load_ref_blocks_metric, "rtp_llm_kv_cache_load_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(eviction_target_ref_blocks_metric, "rtp_llm_kv_cache_eviction_target_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(eviction_ref_blocks_compat_metric, "rtp_llm_kv_cache_eviction_ref_blocks");
-    REGISTER_GAUGE_MUTABLE_METRIC(store_ref_blocks_metric, "rtp_llm_kv_cache_store_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(frozen_ref_blocks_metric, "rtp_llm_kv_cache_frozen_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(used_ratio_metric, "rtp_llm_kv_cache_used_ratio");
     REGISTER_GAUGE_MUTABLE_METRIC(read_bytes_metric, "rtp_llm_kv_cache_disk_cache_read_bytes");
@@ -755,7 +753,6 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
         REPORT_MUTABLE_METRIC(eviction_target_ref_blocks_metric, collector->eviction_target_ref_blocks);
         REPORT_MUTABLE_METRIC(eviction_ref_blocks_compat_metric, collector->eviction_target_ref_blocks);
     }
-    REPORT_MUTABLE_METRIC(store_ref_blocks_metric, collector->store_ref_blocks);
     if (collector->report_frozen_ref_blocks) {
         REPORT_MUTABLE_METRIC(frozen_ref_blocks_metric, collector->frozen_ref_blocks);
     }
@@ -965,17 +962,6 @@ void RtpLLMCacheInsertMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMC
     hard_stop_tags.AddTag("tier", collector->tier);
     hard_stop_tags.AddTag("operation", collector->operation);
     insert_hard_stop_qps_metric->Report(&hard_stop_tags, 1);
-}
-
-bool RtpLLMTierStoreMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_QPS_MUTABLE_METRIC(store_publish_block_qps_metric, "rtp_llm_kv_cache_store_publish_block_qps");
-    return true;
-}
-
-void RtpLLMTierStoreMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMTierStoreMetricsCollector* collector) {
-    kmonitor::MetricsTags tier_tags("target_tier", collector->target_tier);
-    tier_tags.AddTag("outcome", collector->outcome);
-    store_publish_block_qps_metric->Report(&tier_tags, collector->block_count);
 }
 
 bool RtpLLMDecodePublicationMetrics::init(kmonitor::MetricsGroupManager* manager) {

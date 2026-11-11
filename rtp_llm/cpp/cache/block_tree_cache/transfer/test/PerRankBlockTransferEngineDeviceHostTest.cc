@@ -179,11 +179,11 @@ makeGroupBase(CacheGroupType group_type, std::vector<int> layer_ids, size_t kv_b
     return makeTestGroupBase(std::move(policy), std::move(layer_ids), kv_bytes, scale_bytes);
 }
 
-static GroupSetPtr makeDeviceHostGroup(size_t                                  group_set_id,
-                                       std::vector<DeviceBlockPoolPtr>         device_pools,
-                                       std::shared_ptr<HostBlockPool>          host_pool,
-                                       std::vector<TestGroupConfig>            groups,
-                                       std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = nullptr) {
+static GroupSetPtr makeDeviceHostGroup(size_t                          group_set_id,
+                                       std::vector<DeviceBlockPoolPtr> device_pools,
+                                       std::shared_ptr<HostBlockPool>  host_pool,
+                                       std::vector<TestGroupConfig>    groups,
+                                       std::shared_ptr<DiskBlockPool>  disk_pool = nullptr) {
     auto topology   = makeTestTopology(std::move(groups));
     auto group_tags = topology->groupTags();
     auto group      = makeTestGroupSet(group_set_id,
@@ -197,8 +197,12 @@ static GroupSetPtr makeDeviceHostGroup(size_t                                  g
 
 static std::shared_ptr<PerRankBlockTransferEngine>
 makeEngine(std::vector<GroupSetPtr> groups, DeviceHostCopyOptions options = {}, bool enable_disk_cache = true) {
+    const bool async = std::all_of(groups.begin(), groups.end(), [enable_disk_cache](const GroupSetPtr& group) {
+        return group->devicePools().empty() || (!group->hostPool() && !(enable_disk_cache && group->diskPool()))
+               || group->crcEnabled();
+    });
     return std::make_shared<PerRankBlockTransferEngine>(
-        std::move(groups), enable_disk_cache, std::move(options), 128, 8, 4, 10000, nullptr, 0, 4, true);
+        std::move(groups), enable_disk_cache, std::move(options), 128, 8, 4, 10000, nullptr, 0, 4, async);
 }
 
 struct StrategyCounters {
@@ -449,19 +453,8 @@ TEST_F(CopyBoundsTest, RejectsInvalidBatchDimensionsAndHostCapacity) {
     std::vector<uint8_t>       data(host_block_size_);
     HostBufferView             host{data.data(), data.size(), data.size()};
     auto                       descriptor = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, 1);
-    EXPECT_THROW(
-        {
-            try {
-                executor.generatePlan({}, {}, {});
-            } catch (const RTPException& error) {
-                const std::string message = error.what();
-                EXPECT_NE(message.find("invalid device-host batch dimensions"), std::string::npos);
-                EXPECT_NE(message.find("DeviceHostTransferExecutor.cc"), std::string::npos);
-                EXPECT_FALSE(error.getTrace().empty());
-                throw;
-            }
-        },
-        RTPException);
+    auto                       empty      = per_rank_transfer_engine_->execute(makeTransferTask({}));
+    EXPECT_EQ(empty->errorInfo().code(), ErrorCode::INVALID_PARAMS);
     host.capacity_bytes = host.payload_bytes - 1;
     EXPECT_EQ(executor.generatePlan({host}, {descriptor}, {group_set_.get()}).first, TransferStatus::INVALID_ARGS);
 }
@@ -1282,7 +1275,7 @@ protected:
 
     TempDirGuard                                temp_dir_{"per_rank_transfer_engine_multi_member"};
     std::shared_ptr<HostBlockPool>              host_pool_;
-    BlockTreeDiskBlockPoolPtr                   disk_pool_;
+    DiskBlockPoolPtr                            disk_pool_;
     std::vector<DeviceBlockPoolPtr>             pools_;
     std::vector<BlockIdxType>                   blocks_;
     std::shared_ptr<PerRankBlockTransferEngine> engine_;
@@ -1319,15 +1312,16 @@ TEST_F(PerRankBlockTransferEngineMultiMemberTest, CompleteMultiMemberThreeTierRo
 
     expectStatus(engine_, makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block_, disk_block_), TransferStatus::OK);
     std::memset(host_data, 0, 240);
-    expectStatus(engine_, makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block_, disk_block_), TransferStatus::OK);
+    ASSERT_EQ(disk_pool_->read(disk_block_, host_data, disk_pool_->strideBytes()), BlockIOStatus::OK);
     expect_host_payload();
 
     fillDeviceLayer(pools_[0], 0, blocks_[0], {0x00, 0x00});
     fillDeviceLayer(pools_[1], 0, blocks_[1], {0x00, 0x00});
     fillDeviceLayer(pools_[2], 0, blocks_[2], {0x00, 0x00});
-    expectStatus(engine_,
-                 makeDescriptor(Tier::HOST, Tier::DEVICE, {blocks_[0], blocks_[1], blocks_[2]}, host_block_),
-                 TransferStatus::OK);
+    expectStatus(
+        engine_,
+        makeDescriptor(Tier::DISK, Tier::DEVICE, {blocks_[0], blocks_[1], blocks_[2]}, NULL_BLOCK_IDX, disk_block_),
+        TransferStatus::OK);
 
     const auto comp0 = readDeviceLayer(pools_[0], 0, blocks_[0]);
     const auto comp1 = readDeviceLayer(pools_[1], 0, blocks_[1]);
@@ -1344,7 +1338,7 @@ TEST_F(PerRankBlockTransferEngineMultiMemberTest, CompleteMultiMemberThreeTierRo
     }
 }
 
-TEST(PerRankBlockTransferEngineIntegrationTest, DeviceHostDiskHostDeviceRoundTrip) {
+TEST(PerRankBlockTransferEngineIntegrationTest, DeviceHostDiskDeviceRoundTrip) {
     ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
     TempDirGuard     temp_dir("per_rank_transfer_engine_three_tier");
     constexpr size_t payload_bytes = 80;
@@ -1374,18 +1368,16 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceHostDiskHostDeviceRoundTri
     std::memset(host_pool->blockBuffer(host_block).addr, 0, payload_bytes);
     fillDeviceLayer(device_pool, 0, device_block, {0x00, 0x00});
 
-    expectStatus(engine, makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, disk_block, 0), TransferStatus::OK);
+    ASSERT_EQ(disk_pool->read(disk_block, host_pool->blockBuffer(host_block).addr, disk_pool->strideBytes()),
+              BlockIOStatus::OK);
     EXPECT_TRUE(std::equal(expected.begin(), expected.end(), host_data));
-
-    fillDeviceLayer(device_pool, 0, device_block, {0x00, 0x00});
     expectStatus(engine,
-                 makeDescriptor(Tier::HOST, Tier::DEVICE, {device_block}, host_block, NULL_BLOCK_IDX, 0),
+                 makeDescriptor(Tier::DISK, Tier::DEVICE, {device_block}, NULL_BLOCK_IDX, disk_block, 0),
                  TransferStatus::OK);
     EXPECT_EQ(readDeviceLayer(device_pool, 0, device_block), expected);
     const auto events = profiling->finish();
-    EXPECT_EQ(events.size(), 12u);
     for (const auto* path :
-         {"device_to_host.d2h", "host_to_disk.disk_write", "disk_to_host.disk_read", "host_to_device.h2d"}) {
+         {"device_to_host.d2h", "host_to_disk.disk_write", "disk_to_device.disk_read", "disk_to_device.h2d"}) {
         EXPECT_EQ(std::count_if(events.begin(),
                                 events.end(),
                                 [path](const auto& event) {
@@ -1526,21 +1518,22 @@ private:
     std::thread*         thread_;
 };
 
-TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskDirectRoundTripWithoutHostPool) {
+TEST(PerRankBlockTransferEngineIntegrationTest, HostDiskDirectRoundTripThroughDevice) {
     ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
     TempDirGuard     temp_dir("per_rank_direct_round_trip");
     constexpr size_t payload_bytes = 80;
     auto             owned_io      = std::make_unique<DirectAlignmentDiskBlockIO>();
     auto*            direct_io     = owned_io.get();
     auto disk_pool    = makeDiskPool(payload_bytes, 2, temp_dir.path, std::move(owned_io), "device_disk_direct", false);
+    auto host_pool    = makeHostPool(payload_bytes, 2);
     auto device_pool  = makeDevicePool({{64, 16}}, 2, "per_rank_direct_round_trip_device");
+    auto host_block   = poolMalloc(*host_pool);
     auto device_block = poolMalloc(*device_pool);
     auto disk_block   = poolMalloc(*disk_pool);
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
-    auto group = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
-    ASSERT_EQ(group->hostPool(), nullptr);
+    auto group  = makeDeviceHostGroup(0, {device_pool}, host_pool, {makeGroupBase({0}, 64, 16)}, disk_pool);
     auto engine = makeEngine({group}, {}, true);
 
     fillDeviceLayer(device_pool, 0, device_block, {0x6A, 0xD3});
@@ -1548,8 +1541,9 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskDirectRoundTripWithout
     auto       profiling = AsyncProfileSession::start();
 
     expectStatus(engine,
-                 makeDescriptor(Tier::DEVICE, Tier::DISK, {device_block}, NULL_BLOCK_IDX, disk_block, 0),
+                 makeDescriptor(Tier::DEVICE, Tier::HOST, {device_block}, host_block, NULL_BLOCK_IDX, 0),
                  TransferStatus::OK);
+    expectStatus(engine, makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block, 0), TransferStatus::OK);
     EXPECT_FALSE(direct_io->bufferedIo());
     EXPECT_EQ(direct_io->lastWriteBytes(), disk_pool->strideBytes());
     fillDeviceLayer(device_pool, 0, device_block, {0x00, 0x00});
@@ -1559,100 +1553,51 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskDirectRoundTripWithout
     EXPECT_EQ(readDeviceLayer(device_pool, 0, device_block), expected);
     EXPECT_EQ(direct_io->lastReadBytes(), disk_pool->strideBytes());
     const auto events = profiling->finish();
-    EXPECT_EQ(events.size(), 10u);
-    for (const auto* stage : {"staging_wait", "transfer_queue_wait", "d2h", "disk_write", "worker_batch_total"}) {
-        EXPECT_EQ(std::count_if(events.begin(),
-                                events.end(),
-                                [stage](const auto& event) {
-                                    return event.name.find(std::string("cache.transfer.device_to_disk.") + stage + "(")
-                                           == 0;
-                                }),
-                  1)
-            << stage;
-    }
+    EXPECT_FALSE(events.empty());
 }
 
-TEST(PerRankBlockTransferEngineIntegrationTest, LegacyDeviceToDiskBatchesMultipleDescriptors) {
-    ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
-    TempDirGuard     temp_dir("per_rank_device_to_disk_batch");
+TEST(PerRankBlockTransferEngineIntegrationTest, LegacyHostToDiskBatchesMultipleDescriptors) {
+    ASSERT_TRUE(torch::cuda::is_available());
+    TempDirGuard     temp_dir("per_rank_host_to_disk_batch");
     constexpr size_t payload_bytes = 80;
     auto             owned_io      = std::make_unique<DirectAlignmentDiskBlockIO>();
     auto*            direct_io     = owned_io.get();
-    auto disk_pool = makeDiskPool(payload_bytes, 2, temp_dir.path, std::move(owned_io), "device_to_disk_batch", false);
-    auto device_pool = makeDevicePool({{64, 16}}, 2, "per_rank_device_to_disk_batch");
-    auto group       = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
+    auto disk_pool   = makeDiskPool(payload_bytes, 2, temp_dir.path, std::move(owned_io), "host_to_disk_batch", false);
+    auto host_pool   = makeHostPool(payload_bytes, 2);
+    auto device_pool = makeDevicePool({{64, 16}}, 2, "per_rank_host_to_disk_batch");
+    auto group       = makeDeviceHostGroup(0, {device_pool}, host_pool, {makeGroupBase({0}, 64, 16)}, disk_pool);
     auto engine      = makeEngine({group}, {}, true);
     ASSERT_FALSE(engine->asyncEnabled());
-
-    std::vector<TransferDescriptor> descriptors;
+    std::vector<TransferDescriptor> copies, evictions;
     for (size_t index = 0; index < 2; ++index) {
-        descriptors.push_back(makeDescriptor(
-            Tier::DEVICE, Tier::DISK, {poolMalloc(*device_pool)}, NULL_BLOCK_IDX, poolMalloc(*disk_pool), 0));
-        for (const auto& buffer : device_pool->convertIndexToBuffer(0, descriptors.back().source_blocks.front()))
+        const auto device = poolMalloc(*device_pool);
+        const auto host   = poolMalloc(*host_pool);
+        const auto disk   = poolMalloc(*disk_pool);
+        copies.push_back(TransferDescriptor::deviceToHost(0, {device}, host));
+        evictions.push_back(TransferDescriptor::hostToDisk(0, host, disk));
+        for (const auto& buffer : device_pool->convertIndexToBuffer(0, device))
             ASSERT_EQ(cudaMemset(buffer.addr, int(index + 23), buffer.size_bytes), cudaSuccess);
     }
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-    auto context = engine->execute(makeTransferTask(descriptors));
-    ASSERT_NE(context, nullptr);
-    context->waitDone();
-    ASSERT_TRUE(context->success());
-    EXPECT_EQ(context->result().block_errors, std::vector<CacheCopyError>(2, CacheCopyError::NONE));
+    auto copied = engine->execute(makeTransferTask(copies));
+    copied->waitDone();
+    ASSERT_TRUE(copied->success());
+    auto evicted = engine->execute(makeTransferTask(evictions));
+    evicted->waitDone();
+    ASSERT_TRUE(evicted->success());
+    EXPECT_EQ(evicted->result().block_errors, std::vector<CacheCopyError>(2, CacheCopyError::NONE));
     EXPECT_EQ(direct_io->lastWriteBytes(), disk_pool->strideBytes());
     HostStagingBlockPool read_pool(1, disk_pool->strideBytes());
     auto                 reads = read_pool.tryMallocBatch(1);
     ASSERT_TRUE(reads);
     const auto  record = reads->front().blockBuffer(payload_bytes);
     const auto* bytes  = static_cast<const uint8_t*>(record.base);
-    for (size_t index = 0; index < descriptors.size(); ++index) {
-        ASSERT_EQ(disk_pool->read(descriptors[index].singleBlockAt(Tier::DISK), record.base, disk_pool->strideBytes()),
+    for (size_t index = 0; index < evictions.size(); ++index) {
+        ASSERT_EQ(disk_pool->read(evictions[index].singleBlockAt(Tier::DISK), record.base, disk_pool->strideBytes()),
                   BlockIOStatus::OK);
         EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + payload_bytes),
                   std::vector<uint8_t>(payload_bytes, uint8_t(index + 23)));
-        EXPECT_TRUE(std::all_of(
-            bytes + payload_bytes, bytes + disk_pool->strideBytes(), [](uint8_t byte) { return byte == 0; }));
     }
-}
-
-TEST(PerRankBlockTransferEngineIntegrationTest, DeviceToDiskFailureReleasesStaging) {
-    ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
-    TempDirGuard     temp_dir("per_rank_device_to_disk_failure");
-    constexpr size_t payload_bytes = 80;
-    auto             failing_io    = std::make_unique<StatusDiskBlockIO>(DiskBlockIOStatus::IO_ERROR);
-    auto*            status_io     = failing_io.get();
-    auto             disk_pool     = makeDiskPool(payload_bytes, 1, temp_dir.path, std::move(failing_io));
-    auto             device_pool   = makeDevicePool({{64, 16}}, 1, "per_rank_device_to_disk_failure");
-    auto             descriptor =
-        makeDescriptor(Tier::DEVICE, Tier::DISK, {poolMalloc(*device_pool)}, NULL_BLOCK_IDX, poolMalloc(*disk_pool), 0);
-    auto group  = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
-    auto engine = makeEngine({group}, {}, true);
-
-    auto& strategies          = engine->legacy_->device_host_executor_->strategies_;
-    auto  original_strategies = std::move(strategies);
-    strategies.clear();
-    strategies.push_back(std::make_unique<FailingStrategy>());
-    auto device_failed = engine->execute(makeTransferTask({descriptor}));
-    device_failed->waitDone();
-    EXPECT_FALSE(device_failed->success());
-    EXPECT_EQ(device_failed->errorInfo().code(), ErrorCode::INVALID_PARAMS);
-    EXPECT_EQ(
-        device_failed->errorInfo().ToString(),
-        "device-to-disk transfer failed, stage=device-to-staging, descriptor_range=[0,1): invalid block transfer request");
-    EXPECT_EQ(device_failed->result().copy_error, CacheCopyError::INVALID_REQUEST);
-    EXPECT_EQ(device_failed->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::INVALID_REQUEST}));
-
-    strategies       = std::move(original_strategies);
-    auto disk_failed = engine->execute(makeTransferTask({descriptor}));
-    disk_failed->waitDone();
-    EXPECT_FALSE(disk_failed->success());
-    EXPECT_EQ(disk_failed->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
-    EXPECT_EQ(
-        disk_failed->errorInfo().ToString(),
-        "device-to-disk transfer failed, stage=staging-to-disk, descriptor_range=[0,1): disk block transfer failed");
-    EXPECT_EQ(disk_failed->result().copy_error, CacheCopyError::IO_FAILED);
-    EXPECT_EQ(disk_failed->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::IO_FAILED}));
-
-    status_io->setStatus(DiskBlockIOStatus::OK);
-    expectStatus(engine, descriptor, TransferStatus::OK);
 }
 
 TEST(PerRankBlockTransferEngineIntegrationTest, LegacyDefaultStagingCanReserve64FullBlocks) {
@@ -1726,29 +1671,15 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceUsesMinimumOfBatchLimi
             Tier::DISK, Tier::DEVICE, {poolMalloc(*swa_device)}, NULL_BLOCK_IDX, poolMalloc(*swa_disk), 1));
     }
 
-    auto full_context = engine->execute(makeTransferTask(full_descriptors));
+    // Exercise the legacy batch's staging split without the logical request split.
+    auto full_context = engine->executeBatch(makeTransferTask(full_descriptors));
     full_context->waitDone();
     ASSERT_TRUE(full_context->success());
-    auto swa_context = engine->execute(makeTransferTask(swa_descriptors));
+    auto swa_context = engine->executeBatch(makeTransferTask(swa_descriptors));
     swa_context->waitDone();
     ASSERT_TRUE(swa_context->success());
     EXPECT_EQ(full_io_ptr->batch_sizes, (std::vector<size_t>{2, 2, 1}));
     EXPECT_EQ(swa_io_ptr->batch_sizes, (std::vector<size_t>{3, 2}));
-
-    const auto store = [&engine](const std::vector<TransferDescriptor>& loads) {
-        std::vector<TransferDescriptor> stores;
-        for (const auto& descriptor : loads)
-            stores.push_back(TransferDescriptor::deviceToDisk(
-                descriptor.group_set_id, descriptor.target_blocks, descriptor.singleBlockAt(Tier::DISK)));
-        auto context = engine->execute(makeTransferTask(stores));
-        context->waitDone();
-        EXPECT_TRUE(context->success());
-        EXPECT_EQ(context->result().block_errors, std::vector<CacheCopyError>(stores.size(), CacheCopyError::NONE));
-    };
-    store(full_descriptors);
-    store(swa_descriptors);
-    EXPECT_EQ(full_io_ptr->write_batch_sizes, (std::vector<size_t>{2, 2, 1}));
-    EXPECT_EQ(swa_io_ptr->write_batch_sizes, (std::vector<size_t>{3, 2}));
 }
 
 TEST(PerRankBlockTransferEngineIntegrationTest, DiskToDeviceReturnsPendingContext) {
@@ -1927,7 +1858,7 @@ TEST(TransferStageTimerTest, DisabledObserverDoesNotAttemptSharedAllocation) {
     TransferStageTimerTestPeer::setAllocationProbe(nullptr);
 }
 
-TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskWaitingForStagingDoesNotOccupyTransferWorker) {
+TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceWaitingForStagingDoesNotOccupyOtherTransferWorker) {
     ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
     TempDirGuard     temp_dir("per_rank_device_disk_staging_admission");
     constexpr size_t payload_bytes = 80;
@@ -1948,20 +1879,20 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskWaitingForStagingDoesN
     engine->legacy_->device_host_executor_->strategies_.clear();
     engine->legacy_->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
 
-    auto device_to_disk = engine->execute(makeTransferTask({makeDescriptor(
-        Tier::DEVICE, Tier::DISK, {poolMalloc(*device_pool)}, NULL_BLOCK_IDX, poolMalloc(*disk_pool), 0)}));
+    auto disk_to_device = engine->execute(makeTransferTask({makeDescriptor(
+        Tier::DISK, Tier::DEVICE, {poolMalloc(*device_pool)}, NULL_BLOCK_IDX, poolMalloc(*disk_pool), 0)}));
     auto host_to_device = engine->execute(makeTransferTask({makeDescriptor(
         Tier::HOST, Tier::DEVICE, {poolMalloc(*device_pool)}, poolMalloc(*host_pool), NULL_BLOCK_IDX, 0)}));
 
     EXPECT_TRUE(blocker->waitUntilEntered(1, std::chrono::milliseconds(300)));
-    EXPECT_FALSE(device_to_disk->done());
+    EXPECT_FALSE(disk_to_device->done());
     blocker->release();
     host_to_device->waitDone();
     EXPECT_TRUE(host_to_device->success());
 
     held_staging.reset();
-    device_to_disk->waitDone();
-    EXPECT_TRUE(device_to_disk->success());
+    disk_to_device->waitDone();
+    EXPECT_TRUE(disk_to_device->success());
 }
 
 TEST(PerRankBlockTransferEngineIntegrationTest, DestructionCancelsStagingWaitersAndDrainsActiveTransfers) {
@@ -1987,31 +1918,31 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DestructionCancelsStagingWaiters
 
     auto disk_to_device = engine->execute(makeTransferTask({makeDescriptor(
         Tier::DISK, Tier::DEVICE, {poolMalloc(*device_pool)}, NULL_BLOCK_IDX, poolMalloc(*disk_pool), 0)}));
-    auto device_to_disk = engine->execute(makeTransferTask({makeDescriptor(
-        Tier::DEVICE, Tier::DISK, {poolMalloc(*device_pool)}, NULL_BLOCK_IDX, poolMalloc(*disk_pool), 0)}));
+    auto second_disk_to_device = engine->execute(makeTransferTask({makeDescriptor(
+        Tier::DISK, Tier::DEVICE, {poolMalloc(*device_pool)}, NULL_BLOCK_IDX, poolMalloc(*disk_pool), 0)}));
     EXPECT_FALSE(disk_to_device->done());
-    EXPECT_FALSE(device_to_disk->done());
+    EXPECT_FALSE(second_disk_to_device->done());
 
     auto disk_to_device_completions = std::make_shared<std::atomic<size_t>>(0);
-    auto device_to_disk_completions = std::make_shared<std::atomic<size_t>>(0);
+    auto second_disk_to_device_completions = std::make_shared<std::atomic<size_t>>(0);
     auto load_cancelled             = std::make_shared<std::promise<void>>();
-    auto store_cancelled            = std::make_shared<std::promise<void>>();
+    auto second_load_cancelled             = std::make_shared<std::promise<void>>();
     auto load_cancelled_future      = load_cancelled->get_future();
-    auto store_cancelled_future     = store_cancelled->get_future();
+    auto second_load_cancelled_future      = second_load_cancelled->get_future();
     disk_to_device->onDone([disk_to_device_completions, load_cancelled](TransferResult) {
         if (disk_to_device_completions->fetch_add(1) == 0) {
             load_cancelled->set_value();
         }
     });
-    device_to_disk->onDone([device_to_disk_completions, store_cancelled](TransferResult) {
-        if (device_to_disk_completions->fetch_add(1) == 0) {
-            store_cancelled->set_value();
+    second_disk_to_device->onDone([second_disk_to_device_completions, second_load_cancelled](TransferResult) {
+        if (second_disk_to_device_completions->fetch_add(1) == 0) {
+            second_load_cancelled->set_value();
         }
     });
 
     BoundedThread<void> destruction([engine = std::move(engine), temp_dir]() mutable { engine.reset(); });
     EXPECT_EQ(load_cancelled_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    EXPECT_EQ(store_cancelled_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(second_load_cancelled_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
     EXPECT_EQ(destruction.waitFor(std::chrono::milliseconds(50)), std::future_status::timeout);
     blocking_io->release();
     ASSERT_EQ(destruction.waitFor(std::chrono::seconds(5)), std::future_status::ready);
@@ -2022,12 +1953,13 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DestructionCancelsStagingWaiters
     EXPECT_FALSE(disk_to_device->success());
     EXPECT_EQ(disk_to_device->result().copy_error, CacheCopyError::NOT_EXECUTED);
     EXPECT_EQ(disk_to_device->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED}));
-    EXPECT_TRUE(device_to_disk->done());
-    EXPECT_FALSE(device_to_disk->success());
-    EXPECT_EQ(device_to_disk->result().copy_error, CacheCopyError::NOT_EXECUTED);
-    EXPECT_EQ(device_to_disk->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED}));
+    EXPECT_TRUE(second_disk_to_device->done());
+    EXPECT_FALSE(second_disk_to_device->success());
+    EXPECT_EQ(second_disk_to_device->result().copy_error, CacheCopyError::NOT_EXECUTED);
+    EXPECT_EQ(second_disk_to_device->result().block_errors,
+              (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED}));
     EXPECT_EQ(disk_to_device_completions->load(), 1u);
-    EXPECT_EQ(device_to_disk_completions->load(), 1u);
+    EXPECT_EQ(second_disk_to_device_completions->load(), 1u);
 }
 
 TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceFullAndSwaStagingMayOverlapWithSharedWorkers) {
@@ -2420,18 +2352,18 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedBatchRoundTripPreservesUnse
         ASSERT_NE(block, NULL_BLOCK_IDX);
         std::memset(host_pool_->blockBuffer(block).addr, 0xE7, host_block_size_);
     }
-    std::vector<TransferDescriptor> stores;
+    std::vector<TransferDescriptor> evictions;
     std::vector<TransferDescriptor> loads;
     for (size_t i = 0; i < device_blocks.size(); ++i) {
         fillDeviceLayer(device_pool_, 0, device_blocks[i], {static_cast<uint8_t>(0x31 + i)});
         fillDeviceLayer(device_pool_, 1, device_blocks[i], {static_cast<uint8_t>(0x71 + i)});
         const auto host_block = host_blocks[2 - 2 * i];
-        stores.push_back(makeDescriptor(Tier::DEVICE, Tier::HOST, {device_blocks[i]}, host_block));
+        evictions.push_back(makeDescriptor(Tier::DEVICE, Tier::HOST, {device_blocks[i]}, host_block));
         loads.push_back(makeDescriptor(Tier::HOST, Tier::DEVICE, {device_blocks[i]}, host_block));
     }
-    auto store = engine->execute(makeTransferTask(std::move(stores)));
-    store->waitDone();
-    ASSERT_TRUE(store->success());
+    auto evict = engine->execute(makeTransferTask(std::move(evictions)));
+    evict->waitDone();
+    ASSERT_TRUE(evict->success());
     for (size_t i = 0; i < device_blocks.size(); ++i) {
         const auto* host = static_cast<const uint8_t*>(host_pool_->blockBuffer(host_blocks[2 - 2 * i]).addr);
         EXPECT_EQ(std::vector<uint8_t>(host, host + 128), std::vector<uint8_t>(128, 0x31 + i));

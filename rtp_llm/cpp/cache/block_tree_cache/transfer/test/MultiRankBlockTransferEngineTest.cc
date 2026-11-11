@@ -17,7 +17,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/store/StoreTaskRunner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
@@ -173,7 +172,7 @@ static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<
 
 static std::shared_ptr<FullGroupSet> makeBroadcastGroup(const std::string&             pool_name,
                                                         std::shared_ptr<HostBlockPool> host_pool = nullptr,
-                                                        BlockTreeDiskBlockPoolPtr      disk_pool = nullptr) {
+                                                        DiskBlockPoolPtr               disk_pool = nullptr) {
     auto device_pool = makeDevicePool({{256, 0}}, 8, pool_name);
     RTP_LLM_CHECK(device_pool != nullptr);
     return std::make_shared<FullGroupSet>(
@@ -218,7 +217,7 @@ public:
         PerRankBlockTransferEngine({}, false, {}, 128, max_batch, 4, 10000, nullptr, 0, 8, async),
         failing_host_(failing_host) {}
 
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         const auto& descriptors = task.descriptors();
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -260,7 +259,7 @@ TEST_P(RequestLevelBroadcastTest, EachRankReceivesWholeRequestAndMergesLocalBatc
         auto engine = std::make_shared<RecordingLocalTransferEngine>(2, rank == 1 ? 3 : NULL_BLOCK_IDX, GetParam());
         ASSERT_EQ(engine->asyncEnabled(), GetParam());
         MultiRankBlockTransferRpcConfig config{true, MemoryOperationResponsePB::OK, grpc::Status::OK, state};
-        config.local_dispatcher = std::make_shared<BlockTransferDispatcher>(engine, nullptr, 2);
+        config.local_dispatcher = std::make_shared<BlockTransferDispatcher>(engine, nullptr);
         config.groups           = groups;
         configs.push_back(std::move(config));
         engines.push_back(std::move(engine));
@@ -270,7 +269,7 @@ TEST_P(RequestLevelBroadcastTest, EachRankReceivesWholeRequestAndMergesLocalBatc
     ASSERT_NE(manager, nullptr);
     auto                    multi  = std::make_shared<MultiRankBlockTransferEngine>(groups, manager);
     auto                    sender = std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX, GetParam());
-    BlockTransferDispatcher dispatcher(sender, multi, 2);
+    BlockTransferDispatcher         dispatcher(sender, multi);
     std::vector<TransferDescriptor> descriptors;
     const std::vector<size_t>       group_ids{0, 1, 0, 0, 1, 1, 0};
     for (size_t i = 0; i < group_ids.size(); ++i)
@@ -301,7 +300,7 @@ TEST_P(RequestLevelBroadcastTest, EachRankReceivesWholeRequestAndMergesLocalBatc
     }
 }
 
-TEST_P(RequestLevelBroadcastTest, MixedDirectionsBroadcastOncePerDirectionAndRank) {
+TEST_P(RequestLevelBroadcastTest, MixedDirectionsRejectBeforeBroadcast) {
     auto group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)},
                                                 block_transfer_engine_test::makeHostPool(256, 8),
                                                 nullptr);
@@ -314,8 +313,8 @@ TEST_P(RequestLevelBroadcastTest, MixedDirectionsBroadcastOncePerDirectionAndRan
     auto                                                          manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(manager, nullptr);
     auto multi = std::make_shared<MultiRankBlockTransferEngine>(std::vector<GroupSetPtr>{group}, manager);
-    BlockTransferDispatcher dispatcher(
-        std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX, GetParam()), multi, 2);
+    BlockTransferDispatcher dispatcher(std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX, GetParam()),
+                                       multi);
     std::vector<TransferDescriptor> descriptors;
     for (size_t i = 0; i < 5; ++i) {
         descriptors.push_back(TransferDescriptor::hostToDevice(0, 1, {1}));
@@ -326,18 +325,15 @@ TEST_P(RequestLevelBroadcastTest, MixedDirectionsBroadcastOncePerDirectionAndRan
     dispatcher.runTransfer(TransferTask(descriptors, std::chrono::seconds(5)),
                            [&](TransferResult result) { done.set_value(std::move(result)); });
     ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    EXPECT_TRUE(future.get().ok());
+    const auto result = future.get();
+    EXPECT_EQ(result.status.code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(result.block_errors, std::vector<CacheCopyError>(descriptors.size(), CacheCopyError::INVALID_REQUEST));
     dispatcher.waitForTransfers();
-    ASSERT_EQ(state->requests.size(), 4u);
-    size_t loads = 0;
-    for (const auto& request : state->requests) {
-        EXPECT_EQ(request.copy_items_size(), 5);
-        loads += request.copy_direction() == MemoryOperationRequestPB::H2D;
-    }
-    EXPECT_EQ(loads, 2u);
+    std::lock_guard<std::mutex> lock(state->mutex);
+    EXPECT_TRUE(state->requests.empty());
 }
 
-TEST_P(RequestLevelBroadcastTest, DiskStoreBroadcastsWholeTaskAndUsesBackendBatchLimitsPerRank) {
+TEST_P(RequestLevelBroadcastTest, DiskLoadBroadcastsWholeTaskAndUsesBackendBatchLimitsPerRank) {
     block_transfer_engine_test::TempDirGuard temp("request_disk_store");
     auto                                     disk = block_transfer_engine_test::makeDiskPool(256, 8, temp.path);
     auto                                     group =
@@ -351,7 +347,7 @@ TEST_P(RequestLevelBroadcastTest, DiskStoreBroadcastsWholeTaskAndUsesBackendBatc
         auto engine = std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX, GetParam());
         ASSERT_EQ(engine->asyncEnabled(), GetParam());
         MultiRankBlockTransferRpcConfig config{true, MemoryOperationResponsePB::OK, grpc::Status::OK, state};
-        config.local_dispatcher = std::make_shared<BlockTransferDispatcher>(engine, nullptr, 2);
+        config.local_dispatcher = std::make_shared<BlockTransferDispatcher>(engine, nullptr);
         config.groups           = groups;
         configs.push_back(std::move(config));
         engines.push_back(std::move(engine));
@@ -360,22 +356,20 @@ TEST_P(RequestLevelBroadcastTest, DiskStoreBroadcastsWholeTaskAndUsesBackendBatc
     auto                                                          manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(manager, nullptr);
     auto                    multi = std::make_shared<MultiRankBlockTransferEngine>(groups, manager);
-    BlockTransferDispatcher dispatcher(
-        std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX, GetParam()), multi, 2);
-    StoreTaskRunner               runner(groups);
-    BlockTreeCacheMetricsReporter reporter(nullptr);
-    auto task = std::make_shared<StoreTaskRunner::Task>(Tier::DISK, CacheKeysType{}, std::chrono::seconds(5));
+    BlockTransferDispatcher dispatcher(std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX, GetParam()),
+                                       multi);
+    TransferTask            task({}, std::chrono::seconds(5));
     for (size_t i = 0; i < 5; ++i)
-        task->transfer_task.addDescriptor(TransferDescriptor::deviceToDisk(0, {1}, i + 1));
-    std::promise<ErrorInfo> done;
+        task.addDescriptor(TransferDescriptor::diskToDevice(0, i + 1, {1}));
+    std::promise<TransferResult> done;
     auto                    future = done.get_future();
-    runner.runTransfer(task, dispatcher, reporter, [&](ErrorInfo result) { done.set_value(std::move(result)); });
+    dispatcher.runTransfer(std::move(task), [&](TransferResult result) { done.set_value(std::move(result)); });
     ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
     EXPECT_TRUE(future.get().ok());
     dispatcher.waitForTransfers();
     ASSERT_EQ(state->requests.size(), 2u);
     for (const auto& request : state->requests) {
-        EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::D2DISK);
+        EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::DISK2D);
         EXPECT_EQ(request.copy_items_size(), 5);
     }
     for (const auto& engine : engines) {
@@ -599,7 +593,7 @@ TEST_F(MultiRankBlockTransferEngineTest, CoordinatorSuccessDoesNotDependOnWaiter
     EXPECT_TRUE(context->success());
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, DispatcherAssignsDistinctWireIdsToConcurrentRequests) {
+TEST_F(MultiRankBlockTransferEngineTest, DispatcherPreservesTaskWireIdentityAcrossSubmissions) {
     auto state = std::make_shared<MultiRankBlockTransferRpcState>();
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     auto manager = makeBroadcastManager({{true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
@@ -608,7 +602,7 @@ TEST_F(MultiRankBlockTransferEngineTest, DispatcherAssignsDistinctWireIdsToConcu
     ASSERT_NE(manager, nullptr);
     auto                         cache  = makeBroadcastCache(manager);
     auto                         engine = std::make_shared<MultiRankBlockTransferEngine>(cache->groupSets(), manager);
-    BlockTransferDispatcher      dispatcher(cache->transfer_dispatcher_->per_rank_engine_, engine, 2);
+    BlockTransferDispatcher      dispatcher(cache->transfer_dispatcher_->per_rank_engine_, engine);
     TransferTask                 task({TransferDescriptor::hostToDevice(0, 1, {1}),
                                        TransferDescriptor::hostToDevice(0, 2, {2}),
                                        TransferDescriptor::hostToDevice(0, 3, {3}),
@@ -634,12 +628,13 @@ TEST_F(MultiRankBlockTransferEngineTest, DispatcherAssignsDistinctWireIdsToConcu
     for (const auto& request : state->requests) {
         EXPECT_EQ(request.copy_items_size(), 4);
         EXPECT_EQ(request.transfer_request_id(), 42);
-        EXPECT_NE(request.transfer_trace_id(), root_id);
+        EXPECT_EQ(request.transfer_trace_id(), root_id);
+        EXPECT_EQ(request.transfer_workflow_id(), root_id);
+        EXPECT_EQ(request.transfer_parent_id(), 0u);
         ++batches[request.transfer_trace_id()];
     }
-    ASSERT_EQ(batches.size(), 2u);
-    for (const auto& batch : batches)
-        EXPECT_EQ(batch.second, 2u);
+    ASSERT_EQ(batches.size(), 1u);
+    EXPECT_EQ(batches.at(root_id), 4u);
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, DiskLoadDiagnosticsCoverAllRanksAndKeepWireIdentity) {
@@ -922,8 +917,6 @@ TEST_F(MultiRankBlockTransferEngineTest, ConnectFailureUsesQueryAndActualCopyDir
         {TransferDescriptor::hostToDevice(0, 1, {1}), "H2D"},
         {TransferDescriptor::deviceToHost(0, {1}, 1), "D2H"},
         {TransferDescriptor::hostToDisk(0, 1, 1), "H2DISK"},
-        {TransferDescriptor::diskToHost(0, 1, 1), "DISK2H"},
-        {TransferDescriptor::deviceToDisk(0, {1}, 1), "D2DISK"},
         {TransferDescriptor::diskToDevice(0, 1, {1}), "DISK2D"}};
     for (const auto& [descriptor, direction] : cases) {
         auto result = cache->transfer_dispatcher_->multi_rank_engine_->execute(
@@ -934,7 +927,7 @@ TEST_F(MultiRankBlockTransferEngineTest, ConnectFailureUsesQueryAndActualCopyDir
         EXPECT_NE(message.find("request_id=73"), std::string::npos);
         EXPECT_NE(message.find("direction=" + direction), std::string::npos);
     }
-    EXPECT_EQ(directions, (std::vector<std::string>{"H2D", "D2H", "H2DISK", "DISK2H", "D2DISK", "DISK2D"}));
+    EXPECT_EQ(directions, (std::vector<std::string>{"H2D", "D2H", "H2DISK", "DISK2D"}));
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferReportsWorkerRpcError) {
@@ -1322,8 +1315,9 @@ TEST_F(MultiRankBlockTransferEngineTest, EvictionRpcFailureFreezesBothEndsAndPre
                                                                   {true, MemoryOperationResponsePB::OK, grpc::Status(grpc::StatusCode::UNAVAILABLE, "lost reply"), state}},
         servers);
     ASSERT_NE(broadcast_manager, nullptr);
+    auto host_pool = makeHostPool(256, 8);
     auto disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
-    auto group     = makeBroadcastGroup("rpc_unknown_eviction", nullptr, disk_pool);
+    auto group     = makeBroadcastGroup("rpc_unknown_eviction", host_pool, disk_pool);
     initializeBroadcastGroups({group});
     auto blocks = allocateDeviceBlocksForTest(*group, 1);
     ASSERT_EQ(blocks.size(), 1u);
@@ -1332,7 +1326,7 @@ TEST_F(MultiRankBlockTransferEngineTest, EvictionRpcFailureFreezesBothEndsAndPre
     auto                 device_pool = group->devicePools().front();
     BlockTreeCacheConfig config;
     config.enable_device_cache = true;
-    config.enable_host_cache   = false;
+    config.enable_host_cache   = true;
     config.enable_disk_cache   = true;
     auto cache                 = makeBlockTreeCacheForTest({group}, config, nullptr, broadcast_manager);
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
@@ -1349,17 +1343,17 @@ TEST_F(MultiRankBlockTransferEngineTest, EvictionRpcFailureFreezesBothEndsAndPre
     EXPECT_FALSE(nodes.back()->group_set_resources[0].hasTier(Tier::DISK));
     EXPECT_TRUE(device_pool->isFrozen(source));
     EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
-    EXPECT_EQ(disk_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
-    EXPECT_EQ(disk_pool->freeBlocksNum(), 7u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    EXPECT_EQ(host_pool->freeBlocksNum(), 7u);
     EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
-    EXPECT_EQ(disk_pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     std::lock_guard<std::mutex> lock(state->mutex);
     EXPECT_EQ(state->requests.size(), 2u);
     for (const auto& request : state->requests) {
         ASSERT_EQ(request.copy_items_size(), 1);
-        EXPECT_TRUE(disk_pool->isFrozen(request.copy_items(0).disk_block()));
+        EXPECT_TRUE(host_pool->isFrozen(request.copy_items(0).mem_block()));
     }
 }
 
@@ -1377,7 +1371,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
     ASSERT_NE(broadcast_manager, nullptr);
 
     std::shared_ptr<HostBlockPool>          host_pool = makeHostPool(256, 4);
-    std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeDiskPool(256, 4, std::make_unique<MemoryDiskBlockIO>());
+    std::shared_ptr<DiskBlockPool>          disk_pool    = makeDiskPool(256, 4, std::make_unique<MemoryDiskBlockIO>());
     std::shared_ptr<FullGroupSet>           group     = makeBroadcastGroup("broadcast_disk_load", host_pool, disk_pool);
     const BlockIdxType                      device_block = prepareDeviceTarget(group);
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
@@ -1440,7 +1434,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsTask) {
     ASSERT_NE(broadcast_manager, nullptr);
 
     std::shared_ptr<HostBlockPool>          host_pool = makeHostPool(256, 8);
-    std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
+    std::shared_ptr<DiskBlockPool>          disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
     std::shared_ptr<FullGroupSet> full = makeBroadcastGroup("broadcast_eviction_success", host_pool, disk_pool);
     initializeBroadcastGroups({full});
     const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
@@ -1580,7 +1574,7 @@ TEST_F(MultiRankBlockTransferEngineTest, CacheShutdownWaitsForLateMultiRankEvict
     }
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWithD2Disk) {
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionToHostCommits) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1593,8 +1587,9 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWith
     auto broadcast_manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(broadcast_manager, nullptr);
 
+    auto host_pool = makeHostPool(256, 8);
     auto disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
-    auto full      = makeBroadcastGroup("broadcast_device_to_disk", nullptr, disk_pool);
+    auto full      = makeBroadcastGroup("broadcast_device_to_host", host_pool, disk_pool);
     initializeBroadcastGroups({full});
     MultiNodeBlocks device = allocateDeviceBlocksForTest(*full, 1);
     ASSERT_EQ(device.size(), 1u);
@@ -1603,7 +1598,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWith
 
     BlockTreeCacheConfig config;
     config.enable_device_cache                        = true;
-    config.enable_host_cache                          = false;
+    config.enable_host_cache                          = true;
     config.enable_disk_cache                          = true;
     std::vector<GroupSetPtr>                   groups = {full};
     auto                                       cache  = makeBlockTreeCacheForTest(std::move(groups),
@@ -1625,19 +1620,20 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWith
     const GroupSetResource& resource = after.back()->group_set_resources[0];
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
-    EXPECT_TRUE(resource.hasTier(Tier::DISK));
+    EXPECT_TRUE(resource.hasTier(Tier::HOST));
+    EXPECT_FALSE(resource.hasTier(Tier::DISK));
 
     std::lock_guard<std::mutex> lock(state->mutex);
     ASSERT_EQ(state->requests.size(), 2u);
     for (const MemoryOperationRequestPB& request : state->requests) {
-        EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::D2DISK);
+        EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::D2H);
         ASSERT_EQ(request.copy_items_size(), 1);
-        EXPECT_EQ(request.copy_items(0).disk_block(), resource.disk_block);
+        EXPECT_EQ(request.copy_items(0).mem_block(), resource.host_block);
         expectSingleGroupBlock(request.copy_items(0), "group0", device_block);
     }
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSource) {
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceToHostFailureRollsBackDeviceSource) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1650,8 +1646,9 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
     auto broadcast_manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(broadcast_manager, nullptr);
 
+    auto host_pool = makeHostPool(256, 8);
     auto disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
-    auto full      = makeBroadcastGroup("broadcast_device_to_disk_failure", nullptr, disk_pool);
+    auto full      = makeBroadcastGroup("broadcast_device_to_host_failure", host_pool, disk_pool);
     initializeBroadcastGroups({full});
     MultiNodeBlocks device = allocateDeviceBlocksForTest(*full, 1);
     ASSERT_EQ(device.size(), 1u);
@@ -1660,7 +1657,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
 
     BlockTreeCacheConfig config;
     config.enable_device_cache                        = true;
-    config.enable_host_cache                          = false;
+    config.enable_host_cache                          = true;
     config.enable_disk_cache                          = true;
     std::vector<GroupSetPtr>                   groups = {full};
     auto                                       cache  = makeBlockTreeCacheForTest(std::move(groups),
@@ -1682,6 +1679,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
     const GroupSetResource& resource = after.back()->group_set_resources[0];
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_EQ(resource.device_blocks, (std::vector<BlockIdxType>{device_block}));
+    EXPECT_FALSE(resource.hasTier(Tier::HOST));
     EXPECT_FALSE(resource.hasTier(Tier::DISK));
     EXPECT_TRUE(full->devicePools().front()->isAllocated(device_block));
     EXPECT_EQ(disk_pool->freeBlocksNum(), 8u);
@@ -1692,7 +1690,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
     std::lock_guard<std::mutex> lock(state->mutex);
     ASSERT_EQ(state->requests.size(), 2u);
     for (const MemoryOperationRequestPB& request : state->requests) {
-        EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::D2DISK);
+        EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::D2H);
     }
 }
 
@@ -1707,7 +1705,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastBatchEvictionFailureOnOneRankR
     ASSERT_NE(broadcast_manager, nullptr);
 
     std::shared_ptr<HostBlockPool>          host_pool = makeHostPool(256, 8);
-    std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
+    std::shared_ptr<DiskBlockPool>          disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
     std::shared_ptr<FullGroupSet> full = makeBroadcastGroup("broadcast_batch_eviction_failure", host_pool, disk_pool);
     initializeBroadcastGroups({full});
     std::vector<BlockIdxType> host_blocks;
@@ -1765,7 +1763,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastBatchEvictionFailureOnOneRankR
 
 TEST_F(MultiRankBlockTransferEngineTest, EncodeTransferRequestIncludesMultipleDescriptors) {
     std::shared_ptr<HostBlockPool>          host_pool = makeHostPool(256, 8);
-    std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
+    std::shared_ptr<DiskBlockPool>          disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
     std::shared_ptr<FullGroupSet> primary_group       = makeBroadcastGroup("broadcast_primary", host_pool, disk_pool);
     std::shared_ptr<FullGroupSet> cascade_group       = makeBroadcastGroup("broadcast_cascade", host_pool, disk_pool);
     initializeBroadcastGroups({primary_group, cascade_group});
@@ -1870,14 +1868,22 @@ TEST_F(MultiRankBlockTransferEngineTest, MixedIntegrityBatchReportsGenericFailur
     EXPECT_EQ(callbacks, 1u);
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, MixedIntegrityBatchRejectsMixedDirectionsBeforeAnyDispatch) {
-    MultiRankBlockTransferEngine engine(makeMixedIntegrityBroadcastGroups(), nullptr);
+TEST_F(MultiRankBlockTransferEngineTest, MixedDirectionsRejectBeforeSendingRequests) {
+    auto state = std::make_shared<MultiRankBlockTransferRpcState>();
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto manager = makeBroadcastManager({{true, MemoryOperationResponsePB::OK, grpc::Status::OK, state}}, servers);
+    ASSERT_NE(manager, nullptr);
+    MultiRankBlockTransferEngine engine(makeMixedIntegrityBroadcastGroups(), manager);
     auto                         context = engine.execute(
         TransferTask({TransferDescriptor::hostToDevice(0, 1, {2}), TransferDescriptor::deviceToHost(1, {4}, 3)},
                      std::chrono::seconds(5)));
-    ASSERT_TRUE(context->done());
+    context->waitDone();
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(context->result().block_errors,
+              (std::vector<CacheCopyError>{CacheCopyError::INVALID_REQUEST, CacheCopyError::INVALID_REQUEST}));
+    std::lock_guard<std::mutex> lock(state->mutex);
+    EXPECT_TRUE(state->requests.empty());
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, MixedIntegrityFailureWaitsForEveryRankAfterContextRelease) {

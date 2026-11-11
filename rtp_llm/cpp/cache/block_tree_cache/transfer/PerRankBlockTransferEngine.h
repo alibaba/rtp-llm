@@ -8,7 +8,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskIOExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferAsyncContext.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcTransferService.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferWorkLoop.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
@@ -37,15 +37,16 @@ public:
     PerRankBlockTransferEngine() = delete;
     virtual ~PerRankBlockTransferEngine();
 
-    virtual std::shared_ptr<TransferAsyncContext> execute(TransferTask task);
-    // Shared by every direction. WorkLoop bounds M by its staging capacities;
-    // legacy uses M and splits Device/Disk work further to fit its staging pool.
-    size_t batchLimit() const noexcept {
-        return max_descriptors_per_batch_;
+    // Group a logical request by direction and GroupSet, then submit bounded batches.
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task);
+    // Maximum physical batch for this route, precomputed during initialization.
+    size_t batchLimit(Tier source, Tier target) const noexcept {
+        return async_ && source == Tier::DISK && target == Tier::DEVICE ? staging_batch_limit_ :
+                                                                          max_descriptors_per_batch_;
     }
     void                cancelPendingStagingTransfers();
     // Monitoring compatibility: async reports outstanding batches, including
-    // callbacks; offload maps to background. Legacy reports task-pool queues.
+    // callbacks; evict maps to background. Legacy reports task-pool queues.
     BlockTreeQueueSizes queueSizes() const;
     void                stopAdmission();
     // External lifecycle thread only, never from a WorkLoop callback.
@@ -73,14 +74,17 @@ public:
     }
 
 private:
+    virtual std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task);
+
     std::vector<GroupSetPtr> group_sets_;
     size_t                   max_descriptors_per_batch_;
+    size_t                   staging_batch_limit_;
 
     std::unique_ptr<DiskIOExecutor> disk_io_executor_;
 
     std::unique_ptr<LegacyTransferEngine>          legacy_;
-    std::vector<std::unique_ptr<TransferWorkLoop>> load_loops_, offload_loops_;
-    std::atomic<size_t>                            next_load_{0}, next_offload_{0};
+    std::vector<std::unique_ptr<TransferWorkLoop>> load_loops_, evict_loops_;
+    std::atomic<size_t>                            next_load_{0}, next_evict_{0};
     bool                                           async_{false}, enable_disk_cache_{false};
     size_t                                         transfer_worker_count_{1};
     bool                                           track_decode_origins_{false};

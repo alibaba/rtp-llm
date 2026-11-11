@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/LegacyTransferEngine.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcTransferService.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferEngineSelection.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <algorithm>
 
@@ -15,29 +14,29 @@ LegacyTransferEngine::LegacyTransferEngine(std::vector<GroupSetPtr> groups,
                                            std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
                                            int64_t                                        world_rank):
     group_sets_(std::move(groups)) {
-    std::shared_ptr<CrcTransferService> load_crc_service, offload_crc_service;
+    std::shared_ptr<CrcCopyExecutor> load_crc_executor, evict_crc_executor;
     if (std::any_of(group_sets_.begin(), group_sets_.end(), [enable_disk_cache](const GroupSetPtr& group) {
             return group->crcEnabled() && !group->devicePools().empty()
                    && (group->hostPool() || (enable_disk_cache && group->diskPool()));
         })) {
         const auto crc_groups = crcTransferGroups(group_sets_, enable_disk_cache);
-        load_crc_service      = std::make_shared<CrcTransferService>(
+        load_crc_executor     = std::make_shared<CrcCopyExecutor>(
             crc_groups, max_descriptors_per_batch, transfer_worker_count, world_rank, nullptr, false);
-        offload_crc_service = std::make_shared<CrcTransferService>(
+        evict_crc_executor = std::make_shared<CrcCopyExecutor>(
             crc_groups, max_descriptors_per_batch, transfer_worker_count, world_rank, nullptr, false);
     }
     load_transfer_task_pool_ =
         std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "btc_load");
     transfer_task_pool_ =
-        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "btc_evict_store");
+        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "btc_evict");
     RTP_LLM_CHECK(load_transfer_task_pool_->start());
     RTP_LLM_CHECK(transfer_task_pool_->start());
     device_host_executor_ = std::make_unique<DeviceHostTransferExecutor>(*transfer_task_pool_,
                                                                          max_descriptors_per_batch,
                                                                          std::move(device_host_options),
                                                                          metrics_reporter,
-                                                                         std::move(load_crc_service),
-                                                                         std::move(offload_crc_service),
+                                                                         std::move(load_crc_executor),
+                                                                         std::move(evict_crc_executor),
                                                                          load_transfer_task_pool_.get(),
                                                                          world_rank);
     host_disk_executor_   = std::make_unique<HostDiskTransferExecutor>(
@@ -62,7 +61,7 @@ std::shared_ptr<TransferAsyncContext> LegacyTransferEngine::execute(TransferTask
     const auto& descriptors = task.descriptors();
     const auto  source      = descriptors.front().source_tier;
     const auto  target      = descriptors.front().target_tier;
-    if ((source == Tier::DISK && target == Tier::DEVICE) || (source == Tier::DEVICE && target == Tier::DISK))
+    if (source == Tier::DISK && target == Tier::DEVICE)
         return device_disk_executor_->execute(std::move(task), groups);
     std::vector<HostBufferView> hosts;
     hosts.reserve(descriptors.size());

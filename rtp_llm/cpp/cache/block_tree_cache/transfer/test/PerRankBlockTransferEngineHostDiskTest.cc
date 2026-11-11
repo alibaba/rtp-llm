@@ -1,11 +1,13 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/LegacyTransferEngine.h"
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -17,6 +19,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "kmonitor/client/core/MetricsData.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskIOExecutor.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
@@ -46,7 +49,7 @@ TEST(PerRankBlockTransferEngineConfigTest, BatchLimitIsAvailableForBothBackends)
         SCOPED_TRACE(async);
         PerRankBlockTransferEngine engine({}, false, {}, 128, 17, 2, 32, nullptr, 0, 2, async);
         ASSERT_EQ(engine.asyncEnabled(), async);
-        EXPECT_EQ(engine.batchLimit(), 17u);
+        EXPECT_EQ(engine.batchLimit(Tier::HOST, Tier::DISK), 17u);
     }
 }
 
@@ -66,10 +69,10 @@ using block_transfer_engine_test::poolMalloc;
 using block_transfer_engine_test::releasePoolBlock;
 using block_transfer_engine_test::executeSucceeded;
 
-GroupSetPtr makeHostDiskGroup(size_t                                  group_set_id,
-                              std::shared_ptr<HostBlockPool>          host_pool,
-                              std::shared_ptr<BlockTreeDiskBlockPool> disk_pool,
-                              size_t                                  payload_bytes) {
+GroupSetPtr makeHostDiskGroup(size_t                         group_set_id,
+                              std::shared_ptr<HostBlockPool> host_pool,
+                              std::shared_ptr<DiskBlockPool> disk_pool,
+                              size_t                         payload_bytes) {
     auto policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
     policy.enable_prefix_reuse = true;
     auto topology              = makeTestTopology({makeTestGroupBase(policy, {0}, payload_bytes)});
@@ -89,11 +92,17 @@ public:
     RecordingBatchDiskBlockIO(): StatusDiskBlockIO(DiskBlockIOStatus::OK) {}
 
     DiskBlockIOStatus write(const std::vector<DiskWrite>& writes) override {
-        batch_sizes.push_back(writes.size());
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            batch_sizes.push_back(writes.size());
+        }
         return StatusDiskBlockIO::write(writes);
     }
 
     std::vector<size_t> batch_sizes;
+
+private:
+    std::mutex mutex_;
 };
 
 class BlockingBatchDiskBlockIO: public StatusDiskBlockIO {
@@ -166,7 +175,7 @@ protected:
     TempDirGuard                                temp_dir_{"block_transfer_engine_test"};
     size_t                                      host_block_size_;
     std::shared_ptr<HostBlockPool>              host_pool_;
-    std::shared_ptr<BlockTreeDiskBlockPool>     disk_pool_;
+    std::shared_ptr<DiskBlockPool>              disk_pool_;
     std::shared_ptr<PerRankBlockTransferEngine> per_rank_transfer_engine_;
     GroupSetPtr                                 group_set_;
 };
@@ -195,8 +204,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
 
     std::memset(host_data, 0, host_block_size_);
 
-    auto disk_to_host = makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, disk_block);
-    ASSERT_TRUE(executeSucceeded(per_rank_transfer_engine_, disk_to_host));
+    ASSERT_EQ(disk_pool_->read(disk_block, host_data, disk_pool_->strideBytes()), BlockIOStatus::OK);
 
     for (size_t i = 0; i < host_block_size_; ++i)
         EXPECT_EQ(host_data[i], static_cast<uint8_t>(i & 0xFF)) << "byte " << i;
@@ -205,7 +213,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
     releasePoolBlock(*disk_pool_, disk_block);
 }
 
-TEST_F(PerRankBlockTransferEngineHostDiskTest, PhysicalOriginsFollowHostDiskRoundTripAndClearUnknownOverwrite) {
+TEST_F(PerRankBlockTransferEngineHostDiskTest, EvictionCopiesOriginAndClearsUnknownOverwrite) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     auto            engine     = makeEngine({group_set_});
     const auto      host_block = poolMalloc(*host_pool_);
@@ -221,9 +229,6 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, PhysicalOriginsFollowHostDiskRoun
     ASSERT_TRUE(host_pool_->bindDecodeOrigin(host_block, host_generation, tag, origin));
     ASSERT_TRUE(executeSucceeded(engine, makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block)));
     EXPECT_EQ(disk_pool_->decodeOrigin(disk_block, tag), origin);
-    ASSERT_TRUE(host_pool_->bindDecodeOrigin(host_block, host_generation, tag, nullptr));
-    ASSERT_TRUE(executeSucceeded(engine, makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, disk_block)));
-    EXPECT_EQ(host_pool_->decodeOrigin(host_block, tag), origin);
     ASSERT_TRUE(host_pool_->bindDecodeOrigin(host_block, host_generation, tag, nullptr));
     ASSERT_TRUE(executeSucceeded(engine, makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block)));
     EXPECT_FALSE(disk_pool_->decodeOrigin(disk_block, tag));
@@ -327,7 +332,9 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, LegacyMaxBatchSizeSplitsOneLogica
     context->waitDone();
 
     ASSERT_TRUE(context->success()) << context->errorInfo().ToString();
-    EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{2, 2, 1}));
+    // Worker execution order is independent of the logical descriptor order.
+    std::sort(io->batch_sizes.begin(), io->batch_sizes.end());
+    EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{1, 2, 2}));
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, LegacyDefaultBatchSizeSplitsSeventeenDescriptorsIntoEightEightOne) {
@@ -349,7 +356,8 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, LegacyDefaultBatchSizeSplitsSeven
     context->waitDone();
 
     ASSERT_TRUE(context->success()) << context->errorInfo().ToString();
-    EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{8, 8, 1}));
+    std::sort(io->batch_sizes.begin(), io->batch_sizes.end());
+    EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{1, 8, 8}));
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionHostToDiskTasksMayUseSharedWorkers) {
@@ -375,31 +383,46 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionHostToDiskTasksMayUs
     EXPECT_TRUE(second_context->success());
 }
 
-TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionDiskToHostTasksMayUseSharedWorkers) {
-    auto       owned_io   = std::make_unique<BlockingBatchDiskBlockIO>(BlockingBatchDiskBlockIO::Operation::READ);
-    auto*      io         = owned_io.get();
-    auto       host_pool  = makeHostPool(host_block_size_, 3);
-    auto       disk_pool  = makeDiskPool(host_block_size_, 2, temp_dir_.path, std::move(owned_io), "shared_read");
-    auto       group      = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
-    auto       engine     = makeEngine({group});
+TEST_F(PerRankBlockTransferEngineHostDiskTest, PhysicalDiskReadsMayUseSharedWorkers) {
+    auto       owned_io    = std::make_unique<BlockingBatchDiskBlockIO>(BlockingBatchDiskBlockIO::Operation::READ);
+    auto*      io          = owned_io.get();
+    auto       host_pool   = makeHostPool(host_block_size_, 3);
+    auto       disk_pool   = makeDiskPool(host_block_size_, 2, temp_dir_.path, std::move(owned_io), "shared_read");
     const auto disk_block = poolMalloc(*disk_pool);
-    const auto first      = makeDescriptor(Tier::DISK, Tier::HOST, {}, poolMalloc(*host_pool), disk_block);
-    const auto second     = makeDescriptor(Tier::DISK, Tier::HOST, {}, poolMalloc(*host_pool), disk_block);
-
-    auto first_context = engine->execute(makeTransferTask({first}));
+    const auto first_host  = poolMalloc(*host_pool);
+    const auto second_host = poolMalloc(*host_pool);
+    DiskIOExecutorConfig config;
+    config.read_thread_count  = 2;
+    config.write_thread_count = 1;
+    config.read_queue_size = config.write_queue_size = 8;
+    DiskIOExecutor executor(config);
+    executor.start();
+    [[maybe_unused]] auto       release = std::shared_ptr<void>(nullptr, [io](void*) { io->release(); });
+    std::promise<BlockIOStatus> first_done, second_done;
+    auto                        first_future  = first_done.get_future();
+    auto                        second_future = second_done.get_future();
+    ASSERT_EQ(disk_pool->asyncRead(executor,
+                                   {disk_block},
+                                   {host_pool->blockBuffer(first_host).addr},
+                                   disk_pool->strideBytes(),
+                                   [&](auto status) { first_done.set_value(status); }),
+              BlockIOStatus::OK);
     ASSERT_TRUE(io->waitForBlockedCalls(1, std::chrono::seconds(5)));
-    auto       second_context                = engine->execute(makeTransferTask({second}));
-    const bool second_started_before_release = io->waitForBlockedCalls(2, std::chrono::milliseconds(200));
-
+    ASSERT_EQ(disk_pool->asyncRead(executor,
+                                   {disk_block},
+                                   {host_pool->blockBuffer(second_host).addr},
+                                   disk_pool->strideBytes(),
+                                   [&](auto status) { second_done.set_value(status); }),
+              BlockIOStatus::OK);
+    const bool second_started = io->waitForBlockedCalls(2, std::chrono::milliseconds(200));
     io->release();
-    first_context->waitDone();
-    second_context->waitDone();
-    EXPECT_TRUE(second_started_before_release);
-    EXPECT_TRUE(first_context->success());
-    EXPECT_TRUE(second_context->success());
+    EXPECT_TRUE(second_started);
+    EXPECT_EQ(first_future.get(), BlockIOStatus::OK);
+    EXPECT_EQ(second_future.get(), BlockIOStatus::OK);
+    executor.stop();
 }
 
-TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskDirectIoWritesAlignedStrideAndZeroPads) {
+TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskDirectIoPreservesAlignedSourceAndPadding) {
     auto  owned_io  = std::make_unique<DirectAlignmentDiskBlockIO>();
     auto* direct_io = owned_io.get();
     auto  direct_disk =
@@ -414,7 +437,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskDirectIoWritesAlignedStri
     const BlockIdxType host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     uint8_t* host_data = static_cast<uint8_t*>(host_pool_->blockBuffer(host_block).addr);
-    // Seed non-zero padding to verify that the executor clears it.
+    // Distinct non-zero padding must be written without modifying the source.
     for (size_t i = 0; i < stride; ++i) {
         host_data[i] = static_cast<uint8_t>((i * 7 + 1) & 0xFF);
     }
@@ -423,7 +446,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskDirectIoWritesAlignedStri
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
     ASSERT_TRUE(executor
                     .executeBatch({HostBufferView{host_data, host_block_size_, stride}},
-                                  {TransferDescriptor::deviceToDisk(0, {0}, disk_block)},
+                                  {TransferDescriptor::hostToDisk(0, host_block, disk_block)},
                                   {group.get()})
                     .ok());
     EXPECT_EQ(direct_io->lastWriteBytes(), stride);
@@ -443,7 +466,8 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskDirectIoWritesAlignedStri
         EXPECT_EQ(dst_data[i], static_cast<uint8_t>((i * 7 + 1) & 0xFF)) << "payload byte " << i;
     }
     for (size_t i = host_block_size_; i < stride; ++i) {
-        EXPECT_EQ(dst_data[i], 0) << "padding byte " << i;
+        EXPECT_EQ(dst_data[i], static_cast<uint8_t>((i * 7 + 1) & 0xFF)) << "padding byte " << i;
+        EXPECT_EQ(host_data[i], static_cast<uint8_t>((i * 7 + 1) & 0xFF)) << "source byte " << i;
     }
 
     releasePoolBlock(*host_pool_, host_block);
@@ -508,7 +532,6 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskStatusMapping) {
         auto group      = makeHostDiskGroup(0, host_pool_, disk_pool, host_block_size_);
         auto engine     = makeEngine({group});
         expectStatus(engine, makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block), expected);
-        expectStatus(engine, makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, disk_block), expected);
         releasePoolBlock(*host_pool_, host_block);
     }
 }

@@ -1,44 +1,21 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/store/BlockTreeStorer.h"
 
-#include <chrono>
-#include <cassert>
-#include <exception>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
+
 BlockTreeStorer::BlockTreeStorer(BlockTree*                      tree,
                                  BlockTreeEvictor&               evictor,
-                                 BlockTransferDispatcher*        transfer_dispatcher,
-                                 BlockTreeTaskPool*              task_pool,
                                  BlockTreeCacheMetricsReporter&  metrics_reporter,
-                                 std::mutex&                     mutex,
-                                 int                             host_timeout_ms,
-                                 int                             disk_timeout_ms,
                                  std::shared_ptr<StorageBackend> storage_backend,
                                  SettledFn                       settled):
     tree_(tree),
     evictor_(evictor),
-    transfer_dispatcher_(transfer_dispatcher),
-    task_pool_(task_pool),
     metrics_reporter_(metrics_reporter),
-    store_task_runner_(tree_->groupSets()),
-    mutex_(mutex),
-    host_timeout_ms_(host_timeout_ms),
-    disk_timeout_ms_(disk_timeout_ms),
     storage_backend_(std::move(storage_backend)),
     settled_(std::move(settled)) {}
-
-void BlockTreeStorer::stopAdmissionLocked() {
-    stopping_.store(true);
-}
 
 StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&                              cache_keys,
                                               const std::vector<std::vector<GroupSetResource>>& resources,
@@ -49,16 +26,8 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                                               size_t                                            remote_reuse_begin,
                                               size_t                                            remote_reuse_end) {
     resident_prefix_length = 0;
-    assert(!is_resident || target_tier == Tier::DEVICE);
-    RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK,
-                            "unsupported store target tier: %s",
-                            tierName(target_tier));
-    if (target_tier == Tier::DEVICE) {
-        publishDeviceLocked(cache_keys, resources, is_resident, resident_prefix_length);
-    } else {
-        submitLowerTierLocked(cache_keys, resources, target_tier, request_id);
-        return {};
-    }
+    RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE, "unsupported store target tier: %s", tierName(target_tier));
+    publishDeviceLocked(cache_keys, resources, is_resident, resident_prefix_length);
     return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(
                                   cache_keys, resources, request_id, remote_reuse_begin, remote_reuse_end)) :
                               StorageWriteTask{};
@@ -86,16 +55,16 @@ StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&         
                                                    const std::vector<std::vector<GroupSetResource>>& resources,
                                                    const std::optional<int64_t>&                     request_id,
                                                    size_t                                            remote_reuse_begin,
-                                                   size_t                                            remote_reuse_end) const {
+                                                   size_t remote_reuse_end) const {
     RTP_LLM_CHECK(remote_reuse_begin <= remote_reuse_end && remote_reuse_end <= cache_keys.size());
     const size_t key_count = cache_keys.size() - (remote_reuse_end - remote_reuse_begin);
-    auto keys = std::make_shared<CacheKeysType>();
+    auto         keys      = std::make_shared<CacheKeysType>();
     keys->reserve(key_count);
     keys->insert(keys->end(), cache_keys.begin(), cache_keys.begin() + remote_reuse_begin);
     keys->insert(keys->end(), cache_keys.begin() + remote_reuse_end, cache_keys.end());
     StorageRequest request{std::move(keys), std::vector<std::vector<StorageBlockHandle>>(key_count)};
     request.request_id = request_id;
-    size_t output = 0;
+    size_t output      = 0;
     for (size_t key_index = 0; key_index < resources.size(); ++key_index) {
         if (key_index >= remote_reuse_begin && key_index < remote_reuse_end) {
             continue;
@@ -113,168 +82,6 @@ StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&         
         }
     }
     return request;
-}
-
-void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                              cache_keys,
-                                            const std::vector<std::vector<GroupSetResource>>& resources,
-                                            Tier                                              target_tier,
-                                            std::optional<int64_t>                            request_id) {
-    if (stopping_.load()) {
-        return;
-    }
-
-    StoreTaskPtr task = std::make_shared<StoreTask>(
-        target_tier,
-        cache_keys,
-        std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_),
-        request_id);
-
-    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task]() {
-        settleLocked(*task,
-                     /*publish=*/false,
-                     CompletionStageContext::forTransfer(metrics_reporter_, task->transfer_task, "store", false));
-    });
-
-    if (!store_task_runner_.prepareTask(*task, resources)) {
-        return;
-    }
-    const int64_t queue_begin = currentTimeUs();
-    auto          on_timeout  = [this, task, queue_begin]() {
-        metrics_reporter_.reportQueueWaitMetric(false,
-                                                "business",
-                                                cacheTransferOperationName(CacheTransferOperation::STORE),
-                                                Tier::NONE,
-                                                Tier::NONE,
-                                                currentTimeUs() - queue_begin);
-        RTP_LLM_LOG_WARNING("store expired in business queue, target=%s blocks=%zu",
-                            tierName(task->target_tier),
-                            task->descriptors().size());
-        scheduleStoreSettlement(task, ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "store business queue timeout"));
-    };
-    const auto deadline = task->transfer_task.deadline();
-    if (!task_pool_->submit(
-            BlockTreeTaskClass::BACKGROUND,
-            [this, task, queue_begin]() {
-                metrics_reporter_.reportQueueWaitMetric(false,
-                                                        "business",
-                                                        cacheTransferOperationName(CacheTransferOperation::STORE),
-                                                        Tier::NONE,
-                                                        Tier::NONE,
-                                                        currentTimeUs() - queue_begin);
-                runStoreTask(task);
-            },
-            deadline,
-            std::move(on_timeout))) {
-        RTP_LLM_LOG_WARNING("store aborted: business task submission rejected, target=%s blocks=%zu",
-                            tierName(target_tier),
-                            task->descriptors().size());
-        return;
-    }
-    prepare_guard.dismiss();
-}
-
-void BlockTreeStorer::runStoreTask(const StoreTaskPtr& task) {
-    if (stopping_.load()) {
-        scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store stopped before transfer"));
-        return;
-    }
-
-    try {
-        store_task_runner_.runTransfer(task, *transfer_dispatcher_, metrics_reporter_, [this, task](ErrorInfo error) {
-            scheduleStoreSettlement(task, std::move(error));
-        });
-    } catch (const std::exception& error) {
-        RTP_LLM_LOG_ERROR("store copy threw: %s", error.what());
-        scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
-    } catch (...) {
-        RTP_LLM_LOG_ERROR("store copy threw an unknown exception");
-        scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown store copy exception"));
-    }
-}
-
-void BlockTreeStorer::scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInfo error) {
-    auto observation = CompletionStageContext::forTransfer(metrics_reporter_, task->transfer_task, "store", error.ok());
-    auto timers      = CompletionStageTimers::create(observation);
-    const int64_t queue_begin = currentTimeUs();
-    auto          settle      = [this, task, observation, timers, queue_begin](bool queued) {
-        timers.finishQueue(observation.success);
-        bool                                   success = false;
-        block_tree_cache_detail::ScopeRollback finish([&] { timers.finish(success); });
-        CompletionStageScope                   execute(observation, "completion_execute", "business_completion");
-        if (queued) {
-            metrics_reporter_.reportQueueWaitMetric(
-                true, "business", "store", Tier::NONE, Tier::NONE, currentTimeUs() - queue_begin);
-        }
-        success = settleTask(*task, observation);
-        execute.setSuccess(success);
-    };
-    if (!task_pool_->submitCompletion([settle] { settle(true); })) {
-        RTP_LLM_LOG_WARNING("store completion queue is closed; settling inline");
-        settle(false);
-    }
-}
-
-bool BlockTreeStorer::settleTask(const StoreTask& task, const CompletionStageContext& observation) {
-    const bool copy_success = observation.success;
-    bool   stopping = false;
-    size_t accepted = 0;
-    {
-        std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
-        {
-            CompletionStageScope wait(observation, "completion_lock_wait", "business_completion", AsyncProfileKind::Wait);
-            lock.lock();
-        }
-        CompletionStageScope tree(observation, "completion_settle", "business_completion");
-        stopping = stopping_.load();
-        accepted = settleLocked(task, copy_success && !stopping, observation);
-        tree.setSuccess(copy_success && !stopping);
-    }
-
-    if (stopping) {
-        RTP_LLM_LOG_INFO("store rolled back during shutdown, target=%s blocks=%zu",
-                         tierName(task.target_tier),
-                         task.descriptors().size());
-    } else if (!copy_success) {
-        RTP_LLM_LOG_WARNING("store copy failed, target=%s blocks=%zu; tree unchanged",
-                            tierName(task.target_tier),
-                            task.descriptors().size());
-    } else {
-        metrics_reporter_.reportStorePublish(task.target_tier, accepted, task.descriptors().size() - accepted);
-        RTP_LLM_LOG_DEBUG("store published target=%s accepted=%zu duplicate=%zu",
-                          tierName(task.target_tier),
-                          accepted,
-                          task.descriptors().size() - accepted);
-    }
-    return copy_success && !stopping;
-}
-
-size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish, CompletionStageContext observation) {
-    observation.success = publish;
-    BlockTreeInsertResult insert_result;
-    if (publish) {
-        CompletionStageScope                       tree(observation, "completion_publish_tree", "business_completion");
-        std::vector<std::vector<GroupSetResource>> resources(task.cache_keys.size(),
-                                                             std::vector<GroupSetResource>(tree_->groupSets().size()));
-        for (const TransferDescriptor& descriptor : task.descriptors()) {
-            resources[descriptor.path_index][descriptor.group_set_id].setBlocks(
-                task.target_tier, {descriptor.singleBlockAt(task.target_tier)});
-        }
-        insert_result = tree_->insertNode(task.cache_keys, resources, true, false);
-    }
-
-    {
-        CompletionStageScope refs(observation, "completion_release_refs", "business_completion");
-        store_task_runner_.releaseTaskResources(task);
-    }
-    if (insert_result.accepted_resource_count > 0) {
-        CompletionStageScope candidates(observation, "completion_candidates", "business_completion");
-        evictor_.onInserted(insert_result);
-    }
-    if (!task.descriptors().empty()) {
-        CompletionStageScope watermark(observation, "completion_watermark", "business_completion");
-        settled_(true);
-    }
-    return insert_result.accepted_resource_count;
 }
 
 }  // namespace rtp_llm

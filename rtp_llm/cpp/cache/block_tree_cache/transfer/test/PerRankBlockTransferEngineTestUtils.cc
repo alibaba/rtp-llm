@@ -107,7 +107,7 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
                              std::vector<std::string>             group_tags,
                              std::vector<DeviceBlockPoolPtr>      device_pools,
                              std::shared_ptr<HostBlockPool>       host_pool,
-                             BlockTreeDiskBlockPoolPtr            disk_pool,
+                             DiskBlockPoolPtr                     disk_pool,
                              bool                                 enable_crc,
                              size_t                               physical_payload_bytes) {
     RTP_LLM_CHECK(topology != nullptr);
@@ -210,17 +210,17 @@ TempDirGuard::~TempDirGuard() {
     removeTempDir(path);
 }
 
-std::shared_ptr<BlockTreeDiskBlockPool> makeDiskPool(size_t                       payload_bytes,
-                                                     size_t                       usable_count,
-                                                     const std::string&           work_dir,
-                                                     std::unique_ptr<DiskBlockIO> io,
-                                                     const std::string&           pool_name,
-                                                     bool                         buffered_io,
-                                                     bool                         enable_crc) {
+std::shared_ptr<DiskBlockPool> makeDiskPool(size_t                       payload_bytes,
+                                            size_t                       usable_count,
+                                            const std::string&           work_dir,
+                                            std::unique_ptr<DiskBlockIO> io,
+                                            const std::string&           pool_name,
+                                            bool                         buffered_io,
+                                            bool                         enable_crc) {
     const size_t storage_bytes = enable_crc ? ((payload_bytes + 4 + 15) / 16) * 16 : payload_bytes;
     const size_t stride_bytes  = ((storage_bytes + 4095) / 4096) * 4096;
 
-    auto config             = std::make_shared<BlockTreeDiskBlockPoolConfig>();
+    auto config                            = std::make_shared<DiskBlockPoolConfig>();
     config->pool_type       = BlockPoolType::DISK;
     config->pool_name       = pool_name;
     config->work_dir        = work_dir;
@@ -232,7 +232,7 @@ std::shared_ptr<BlockTreeDiskBlockPool> makeDiskPool(size_t                     
     config->stride_bytes    = stride_bytes;
     config->buffered_io     = buffered_io;
 
-    auto pool = std::make_shared<BlockTreeDiskBlockPool>(config, std::move(io));
+    auto pool = std::make_shared<DiskBlockPool>(config, std::move(io));
     RTP_LLM_CHECK(pool->init());
     return pool;
 }
@@ -342,8 +342,8 @@ BlockIdxType poolMalloc(IBlockPool& pool) {
 }
 
 void releasePoolBlock(IBlockPool& pool, BlockIdxType block) {
-    pool.incTreeRef(block, BlockTreeRefType::STORE);
-    pool.decTreeRef(block, BlockTreeRefType::STORE);
+    pool.incTreeRef(block, BlockTreeRefType::EVICTION);
+    pool.decTreeRef(block, BlockTreeRefType::EVICTION);
 }
 
 TransferDescriptor makeDescriptor(Tier                             source_tier,

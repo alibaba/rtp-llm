@@ -199,8 +199,8 @@ public:
     }
 };
 
-std::shared_ptr<BlockTreeDiskBlockPool> makeTestDiskPool(size_t usable_blocks, const std::string& name) {
-    auto config                  = std::make_shared<BlockTreeDiskBlockPoolConfig>();
+std::shared_ptr<DiskBlockPool> makeTestDiskPool(size_t usable_blocks, const std::string& name) {
+    auto config                            = std::make_shared<DiskBlockPoolConfig>();
     config->pool_type            = BlockPoolType::DISK;
     config->pool_name            = name;
     config->work_dir             = "/tmp";
@@ -211,7 +211,7 @@ std::shared_ptr<BlockTreeDiskBlockPool> makeTestDiskPool(size_t usable_blocks, c
     config->physical_block_count = usable_blocks + 1;
     config->buffered_io          = true;
 
-    auto pool = std::make_shared<BlockTreeDiskBlockPool>(config, std::make_unique<NoopDiskBlockIO>());
+    auto pool = std::make_shared<DiskBlockPool>(config, std::make_unique<NoopDiskBlockIO>());
     if (!pool->init()) {
         return nullptr;
     }
@@ -348,9 +348,8 @@ public:
         BlockTreeTaskPool*                task_pool                 = nullptr,
         size_t                            max_descriptors_per_batch = 8,
         bool                              async                     = true) {
-        transfer_engine_ = std::make_shared<ScriptedTransferEngine>(tree->groupSets(), false, false, async);
-        transfer_dispatcher_ =
-            std::make_unique<BlockTransferDispatcher>(transfer_engine_, nullptr, max_descriptors_per_batch);
+        transfer_engine_     = std::make_shared<ScriptedTransferEngine>(tree->groupSets(), false, false, async);
+        transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(transfer_engine_, nullptr);
         return std::make_unique<BlockTreeEvictor>(tree,
                                                   device_policy,
                                                   host_policy,
@@ -396,7 +395,7 @@ public:
     explicit DeferredEvictionTransferEngine(const std::vector<GroupSetPtr>& groups):
         PerRankBlockTransferEngine(groups) {}
 
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         const auto& descriptors = task.descriptors();
         auto        context     = std::make_shared<TransferBatchAsyncContext>();
         {
@@ -708,7 +707,7 @@ public:
 
     std::vector<DeviceBlockPoolPtr>                      device_pools_;
     std::vector<std::shared_ptr<HostBlockPool>>          host_pools_;
-    std::vector<std::shared_ptr<BlockTreeDiskBlockPool>> disk_pools_;
+    std::vector<std::shared_ptr<DiskBlockPool>>          disk_pools_;
     std::vector<GroupSetPtr>                             groups_;
     std::vector<BlockIdxType>                            device_sources_;
     std::vector<BlockIdxType>                            host_sources_;
@@ -1223,7 +1222,7 @@ public:
 
     std::vector<GroupSetPtr>                             groups_;
     std::vector<std::shared_ptr<HostBlockPool>>          host_pools_;
-    std::vector<std::shared_ptr<BlockTreeDiskBlockPool>> disk_pools_;
+    std::vector<std::shared_ptr<DiskBlockPool>>          disk_pools_;
     std::vector<BlockIdxType>                            host_blocks_;
     std::unique_ptr<BlockTree>                           tree_;
     TestEvictorRuntime                                   evictor_runtime_;
@@ -1241,7 +1240,7 @@ protected:
         resetGroup();
     }
 
-    void resetGroup(std::shared_ptr<HostBlockPool> host_pool = nullptr, BlockTreeDiskBlockPoolPtr disk_pool = nullptr) {
+    void resetGroup(std::shared_ptr<HostBlockPool> host_pool = nullptr, DiskBlockPoolPtr disk_pool = nullptr) {
         group_ = std::make_shared<FullGroupSet>(
             std::vector<DeviceBlockPoolPtr>{device_pool_}, std::move(host_pool), std::move(disk_pool));
         initializeFullGroup(group_, device_pool_);
@@ -1910,14 +1909,14 @@ TEST_F(BlockTreeEvictorTest, HostDiskWatermarkConvergesAcrossBoundedBatches) {
     task_pool.shutdown();
 }
 
-TEST_F(BlockTreeEvictorTest, DeviceDiskEvictionRespectsSelectedBackendBatchLimit) {
+TEST_F(BlockTreeEvictorTest, DeviceHostEvictionRespectsSelectedBackendBatchLimit) {
     for (const bool async : {false, true}) {
         SCOPED_TRACE(async);
         device_pool_ = makeTestDevicePool(4, "device_disk_single_descriptor");
         ASSERT_NE(device_pool_, nullptr);
-        auto disk_pool = makeTestDiskPool(3, "device_disk_single_descriptor");
-        ASSERT_NE(disk_pool, nullptr);
-        resetGroup(nullptr, disk_pool);
+        auto host_pool = makePinnedHostPool(3);
+        ASSERT_NE(host_pool, nullptr);
+        resetGroup(host_pool, nullptr);
 
         BlockTreeTaskPool task_pool(/*thread_count=*/1, /*queue_size=*/4, "device_disk_single_descriptor");
         ASSERT_TRUE(task_pool.start());
@@ -1926,7 +1925,7 @@ TEST_F(BlockTreeEvictorTest, DeviceDiskEvictionRespectsSelectedBackendBatchLimit
             EvictionPolicy::LRU,
             EvictionPolicy::LRU,
             EvictionPolicy::FIFO,
-            [](Tier tier) { return tier != Tier::HOST; },
+            [](Tier tier) { return tier == Tier::DEVICE || tier == Tier::HOST; },
             &task_pool,
             8,
             async);
@@ -1955,11 +1954,11 @@ TEST_F(BlockTreeEvictorTest, DeviceDiskEvictionRespectsSelectedBackendBatchLimit
         EXPECT_EQ(evictor_runtime_.transferEngine()->submittedBatchCount(), 1u);
         EXPECT_EQ(evictor_runtime_.transferEngine()->submittedDescriptorCount(), 3u);
         EXPECT_EQ(device_pool_->usedBlocksNum(), 0u);
-        EXPECT_EQ(disk_pool->usedBlocksNum(), 3u);
+        EXPECT_EQ(host_pool->usedBlocksNum(), 3u);
 
         evictor_->settled_ = [](bool) {};
         while (evictor_->dropLocked(/*group_set_id=*/0, Tier::DEVICE, /*notify_settled=*/false)) {}
-        while (evictor_->dropLocked(/*group_set_id=*/0, Tier::DISK, /*notify_settled=*/false)) {}
+        while (evictor_->dropLocked(/*group_set_id=*/0, Tier::HOST, /*notify_settled=*/false)) {}
         task_pool.shutdown();
     }
 }
@@ -2015,13 +2014,13 @@ TEST_F(BlockTreeEvictorTest, BatchDropLockedHonorsVictimLimit) {
 }
 
 TEST_F(BlockTreeEvictorTest, BatchDropReportsZeroScheduledBlocksWhenPhysicalBlockRemainsReferenced) {
-    std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeTestDiskPool(1, "batch_drop_referenced");
+    std::shared_ptr<DiskBlockPool> disk_pool = makeTestDiskPool(1, "batch_drop_referenced");
     ASSERT_NE(disk_pool, nullptr);
     resetGroup(nullptr, disk_pool);
 
     const BlockIdxType source = group_->allocateSingleBlock(Tier::DISK, BlockTreeRefType::CACHE);
     ASSERT_FALSE(isNullBlockIdx(source));
-    disk_pool->incTreeRef(source, BlockTreeRefType::STORE);
+    disk_pool->incTreeRef(source, BlockTreeRefType::EVICTION);
     BlockTreeInsertResult result = insert({100}, {{makeResource(Tier::DISK, source)}});
     ASSERT_NE(insertedNode(result), nullptr);
 
@@ -2032,7 +2031,7 @@ TEST_F(BlockTreeEvictorTest, BatchDropReportsZeroScheduledBlocksWhenPhysicalBloc
     EXPECT_EQ(tree_->size(), 0u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 0u);
 
-    disk_pool->decTreeRef(source, BlockTreeRefType::STORE);
+    disk_pool->decTreeRef(source, BlockTreeRefType::EVICTION);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 1u);
 }
 
@@ -2936,7 +2935,7 @@ TEST_F(BlockTreeEvictorTest, DropLockedDropsSelectedVictim) {
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimSkipsRequestHeldDeviceForEveryTargetTier) {
-    for (const Tier target_tier : {Tier::HOST, Tier::DISK, Tier::NONE}) {
+    for (const Tier target_tier : {Tier::HOST, Tier::NONE}) {
         SCOPED_TRACE(tierName(target_tier));
         auto host_pool = target_tier == Tier::HOST ? makePinnedHostPool(1) : nullptr;
         auto disk_pool = target_tier == Tier::DISK ? makeTestDiskPool(1, "held_device_selection") : nullptr;
@@ -3107,7 +3106,7 @@ TEST(BlockTreeEvictorCascadeTest, NonFullDeviceDropStillProtectsRequestHeldCasca
 }
 
 TEST_F(BlockTreeEvictorTest, DeviceWatermarkSkipsHeldMemberAndMigratesIdleCandidate) {
-    for (const Tier target_tier : {Tier::HOST, Tier::DISK}) {
+    for (const Tier target_tier : {Tier::HOST}) {
         SCOPED_TRACE(tierName(target_tier));
         device_pool_ = makeTestDevicePool(4, "held_watermark_first_member");
         auto second_pool = makeTestDevicePool(4, "held_watermark_second_member");
@@ -3201,7 +3200,7 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimUsesNearestEnabledTargetTier) {
     evictor_->onInserted(result);
     victim = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE);
     ASSERT_TRUE(victim.has_value());
-    EXPECT_EQ(victim->target_tier, Tier::DISK);
+    EXPECT_EQ(victim->target_tier, Tier::NONE);
 
     evictor_ = evictor_runtime_.make(
         tree_.get(), EvictionPolicy::LRU, EvictionPolicy::LRU, EvictionPolicy::FIFO, [](Tier) { return false; });
@@ -4121,7 +4120,7 @@ TEST_F(BlockTreeEvictorTest, PrimaryTargetExhaustionLeavesSourceAndCandidateUnch
 
     const auto exhausted_target_result = host_pool->malloc();
     ASSERT_TRUE(exhausted_target_result.has_value());
-    host_pool->incTreeRef(*exhausted_target_result, BlockTreeRefType::STORE);
+    host_pool->incTreeRef(*exhausted_target_result, BlockTreeRefType::LOAD);
     const BlockIdxType exhausted_target = *exhausted_target_result;
     ASSERT_EQ(host_pool->freeBlocksNum(), 0u);
 
@@ -4155,7 +4154,7 @@ TEST_F(BlockTreeEvictorTest, PrimaryTargetExhaustionLeavesSourceAndCandidateUnch
     evictor_->suspendCandidate(insertedNode(result), 0, Tier::DEVICE);
     resource.evictFromTier(Tier::DEVICE);
     unreferenceDeviceBlocksForTest(*group_, MultiNodeBlocks{{source_block}}, BlockTreeRefType::CACHE);
-    host_pool->decTreeRef(exhausted_target, BlockTreeRefType::STORE);
+    host_pool->decTreeRef(exhausted_target, BlockTreeRefType::LOAD);
 }
 
 TEST(BlockTreeEvictorCascadeTest, PrepareDemotionReservesOnlyPrimary) {

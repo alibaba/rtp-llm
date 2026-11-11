@@ -30,7 +30,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
             if (!block.has_value()) {
                 break;
             }
-            group_set->hostPool()->incTreeRef(*block, BlockTreeRefType::STORE);
+            group_set->hostPool()->incTreeRef(*block, BlockTreeRefType::LOAD);
             host_holds[group_set_id].push_back(*block);
         }
         EXPECT_EQ(group_set->hostPool()->freeBlocksNum(), 0u);
@@ -54,7 +54,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
 
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
         for (const BlockIdxType block : host_holds[group_set_id]) {
-            cache->groupSets()[group_set_id]->hostPool()->decTreeRef(block, BlockTreeRefType::STORE);
+            cache->groupSets()[group_set_id]->hostPool()->decTreeRef(block, BlockTreeRefType::LOAD);
         }
         EXPECT_EQ(cache->groupSets()[group_set_id]->hostPool()->usedBlocksNum(), 0u);
     }
@@ -82,7 +82,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
                 if (!block.has_value()) {
                     break;
                 }
-                group_set->diskPool()->incTreeRef(*block, BlockTreeRefType::STORE);
+                group_set->diskPool()->incTreeRef(*block, BlockTreeRefType::LOAD);
                 disk_holds[group_set_id].push_back(*block);
             }
             EXPECT_EQ(group_set->diskPool()->freeBlocksNum(), 0u);
@@ -111,7 +111,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
 
         for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
             for (const BlockIdxType block : disk_holds[group_set_id]) {
-                cache->groupSets()[group_set_id]->diskPool()->decTreeRef(block, BlockTreeRefType::STORE);
+                cache->groupSets()[group_set_id]->diskPool()->decTreeRef(block, BlockTreeRefType::LOAD);
             }
             EXPECT_EQ(cache->groupSets()[group_set_id]->diskPool()->usedBlocksNum(), 0u);
         }
