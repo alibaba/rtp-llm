@@ -1263,13 +1263,16 @@ class DeepSeekV4Model(GptModelBase):
                     for p in self.parameters()
                 )
                 _free, _total_dev = _t.cuda.mem_get_info()
-                logging.warning(
+                print(
                     "[AWI_MEM] params=%.2f GiB torch_alloc=%.2f GiB "
-                    "torch_reserved=%.2f GiB device_free=%.2f GiB",
-                    _total / 2**30,
-                    _t.cuda.memory_allocated() / 2**30,
-                    _t.cuda.memory_reserved() / 2**30,
-                    _free / 2**30,
+                    "torch_reserved=%.2f GiB device_free=%.2f GiB"
+                    % (
+                        _total / 2**30,
+                        _t.cuda.memory_allocated() / 2**30,
+                        _t.cuda.memory_reserved() / 2**30,
+                        _free / 2**30,
+                    ),
+                    flush=True,
                 )
             except Exception:
                 pass
