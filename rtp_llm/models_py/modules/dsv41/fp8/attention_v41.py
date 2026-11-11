@@ -3306,11 +3306,22 @@ class AttentionV41FP8(AttentionFP8):
             (T, self.index_topk), -1, dtype=torch.int32, device=x.device
         )
         columns = None if paged else torch.arange(score_capacity, device=x.device)
-        if not paged and q is not None and q.dtype != keys_dense.dtype:
-            # Decode keys are bf16 (see _produce_global_decode). q is
-            # fp4_roundtrip output -- FP4-representable values -- so matching
-            # its dtype is value-exact; einsum accumulates in fp32 either way.
-            q = q.to(keys_dense.dtype)
+        if not paged:
+            if q is not None and q.dtype != keys_dense.dtype:
+                # Decode keys are bf16 (see _produce_global_decode). q is
+                # fp4_roundtrip output -- FP4-representable values -- so
+                # matching its dtype is value-exact; einsum accumulates in
+                # fp32 either way.
+                q = q.to(keys_dense.dtype)
+            if weights is not None and weights.dtype != keys_dense.dtype:
+                # Keep the weighted score rectangle in the keys dtype: an
+                # fp32 head-weight promotion of bf16 logits would materialize
+                # [t, heads, capacity] fp32 (128MiB at 1M columns), which does
+                # not fit tight-HBM ranks; bf16 halves it. Head weights round
+                # to bf16 (~2^-9 relative), far below the keys' own FP4
+                # quantization noise; the head sum below still accumulates
+                # in fp32.
+                weights = weights.to(keys_dense.dtype)
         for b in range(B):
             for start in range(b * S, (b + 1) * S, 16):
                 end = min(start + 16, (b + 1) * S)
@@ -3329,7 +3340,9 @@ class AttentionV41FP8(AttentionFP8):
                         logits = torch.einsum(
                             "thd,tkd->thk", q[start:end], query_keys
                         ).relu_()
-                    logits = (logits * weights[start:end, :, None]).sum(1)
+                    logits = (logits * weights[start:end, :, None]).sum(
+                        1, dtype=torch.float32
+                    )
                 visible = visible_per_token[start:end]
                 if not paged:
                     logits.masked_fill_(columns[None] >= visible[:, None], -torch.inf)
