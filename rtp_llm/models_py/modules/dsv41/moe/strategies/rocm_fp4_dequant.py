@@ -242,6 +242,11 @@ class RocmFp4DequantStrategy(RoutedExpertsStrategy):
             y[idx] = y[idx] + out.float()
         return y
 
+    # Experts per batched-GEMM chunk inside captured forwards: bounds the
+    # (chunk, t, dim) fp32 temporary (~94MB at chunk=96, t=48) while keeping
+    # the recorded node count tiny.
+    _GRAPH_SAFE_EXPERT_CHUNK = 96
+
     def _forward_graph_safe(
         self,
         x: torch.Tensor,
@@ -249,10 +254,56 @@ class RocmFp4DequantStrategy(RoutedExpertsStrategy):
         indices: torch.Tensor,
         y: torch.Tensor,
     ) -> torch.Tensor:
-        """Fixed-shape masked compute (no data-dependent ``torch.where``)."""
+        """Fixed-shape dense-batched compute (no data-dependent shapes).
+
+        Batched over experts in chunks: the previous per-expert python loop
+        recorded ~384 experts x ~7 launches per layer (~110k graph nodes over
+        40 layers), and the backend process SEGVed during recording/
+        instantiation on ROCm (loads 34-36: probe traces reached the end of
+        the forward on every rank, then the process died before capture_end
+        returned). This keeps the identical math - dense per-(token,expert)
+        routing weights, full dense compute, weighted reduction - as chunked
+        batched GEMMs (~40 nodes per layer), which also replays far faster.
+        """
         start, end = self.cfg.local_expert_start, self.cfg.local_expert_end
-        for i in range(start, end):
-            mask = (indices == i).to(weights.dtype)
-            per_token_w = (weights * mask).sum(dim=-1, keepdim=True)
-            y.add_(self._expert_out(i - start, x, per_token_w).float())
+        E = end - start
+        t = x.size(0)
+        limit = self.cfg.swiglu_limit
+
+        # Dense routing weights (t, E): scatter the top-k weights into their
+        # expert columns; mirrors (weights * (indices == i)).sum(-1) per i.
+        loc = indices.to(torch.int64) - start
+        valid = (loc >= 0) & (loc < E)
+        w_dense = torch.zeros((t, E), dtype=torch.float32, device=x.device)
+        w_dense.scatter_add_(
+            1,
+            loc.clamp(min=0, max=E - 1),
+            (weights * valid).to(torch.float32),
+        )
+
+        x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
+        xb = x_bf16.unsqueeze(0)  # (1, t, dim), broadcast across expert batch
+        W1 = self._W1[start:end]  # (E, inter, dim) gate
+        W2 = self._W2[start:end]  # (E, dim, inter) down
+        W3 = self._W3[start:end]  # (E, inter, dim) up
+        chunk = self._GRAPH_SAFE_EXPERT_CHUNK
+        for c0 in range(0, E, chunk):
+            c1 = min(c0 + chunk, E)
+            xc = xb.expand(c1 - c0, t, x_bf16.shape[-1])
+            gate = torch.bmm(xc, W1[c0:c1].transpose(1, 2)).float()
+            up = torch.bmm(xc, W3[c0:c1].transpose(1, 2)).float()
+            if silu_mul_split is not None:
+                sm = silu_mul_split(
+                    gate.reshape(-1, gate.shape[-1]).contiguous(),
+                    up.reshape(-1, up.shape[-1]).contiguous(),
+                    clamp_limit=limit,
+                ).view(gate.shape)
+            else:
+                if limit > 0:
+                    up = torch.clamp(up, min=-limit, max=limit)
+                    gate = torch.clamp(gate, max=limit)
+                sm = F.silu(gate) * up
+            sm = sm * w_dense[:, c0:c1].t().unsqueeze(-1)  # (e, t, 1)
+            out = torch.bmm(sm.to(x_bf16.dtype), W2[c0:c1].transpose(1, 2))
+            y.add_(out.float().sum(dim=0))
         return y
