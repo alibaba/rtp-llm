@@ -38,6 +38,7 @@ private:
         config->pool_type            = BlockPoolType::DEVICE;
         config->pool_name            = "load_context_test";
         config->physical_block_count = 4;
+        config->frozen_block_abort_lower_ratio = 0.0;
         MemoryLayoutConfig layout;
         layout.block_num                = 4;
         layout.layer_num                = 1;
