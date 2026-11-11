@@ -23,8 +23,7 @@ struct P2PWorkerRoute {
     SliceSpec     slice;
 
     /// Decode 方向：本 route 覆盖的每层 buffer（cache_key -> block_id 已由 rank0 解析好）。
-    /// Prefill 方向为空 —— prefill worker 用自己 writeByLayer 产出的本地投影，
-    /// 在所有被允许的 CP 形态下它恰好等于该 route 的键集。
+    /// Prefill 方向为空，worker 从 writeByLayerTag 的发布中获取本批本地块。
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_buffers;
 
     /// Prefill 方向：目的端点（由 peer_index 在 peer_workers 里解析而来）。

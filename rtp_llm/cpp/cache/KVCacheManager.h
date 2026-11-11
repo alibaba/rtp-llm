@@ -154,6 +154,11 @@ public:
     void              publishPrefillPayload(const std::string&                           unique_key,
                                              int64_t                                      deadline_ms,
                                              PrefillResultStore::SideChannelData&& data);
+    void finishP2PPublication(const torch::Tensor& final_prefill,
+                              const torch::Tensor& pd_separation,
+                              const torch::Tensor& request_ids,
+                              const torch::Tensor& deadlines,
+                              int64_t              clock_offset_ms);
     bool              writeP2PLayer(size_t                               model_id,
                                     int                                  local_layer_id,
                                     const std::string&                   tag,
@@ -162,7 +167,8 @@ public:
                                     int64_t                              request_id,
                                     const std::shared_ptr<torch::Event>& event,
                                     int64_t                              deadline_ms,
-                                    int64_t                              deadline_clock_offset_ms);
+                                    int64_t                              deadline_clock_offset_ms,
+                                    int                                  chunk_id = 0);
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;
     }

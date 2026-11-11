@@ -123,6 +123,10 @@ void RdmaTransferService::transferViaRdma(const std::shared_ptr<RdmaTaskContext>
 
     auto block_pairs = ctx->getRdmaBlockPair();
     if (block_pairs.empty()) {
+        if (ctx->emptyBatch() && ctx->startTransfer()) {
+            ctx->run(true);
+            return;
+        }
         ctx->run(false, TransferErrorCode::BUFFER_MISMATCH, "no rdma block pair to transfer");
         return;
     }

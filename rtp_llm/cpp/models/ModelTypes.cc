@@ -110,6 +110,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
                             "cache_store_publish_start_tokens must be on CPU for TP sync");
     shape_hints[GptModelInputIndex::cacheStorePublishStartTokens] =
         inputs.cache_store_publish_start_tokens.defined() ? inputs.cache_store_publish_start_tokens.numel() : 0;
+    shape_hints[GptModelInputIndex::p2pFinalPrefill] =
+        inputs.p2p_final_prefill.defined() ? inputs.p2p_final_prefill.numel() : 0;
     shape_hints[GptModelInputIndex::maxKernelBlocksPerBatch] = kernel_block_table.width;
     shape_hints[GptModelInputIndex::maxBlocksPerBatch]       = block_table.width;
     shape_hints[GptModelInputIndex::cacheKeysWidth] =
@@ -491,6 +493,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.cache_store_publish_start_tokens = publish_count ?
             allocBuf(rtp_llm::DataType::TYPE_INT32, {publish_count}) :
             torch::Tensor();
+        const auto final_count = checkedHint(GptModelInputIndex::p2pFinalPrefill, "p2pFinalPrefill");
+        inputs.p2p_final_prefill = final_count ? allocBuf(rtp_llm::DataType::TYPE_BOOL, {final_count}) : torch::Tensor();
         if (max_kernel_blocks != 0) {
             // kv_cache_kernel_block_id residency follows the producer (rank 0): device only when
             // RTP_LLM_DEVICE_INPUT publishes it to CUDA. Follow the root bitmap so the packed-buffer
@@ -631,6 +635,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.sequence_lengths);
     collect(inputs.prefix_lengths);
     collect(inputs.cache_store_publish_start_tokens);
+    collect(inputs.p2p_final_prefill);
     if (max_kernel_blocks || max_blocks) {
         collect(wire_kernel_blocks);
         collect(wire_blocks);

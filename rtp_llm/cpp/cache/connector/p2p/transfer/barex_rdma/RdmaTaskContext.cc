@@ -62,20 +62,11 @@ uint32_t RdmaTaskContext::getRdmaServerPort() const {
     return request_->server_rdma_port();
 }
 
-std::optional<torch::Tensor> RdmaTaskContext::findLocalBuffer(int64_t cache_key, int sub_block_idx) const {
-    if (!task_) {
+std::optional<torch::Tensor> RdmaTaskContext::findLocalBuffer(const KeyBlockInfo& target, int sub_block_idx) {
+    if (sub_block_idx < 0 || static_cast<size_t>(sub_block_idx) >= target.blocks.size()) {
         return std::nullopt;
     }
-    const auto& block_infos = task_->getBlockInfos();
-    auto        it          = block_infos.find(cache_key);
-    if (it == block_infos.end() || !it->second) {
-        return std::nullopt;
-    }
-    const auto& kbi = *it->second;
-    if (sub_block_idx < 0 || static_cast<size_t>(sub_block_idx) >= kbi.blocks.size()) {
-        return std::nullopt;
-    }
-    const BlockInfo& bi = kbi.blocks[sub_block_idx];
+    const BlockInfo& bi = target.blocks[sub_block_idx];
     if (bi.addr == nullptr || bi.size_bytes == 0) {
         return std::nullopt;
     }
@@ -103,14 +94,39 @@ std::vector<std::pair<torch::Tensor, std::shared_ptr<RemoteBuffer>>> RdmaTaskCon
         return std::make_shared<RemoteBuffer>(rdma_info.addr(), info.len(), nic_rkeys);
     };
 
+    const bool has_batch_callback = task_->acceptsBatches();
+    empty_batch_ = has_batch_callback;
+    const auto& targets = task_->getBlockInfos();
     for (const auto& cache_key_block : request_->blocks()) {
-        int64_t cache_key = cache_key_block.key();
-        for (int i = 0; i < cache_key_block.blocks_size(); ++i) {
+        const auto cache_key = cache_key_block.key();
+        const auto expected = targets.find(cache_key);
+        if (expected == targets.end()) {
+            continue;
+        }
+        empty_batch_ = false;
+        if (!expected->second) {
+            if (has_batch_callback) {
+                return {};
+            }
+            continue;
+        }
+        const auto expected_count = has_batch_callback ? static_cast<int>(expected->second->blocks.size()) :
+                                                   cache_key_block.blocks_size();
+        if (cache_key_block.blocks_size() < expected_count) {
+            return {};
+        }
+        for (int i = 0; i < expected_count; ++i) {
             const auto& block_info = cache_key_block.blocks(i);
             if (!block_info.has_rdma_info() || !block_info.rdma_info().has_addr()) {
+                if (has_batch_callback) {
+                    return {};
+                }
                 continue;
             }
-            auto local_buf = findLocalBuffer(cache_key, i);
+            auto local_buf = findLocalBuffer(*expected->second, i);
+            if (has_batch_callback && (!local_buf || static_cast<uint64_t>(local_buf->numel()) != block_info.len())) {
+                return {};
+            }
             if (!local_buf) {
                 RTP_LLM_LOG_WARNING(
                     "getRdmaBlockPair: local buffer not found, cache_key: %lld, sub: %d", cache_key, i);
@@ -120,6 +136,7 @@ std::vector<std::pair<torch::Tensor, std::shared_ptr<RemoteBuffer>>> RdmaTaskCon
             result.push_back({*local_buf, remote_buf});
             collector_->total_block_size += block_info.len();
         }
+        batch_keys_.push_back(cache_key);
     }
     collector_->block_count = static_cast<int>(result.size());
     return result;
@@ -150,7 +167,11 @@ void RdmaTaskContext::run(bool               success,
     collector_->total_cost_latency_us = currentTimeUs() - start_time_us_;
 
     if (task_) {
-        task_->notifyDone(success, success ? TransferErrorCode::OK : error_code, error_message);
+        if (success && task_->acceptsBatches()) {
+            task_->notifyBatchDone(batch_keys_);
+        } else {
+            task_->notifyDone(success, success ? TransferErrorCode::OK : error_code, error_message);
+        }
         // notifyDone() may override the result (e.g. cancel_requested_ was set during transfer).
         // Read back the authoritative error code so sender and receiver see the same outcome.
         error_code = task_->errorCode();

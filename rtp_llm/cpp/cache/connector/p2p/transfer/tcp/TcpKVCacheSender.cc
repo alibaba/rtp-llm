@@ -54,13 +54,14 @@ public:
         request_(request),
         response_(response),
         controller_(controller),
-        callback_(callback) {}
+        callback_(std::move(callback)) {}
 
     ~TcpTransferClosure() {
         delete controller_;
     }
 
     void Run() override {
+        std::unique_ptr<TcpTransferClosure> self_guard(this);
         TransferErrorCode error_code = TransferErrorCode::OK;
         std::string       error_msg;
 
@@ -232,7 +233,8 @@ void TcpKVCacheSender::loadToRemote(
     auto transfer_response = std::make_shared<::tcp_transfer::TcpLayerBlockTransferResponse>();
     auto controller        = new arpc::ANetRPCController();
     controller->SetExpireTime(timeout_ms);
-    auto closure = new TcpTransferClosure(ip, port, transfer_request, transfer_response, controller, callback);
+    auto closure = new TcpTransferClosure(
+        ip, port, transfer_request, transfer_response, controller, callback);
     ::tcp_transfer::TcpTransferService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
                                                  ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
     stub.transfer(controller, transfer_request.get(), transfer_response.get(), closure);

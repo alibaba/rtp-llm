@@ -14,7 +14,6 @@
 
 namespace rtp_llm {
 
-class KVCacheConnectorLayerContext;
 class Meta;
 class P2PBroadcastClient;
 class P2PSchedulerPrefillRead;
@@ -34,16 +33,15 @@ public:
     std::shared_ptr<AsyncContext> registerResource(const KVCacheResourcePtr&    resource,
                                                    const std::shared_ptr<Meta>& meta);
 
-    std::shared_ptr<AsyncContext>
-    asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context);
-
+    void finishP2PPublication(int64_t request_id, int64_t deadline_ms, int64_t clock_offset_ms);
     bool writeByLayerTag(int                                layer_id,
                          const std::string&                 tag,
                          const KVCacheResourcePtr&          resource,
                          int64_t                            request_id,
                          const std::shared_ptr<c10::Event>& event,
                          int64_t                            deadline_ms,
-                         int64_t                            deadline_clock_offset_ms);
+                         int64_t                            deadline_clock_offset_ms,
+                         int                                  chunk_id = 0);
 
     void processRead(const P2PConnectorStartLoadRequestPB& request,
                      P2PConnectorStartLoadResponsePB&      response,

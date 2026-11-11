@@ -83,10 +83,22 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
         }
     }
 
-    // Iterate over task's expected blocks as the authoritative source of truth.
-    // Every BlockInfo in the task must be present in the request with a matching size.
+    const bool has_batch_callback = task_->acceptsBatches();
+    KeyBlockInfoMap batch_blocks;
+    if (has_batch_callback) {
+        const auto& targets = task_->getBlockInfos();
+        batch_blocks.reserve(request_index.size());
+        for (const auto& offered : request_index) {
+            const auto target = targets.find(offered.first);
+            if (target != targets.end()) {
+                batch_blocks.emplace(target->first, target->second);
+            }
+        }
+    }
+    const auto& expected = has_batch_callback ? batch_blocks : task_->getBlockInfos();
     std::vector<CopyTask> copy_tasks;
-    for (const auto& [cache_key, kbi_ptr] : task_->getBlockInfos()) {
+    for (const auto& [cache_key, kbi_ptr] : expected) {
+        const auto req_it = request_index.find(cache_key);
         if (!kbi_ptr || kbi_ptr->blocks.empty()) {
             RTP_LLM_LOG_WARNING("executeCopy: empty Decode block set for cache_key %lld, unique_key: %s",
                                 cache_key,
@@ -95,7 +107,6 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
                         (kbi_ptr ? "empty Decode block set cache_key=" : "null Decode block info cache_key=")
                             + std::to_string(cache_key));
         }
-        auto req_it = request_index.find(cache_key);
         if (req_it == request_index.end()) {
             RTP_LLM_LOG_WARNING(
                 "executeCopy: cache_key %lld missing in request, unique_key: %s", cache_key, unique_key_.c_str());
@@ -149,9 +160,13 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
             copy_tasks.push_back(task);
             collector_->total_block_size += proto_block.len();
         }
+        batch_keys_.push_back(cache_key);
         ++collector_->block_count;
     }
 
+    if (has_batch_callback && copy_tasks.empty()) {
+        return true;
+    }
     if (copy_tasks.empty()) {
         RTP_LLM_LOG_WARNING("executeCopy: no blocks to transfer, unique_key: %s", unique_key_.c_str());
         return fail(TransferErrorCode::BUFFER_MISMATCH, "no blocks to transfer");
@@ -202,7 +217,11 @@ void TcpTaskContext::run(bool success, TransferErrorCode error_code, const std::
     std::string final_error_message    = error_message;
 
     if (task_) {
-        task_->notifyDone(success, success ? TransferErrorCode::OK : error_code, error_message);
+        if (success && task_->acceptsBatches()) {
+            task_->notifyBatchDone(batch_keys_);
+        } else {
+            task_->notifyDone(success, success ? TransferErrorCode::OK : error_code, error_message);
+        }
         // notifyDone() may override the result (e.g. cancel_requested_ was set during transfer).
         // Read back the authoritative result so sender and receiver see the same outcome.
         error_code = task_->errorCode();

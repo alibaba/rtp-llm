@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
 
+#include <limits>
 #include <mutex>
 
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -137,6 +138,21 @@ void TransferTask::notifyDone(bool success, TransferErrorCode error_code, const 
     }
 }
 
+void TransferTask::notifyBatchDone(const std::vector<int64_t>& keys) {
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        if (done_) {
+            return;
+        }
+        if (error_code_ == TransferErrorCode::OK && !cancel_requested_ && currentTimeMs() < deadline_ms_
+            && !on_batch_copied_(keys)) {
+            transferring_ = false;
+            return;
+        }
+    }
+    notifyDone(true);
+}
+
 void TransferTask::setDoneCallback(std::function<void()> callback) {
     bool invoke_now = false;
     {
@@ -155,7 +171,10 @@ void TransferTask::setDoneCallback(std::function<void()> callback) {
 // ==================== TransferTaskStore ====================
 
 std::shared_ptr<TransferTask>
-TransferTaskStore::addTask(const std::string& unique_key, transfer::KeyBlockInfoMap block_infos, int64_t deadline_ms) {
+TransferTaskStore::addTask(const std::string& unique_key,
+                           KeyBlockInfoMap block_infos,
+                           int64_t deadline_ms,
+                           BatchCopiedCallback on_batch_copied) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     if (task_map_.find(unique_key) != task_map_.end()) {
         RTP_LLM_LOG_WARNING("P2P recv task registration rejected, stage=duplicate_recv_task "
@@ -163,7 +182,8 @@ TransferTaskStore::addTask(const std::string& unique_key, transfer::KeyBlockInfo
                             unique_key.c_str(), deadline_ms);
         return nullptr;
     }
-    auto task             = std::make_shared<TransferTask>(std::move(block_infos), deadline_ms);
+    auto task = std::make_shared<TransferTask>(std::move(block_infos), deadline_ms, std::move(on_batch_copied));
+    completed_batches_.erase(unique_key);
     task_map_[unique_key] = task;
     return task;
 }
@@ -171,7 +191,19 @@ TransferTaskStore::addTask(const std::string& unique_key, transfer::KeyBlockInfo
 std::shared_ptr<TransferTask> TransferTaskStore::getTask(const std::string& unique_key) const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     auto                                it = task_map_.find(unique_key);
-    return it != task_map_.end() ? it->second : nullptr;
+    if (it != task_map_.end()) {
+        return it->second;
+    }
+    const auto completed = completed_batches_.find(unique_key);
+    if (completed == completed_batches_.end() || currentTimeMs() >= completed->second) {
+        return nullptr;
+    }
+    static const auto completed_receipt = [] {
+        auto receipt = std::make_shared<TransferTask>(KeyBlockInfoMap{}, std::numeric_limits<int64_t>::max());
+        receipt->notifyDone(true);
+        return receipt;
+    }();
+    return completed_receipt;
 }
 
 std::shared_ptr<TransferTask> TransferTaskStore::stealTask(const std::string& unique_key) {
@@ -182,6 +214,19 @@ std::shared_ptr<TransferTask> TransferTaskStore::stealTask(const std::string& un
     }
     auto task = it->second;
     task_map_.erase(it);
+    const auto now_ms = currentTimeMs();
+    while (!completed_expiry_.empty() && completed_expiry_.begin()->first <= now_ms) {
+        const auto expired = completed_expiry_.begin();
+        const auto completed = completed_batches_.find(expired->second);
+        if (completed != completed_batches_.end() && completed->second == expired->first) {
+            completed_batches_.erase(completed);
+        }
+        completed_expiry_.erase(expired);
+    }
+    if (task->acceptsBatches() && task->success() && task->deadlineMs() > now_ms) {
+        completed_batches_.emplace(unique_key, task->deadlineMs());
+        completed_expiry_.emplace(task->deadlineMs(), unique_key);
+    }
     return task;
 }
 

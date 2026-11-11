@@ -74,9 +74,10 @@ void P2PConnector::cancelRead(const std::shared_ptr<AsyncContext>& context) {
     }
 }
 
-std::shared_ptr<AsyncContext>
-P2PConnector::asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) {
-    return prefill_ ? prefill_->asyncWriteByLayer(layer_id, layer_context) : nullptr;
+void P2PConnector::finishP2PPublication(int64_t request_id, int64_t deadline_ms, int64_t clock_offset_ms) {
+    if (prefill_) {
+        prefill_->finishP2PPublication(request_id, deadline_ms, clock_offset_ms);
+    }
 }
 
 bool P2PConnector::writeByLayerTag(int                                layer_id,
@@ -85,9 +86,10 @@ bool P2PConnector::writeByLayerTag(int                                layer_id,
                                    int64_t                            request_id,
                                    const std::shared_ptr<c10::Event>& event,
                                    int64_t                            deadline_ms,
-                                   int64_t                            deadline_clock_offset_ms) {
+                                   int64_t                            deadline_clock_offset_ms,
+                                   int                                  chunk_id) {
     return prefill_ ? prefill_->writeByLayerTag(
-                          layer_id, tag, resource, request_id, event, deadline_ms, deadline_clock_offset_ms) :
+                          layer_id, tag, resource, request_id, event, deadline_ms, deadline_clock_offset_ms, chunk_id) :
                       false;
 }
 

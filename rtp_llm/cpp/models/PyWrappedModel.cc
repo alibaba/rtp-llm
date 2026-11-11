@@ -7,6 +7,8 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include <algorithm>
 #include <cstdint>
+#include <limits>
+#include <map>
 #include <stdexcept>
 #include <mutex>
 #include <utility>
@@ -633,18 +635,44 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
     cache_store_inputs.request_pd_separation = inputs.request_pd_separation;
     cache_store_inputs.request_deadline_ms   = to_host(inputs.request_deadline_ms);
     if (cache_manager_->hasP2PConnector()) {
+        // Capture the per-request chunk for this forward (or microbatch). The writer
+        // can call back asynchronously with just the request ID and source deadline.
+        using ChunkIds = std::map<std::pair<int64_t, int64_t>, int32_t>;
+        ChunkIds chunk_ids;
+        const auto& publish_starts = cache_store_inputs.publish_start_tokens;
+        if (publish_starts.defined() && publish_starts.numel() == cache_store_inputs.request_id.numel()
+            && (!cache_store_inputs.request_deadline_ms.defined()
+                || cache_store_inputs.request_deadline_ms.numel() == publish_starts.numel())) {
+            const auto  request_ids   = cache_store_inputs.request_id.accessor<int64_t, 1>();
+            const auto  starts        = publish_starts.accessor<int32_t, 1>();
+            const auto& deadlines     = cache_store_inputs.request_deadline_ms;
+            const auto* deadline_data = deadlines.defined() ? deadlines.data_ptr<int64_t>() : nullptr;
+            for (int64_t row = 0; row < starts.size(0); ++row) {
+                const int64_t deadline = deadline_data ? deadline_data[row] : std::numeric_limits<int64_t>::max();
+                chunk_ids.emplace(std::make_pair(request_ids[row], deadline), starts[row]);
+            }
+        }
         cache_store_inputs.p2p_layer_write =
-            [manager         = cache_manager_,
-             clock_offset_ms = inputs.p2p_deadline_clock_offset_ms](size_t                               model_id,
-                                                                    int                                  layer_id,
-                                                                    const std::string&                   tag,
-                                                                    const std::vector<int64_t>&          keys,
-                                                                    const std::vector<int32_t>&          blocks,
-                                                                    int64_t                              request_id,
-                                                                    const std::shared_ptr<torch::Event>& event,
-                                                                    int64_t                              deadline_ms) {
+            [manager = cache_manager_,
+             clock_offset_ms = inputs.p2p_deadline_clock_offset_ms,
+             chunk_ids = std::make_shared<const ChunkIds>(std::move(chunk_ids))](
+                size_t                               model_id,
+                int                                  layer_id,
+                const std::string&                   tag,
+                const std::vector<int64_t>&          keys,
+                const std::vector<int32_t>&          blocks,
+                int64_t                              request_id,
+                const std::shared_ptr<torch::Event>& event,
+                int64_t                              deadline_ms) {
+                const auto chunk = chunk_ids->find({request_id, deadline_ms});
+                if (chunk == chunk_ids->end()) {
+                    RTP_LLM_LOG_ERROR("Missing P2P chunk metadata, request_id=%ld deadline_ms=%ld",
+                                      request_id,
+                                      deadline_ms);
+                    return false;
+                }
                 return manager->writeP2PLayer(
-                    model_id, layer_id, tag, keys, blocks, request_id, event, deadline_ms, clock_offset_ms);
+                    model_id, layer_id, tag, keys, blocks, request_id, event, deadline_ms, clock_offset_ms, chunk->second);
             };
     }
     cache_store_inputs.cache_keys            = inputs.cache_keys;

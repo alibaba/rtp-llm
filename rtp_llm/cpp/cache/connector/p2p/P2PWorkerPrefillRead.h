@@ -35,18 +35,13 @@ public:
 public:
     bool init();
 
-    bool writeByLayer(int                           layer_id,
-                      const KVCacheResourcePtr&     resource,
-                      int64_t                       request_id,
-                      std::shared_ptr<torch::Event> event,
-                      int64_t                       deadline_ms);
-
     bool writeByLayerTag(int                                  layer_id,
                          const std::string&                   tag,
                          const KVCacheResourcePtr&            resource,
                          int64_t                              request_id,
                          const std::shared_ptr<torch::Event>& event,
-                         int64_t                              deadline_ms);
+                         int64_t                              deadline_ms,
+                         int                                  chunk_id = 0);
 
     /// @brief 按编排层下发的 route 发送。worker 不再自选目标、不再推导 partition。
     ErrorInfo sendKVCache(int64_t                   request_id,
@@ -55,6 +50,7 @@ public:
                           const P2PWorkerRoutePlan& worker_plan,
                           int64_t                   request_deadline_ms);
 
+    void finishPublication(int64_t request_id, int64_t request_deadline_ms);
     void completeNoTransfer(int64_t request_id, int64_t deadline_ms, int64_t request_deadline_ms);
 
     bool cancelRequest(int64_t            request_id,
@@ -70,11 +66,6 @@ public:
 private:
     bool rejectLayer(int64_t request_id, int64_t request_deadline_ms, const ErrorInfo& error);
 
-    bool scheduleLayerCacheBuffers(int                                                   layer_id,
-                                   int64_t                                               request_id,
-                                   const std::shared_ptr<torch::Event>&                  event,
-                                   int64_t                                               request_deadline_ms,
-                                   const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers);
     void loopCheckProc();
 
     struct SendTransferResult {
@@ -86,6 +77,8 @@ private:
         std::atomic<bool>       dispatch_failed{false};
         mutable std::mutex      result_mutex;
         std::condition_variable result_cv;
+        std::weak_ptr<ComputedLayerCacheBuffer> computed_buffer;
+        std::map<std::string, int>              in_flight_by_layer;
         ErrorCode               error_code{ErrorCode::NONE_ERROR};
         std::string             error_msg;
     };
@@ -97,9 +90,7 @@ private:
                                       int64_t                                          return_deadline_ms,
                                       const std::shared_ptr<std::atomic<bool>>&        cancel_flag,
                                       const std::shared_ptr<SendTransferResult>&       transfer_result,
-                                      const std::set<std::string>&                     expected_buffer_keys,
-                                      std::set<std::string>&                           sent_buffer_keys,
-                                      int                                              total_transfers);
+                                      const std::set<std::string>&                     expected_buffer_keys);
 
     int sendLayerToPartitions(const std::shared_ptr<LayerCacheBuffer>&   layer_cache_buffer,
                               const P2PWorkerRoutePlan&                 worker_plan,
@@ -124,7 +115,6 @@ private:
                                        bool                                       timeout_cancelled_pending_tasks,
                                        bool                                       all_callbacks_received,
                                        int                                        sent_transfer_count,
-                                       int                                        total_transfers,
                                        const P2PWorkerRoutePlan&                  worker_plan,
                                        const std::string&                         unique_key) const;
 

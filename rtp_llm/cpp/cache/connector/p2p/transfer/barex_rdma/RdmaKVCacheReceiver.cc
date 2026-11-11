@@ -122,7 +122,7 @@ bool RdmaKVCacheReceiver::regMem(const BlockInfo& block_info, uint64_t aligned_s
 }
 
 transfer::IKVCacheRecvTaskPtr RdmaKVCacheReceiver::recv(const transfer::RecvRequest& request) {
-    return task_store_->addTask(request.unique_key, request.block_info, request.deadline_ms);
+    return task_store_->addTask(request.unique_key, request.block_info, request.deadline_ms, request.on_batch_copied);
 }
 
 void RdmaKVCacheReceiver::stealTask(const std::string& unique_key) {

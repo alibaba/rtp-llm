@@ -4,6 +4,15 @@
 #include <thread>
 #include <vector>
 
+TEST_F(TransferTaskTest, UpperLayerCanCompleteReceptionInOneBatch) {
+    const std::vector<int64_t> expected{101, 102};
+    TransferTask task({}, currentTimeMs() + 5000, [&](const auto& keys) { return keys == expected; });
+
+    ASSERT_TRUE(task.startTransfer());
+    task.notifyBatchDone(expected);
+    EXPECT_TRUE(task.success());
+}
+
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
@@ -72,6 +81,38 @@ TEST_F(TransferTaskTest, StartTransfer_AfterNotifyDone_ReturnsFalse) {
 }
 
 // ==================== notifyDone() 正常路径 ====================
+
+TEST_F(TransferTaskTest, CancelAfterUpperLayerKeepsReceptionOpen) {
+    TransferTask task({}, currentTimeMs() + 5000, [](const auto&) { return false; });
+    int completions = 0;
+    task.setDoneCallback([&] { ++completions; });
+
+    ASSERT_TRUE(task.startTransfer());
+    task.notifyBatchDone({101});
+    EXPECT_FALSE(task.done());
+    EXPECT_EQ(completions, 0);
+
+    task.cancel();
+    EXPECT_TRUE(task.done());
+    EXPECT_EQ(task.errorCode(), TransferErrorCode::CANCELLED);
+    EXPECT_EQ(completions, 1);
+}
+
+TEST_F(TransferTaskTest, CancelInFlightBatchWaitsForPhysicalCompletion) {
+    int copied_batches = 0;
+    TransferTask task({}, currentTimeMs() + 5000, [&](const auto&) {
+        ++copied_batches;
+        return true;
+    });
+    ASSERT_TRUE(task.startTransfer());
+    task.cancel();
+    EXPECT_FALSE(task.done());
+
+    task.notifyBatchDone({101});
+    EXPECT_TRUE(task.done());
+    EXPECT_EQ(task.errorCode(), TransferErrorCode::CANCELLED);
+    EXPECT_EQ(copied_batches, 0);
+}
 
 TEST_F(TransferTaskTest, NotifyDone_Success) {
     auto task = makeTask();
