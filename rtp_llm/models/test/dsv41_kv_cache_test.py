@@ -92,7 +92,7 @@ class Dsv41KvCacheConfigTest(TestCase):
                         DeepSeekV41._post_build_model_config(config)
                     by_tag = descriptors(config)
                     self.assertEqual(capacity(by_tag["decoder_swa_kv"]), 16)
-                    for tag in ("csa_state", "swa_kv", "decoder_swa_kv"):
+                    for tag in ("swa_kv", "decoder_swa_kv"):
                         if tag in by_tag:
                             self.assertEqual(
                                 by_tag[tag].memory.placement,
@@ -101,6 +101,15 @@ class Dsv41KvCacheConfigTest(TestCase):
                             self.assertFalse(
                                 by_tag[tag].capacity.charge_to_paged_budget
                             )
+                    # csa_state stays device-resident: the compressor kernels
+                    # require CUDA state pools, and 24 KiB/block is cheap.
+                    if "csa_state" in by_tag:
+                        state_memory = by_tag["csa_state"].memory
+                        self.assertTrue(
+                            state_memory is None
+                            or state_memory.placement
+                            != CacheMemoryPlacement.HOST_PINNED
+                        )
                     settings.dsv41_decoder_swa_pool_blocks = 0
                     settings.dsv4_fixed_pool_use_memory = False
                     DeepSeekV41._apply_kv_cache_config(config, settings)

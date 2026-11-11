@@ -66,7 +66,14 @@ def build_v41_kv_cache_spec_descs(
     reuse.enable_prefix_reuse = False
     decoder_swa.reuse = reuse
     if fixed_pool_use_host_memory:
-        for desc in (state, swa, decoder_swa):
+        # Only the SWA pools move to pinned host memory: they are the
+        # per-position giants (528 B/token/layer -> ~22 GiB per 1M sequence
+        # per rank) and their sm80 reference readers/writers are loop-free
+        # UVA-safe Triton kernels. csa_state stays device-resident — it is
+        # small (24 KiB/block) and the compressor kernels that consume it
+        # require CUDA state pools (device block-table moves, pipelined
+        # gathers).
+        for desc in (swa, decoder_swa):
             _use_host_pinned_memory(desc)
     sources = set(source_layers)
     decoder_start = max(sources) + 1 if sources else 0
