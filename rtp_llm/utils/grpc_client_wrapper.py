@@ -294,6 +294,28 @@ class GrpcClientWrapper:
             logging.error(f"Update scheduler info failed: {e}")
             return {"error": f"Failed to update scheduler info: {str(e)}"}
 
+    async def awi_query_observations(self, req: Any) -> Dict[str, Any]:
+        """Query AWI instrumentation observations from the local backend (tp_rank 0).
+
+        Only tp_rank 0 schedules streams, so its registry holds the complete
+        observation set; the response JSON is passed through verbatim.
+        """
+        try:
+            if isinstance(req, str):
+                req = json.loads(req)
+            operation_id = str((req or {}).get("operation_id", "") or "")
+            rpc_request = pb2.AwiQueryObservationsRequestPB(operation_id=operation_id)
+            await self._ensure_connection()
+            response = await self.stub.AwiQueryObservations(rpc_request, timeout=30)
+            return {
+                "status": "ok",
+                "world_rank": response.world_rank,
+                "observations_json": response.observations_json,
+            }
+        except Exception as e:
+            logging.error(f"AWI observations query failed: {e}")
+            return {"error": f"Failed to query AWI observations: {str(e)}"}
+
     async def post_request(self, uri: str, req: Dict[str, Any]) -> Dict[str, Any]:
         """Generic POST request handler - routes to appropriate method based on URI"""
         try:

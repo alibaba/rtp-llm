@@ -982,6 +982,30 @@ class FrontendApp(object):
             }
             return await self.grpc_client.post_request("update_scheduler_info", payload)
 
+        # AWI evaluator contract: read-only telemetry query. tp_rank 0 is the
+        # only rank whose scheduler admits streams, so its registry holds the
+        # complete observation set; its JSON is passed through verbatim.
+        @app.get("/awi/observations")
+        async def awi_observations(request: Request):
+            check_not_draining(request)
+            operation_id = request.query_params.get("operation_id") or ""
+            result = await self.grpc_client.awi_query_observations(
+                {"operation_id": operation_id}
+            )
+            if "observations_json" not in result:
+                return ORJSONResponse(
+                    {"error": result.get("error", "observations unavailable")},
+                    status_code=503,
+                )
+            try:
+                observations = json.loads(result["observations_json"])
+            except (TypeError, ValueError) as exc:
+                return ORJSONResponse(
+                    {"error": f"malformed observations payload: {exc}"},
+                    status_code=503,
+                )
+            return ORJSONResponse(observations)
+
         if self.frontend_server.is_embedding:
             # embedding
             @app.post("/v1/embeddings/similarity")

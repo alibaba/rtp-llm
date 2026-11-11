@@ -120,6 +120,7 @@ public:
 
     // ---- query (per-rank JSON; frontend aggregates) ----
     std::string queryJson(const std::string& operation_id) const;
+    int64_t     rank() const;
 
     static int64_t nowNs();
 

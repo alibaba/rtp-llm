@@ -208,7 +208,10 @@ uint64_t AwiObservationRegistry::graphReplayCount() const {
 
 void AwiObservationRegistry::recordReuseOnce(const std::string& request_id, int64_t hit_tokens) {
     std::lock_guard<std::mutex> lock(mu_);
-    if (request_to_op_.count(request_id) == 0 || hit_tokens <= 0) {
+    // Reuse hits are recorded for EVERY request (not only barrier-armed ones):
+    // the evaluator's reuse smoke drives plain /v1/chat/completions cases whose
+    // rids are never armed, yet their hits must appear as kind=reuse events.
+    if (request_id.empty() || hit_tokens <= 0) {
         return;
     }
     if (!reuse_recorded_.insert(request_id).second) {
@@ -290,6 +293,11 @@ void AwiObservationRegistry::setRank(int64_t world_rank) {
     rank_world_rank_ = world_rank;
 }
 
+int64_t AwiObservationRegistry::rank() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return rank_world_rank_;
+}
+
 std::string AwiObservationRegistry::queryJson(const std::string& operation_id) const {
     std::lock_guard<std::mutex> lock(mu_);
     std::unordered_set<std::string> op_requests;
@@ -299,6 +307,15 @@ std::string AwiObservationRegistry::queryJson(const std::string& operation_id) c
             op_requests.insert(r);
         }
     }
+    // Evaluator request ids are all prefixed with the operation id (wave ids
+    // "<op>-r<rep>-s<sample>-c<i>", smoke ids "<op>-smoke-<file>-<i>"). The
+    // prefix match keeps non-armed smoke events (e.g. reuse hits) queryable,
+    // while armed wave ids match exactly through op_requests.
+    const bool include_all = operation_id.empty();
+    auto       include     = [&include_all, &operation_id, &op_requests](const std::string& request_id) {
+        return include_all || op_requests.count(request_id) != 0
+               || request_id.compare(0, operation_id.size(), operation_id) == 0;
+    };
 
     std::string out;
     out.reserve(4096);
@@ -321,30 +338,30 @@ std::string AwiObservationRegistry::queryJson(const std::string& operation_id) c
     };
     for (const auto& backend : capture_backends_) {
         sep();
-        out += "{\"type\":\"capture\",\"backend\":\"" + jsonEscape(backend) + "\"}";
+        out += "{\"kind\":\"capture\",\"backend\":\"" + jsonEscape(backend) + "\"}";
     }
     for (const auto& e : prefill_events_) {
-        if (!op_requests.empty() && op_requests.find(e.request_id) == op_requests.end()) {
+        if (!include(e.request_id)) {
             continue;
         }
         sep();
-        out += "{\"type\":\"prefill\",\"request_id\":\"" + jsonEscape(e.request_id) + "\",\"input_tokens\":"
+        out += "{\"kind\":\"prefill\",\"request_id\":\"" + jsonEscape(e.request_id) + "\",\"input_tokens\":"
                + std::to_string(e.input_tokens) + ",\"start_ns\":" + std::to_string(e.start_ns)
                + ",\"end_ns\":" + std::to_string(e.end_ns) + "}";
     }
     for (const auto& e : decode_events_) {
-        if (!op_requests.empty() && op_requests.find(e.request_id) == op_requests.end()) {
+        if (!include(e.request_id)) {
             continue;
         }
         sep();
-        out += "{\"type\":\"decode\",\"request_id\":\"" + jsonEscape(e.request_id) + "\",\"step\":"
+        out += "{\"kind\":\"decode\",\"request_id\":\"" + jsonEscape(e.request_id) + "\",\"step\":"
                + std::to_string(e.step) + ",\"backend\":\"" + jsonEscape(e.backend) + "\",\"graph_replay\":"
                + (e.graph_replay ? "true" : "false") + ",\"elapsed_ms\":" + std::to_string(e.elapsed_ms) + "}";
     }
     for (const auto& sequences : resident_events_) {
-        bool intersects = op_requests.empty();
+        bool intersects = include_all;
         for (const auto& s : sequences) {
-            if (op_requests.count(s.request_id) != 0) {
+            if (include(s.request_id)) {
                 intersects = true;
                 break;
             }
@@ -353,7 +370,7 @@ std::string AwiObservationRegistry::queryJson(const std::string& operation_id) c
             continue;
         }
         sep();
-        out += "{\"type\":\"resident\",\"sequences\":[";
+        out += "{\"kind\":\"resident\",\"sequences\":[";
         for (size_t i = 0; i < sequences.size(); ++i) {
             if (i > 0) {
                 out += ",";
@@ -366,19 +383,19 @@ std::string AwiObservationRegistry::queryJson(const std::string& operation_id) c
         out += "]}";
     }
     for (const auto& e : reuse_events_) {
-        if (!op_requests.empty() && op_requests.find(e.request_id) == op_requests.end()) {
+        if (!include(e.request_id)) {
             continue;
         }
         sep();
-        out += "{\"type\":\"reuse\",\"request_id\":\"" + jsonEscape(e.request_id) + "\",\"hit_tokens\":"
+        out += "{\"kind\":\"reuse\",\"request_id\":\"" + jsonEscape(e.request_id) + "\",\"hit_tokens\":"
                + std::to_string(e.hit_tokens) + "}";
     }
     for (const auto& e : capacity_events_) {
-        if (!operation_id.empty() && e.operation_id != operation_id) {
+        if (!include_all && e.operation_id != operation_id) {
             continue;
         }
         sep();
-        out += "{\"type\":\"capacity_failure\",\"operation_id\":\"" + jsonEscape(e.operation_id)
+        out += "{\"kind\":\"capacity_failure\",\"operation_id\":\"" + jsonEscape(e.operation_id)
                + "\",\"concurrency\":" + std::to_string(e.concurrency) + ",\"context_tokens\":"
                + std::to_string(e.context_tokens) + ",\"failure_kind\":\"" + jsonEscape(e.failure_kind) + "\"}";
     }

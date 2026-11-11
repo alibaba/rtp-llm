@@ -93,6 +93,12 @@ public:
         return local_server_->UpdateSchedulerInfo(context, request, response);
     }
 
+    ::grpc::Status AwiQueryObservations(::grpc::ServerContext*                 context,
+                                        const AwiQueryObservationsRequestPB*   request,
+                                        AwiQueryObservationsResponsePB*        response) override {
+        return local_server_->AwiQueryObservations(context, request, response);
+    }
+
     ::grpc::Status
     SetLogLevel(::grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response) override {
         return local_server_->SetLogLevel(context, request, response);

@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <c10/core/InferenceMode.h>
 #include "autil/Scope.h"
+#include "rtp_llm/cpp/awi/AwiObservationRegistry.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -847,6 +848,18 @@ grpc::Status LocalRpcServer::UpdateSchedulerInfo(grpc::ServerContext*           
                                                  EmptyPB*                            response) {
     const std::string scheduler_info = request->scheduler_info();
     engine_->getScheduler().updateSchedulerInfo(scheduler_info);
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::AwiQueryObservations(grpc::ServerContext*                 context,
+                                                  const AwiQueryObservationsRequestPB* request,
+                                                  AwiQueryObservationsResponsePB*      response) {
+    // Served from this process's registry. The frontend addresses tp_rank 0,
+    // the only rank whose scheduler admits streams, so its registry holds the
+    // complete observation set (events are recorded on the scheduling rank).
+    auto& registry = AwiObservationRegistry::instance();
+    response->set_world_rank(registry.rank());
+    response->set_observations_json(registry.queryJson(request->operation_id()));
     return grpc::Status::OK;
 }
 

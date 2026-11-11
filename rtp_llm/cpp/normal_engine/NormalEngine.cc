@@ -60,11 +60,21 @@ void recordAwiStepObservations(const std::list<GenerateStreamPtr>& streams,
     if (streams.empty()) {
         return;
     }
+    // Pass 1 (always): memory-KV reuse hits are recorded for EVERY request,
+    // armed or not — the evaluator's reuse smoke drives plain endpoint cases
+    // that never pass a barrier. Also detect whether any armed (tracked)
+    // request is present; the detailed step observations stay tracked-only.
     bool any_tracked = false;
     for (const auto& stream : streams) {
-        if (registry.isTracked(stream->generateInput()->request_info.request_id)) {
+        const auto& request_id = stream->generateInput()->request_info.request_id;
+        if (request_id.empty()) {
+            continue;
+        }
+        if (stream->reuseLength() > 0) {
+            registry.recordReuseOnce(request_id, stream->reuseLength());
+        }
+        if (!any_tracked && registry.isTracked(request_id)) {
             any_tracked = true;
-            break;
         }
     }
     if (!any_tracked) {
@@ -86,9 +96,6 @@ void recordAwiStepObservations(const std::list<GenerateStreamPtr>& streams,
         const auto& request_id = stream->generateInput()->request_info.request_id;
         if (request_id.empty() || !registry.isTracked(request_id)) {
             continue;
-        }
-        if (stream->reuseLength() > 0) {
-            registry.recordReuseOnce(request_id, stream->reuseLength());
         }
         if (stream->isContextStream()) {
             registry.prefillStep(request_id, stream->inputLength(), start_ns, end_ns);
