@@ -2,6 +2,7 @@
 
 import functools
 import inspect
+from datetime import timedelta
 
 from q38_megatron_loader import TRAIN_LOCAL_EXPERTS, capture_groups, _world_gate
 
@@ -95,6 +96,11 @@ def install_for_verl():
         except Exception as exc:
             error = exc
         _world_gate(error, "BF16 optimizer ownership")
+        if dist.get_world_size() != 64 or not dist.is_gloo_available():
+            raise RuntimeError("Qwen3.8 Adam requires the 64-rank CPU commit group")
+        config.q38_cpu_commit_group = dist.new_group(
+            ranks=list(range(64)), backend="gloo", timeout=timedelta(minutes=45),
+        )
         optimizer = get_optimizer(config, model_chunks, *args, **kwargs)
         return attach(optimizer, model_chunks, torch, dist)
 

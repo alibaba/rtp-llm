@@ -9,6 +9,7 @@ import functools
 import hashlib
 import json
 import math
+import time
 import types
 import torch
 import torch.distributed as dist
@@ -38,6 +39,13 @@ def _check_config(config):
         raise ValueError('requires distributed precision-aware optimizer')
     if config.overlap_cpu_optimizer_d2h_h2d or config.overlap_param_gather_with_optimizer_step:
         raise ValueError('overlap not qualified')
+
+
+def cpu_step_commit(success, group):
+    """Require the local Adam result from every rank before publication."""
+    ok = torch.tensor(success, dtype=torch.int32, device='cpu')
+    dist.all_reduce(ok, op=dist.ReduceOp.MIN, group=group)
+    return bool(ok.item())
 
 
 def install():
@@ -261,20 +269,37 @@ def install():
                 return value
 
             original_step = result.step
+            cpu_commit_group = getattr(config, 'q38_cpu_commit_group', None)
             def guarded_step(self):
                 # Independent phase-separated inference has no shared reader
                 # lease. Preserve a world-level outcome vote after the actual
                 # optimizer and its CUDA writes complete.
                 error, outcome = None, None
+                started = time.monotonic()
                 try:
                     with bounded_clip_scope():
                         outcome = original_step()
                     torch.cuda.synchronize()
                 except Exception as exc:
                     error = exc
-                ok = torch.tensor(error is None, dtype=torch.int32, device=torch.cuda.current_device())
-                dist.all_reduce(ok, op=dist.ReduceOp.MIN)
-                if not bool(ok.item()):
+                if cpu_commit_group is not None:
+                    # The pageable CPU Adam tiles can finish minutes apart.
+                    # Keep CUDA synchronized locally and rendezvous on the CPU
+                    # so a faster rank does not hold an in-flight GPU collective.
+                    success = error is None and bool(outcome and outcome[0])
+                    print('q38_optimizer_local_update ' + json.dumps({
+                        'rank': dist.get_rank(),
+                        'success': success,
+                        'error_type': None if error is None else type(error).__name__,
+                        'seconds': time.monotonic() - started,
+                    }, separators=(',', ':')), flush=True)
+                    committed = cpu_step_commit(success, cpu_commit_group)
+                else:
+                    ok = torch.tensor(error is None, dtype=torch.int32,
+                                      device=torch.cuda.current_device())
+                    dist.all_reduce(ok, op=dist.ReduceOp.MIN)
+                    committed = bool(ok.item())
+                if not committed:
                     raise RuntimeError('optimizer failed on at least one rank') from error
                 return outcome
             result.get_grad_norm = types.MethodType(grad_norm, result)
