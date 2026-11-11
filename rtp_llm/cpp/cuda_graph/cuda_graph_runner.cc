@@ -2079,6 +2079,16 @@ void CudaGraphRunner::initCapture() {
 
     if (enable_cuda_graph_) {
         RTP_LLM_LOG_INFO("CUDA graph capture is enabled");
+        // Release allocator-cached blocks before any capture allocation. On
+        // tight-HBM devices the datatype-probe forward below materializes the
+        // static-capacity gathers (e.g. the DSV4.1 indexer-K dequant buffer is
+        // capacity x head_dim x fp32, 512MiB at a 1M-token context) and can OOM
+        // with a few hundred MiB physically free while the caching allocator
+        // still holds enough releasable blocks to cover the request. Returning
+        // the cache first sizes the probe and the shared graph pool against
+        // real physical free memory; the replay path keeps its own
+        // empty-cache-and-retry recovery.
+        cuda_graph::graphEmptyCache();
         shared_graph_pool_ = cuda_graph::graphPoolHandle();
         if (is_prefill_cuda_graph_mode_) {
             RTP_LLM_LOG_INFO("CUDA graph capture for prefill, num_tokens_per_bs_: %d", num_tokens_per_bs_);
