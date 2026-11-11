@@ -446,6 +446,16 @@ def combine_kv(shared, globals_by_req, swa):
     cached = shared.get("prefill_kv_workspace")
     if cached is not None:
         source, previous_signature, output = cached
+        g_rows = g.shape[0]
+        if output.numel() == (g_rows + sw.shape[0]) * sw.shape[1]:
+            # Layers produce a new global tensor but the same [global+SWA]
+            # geometry.  Reuse the one full-size buffer instead of allocating
+            # 2 GiB per layer; the copies are stream-ordered after the previous
+            # layer's attention reads.
+            output[:g_rows].view_as(g).copy_(g)
+            output[g_rows:].view_as(sw).copy_(sw)
+            shared["prefill_kv_workspace"] = (g, signature, output)
+            return output
         if source is g and previous_signature == signature:
             output[g.shape[0] :].copy_(sw)
             return output
