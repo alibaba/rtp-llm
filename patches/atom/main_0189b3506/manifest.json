@@ -1,0 +1,21 @@
+{
+  "atom_version": "0.1.1.dev1+g0189b3506",
+  "source_commit": "0189b35066e8ceac6446fac19cd8ba77671d1848",
+  "wheel_sha256": "021920395fa6e95e7d3fe75631d0f8c93083c90f5c1ae3f4a4d46a93d940cbcc",
+  "transformers_version": "5.16.1",
+  "patch_sha256": "c67dde6523f04402aee7d5f3f7471ef86454e1d5b4cdf22af14019646709703d",
+  "source_files_sha256": {
+    "atom/model_ops/minimax_m3/index_topk.py": "1bba262aa6b800aba9b366745866bec5d26a075aad64be6e45668c58b9165965",
+    "atom/model_ops/minimax_m3/sparse_attn.py": "8183f931828077bdec405da3284001472f735ccf4be029c09d946526e8d56172",
+    "atom/plugin/rtpllm/models/base_model_wrapper.py": "03677c5321c1eb459992cd9b3b0f726db89082ee3950745aa8793a042f2f8cf2",
+    "atom/plugin/rtpllm/models/qwen4_exp.py": "8191fa2260d7ac182ede966dd2a9389bc557c9851558ccab6ee883b5e04a01bf",
+    "atom/plugin/config.py": "e181b549d130d557005cd8cfa7233fa42e1e0aab7de32c70059b61c13db83f98"
+  },
+  "patched_files_sha256": {
+    "atom/model_ops/minimax_m3/index_topk.py": "66582bea1395f3cdadb469116cd2800f97d3e703d79443022a72ddf81d41502c",
+    "atom/model_ops/minimax_m3/sparse_attn.py": "bb481aebfc322735986f9efc9c808df9ff57c54e182eda0d591e7afbb376dddd",
+    "atom/plugin/rtpllm/models/base_model_wrapper.py": "18cf80ba2b639f2aa87e516674659e1404102219e86a663bfaf917b17aeea482",
+    "atom/plugin/rtpllm/models/qwen4_exp.py": "083f4413b5bc06a8997a45022e3142e85eed28e821597579df6f03e01f9becff",
+    "atom/plugin/config.py": "26a798c42e45dfeee5ce0c332c837ab9bd09de4d8ad168a50f693660e1f2bbb7"
+  }
+}
