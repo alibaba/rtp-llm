@@ -80,6 +80,27 @@ def group_tags(kv_cache: Optional[Any]) -> List[str]:
     return [str(tag) for tag in tags]
 
 
+def resolve_dsv4_tag(kv_cache: Optional[Any], tag: str) -> str:
+    """Map a canonical DSV4 tag onto the tag actually published by ``kv_cache``.
+
+    MTP modules publish their cache groups under ``mtp_<tag>`` (see
+    ``renameMTPGroupTags`` in ``CacheConfigCreator``) so that the
+    tag -> module mapping stays bijective, while the kernels keep addressing
+    pools by canonical name. Identity whenever the canonical tag is present, so
+    main / eagle / eagle3 behaviour is unchanged.
+    """
+    tag = str(tag)
+    tags = group_tags(kv_cache)
+    if not tags or tag in tags:
+        return tag
+    prefixed = "mtp_" + tag
+    if prefixed in tags:
+        return prefixed
+    if len(tags) == 1:
+        return tags[0]
+    return tag
+
+
 def as_attention_inputs_by_tag(
     attention_inputs: Any,
     kv_cache: Optional[Any] = None,
