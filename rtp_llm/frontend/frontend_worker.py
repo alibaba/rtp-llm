@@ -404,7 +404,7 @@ class FrontendWorker:
         group_id: int = -1,
         **kwargs: Any,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        stream = self.pipeline.pipeline_async(
+        stream = await self.pipeline.pipeline_async(
             prompt=text,
             request_id=request_id,
             urls=urls,

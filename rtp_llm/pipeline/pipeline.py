@@ -3,6 +3,7 @@ import copy
 import logging
 import queue
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from typing import Any, AsyncGenerator, Dict, Iterator, List, Optional, Tuple, Union
 
@@ -77,6 +78,15 @@ class Pipeline(object):
         self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
         self._prefix_cache = prefix_cache
+        # The '/' prompt encode is CPU-bound (suffix splice or full-encode fallback) and
+        # synchronous: run on a worker's event loop it serializes every concurrent
+        # request behind one tokenize.  The HF fast-tokenizer Rust core releases the
+        # GIL during encode and the prefix cache is thread-safe, so a small dedicated
+        # pool moves the tokenize off the event loop without contention.  Semantics
+        # are unchanged: same cache, same boundary verification, same fallback.
+        self._encode_executor = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="tok-encode"
+        )
         self._special_tokens: SpecialTokens = special_tokens
         self._mm_token: str = ""
         if mm_related_params:
@@ -101,6 +111,9 @@ class Pipeline(object):
         )
 
     async def close(self) -> None:
+        # Do not wait for in-flight encodes: a closing pipeline rejects new requests
+        # anyway; the interpreter exits threads that are still running at shutdown.
+        self._encode_executor.shutdown(wait=False)
         await self.backend_rpc_server_visitor.close()
 
     def encode(self, prompt: str):
@@ -152,7 +165,7 @@ class Pipeline(object):
         async def generator():
             res = None
             try:
-                res = self.pipeline_async(prompt, request_id, urls, **kwargs)
+                res = await self.pipeline_async(prompt, request_id, urls, **kwargs)
                 async for x in res:
                     q.put(x)
                 q.put(None)
@@ -184,8 +197,7 @@ class Pipeline(object):
         finally:
             backgroud_thread.join()
 
-    @torch.inference_mode()
-    def pipeline_async(  # type: ignore
+    async def pipeline_async(  # type: ignore
         self,
         prompt: str,
         request_id: int = None,
@@ -234,7 +246,12 @@ class Pipeline(object):
         # 在 tokenizer.encode(prompt) 之前解析及填充 banned_combo_token_ids，
         # 避免重复编码 prompt。
         parse_and_fill_banned_combo(prompt, generate_config, self.tokenizer)
-        token_ids = self.encode(prompt)
+        # Off-loop tokenize: keep the event loop serving other requests' RPC waits
+        # while this prompt's splice/full-encode runs in the dedicated pool.
+        loop = asyncio.get_running_loop()
+        token_ids = await loop.run_in_executor(
+            self._encode_executor, self.encode, prompt
+        )
 
         # Prompt scoring constraints (max_new_tokens=1, non-streaming, no reuse/PD-sep) are
         # already enforced by validate() → enforce_prompt_scoring_constraints() during config creation.

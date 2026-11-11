@@ -148,3 +148,12 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
+
+py_test(
+    name = "pipeline_off_loop_encode_test",
+    srcs = ["pipeline_off_loop_encode_test.py"],
+    deps = [
+        "//rtp_llm:rtp_llm_frontend_lib",
+        "//rtp_llm:testlib",
+    ],
+)
