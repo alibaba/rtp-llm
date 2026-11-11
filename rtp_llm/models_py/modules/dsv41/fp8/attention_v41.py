@@ -3329,20 +3329,39 @@ class AttentionV41FP8(AttentionFP8):
                     logits = all_logits[start:end]
                 else:
                     request_ids = shared.get("decode_packed_request_ids")
-                    if request_ids is None:
-                        logits = torch.einsum(
-                            "thd,kd->thk", q[start:end], keys_dense[b]
-                        ).relu_()
-                    else:
+                    if request_ids is not None:
                         query_keys = keys_dense.index_select(
                             0, request_ids[start:end].long()
                         )
-                        logits = torch.einsum(
-                            "thd,tkd->thk", q[start:end], query_keys
-                        ).relu_()
-                    logits = (logits * weights[start:end, :, None]).sum(
-                        1, dtype=torch.float32
+                    # Slice the score rectangle over capacity. The full-width
+                    # einsum output [t, heads, score_capacity] (64MiB bf16 at
+                    # 1M columns; 128MiB once head-weighted in fp32) does not
+                    # fit tight-HBM ranks during graph warmup/capture, where
+                    # only tens of MiB of physical headroom remain. Every
+                    # operation here is per-column (relu, head weighting,
+                    # fp32 head-sum), so accumulating column slices into the
+                    # [t, score_capacity] fp32 score row yields identical
+                    # values with a bounded slice transient. Slice count is
+                    # shape-derived, keeping CUDA graph capture static.
+                    logits = torch.empty(
+                        (end - start, score_capacity),
+                        dtype=torch.float32,
+                        device=x.device,
                     )
+                    slice_cols = 32768
+                    for k0 in range(0, score_capacity, slice_cols):
+                        k1 = min(k0 + slice_cols, score_capacity)
+                        if request_ids is None:
+                            part = torch.einsum(
+                                "thd,kd->thk", q[start:end], keys_dense[b][k0:k1]
+                            ).relu_()
+                        else:
+                            part = torch.einsum(
+                                "thd,tkd->thk", q[start:end], query_keys[:, k0:k1, :]
+                            ).relu_()
+                        logits[:, k0:k1] = (part * weights[start:end, :, None]).sum(
+                            1, dtype=torch.float32
+                        )
                 visible = visible_per_token[start:end]
                 if not paged:
                     logits.masked_fill_(columns[None] >= visible[:, None], -torch.inf)
