@@ -78,14 +78,14 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     profile_step_start_(std::move(profile_step_start)),
     profile_step_finish_(std::move(profile_step_finish)),
     dispatch_runner_(cuda_graph::graphGetStreamFromPool(true)) {
-    has_engram_        = !params.model_config_.attn_config.v41_kv_source_layer_ids.empty();
-    enable_detail_log_ = params.profiling_debug_logging_config.enable_detail_log;
+    has_engram_         = !params.model_config_.attn_config.v41_kv_source_layer_ids.empty();
+    enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     // Defensively clamp values arriving outside the arg parser (direct C++
     // construction or older pickles use the config default).
     record_decode_sample_rate_ = std::clamp(params.profiling_debug_logging_config.record_decode_sample_rate, 0.0, 1.0);
-    tp_rank_                   = params.parallelism_config.tp_rank;
-    parallelism_config_        = params.parallelism_config;
-    role_type_                 = params.pd_sep_config.role_type;
+    tp_rank_            = params.parallelism_config.tp_rank;
+    parallelism_config_ = params.parallelism_config;
+    role_type_          = params.pd_sep_config.role_type;
     // First instance() call may carry the arg+env resolved engine config; a
     // null/disabled config leaves the recorder Disabled.
     auto& recorder = ExecutionRecorder::instance(&params.profiling_debug_logging_config);
@@ -135,9 +135,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                        params.model_config_.num_layers,
                                                        moe_inter_size,
                                                        params.model_config_.hidden_size,
-                                                       params.parallelism_config.ep_rank,
-                                                       params.parallelism_config.ep_size,
-                                                       params.parallelism_config.world_size,
+                                                       params.parallelism_config,
+                                                       std::pair<int64_t, int64_t>{0, params.model_config_.num_layers},
                                                        params.py_eplb,
                                                        moe_weight_type,
                                                        params.model_config_.quant_algo,
@@ -170,13 +169,13 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          cache_manager,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.metrics_reporter               = metrics_reporter_;
+    model_init_params.metrics_reporter = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         is_propose_ ? HiddenStateCaptureModelRole::DRAFT : HiddenStateCaptureModelRole::TARGET,
         role_type_,
         warm_up_,
         params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
         const auto& model_cache_config =
@@ -240,7 +239,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     cudaProfilerBegin();
 }
 
-absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
+absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int64_t schedule_time_us) {
+    const auto&   streams               = schedule_output.streams;
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     if (schedule_time_us <= 0) {
         schedule_time_us = process_start_time_us;
@@ -304,7 +304,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                                   0;
     {
         RTP_LLM_PROFILE_SCOPE("executor.gather_model_input");
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         auto    model_input_status =
             batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_, record_id != 0);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
@@ -832,10 +832,10 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
     }
 }
 
-absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&            stream_groups,
-                                                 GptModelOutputs                model_output,
-                                                 SamplerOutput                  sampler_output,
-                                                 std::shared_ptr<torch::Event>  sampler_event,
+absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           stream_groups,
+                                                 GptModelOutputs               model_output,
+                                                 SamplerOutput                 sampler_output,
+                                                 std::shared_ptr<torch::Event> sampler_event,
                                                  std::function<void()>          profile_step_finish,
                                                  std::shared_ptr<RecordedBatch> recorded_batch) {
     RTP_LLM_PROFILE_SCOPE("executor.dispatch_output_async");

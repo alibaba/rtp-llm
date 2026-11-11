@@ -10,6 +10,7 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
 from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.layer_partition import finalize_pp_partition, is_last_stage
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig, build_model_config
 from rtp_llm.config.py_config_modules import (
@@ -169,6 +170,19 @@ class ModelFactory:
                 engine_config.sp_config.type = SpeculativeType.EAGLE3
                 sp_type = SpeculativeType.EAGLE3
 
+            parallelism_config = engine_config.parallelism_config
+            if not is_last_stage(
+                parallelism_config.pp_rank, parallelism_config.pp_size
+            ):
+                return None
+
+            load_method = engine_config.load_config.load_method
+            if parallelism_config.pp_size > 1:
+                # Only the last PP stage loads draft weights, but fastsafetensors
+                # requires all WORLD ranks to participate in its collectives.
+                # Force SCRATCH here because AUTO may select fastsafetensors.
+                load_method = "scratch"
+
             # Need to create GPT model for propose model
             model_cls = ModelFactory.get_model_cls(propose_model_config.model_type)
             # propose model's max seq len must be equal to score model's max seq len
@@ -217,7 +231,7 @@ class ModelFactory:
                 kv_cache_config=engine_config.kv_cache_config,
                 fmha_config=engine_config.fmha_config,
                 moe_config=engine_config.moe_config,
-                load_method=engine_config.load_config.load_method,
+                load_method=load_method,
                 max_generate_batch_size=engine_config.runtime_config.max_generate_batch_size,
                 vit_config=None,  # Propose model doesn't need vit_config
                 merge_lora=False,  # Propose model doesn't need merge_lora
@@ -413,14 +427,16 @@ class ModelFactory:
         engine_config: EngineConfig,
         model_config: ModelConfig,
     ) -> None:
-        """Update EngineConfig based on ModelConfig.
+        """Resolve model-dependent engine settings.
 
-        This method finalizes scheduler config and sets model_name in engine_config.
+        PP partitioning and scheduler limits must use the final model configuration.
 
         Args:
             engine_config: EngineConfig to update
             model_config: ModelConfig containing model information
         """
+        finalize_pp_partition(engine_config.parallelism_config, model_config.num_layers)
+
         # Finalize scheduler config based on ModelConfig (only once, for main model)
         finalize_scheduler_config(
             fifo_scheduler_config=engine_config.runtime_config.fifo_scheduler_config,
@@ -449,10 +465,7 @@ class ModelFactory:
         model_config: ModelConfig,
         model_args: ModelArgs,
     ) -> Optional[ModelConfig]:
-        """Create propose ModelConfig from configuration objects.
-
-        This method handles ModelConfig construction and initialization logic for the propose model.
-        The main model_config must be created first, as propose model's max_seq_len must match main model.
+        """Create draft ModelConfig aligned with the main model.
 
         Args:
             engine_config: Already built EngineConfig
@@ -497,6 +510,9 @@ class ModelFactory:
         propose_model_config = propose_model_cls._create_config(
             sp_config.checkpoint_path
         )
+        # Drafts share the target's PP topology but must load all their own layers.
+        # is_mtp marks this role for MTP, EAGLE and DSpARK.
+        propose_model_config.is_mtp = True
         # Ensure max_seq_len matches main model
         propose_model_config.max_seq_len = model_config.max_seq_len
         propose_model_config.quantization = sp_config.quantization

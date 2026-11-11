@@ -221,7 +221,7 @@ void RecordingEngineTest::runEmptyAlignmentRoundNotRecorded() {
     // receives an empty stream list and must run process() to completion.
     const std::list<GenerateStreamPtr> empty;
     for (int i = 0; i < 3; ++i) {
-        const auto status = engine->executor_->process(empty, 0);
+        const auto status = engine->executor_->process(ScheduleOutput{empty}, 0);
         trace << "process[" << i << "] ok=" << status.ok() << " status=" << status.ToString() << "\n";
         ASSERT_TRUE(status.ok());
     }
@@ -284,7 +284,7 @@ void RecordingEngineTest::runFakeOnlyBatchNotRecorded() {
     // batch that contains only a fake filler stream.
     for (int i = 0; i < 3; ++i) {
         const std::list<GenerateStreamPtr> streams{engine->createMinFakeStream(1)};
-        const auto                         status = engine->executor_->process(streams, 0);
+        const auto                         status = engine->executor_->process(ScheduleOutput{streams}, 0);
         trace << "process[" << i << "] ok=" << status.ok() << " status=" << status.ToString() << "\n";
         ASSERT_TRUE(status.ok());
     }

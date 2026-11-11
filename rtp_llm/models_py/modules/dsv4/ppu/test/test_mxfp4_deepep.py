@@ -52,7 +52,7 @@ def run_rank(rank, world, rendezvous):
         ll_num_max_token=capacity,
         ll_num_max_token_per_rank=capacity,
     )
-    DeepEPWrapper.create(config)
+    DeepEPWrapper.create(config, group=dist.group.WORLD)
     strategy = PpuDeepEPFP4Strategy(
         MoeCfg(
             layer_id=0,

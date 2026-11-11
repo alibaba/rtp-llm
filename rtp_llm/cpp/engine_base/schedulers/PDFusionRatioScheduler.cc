@@ -17,8 +17,8 @@ namespace {
 constexpr auto kNoProgressScheduleGap = std::chrono::milliseconds(1);
 
 int remainingKVAllocationSteps(const GenerateStreamPtr& stream) {
-    // The final generated token is never used as input to another forward, so it does not get a KV entry.
-    return std::max(0, static_cast<int>(stream->maxTokenNum()) - stream->seqLength() - 1);
+    /** Estimate until scheduling stops; the final generated token needs no subsequent KV allocation. */
+    return std::max(0, static_cast<int>(stream->nextStepSeqLengthLimit()) - stream->seqLength() - 1);
 }
 
 int64_t estimateNeedBlocks(const GenerateStreamPtr& stream, int decode_step) {
@@ -199,7 +199,7 @@ bool PDFusionRatioScheduler::waitPredicate() {
            || !running_streams_.empty() || !pending_decode_streams_.empty() || !new_streams_.empty();
 }
 
-absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
+absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
     if (need_fill_fake_stream_) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
@@ -244,7 +244,7 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
                 prefill_since_decode_ += 1;
                 reportMetrics();
                 last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
-                return prefill_batch;
+                return ScheduleOutput{std::move(prefill_batch)};
             }
         }
     }
@@ -268,7 +268,7 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
 
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
-    return running_streams_;
+    return ScheduleOutput{running_streams_};
 }
 
 PDFusionRatioScheduler::RoundType PDFusionRatioScheduler::chooseRound() {

@@ -11,6 +11,7 @@ py_library(
         "//rtp_llm:openai_api",
         "//rtp_llm:structure",
         "//rtp_llm:utils",
+        "//rtp_llm/models_py/distributed:rank_layout",
         "//rtp_llm/server",
         "//rtp_llm/tools:model_assistant_api",
     ],
