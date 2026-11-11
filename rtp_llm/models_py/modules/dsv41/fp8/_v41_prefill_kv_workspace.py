@@ -452,6 +452,14 @@ def combine_kv(shared, globals_by_req, swa):
         # Drop the old buffer before allocating a new source group's layout.
         shared.pop("prefill_kv_workspace")
         del cached, source, output
+    # Long-context A100 prefixes leave a sizeable allocator cache behind the
+    # score/dequant scratch allocations.  Release it before the one full-size
+    # [global + SWA] KV copy; this runs only on the prefill path, never during
+    # graph capture.
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
     output = torch.cat((g, sw))
     shared["prefill_kv_workspace"] = (g, signature, output)
     return output
