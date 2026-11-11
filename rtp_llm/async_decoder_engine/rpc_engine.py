@@ -43,24 +43,31 @@ class LanguageCppEngine(BaseEngine):
             self.tokenizer, self.model.model_config.special_tokens
         )
         self.mm_process_engine = None
+        # Opt-in placement overrides for tight-HBM deployments: the vision
+        # tower (several hundred MiB) may not coexist with the language
+        # weights, KV cache and CUDA graph pool on the tp_rank-0 GPU.
+        # MULTIMODAL_ENGINE_RANK moves the in-backend multimodal engine into
+        # another tp rank's OWN process, so the vision weights load on that
+        # rank's primary CUDA context with no secondary-context overhead
+        # (measured: a cross-process device pin costs ~1.27GiB total vs
+        # ~0.8GiB in-process). MULTIMODAL_ENGINE_DEVICE only repins the
+        # device from within the hosting process and still pays the
+        # secondary-context cost. Weights stay device-resident; the placement
+        # census records their actual device. Text-only serving never invokes
+        # the vision forward; image serving under either override would
+        # additionally require the embedding handoff to tolerate the
+        # non-rank0 placement.
+        mm_engine_rank = int(os.environ.get("MULTIMODAL_ENGINE_RANK", "0"))
         if (
             self.model.is_multimodal()
             and self.model.vit_config.vit_separation
             == VitSeparation.VIT_SEPARATION_LOCAL
-            and engine_config.parallelism_config.tp_rank == 0
+            and engine_config.parallelism_config.tp_rank == mm_engine_rank
             and (
                 engine_config.pd_sep_config.role_type == RoleType.PREFILL
                 or engine_config.pd_sep_config.role_type == RoleType.PDFUSION
             )
         ):
-            # Opt-in device override: on tight-HBM ranks the vision tower
-            # (several hundred MiB) may not coexist with the language weights,
-            # KV cache and CUDA graph pool on the tp_rank-0 GPU. Setting
-            # MULTIMODAL_ENGINE_DEVICE pins the in-backend multimodal engine
-            # (and thus the vision weights, which stay device-resident) to
-            # another local CUDA device. Text-only serving never invokes the
-            # vision forward; image serving would additionally require the
-            # embedding handoff to tolerate the cross-device placement.
             self.mm_process_engine = (
                 MultimodalMixinFactory.create_multimodal_process_engine(
                     model_config=self.model.model_config,
