@@ -2868,9 +2868,15 @@ class AttentionV41FP8(AttentionFP8):
             INDEXER_KV, read_positions.reshape(-1), read_req.reshape(-1)
         ).view(B, width)
         slots = torch.where(ids < (ends // self.compress_ratio)[:, None], slots, -1)
-        keys = dequantize_indexer_k_fp4(index_pool, slots.reshape(-1)).view(
-            B, width, self.index_head_dim
-        )
+        # bf16 halves the capture-static pool-wide rectangle (256MiB instead of
+        # 512MiB at a 1M-token pool, ratio 2) so tight-HBM ranks can hold it
+        # beside the weights inside a CUDA graph pool. Value-exact: dequantized
+        # entries are FP4 payloads (3-bit mantissa) scaled by UE8M0 powers of
+        # two, and bf16 shares fp32's 8-bit exponent range. The dense scorer
+        # below matches q to this dtype; its einsum accumulates in fp32.
+        keys = dequantize_indexer_k_fp4(
+            index_pool, slots.reshape(-1), out_dtype=torch.bfloat16
+        ).view(B, width, self.index_head_dim)
         self._shared_attention["global"] = {self.layer_id: keys}
 
     def _prepare_indexer_query_decode(
@@ -3289,6 +3295,11 @@ class AttentionV41FP8(AttentionFP8):
             (T, self.index_topk), -1, dtype=torch.int32, device=x.device
         )
         columns = None if paged else torch.arange(score_capacity, device=x.device)
+        if not paged and q is not None and q.dtype != keys_dense.dtype:
+            # Decode keys are bf16 (see _produce_global_decode). q is
+            # fp4_roundtrip output -- FP4-representable values -- so matching
+            # its dtype is value-exact; einsum accumulates in fp32 either way.
+            q = q.to(keys_dense.dtype)
         for b in range(B):
             for start in range(b * S, (b + 1) * S, 16):
                 end = min(start + 16, (b + 1) * S)
