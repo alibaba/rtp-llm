@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/LegacyTransferEngine.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcTransferService.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferEngineSelection.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -59,17 +60,23 @@ LegacyTransferEngine::~LegacyTransferEngine() {
 }
 std::shared_ptr<TransferAsyncContext> LegacyTransferEngine::execute(TransferTask                 task,
                                                                     std::vector<const GroupSet*> groups) {
+    block_tree_cache_detail::ScopeRollback unsubmitted([proof = task.completionProof()] {
+        if (proof) proof->report(true);
+    });
     const auto& descriptors = task.descriptors();
     const auto  source      = descriptors.front().source_tier;
     const auto  target      = descriptors.front().target_tier;
-    if ((source == Tier::DISK && target == Tier::DEVICE) || (source == Tier::DEVICE && target == Tier::DISK))
+    if ((source == Tier::DISK && target == Tier::DEVICE) || (source == Tier::DEVICE && target == Tier::DISK)) {
+        unsubmitted.dismiss();
         return device_disk_executor_->execute(std::move(task), groups);
+    }
     std::vector<HostBufferView> hosts;
     hosts.reserve(descriptors.size());
     for (size_t i = 0; i < descriptors.size(); ++i) {
         const auto buffer = groups[i]->hostPool()->blockBuffer(descriptors[i].singleBlockAt(Tier::HOST));
         hosts.push_back({buffer.addr, buffer.payload_bytes, buffer.stride_bytes});
     }
+    unsubmitted.dismiss();
     if (source == Tier::DEVICE || target == Tier::DEVICE)
         return device_host_executor_->execute(std::move(task), std::move(hosts), std::move(groups));
     return host_disk_executor_->execute(std::move(task), std::move(hosts), std::move(groups));

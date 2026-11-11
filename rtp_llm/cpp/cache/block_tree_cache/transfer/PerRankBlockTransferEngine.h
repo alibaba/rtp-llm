@@ -43,6 +43,9 @@ public:
     size_t batchLimit() const noexcept {
         return max_descriptors_per_batch_;
     }
+    const std::vector<GroupSetPtr>& groupSets() const noexcept {
+        return group_sets_;
+    }
     void                cancelPendingStagingTransfers();
     // Monitoring compatibility: async reports outstanding batches, including
     // callbacks; offload maps to background. Legacy reports task-pool queues.

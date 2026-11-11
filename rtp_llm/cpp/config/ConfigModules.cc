@@ -139,6 +139,8 @@ std::string KVCacheConfig::to_string() const {
         << "block_tree_transfer_worker_count: " << block_tree_transfer_worker_count << "\n"
         << "block_tree_business_queue_max_size: " << block_tree_business_queue_max_size << "\n"
         << "block_tree_transfer_queue_max_size: " << block_tree_transfer_queue_max_size << "\n"
+        << "block_tree_frozen_recovery_interval_ms: " << block_tree_frozen_recovery_interval_ms << "\n"
+        << "block_tree_frozen_recovery_query_timeout_ms: " << block_tree_frozen_recovery_query_timeout_ms << "\n"
         << "block_pool_frozen_abort_lower_ratio: " << block_pool_frozen_abort_lower_ratio << "\n"
         << "block_pool_frozen_abort_upper_ratio: " << block_pool_frozen_abort_upper_ratio << "\n"
         << "block_tree_device_evict_low_watermark_ratio: " << block_tree_device_evict_low_watermark_ratio << "\n"

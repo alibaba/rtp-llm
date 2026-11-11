@@ -1230,7 +1230,7 @@ TEST(BlockTreeLoaderTest, DecodeSourcesValidateTheActualFallbackSwaWindow) {
     }
 }
 
-TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyDiskTransferAndStillPublishesHost) {
+TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyItsTargetBeforeHostCompletion) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1256,6 +1256,17 @@ TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyDiskTransferAndStillPu
     ASSERT_TRUE(engine->waitForBatches(2));
     engine->completeResult(1, ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "disk completion unknown"));
     EXPECT_FALSE(owner->done());
+    const auto frozen_tasks = env->cache->transfer_dispatcher_->frozenTasks();
+    ASSERT_EQ(frozen_tasks.size(), 1u);
+    ASSERT_EQ(frozen_tasks.front()->execution().descriptors.size(), 1u);
+    EXPECT_EQ(frozen_tasks.front()->execution().descriptors.front().source_tier, Tier::DISK);
+    for (size_t group = 0; group < env->groups.size(); ++group) {
+        EXPECT_EQ(env->groups[group]->hostPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+        EXPECT_EQ(env->groups[group]->diskPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+        for (const auto& pool : env->groups[group]->devicePools()) {
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), group);
+        }
+    }
     engine->complete(0, 1);
     owner->waitDone();
     EXPECT_FALSE(owner->success());
@@ -1264,7 +1275,7 @@ TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyDiskTransferAndStillPu
     EXPECT_TRUE(env->resourcesForPathNode(0)[1].hasTier(Tier::DISK));
     for (size_t group = 0; group < env->groups.size(); ++group) {
         EXPECT_EQ(env->groups[group]->hostPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
-        EXPECT_EQ(env->groups[group]->diskPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), group);
+        EXPECT_EQ(env->groups[group]->diskPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
         for (const auto& pool : env->groups[group]->devicePools()) {
             EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), group);
         }
@@ -1272,6 +1283,11 @@ TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyDiskTransferAndStillPu
     releaseTargets(refs);
     env->releaseMatch(match);
     env->reclaimAll();
+    for (const auto& target : frozen_tasks.front()->execution().descriptors.front().targets) {
+        EXPECT_EQ(target.pool->treeRefCount(target.block), 1u);
+    }
+    frozen_tasks.front()->unfreeze();
+    env->expectFullyReclaimed();
 }
 
 TEST(BlockTreeLoaderTest, SwaCorruptionDropsNonLeafResourceAndPreservesFullPath) {

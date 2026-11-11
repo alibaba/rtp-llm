@@ -15,6 +15,17 @@
 
 namespace rtp_llm {
 
+namespace {
+
+TransferResult unsubmittedResult(TransferResult result) {
+    // This stage has not submitted I/O. recordResult still ANDs any earlier
+    // stage's proof, including when a successor expires while waiting.
+    result.buffer_safe = true;
+    return result;
+}
+
+}  // namespace
+
 void TransferWorkLoop::Queue::push(Entry& entry) {
     assert(entry.next == nullptr && entry.previous == nullptr);
     entry.previous = tail;
@@ -56,8 +67,9 @@ TransferWorkLoop::Queue TransferWorkLoop::Queue::take() {
 
 TransferWorkLoop::Entry::Entry(TransferTask task, BeforeCompleteCallback before_complete):
     task(std::move(task)),
-    context(std::make_shared<TransferBatchAsyncContext>(this->task.descriptors().size())),
-    result(this->task.descriptors().size()),
+    context(std::make_shared<TransferBatchAsyncContext>(
+        this->task.descriptors().size(), nullptr, this->task.completionProof())),
+    result(TransferResult::emptyAggregate(this->task.descriptors().size())),
     before_complete(std::move(before_complete)) {}
 
 bool TransferWorkLoop::isCrc(Step step) {
@@ -120,6 +132,9 @@ void TransferWorkLoop::start() {
 
 std::shared_ptr<TransferAsyncContext> TransferWorkLoop::execute(TransferTask           task,
                                                                 BeforeCompleteCallback before_complete) {
+    block_tree_cache_detail::ScopeRollback unsubmitted([proof = task.completionProof()] {
+        if (proof) proof->report(true);
+    });
     return abortOnOom([&]() -> std::shared_ptr<TransferAsyncContext> {
         const auto count = task.descriptors().size();
         // Reuse task-level observations for both direct and combined routes.
@@ -131,7 +146,9 @@ std::shared_ptr<TransferAsyncContext> TransferWorkLoop::execute(TransferTask    
             queue_timer.finish(false);
             total_timer.finish(false);
             return std::make_shared<CompletedTransferAsyncContext>(
-                TransferResult(ErrorInfo(code, message), CacheCopyError::NOT_EXECUTED), count);
+                unsubmittedResult(TransferResult(ErrorInfo(code, message), CacheCopyError::NOT_EXECUTED)),
+                count,
+                task.completionProof());
         };
         if (!count)
             return reject("empty WorkLoop transfer", ErrorCode::INVALID_PARAMS);
@@ -149,6 +166,9 @@ std::shared_ptr<TransferAsyncContext> TransferWorkLoop::execute(TransferTask    
         // Copy logical sizes, including nested block vectors. Do not retain a
         // caller's arbitrary excess vector capacity inside the resident budget.
         auto    owned_task = task.subtask(std::vector<TransferDescriptor>(task.descriptors()));
+        // This is the same physical batch; ordinary internal subtasks do not
+        // inherit the producer's completion token.
+        owned_task.setCompletionProof(task.completionProof());
         Entries incoming;
         incoming.push_back(std::make_unique<Entry>(std::move(owned_task), std::move(before_complete)));
         incoming.front()->task_timer     = std::move(total_timer);
@@ -158,6 +178,7 @@ std::shared_ptr<TransferAsyncContext> TransferWorkLoop::execute(TransferTask    
             std::lock_guard<std::mutex> lock(mutex_);
             rejected = !accepting_ || entry_count_ == capacity_;
             if (!rejected) {
+                unsubmitted.dismiss();
                 incoming_.splice(incoming_.end(), incoming);
                 ++entry_count_;
                 cv_.notify_all();
@@ -244,8 +265,9 @@ bool TransferWorkLoop::plan(Entry& entry) {
         }
         if (expired) {
             fail(entry,
-                 TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired in WorkLoop queue"),
-                                CacheCopyError::NOT_EXECUTED));
+                 unsubmittedResult(TransferResult(
+                     ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired in WorkLoop queue"),
+                     CacheCopyError::NOT_EXECUTED)));
             return false;
         }
     }
@@ -278,8 +300,8 @@ bool TransferWorkLoop::plan(Entry& entry) {
 bool TransferWorkLoop::acquireStaging(Entry& entry, bool waiting) {
     if (!waiting && entry.task.expired()) {
         fail(entry,
-             TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "staging admission timed out"),
-                            CacheCopyError::NOT_EXECUTED));
+             unsubmittedResult(TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "staging admission timed out"),
+                                              CacheCopyError::NOT_EXECUTED)));
         return false;
     }
     auto& resource = staging_;
@@ -318,8 +340,9 @@ void TransferWorkLoop::retryStaging(StagingResource& resource) {
             if (waiting->task.expired()) {
                 unqueue.run();
                 fail(*waiting,
-                     TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "staging admission timed out"),
-                                    CacheCopyError::NOT_EXECUTED));
+                     unsubmittedResult(TransferResult(
+                         ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "staging admission timed out"),
+                         CacheCopyError::NOT_EXECUTED)));
                 return;
             }
             if (!acquireStaging(*waiting, true)) {
@@ -342,8 +365,9 @@ void TransferWorkLoop::tryStep(Entry& entry) {
             return;
         if (entry.task.expired()) {
             fail(entry,
-                 TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired before stage submission"),
-                                CacheCopyError::NOT_EXECUTED));
+                 unsubmittedResult(TransferResult(
+                     ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired before stage submission"),
+                     CacheCopyError::NOT_EXECUTED)));
             return;
         }
         if (isCrc(entry.step))
@@ -391,7 +415,7 @@ void TransferWorkLoop::submitDisk(Entry& entry) {
         const auto& host  = entry.hosts[i];
         const auto& owner = *group(entry);
         if (owner.storageBytes() > stride || !isValidHostBufferView(host, owner.payloadBytes(), stride)) {
-            fail(entry, TransferStatus::DISK_IO_ERROR);
+            fail(entry, unsubmittedResult(TransferStatus::DISK_IO_ERROR));
             return;
         }
         blocks.push_back(descriptors[i].singleBlockAt(Tier::DISK));
@@ -440,12 +464,17 @@ void TransferWorkLoop::pollOnce() {
         for (auto& [device, waiting] : crc_waiting_)
             while (auto* entry = waiting.head) {
                 removeWaiter(*entry);
-                fail(*entry, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "CRC Busy without a pending direction record"));
+                fail(*entry,
+                     unsubmittedResult(
+                         ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "CRC Busy without a pending direction record")));
             }
 }
 
 void TransferWorkLoop::recordDiskResult(Entry& entry, BlockIOStatus status) noexcept {
     assert(entry.result.ok());
+    // Only called after a zero-I/O rejection or the final DiskIOExecutor callback,
+    // which joins every accepted worker even on partial failure or exception.
+    // This stage contributes true to the AND; preserve the earlier stages' proof.
     const auto transfer_status = blockIOStatusToTransferStatus(status);
     const auto copy_error      = cacheCopyErrorFor(transfer_status);
     const bool intermediate    = transfer_status == TransferStatus::OK && entry.step == Step::DISK_READ
@@ -469,6 +498,7 @@ void TransferWorkLoop::recordResult(Entry& entry, TransferResult result) noexcep
     if (!intermediate)
         for (size_t i = 0; i < entry.task.descriptors().size(); ++i)
             entry.result.block_errors[i] = result.blockError(i);
+    entry.result.buffer_safe = entry.result.buffer_safe && result.buffer_safe;
     entry.result.status     = std::move(result.status);
     entry.result.copy_error = result.copy_error;
 }
@@ -557,8 +587,8 @@ void TransferWorkLoop::cancelStaging() {
     while (auto* entry = staging_.waiting.head) {
         removeWaiter(*entry);
         fail(*entry,
-             TransferResult(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "staging admission cancelled"),
-                            CacheCopyError::NOT_EXECUTED));
+             unsubmittedResult(TransferResult(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "staging admission cancelled"),
+                                              CacheCopyError::NOT_EXECUTED)));
     }
 }
 
@@ -590,8 +620,8 @@ void TransferWorkLoop::expireResourceWaiters() {
         auto& entry = *wait_deadlines_.begin()->second;
         removeWaiter(entry);
         fail(entry,
-             TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer resource wait timed out"),
-                            CacheCopyError::NOT_EXECUTED));
+             unsubmittedResult(TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer resource wait timed out"),
+                                              CacheCopyError::NOT_EXECUTED)));
     }
     // An expired FIFO head may have needed more blocks than the next waiter.
     // Retry against existing free capacity without waiting for another release.

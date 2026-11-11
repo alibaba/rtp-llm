@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <condition_variable>
 #include <cstring>
 #include <cstdlib>
@@ -15,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <sys/resource.h>
 #include <utility>
 #include <vector>
 
@@ -498,19 +500,227 @@ TEST_F(CopyBoundsTest, RejectsLogicalCopyLargerThanPhysicalBufferButAllowsPrefix
     }
 }
 
-TEST_F(CopyBoundsTest, InvalidStagedParametersAllowFallbackBeforeCudaAccess) {
+TEST_F(CopyBoundsTest, StagedLayoutCanFallbackButInvalidPointersAndSizesCannot) {
     StagedMemoryCopyParams params;
     params.device_index = 0;
     params.host_base    = reinterpret_cast<void*>(0x1000);
     params.host_bytes   = 32;
     params.tiles.push_back({reinterpret_cast<void*>(0x2000), 16, 32});
     EXPECT_FALSE(execStagedMemoryCopy(params));
+    // Invalid pointers must not be hidden by a simultaneous layout mismatch.
+    params.tiles[0].gpu = nullptr;
+    EXPECT_THROW(execStagedMemoryCopy(params), std::invalid_argument);
     params.tiles[0] = {nullptr, 0, 32};
-    EXPECT_FALSE(execStagedMemoryCopy(params));
+    EXPECT_THROW(execStagedMemoryCopy(params), std::invalid_argument);
     params.tiles[0] = {reinterpret_cast<void*>(0x2000), 0, 0};
-    EXPECT_FALSE(execStagedMemoryCopy(params));
+    EXPECT_THROW(execStagedMemoryCopy(params), std::invalid_argument);
     params.host_base = nullptr;
-    EXPECT_FALSE(execStagedMemoryCopy(params));
+    EXPECT_THROW(execStagedMemoryCopy(params), std::invalid_argument);
+}
+
+struct CopyFailureInjection {
+    const char* submit_phase{nullptr};
+    const char* completion_phase{nullptr};
+    bool        throw_after_submit{false};
+    size_t      completions{0};
+    size_t      generic_submits{0};
+};
+
+thread_local CopyFailureInjection* copy_failure = nullptr;
+
+int injectCopyResult(const char* phase, int actual) {
+    if (std::strcmp(phase, "generic_submit") == 0)
+        ++copy_failure->generic_submits;
+    if (std::strstr(phase, "drain") || std::strstr(phase, "completion"))
+        ++copy_failure->completions;
+    if (actual != cudaSuccess)
+        return actual;
+    if (copy_failure->submit_phase && std::strcmp(phase, copy_failure->submit_phase) == 0) {
+        if (copy_failure->throw_after_submit)
+            throw std::runtime_error("injected exception after real CUDA submission");
+        return cudaErrorInvalidValue;
+    }
+    if (copy_failure->completion_phase && std::strcmp(phase, copy_failure->completion_phase) == 0)
+        return cudaErrorUnknown;
+    return actual;
+}
+
+class ScopedCopyFailure {
+public:
+    explicit ScopedCopyFailure(CopyFailureInjection& failure):
+        previous_(copy_failure), previous_probe_(no_block_copy_detail::cuda_result_for_test) {
+        copy_failure = &failure;
+        no_block_copy_detail::cuda_result_for_test = injectCopyResult;
+    }
+    ~ScopedCopyFailure() {
+        no_block_copy_detail::cuda_result_for_test = previous_probe_;
+        copy_failure = previous_;
+    }
+private:
+    CopyFailureInjection* previous_;
+    int (*previous_probe_)(const char*, int);
+};
+
+class CopyCompletionFailureTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        previous_core_dump_ = StaticConfig::user_ft_core_dump_on_exception;
+        previous_death_style_ = ::testing::FLAGS_gtest_death_test_style;
+        StaticConfig::user_ft_core_dump_on_exception = false;
+        // Re-exec the death-test child: do not fork and reuse a CUDA context.
+        ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+        ASSERT_TRUE(torch::cuda::is_available());
+        host_ = torch::empty({64}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true));
+        device_ = torch::empty({64}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        streams_ = acquireDeviceHostCopyStreams(device_.get_device());
+    }
+    void TearDown() override {
+        StaticConfig::user_ft_core_dump_on_exception = previous_core_dump_;
+        ::testing::FLAGS_gtest_death_test_style = previous_death_style_;
+    }
+    DeviceHostCopyPlan plan(bool to_host) {
+        std::memset(host_.data_ptr(), to_host ? 0 : 0x5A, 64);
+        RTP_LLM_CHECK(cudaMemset(device_.data_ptr(), to_host ? 0x5A : 0, 64) == cudaSuccess);
+        RTP_LLM_CHECK(cudaDeviceSynchronize() == cudaSuccess);
+        return {to_host, 0, {host_.data_ptr(), 64, 64},
+                {{host_.data_ptr(), device_.data_ptr(), 64, device_.get_device(), 0, 0}}};
+    }
+    DeviceHostCopyExecutionContext context(bool to_host = false) const {
+        return {streams_, to_host ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D};
+    }
+    static DeviceHostCopyOptions stagedOptions() {
+        DeviceHostCopyOptions options;
+        options.staged_sm_min_tile_count = 1;
+        options.staged_sm_min_bytes = 1;
+        return options;
+    }
+    static void disableCoreFile() {
+        const rlimit limit{0, 0};
+        if (setrlimit(RLIMIT_CORE, &limit) != 0)
+            std::_Exit(10);
+    }
+    torch::Tensor host_, device_;
+    std::shared_ptr<DeviceHostCopyStreams> streams_;
+    bool previous_core_dump_{false};
+    std::string previous_death_style_;
+};
+
+TEST_F(CopyCompletionFailureTest, GenericFailureAfterSuccessfulDrainRemainsOrdinaryError) {
+    auto copy_plan = plan(false);
+    CopyFailureInjection failure{"generic_submit"};
+    ScopedCopyFailure injection(failure);
+    GenericMultiCopyDeviceHostCopyStrategy generic;
+    const auto result = generic.tryExecute(copy_plan, {}, context());
+    EXPECT_EQ(result.status, StrategyStatus::FAILED);
+    EXPECT_EQ(result.copy_status, TransferStatus::DEVICE_IO_ERROR);
+    EXPECT_EQ(failure.completions, 1u);
+    EXPECT_EQ(cudaStreamQuery(reinterpret_cast<cudaStream_t>(context().stream())), cudaSuccess);
+}
+
+TEST_F(CopyCompletionFailureTest, GenericUnconfirmedDrainAbortsDespiteCatchAndCoreDumpDisabled) {
+    for (bool explicit_context : {true, false}) {
+        EXPECT_EXIT(([&] {
+            disableCoreFile();
+            auto copy_plan = plan(false);
+            CopyFailureInjection failure{"generic_submit", "generic_exception_drain"};
+            ScopedCopyFailure injection(failure);
+            try {
+                if (explicit_context) {
+                    GenericMultiCopyDeviceHostCopyStrategy generic;
+                    (void)generic.tryExecute(copy_plan, {}, context());
+                } else {
+                    execNoBlockCopy(MultiCopyParams{{device_}, {host_}});
+                }
+            } catch (...) { std::_Exit(11); }
+            std::_Exit(12);
+        }()), ::testing::KilledBySignal(SIGABRT), "completion unconfirmed phase=generic_exception_drain");
+    }
+}
+
+TEST_F(CopyCompletionFailureTest, StagedFailureCanUseGenericOnlyAfterDraining) {
+    for (bool to_host : {true, false}) {
+        for (const char* phase : {"staged_metadata_submit", "staged_payload_submit"}) {
+            SCOPED_TRACE(phase);
+            auto copy_plan = plan(to_host);
+            CopyFailureInjection failure{phase};
+            ScopedCopyFailure injection(failure);
+            StagedSmDeviceHostCopyStrategy staged;
+            EXPECT_EQ(staged.tryExecute(copy_plan, stagedOptions(), context(to_host)).status,
+                      StrategyStatus::NOT_APPLICABLE);
+            EXPECT_EQ(failure.completions, 1u);
+            EXPECT_EQ(failure.generic_submits, 0u);
+            GenericMultiCopyDeviceHostCopyStrategy generic;
+            EXPECT_EQ(generic.tryExecute(copy_plan, {}, context(to_host)).status, StrategyStatus::DONE);
+            EXPECT_EQ(failure.generic_submits, 1u);
+            auto actual = to_host ? host_ : device_.cpu();
+            EXPECT_TRUE(std::all_of(actual.data_ptr<uint8_t>(), actual.data_ptr<uint8_t>() + 64,
+                                    [](uint8_t value) { return value == 0x5A; }));
+        }
+    }
+}
+
+TEST_F(CopyCompletionFailureTest, StagedUnconfirmedCompletionNeverReturnsFallback) {
+    for (const char* phase : {"staged_metadata_submit", "staged_payload_submit", "no_submit_failure"}) {
+        EXPECT_EXIT(([&] {
+            disableCoreFile();
+            auto copy_plan = plan(false);
+            CopyFailureInjection failure{phase, "staged_completion"};
+            ScopedCopyFailure injection(failure);
+            try {
+                StagedSmDeviceHostCopyStrategy staged;
+                (void)staged.tryExecute(copy_plan, stagedOptions(), context());
+            } catch (...) { std::_Exit(11); }
+            std::_Exit(12);
+        }()), ::testing::KilledBySignal(SIGABRT), "completion unconfirmed phase=staged_completion");
+    }
+}
+
+TEST_F(CopyCompletionFailureTest, StagedExceptionAfterSubmissionDrainsBeforeReturningSafeFailure) {
+    auto copy_plan = plan(false);
+    StagedSmDeviceHostCopyStrategy staged;
+    {
+        CopyFailureInjection failure{"staged_payload_submit", nullptr, true};
+        ScopedCopyFailure injection(failure);
+        const auto result = staged.tryExecute(copy_plan, stagedOptions(), context());
+        EXPECT_EQ(result.status, StrategyStatus::FAILED);
+        EXPECT_EQ(result.copy_status, TransferStatus::DEVICE_IO_ERROR);
+        EXPECT_TRUE(result.buffer_safe);
+        EXPECT_EQ(failure.completions, 1u);
+    }
+    // Reusing the same scratch is allowed after the exceptional call drained.
+    EXPECT_EQ(staged.tryExecute(copy_plan, stagedOptions(), context()).status, StrategyStatus::DONE);
+}
+
+TEST_F(CopyCompletionFailureTest, StagedExceptionWithUnconfirmedDrainAborts) {
+    EXPECT_EXIT(([&] {
+        disableCoreFile();
+        auto copy_plan = plan(false);
+        CopyFailureInjection failure{"staged_payload_submit", "staged_exception_drain", true};
+        ScopedCopyFailure injection(failure);
+        try {
+            StagedSmDeviceHostCopyStrategy staged;
+            (void)staged.tryExecute(copy_plan, stagedOptions(), context());
+        } catch (...) { std::_Exit(11); }
+        std::_Exit(12);
+    }()), ::testing::KilledBySignal(SIGABRT), "completion unconfirmed phase=staged_exception_drain");
+}
+
+TEST_F(CopyCompletionFailureTest, BatchUnconfirmedCompletionAlsoAbortsWithCoreDumpDisabled) {
+    for (const char* phase : {"batch_submit_drain", "batch_completion"}) {
+        EXPECT_EXIT(([&] {
+            disableCoreFile();
+            (void)plan(false);
+            CopyFailureInjection failure{std::strcmp(phase, "batch_submit_drain") == 0 ? "batch_submit" : nullptr, phase};
+            ScopedCopyFailure injection(failure);
+            BatchedMemoryCopyParams params;
+            params.device_index = device_.get_device();
+            params.tiles.push_back({device_.data_ptr(), host_.data_ptr(), 64});
+            try {
+                (void)execBatchedMemoryCopy(params, context());
+            } catch (...) { std::_Exit(11); }
+            std::_Exit(12);
+        }()), ::testing::KilledBySignal(SIGABRT), "completion unconfirmed phase=batch_");
+    }
 }
 
 TEST_F(LegacyPerRankBlockTransferEngineTest, DirectionStreamsAreDistinctAndSharedBetweenExecutors) {

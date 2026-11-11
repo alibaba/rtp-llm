@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 
 #include <memory>
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/LegacyTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferEngineSelection.h"
 #include <algorithm>
@@ -26,9 +27,11 @@ namespace rtp_llm {
 
 namespace {
 
-std::shared_ptr<TransferAsyncContext> invalidTransferContext(size_t block_count) {
+std::shared_ptr<TransferAsyncContext> invalidTransferContext(const TransferTask& task) {
+    TransferResult result(ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid block transfer request"));
+    result.buffer_safe = true;
     return std::make_shared<CompletedTransferAsyncContext>(
-        ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid block transfer request"), block_count);
+        std::move(result), task.descriptors().size(), task.completionProof());
 }
 
 // Metadata follows the same physical allocations as the payload. HOST/DISK
@@ -353,26 +356,29 @@ BlockTreeQueueSizes PerRankBlockTransferEngine::queueSizes() const {
 }
 
 std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(TransferTask task) {
+    block_tree_cache_detail::ScopeRollback unsubmitted([proof = task.completionProof()] {
+        if (proof) proof->report(true);
+    });
     const auto& descriptors = task.descriptors();
     if (descriptors.empty()) {
-        return invalidTransferContext(descriptors.size());
+        return invalidTransferContext(task);
     }
     const Tier source = descriptors.front().source_tier;
     const Tier target = descriptors.front().target_tier;
     if (async_ && descriptors.size() > batchLimit())
-        return invalidTransferContext(descriptors.size());
+        return invalidTransferContext(task);
     std::vector<const GroupSet*> group_sets;
     group_sets.reserve(descriptors.size());
     for (const auto& descriptor : descriptors) {
         if (descriptor.source_tier != source || descriptor.target_tier != target
             || (async_ && descriptor.group_set_id != descriptors.front().group_set_id)) {
-            return invalidTransferContext(descriptors.size());
+            return invalidTransferContext(task);
         }
         if (descriptor.group_set_id >= group_sets_.size() || !group_sets_[descriptor.group_set_id])
-            return invalidTransferContext(descriptors.size());
+            return invalidTransferContext(task);
         const auto* group_set = group_sets_[descriptor.group_set_id].get();
         if (!validDescriptor(descriptor, *group_set))
-            return invalidTransferContext(descriptors.size());
+            return invalidTransferContext(task);
         group_sets.push_back(group_set);
     }
 
@@ -380,14 +386,14 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(Transf
         && std::any_of(group_sets.begin(), group_sets.end(), [&](const auto* group) {
                return group->crcEnabled() != group_sets.front()->crcEnabled();
            }))
-        return invalidTransferContext(descriptors.size());
+        return invalidTransferContext(task);
     if ((source == Tier::DISK || target == Tier::DISK) && !enable_disk_cache_)
-        return invalidTransferContext(descriptors.size());
+        return invalidTransferContext(task);
     if (((source == Tier::DISK && target == Tier::DEVICE) || (source == Tier::DEVICE && target == Tier::DISK))
         && std::any_of(group_sets.begin(), group_sets.end(), [&](const auto* group) {
                return group->groupType() != group_sets.front()->groupType();
            }))
-        return invalidTransferContext(descriptors.size());
+        return invalidTransferContext(task);
     if (async_) {
         TransferWorkLoop::BeforeCompleteCallback before_complete;
         if (track_decode_origins_) {
@@ -399,9 +405,13 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(Transf
         auto&      loops  = isLoadTransfer(source, target) ? load_loops_ : offload_loops_;
         auto&      next   = isLoadTransfer(source, target) ? next_load_ : next_offload_;
         const auto worker = loops.size() == 1 ? 0 : next.fetch_add(1, std::memory_order_relaxed) % loops.size();
+        unsubmitted.dismiss();
         return loops[worker]->execute(std::move(task), std::move(before_complete));
     }
-    const auto submit = [&] { return legacy_->execute(std::move(task), group_sets); };
+    const auto submit = [&] {
+        unsubmitted.dismiss();
+        return legacy_->execute(std::move(task), std::move(group_sets));
+    };
     if (!track_decode_origins_)
         return submit();
     auto origins = prepareOriginTransfers(descriptors, group_sets);
@@ -409,6 +419,8 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(Transf
         return submit();
     std::shared_ptr<TransferBatchAsyncContext> observed;
     try {
+        // The underlying producer owns the proof; this context only observes
+        // its business result after settling decode-origin metadata.
         observed = std::make_shared<TransferBatchAsyncContext>(descriptors.size());
     } catch (const std::bad_alloc&) {
         // Attribution is optional; the already-cleared destination remains

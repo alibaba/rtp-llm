@@ -18,14 +18,21 @@ HostDiskTransferExecutor::HostDiskTransferExecutor(BlockTreeTaskPool& transfer_t
 
 TransferResult HostDiskTransferExecutor::executeBatch(const std::vector<HostBufferView>&     hosts,
                                                       const std::vector<TransferDescriptor>& descriptors,
-                                                      const std::vector<const GroupSet*>&    group_sets) {
+                                                      const std::vector<const GroupSet*>&    group_sets) try {
+    // Normal returns either reject before I/O or follow synchronous disk I/O,
+    // including partial failures. Synchronous disk calls retain no access on unwind.
+    const auto completed = [](TransferStatus status) {
+        TransferResult result(status);
+        result.buffer_safe = true;
+        return result;
+    };
     if (hosts.empty() || hosts.size() != descriptors.size() || hosts.size() != group_sets.size()) {
-        return TransferStatus::INVALID_ARGS;
+        return completed(TransferStatus::INVALID_ARGS);
     }
     const bool               write_to_disk = descriptors.front().target_tier == Tier::DISK;
     BlockTreeDiskBlockPool*  disk_pool     = group_sets.front()->diskPool().get();
     if (!disk_pool) {
-        return TransferStatus::INVALID_ARGS;
+        return completed(TransferStatus::INVALID_ARGS);
     }
     const size_t             disk_stride   = disk_pool->strideBytes();
     BlockIdList              disk_blocks;
@@ -43,7 +50,7 @@ TransferResult HostDiskTransferExecutor::executeBatch(const std::vector<HostBuff
         if (!group_set->diskPool() || group_set->diskPool().get() != disk_pool
             || group_set->storageBytes() > disk_stride || !isValidHostBufferView(host, payload, disk_stride)) {
             RTP_LLM_LOG_WARNING("invalid host-disk batch item index=%zu group=%zu", index, descriptor.group_set_id);
-            return TransferStatus::DISK_IO_ERROR;
+            return completed(TransferStatus::DISK_IO_ERROR);
         }
         const size_t encoded_bytes = group_set->storageBytes();
         if (write_to_disk && disk_stride > encoded_bytes) {
@@ -61,9 +68,13 @@ TransferResult HostDiskTransferExecutor::executeBatch(const std::vector<HostBuff
                             write_to_disk ? "write" : "read",
                             descriptors.size(),
                             blockIOStatusName(status));
-        return blockIOStatusToTransferStatus(status);
+        return completed(blockIOStatusToTransferStatus(status));
     }
-    return TransferStatus::OK;
+    return completed(TransferStatus::OK);
+} catch (const std::exception& error) {
+    return TransferResult::executionException(true, error.what());
+} catch (...) {
+    return TransferResult::executionException(true);
 }
 
 }  // namespace rtp_llm

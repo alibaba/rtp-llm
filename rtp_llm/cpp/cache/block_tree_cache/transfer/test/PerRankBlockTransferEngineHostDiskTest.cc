@@ -327,6 +327,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, LegacyMaxBatchSizeSplitsOneLogica
     context->waitDone();
 
     ASSERT_TRUE(context->success()) << context->errorInfo().ToString();
+    EXPECT_TRUE(context->result().buffer_safe);
     EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{2, 2, 1}));
 }
 
@@ -506,9 +507,23 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskStatusMapping) {
         auto host_block = poolMalloc(*host_pool_);
         auto disk_block = poolMalloc(*disk_pool);
         auto group      = makeHostDiskGroup(0, host_pool_, disk_pool, host_block_size_);
-        auto engine     = makeEngine({group});
-        expectStatus(engine, makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block), expected);
-        expectStatus(engine, makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, disk_block), expected);
+        for (const bool async : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "async=" << async);
+            auto engine = std::make_shared<PerRankBlockTransferEngine>(
+                std::vector<GroupSetPtr>{group}, true, DeviceHostCopyOptions{}, 4, 16, 1, 8, nullptr, 0, 8, async);
+            for (const bool write : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << "write=" << write);
+                auto descriptor = makeDescriptor(
+                    write ? Tier::HOST : Tier::DISK, write ? Tier::DISK : Tier::HOST, {}, host_block, disk_block);
+                auto context = engine->execute(makeTransferTask({descriptor}));
+                context->waitDone();
+                EXPECT_EQ(context->success(), expected == TransferStatus::OK);
+                EXPECT_EQ(context->errorInfo().code(), transferStatusToErrorInfo(expected).code());
+                EXPECT_EQ(context->result().copy_error, cacheCopyErrorFor(expected));
+                EXPECT_TRUE(context->result().buffer_safe);
+            }
+            engine->shutdown();
+        }
         releasePoolBlock(*host_pool_, host_block);
     }
 }
