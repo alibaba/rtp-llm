@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpTaskContext.h"
+#include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TransferValidation.h"
 
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -63,13 +64,19 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
     std::unordered_map<int64_t, const ::tcp_transfer::TcpCacheKeyBlockBufferInfo*> request_index;
     request_index.reserve(request_->blocks_size());
     for (const auto& cache_key_block : request_->blocks()) {
-        request_index[cache_key_block.key()] = &cache_key_block;
+        if (!request_index.emplace(cache_key_block.key(), &cache_key_block).second) {
+            RTP_LLM_LOG_WARNING("executeCopy: duplicate cache key, unique_key: %s", unique_key_.c_str());
+            return false;
+        }
     }
 
     // Iterate over task's expected blocks as the authoritative source of truth.
     // Every non-empty BlockInfo in the task must be present in the request with a matching size.
     std::vector<CopyTask> copy_tasks;
     for (const auto& [cache_key, kbi_ptr] : task_->getBlockInfos()) {
+        if (!kbi_ptr) {
+            return false;
+        }
         auto req_it = request_index.find(cache_key);
         if (req_it == request_index.end()) {
             RTP_LLM_LOG_WARNING(
@@ -80,6 +87,9 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
 
         for (int i = 0; i < static_cast<int>(kbi_ptr->blocks.size()); ++i) {
             const BlockInfo& bi = kbi_ptr->blocks[i];
+            if (bi.addr == nullptr && bi.size_bytes > 0) {
+                return false;
+            }
             if (bi.addr == nullptr || bi.size_bytes == 0) {
                 continue;
             }
@@ -91,20 +101,24 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
                 return false;
             }
             const auto& proto_block = req_block->blocks(i);
-            if (proto_block.len() != static_cast<uint32_t>(bi.size_bytes)) {
+            if (!matchesBlockPayload(bi.size_bytes, proto_block.len(), proto_block.content().size())) {
                 RTP_LLM_LOG_WARNING(
-                    "executeCopy: size mismatch cache_key %lld sub %d: expected %zu got %u, unique_key: %s",
+                    "executeCopy: size mismatch cache_key %lld sub %d: expected %zu declared %u actual %zu, unique_key: %s",
                     cache_key,
                     i,
                     bi.size_bytes,
                     proto_block.len(),
+                    proto_block.content().size(),
                     unique_key_.c_str());
                 return false;
             }
             CopyTask task;
-            task.src_ptr = const_cast<char*>(proto_block.content().data());
-            task.size    = proto_block.len();
-            task.dst_ptr = static_cast<char*>(bi.addr);
+            task.src_ptr      = const_cast<char*>(proto_block.content().data());
+            task.size         = proto_block.len();
+            task.dst_ptr      = static_cast<char*>(bi.addr);
+            task.is_cuda      = bi.is_cuda;
+            task.device_index = bi.device_index;
+            task.device_type  = bi.device_type;
             copy_tasks.push_back(task);
             collector_->total_block_size += proto_block.len();
         }
