@@ -1,10 +1,10 @@
-"""Experimental single-kernel RMSNorm/PTPC producer with an ATen-shaped sum.
+"""Single-kernel RMSNorm/PTPC producer with an ATen-shaped sum.
 
-This candidate is not wired into production. Its reduction follows the
+Its reduction follows the
 installed Torch 2.11 Reduce.cuh FP32 contiguous MeanOps specialization:
 four lane-local accumulators, their left-to-right combination, block-x folds,
 then descending warp shuffle folds. A plain sum over the feature tile would
-change that order. Native byte/Graph validation remains a promotion condition.
+change that order. Native byte/Graph components cover its admitted metadata.
 """
 
 from functools import lru_cache
@@ -189,8 +189,8 @@ def ptpc_rms_norm_candidate(hidden, gamma, eps=1e-6):
     """Return one-kernel norm candidate, or None for unsupported metadata.
 
     Inputs are finite BF16 inference tensors on the Torch2.11 PPU runtime.
-    The kernel has not been promoted until exact native component/Graph tests
-    establish that its rsqrt and BF16 landing match the installed provider.
+    Its rsqrt and BF16 landing match the installed provider in the native
+    bitwise and changed-input/gamma Graph component matrix.
     """
     return _candidate(hidden, gamma, eps, False)
 
