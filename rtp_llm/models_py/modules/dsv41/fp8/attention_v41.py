@@ -2073,9 +2073,27 @@ class AttentionV41FP8(AttentionFP8):
                                 **({"bounds": bounds} if bounds is not None else {}),
                             )
                     else:
-                        logits = torch.einsum(
-                            "thd,kd->thk", q[chunk], keys.float()
-                        ).relu_()
+                        # keys.float() alone is 80-254 MiB at 1M context and
+                        # was the last allocation to fail on a 44 GiB L20.
+                        # Fill the FP32 logits in key slices instead; the
+                        # result and its dtype are unchanged.
+                        key_chunk = int(
+                            os.environ.get("DSV41_PREFILL_KEY_CHUNK", "16384")
+                        )
+                        q_rows = q[chunk]
+                        logits = torch.empty(
+                            (q_rows.shape[0], q_rows.shape[1], key_count),
+                            dtype=torch.float32,
+                            device=q_rows.device,
+                        )
+                        for key_start in range(0, key_count, key_chunk):
+                            key_stop = min(key_start + key_chunk, key_count)
+                            logits[:, :, key_start:key_stop] = torch.einsum(
+                                "thd,kd->thk",
+                                q_rows,
+                                keys[key_start:key_stop].float(),
+                            )
+                        logits.relu_()
                         # Apply the per-head weights in place. The eager
                         # product below allocated a second [queries, heads,
                         # keys] FP32 tile (~130 MiB at key_count=65536),
