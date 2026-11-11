@@ -49,11 +49,11 @@ CacheStoreAsyncWriter::CacheStoreAsyncWriter(int                                
     cache_manager_(std::move(cache_manager)),
     cache_model_id_(cache_model_id) {
     if (cache_manager_) {
-        const CacheConfig* selected_config = &cache_manager_->cacheConfig();
+        const CacheModuleConfig* selected_config = &cache_manager_->cacheConfig().main_config;
         if (mtp_cache_config_index.has_value()) {
             selected_config = &cache_manager_->getMTPModuleCacheConfig(*mtp_cache_config_index);
         }
-        cache_config_ = std::shared_ptr<const CacheConfig>(cache_manager_, selected_config);
+        cache_config_ = std::shared_ptr<const CacheModuleConfig>(cache_manager_, selected_config);
 
         // Cache-store key/offset projection follows physical KV ownership, not
         // forward-only CP execution. An unsharded allocator deliberately leaves
@@ -408,14 +408,14 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
         RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING,
                                 "CacheStoreAsyncWriter::write() called when not RUNNING. Call init() first.");
         auto completion_state     = active_store_completion_state_;
-        register_store_completion = [completion_state, cache_manager = cache_manager_, cache_config](
-                                        const std::vector<int64_t>& cache_keys,
-                                        const std::vector<int32_t>& block_ids,
-                                        const std::string&          tag) {
+        register_store_completion = [completion_state,
+                                     cache_manager = cache_manager_](const std::vector<int64_t>& cache_keys,
+                                                                     const std::vector<int32_t>& block_ids,
+                                                                     const std::string&          tag) {
             std::shared_ptr<KVCacheResource> publication_lease;
             if (cache_manager->initialized() && cache_manager->isAllocatorOwner()) {
                 KVCacheResource lease_resource;
-                lease_resource.initGroups(cache_config->topologyPtr());
+                lease_resource.initGroups(cache_manager->cacheConfig());
                 lease_resource.setCacheKeys(cache_keys);
                 lease_resource.mutableBlockIds(tag).assign(block_ids);
                 publication_lease = cache_manager->incrKVCacheRef(lease_resource, cache_keys, /*is_connector=*/true);
@@ -433,13 +433,15 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
                 cache_config,
                 cache_store,
                 register_store_completion,
-                cache_model_id = cache_model_id_,
-                cp_rank        = cp_rank_,
-                cp_size        = cp_size_,
-                event          = std::move(event)]() mutable {
+                cache_model_id          = cache_model_id_,
+                cp_rank                 = cp_rank_,
+                cp_size                 = cp_size_,
+                base_seq_size_per_block = cache_config->seq_size_per_block,
+                event                   = std::move(event)]() mutable {
         runtimeWriteCacheStore(captured_cache_store_inputs,
                                captured_layer_kv,
                                *cache_config,
+                               base_seq_size_per_block,
                                cache_store,
                                cache_model_id,
                                cp_rank,

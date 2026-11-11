@@ -92,9 +92,9 @@ protected:
         EXPECT_FALSE(expected->hasError());
     }
 
-    void verifySchedulersPartitionMixedExecutionModes(int first_max_new_tokens,
-                                                       int second_max_new_tokens,
-                                                       bool with_group_metadata = false);
+    void verifySchedulersPartitionMixedExecutionModes(int  first_max_new_tokens,
+                                                      int  second_max_new_tokens,
+                                                      bool with_group_metadata = false);
     void verifyBatchDecodeSchedulerDrainsMixedModeTail(const std::vector<int>& max_new_tokens);
 
     std::shared_ptr<LoadAsyncContext> setupPendingCacheLoad(const std::shared_ptr<KVCacheManager>& cache_manager) {
@@ -267,8 +267,9 @@ class ChunkSchedulerTestEnv {
 public:
     explicit ChunkSchedulerTestEnv(const ChunkSchedulerTestConfig& config, const CacheConfig* cache_config = nullptr):
         cache_manager(std::make_shared<KVCacheManager>(
-            cache_config ? *cache_config : rtp_llm::test::makeSimpleMhaCacheConfig(
-                1, config.block_num, config.seq_size_per_block, rtp_llm::DataType::TYPE_FP16, 1, 4))) {
+            cache_config ? *cache_config :
+                           rtp_llm::test::makeSimpleMhaCacheConfig(
+                               1, config.block_num, config.seq_size_per_block, rtp_llm::DataType::TYPE_FP16, 1, 4))) {
         resource_context.cache_manager = cache_manager;
         resource_context.role_type     = config.role_type;
 
@@ -327,10 +328,9 @@ TEST_F(FIFOSchedulerTest, testSimple) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = torch::tensor({1}, torch::kInt32);
     query->generate_config               = makeTestGenerateConfig();
@@ -370,10 +370,9 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = torch::tensor({1, 2, 3}, torch::kInt32);
     query->generate_config               = makeTestGenerateConfig();
@@ -402,10 +401,9 @@ TEST_F(FIFOSchedulerTest, testMaxInitedKVCacheStreamsBlocksNewInit) {
     runtime_config.max_generate_batch_size                           = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size       = 8192;
     runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = 1;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto make_stream = [&]() {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
@@ -448,10 +446,9 @@ TEST_F(FIFOSchedulerTest, testRejectInputWithoutSpeculativeReserveSpace) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto make_stream = [&](size_t input_len) {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
@@ -491,10 +488,9 @@ TEST_F(FIFOSchedulerTest, testRejectSpeculativeTailWithoutReserveSpace) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     const size_t gamma        = 3;
     const size_t reserve_step = gamma + 1;
@@ -533,10 +529,9 @@ TEST_F(FIFOSchedulerTest, testDSparkGammaThreeReservesThreeWindows) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     const size_t gamma        = 3;
     const size_t reserve_step = 3 * gamma;
@@ -575,10 +570,9 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = torch::tensor({1, 2, 3, 4}, torch::kInt32);
     query->generate_config               = makeTestGenerateConfig(0);
@@ -629,10 +623,9 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheRejectedByReserveBlocks) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     // Need 6 blocks. With reserve=5 blocks and available=10 blocks, init malloc should be rejected.
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
@@ -683,10 +676,9 @@ TEST_F(FIFOSchedulerTest, testReserveBlocksOnlyAffectInitMallocNotIncrMalloc) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     // Init need 4 blocks, should pass: 10 >= 4 + 5.
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
@@ -726,10 +718,9 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
@@ -797,10 +788,9 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
     runtime_config.max_generate_batch_size                      = 1;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size  = 100;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     {
         // test normalcase
@@ -891,10 +881,9 @@ TEST_F(FIFOSchedulerTest, testCheckInputLengthIgnoresBatchSizeFanOut) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 100;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     {
         // num_return_sequences fan-out: input_len 7 * batch 20 = 140 > 100, but accepted.
@@ -948,11 +937,10 @@ TEST_F(FIFOSchedulerTest, testCpForceSinglePrefillConfig) {
         runtime_config.max_generate_batch_size                       = 100;
         runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
         runtime_config.fifo_scheduler_config.cp_force_single_prefill = cp_force_single_prefill;
-        PDSepConfig         pd_sep_config;
-        ParallelismConfig   parallelism_config;
+        PDSepConfig       pd_sep_config;
+        ParallelismConfig parallelism_config;
         parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
-        FIFOScheduler scheduler(
-            runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+        FIFOScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
         vector<GenerateStreamPtr> streams;
         for (size_t i = 0; i < 2; ++i) {
@@ -976,7 +964,6 @@ TEST_F(FIFOSchedulerTest, testCpForceSinglePrefillConfig) {
 // Helper used by the prefill-first cadence / KV-gate tests (Tasks 5–7)
 // ---------------------------------------------------------------------------
 
-
 static std::shared_ptr<GenerateStream> makeForceBatchStream(const std::vector<int>& ids,
                                                             int64_t                 group_id,
                                                             int                     group_size,
@@ -994,8 +981,8 @@ static std::shared_ptr<GenerateStream> makeForceBatchStream(const std::vector<in
     return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
 }
 
-void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_max_new_tokens,
-                                                                     int second_max_new_tokens,
+void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int  first_max_new_tokens,
+                                                                     int  second_max_new_tokens,
                                                                      bool with_group_metadata) {
     ModelConfig model_config;
     model_config.max_seq_len                  = 8192;
@@ -1004,12 +991,12 @@ void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_m
     runtime_config.max_generate_batch_size                                         = 2;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size                     = 8192;
     runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 2;
-    PDSepConfig         pd_sep_config                                              = makePDFusionPDSepConfig();
-    ParallelismConfig   parallelism_config;
+    PDSepConfig       pd_sep_config                                                = makePDFusionPDSepConfig();
+    ParallelismConfig parallelism_config;
 
     const auto make_stream = [&](const std::vector<int>& ids,
-                                  const ResourceContext& resource_context,
-                                  int max_new_tokens) {
+                                 const ResourceContext&  resource_context,
+                                 int                     max_new_tokens) {
         if (with_group_metadata) {
             return makeForceBatchStream(ids, 800, 2, model_config, runtime_config, resource_context, max_new_tokens);
         }
@@ -1048,10 +1035,9 @@ void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_m
         ASSERT_TRUE(cache_manager->init());
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager;
-        FIFOScheduler scheduler(
-            runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
-        auto first  = make_stream({1, 2}, resource_context, first_max_new_tokens);
-        auto second = make_stream({3, 4}, resource_context, second_max_new_tokens);
+        FIFOScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+        auto          first  = make_stream({1, 2}, resource_context, first_max_new_tokens);
+        auto          second = make_stream({3, 4}, resource_context, second_max_new_tokens);
         ASSERT_TRUE(enqueueIndividually(scheduler, {first, second}));
 
         ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, first));
@@ -1070,8 +1056,8 @@ void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_m
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager;
         BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
-        auto first  = make_stream({1, 2}, resource_context, first_max_new_tokens);
-        auto second = make_stream({3, 4}, resource_context, second_max_new_tokens);
+        auto                 first  = make_stream({1, 2}, resource_context, first_max_new_tokens);
+        auto                 second = make_stream({3, 4}, resource_context, second_max_new_tokens);
         ASSERT_TRUE(enqueueIndividually(scheduler, {first, second}));
 
         ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, first));
@@ -1400,9 +1386,8 @@ TEST_F(FIFOSchedulerTest, testFIFOAdmissionModeStillIncludesRunningStream) {
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
     PDSepConfig pd_sep_config;
     pd_sep_config.role_type = RoleType::DECODE;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto running = makeStream({1, 2}, model_config, runtime_config, resource_context, /*max_new_tokens=*/2);
     ASSERT_TRUE(scheduler.enqueue(running).ok());
@@ -1427,9 +1412,8 @@ TEST_F(FIFOSchedulerTest, testFIFOAsyncLoadAdmissionStillSelectsExecutionMode) {
     auto        load_context = setupPendingCacheLoad(cache_manager);
     PDSepConfig pd_sep_config;
     pd_sep_config.role_type = RoleType::PREFILL;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto generation = makeStream({1, 2}, model_config, runtime_config, resource_context, /*max_new_tokens=*/1);
     generation->generateConfig()->reuse_cache         = true;
@@ -1482,9 +1466,8 @@ TEST_F(FIFOSchedulerTest, testFIFOFailedAdmissionDoesNotSelectExecutionMode) {
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
     PDSepConfig pd_sep_config;
     pd_sep_config.role_type = RoleType::PREFILL;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto oversized    = makeStream({1, 2, 3, 4, 5, 6}, model_config, runtime_config, resource_context);
     auto prefill_only = makeStream({7, 8}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
@@ -1510,9 +1493,8 @@ TEST_F(FIFOSchedulerTest, testFIFORetryableKVShortageDoesNotBlockLoadedOppositeM
     auto        load_context = setupPendingCacheLoad(cache_manager);
     PDSepConfig pd_sep_config;
     pd_sep_config.role_type = RoleType::PREFILL;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     // B owns real KV while only allocator readiness is controlled by the test.
     auto generation = makeStream({1, 2}, model_config, runtime_config, resource_context, /*max_new_tokens=*/1);
@@ -1576,8 +1558,7 @@ TEST_F(FIFOSchedulerTest, testPDFusionLoadedOppositeModeWaitsForItsOwnPrefillRou
     auto                   load_context  = setupPendingCacheLoad(cache_manager);
     PDSepConfig            pd_sep_config = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto generation = makeStream({1, 2}, model_config, runtime_config, resource_context, /*max_new_tokens=*/1);
     generation->generateConfig()->reuse_cache         = true;
@@ -1826,8 +1807,7 @@ TEST_F(FIFOSchedulerTest, testPDFusionPrefillModeIgnoresRunningDecodeForComplete
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto running = makeStream({1, 2}, model_config, runtime_config, resource_context, /*max_new_tokens=*/4);
     ASSERT_TRUE(scheduler.enqueue(running).ok());
@@ -1896,14 +1876,13 @@ TEST_F(FIFOSchedulerTest, testSchedulersRejectMixedForceBatchGroupAtomically) {
     runtime_config.max_generate_batch_size                                         = 2;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size                     = 8192;
     runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 2;
-    PDSepConfig         pd_sep_config                                              = makePDFusionPDSepConfig();
-    ParallelismConfig   parallelism_config;
+    PDSepConfig       pd_sep_config                                                = makePDFusionPDSepConfig();
+    ParallelismConfig parallelism_config;
     // Mixed modes are rejected at the explicit enqueueGroup entry point for every scheduler.
     PDFusionRatioScheduler base_scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
     BatchDecodeScheduler batch_decode_scheduler(runtime_config, cache_manager, nullptr);
-    FIFOScheduler        fifo_scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    FIFOScheduler        fifo_scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto streamsInOrder =
         [](const GenerateStreamPtr& prefill_only, const GenerateStreamPtr& generation, bool generation_first) {
@@ -1956,8 +1935,7 @@ TEST_F(FIFOSchedulerTest, testPrefillFirstAlternation) {
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1";  // strict alternation
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto s1 = makeStream({1, 2}, model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(s1).ok());
@@ -2006,8 +1984,7 @@ TEST_F(FIFOSchedulerTest, testDecodeHeavyCadence) {
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "3";  // 1 prefill : 3 decode
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto s1 = makeStream({1, 2}, model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(s1).ok());
@@ -2051,8 +2028,7 @@ TEST_F(FIFOSchedulerTest, testDecodeRoundReapsErroredWaitingStream) {
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "3";  // keep s2 waiting during decode rounds
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto s1 = makeStream({1, 2}, model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(s1).ok());
@@ -2137,8 +2113,7 @@ TEST_F(FIFOSchedulerTest, testDecodeHeavyCadenceSeedsAfterInFlightDrains) {
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "3";
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto s1 = makeStream({1, 2}, model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(s1).ok());
@@ -2177,8 +2152,7 @@ TEST_F(FIFOSchedulerTest, testPrefillHeavyCadence) {
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1/3";  // 3 prefill : 1 decode
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     // Enqueue ONE stream right before each of the 3 prefill rounds so each admits exactly one,
     // accumulating in the pending pool (multi-admit would otherwise grab all at once).
@@ -2236,8 +2210,7 @@ TEST_F(FIFOSchedulerTest, testLargeStepDecodeFirst) {
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "20000";  // legacy decode-drain
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto s1 = makeStream({1, 2}, model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(s1).ok());
@@ -2278,8 +2251,7 @@ TEST_F(FIFOSchedulerTest, testZeroRatioTriesPrefillBeforeDecode) {
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto s1 = makeStream({1, 2}, model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(s1).ok());
@@ -2316,8 +2288,7 @@ TEST_F(FIFOSchedulerTest, testConcurrencyCapCountsPending) {
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1/100";  // very prefill-heavy
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     std::vector<std::shared_ptr<GenerateStream>> streams;
     for (int i = 0; i < 4; ++i) {
@@ -2358,8 +2329,7 @@ TEST_F(FIFOSchedulerTest, testZeroRatioFallsBackToDecodeWhenKvAdmissionRejectsAl
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto running = makeStream({1}, model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(running).ok());
@@ -2398,8 +2368,7 @@ TEST_F(FIFOSchedulerTest, testEmptyDegradedPrefillDoesNotAdvanceDecodeCounter) {
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1";
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto s1 = makeStream({1, 2}, model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(s1).ok());
@@ -2435,8 +2404,7 @@ TEST_F(FIFOSchedulerTest, testKvGatedAdmission) {
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1/100";  // prefill-heavy
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto s1 = makeStream({1}, model_config, runtime_config, resource_context);
     auto s2 = makeStream({3}, model_config, runtime_config, resource_context);
@@ -2470,8 +2438,7 @@ TEST_F(FIFOSchedulerTest, testMultiBlockPromptPromotesWithIncrementalKv) {
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1";
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto stream = makeStream({1, 2, 3, 4, 5, 6, 7, 8}, model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
@@ -2509,8 +2476,7 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionAccountsPromptBlocksAcrossRound) {
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1/100";
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto s1 = makeStream({1, 2, 3, 4, 5, 6, 7, 8}, model_config, runtime_config, resource_context);
     auto s2 = makeStream({9, 10, 11, 12, 13, 14, 15, 16}, model_config, runtime_config, resource_context);
@@ -2548,8 +2514,7 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionAccountsFanOutAtShortLifetimePeak)
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto high_fanout = makeStream({1, 2, 3, 4, 5, 6, 7},
                                   model_config,
@@ -2653,8 +2618,7 @@ TEST_F(FIFOSchedulerTest, testMultiSequenceAdmissionMatchesPhysicalFreeBlockWate
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto in_flight = makeStream({0},
                                 model_config,
@@ -2724,8 +2688,7 @@ TEST_F(FIFOSchedulerTest, testHybridAdmissionUsesTailOnlyLinearPeak) {
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto long_context_short_lifetime = makeStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
                                                   model_config,
@@ -2771,8 +2734,7 @@ TEST_F(FIFOSchedulerTest, testKVAdmissionCostAcrossStreamCounts) {
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 1 << 20;
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     std::vector<int> prompt(1024);
     std::iota(prompt.begin(), prompt.end(), 1);
@@ -2918,8 +2880,7 @@ TEST_F(FIFOSchedulerTest, testReserveOnlyLimitsInitialAllocationNotLifecycleGrow
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto long_running = makeStream({1, 2},
                                    model_config,
@@ -2987,8 +2948,7 @@ TEST_F(FIFOSchedulerTest, testMaxNewTokensOneDoesNotReserveFinalTokenKVBlock) {
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto running = makeStream({0}, model_config, runtime_config, resource_context, /*max_new_tokens=*/2);
     ASSERT_TRUE(scheduler.enqueue(running).ok());
@@ -3061,8 +3021,7 @@ TEST_F(FIFOSchedulerTest, testSinglePrefillDefersReserveCapacityFailureToAllocat
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1";
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     // The input fits the 10-block physical cache but violates the 5-block reserve watermark.
     // The idle scheduler admits it, then the allocator reports the reserve-capacity failure.
@@ -3105,8 +3064,7 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionUsesMaxTokenNumRemainingTokens) {
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto seed = makeStream({0}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
     ASSERT_TRUE(scheduler.enqueue(seed).ok());
@@ -3149,8 +3107,7 @@ TEST_F(FIFOSchedulerTest, testPendingDecodePromotionMallocFailureFinishes) {
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1";
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto stream = makeStream({1, 2}, model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
@@ -3182,8 +3139,7 @@ TEST_F(FIFOSchedulerTest, testPendingDecodePromotionMallocFailureDoesNotSpin) {
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1";
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     // Seed-prefill s1 (1 block), promote it to running on the next decode round.
     auto s1 = makeStream({1, 2}, model_config, runtime_config, resource_context);
@@ -3224,8 +3180,7 @@ TEST_F(FIFOSchedulerTest, testNoIncrKvBlockOnPrefillRounds) {
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1/3";  // P P P D
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     // One long-running decode stream that will be held back during the prefill burst.
     auto held = makeStream({1, 2, 3, 4, 5, 6, 7, 8},
@@ -3273,8 +3228,7 @@ TEST_F(FIFOSchedulerTest, testPrefillRoundDoesNotAccountHeldDecodeAsBatchedWithP
     runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1/3";  // P P P D
     PDSepConfig            pd_sep_config                       = makePDFusionPDSepConfig();
     ParallelismConfig      parallelism_config;
-    PDFusionRatioScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDFusionRatioScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto held = makeStream({1, 2}, model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(held).ok());
@@ -3320,10 +3274,9 @@ TEST_F(FIFOSchedulerTest, permanentlyOversizedStreamDoesNotBlockLaterStream) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto make_stream = [&](std::vector<int> tokens) {
         auto query             = std::make_shared<GenerateInput>();
@@ -3360,10 +3313,9 @@ TEST_F(FIFOSchedulerTest, retryableKVShortageStillAdmitsLaterSmallerStreams) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto make_stream = [&](std::vector<int> tokens) {
         auto query             = std::make_shared<GenerateInput>();
@@ -3415,10 +3367,9 @@ TEST_F(FIFOSchedulerTest, retryableKVShortageDoesNotConsumeBatchTokenBudget) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 9;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto make_stream = [&](std::vector<int> tokens) {
         auto query             = std::make_shared<GenerateInput>();
@@ -3462,10 +3413,9 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaIncludesPostAllocationPrefixLength) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 10;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto make_stream = [&](int token_count) {
         auto query             = std::make_shared<GenerateInput>();
@@ -3507,10 +3457,9 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaAccountsForStreamBatchSize) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto make_stream = [&](int batch_size) {
         auto query                                   = std::make_shared<GenerateInput>();
@@ -3547,10 +3496,9 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesPostAllocationContextLengthAndSto
     runtime_config.max_generate_batch_size                              = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size          = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = 2;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto make_stream = [&](int token_count) {
         auto query             = std::make_shared<GenerateInput>();
@@ -3608,12 +3556,11 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesSharedZigzagPaddingAndStopsTail) 
     runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = 10;
     // This case is about the shared zigzag padding quota, so CP prefill batching must stay on.
     runtime_config.fifo_scheduler_config.cp_force_single_prefill = false;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
     parallelism_config.tp_size                  = 2;
     parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
-    FIFOScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    FIFOScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto make_stream = [&](int token_count) {
         auto query             = std::make_shared<GenerateInput>();
@@ -3650,12 +3597,11 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaUsesUnpaddedFullInputLength) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 10;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
     parallelism_config.tp_size                  = 4;
     parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
-    FIFOScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    FIFOScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto query             = std::make_shared<GenerateInput>();
     query->input_ids       = torch::ones({9}, torch::kInt32);
@@ -3683,10 +3629,9 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaAllowsMetadataResidualToProgress) {
     runtime_config.max_generate_batch_size                              = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size          = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = 2;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto make_group_stream = [&](int group_size) {
         auto query                            = std::make_shared<GenerateInput>();
@@ -3743,10 +3688,9 @@ TEST_F(FIFOSchedulerTest, retryableMetadataStreamDoesNotBlockFollowingNormalStre
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 9;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto make_stream = [&](std::vector<int> tokens, bool force_batch) {
         auto query             = std::make_shared<GenerateInput>();
@@ -3793,10 +3737,9 @@ TEST_F(FIFOSchedulerTest, explicitGroupResidualPrecedesFollowingExplicitGroup) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto make_group_stream = [&](std::vector<int> tokens, int64_t group_id, int group_size) {
         auto query                            = std::make_shared<GenerateInput>();
@@ -3858,10 +3801,9 @@ TEST_F(FIFOSchedulerTest, testEnqueueGroup) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig               pd_sep_config;
+    ParallelismConfig         parallelism_config;
+    FIFOScheduler             scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
     vector<GenerateStreamPtr> streams;
     {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
@@ -3908,24 +3850,21 @@ std::shared_ptr<GenerateStream> makeSingleStream(const ModelConfig&     model_co
 }  // namespace
 
 TEST_F(FIFOSchedulerTest, prefillOnlySingletonCanFillTokenBudget) {
-    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
-        test::makeSimpleMhaCacheConfig(1, 512, 32, rtp_llm::DataType::TYPE_FP16, 1, 4), 32);
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeSchedulerResources(test::makeSimpleMhaCacheConfig(1, 512, 32, rtp_llm::DataType::TYPE_FP16, 1, 4), 32);
     ASSERT_TRUE(cache_manager->init());
     model_config.max_seq_len               = 4096;
     runtime_config.max_generate_batch_size = 4;
     for (bool grouped : {false, true}) {
         for (int prompt_length : {4095, 4096}) {
             for (int budget : {0, 4094, 4095, 4096, 4097}) {
-                SCOPED_TRACE(::testing::Message() << "grouped=" << grouped << " length=" << prompt_length
-                                                 << " budget=" << budget);
+                SCOPED_TRACE(::testing::Message()
+                             << "grouped=" << grouped << " length=" << prompt_length << " budget=" << budget);
                 runtime_config.fifo_scheduler_config.max_batch_tokens_size = budget;
-                FIFOScheduler scheduler(runtime_config,
-                                        model_config,
-                                        PDSepConfig{},
-                                        ParallelismConfig{},
-                                        cache_manager);
-                auto stream = makeStream(std::vector<int>(prompt_length, 1),
-                                         model_config, runtime_config, resource_context, 0);
+                FIFOScheduler scheduler(
+                    runtime_config, model_config, PDSepConfig{}, ParallelismConfig{}, cache_manager);
+                auto stream =
+                    makeStream(std::vector<int>(prompt_length, 1), model_config, runtime_config, resource_context, 0);
                 ASSERT_EQ(stream->currentBatchSize(), 1);
                 if (grouped) {
                     ASSERT_EQ(scheduler.enqueueGroup({stream}).first, std::vector<bool>({true}));
@@ -3951,8 +3890,8 @@ TEST_F(FIFOSchedulerTest, prefillOnlySingletonCanFillTokenBudget) {
 }
 
 TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix) {
-    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
-        test::makeSimpleMhaCacheConfig(1, 256, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeSchedulerResources(test::makeSimpleMhaCacheConfig(1, 256, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
     ASSERT_TRUE(cache_manager->init());
     runtime_config.max_generate_batch_size = 4;
     // Equal lengths reach the logical sum and rectangle together. Unequal lengths
@@ -3964,25 +3903,25 @@ TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix
             for (int width : {1, 3}) {
                 for (bool reuse_prefix : {false, true}) {
                     for (int delta : {-1, 0, 1}) {
-                        SCOPED_TRACE(::testing::Message() << "grouped=" << grouped << " max_new_tokens=" << max_new_tokens
-                                                         << " width=" << width << " reuse=" << reuse_prefix
-                                                         << " delta=" << delta);
+                        SCOPED_TRACE(::testing::Message()
+                                     << "grouped=" << grouped << " max_new_tokens=" << max_new_tokens
+                                     << " width=" << width << " reuse=" << reuse_prefix << " delta=" << delta);
                         runtime_config.fifo_scheduler_config.max_batch_tokens_size = 32 * (1 + width) + delta;
-                        FIFOScheduler scheduler(runtime_config,
-                                                model_config,
-                                                PDSepConfig{},
-                                                ParallelismConfig{},
-                                                cache_manager);
-                        auto first = makeStream(std::vector<int>(32, 1),
-                                                model_config, runtime_config, resource_context, max_new_tokens);
-                        auto second = makeStream(std::vector<int>(width == 1 ? 32 : 16, 2),
-                                                 model_config, runtime_config, resource_context, max_new_tokens,
+                        FIFOScheduler scheduler(
+                            runtime_config, model_config, PDSepConfig{}, ParallelismConfig{}, cache_manager);
+                        auto first = makeStream(
+                            std::vector<int>(32, 1), model_config, runtime_config, resource_context, max_new_tokens);
+                        auto                      second  = makeStream(std::vector<int>(width == 1 ? 32 : 16, 2),
+                                                 model_config,
+                                                 runtime_config,
+                                                 resource_context,
+                                                 max_new_tokens,
                                                  max_new_tokens == 0 ? 1 : width);
                         vector<GenerateStreamPtr> streams = {first, second};
                         if (max_new_tokens == 0) {
                             for (int i = 1; i < width; ++i) {
-                                streams.push_back(makeStream(std::vector<int>(16, 2),
-                                                             model_config, runtime_config, resource_context, 0));
+                                streams.push_back(makeStream(
+                                    std::vector<int>(16, 2), model_config, runtime_config, resource_context, 0));
                             }
                         }
                         if (reuse_prefix) {
@@ -3998,13 +3937,14 @@ TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix
                         }
                         auto result = scheduler.schedule();
                         ASSERT_TRUE(result.ok());
-                        const size_t admitted = max_new_tokens == 0 ? 1 + width - (delta < 0 ? 1 : 0) :
-                                                                     (delta > 0 ? 2 : 1);
+                        const size_t admitted =
+                            max_new_tokens == 0 ? 1 + width - (delta < 0 ? 1 : 0) : (delta > 0 ? 2 : 1);
                         ASSERT_EQ(result->size(), admitted);
                         EXPECT_EQ(result->front().get(), first.get());
                         EXPECT_EQ(scheduler.waitingStreamsSize(), streams.size() - admitted);
                         for (size_t i = 0; i < streams.size(); ++i) {
-                            EXPECT_EQ(streams[i]->getStatus(), i < admitted ? StreamState::RUNNING : StreamState::WAITING);
+                            EXPECT_EQ(streams[i]->getStatus(),
+                                      i < admitted ? StreamState::RUNNING : StreamState::WAITING);
                             EXPECT_FALSE(streams[i]->hasError());
                         }
                     }
@@ -4015,19 +3955,15 @@ TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix
 }
 
 TEST_F(FIFOSchedulerTest, prefillTokenLimitsPreserveReserveAndAvoidOverflow) {
-    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
-        test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeSchedulerResources(test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
     ASSERT_TRUE(cache_manager->init());
-    model_config.max_seq_len                                    = 8;
-    runtime_config.max_generate_batch_size                      = 4;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8;
-    FIFOScheduler scheduler(runtime_config,
-                            model_config,
-                            PDSepConfig{},
-                            ParallelismConfig{},
-                            cache_manager);
-    auto prefill = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 0);
-    auto generation = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 2);
+    model_config.max_seq_len                                   = 8;
+    runtime_config.max_generate_batch_size                     = 4;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8;
+    FIFOScheduler scheduler(runtime_config, model_config, PDSepConfig{}, ParallelismConfig{}, cache_manager);
+    auto          prefill    = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 0);
+    auto          generation = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 2);
     for (size_t admitted_tokens : {size_t(3), size_t(4), size_t(5)}) {
         // Two rows of length four: the rectangle itself exactly fills the cap.
         EXPECT_EQ(scheduler.fitsPrefillTokenLimits(1, admitted_tokens, 4, 1, prefill), admitted_tokens <= 4);
@@ -4055,30 +3991,26 @@ TEST_F(FIFOSchedulerTest, prefillTokenLimitsPreserveReserveAndAvoidOverflow) {
         EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 0, 0, prefill));
     }
     scheduler.max_batch_tokens_size_ = 8;
-    const auto max_size = std::numeric_limits<size_t>::max();
+    const auto max_size              = std::numeric_limits<size_t>::max();
     EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, max_size, 4, 1, prefill));
     EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 4, max_size, prefill));
     EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, max_size, 1, prefill));
 }
 
 TEST_F(FIFOSchedulerTest, fullBudgetPrefillOnlyDoesNotMixWithGeneration) {
-    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
-        test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeSchedulerResources(test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
     ASSERT_TRUE(cache_manager->init());
-    model_config.max_seq_len                                  = 8;
-    runtime_config.max_generate_batch_size                    = 2;
+    model_config.max_seq_len                                   = 8;
+    runtime_config.max_generate_batch_size                     = 2;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8;
     for (bool prefill_first : {false, true}) {
         SCOPED_TRACE(prefill_first);
-        FIFOScheduler scheduler(runtime_config,
-                                model_config,
-                                PDSepConfig{},
-                                ParallelismConfig{},
-                                cache_manager);
-        auto prefill = makeStream(std::vector<int>(8, 1), model_config, runtime_config, resource_context, 0);
-        auto generation = makeStream({1, 2}, model_config, runtime_config, resource_context, 2);
-        auto first = prefill_first ? prefill : generation;
-        auto second = prefill_first ? generation : prefill;
+        FIFOScheduler scheduler(runtime_config, model_config, PDSepConfig{}, ParallelismConfig{}, cache_manager);
+        auto          prefill = makeStream(std::vector<int>(8, 1), model_config, runtime_config, resource_context, 0);
+        auto          generation = makeStream({1, 2}, model_config, runtime_config, resource_context, 2);
+        auto          first      = prefill_first ? prefill : generation;
+        auto          second     = prefill_first ? generation : prefill;
         ASSERT_TRUE(enqueueIndividually(scheduler, {first, second}));
         ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, first));
         EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
@@ -4102,10 +4034,9 @@ TEST_F(FIFOSchedulerTest, prefillShapeLimitAppliesToOrdinaryAndGroupAdmission) {
         RuntimeConfig runtime_config;
         runtime_config.max_generate_batch_size                     = 100;
         runtime_config.fifo_scheduler_config.max_batch_tokens_size = 100;
-        PDSepConfig         pd_sep_config;
-        ParallelismConfig   parallelism_config;
-        FIFOScheduler       scheduler(
-            runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+        PDSepConfig       pd_sep_config;
+        ParallelismConfig parallelism_config;
+        FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
         vector<GenerateStreamPtr> streams = {
             makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(60, 1)),
@@ -4141,10 +4072,9 @@ TEST_F(FIFOSchedulerTest, prefillShapeIncludesReusedPrefixLength) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 100;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto cached_stream = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(60, 1));
     cached_stream->reportEvent(StreamEvents::CanRun);
@@ -4176,10 +4106,9 @@ TEST_F(FIFOSchedulerTest, prefillShapeUsesCurrentBatchSizeAsWidth) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 100;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto long_single   = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(40, 1));
     auto batched_query = std::make_shared<GenerateInput>();
@@ -4212,10 +4141,9 @@ TEST_F(FIFOSchedulerTest, groupIsolation_size2) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     vector<GenerateStreamPtr> streams = {
         makeSingleStream(model_config, runtime_config, resource_context),
@@ -4250,10 +4178,9 @@ TEST_F(FIFOSchedulerTest, enqueueGroupFallsBackToIndividualStreamsWhenGroupExcee
     runtime_config.max_generate_batch_size                           = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size       = 8192;
     runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = 1;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     vector<GenerateStreamPtr> streams = {
         makeSingleStream(model_config, runtime_config, resource_context),
@@ -4290,10 +4217,9 @@ TEST_F(FIFOSchedulerTest, enqueueGroupFallsBackToIndividualStreamsWhenGroupExcee
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 1;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     vector<GenerateStreamPtr> streams = {
         makeSingleStream(model_config, runtime_config, resource_context),
@@ -4327,10 +4253,9 @@ TEST_F(FIFOSchedulerTest, enqueueGroupIgnoresCurrentlyInitedStreamsWhenGroupFits
     runtime_config.max_generate_batch_size                           = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size       = 8192;
     runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = 2;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto running_stream = makeSingleStream(model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(running_stream).ok());
@@ -4369,10 +4294,9 @@ TEST_F(FIFOSchedulerTest, waitingStreamRunsBeforeGroupAtInitedLimit) {
     runtime_config.max_generate_batch_size                           = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size       = 8192;
     runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = 2;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     vector<GenerateStreamPtr> group_streams = {
         makeSingleStream(model_config, runtime_config, resource_context),
@@ -4409,10 +4333,9 @@ TEST_F(FIFOSchedulerTest, groupTokenCapExceededKeepsResidualGroup) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 100;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     // Each stream has 60 tokens; group total = 120 > max_batch_tokens_size (100)
     std::vector<int>          tokens(60, 1);
@@ -4447,10 +4370,9 @@ TEST_F(FIFOSchedulerTest, groupCacheShortageDefersUnallocatedStreams) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     vector<GenerateStreamPtr> streams = {
         makeSingleStream(model_config, runtime_config, resource_context, {1, 2, 3}),
@@ -4487,10 +4409,9 @@ TEST_F(FIFOSchedulerTest, groupCacheShortageStillAdmitsLaterSmallerStreams) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     vector<GenerateStreamPtr> streams = {
         makeSingleStream(model_config, runtime_config, resource_context, {1, 2, 3, 4}),
@@ -4534,10 +4455,9 @@ TEST_F(FIFOSchedulerTest, residualGroupPrecedesFollowingGroups) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     vector<GenerateStreamPtr> first_group = {
         makeSingleStream(model_config, runtime_config, resource_context, {1, 2, 3, 4}),
@@ -4580,10 +4500,9 @@ TEST_F(FIFOSchedulerTest, groupTokenCapStillAdmitsLaterSmallerStreams) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 100;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     vector<GenerateStreamPtr> streams = {
         makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(40, 1)),
@@ -4612,10 +4531,9 @@ TEST_F(FIFOSchedulerTest, groupIsolation_size3) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     vector<GenerateStreamPtr> streams;
     for (int i = 0; i < 3; ++i) {
@@ -4641,10 +4559,9 @@ TEST_F(FIFOSchedulerTest, groupIsolation_size4) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     vector<GenerateStreamPtr> streams;
     for (int i = 0; i < 4; ++i) {
@@ -4670,10 +4587,9 @@ TEST_F(FIFOSchedulerTest, waitingStreamRunsBeforeGroupWhenGroupWasEnqueuedFirst)
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     vector<GenerateStreamPtr> group_streams = {
         makeSingleStream(model_config, runtime_config, resource_context),
@@ -4711,10 +4627,9 @@ TEST_F(FIFOSchedulerTest, waitingStreamsRunBeforeGroupWhenEnqueuedFirst) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto waiting_stream_1 = makeSingleStream(model_config, runtime_config, resource_context);
     auto waiting_stream_2 = makeSingleStream(model_config, runtime_config, resource_context);
@@ -4756,9 +4671,8 @@ TEST_F(FIFOSchedulerTest, continuousOrdinaryTrafficCannotStarveExplicitGroup) {
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
     PDSepConfig pd_sep_config;
     pd_sep_config.role_type = RoleType::DECODE;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto running_normal = makeSingleStream(model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(running_normal).ok());
@@ -4813,10 +4727,9 @@ TEST_F(FIFOSchedulerTest, blockedNormalLaneLeavesResidualCapacityToExplicitGroup
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 6;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     // This ordinary stream is permanently too large for the per-round token
     // budget but valid against the Engine's total KV capacity.
@@ -4848,10 +4761,9 @@ TEST_F(FIFOSchedulerTest, groupIsolation_twoGroupsNotMixed) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     vector<GenerateStreamPtr> group_a = {
         makeSingleStream(model_config, runtime_config, resource_context),
@@ -4890,10 +4802,9 @@ TEST_F(FIFOSchedulerTest, waitingFallbackFromFrontGroupPrecedesNextGroup) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 100;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     std::vector<int>          long_prompt(60, 1);
     vector<GenerateStreamPtr> rejected_group = {
@@ -4963,10 +4874,9 @@ TEST_F(FIFOSchedulerTest, groupIsolation_singlesCanMix) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     ASSERT_TRUE(scheduler.enqueue(makeSingleStream(model_config, runtime_config, resource_context)).ok());
     ASSERT_TRUE(scheduler.enqueue(makeSingleStream(model_config, runtime_config, resource_context)).ok());
@@ -4995,10 +4905,9 @@ TEST_F(FIFOSchedulerTest, groupIsolation_interleavedSinglesAndGroup) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     // Enqueue order: single_A, enqueueGroup(2 streams), single_B
     auto single_a = makeSingleStream(model_config, runtime_config, resource_context);
@@ -5044,9 +4953,8 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunStillRespectsMaxGenerateBatchSize
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
     PDSepConfig pd_sep_config;
     pd_sep_config.role_type = RoleType::DECODE;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto make_pd_decode_stream = [&]() {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
@@ -5099,9 +5007,8 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunCanTopUpToMaxGenerateBatchSize) {
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
     PDSepConfig pd_sep_config;
     pd_sep_config.role_type = RoleType::DECODE;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto make_pd_decode_stream = [&]() {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
@@ -5164,9 +5071,8 @@ TEST_F(FIFOSchedulerTest, testMaxInitedKVCacheStreamsAllowsAlreadyInitedStreams)
     runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = 1;
     PDSepConfig pd_sep_config;
     pd_sep_config.role_type = RoleType::DECODE;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto make_preinited_decode_stream = [&]() {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
@@ -5210,9 +5116,8 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunWithPendingAsyncStillCountsRunnin
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
     PDSepConfig pd_sep_config;
     pd_sep_config.role_type = RoleType::DECODE;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     auto make_pd_decode_stream = [&]() {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
@@ -5281,11 +5186,10 @@ TEST_F(FIFOSchedulerTest, testCpPrefillBatchesMultipleStreams) {
     // This test exercises CP prefill batching, so opt out of the conservative
     // single-prefill default (see testCpForceSinglePrefillConfig).
     runtime_config.fifo_scheduler_config.cp_force_single_prefill = false;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
     parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
-    FIFOScheduler scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    FIFOScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     vector<GenerateStreamPtr> streams;
     for (size_t i = 0; i < 2; ++i) {
@@ -5313,10 +5217,9 @@ TEST_F(FIFOSchedulerTest, testGroupMetadataDoesNotDelayWaitingStreams) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     for (int i = 0; i < 2; ++i) {
         std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
@@ -5353,10 +5256,9 @@ TEST_F(FIFOSchedulerTest, enqueueGroupDissolvesWhenOnlyPartFitsTokenCap) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 2;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     int64_t                   group_id   = 101;
     int                       group_size = 3;
@@ -5397,10 +5299,9 @@ TEST_F(FIFOSchedulerTest, testExpiredGroupMetadataDoesNotAffectWaitingStreams) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     int64_t group_id   = 200;
     int     group_size = 3;
@@ -5451,10 +5352,9 @@ TEST_F(FIFOSchedulerTest, testGroupMetadataDoesNotBypassNormalTokenCap) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 2;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     int64_t group_id   = 201;
     int     group_size = 3;
@@ -5493,10 +5393,9 @@ TEST_F(FIFOSchedulerTest, testGroupMetadataDoesNotIsolateWaitingStreams) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     int64_t group_id   = 300;
     int     group_size = 2;
@@ -5555,10 +5454,9 @@ TEST_F(FIFOSchedulerTest, testDifferentGroupMetadataDoesNotIsolateWaitingStreams
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    FIFOScheduler     scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
 
     int64_t group_id_a = 500;
     int64_t group_id_b = 600;
@@ -5628,8 +5526,8 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillNeverReturnsMixedContextAndDecodeBat
     ASSERT_TRUE(env.init());
     auto& scheduler = env.scheduler();
 
-    auto   short_stream = env.makeStream({1, 2}, 4);
-    auto   long_stream  = env.makeStream({3, 4, 5, 6, 7, 8, 9, 10}, 4);
+    auto   short_stream             = env.makeStream({1, 2}, 4);
+    auto   long_stream              = env.makeStream({3, 4, 5, 6, 7, 8, 9, 10}, 4);
     size_t short_blocks_before_park = 0;
     ASSERT_NO_FATAL_FAILURE(
         runShortAndLongPrefillRounds(scheduler, short_stream, long_stream, short_blocks_before_park));
@@ -5804,8 +5702,8 @@ TEST_F(FIFOSchedulerTest, testPDFusionMixedActiveBatchSeparatesFinalAndMiddleChu
     ASSERT_TRUE(env.init());
     auto& scheduler = env.scheduler();
 
-    auto   short_stream = env.makeStream({1, 2});
-    auto   long_stream  = env.makeStream({3, 4, 5, 6, 7, 8, 9, 10});
+    auto   short_stream                     = env.makeStream({1, 2});
+    auto   long_stream                      = env.makeStream({3, 4, 5, 6, 7, 8, 9, 10});
     size_t short_blocks_before_continuation = 0;
     ASSERT_NO_FATAL_FAILURE(
         runShortAndLongPrefillRounds(scheduler, short_stream, long_stream, short_blocks_before_continuation));
@@ -5893,16 +5791,13 @@ TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetPDFusionFourRoundPrefix) {
     verifyGlobalChunkBudgetFourRoundPrefix<PDFusionRatioScheduler>(RoleType::PDFUSION, "1/100");
 }
 
-static CacheConfig makeChunkCpGroupCacheConfig(size_t group_block_size,
-                                               bool   prefix_reuse,
-                                               size_t block_size,
-                                               bool   shared_chunk_state) {
-    auto config = test::makeSimpleMhaCacheConfig(1, 64, block_size, DataType::TYPE_FP16, 1, 4);
+static CacheConfig
+makeChunkCpGroupCacheConfig(size_t group_block_size, bool prefix_reuse, size_t block_size, bool shared_chunk_state) {
+    auto      config = test::makeSimpleMhaCacheConfig(1, 64, block_size, DataType::TYPE_FP16, 1, 4);
     GroupBase swa;
-    swa.tag       = "swa";
-    swa.spec      =
-        test::makeResolvedOpaqueSpec(true, swa.tag, DataType::TYPE_FP16, group_block_size, group_block_size);
-    swa.policy    = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa.tag    = "swa";
+    swa.spec   = test::makeResolvedOpaqueSpec(true, swa.tag, DataType::TYPE_FP16, group_block_size, group_block_size);
+    swa.policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
     swa.policy.enable_prefix_reuse = prefix_reuse;
     swa.policy.shared_chunk_state  = shared_chunk_state;
     if (shared_chunk_state) {
@@ -5984,7 +5879,7 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCyclicGroupBlocks) {
             env.cache_manager->cp_slot_mapper_ =
                 std::make_shared<CPSlotMapper>(0, test_case.cp_size, test_case.block_size);
         }
-        auto stream = env.makeStream(std::vector<int>(1200, 1));
+        auto stream                           = env.makeStream(std::vector<int>(1200, 1));
         stream->generateConfig()->reuse_cache = test_case.request_reuse;
         bool accepted;
         if (group_enqueue) {
@@ -6008,16 +5903,14 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCyclicGroupBlocks) {
     };
     for (const auto& test_case : cases) {
         SCOPED_TRACE(test_case.name);
-        auto cache_config = makeChunkCpGroupCacheConfig(test_case.group_block_size,
-                                                        test_case.prefix_reuse,
-                                                        test_case.block_size,
-                                                        test_case.shared_chunk_state);
+        auto cache_config = makeChunkCpGroupCacheConfig(
+            test_case.group_block_size, test_case.prefix_reuse, test_case.block_size, test_case.shared_chunk_state);
         if (test_case.round_robin) {
-            auto groups = cache_config.groups();
+            auto groups                     = cache_config.groups();
             groups.back().policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
             cache_config.setTopology(std::move(groups), cache_config.topology().layers());
         }
-        cache_config.reuse_cache_tail_blocks = test_case.tail_blocks;
+        cache_config.main_config.reuse_cache_tail_blocks = test_case.tail_blocks;
         ChunkSchedulerTestConfig config;
         config.seq_size_per_block = test_case.block_size;
         config.prefill_chunk_size = test_case.chunk_size;
@@ -6077,7 +5970,7 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCacheCompatibility) {
         env.resource_context.reuse_cache                   = test_case.global_reuse;
         env.resource_context.ignore_request_cache_switches = test_case.ignore_request_switches;
         ASSERT_TRUE(env.init());
-        auto stream = env.makeStream(std::vector<int>(641, 1));
+        auto stream                           = env.makeStream(std::vector<int>(641, 1));
         stream->generateConfig()->reuse_cache = test_case.request_reuse;
         bool accepted;
         if (group_enqueue) {
@@ -6096,18 +5989,18 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCacheCompatibility) {
     };
     for (const auto& test_case : cases) {
         SCOPED_TRACE(test_case.name);
-        auto cache_config = test_case.has_linear ?
-                                test::makeSimpleHybridMhaCacheConfig(4, 64, test_case.block_size, DataType::TYPE_FP16) :
-                                test::makeSimpleMhaCacheConfig(1, 64, test_case.block_size, DataType::TYPE_FP16);
-        cache_config.reuse_cache_tail_blocks = test_case.tail_blocks;
+        auto cache_config                                = test_case.has_linear ?
+                                                               test::makeSimpleHybridMhaCacheConfig(4, 64, test_case.block_size, DataType::TYPE_FP16) :
+                                                               test::makeSimpleMhaCacheConfig(1, 64, test_case.block_size, DataType::TYPE_FP16);
+        cache_config.main_config.reuse_cache_tail_blocks = test_case.tail_blocks;
         if (test_case.group_block_size > 0) {
             auto groups = cache_config.groups();
             for (auto& group : groups) {
                 if (group.policy.group_type == CacheGroupType::LINEAR) {
-                    auto spec = group.spec->clone();
+                    auto spec                = group.spec->clone();
                     spec->seq_size_per_block = spec->kernel_seq_size_per_block = test_case.group_block_size;
-                    group.spec                      = std::move(spec);
-                    group.policy.enable_prefix_reuse = test_case.group_reuse;
+                    group.spec                                                 = std::move(spec);
+                    group.policy.enable_prefix_reuse                           = test_case.group_reuse;
                 }
             }
             cache_config.setTopology(std::move(groups), cache_config.topology().layers());

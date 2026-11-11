@@ -52,7 +52,7 @@ std::vector<GroupSetPtr> makeGroupSets(bool with_host = true, bool with_disk = t
 
     const std::vector<std::vector<std::string>> memberships = {
         {"group0"}, {"group1", "group2"}, {"group3", "group4"}, {"group5"}, {"group6"}};
-    std::vector<GroupSetPtr>               group_sets;
+    std::vector<GroupSetPtr> group_sets;
     for (size_t group_set_id = 0; group_set_id < memberships.size(); ++group_set_id) {
         const auto& membership = memberships[group_set_id];
         auto        group_set  = makeTestGroupSet(group_set_id,
@@ -75,7 +75,7 @@ std::vector<GroupSetPtr> protectedGroupSets() {
     auto groups = makeGroupSets();
     for (const auto& group : groups) {
         group->initialize(group->groupSetId(),
-                          group->topologyPtr(),
+                          group->cacheConfig(),
                           group->groupTags(),
                           block_transfer_engine_test::makeTestBackingLayout(group->payloadBytes(), true));
     }
@@ -449,9 +449,9 @@ TEST(BlockTransferRequestConverterTest, ResolvesReorderedLocalGroupSetAndPoolSlo
 
     const auto&                     source   = groupSets()[2];
     auto                            receiver = makeTestGroupSet(0,
-                                     source->topologyPtr(),
-                                     {"group4", "group3"},
-                                     {source->devicePools()[1], source->devicePools()[0]},
+                                     source->cacheConfig()->topologyPtr(),
+                                                                {"group4", "group3"},
+                                                                {source->devicePools()[1], source->devicePools()[0]},
                                      source->hostPool(),
                                      source->diskPool());
     std::vector<TransferDescriptor> descriptors;
@@ -560,13 +560,13 @@ TEST(BlockTransferRequestConverterTest, CrcRoutesReorderedGroupSetsAndMembersByT
     auto        sender_groups = protectedGroupSets();
     const auto& source        = sender_groups[2];
     auto        receiver      = makeTestGroupSet(0,
-                                     source->topologyPtr(),
+                                     source->cacheConfig()->topologyPtr(),
                                                  {"group4", "group3"},
                                                  {source->devicePools()[1], source->devicePools()[0]},
                                      source->hostPool(),
                                      source->diskPool());
     receiver->initialize(0,
-                         receiver->topologyPtr(),
+                         receiver->cacheConfig(),
                          receiver->groupTags(),
                          block_transfer_engine_test::makeTestBackingLayout(receiver->payloadBytes(), true));
     const std::vector<TransferDescriptor> inputs{
@@ -635,12 +635,11 @@ TEST(BlockTransferRequestConverterTest, CrcRejectsMalformedSecondItemWithoutPubl
 TEST(BlockTransferRequestConverterTest, MixedGroupLayoutsRoundTripWithLocalCrcConfiguration) {
     auto        groups   = protectedGroupSets();
     const auto& ordinary = groups[2];
-    ordinary->initialize(2, ordinary->topologyPtr(), ordinary->groupTags());
+    ordinary->initialize(2, ordinary->cacheConfig(), ordinary->groupTags());
     const auto               first  = TransferDescriptor::hostToDevice(0, 21, {11});
     const auto               second = TransferDescriptor::hostToDevice(2, 22, {12, 13});
     MemoryOperationRequestPB request;
-    ASSERT_TRUE(
-        BlockTransferRequestConverter::encodeTransfer(request, makeTransferTask({first, second}), groups));
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(request, makeTransferTask({first, second}), groups));
     EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::H2D);
     std::vector<TransferDescriptor> decoded;
     ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, decoded, groups));
@@ -704,8 +703,7 @@ TEST(BlockTransferRequestConverterTest, ResponseReportsHighestCopyErrorForEntire
     EXPECT_EQ(received.code(), MemoryOperationResponsePB::CRC_COMPUTE_FAILED);
     EXPECT_EQ(BlockTransferRequestConverter::decodeCode(received.code()), CacheCopyError::CRC_COMPUTE_FAILED);
     result.merge({failure, CacheCopyError::CRC_MISMATCH});
-    EXPECT_EQ(BlockTransferRequestConverter::encodeCode(result.copy_error),
-              MemoryOperationResponsePB::CRC_MISMATCH);
+    EXPECT_EQ(BlockTransferRequestConverter::encodeCode(result.copy_error), MemoryOperationResponsePB::CRC_MISMATCH);
 }
 
 TEST(BlockTransferRequestConverterTest, ResponseRoundTripPreservesMixedBlockOutcomes) {

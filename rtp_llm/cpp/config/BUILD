@@ -64,7 +64,6 @@ cc_library(
 cc_library(
     name = "model_config",
     hdrs = [
-        "MTPModelConfigHelper.h",
         "ModelConfig.h",
     ],
     srcs = ["ModelConfig.cc"],

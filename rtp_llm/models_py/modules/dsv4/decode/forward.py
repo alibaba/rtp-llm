@@ -43,6 +43,7 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     group_tags as _kv_cache_group_tags,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
+from rtp_llm.models_py.utils.kvcache import canonical_cache_tag
 
 # DSV4 paged (FULL) + fixed/state pool tags, in the probe order the metadata
 # allocator expects. SWA_KV lives on every layer; CSA/HCA/INDEXER only on the
@@ -156,7 +157,7 @@ def build_paged_pool_specs(
                 attn = layer.attn
                 if attn.layer_id not in layer_tags:
                     layer_tags[attn.layer_id] = {
-                        cache.tag
+                        canonical_cache_tag(cache.tag)
                         for cache in kv_cache.get_layer_cache_groups(attn.layer_id)
                     }
                 if tag not in layer_tags[attn.layer_id]:

@@ -25,8 +25,18 @@ public:
     /// @brief 返回当前已有层数及指定层集合对应的缓冲区列表
     std::pair<int, std::vector<std::shared_ptr<LayerCacheBuffer>>> getBuffers(const std::set<int>& layer_ids);
 
+    std::vector<std::shared_ptr<LayerCacheBuffer>> getAllBuffers();
+
     /// @brief 阻塞等待层数变化，直到超过 last_layer_num 或 timeout_ms 超时
     void waitChange(int last_layer_num, int timeout_ms);
+
+    /// @brief Seal the topology-derived descriptor set. Later publications outside it
+    /// are rejected; a second seal with a different set is a hard error.
+    void sealExpectedDescriptors(std::set<LayerCacheDescriptor> expected_descriptors);
+
+    std::optional<std::set<LayerCacheDescriptor>> expectedDescriptors() const;
+    bool                                          hasSealedDescriptors() const;
+    bool                                          descriptorsComplete() const;
 
     /// @brief Publish the topology-derived number of (layer, tag) buffers for this request.
     void                  setExpectedBufferCount(size_t expected_buffer_count);
@@ -37,13 +47,14 @@ public:
     }
 
 private:
-    int64_t                                                                  request_id_;
-    std::map<std::pair<int, std::string>, std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers_;
-    std::atomic<int64_t>                                                     deadline_ms_;
+    int64_t                                                           request_id_;
+    std::map<LayerCacheDescriptor, std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers_;
+    std::atomic<int64_t>                                              deadline_ms_;
 
-    mutable std::mutex      mutex_;
-    std::condition_variable condition_variable_;
-    std::optional<size_t>   expected_buffer_count_;
+    mutable std::mutex                            mutex_;
+    std::condition_variable                       condition_variable_;
+    std::optional<size_t>                         expected_buffer_count_;
+    std::optional<std::set<LayerCacheDescriptor>> expected_descriptors_;
 };
 
 class ComputedLayerCacheBufferStore {

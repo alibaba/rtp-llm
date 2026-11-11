@@ -220,10 +220,10 @@ struct BackendEnvironment {
     StorageBackend::PoolsByTag pools_by_tag;
     BlockIdxType               block_id{NULL_BLOCK_IDX};
 
-    BackendEnvironment()                              = default;
-    BackendEnvironment(BackendEnvironment&&) noexcept = default;
-    BackendEnvironment& operator=(BackendEnvironment&&) = delete;
-    BackendEnvironment(const BackendEnvironment&)       = delete;
+    BackendEnvironment()                                     = default;
+    BackendEnvironment(BackendEnvironment&&) noexcept        = default;
+    BackendEnvironment& operator=(BackendEnvironment&&)      = delete;
+    BackendEnvironment(const BackendEnvironment&)            = delete;
     BackendEnvironment& operator=(const BackendEnvironment&) = delete;
     ~BackendEnvironment() {
         for (const auto& [tag, pool] : pools_by_tag) {
@@ -239,10 +239,10 @@ struct BackendHandle {
 
     BackendHandle() = default;
     explicit BackendHandle(std::unique_ptr<KVCMStorageBackend> value): backend(std::move(value)) {}
-    BackendHandle(BackendHandle&&) noexcept = default;
+    BackendHandle(BackendHandle&&) noexcept            = default;
     BackendHandle& operator=(BackendHandle&&) noexcept = default;
     BackendHandle(const BackendHandle&)                = delete;
-    BackendHandle& operator=(const BackendHandle&) = delete;
+    BackendHandle& operator=(const BackendHandle&)     = delete;
     ~BackendHandle() {
         if (backend) {
             backend->shutdown();
@@ -365,10 +365,10 @@ environmentBuffers(const BackendEnvironment& environment, int layer, const std::
 makeMultiGroupBackendEnvironment(const std::string& pool_name, size_t full_group_count, size_t linear_group_count) {
     RTP_LLM_CHECK(full_group_count > 0 && linear_group_count > 0);
     BackendEnvironment result;
-    const size_t       group_count         = full_group_count + linear_group_count;
-    result.cache_config.dtype              = DataType::TYPE_FP16;
-    result.cache_config.layer_num          = static_cast<uint32_t>(group_count);
-    result.cache_config.seq_size_per_block = 8;
+    const size_t       group_count            = full_group_count + linear_group_count;
+    result.cache_config.main_config.dtype     = DataType::TYPE_FP16;
+    result.cache_config.main_config.layer_num = static_cast<uint32_t>(group_count);
+    result.cache_config.seq_size_per_block    = 8;
 
     std::vector<KVCacheSpecPtr>   specs;
     std::vector<std::vector<int>> layers_by_group;
@@ -401,7 +401,7 @@ makeMultiGroupBackendEnvironment(const std::string& pool_name, size_t full_group
                                            std::shared_ptr<BroadcastManager>         broadcast_manager   = nullptr,
                                            int                                       transfer_timeout_ms = 1000) {
     KVCacheConfig kv_cache_config;
-    kv_cache_config.kvcm_server_address = "unused-test-address";
+    kv_cache_config.kvcm_server_address        = "unused-test-address";
     kv_cache_config.kvcm_get_broadcast_timeout = transfer_timeout_ms;
     kv_cache_config.kvcm_put_broadcast_timeout = transfer_timeout_ms;
     RuntimeConfig runtime_config;
@@ -495,11 +495,11 @@ read(KVCMStorageBackend& backend, StorageRequest request, std::shared_ptr<Storag
 }
 
 [[maybe_unused]] bool initSingleRank(KVCMStorageBackend& backend, const BackendEnvironment& environment) {
-    return backend.init(environment.cache_config.topologyPtr(),
-                        environment.pools_by_tag,
-                        [&](int layer_id, const std::string& tag, int block_id) {
-                            return environmentBuffers(environment, layer_id, tag, block_id);
-                        });
+    auto cache_config = std::make_shared<CacheConfig>(environment.cache_config);
+    auto pools        = environment.pools_by_tag;
+    return backend.init(cache_config, pools, [pools](int layer_ordinal, const std::string& tag, int block_id) {
+        return pools.at(tag)->convertIndexToBuffer(layer_ordinal, block_id);
+    });
 }
 
 }  // namespace

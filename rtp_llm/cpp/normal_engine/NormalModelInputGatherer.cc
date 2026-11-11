@@ -25,6 +25,34 @@ bool ordinaryStreamHasBlockTable(const GenerateStreamPtr& stream) {
     return stream->curBlocksNum() > 0;
 }
 
+void validateMtpSnapshotRowTags(const GenerateStream::MtpAsyncDeviceState& state,
+                                const std::vector<std::string>&            destination_tags,
+                                const char*                                table_name) {
+    const auto& row_tags = state.next_kv_cache_row_tags;
+    RTP_LLM_CHECK_WITH_INFO(!row_tags.empty(), "MTP %s cache snapshot requires explicit row tags", table_name);
+    for (size_t row = 0; row < row_tags.size(); ++row) {
+        RTP_LLM_CHECK_WITH_INFO(
+            !row_tags[row].empty(), "MTP %s cache snapshot row tag must be non-empty: row=%zu", table_name, row);
+        for (size_t other = 0; other < row; ++other) {
+            RTP_LLM_CHECK_WITH_INFO(row_tags[row] != row_tags[other],
+                                    "MTP %s cache snapshot row tags must be unique: tag=%s",
+                                    table_name,
+                                    row_tags[row].c_str());
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(row_tags.size() == destination_tags.size(),
+                            "MTP %s cache snapshot tag count %zu differs from gather tag count %zu",
+                            table_name,
+                            row_tags.size(),
+                            destination_tags.size());
+    for (const auto& tag : destination_tags) {
+        RTP_LLM_CHECK_WITH_INFO(std::find(row_tags.begin(), row_tags.end(), tag) != row_tags.end(),
+                                "MTP %s cache snapshot is missing row tag=%s",
+                                table_name,
+                                tag.c_str());
+    }
+}
+
 size_t blockTableWidth(const StreamGroups& stream_groups, const std::vector<std::string>& tags, bool kernel) {
     size_t width = 0;
     auto   visit = [&](const GenerateStreamPtr& stream, bool decode) {
@@ -38,6 +66,7 @@ size_t blockTableWidth(const StreamGroups& stream_groups, const std::vector<std:
                                     "MTP cache snapshot must be a CUDA int32 [group,1,blocks] tensor");
             RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(table.size(0)) == tags.size(),
                                     "MTP cache snapshot group count differs from gather tags");
+            validateMtpSnapshotRowTags(state, tags, kernel ? "kernel" : "physical");
             width = std::max(width, static_cast<size_t>(table.size(2)));
             return;  // The bookkeeping worker owns the host rows while this snapshot is published.
         }
@@ -870,10 +899,14 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
                                     "MTP kernel snapshot group count differs from gathered table");
             RTP_LLM_CHECK_WITH_INFO(source.size(2) <= device_tensor.size(2),
                                     "MTP kernel snapshot exceeds gathered table width");
+            validateMtpSnapshotRowTags(state, group_tags, "kernel");
+            const auto& row_tags = state.next_kv_cache_row_tags;
             for (size_t row = 0; row < group_tags.size(); ++row) {
-                const auto position =
-                    std::find(config_.kv_cache_group_tags.begin(), config_.kv_cache_group_tags.end(), group_tags[row]);
-                const auto source_row = std::distance(config_.kv_cache_group_tags.begin(), position);
+                const auto position = std::find(row_tags.begin(), row_tags.end(), group_tags[row]);
+                RTP_LLM_CHECK_WITH_INFO(position != row_tags.end(),
+                                        "MTP kernel snapshot is missing requested tag=%s",
+                                        group_tags[row].c_str());
+                const auto source_row = static_cast<size_t>(std::distance(row_tags.begin(), position));
                 device_tensor.select(0, row)
                     .select(0, batch_idx)
                     .narrow(0, 0, source.size(2))
