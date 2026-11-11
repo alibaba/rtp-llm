@@ -616,6 +616,16 @@ class DeepSeekV4Model(GptModelBase):
         self._max_prefill_batch_tokens = int(
             getattr(init_resource, "max_batch_tokens_size", 0)
         )
+        if self._v4_args.v41_config is not None:
+            # Host-pinned fixed pools (DSV4_FIXED_POOL_USE_MEMORY) are torch CPU
+            # tensors; Python-side Triton/index consumers need zero-copy UVA
+            # CUDA views. No-op for GPU-resident pools. Must precede any
+            # get_layer_cache consumer (JIT warmups, runtime buffer binding).
+            from rtp_llm.models_py.modules.dsv41.pinned_pools import (
+                install_pinned_pool_cuda_views,
+            )
+
+            install_pinned_pool_cuda_views(getattr(init_resource, "kv_cache", None))
         if self._materialized:
             if self._v4_args.v41_config is not None:
                 from rtp_llm.models_py.modules.dsv41.dsv41_kernel_jit_warmup import (
