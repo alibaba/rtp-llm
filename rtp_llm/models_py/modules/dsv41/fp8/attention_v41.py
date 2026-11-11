@@ -2390,7 +2390,7 @@ class AttentionV41FP8(AttentionFP8):
             and not torch.cuda.is_current_stream_capturing()
         ):
             shared["prefill_kv_buffer"] = torch.empty(
-                2_400_000_000, dtype=torch.uint8, device=x.device
+                2_200_000_000, dtype=torch.uint8, device=x.device
             )
         prepared = self._prefill_produce(x, positions, shared_input_quant)
         return self._prefill_query(x, *prepared)
