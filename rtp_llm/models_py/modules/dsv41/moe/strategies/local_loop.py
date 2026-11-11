@@ -76,6 +76,55 @@ def _get_or_create_local_y(
     return cached
 
 
+_GROUPED_CAPTURE_GROUP = 8
+
+
+def _fp4_byte_lut(device: torch.device) -> torch.Tensor:
+    """[256, 2] bf16 table: packed FP4 byte -> (low nibble, high nibble)."""
+    values = torch.tensor(
+        [
+            0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+            -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+        ],
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    idx = torch.arange(256, dtype=torch.long, device=device)
+    return torch.stack((values[idx & 0xF], values[(idx >> 4) & 0xF]), dim=1)
+
+
+def _e8m0_byte_lut(device: torch.device) -> torch.Tensor:
+    """[256] bf16 table for UE8M0 scale bytes (value = 2**(byte-127))."""
+    return torch.exp2(
+        torch.arange(256, dtype=torch.float32, device=device) - 127.0
+    ).to(torch.bfloat16)
+
+
+def _fp4_group_dequant_bf16(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    byte_lut: torch.Tensor,
+    e8m0_lut: torch.Tensor,
+) -> torch.Tensor:
+    """Exact packed-FP4 -> bf16 dequant for a stacked expert group.
+
+    ``weight`` is int8 [rows, in/2], ``scale`` is UE8M0 [rows, in/32].
+    FP4 e2m1 values times power-of-two UE8M0 scales are exactly
+    representable in bf16, so this is the same arithmetic as the
+    per-expert ``_fp4_unpack_rows_to_bf16`` fallback.  It works on a
+    whole group at once: the decode graph then contains one gather /
+    scale / multiply per linear instead of a Python per-expert loop.
+    """
+    rows, packed = weight.shape
+    in_dim = packed * 2
+    wb = weight.view(torch.uint8)
+    vals = byte_lut[wb.long()].reshape(rows, in_dim)
+    sb = scale.contiguous().view(torch.uint8)
+    scales = e8m0_lut[sb.long()].repeat_interleave(32, dim=1)
+    vals.mul_(scales)
+    return vals
+
+
 def _select_mn_major_scale_for_index(
     scale_gemm_t: torch.Tensor, expert_idx: torch.Tensor
 ) -> torch.Tensor:
@@ -148,6 +197,23 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             # through its exact bf16 dequant path instead.
             self._W1_s_gemm = self._W2_s_gemm = self._W3_s_gemm = None
             self._W1_s_gemm_t = self._W2_s_gemm_t = self._W3_s_gemm_t = None
+
+        # Pre-SM100, EP>1 lane: batch the 48-expert graph loop into six
+        # 8-expert groups.  The prior lane measured capture success but
+        # cudaGraphInstantiate OOM at ~44K nodes with ~1264MiB free; one
+        # grouped dequant + one bmm per linear replaces the per-expert
+        # Python unroll, cutting MoE graph nodes ~8x while keeping the exact
+        # per-expert FP4 arithmetic and the EP8 weight layout.
+        self._grouped_capture = (
+            os.environ.get("DSV4_LOCALLOOP_GROUPED_CAPTURE", "0") == "1"
+            and cfg.ep_size > 1
+            and cfg.n_local_experts % _GROUPED_CAPTURE_GROUP == 0
+            and self._W1_w.dtype == torch.int8
+            and self._W1_s_gemm_t is None
+        )
+        if self._grouped_capture:
+            self._fp4_byte_lut = _fp4_byte_lut(self._W1_w.device)
+            self._e8m0_byte_lut = _e8m0_byte_lut(self._W1_w.device)
 
         def _expert_at(global_idx: int) -> Optional[Expert]:
             if not cfg.local_expert_start <= global_idx < cfg.local_expert_end:
@@ -247,7 +313,14 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         buf = self._local_y_buf
         y = buf[:T]
         y.zero_()
-        if torch.cuda.is_current_stream_capturing():
+        if getattr(self, "_grouped_capture", False) and T <= 32:
+            # Also used eagerly: the graph warmup forward then compiles the
+            # bmm/dequant kernels and allocates cuBLAS workspaces before
+            # capture, instead of doing either inside the capture stream.
+            self._forward_grouped_capture(
+                x, weights, indices, y, local_start, local_end
+            )
+        elif torch.cuda.is_current_stream_capturing():
             topk_max_n = _topk_dispatch_max_n()
             if (
                 _bs1_fast_enabled()
@@ -261,7 +334,9 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
                 else:
                     self._forward_topk_bsN(x, weights, indices, y)
             else:
-                self._forward_graph_safe(x, weights, indices, y, local_start, local_end)
+                self._forward_graph_safe(
+                    x, weights, indices, y, local_start, local_end
+                )
         else:
             self._forward_eager(x, weights, indices, y, local_start, local_end)
         return y
@@ -326,6 +401,94 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             mask = (indices == i).to(weights.dtype)
             per_token_w = (weights * mask).sum(dim=-1, keepdim=True)
             y.add_(expert(x, per_token_w).float())
+        return y
+
+    def _forward_grouped_capture(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+        y: torch.Tensor,
+        local_start: int,
+        local_end: int,
+    ) -> torch.Tensor:
+        """Pre-SM100 EP>1 graph-capture path: 8-expert grouped dense compute.
+
+        The eager/EP8 ``_forward_graph_safe`` path unrolls 48 local experts
+        (x3 linears) into the captured graph, which is the measured
+        ``cudaGraphInstantiate`` wall on 45GiB L20 (about 38K MoE nodes).
+        Here each group of eight local experts is dequantized as one stacked
+        bf16 tensor and applied with one ``bmm`` per linear.  Every token is
+        evaluated against every local expert in the group; the per-expert
+        routing weight is zero for inactive slots, so the result is exactly
+        the same sum of local-expert contributions.  The EP partial is
+        combined by the existing TP all-reduce in ``MoELayer``.
+
+        Router weights are applied after the down projection.  The current
+        path applies them between the activation and the down projection;
+        both are the same linear map, differing only in fp32 rounding order.
+        """
+        cfg = self.cfg
+        group = _GROUPED_CAPTURE_GROUP
+        T = x.size(0)
+        n_local = local_end - local_start
+        assert n_local == self._W1_w.shape[0]
+        assert n_local % group == 0
+
+        x_bf = x.reshape(T, cfg.dim).to(torch.bfloat16)
+        x_group = x_bf.unsqueeze(0).repeat(group, 1, 1)
+
+        # [T, n_local] router weight per local expert.  Slots routed to a
+        # non-local expert contribute zero; the EP all-reduce combines ranks.
+        local_w = torch.zeros(
+            (T, n_local), dtype=torch.float32, device=x.device
+        )
+        for k in range(indices.size(1)):
+            gid = indices[:, k]
+            lid = gid - local_start
+            valid = ((lid >= 0) & (lid < n_local)).to(torch.float32)
+            lid_c = lid.clamp(0, n_local - 1).to(torch.long)
+            local_w.scatter_add_(
+                1, lid_c[:, None], (weights[:, k].float() * valid)[:, None]
+            )
+
+        for g in range(n_local // group):
+            a = g * group
+            b = a + group
+            w1 = _fp4_group_dequant_bf16(
+                self._W1_w[a:b],
+                self._W1_s[a:b],
+                self._fp4_byte_lut,
+                self._e8m0_byte_lut,
+            ).reshape(group, self._W1_w.shape[1], self._W1_w.shape[2] * 2)
+            gate = torch.bmm(x_group, w1.transpose(1, 2)).float()
+            del w1
+            w3 = _fp4_group_dequant_bf16(
+                self._W3_w[a:b],
+                self._W3_s[a:b],
+                self._fp4_byte_lut,
+                self._e8m0_byte_lut,
+            ).reshape(group, self._W3_w.shape[1], self._W3_w.shape[2] * 2)
+            up = torch.bmm(x_group, w3.transpose(1, 2)).float()
+            del w3
+            if cfg.swiglu_limit > 0:
+                up = torch.clamp(up, -cfg.swiglu_limit, cfg.swiglu_limit)
+                gate = torch.clamp(gate, max=cfg.swiglu_limit)
+            # Pure torch SiLU avoids a Triton JIT specialization (N=group*T)
+            # being compiled inside cudaStreamCapture.  Same math as the
+            # fused Expert path; the extra elementwise nodes are negligible
+            # against the removed per-expert loop.
+            h = (torch.nn.functional.silu(gate) * up).to(torch.bfloat16)
+            w2 = _fp4_group_dequant_bf16(
+                self._W2_w[a:b],
+                self._W2_s[a:b],
+                self._fp4_byte_lut,
+                self._e8m0_byte_lut,
+            ).reshape(group, self._W2_w.shape[1], self._W2_w.shape[2] * 2)
+            down = torch.bmm(h, w2.transpose(1, 2)).float()
+            del w2
+            gw = local_w[:, a:b].transpose(0, 1).unsqueeze(-1)
+            y.add_((down * gw).sum(dim=0))
         return y
 
     def _forward_topk_bs1(
