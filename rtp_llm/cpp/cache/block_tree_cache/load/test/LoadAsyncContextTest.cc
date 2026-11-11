@@ -406,32 +406,41 @@ TEST(LoadAsyncContextTest, BatchTransferCompletionReachesSettlementBarrierOnce) 
     coordinator->shutdown();
 }
 
-TEST(LoadAsyncContextTest, BackendMatchFailureAbortsWithoutRunningAllocatorCallback) {
+TEST(LoadAsyncContextTest, BackendMatchFailureRunsDeferredAllocationAndKeepsLocalPrefix) {
     size_t commits     = 0;
     size_t aborts      = 0;
     auto   coordinator = makeCoordinator(commits, aborts);
     auto   backend     = std::make_shared<ManualBackend>();
     auto   pool        = std::make_shared<TestBlockPool>();
     initBackend(*backend, pool);
-    auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    TransferDescriptor local;
+    local.source_tier                = Tier::HOST;
+    auto request                     = makeRequest(2);
+    request.local_matched_blocks_num = 1;
+    auto context                     = coordinator->create({local}, {false}, 1, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
     size_t callbacks = 0;
-    context->setMatchCallback([&](LoadAsyncContext&, size_t) {
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
         ++callbacks;
-        return true;
+        EXPECT_EQ(matched, 1u);
+        return current.commit();
     });
 
     backend->failNextMatch();
     context->startBackendMatch();
-    backend->completeMatch(1);
+    backend->completeMatch(2);
 
+    EXPECT_FALSE(backend->readPending());
+    EXPECT_FALSE(context->done());
+    EXPECT_TRUE(context->completeTransfers(1, true, Tier::HOST));
     EXPECT_TRUE(context->done());
-    EXPECT_FALSE(context->success());
-    EXPECT_FALSE(context->errorInfo().ok());
-    EXPECT_EQ(context->mallocStatus(), MallocStatus::INTERNAL_ERROR);
-    EXPECT_EQ(callbacks, 0u);
-    EXPECT_EQ(commits, 0u);
-    EXPECT_EQ(aborts, 1u);
+    EXPECT_TRUE(context->success());
+    EXPECT_TRUE(context->errorInfo().ok());
+    EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
+    EXPECT_EQ(context->matchedBlocks(), 1u);
+    EXPECT_EQ(callbacks, 1u);
+    EXPECT_EQ(commits, 1u);
+    EXPECT_EQ(aborts, 0u);
     coordinator->shutdown();
 }
 

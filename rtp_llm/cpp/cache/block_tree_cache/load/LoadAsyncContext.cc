@@ -187,9 +187,7 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
         return;
     }
     if (!success) {
-        malloc_status_.store(MallocStatus::INTERNAL_ERROR, std::memory_order_release);
-        failBeforeCommit();
-        return;
+        matched_blocks_num = local_matched_blocks_;
     }
     RTP_LLM_CHECK(storage_request_.keys && storage_request_.keys->size() == storage_request_.handles.size()
                   && storage_request_.local_matched_blocks_num == local_matched_blocks_
