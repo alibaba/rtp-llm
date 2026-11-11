@@ -1255,6 +1255,25 @@ class DeepSeekV4Model(GptModelBase):
                 layer.ffn._has_visual_tokens = has_visual_tokens
                 layer.ffn.gate._has_visual_tokens = has_visual_tokens
         cls = type(self)
+        if not getattr(self, "_awi_mem_logged", False):
+            try:
+                import torch as _t
+                _total = sum(
+                    int(p.numel()) * int(p.element_size())
+                    for p in self.parameters()
+                )
+                _free, _total_dev = _t.cuda.mem_get_info()
+                logging.warning(
+                    "[AWI_MEM] params=%.2f GiB torch_alloc=%.2f GiB "
+                    "torch_reserved=%.2f GiB device_free=%.2f GiB",
+                    _total / 2**30,
+                    _t.cuda.memory_allocated() / 2**30,
+                    _t.cuda.memory_reserved() / 2**30,
+                    _free / 2**30,
+                )
+            except Exception:
+                pass
+            self._awi_mem_logged = True
         prep_decode = (
             self._prepare_decode_hidden
             if cls._prepare_decode_hidden is not DeepSeekV4Model._prepare_decode_hidden
