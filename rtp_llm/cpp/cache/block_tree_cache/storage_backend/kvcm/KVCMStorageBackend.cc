@@ -507,8 +507,8 @@ public:
         const auto                             trace_id = nextTraceId("match", match_trace_sequence_);
         auto query_type                                 = static_cast<kv_cache_manager::QueryType>(default_query_type_);
         if (has_swa_) {
-            // Fetch the FULL prefix as well as SWA locations, then apply each
-            // group's model-defined reuse window locally.
+            // Fetch FULL and SWA locations, then apply each group's
+            // model-defined reuse window locally.
             query_type = kv_cache_manager::QueryType::QT_BATCH_GET;
         }
         (void)remainingTimeout(request, "before match");
@@ -529,6 +529,15 @@ public:
                 locations = selectBackendLocations(result.second);
             }
             positional = true;
+        } else if (positional && request.local_matched_blocks_num > 0) {
+            const CacheKeysType query_keys(keys.begin() + request.local_matched_blocks_num, keys.end());
+            auto result = client_wrapper_->match(
+                "", trace_id, query_type, query_keys, kv_cache_manager::BlockMaskOffset{0}, {});
+            success = result.first;
+            locations = std::move(result.second);
+            if (success) {
+                locations.insert(locations.begin(), request.local_matched_blocks_num, kv_cache_manager::Location{});
+            }
         } else {
             auto result = client_wrapper_->match("", trace_id, query_type, keys, request.local_matched_blocks_num, {});
             success     = result.first;

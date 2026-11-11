@@ -369,10 +369,11 @@ TEST(KVCMMockFullLinearTest, ReuseDisabledGroupsAreExcludedFromRemoteProtocolAnd
         {},
         {{"tp0_Ffull0", "full_102"}, {"tp0_Lwindow0", "window_102"}},
         {{"tp0_Ffull0", "full_103"}, {"tp0_Lwindow0", "window_103"}}};
-    const kv_cache_manager::BlockMask offset = kv_cache_manager::BlockMaskOffset{1};
+    const kv_cache_manager::BlockMask offset = kv_cache_manager::BlockMaskOffset{0};
     EXPECT_CALL(*client, match(_, _, kv_cache_manager::QueryType::QT_BATCH_GET,
-                              std::vector<int64_t>({101, 102, 103}), offset, _))
-        .WillOnce(Return(std::make_pair(true, locations)));
+                              std::vector<int64_t>({102, 103}), offset, _))
+        .WillOnce(Return(std::make_pair(
+            true, kv_cache_manager::Locations(locations.begin() + 1, locations.end()))));
     auto request = makeGroupedStorageRequest(environment, {101, 102, 103}, 1, block_ids,
                                              {{"full0"}, {"full0", "window0"}, {"full0", "window0"}});
     auto result = match(*backend.backend, request);
