@@ -48,6 +48,24 @@ from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 
 _FP4_BLOCK = 32
 
+# Per-device cache for the E2M1 lookup table. _FP4_LUT is a pageable CPU
+# tensor; Tensor.to(device) on it runs a staging H2D copy plus a stream
+# synchronize, which is ILLEGAL during HIP graph capture — n12 (2026-11-11)
+# died with hipErrorStreamCaptureUnsupported ("operation not permitted when
+# stream is capturing") on all 8 ranks the moment the first capture entered
+# a MoE layer, after the FP4-resident load itself had succeeded. Populate
+# once at weight-bind time; forwards then only read the cached device copy.
+_LUT_DEVICE_CACHE: Dict[torch.device, torch.Tensor] = {}
+
+
+def _fp4_lut(device: torch.device) -> torch.Tensor:
+    """Device-resident float32 E2M1 LUT (single H2D copy per device)."""
+    lut = _LUT_DEVICE_CACHE.get(device)
+    if lut is None:
+        lut = _FP4_LUT.to(device=device, dtype=torch.float32)
+        _LUT_DEVICE_CACHE[device] = lut
+    return lut
+
 
 def _check_fp4_pair(packed: torch.Tensor, scales: torch.Tensor):
     """Validate a packed E2M1 + UE8M0 pair; return ``(e, n, k)``."""
@@ -75,12 +93,14 @@ def _dequant_fp4_rows(
     the even K index, the high nibble the odd one. Products of an E2M1 value
     (<=3 significand bits) and a power-of-two scale are exact in BF16.
 
-    Guard-free and sync-free on purpose: this runs inside eager forwards AND
-    inside HIP graph capture/replay (per bmm chunk), where ``.all()``/
-    ``bool()`` device reads are illegal. The whole-stack finiteness/underflow
-    guard runs once at weight-bind time via :func:`_validate_fp4_stack`.
+    Guard-free, sync-free and H2D-free on purpose: this runs inside eager
+    forwards AND inside HIP graph capture/replay (per bmm chunk), where
+    ``.all()``/``bool()`` device reads and pageable host->device copies are
+    illegal (the LUT comes from :func:`_fp4_lut`'s per-device cache). The
+    whole-stack finiteness/underflow guard runs once at weight-bind time via
+    :func:`_validate_fp4_stack`.
     """
-    lut = _FP4_LUT.to(device=packed.device, dtype=torch.float32)
+    lut = _fp4_lut(packed.device)
     e, n, k = _check_fp4_pair(packed, scales)
     hi = min(hi, e)
     out = torch.empty((hi - lo, n, k), dtype=torch.bfloat16, device=packed.device)
@@ -103,7 +123,7 @@ def _validate_fp4_stack(
     OverflowError) without paying the 4x BF16 memory.
     """
     e, n, k = _check_fp4_pair(packed, scales)
-    lut = _FP4_LUT.to(device=packed.device, dtype=torch.float32)
+    lut = _fp4_lut(packed.device)  # runs at load time: warms the device cache
     for start in range(0, e, chunk):
         stop = min(start + chunk, e)
         w_uint = packed[start:stop].to(torch.int32) & 0xFF
