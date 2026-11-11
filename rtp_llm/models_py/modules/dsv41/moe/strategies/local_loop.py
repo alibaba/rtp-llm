@@ -39,7 +39,7 @@ import torch
 import torch.nn as nn
 
 from ...quant_layouts import prepare_fp4_weight_scale_for_deepgemm
-from ..expert import Expert
+from ..expert import Expert, silu_mul_split
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 
 _FP8_BLOCK = 128
@@ -48,6 +48,22 @@ _FP4_BLOCK = 32
 
 def _bs1_fast_enabled() -> bool:
     return os.environ.get("DSV4_LOCALLOOP_BS1_FAST", "1") != "0"
+
+
+def _grouped_experts_size() -> int:
+    """Experts per stacked dequant+bmm pass (0 = keep per-expert paths).
+
+    Decode-graph capture on tight-HBM devices is node-bound: the per-expert
+    unroll records ~44K kernels for a bs=4 graph and cudaGraphInstantiate
+    alone needs >1.2GB (load38f on L20). Grouping G experts per stacked
+    exact-dequant + bmm pass cuts MoE nodes ~G× with identical math.
+    """
+    return int(os.environ.get("DSV41_LOCALLOOP_GROUPED_EXPERTS", "0"))
+
+
+def _grouped_experts_max_t() -> int:
+    """Max token rows for the grouped path (decode-sized batches only)."""
+    return int(os.environ.get("DSV41_LOCALLOOP_GROUPED_MAX_T", "32"))
 
 
 def _topk_dispatch_max_n() -> int:
@@ -247,6 +263,13 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         buf = self._local_y_buf
         y = buf[:T]
         y.zero_()
+        group_size = _grouped_experts_size()
+        if group_size > 1 and T <= _grouped_experts_max_t() and self._grouped_ready():
+            # Runs for eager decode AND capture so the per-bs warmup primes
+            # every Triton/cublas specialization the captured graph replays.
+            return self._forward_grouped(
+                x, weights, indices, y, local_start, local_end, group_size
+            )
         if torch.cuda.is_current_stream_capturing():
             topk_max_n = _topk_dispatch_max_n()
             if (
@@ -326,6 +349,95 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             mask = (indices == i).to(weights.dtype)
             per_token_w = (weights * mask).sum(dim=-1, keepdim=True)
             y.add_(expert(x, per_token_w).float())
+        return y
+
+    def _grouped_ready(self) -> bool:
+        ready = getattr(self, "_grouped_ready_flag", None)
+        if ready is None:
+            cfg = self.cfg
+            ready = bool(
+                not self._native_fp4_gemm
+                and silu_mul_split is not None
+                and self._W1_w is not None
+                and self._W2_w is not None
+                and self._W3_w is not None
+                and all(
+                    self.experts[i] is not None
+                    for i in range(cfg.local_expert_start, cfg.local_expert_end)
+                )
+            )
+            self._grouped_ready_flag = ready
+        return ready
+
+    def _forward_grouped(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+        y: torch.Tensor,
+        local_start: int,
+        local_end: int,
+        group_size: int,
+    ) -> torch.Tensor:
+        """Grouped exact-dequant MoE for decode-sized batches.
+
+        Semantically mirrors :meth:`_forward_graph_safe`: the same exact
+        FP4→bf16 row dequantization (``_fp4_unpack_rows_to_bf16`` on the
+        stacked EP-slice views — bitwise-identical rows), the same
+        silu/clamp → routing-weight → down-projection order, fp32
+        accumulation into ``y``. Each kernel here processes ``group_size``
+        experts through stacked tensors + bmm instead of one expert per
+        launch, cutting captured graph nodes ~group_size× (the instantiate
+        wall on L20). Fixed shapes throughout — no data-dependent control
+        flow — and tokens not routed to a group contribute exactly zero
+        through the routing weights, exactly as in the per-expert mask
+        variant. Only summation order across groups differs from the
+        sequential per-expert accumulation (fp32, ≤1ulp).
+        """
+        from rtp_llm.models_py.modules.dsv41.qlinear import (
+            _fp4_unpack_rows_to_bf16,
+        )
+
+        cfg = self.cfg
+        dim = cfg.dim
+        inter = cfg.moe_inter_dim
+        T = x.shape[0]
+        x_bf = x.reshape(T, dim).to(torch.bfloat16)
+        x_exp = x_bf.unsqueeze(0)
+        for g0 in range(local_start, local_end, group_size):
+            g1 = min(g0 + group_size, local_end)
+            gg = g1 - g0
+            s0, s1 = g0 - local_start, g1 - local_start
+            ids = torch.arange(g0, g1, device=x.device)
+            mask = indices.unsqueeze(0) == ids.view(gg, 1, 1)
+            w_g = (weights.unsqueeze(0) * mask.to(weights.dtype)).sum(-1).unsqueeze(-1)
+            w1 = _fp4_unpack_rows_to_bf16(
+                self._W1_w[s0:s1].reshape(gg * inter, -1),
+                self._W1_s[s0:s1].reshape(gg * inter, -1),
+            ).view(gg, inter, dim)
+            gate = torch.bmm(x_exp.expand(gg, T, dim), w1.transpose(1, 2)).float()
+            del w1
+            w3 = _fp4_unpack_rows_to_bf16(
+                self._W3_w[s0:s1].reshape(gg * inter, -1),
+                self._W3_s[s0:s1].reshape(gg * inter, -1),
+            ).view(gg, inter, dim)
+            up = torch.bmm(x_exp.expand(gg, T, dim), w3.transpose(1, 2)).float()
+            del w3
+            h = silu_mul_split(
+                gate.reshape(gg * T, inter).contiguous(),
+                up.reshape(gg * T, inter).contiguous(),
+                clamp_limit=cfg.swiglu_limit,
+            )
+            del gate, up
+            h = h.view(gg, T, inter) * w_g
+            w2 = _fp4_unpack_rows_to_bf16(
+                self._W2_w[s0:s1].reshape(gg * dim, -1),
+                self._W2_s[s0:s1].reshape(gg * dim, -1),
+            ).view(gg, dim, inter)
+            down = torch.bmm(h.to(torch.bfloat16), w2.transpose(1, 2))
+            del h, w2
+            y.add_(down.float().sum(0))
+            del down
         return y
 
     def _forward_topk_bs1(
