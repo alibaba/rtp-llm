@@ -816,7 +816,14 @@ class HostEngramEmbedding:
         self.block_size = block_size
         self._initialize_lookup_state(pinned=pinned)
         if pinned is not None:
-            if os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1":
+            # ROCm reads the UVA host scales directly. Copying them to device
+            # would make part of an Engram checkpoint device-resident, so the
+            # HIP default keeps every checkpoint byte on the host.
+            device_scales_default = "0" if torch.version.hip is not None else "1"
+            if (
+                os.getenv("DSV41_ENGRAM_DEVICE_SCALES", device_scales_default)
+                == "1"
+            ):
                 if torch.cuda.is_current_stream_capturing():
                     raise RuntimeError(
                         "Engram device scales require startup allocation"
@@ -1172,14 +1179,12 @@ class HostEngramEmbedding:
                     # retained by metadata snapshots, owns future replays.
                     uva[1].record_stream(torch.cuda.current_stream(indices.device))
         if torch.cuda.is_current_stream_capturing():
-            # Diagnostic bring-up only: HIP graphs cannot issue the D2H copy
-            # required by host-RAM lookup.  Capture a correctly shaped zero so
-            # the rest of the graph can be validated; real staging must be
-            # wired before correctness is claimed.
-            return torch.zeros(
-                (*indices.shape, self.weight.shape[1]),
-                dtype=torch.bfloat16,
-                device=device,
+            # A host lookup needs a D2H copy and a host synchronization, both
+            # illegal in a graph. Startup must install the UVA view instead;
+            # silently capturing zeros would make graph output incorrect.
+            raise RuntimeError(
+                "Engram host lookup without a device-mapped host table cannot "
+                "be captured; refusing to capture a placeholder"
             )
         indices = indices.detach().to(device="cpu", dtype=torch.int64)
         valid = indices >= 0
@@ -2228,11 +2233,12 @@ class Engram(nn.Module):
                     )
                 pinned = None
                 identity = None
-                # ROCm has no portable device-mapped host registration for the
-                # 95 GiB tables (hipHostRegister fails under multi-rank load).
-                # Keep the table bytes in host RAM and serve them through the
-                # CPU lookup/staging runtime instead.
-                if target.type == "cuda" and torch.version.hip is None:
+                # The HIP host-memory shim supports Portable|Mapped registration
+                # of the shared tmpfs tables; eight ranks on one MI308X host
+                # register both 95 GiB tables concurrently without duplicating
+                # physical pages. Keep the bytes in host RAM and expose a UVA
+                # view so graph replay reads real rows instead of a placeholder.
+                if target.type == "cuda":
                     parts = [str(root.resolve()), prefix]
                     for suffix in ("embed.weight", "embed.scale"):
                         path = root / weight_map[prefix + suffix]
