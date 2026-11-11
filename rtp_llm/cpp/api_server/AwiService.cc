@@ -487,11 +487,14 @@ void AwiService::generate(const std::unique_ptr<http_server::HttpResponseWriter>
             completion_tokens = last.aux_info.front().output_len;
         }
         std::string message;
-        if (!last.response.empty()) {
-            message = last.response.front();
-        }
-        if (message.empty() && last.output_ids.has_value() && !last.output_ids->empty()) {
+        // GenerateStreamWrapper returns per-step text deltas but the complete
+        // output_ids snapshot.  Decode the full snapshot for the final message;
+        // using the last delta would return only the final generated token.
+        if (last.output_ids.has_value() && !last.output_ids->empty()) {
             message = token_processor_->decode(last.output_ids->front());
+        }
+        if (message.empty() && !last.response.empty()) {
+            message = last.response.front();
         }
         if (message.empty()) {
             // Structural contract: the assistant message is nonempty.  The
