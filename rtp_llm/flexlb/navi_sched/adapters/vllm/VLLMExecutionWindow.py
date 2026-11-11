@@ -129,7 +129,22 @@ class PrefillExecutionWindowAssembler:
                     self.rejected_windows += 1
                     continue
                 try:
-                    emitted.append(PrefillExecutionWindow(samples))
+                    # Keep idle time out of latency targets without discarding
+                    # complete execution spans on either side of the gap.
+                    windows = []
+                    first = 0
+                    end = samples[0].completed_ns
+                    previous_start = samples[0].started_ns
+                    for index, step in enumerate(samples[1:], 1):
+                        if step.started_ns < previous_start:
+                            raise ValueError("physical steps are reordered")
+                        if step.started_ns > end:
+                            windows.append(PrefillExecutionWindow(samples[first:index]))
+                            first = index
+                        end = max(end, step.completed_ns)
+                        previous_start = step.started_ns
+                    windows.append(PrefillExecutionWindow(samples[first:]))
+                    emitted.extend(windows)
                 except ValueError:
                     self.rejected_windows += 1
             return tuple(emitted)

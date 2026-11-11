@@ -11,6 +11,11 @@ from pathlib import Path
 
 from navi_sched import NaviSchedAgent
 from navi_sched import _navi_sched_core as core
+from navi_sched.adapters.vllm.VLLMExecutionSample import (
+    PrefillExecutionSample,
+    PrefillStepRequest,
+)
+from navi_sched.adapters.vllm.VLLMExecutionWindow import PrefillExecutionWindowAssembler
 
 
 class VLLMExecutionWindowIntegrationTest(unittest.TestCase):
@@ -71,6 +76,38 @@ class VLLMExecutionWindowIntegrationTest(unittest.TestCase):
                 for identity in range(1, 13):
                     self.assertTrue(record([(identity, 32768, 0, 0)]))
 
+                assembler = PrefillExecutionWindowAssembler((4,))
+                for identity in (1001, 1002):
+                    assembler.register(identity)
+                first = PrefillExecutionSample(
+                    1001,
+                    (PrefillStepRequest(1001, 0, 8192, 0, 1),),
+                    1,
+                    2000000001,
+                    8192,
+                )
+                second = PrefillExecutionSample(
+                    1002,
+                    (PrefillStepRequest(1002, 0, 8192, 0, 2),),
+                    3000000001,
+                    5000000001,
+                    8192,
+                )
+                self.assertEqual((), assembler.complete(1001, first))
+                windows = assembler.complete(1002, second)
+                self.assertEqual(2, len(windows))
+                for window in windows:
+                    self.assertEqual(1, window.execution_step_count)
+                    self.assertTrue(
+                        bridge.record_observed_execution_sample(
+                            window.wire_requests(),
+                            window.elapsed_ms,
+                            window.execution_step_count,
+                            window.global_padded_tokens,
+                            time.time_ns() // 1000,
+                        )
+                    )
+
                 deadline = time.monotonic() + 20
                 text = ""
                 while True:
@@ -101,7 +138,7 @@ class VLLMExecutionWindowIntegrationTest(unittest.TestCase):
                             r"revision_before=(\d+) revision_after=(\d+)", line
                         )
                     ]
-                    if len(samples) == 12 and any(b > a for a, b in revisions):
+                    if len(samples) == 14 and any(b > a for a, b in revisions):
                         break
                     remaining = deadline - time.monotonic()
                     if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
