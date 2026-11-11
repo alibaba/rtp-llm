@@ -211,6 +211,52 @@ def _fp4_global_dequant_words(base, valid, R: tl.constexpr):
     return (_e2m1_to_float(codes) * scale_values[:, :, None]).reshape(R, 512)
 
 
+def _quantize_global_rows_torch(k: torch.Tensor, slot_mapping: torch.Tensor):
+    """Exact E2M1/E4M3 GLOBAL row codec without the Triton fp8e4nv cast.
+
+    SM80 Triton has no float8e4nv type.  PyTorch's float8_e4m3fn cast uses the
+    same round-to-nearest-even and the same group-16/amax floor constants as
+    the CUDA kernel, so this preserves the checkpoint's KV contract.
+    """
+    T = int(k.shape[0])
+    x = k.reshape(T, FP4_GLOBAL_HEAD_DIM).float()
+    groups = x.view(T, FP4_GLOBAL_HEAD_DIM // FP4_GLOBAL_GROUP, FP4_GLOBAL_GROUP)
+    maximum = groups.abs().amax(-1).clamp_min(6.0 * (2.0**-9))
+    scale_fp8 = (maximum / 6.0).to(torch.float8_e4m3fn)
+    scale = scale_fp8.float()
+    normalized = (groups / scale[..., None]).clamp(-6.0, 6.0)
+    magnitude = normalized.abs()
+    code = (magnitude > 0.25).to(torch.uint8)
+    code += (magnitude >= 0.75).to(torch.uint8)
+    code += (magnitude > 1.25).to(torch.uint8)
+    code += (magnitude >= 1.75).to(torch.uint8)
+    code += (magnitude > 2.5).to(torch.uint8)
+    code += (magnitude >= 3.5).to(torch.uint8)
+    code += (magnitude > 5.0).to(torch.uint8)
+    sign = ((normalized.view(torch.int32) >> 28) & 8).to(torch.uint8)
+    code = code | sign
+    even = code[..., 0::2]
+    odd = code[..., 1::2]
+    payload = (even | (odd << 4)).to(torch.uint8).reshape(
+        T, FP4_GLOBAL_HEAD_DIM // 2
+    )
+    scale_bytes = scale_fp8.view(torch.uint8).reshape(
+        T, FP4_GLOBAL_HEAD_DIM // FP4_GLOBAL_GROUP
+    )
+    return torch.cat((payload, scale_bytes), dim=1)
+
+
+def _insert_global_rows_torch(k, k_cache, slot_mapping):
+    T = int(k.shape[0])
+    if T == 0:
+        return
+    rows = _quantize_global_rows_torch(k, slot_mapping)
+    flat = k_cache.view(-1, FP4_GLOBAL_ENTRY_BYTES)
+    valid = slot_mapping >= 0
+    if bool(valid.any()):
+        flat[slot_mapping[valid].to(torch.int64)] = rows[valid]
+
+
 def quantize_and_insert_k_cache_fp4(
     k: torch.Tensor,  # [T, 512] bf16, contiguous
     k_cache: torch.Tensor,  # [num_blocks, block_size, 288] uint8
@@ -221,6 +267,9 @@ def quantize_and_insert_k_cache_fp4(
         slot_mapping = slot_mapping.to(torch.int64)
     num_tokens = int(slot_mapping.shape[0])
     if num_tokens == 0:
+        return
+    if not _torch_codec_supported():
+        _insert_global_rows_torch(k, k_cache, slot_mapping.reshape(-1))
         return
     block_size = int(k_cache.shape[1])
     _fp4_global_insert_kernel[(num_tokens,)](
