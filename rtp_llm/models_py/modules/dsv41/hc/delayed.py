@@ -19,7 +19,10 @@ import torch.nn.functional as F
 from torch import nn
 
 from rtp_llm.models_py.modules.dsv41.hc.base import HCUnitBase
-from rtp_llm.models_py.modules.dsv41.hc.fallback_impl import _hc_split_sinkhorn
+from rtp_llm.models_py.modules.dsv41.hc.fallback_impl import (
+    _hc_fallback_chunk_tokens,
+    _hc_split_sinkhorn,
+)
 from rtp_llm.models_py.modules.dsv41.hc.tilelang_impl import TileLangHCUnit
 
 
@@ -33,16 +36,40 @@ def _tile_ops():
     )
 
 
+def _tilelang_supported(x: torch.Tensor) -> bool:
+    """TileLang mHC kernels target Hopper/Blackwell; SM80 uses torch math."""
+    if not x.is_cuda or x.dtype != torch.bfloat16:
+        return False
+    if torch.version.hip is not None:
+        return False
+    try:
+        return torch.cuda.get_device_capability(x.device)[0] >= 9
+    except Exception:
+        return False
+
+
 def collapse_delayed(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
     """Read residual streams using FP32 coefficients and accumulation."""
-    if x.is_cuda and x.dtype == torch.bfloat16:
+    if _tilelang_supported(x):
         ops = _tile_ops()
         shape = x.shape
         return ops.mhc_pre_apply_mix(
             x.reshape(1, -1, shape[-2], shape[-1]),
             pre_mix.reshape(1, -1, shape[-2], 1).contiguous(),
         ).reshape(*shape[:-2], shape[-1])
-    return (x.float() * pre_mix.unsqueeze(-1)).sum(dim=-2).to(x.dtype)
+    shape = x.shape
+    flat = x.reshape(-1, shape[-2], shape[-1])
+    mix = pre_mix.reshape(-1, shape[-2])
+    out = torch.empty(
+        (flat.shape[0], shape[-1]), dtype=x.dtype, device=x.device
+    )
+    chunk = _hc_fallback_chunk_tokens()
+    for start in range(0, flat.shape[0], chunk):
+        end = min(start + chunk, flat.shape[0])
+        out[start:end] = (
+            flat[start:end].float() * mix[start:end].float().unsqueeze(-1)
+        ).sum(dim=-2).to(x.dtype)
+    return out.view(*shape[:-2], shape[-1])
 
 
 def can_fuse_big_pre() -> bool:
@@ -83,7 +110,7 @@ class DelayedHCUnit(HCUnitBase):
 
     def _pre_impl(self, x: torch.Tensor, dbg_tag=None):
         shape = x.shape
-        if x.is_cuda and x.dtype == torch.bfloat16:
+        if _tilelang_supported(x):
             from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import (
                 is_supported,
                 prenorm,
@@ -137,20 +164,10 @@ class DelayedHCUnit(HCUnitBase):
             post = post.reshape(*shape[:-1], 1)
             comb = comb.reshape(*shape[:-2], self.hc_mult, self.hc_mult)
         else:
-            flattened = x.flatten(-2).float()
-            mixes = F.linear(flattened, self.fn.float()) * torch.rsqrt(
-                flattened.square().mean(dim=-1, keepdim=True) + self.norm_eps
-            )
-            pre, post, comb = _hc_split_sinkhorn(
-                mixes,
-                self.scale,
-                self.base,
-                self.hc_mult,
-                self.hc_sinkhorn_iters,
-                self.hc_eps,
-            )
-            self.pre_mix_out = pre
-            post = post.unsqueeze(-1)
+            previous = self._previous_ref() if self._previous_ref is not None else None
+            y, post, comb = self._pre_torch_chunked(x, previous)
+            self.pre_mix_out = self._last_pre_mix
+            return y, post, comb
 
         if self._previous_ref is None:
             # Identity readout at entry selects lane zero, not the new mix.
@@ -160,13 +177,77 @@ class DelayedHCUnit(HCUnitBase):
             y = collapse_delayed(x, previous.pre_mix_out)
         return y, post, comb
 
-    def _post_impl(self, x, residual, post, comb):
-        if residual.is_cuda and residual.dtype == torch.bfloat16:
-            return TileLangHCUnit._post_impl(self, x, residual, post, comb)
+    def _pre_torch_chunked(self, x, previous):
+        """Chunked FP32 reference pre-mix for SM80 (no TileLang, no full
+        ``[T, hc*dim]`` fp32 materialization)."""
+        shape = x.shape
+        hc = self.hc_mult
+        dim = self.dim
+        flat = x.reshape(-1, hc, dim)
+        tokens = flat.shape[0]
+        chunk = _hc_fallback_chunk_tokens()
+        out = torch.empty((tokens, dim), dtype=x.dtype, device=x.device)
+        pre_all = torch.empty((tokens, hc), dtype=torch.float32, device=x.device)
+        post_all = torch.empty((tokens, hc), dtype=torch.float32, device=x.device)
+        comb_all = torch.empty((tokens, hc, hc), dtype=torch.float32, device=x.device)
+        prev = None
+        if previous is not None:
+            prev = previous.pre_mix_out.reshape(-1, hc)
+        for start in range(0, tokens, chunk):
+            end = min(start + chunk, tokens)
+            xc = flat[start:end]
+            flattened = xc.flatten(-2).float()
+            mixes = F.linear(flattened, self.fn.float()) * torch.rsqrt(
+                flattened.square().mean(dim=-1, keepdim=True) + self.norm_eps
+            )
+            pre, post, comb = _hc_split_sinkhorn(
+                mixes,
+                self.scale,
+                self.base,
+                hc,
+                self.hc_sinkhorn_iters,
+                self.hc_eps,
+            )
+            pre_all[start:end] = pre
+            post_all[start:end] = post
+            comb_all[start:end] = comb
+            if prev is None:
+                out[start:end] = xc[..., 0, :]
+            else:
+                out[start:end] = (
+                    xc.float() * prev[start:end].unsqueeze(-1)
+                ).sum(dim=-2).to(x.dtype)
+        self._last_pre_mix = pre_all.view(*shape[:-1])
         return (
-            post.float() * x.float().unsqueeze(-2)
-            + torch.matmul(comb.float().transpose(-1, -2), residual.float())
-        ).to(residual.dtype)
+            out.view(*shape[:-2], dim),
+            post_all.view(*shape[:-1], 1),
+            comb_all.view(*shape[:-2], hc, hc),
+        )
+
+    def _post_impl(self, x, residual, post, comb):
+        if _tilelang_supported(residual):
+            return TileLangHCUnit._post_impl(self, x, residual, post, comb)
+        # In-place chunked reference: the caller discards ``residual`` after
+        # this sublayer, matching the TileLang ``out=residual`` contract and
+        # avoiding a second 40 GiB allocation at 1M tokens.
+        shape = residual.shape
+        hc, dim = shape[-2], shape[-1]
+        flat_x = x.reshape(-1, dim)
+        flat_res = residual.reshape(-1, hc, dim)
+        flat_post = post.reshape(-1, hc)
+        flat_comb = comb.reshape(-1, hc, hc)
+        chunk = _hc_fallback_chunk_tokens()
+        for start in range(0, flat_x.shape[0], chunk):
+            end = min(start + chunk, flat_x.shape[0])
+            first = flat_post[start:end].float().unsqueeze(-1) * flat_x[
+                start:end
+            ].float().unsqueeze(-2)
+            second = torch.matmul(
+                flat_comb[start:end].float().transpose(-1, -2),
+                flat_res[start:end].float(),
+            )
+            flat_res[start:end].copy_((first + second).to(residual.dtype))
+        return residual
 
 
 class DelayedHCHead(nn.Module):
