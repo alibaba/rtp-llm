@@ -2302,6 +2302,19 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     inputs_ready.block(capture_stream_);
     CudaGraphStreamLife stream_life(capture_stream_);
 
+    // Release allocator cache (previous size's warmup temporaries, load-phase
+    // staging) before EACH capture size: graph-pool segment reservations
+    // cannot reuse fragmented regular cache segments, and at 1M context a
+    // single size's pool commitment is GiB-scale (native-n10b: tried 4.00GiB
+    // for the bs=8 pool with 2.90GiB free while 18.40GiB sat reserved-but-
+    // unallocated in the regular cache).
+    try {
+        cuda_graph::graphDeviceSynchronize();
+        cuda_graph::graphEmptyCache();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("empty allocator cache before %s %d capture failed (non-fatal): %s", key_type, key, e.what());
+    }
+
     // WarmUp twice (params already prepared in attn impl __init__/create_params when instance was created)
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
