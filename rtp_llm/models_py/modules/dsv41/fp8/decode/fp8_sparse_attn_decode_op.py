@@ -244,6 +244,11 @@ class SparseAttnV4DecodeFp8Op:
         by ``attn_sink``). Empty rows report ``+inf`` and must be guarded
         by the consumer.
         """
+        if q.ndim == 3:
+            # Warmup/graph and the SM80 reference Q path may hand us the
+            # [B, H, D] form with an implicit q_len=1.  The native sparse
+            # MLA ABI and the reference fallback both require [B, S, H, D].
+            q = q.unsqueeze(1)
         if _use_reference_decode(q):
             return self._forward_reference(
                 q,
