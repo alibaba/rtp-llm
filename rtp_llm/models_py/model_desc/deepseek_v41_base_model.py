@@ -643,20 +643,28 @@ class DeepSeekV4Model(GptModelBase):
         torch.set_default_dtype(torch.bfloat16)
         try:
             with torch.device("meta"):
+                logging.info("[V4 init phase] transformer factory begin")
                 self.v4 = V4Transformer(self._v4_args, mw=self.weight)
+                logging.info("[V4 init phase] transformer factory complete")
                 if self.v4.embed is not None:
                     from rtp_llm.models_py.modules.dsv41.utils import V41Embedding
 
+                    logging.info("[V4 init phase] V41 embedding begin")
                     self.v4.embed = V41Embedding(
                         self.config, self.parallelism_config, self.v4.embed.weight
                     )
+                    logging.info("[V4 init phase] V41 embedding complete")
         finally:
             torch.set_default_dtype(prev_dtype)
         if self._captures_aux_hidden:
             self.v4.set_aux_hidden_capture_layer_ids(self._capture_aux_hidden_layer_ids)
+        logging.info("[V4 init phase] rope caches begin")
         for layer in self.v4.layers:
             layer.attn.init_rope_cache(device=device_str)
+        logging.info("[V4 init phase] rope caches complete")
+        logging.info("[V4 init phase] scoped extra weights begin")
         self._load_scoped_extra_weights(self.weight)
+        logging.info("[V4 init phase] scoped extra weights complete")
         del self.weight
         if torch.cuda.is_available() and device_str.startswith("cuda"):
             gpu_mem_gb = torch.cuda.memory_allocated(torch.device(device_str)) / 1024**3
