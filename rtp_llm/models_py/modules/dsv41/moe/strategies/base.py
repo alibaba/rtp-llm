@@ -354,11 +354,25 @@ def select_strategy(
             if cls.name == forced:
                 if cls.can_handle(cfg):
                     if cfg.ep_size > 1 and cls.name not in ("mega", "mega_se"):
-                        raise RuntimeError(
-                            "DSV4 EP MoE requires MegaMoEStrategy. "
-                            f"Requested strategy {forced!r} would bypass Mega "
-                            f"(layer_id={cfg.layer_id}, ep_size={cfg.ep_size})."
-                        )
+                        # SM80 has no MegaMoE, but local_loop can still be
+                        # correct when every rank's routed contribution is
+                        # reduced (DSV4_MOE_EP_ALLREDUCE=1).  Keep this an
+                        # explicit, auditable opt-in rather than silently
+                        # bypassing the default Mega-only EP contract.
+                        if not (
+                            cls.name == "local_loop"
+                            and os.environ.get(
+                                "DSV4_MOE_ALLOW_LOCAL_LOOP_EP", "0"
+                            )
+                            == "1"
+                            and os.environ.get("DSV4_MOE_EP_ALLREDUCE", "0")
+                            == "1"
+                        ):
+                            raise RuntimeError(
+                                "DSV4 EP MoE requires MegaMoEStrategy. "
+                                f"Requested strategy {forced!r} would bypass Mega "
+                                f"(layer_id={cfg.layer_id}, ep_size={cfg.ep_size})."
+                            )
                     return cls
                 if strict:
                     raise RuntimeError(
