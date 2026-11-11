@@ -23,6 +23,7 @@ import os
 import sys
 
 _ENABLED = os.environ.get("AWI_CAPTURE_PROBE", "0") == "1"
+_TRACE = os.environ.get("AWI_CAPTURE_TRACE", "0") == "1"
 _lib = None
 _logger = logging.getLogger("awi.capture_probe")
 
@@ -42,6 +43,16 @@ def probe(tag: str) -> int:
     """Return (and clear) the pending HIP error, logging it against tag."""
     if not _ENABLED:
         return 0
+    if _TRACE:
+        # Progress breadcrumbs for silent native crashes during recording:
+        # the LAST traced tag before process death brackets the crash site.
+        try:
+            import torch
+
+            if torch.cuda.is_current_stream_capturing():
+                print(f"AWI_PROBE_TRACE {tag}", file=sys.stderr, flush=True)
+        except Exception:  # noqa: BLE001
+            pass
     try:
         lib = _runtime()
         err = lib.hipGetLastError()
