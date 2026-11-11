@@ -1,4 +1,4 @@
-"""Exact indexer query norm and BF16 partial RoPE consumer for SM120."""
+"""Shared indexer query norm and BF16 partial RoPE."""
 
 import torch
 import triton
@@ -6,25 +6,36 @@ import triton.language as tl
 
 
 @triton.jit
-def _norm_rope(
+def _norm_rope_row(
     X,
     Gamma,
     Cos,
     Sin,
     Out,
+    row,
+    head,
+    rope_row,
     HEADS: tl.constexpr,
-    STRIDE: tl.constexpr,
+    STRIDE,
     EPS: tl.constexpr,
+    HEAD_BLOCK: tl.constexpr = 1,
 ):
-    row, head = tl.program_id(0), tl.program_id(1)
     lane = tl.arange(0, 32)
+    if HEAD_BLOCK > 1:
+        head = head * HEAD_BLOCK + tl.arange(0, HEAD_BLOCK)[:, None]
+        lane = lane[None, :]
     col = lane * 4
     offset = row * STRIDE + head * 128
     a = tl.load(X + offset + col).to(tl.float32)
     b = tl.load(X + offset + col + 1).to(tl.float32)
     c = tl.load(X + offset + col + 2).to(tl.float32)
     d = tl.load(X + offset + col + 3).to(tl.float32)
-    inv = tl.rsqrt(tl.sum(((a * a + b * b) + c * c) + d * d, 0) / 128.0 + EPS)
+    squares = ((a * a + b * b) + c * c) + d * d
+    if HEAD_BLOCK > 1:
+        total = tl.sum(squares, 1, keep_dims=True)
+    else:
+        total = tl.sum(squares, 0)
+    inv = tl.rsqrt(total / 128.0 + EPS)
     for j in tl.static_range(4):
         i = col + j
         gain = 1.0 + tl.load(Gamma + i).to(tl.float32)
@@ -35,8 +46,8 @@ def _norm_rope(
         other = tl.load(X + offset + partner).to(tl.float32)
         other_gain = 1.0 + tl.load(Gamma + partner).to(tl.float32)
         rotated = ((other * inv) * other_gain).to(tl.bfloat16).to(tl.float32)
-        cosine = tl.load(Cos + row * 64 + i, i < 64, other=1.0).to(tl.float32)
-        sine = tl.load(Sin + row * 64 + i, i < 64, other=0.0).to(tl.float32)
+        cosine = tl.load(Cos + rope_row * 64 + i, i < 64, other=1.0).to(tl.float32)
+        sine = tl.load(Sin + rope_row * 64 + i, i < 64, other=0.0).to(tl.float32)
         left = (normalized * cosine).to(tl.bfloat16).to(tl.float32)
         right = (
             (rotated * tl.where(i < 32, -1.0, 1.0) * sine)
@@ -49,11 +60,37 @@ def _norm_rope(
         tl.store(Out + (row * HEADS + head) * 128 + i, value)
 
 
-def try_indexer_norm_rope(q, cos, sin, gamma, eps):
-    if not (
+@triton.jit
+def _norm_rope(
+    X,
+    Gamma,
+    Cos,
+    Sin,
+    Out,
+    HEADS: tl.constexpr,
+    STRIDE: tl.constexpr,
+    EPS: tl.constexpr,
+    HEAD_BLOCK: tl.constexpr = 1,
+):
+    row, head = tl.program_id(0), tl.program_id(1)
+    _norm_rope_row(
+        X, Gamma, Cos, Sin, Out, row, head, row, HEADS, STRIDE, EPS, HEAD_BLOCK
+    )
+
+
+def _norm_rope_supported(q, cos, sin, gamma):
+    return (
         q.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(q.device) == (12, 0)
+        and (
+            torch.cuda.get_device_capability(q.device) == (12, 0)
+            or (
+                torch.cuda.get_device_capability(q.device) == (9, 0)
+                and q.ndim == 3
+                and 1 <= q.shape[0] <= 64
+                and q.shape[1] == 4
+            )
+        )
         and q.dtype == cos.dtype == sin.dtype == torch.bfloat16
         and q.ndim in (3, 4)
         and q.shape[-1] == 128
@@ -68,7 +105,11 @@ def try_indexer_norm_rope(q, cos, sin, gamma, eps):
         and gamma.is_contiguous()
         and gamma.dtype in (torch.float32, torch.bfloat16)
         and q.device == gamma.device == cos.device == sin.device
-    ):
+    )
+
+
+def try_indexer_norm_rope(q, cos, sin, gamma, eps):
+    if not _norm_rope_supported(q, cos, sin, gamma):
         return None
     rows = q.numel() // (q.shape[-2] * 128)
     out = torch.empty(q.shape, device=q.device, dtype=q.dtype)

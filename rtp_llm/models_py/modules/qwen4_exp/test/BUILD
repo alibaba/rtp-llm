@@ -535,6 +535,25 @@ models_py_test(
     deps = _REFERENCE_DEPS,
 )
 
+py_test(
+    name = "qsa_fused_decode_test",
+    srcs = ["qsa_fused_decode_test.py", "qsa/target_writer_fusion_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "decode_snapshot_sm90_test",
+    srcs = ["qsa/decode_snapshot_test.py", "qsa/target_writer_fusion_test.py"],
+    main = "qsa/decode_snapshot_test.py",
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
 models_py_test(
     name = "main_qk_cache_test",
     src = "qsa/main_qk_cache_test.py",
@@ -872,6 +891,15 @@ py_test(
     srcs = ["sparse_prefill_sm90_test.py", "sparse_prefill_sm90_test_utils.py"],
     main = "sparse_prefill_sm90_test.py",
     deps = ["//rtp_llm/models_py:qsa_sparse_prefill_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "qsa_packed_prefill_test",
+    srcs = ["qsa_packed_prefill_test.py"],
+    deps = ["//rtp_llm/models_py:qsa_packed_prefill_testlib"],
     env = {"GPU_COUNT": "1"},
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},

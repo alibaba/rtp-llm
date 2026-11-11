@@ -27,6 +27,7 @@ def _write_decode_key(
     ROTARY: tl.constexpr,
     EPS: tl.constexpr,
     HAS_VALID: tl.constexpr,
+    RAW_STRIDE: tl.constexpr,
 ):
     request = tl.program_id(0)
     d = tl.arange(0, D)
@@ -39,7 +40,7 @@ def _write_decode_key(
         other=0,
     ).to(tl.int64)
     state_valid = (position >= 0) & (state_id > 0) & (state_id < STATE_POOL_BLOCKS)
-    raw = tl.load(raw_ptr + request * D + d, mask=active, other=0).to(tl.float32)
+    raw = tl.load(raw_ptr + request * RAW_STRIDE + d, mask=active, other=0).to(tl.float32)
     tl.store(
         state_pool_ptr + (state_id * 8 + position % 8) * D + d,
         raw,
