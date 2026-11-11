@@ -1,3 +1,4 @@
+import os
 import sys
 from dataclasses import replace
 
@@ -166,6 +167,63 @@ def test_vision_uses_the_same_engine_entry_without_a_backend_tag(case, artifacts
     case = replace(case, environment=environment)
     launch = local_launch(case, java, prometheus, framework=framework)
     assert launch["components"]["vit"] == launch["components"]["prefill"]
+
+
+def test_cli_resolves_packaged_classpath_after_runtime_is_moved(
+    case, artifacts, tmp_path, monkeypatch
+):
+    runtime, java, prometheus = artifacts
+    for role in ("master", "zookeeper"):
+        target = runtime / f"java/{role}/target"
+        (target / "lib").mkdir()
+        entries = ["lib/2-first.jar", "lib/1-second.jar"]
+        for entry in entries:
+            (target / entry).touch()
+        (target / "dependencies.txt").write_text(os.pathsep.join(entries) + "\n")
+    relocated = runtime.rename(tmp_path / "relocated runtime")
+    framework = tmp_path / "checkout"
+    framework.mkdir()
+    monkeypatch.setattr(
+        case_cli, "__file__", str(framework / "python/mock_framework/case.py")
+    )
+    output = tmp_path / "launch.yaml"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "mock-case",
+            "launch",
+            str(case.source),
+            "--java",
+            str(java),
+            "--prometheus",
+            str(prometheus),
+            "--runtime-root",
+            str(relocated),
+            "--scrape-interval",
+            "4s",
+            "--output",
+            str(output),
+        ],
+    )
+    case_cli.main()
+    launch = load_yaml(output)
+    assert launch["prometheus"]["scrape_interval"] == "4000ms"
+    for role, recipe in (
+        ("master", launch["components"]["master"]),
+        ("zookeeper", launch["zookeeper"]),
+    ):
+        command = recipe["command"]
+        target = relocated / f"java/{role}/target"
+        assert command[command.index("-cp") + 1].split(os.pathsep) == [
+            str(target / entry) for entry in ("classes", *entries)
+        ]
+        assert recipe["cwd"] == str(framework)
+    for role in ("prefill", "decode", "client"):
+        assert any(
+            arg.startswith(str(relocated) + os.sep) and arg.endswith(".jar")
+            for arg in launch["components"][role]["command"]
+        )
 
 
 def test_launch_rejects_duplicate_master_business_setting(case, artifacts, tmp_path):

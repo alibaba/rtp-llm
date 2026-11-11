@@ -128,11 +128,12 @@ def prepare_launch(raw, case, base):
     return result
 
 
-def local_launch(case, java, prometheus, *, framework):
-    """Bind a Case to locally built RTP, Client, Master and ZooKeeper artifacts."""
-    import os
-
+def local_launch(
+    case, java, prometheus, *, framework, runtime_root=None, scrape_interval=None
+):
+    """Bind a Case to Java artifacts from a local build or an unpacked CI runtime."""
     framework, java = Path(framework).resolve(), Path(java).resolve()
+    runtime = framework if runtime_root is None else Path(runtime_root).resolve()
     if not java.is_file() or not os.access(java, os.X_OK):
         raise ExecutionError("java must be an executable Java 21 binary")
     unsupported = set(case.environment) - {
@@ -148,30 +149,28 @@ def local_launch(case, java, prometheus, *, framework):
         )
 
     def artifact(relative):
-        path = framework / relative
+        path = runtime / relative
         if not path.is_file():
+            if runtime_root is not None:
+                raise ExecutionError(f"Missing CI runtime artifact: {path}")
             raise ExecutionError(
                 f"Missing build artifact: {path}; run scripts/build-java.sh first"
             )
         return path
 
     def component_classpath(role):
-        root = f"java/{role}/target"
-        dependencies = (
-            artifact(f"{root}/dependencies.txt").read_text(encoding="utf-8").strip()
-        )
-        if not dependencies or any(
-            not Path(entry).is_absolute() or not Path(entry).exists()
-            for entry in dependencies.split(os.pathsep)
-        ):
-            raise ExecutionError(
-                f"{role} classpath has missing or nonabsolute entries; run scripts/build-java.sh first"
-            )
-        return os.pathsep.join([str(framework / root / "classes"), dependencies])
+        manifest = artifact(f"java/{role}/target/dependencies.txt")
+        entries = manifest.read_text(encoding="utf-8").strip().split(os.pathsep)
+        dependencies = [manifest.parent / entry for entry in entries]
+        if not all(entries) or any(not path.exists() for path in dependencies):
+            raise ExecutionError(f"{role} classpath has missing entries: {manifest}")
+        return os.pathsep.join(map(str, [manifest.parent / "classes", *dependencies]))
 
     prefix = [str(java), "-XX:ActiveProcessorCount=2"]
     commands = {}
     raw = {"prometheus": {"binary": str(Path(prometheus).resolve())}}
+    if scrape_interval is not None:
+        raw["prometheus"]["scrape_interval"] = scrape_interval
     if "master" in case.environment:
         config = case.environment["master"]["config"]
         if not {"FLEXLB_CONFIG", "MODEL_SERVICE_CONFIG"} <= config.keys():

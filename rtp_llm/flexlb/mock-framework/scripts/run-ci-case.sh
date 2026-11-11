@@ -17,34 +17,15 @@ case_file="cases/$1/case.yaml"
 test -f "$framework_dir/$case_file"
 mkdir "$3"
 output_dir="$(cd "$3" && pwd)"
-tar -xzf "$2" -C "$framework_dir"
+runtime_dir="$output_dir.runtime"
+mkdir "$runtime_dir"
+tar -xzf "$2" -C "$runtime_dir"
 cd "$framework_dir"
-# Restore the classpath in Maven's original order, relative to this worker.
-python3 - <<'PY'
-import os
-from pathlib import Path
-
-for role in ('master', 'zookeeper'):
-    target = (Path('java') / role / 'target').resolve()
-    libs = sorted((target / 'ci-libs').iterdir(), key=lambda path: int(path.name.split('-', 1)[0]))
-    (target / 'dependencies.txt').write_text(os.pathsep.join(map(str, libs)))
-PY
 uv sync --locked --offline --no-dev
 uv run --locked --offline --no-dev mock-case compile "$case_file" --output "$output_dir/compiled.json"
 uv run --locked --offline --no-dev mock-case launch "$case_file" \
     --java "$JAVA_HOME/bin/java" --prometheus "$PROMETHEUS_BIN" \
+    --runtime-root "$runtime_dir" --scrape-interval "${MOCK_CI_SCRAPE_INTERVAL:-1s}" \
     --output "$output_dir/launch.yaml"
-if [[ -n "${MOCK_CI_SCRAPE_INTERVAL:-}" ]]; then
-    uv run --locked --offline --no-dev python - "$output_dir/launch.yaml" "$MOCK_CI_SCRAPE_INTERVAL" <<'PY'
-from pathlib import Path
-import sys
-import yaml
-
-path = Path(sys.argv[1])
-launch = yaml.safe_load(path.read_text())
-launch['prometheus']['scrape_interval'] = sys.argv[2]
-path.write_text(yaml.safe_dump(launch, sort_keys=False))
-PY
-fi
 exec uv run --locked --offline --no-dev mock-case run "$case_file" \
     --launch "$output_dir/launch.yaml" --output "$output_dir/result"

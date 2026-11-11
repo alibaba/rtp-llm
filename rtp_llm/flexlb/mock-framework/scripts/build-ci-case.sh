@@ -13,8 +13,7 @@ profiles='-P!internal,!internal-monitoring,!internal-discovery'
 ../mvnw -B -f pom.xml clean "$profiles"
 ./scripts/build-java.sh -DskipTests "$profiles"
 
-# Maven emits absolute classpath entries, including reactor JARs.
-# Copy those dependencies into the archive so it can be used in any checkout.
+# Store each classpath in Maven's original order, relative to the packaged target directory.
 python3 - "$archive" <<'PY'
 import os
 from pathlib import Path
@@ -26,13 +25,17 @@ import tempfile
 with tempfile.TemporaryDirectory() as directory, tarfile.open(sys.argv[1], 'w:gz') as archive:
     for role in ('master', 'zookeeper'):
         target = Path('java') / role / 'target'
-        libs = Path(directory) / role
-        libs.mkdir()
+        packaged = Path(directory) / role
+        (packaged / 'lib').mkdir(parents=True)
         entries = (target / 'dependencies.txt').read_text().strip().split(os.pathsep)
+        classpath = []
         for index, entry in enumerate(entries):
             dependency = Path(entry)
-            shutil.copyfile(dependency, libs / f'{index}-{dependency.name}')
-        archive.add(libs, arcname=target / 'ci-libs')
+            relative = Path('lib') / f'{index}-{dependency.name}'
+            shutil.copyfile(dependency, packaged / relative)
+            classpath.append(str(relative))
+        (packaged / 'dependencies.txt').write_text(os.pathsep.join(classpath) + '\n')
+        archive.add(packaged, arcname=target)
         archive.add(target / 'classes')
     for path in (
         Path('java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'),

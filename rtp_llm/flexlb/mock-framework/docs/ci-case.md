@@ -69,6 +69,8 @@ a1 ci pipeline run 1346 --repo "$CI_REPO" --branch "$RECIPE_REF" \
 
 同一次运行会先执行一次 `mock-ci-case-build`。共享构建验证 Case 文件并按 runner 规格分组，随后为每个 Case 展开独立 Job。各 Job 可以并行，独立上传报告。新增 Case 后直接传它的 ID 即可。
 
+Case Job 把 Java 运行包解到结果目录旁的 `<输出目录>.runtime`，包内 classpath 使用相对路径。启动配置生成时通过 `--runtime-root` 指定解包位置，并通过 `--scrape-interval` 设置采样间隔。运行包留在 Job 工作区，报告目录保存 `compiled.json`、`launch.yaml` 和 Case 结果。
+
 ## 3. 下载和查看 Case 报告
 
 将触发返回的 Run ID 填入 `RUN_ID`。先用 `run get` 回读源码 SHA、Case 列表和运行状态，再用 `job list` 查看共享构建及各 Case 的状态。同一资源组的 Job 名相同，`run-case` 日志首行会打印对应的 Case ID。

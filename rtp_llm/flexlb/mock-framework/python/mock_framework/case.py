@@ -19,7 +19,12 @@ def _launch(args, case, parser):
             "launch requires --java <Java21 binary> and --prometheus <binary>; --launch is not accepted"
         )
     launch = local_launch(
-        case, args.java, args.prometheus, framework=Path(__file__).resolve().parents[2]
+        case,
+        args.java,
+        args.prometheus,
+        framework=Path(__file__).resolve().parents[2],
+        runtime_root=args.runtime_root,
+        scrape_interval=args.scrape_interval,
     )
     encoded = yaml.safe_dump(launch, allow_unicode=True, sort_keys=False)
     if args.output:
@@ -70,11 +75,27 @@ def main():
     parser.add_argument(
         "--prometheus", type=Path, help="Prometheus executable for launch generation"
     )
+    parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        help="Unpacked CI Java runtime directory for launch",
+    )
+    parser.add_argument(
+        "--scrape-interval", help="Prometheus scrape interval for launch"
+    )
     args = parser.parse_args()
     if args.command != "launch" and any(
-        value is not None for value in (args.java, args.prometheus)
+        value is not None
+        for value in (
+            args.java,
+            args.prometheus,
+            args.runtime_root,
+            args.scrape_interval,
+        )
     ):
-        parser.error("--java and --prometheus are only valid with launch")
+        parser.error(
+            "--java, --prometheus, --runtime-root and --scrape-interval are only valid with launch"
+        )
     try:
         case = compile_case(args.case, shared_root=args.shared_root)
         if args.command == "launch":
