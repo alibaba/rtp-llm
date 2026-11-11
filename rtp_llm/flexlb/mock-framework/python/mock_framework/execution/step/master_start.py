@@ -6,11 +6,11 @@ from .step_registry import Bounds, register_step
 
 
 @dataclass(frozen=True)
-class Start:
+class MasterStartArgs:
     count: Annotated[int, Bounds(1, 1024)] = 1
 
 
 @register_step("master/start", effect="write")
-async def master_start(ctx: StepContext, args: Start) -> list[str]:
+async def master_start(ctx: StepContext, args: MasterStartArgs) -> list[str]:
     """Create new Master JVMs in this run's election group; never reuse stopped identities."""
     return await ctx.runtime.masters.start(args.count)

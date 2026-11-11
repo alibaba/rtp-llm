@@ -104,8 +104,7 @@
                 <transformer
                   implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer"
                 >
-                  <mainClass
-                  >org.flexlb.mock.client.ReplayControlServer</mainClass>
+                  <mainClass>org.flexlb.mock.client.ClientMain</mainClass>
                 </transformer>
               </transformers>
             </configuration>

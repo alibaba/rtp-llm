@@ -6,11 +6,13 @@ from .step_registry import register_step
 
 
 @dataclass(frozen=True)
-class Empty:
+class ClientStopArgs:
     pass
 
 
 @register_step("client/stop", effect="write")
-async def client_stop(ctx: StepContext, args: Empty) -> dict[str, ClientResult]:
+async def client_stop(
+    ctx: StepContext, args: ClientStopArgs
+) -> dict[str, ClientResult]:
     """Stop all Clients and collect bounded cleanup; natural completion returns its saved result."""
     return await ctx.runtime.clients.stop_playback(ctx.timeout)

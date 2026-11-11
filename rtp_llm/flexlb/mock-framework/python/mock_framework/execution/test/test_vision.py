@@ -157,7 +157,7 @@ def test_vision_playback_through_real_master(tmp_path):
                 "-XX:ActiveProcessorCount=2",
                 "-cp",
                 master_classpath,
-                "org.flexlb.MasterNode",
+                "org.flexlb.MasterMain",
             ],
             "startup_timeout": "60s",
         },

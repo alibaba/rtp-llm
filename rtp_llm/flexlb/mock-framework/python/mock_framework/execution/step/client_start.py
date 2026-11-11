@@ -23,7 +23,7 @@ class Warmup:
 
 
 @dataclass(frozen=True)
-class Start:
+class ClientStartArgs:
     requests_file: str
     total_concurrency: Annotated[int, Bounds(minimum=1, maximum=2147483647)]
     qps: float | None = None
@@ -59,7 +59,7 @@ class Start:
 
 
 @register_step("client/start", effect="write")
-async def client_start(ctx: StepContext, args: Start) -> bool:
+async def client_start(ctx: StepContext, args: ClientStartArgs) -> bool:
     """Start the same finite plan on all Clients; rate and concurrency are global budgets."""
     body = {key: value for key, value in asdict(args).items() if value is not None}
     case = ctx.runtime.case

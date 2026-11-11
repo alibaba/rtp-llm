@@ -17,9 +17,10 @@ import org.flexlb.mock.client.ClientProtocol.*;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
 
 /**
- * Each JVM executes locally; only client-0 coordinates the one current plan.
+ * Runs one replay worker per JVM. Client-0 partitions the plan and coordinates the workers,
+ * and each worker paces and drains its own requests.
  */
-public final class ReplayControlServer implements ClientProtocol, AutoCloseable {
+public final class ReplayClient implements ClientProtocol, AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private final String id;
@@ -43,11 +44,11 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
     private boolean collected = true;
     private volatile boolean closed;
 
-    public ReplayControlServer(String id, Path topology, Path directory) throws IOException {
+    public ReplayClient(String id, Path topology, Path directory) throws IOException {
         this(id, topology, directory, org.flexlb.mock.protocol.MultimodalProtocol.IMAGE_TOKEN, 0, 0L, 1);
     }
 
-    private ReplayControlServer(String id, Path topology, Path directory, int imageToken, int physicalBlockSize, long seed, int prefillCpSize) throws IOException {
+    ReplayClient(String id, Path topology, Path directory, int imageToken, int physicalBlockSize, long seed, int prefillCpSize) throws IOException {
         this.imageToken = imageToken; this.physicalBlockSize = physicalBlockSize; this.cacheKeySeed = seed;
         this.prefillCpSize = prefillCpSize;
         this.id = id; this.topology = topology; this.directory = directory;
@@ -157,43 +158,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
         api.close(); http.shutdownNow();
     }
 
-    public static void main(String[] args) throws Exception {
-        if (args.length != 0) throw new IllegalArgumentException("Use runner environment");
-        var config = JSON.readTree(Path.of(required("MOCK_CONFIG_FILE")).toFile());
-        var settings = config.path("component").path("config");
-        settings.fieldNames().forEachRemaining(name -> {
-            if (!java.util.Set.of("image_token_id", "cache_key_hash_seed", "seq_size_per_block", "prefill_cp_size").contains(name)) throw new IllegalArgumentException("Unknown Client setting: " + name);
-        });
-        var configuredImageToken = settings.get("image_token_id");
-        if (configuredImageToken != null && (!configuredImageToken.isIntegralNumber()
-                || !configuredImageToken.canConvertToInt() || configuredImageToken.intValue() < 0))
-            throw new IllegalArgumentException("Client image_token_id must be nonnegative int32");
-        int imageToken = settings.path("image_token_id").asInt(org.flexlb.mock.protocol.MultimodalProtocol.IMAGE_TOKEN);
-        int physicalBlockSize = settings.path("seq_size_per_block").asInt(0);
-        if (settings.has("seq_size_per_block") && (!settings.path("seq_size_per_block").isIntegralNumber() || !settings.path("seq_size_per_block").canConvertToInt() || physicalBlockSize < 1))
-            throw new IllegalArgumentException("Client seq_size_per_block must be positive int32");
-        var configuredCp = settings.get("prefill_cp_size");
-        if (configuredCp != null && (!configuredCp.isIntegralNumber() || !configuredCp.canConvertToInt() || configuredCp.intValue() < 0))
-            throw new IllegalArgumentException("Client prefill_cp_size must be nonnegative int32");
-        int prefillCpSize = Math.max(1, settings.path("prefill_cp_size").asInt(1));
-        if (prefillCpSize > 1 && physicalBlockSize == 0)
-            throw new IllegalArgumentException("Client prefill_cp_size requires seq_size_per_block");
-        int tokensPerRoutingKey = Math.multiplyExact(physicalBlockSize, prefillCpSize);
-        long seed = org.flexlb.mock.protocol.ConfigInput.signedLong(settings, "cache_key_hash_seed", 0);
-        var directory = Path.of(required("MOCK_OUTPUT_DIR"));
-        try (var node = new ReplayControlServer(required("MOCK_NODE_ID"), Path.of(required("MOCK_TOPOLOGY_FILE")), directory, imageToken, physicalBlockSize, seed, prefillCpSize)) {
-            var hook = new Thread(node::close, "client-shutdown"); Runtime.getRuntime().addShutdownHook(hook);
-            var effective = JSON.createObjectNode().put("id", node.id).put("seq_size_per_block", physicalBlockSize).put("cache_key_hash_seed", seed)
-                .put("prefill_cp_size", prefillCpSize).put("cache_key_block_size", tokensPerRoutingKey);
-            if (configuredImageToken != null) effective.put("image_token_id", imageToken);
-            save(directory.resolve("effective-config.json"), effective);
-            save(directory.resolve("endpoints.json"), Map.of("id", node.id, "role", "client", "control", node.url(),
-                "rpc", URI.create(node.url()).getAuthority(), "metrics", node.url() + "/metrics"));
-            node.api.publishReady(Path.of(required("MOCK_READY_FILE")));
-            try { new CountDownLatch(1).await(); }
-            finally { try { Runtime.getRuntime().removeShutdownHook(hook); } catch (IllegalStateException ignored) { } }
-        }
-    }
+    void publishReady(Path path) throws IOException { api.publishReady(path); }
 
     private static void save(Path path, Object value) throws IOException {
         Files.createDirectories(path.getParent());
@@ -221,12 +186,6 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
         var current = session;
         if (current == null || expected != current.plan.sequence()) throw new IllegalStateException("Stale/unknown worker command");
         return current;
-    }
-
-    private static String required(String name) {
-        String value = System.getenv(name);
-        if (value == null || value.isBlank()) throw new IllegalArgumentException("Missing " + name);
-        return value;
     }
 
     /**

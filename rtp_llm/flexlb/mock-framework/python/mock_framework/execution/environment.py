@@ -4,10 +4,10 @@ import copy
 
 from . import ExecutionError
 from .processes import ProcessSupervisor
-from .roles.client import ClientManager
+from .roles.client import ClientRole
 from .roles.engine import EngineRole
 from .roles.master import MasterRole
-from .roles.prometheus import Prometheus
+from .roles.prometheus import PrometheusRole
 from .roles.zookeeper import ZooKeeperRole
 from .step_trace import write_json
 
@@ -78,7 +78,7 @@ class RunEnvironment:
         )
         self.topology = EndpointRegistry(records.directory)
         self.monitoring = (
-            Prometheus(self.supervisor, records, launch["prometheus"])
+            PrometheusRole(self.supervisor, records, launch["prometheus"])
             if "prometheus" in launch
             else None
         )
@@ -101,7 +101,7 @@ class RunEnvironment:
             recipes=launch["components"],
             monitoring=self.monitoring,
         )
-        self.clients = ClientManager(
+        self.clients = ClientRole(
             environment=case.environment,
             component=case.environment.get("client"),
             recipe=launch["components"].get("client"),
@@ -125,7 +125,7 @@ class RunEnvironment:
             self.engines.used_ports.update((port, port + 2))
         await self.engines.start()
         await self.masters.start()
-        await self.clients.start_nodes()
+        await self.clients.start()
         if self.monitoring:
             await self.supervisor.guard(
                 self.monitoring.baseline(), self.monitoring.startup_timeout

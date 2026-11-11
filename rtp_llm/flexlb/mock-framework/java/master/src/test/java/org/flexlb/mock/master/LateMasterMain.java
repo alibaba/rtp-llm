@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit;
 /**
  * Test launcher: finish traffic on the real Mock RPC before starting the production Master.
  */
-public final class LateMasterNode {
+public final class LateMasterMain {
     public static void main(String[] args) throws Exception {
         var json = new ObjectMapper();
         var topology = json.readTree(Path.of(System.getenv("MOCK_TOPOLOGY_FILE")).toFile());
@@ -60,6 +60,6 @@ public final class LateMasterNode {
         } finally {
             channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
         }
-        org.flexlb.MasterNode.main(args);
+        org.flexlb.MasterMain.main(args);
     }
 }

@@ -9,7 +9,7 @@ import org.flexlb.mock.protocol.MultimodalProtocol;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.flexlb.mock.client.ClientProtocol.*;
-import org.flexlb.mock.client.ReplayControlServer.Session;
+import org.flexlb.mock.client.ReplayClient.Session;
 
 /**
  * Verifies paced playback, concurrency, and shutdown for one or more Clients.
@@ -119,9 +119,9 @@ class PlaybackTest {
     @Test void threeClientsSplitGlobalCountAndUseTcpEvenForClientZero() throws Exception {
         Path topology = directory.resolve("topology.json");
         try (var h = new BackendRpcClientTest.Harness();
-             var zero = new ReplayControlServer("client-0", topology, directory.resolve("zero"));
-             var one = new ReplayControlServer("client-1", topology, directory.resolve("one"));
-             var two = new ReplayControlServer("client-2", topology, directory.resolve("two"))) {
+             var zero = new ReplayClient("client-0", topology, directory.resolve("zero"));
+             var one = new ReplayClient("client-1", topology, directory.resolve("one"));
+             var two = new ReplayClient("client-2", topology, directory.resolve("two"))) {
             new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url()), Map.of("role", "client", "control", two.url())));
             var start = InputFixture.plan(directory, null, 7, 10, 4, 4, 3000, 1000);
@@ -171,7 +171,7 @@ class PlaybackTest {
         peer.start();
         Path topology = directory.resolve("topology.json");
         try (var h = new BackendRpcClientTest.Harness();
-             var zero = new ReplayControlServer("client-0", topology, directory.resolve("zero"))) {
+             var zero = new ReplayClient("client-0", topology, directory.resolve("zero"))) {
             json.writeValue(topology.toFile(), List.of(h.endpoint(),
                 Map.of("role", "client", "control", zero.url()),
                 Map.of("role", "client", "control", "http://127.0.0.1:" + peer.getAddress().getPort())));
@@ -192,8 +192,8 @@ class PlaybackTest {
             Path source = InputFixture.write(directory.resolve("replay-" + early + ".mckidx"),
                 java.util.stream.IntStream.range(0, 6).mapToObj(i -> i * (early ? 30000L : 100L)).toList());
             try (var h = new BackendRpcClientTest.Harness();
-                 var zero = new ReplayControlServer("client-0", topology, directory.resolve("zero-" + early));
-                 var one = new ReplayControlServer("client-1", topology, directory.resolve("one-" + early))) {
+                 var zero = new ReplayClient("client-0", topology, directory.resolve("zero-" + early));
+                 var one = new ReplayClient("client-1", topology, directory.resolve("one-" + early))) {
                 new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                     Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
                 zero.start(new Start(List.of(master(h)), source.toString(), null, 5.0, 4, 8, 3000, 1000, true, null, null));
@@ -212,8 +212,8 @@ class PlaybackTest {
     @Test void oneWorkerOverflowStopsWholeGroupAndCannotBecomeSuccessfulSummary() throws Exception {
         Path topology = directory.resolve("topology.json");
         try (var h = new BackendRpcClientTest.Harness();
-             var zero = new ReplayControlServer("client-0", topology, directory.resolve("zero"));
-             var one = new ReplayControlServer("client-1", topology, directory.resolve("one"))) {
+             var zero = new ReplayClient("client-0", topology, directory.resolve("zero"));
+             var one = new ReplayClient("client-1", topology, directory.resolve("one"))) {
             h.tokenDelay = 500;
             new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
@@ -228,8 +228,8 @@ class PlaybackTest {
     @Test void unreachablePeerStopsTheRemainingClientAndKeepsMissingResultsVisible() throws Exception {
         Path topology = directory.resolve("topology.json");
         try (var h = new BackendRpcClientTest.Harness();
-             var zero = new ReplayControlServer("client-0", topology, directory.resolve("zero"));
-             var one = new ReplayControlServer("client-1", topology, directory.resolve("one"))) {
+             var zero = new ReplayClient("client-0", topology, directory.resolve("zero"));
+             var one = new ReplayClient("client-1", topology, directory.resolve("one"))) {
             new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
             zero.start(InputFixture.plan(directory, List.of(master(h)), 20, 2, 2, 4, 3000, 1000));
@@ -245,7 +245,7 @@ class PlaybackTest {
     @Test void malformedFileFailsBeforeAnyWorkerStarts() throws Exception {
         Path topology = directory.resolve("topology.json"), input = directory.resolve("bad.mckidx");
         Files.writeString(input, "{\"token_ids\":[1],\"max_new_tokens\":2}\nnot-json\n");
-        try (var h = new BackendRpcClientTest.Harness(); var zero = new ReplayControlServer("client-0", topology, directory.resolve("zero"))) {
+        try (var h = new BackendRpcClientTest.Harness(); var zero = new ReplayClient("client-0", topology, directory.resolve("zero"))) {
             new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(), Map.of("role", "client", "control", zero.url())));
             assertThrows(java.io.IOException.class, () -> zero.start(new Start(null, input.toString(), 10.0, null, 1, 4, 3000, 1000)));
             assertFalse(zero.stop(new Empty()).errors().isEmpty());
@@ -258,8 +258,8 @@ class PlaybackTest {
         Path topology = directory.resolve("topology.json"), input = directory.resolve("input.mckidx");
         InputFixture.write(input, Collections.nCopies(20, 0L));
         try (var h = new BackendRpcClientTest.Harness();
-             var zero = new ReplayControlServer("client-0", topology, directory.resolve("zero"));
-             var one = new ReplayControlServer("client-1", topology, directory.resolve("one"))) {
+             var zero = new ReplayClient("client-0", topology, directory.resolve("zero"));
+             var one = new ReplayClient("client-1", topology, directory.resolve("one"))) {
             new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
             byte[] data = Files.readAllBytes(input);

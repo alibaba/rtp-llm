@@ -6,7 +6,7 @@ import pytest
 from mock_framework.config import ConfigError
 from mock_framework.execution import ExecutionError
 from mock_framework.execution.roles import client as client_runtime
-from mock_framework.execution.roles.client import ClientManager
+from mock_framework.execution.roles.client import ClientRole
 from mock_framework.execution.step import _metrics as metrics
 from mock_framework.execution.step.client_qps import client_qps
 from mock_framework.execution.step.step_registry import StepRegistry
@@ -28,7 +28,7 @@ def context():
         ]
     )
     records = SimpleNamespace(emit=lambda **v: events.append(v))
-    clients = ClientManager(
+    clients = ClientRole(
         component=None,
         recipe=None,
         supervisor=None,
@@ -301,7 +301,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
                 "-XX:ActiveProcessorCount=2",
                 "-cp",
                 master_classpath,
-                "org.flexlb.MasterNode",
+                "org.flexlb.MasterMain",
             ],
             "startup_timeout": "60s",
         },

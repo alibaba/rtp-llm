@@ -23,7 +23,7 @@ ROOT = FRAMEWORK
 
 def test_managed_prometheus_rejects_push_backend_before_discovery(tmp_path):
     from mock_framework.execution import ExecutionError
-    from mock_framework.execution.roles.prometheus import Prometheus
+    from mock_framework.execution.roles.prometheus import PrometheusRole
 
     (tmp_path / "endpoints.json").write_text(
         json.dumps(
@@ -35,7 +35,7 @@ def test_managed_prometheus_rejects_push_backend_before_discovery(tmp_path):
             }
         )
     )
-    collector = Prometheus(
+    collector = PrometheusRole(
         None,
         SimpleNamespace(directory=tmp_path),
         {"startup_timeout": "1s", "scrape_interval": "1s"},

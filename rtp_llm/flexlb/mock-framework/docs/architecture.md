@@ -48,7 +48,7 @@ Runner 按 Phase 推进。Step 解析前置结果或全局发现引用，校验�
 
 ### 一份计划，各自发送
 
-Python 把 `client/start` 交给 Java client0。`ReplayControlServer` 固定参与者、分配并发槽和索引范围，在所有 Client 准备后下发同一开始时刻。client0 也发送自己的请求。每个 JVM 独立读取和计算发送时刻，再由 `BackendRpcClient` 调用真实 Master 和原生 Engine RPC。
+Python 把 `client/start` 交给 Java client0。`ReplayClient` 固定参与者、分配并发槽和索引范围，在所有 Client 准备后下发同一开始时刻。client0 也发送自己的请求。每个 JVM 独立读取和计算发送时刻，再由 `BackendRpcClient` 调用真实 Master 和原生 Engine RPC。
 
 | 回放方式       | 全局序号为 `k` 的请求计划发送时刻                |
 | -------------- | ------------------------------------------------ |
@@ -181,7 +181,7 @@ args:
 | ------------------------- | ----------------------------------------------------------------------------------------- |
 | YAML、类型校验与引用      | `python/mock_framework/config/`、`python/mock_framework/execution/step/`                  |
 | Case 编排、发现、进程管理 | `python/mock_framework/execution/runner.py`、`environment.py`、`processes.py` 与 `roles/` |
-| 流量读取、节奏和原生请求  | `java/client/` 中的 `IndexedTrafficReader`、`ReplayControlServer` 和 `BackendRpcClient`   |
+| 流量读取、节奏和原生请求  | `java/client/` 中的 `IndexedTrafficReader`、`ReplayClient` 和 `BackendRpcClient`          |
 | RTP/ViT、计算与缓存       | `java/engine/` 的 `service`、`execution`、`scheduler`、`cache` 和 `vit`                   |
 | 协议、指标导出及实例入口  | `java/protocol/`、`java/metrics/`、`java/master/` 和 `java/zookeeper/`                    |
 

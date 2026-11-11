@@ -12,5 +12,5 @@ def command(root: Path, java):
         "-XX:ActiveProcessorCount=2",
         "-cp",
         classpath,
-        "org.flexlb.mock.zookeeper.ZookeeperNode",
+        "org.flexlb.mock.zookeeper.ZooKeeperMain",
     ]

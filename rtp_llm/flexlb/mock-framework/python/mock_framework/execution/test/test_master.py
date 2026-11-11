@@ -5,10 +5,10 @@ import pytest
 from mock_framework.execution import ExecutionError
 from mock_framework.execution.roles.master import master_environment
 from mock_framework.execution.step.master_engine_get import (
-    EngineSelection,
+    MasterEngineGetArgs,
     master_engine_get,
 )
-from mock_framework.execution.step.master_get import MasterSelection, master_get
+from mock_framework.execution.step.master_get import MasterGetArgs, master_get
 from mock_framework.execution.test.helpers import FRAMEWORK
 from mock_framework.execution.test.helpers.zookeeper import command as zookeeper_command
 
@@ -299,9 +299,9 @@ def test_real_master_routes_to_isolated_rtp_processes(
                 "-cp",
                 master_classpath,
                 (
-                    "org.flexlb.mock.master.LateMasterNode"
+                    "org.flexlb.mock.master.LateMasterMain"
                     if history_overflow
-                    else "org.flexlb.MasterNode"
+                    else "org.flexlb.MasterMain"
                 ),
             ],
             "startup_timeout": "60s",
@@ -570,7 +570,9 @@ def test_adapter_keeps_per_master_observations(
         return responses[len(calls) - 1]
 
     monkeypatch.setattr(master, "post", post)
-    args = MasterSelection(is_leader=True) if operation == "get" else EngineSelection()
+    args = (
+        MasterGetArgs(is_leader=True) if operation == "get" else MasterEngineGetArgs()
+    )
     assert (
         asyncio.run(
             ({"get": master_get, "engines": master_engine_get}[operation])(
@@ -603,9 +605,9 @@ def test_adapter_rejects_wrong_identity_and_invalid_or_duplicate_engine(
 
     monkeypatch.setattr(master, "post", post)
     args = (
-        MasterSelection(["m0:1"], is_leader=True)
+        MasterGetArgs(["m0:1"], is_leader=True)
         if operation == "get"
-        else EngineSelection(["m0:1"])
+        else MasterEngineGetArgs(["m0:1"])
     )
     with pytest.raises(ExecutionError):
         asyncio.run(
@@ -629,18 +631,16 @@ def test_explicit_master_selection_and_empty_selection_do_not_broadcast(monkeypa
     monkeypatch.setattr(master, "post", post)
     assert (
         asyncio.run(
-            master_get(adapter_context(), MasterSelection(["m1:1"], is_leader=True))
+            master_get(adapter_context(), MasterGetArgs(["m1:1"], is_leader=True))
         )
         == []
     )
     assert calls == ["http://m1"]
     with pytest.raises(ValueError):
-        MasterSelection([])
+        MasterGetArgs([])
     with pytest.raises(ExecutionError):
         asyncio.run(
-            master_get(
-                adapter_context(), MasterSelection(["missing:1"], is_leader=True)
-            )
+            master_get(adapter_context(), MasterGetArgs(["missing:1"], is_leader=True))
         )
     assert calls == ["http://m1"]
 
@@ -691,7 +691,7 @@ def test_standby_query_preserves_actual_master_claims(monkeypatch, leaders, expe
 
     monkeypatch.setattr(master, "post", post)
     assert (
-        asyncio.run(master_get(adapter_context(), MasterSelection(is_leader=False)))
+        asyncio.run(master_get(adapter_context(), MasterGetArgs(is_leader=False)))
         == expected
     )
 
@@ -711,5 +711,5 @@ def test_master_get_without_leadership_filter_lists_selected_active_masters(
 
     monkeypatch.setattr(master, "post", unexpected_read)
     assert (
-        asyncio.run(master_get(adapter_context(), MasterSelection(targets))) == expected
+        asyncio.run(master_get(adapter_context(), MasterGetArgs(targets))) == expected
     )

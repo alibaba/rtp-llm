@@ -154,9 +154,9 @@ def local_launch(case, java, prometheus, *, framework):
             raise ExecutionError(
                 "Local Master requires FLEXLB_CONFIG and MODEL_SERVICE_CONFIG"
             )
-        artifact("java/master/target/classes/org/flexlb/MasterNode.class")
+        artifact("java/master/target/classes/org/flexlb/MasterMain.class")
         artifact(
-            "java/zookeeper/target/classes/org/flexlb/mock/zookeeper/ZookeeperNode.class"
+            "java/zookeeper/target/classes/org/flexlb/mock/zookeeper/ZooKeeperMain.class"
         )
         classpath = component_classpath("master")
         # Expose native metrics locally.
@@ -169,14 +169,14 @@ def local_launch(case, java, prometheus, *, framework):
             "-Dflexlb.monitor.metric-whitelist=flexlb_",
             "-cp",
             classpath,
-            "org.flexlb.MasterNode",
+            "org.flexlb.MasterMain",
         ]
         raw["zookeeper"] = {
             "command": prefix
             + [
                 "-cp",
                 component_classpath("zookeeper"),
-                "org.flexlb.mock.zookeeper.ZookeeperNode",
+                "org.flexlb.mock.zookeeper.ZooKeeperMain",
             ],
             "startup_timeout": "60s",
         }

@@ -10,7 +10,7 @@ from .step_registry import Bounds, register_step
 
 
 @dataclass(frozen=True)
-class Requests:
+class ClientRequestsArgs:
     targets: list[str] | None = None
     playback: Annotated[int, Bounds(minimum=1)] | None = None
     request_ids: list[Annotated[int, Bounds(minimum=1)]] | None = None
@@ -73,7 +73,7 @@ def playback_directories(root, topology, targets=None, playback=None):
 
 
 @register_step("client/requests", effect="read")
-async def client_requests(ctx: StepContext, args: Requests) -> RequestsResult:
+async def client_requests(ctx: StepContext, args: ClientRequestsArgs) -> RequestsResult:
     """Read a sealed playback; filters limit returned details, never completeness validation."""
     directories = playback_directories(
         ctx.records.directory,

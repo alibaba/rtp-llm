@@ -654,7 +654,7 @@ def test_engine_allocation_excludes_master_ports_before_master_listeners_start(
         runtime.zookeeper.start = zookeeper_start
         runtime.engines.start = engines_start
         runtime.masters.start = nothing
-        runtime.clients.start_nodes = nothing
+        runtime.clients.start = nothing
         await runtime.start()
 
     asyncio.run(check())

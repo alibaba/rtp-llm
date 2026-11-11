@@ -25,7 +25,7 @@ import java.util.stream.Collectors;
 /**
  * Runs the production Spring Master and its shared read adapter in the same JVM.
  */
-public final class MasterNode {
+public final class MasterMain {
     public static void main(String[] args) {
         try {
             run();

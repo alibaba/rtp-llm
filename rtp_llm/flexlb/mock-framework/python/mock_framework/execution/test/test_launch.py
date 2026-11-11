@@ -22,8 +22,8 @@ def case(case_data, compile_data):
 def artifacts(tmp_path):
     framework = tmp_path / "framework with spaces"
     for relative in (
-        "java/master/target/classes/org/flexlb/MasterNode.class",
-        "java/zookeeper/target/classes/org/flexlb/mock/zookeeper/ZookeeperNode.class",
+        "java/master/target/classes/org/flexlb/MasterMain.class",
+        "java/zookeeper/target/classes/org/flexlb/mock/zookeeper/ZooKeeperMain.class",
         "java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar",
         "java/client/target/mock-client-1.0-SNAPSHOT-all.jar",
         "dependency.jar",
@@ -54,9 +54,9 @@ def test_local_recipes_round_trip_without_shell_or_cwd_assumptions(case, artifac
         launch["components"]["prefill"]["command"][-1]
         == "org.flexlb.mock.engine.EngineMain"
     )
-    assert launch["components"]["master"]["command"][-1] == "org.flexlb.MasterNode"
+    assert launch["components"]["master"]["command"][-1] == "org.flexlb.MasterMain"
     assert (
-        launch["zookeeper"]["command"][-1] == "org.flexlb.mock.zookeeper.ZookeeperNode"
+        launch["zookeeper"]["command"][-1] == "org.flexlb.mock.zookeeper.ZooKeeperMain"
     )
     assert launch["components"]["client"]["command"][-1].endswith(
         "mock-client-1.0-SNAPSHOT-all.jar"
@@ -79,7 +79,7 @@ def test_local_recipes_reject_missing_or_unusable_inputs(case, artifacts, damage
             framework / "java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar"
         ).unlink()
     elif damage == "master":
-        (framework / "java/master/target/classes/org/flexlb/MasterNode.class").unlink()
+        (framework / "java/master/target/classes/org/flexlb/MasterMain.class").unlink()
     else:
         (framework / "java/master/target/dependencies.txt").write_text(
             "relative-or-missing.jar\n"

@@ -1,9 +1,9 @@
 package org.flexlb.mock.master;
 
-import org.flexlb.MasterNode.EngineSelection;
-import org.flexlb.MasterNode.MasterReads;
-import org.flexlb.MasterNode.MasterRef;
-import org.flexlb.MasterNode.None;
+import org.flexlb.MasterMain.EngineSelection;
+import org.flexlb.MasterMain.MasterReads;
+import org.flexlb.MasterMain.MasterRef;
+import org.flexlb.MasterMain.None;
 import org.flexlb.mock.protocol.Role;
 import org.junit.jupiter.api.Test;
 

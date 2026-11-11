@@ -15,8 +15,11 @@ from mock_framework.config import ConfigError, compile_case
 from mock_framework.execution import ExecutionError
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
-from mock_framework.execution.step.engine_scale import Scale, engine_scale
-from mock_framework.execution.step.prometheus_query import Promql, prometheus_query
+from mock_framework.execution.step.engine_scale import EngineScaleArgs, engine_scale
+from mock_framework.execution.step.prometheus_query import (
+    PrometheusQueryArgs,
+    prometheus_query,
+)
 from mock_framework.execution.step.step_registry import StepRegistry, register_step
 from mock_framework.execution.step_trace import timestamp
 from mock_framework.execution.test.helpers import FRAMEWORK
@@ -115,7 +118,7 @@ def setup_case(tmp_path, operation, monitor=False, invalid=False, master=False):
         )
         prefix = [str(java), "-XX:ActiveProcessorCount=2", "-cp", classpath]
         raw["components"]["master"] = {
-            "command": prefix + ["org.flexlb.MasterNode"],
+            "command": prefix + ["org.flexlb.MasterMain"],
             "startup_timeout": "60s",
         }
         raw["zookeeper"] = {"command": zookeeper_command(ROOT, java)}
@@ -241,10 +244,10 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
             ).read_bytes()
             for name in ("config.json", "effective-config.json", "endpoints.json")
         }
-        removed = await engine_scale(ctx, Scale(direction="in", count=1))
+        removed = await engine_scale(ctx, EngineScaleArgs(direction="in", count=1))
         assert len(removed) == 1 and len(ctx.globals()["prefill"]) == 1
         with pytest.raises(ExecutionError):
-            await engine_scale(ctx, Scale(direction="in", targets=removed))
+            await engine_scale(ctx, EngineScaleArgs(direction="in", targets=removed))
         # Force the allocator to encounter retired RPC and HTTP ports before fresh ports.
         candidates = deque(
             [
@@ -261,7 +264,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
 
         with monkeypatch.context() as patch:
             patch.setattr(socket, "socket", ReusedPortSocket)
-            created = await engine_scale(ctx, Scale(direction="out", count=2))
+            created = await engine_scale(ctx, EngineScaleArgs(direction="out", count=2))
         assert not candidates
         for name, content in original_files.items():
             assert (
@@ -303,7 +306,9 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
             write_json(prom.directory / "targets.json", list(prom.targets.values()))
         assert len(ctx.globals()["prefill"]) == 3 and not set(created) & set(original)
         assert (
-            await engine_scale(ctx, Scale(direction="in", targets=created[:1]))
+            await engine_scale(
+                ctx, EngineScaleArgs(direction="in", targets=created[:1])
+            )
             == created[:1]
         )
         assert len(ctx.globals()["prefill"]) == 2
@@ -350,14 +355,16 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
         if owner.monitoring:
             samples = await prometheus_query(
                 replace(ctx, query_time=timestamp()),
-                Promql("count_over_time(rtp_llm_requests_started_total[1m])"),
+                PrometheusQueryArgs(
+                    "count_over_time(rtp_llm_requests_started_total[1m])"
+                ),
             )
             assert {item.labels["instance"] for item in samples.samples} == {
                 item["rpc"] for item in endpoints
             }
-        assert len(await engine_scale(ctx, Scale(direction="in"))) == 2
+        assert len(await engine_scale(ctx, EngineScaleArgs(direction="in"))) == 2
         assert ctx.globals()["prefill"] == []
-        assert len(await engine_scale(ctx, Scale(direction="out"))) == 1
+        assert len(await engine_scale(ctx, EngineScaleArgs(direction="out"))) == 1
         return removed + created
 
     monitor = bool(os.environ.get("PROMETHEUS_BIN"))
@@ -454,9 +461,9 @@ def test_partial_scale_failure_is_not_replayed_or_reported_as_success(
 
         setattr(owner, method, fail_second)
         if operation == "create":
-            await engine_scale(ctx, Scale(direction="out", count=2))
+            await engine_scale(ctx, EngineScaleArgs(direction="out", count=2))
         else:
-            await engine_scale(ctx, Scale(direction="in", count=2))
+            await engine_scale(ctx, EngineScaleArgs(direction="in", count=2))
         raise AssertionError("Partial failure was swallowed")
 
     case, launch = setup_case(tmp_path, exercise)
@@ -489,7 +496,7 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
 
         from mock_framework.execution.roles.prometheus import _get
         from mock_framework.execution.step.master_engine_get import (
-            EngineSelection,
+            MasterEngineGetArgs,
             master_engine_get,
         )
         from mock_framework.execution.step_trace import write_json
@@ -546,13 +553,15 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
 
                 await until(healthy)
                 began = timestamp()
-                removed = await engine_scale(ctx, Scale(direction="in", count=1))
-                created = await engine_scale(ctx, Scale(direction="out"))
+                removed = await engine_scale(
+                    ctx, EngineScaleArgs(direction="in", count=1)
+                )
+                created = await engine_scale(ctx, EngineScaleArgs(direction="out"))
                 expected = sorted(ctx.globals()["prefill"])
                 observations = []
 
                 async def converged():
-                    value = await master_engine_get(ctx, EngineSelection())
+                    value = await master_engine_get(ctx, MasterEngineGetArgs())
                     observations.append({"at": timestamp(), "observed": value})
                     return value == {master: expected}
 
@@ -591,7 +600,9 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
                 await until(new_engine_received_requests, 10)
                 historical = await prometheus_query(
                     replace(ctx, query_time=timestamp()),
-                    Promql("count_over_time(rtp_llm_requests_started_total[1m])"),
+                    PrometheusQueryArgs(
+                        "count_over_time(rtp_llm_requests_started_total[1m])"
+                    ),
                 )
                 assert set(removed + created) <= {
                     sample.labels["instance"] for sample in historical.samples

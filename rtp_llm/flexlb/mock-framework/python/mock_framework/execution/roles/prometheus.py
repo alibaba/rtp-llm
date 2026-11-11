@@ -52,7 +52,7 @@ def _epoch(value):
     return parsed.timestamp()
 
 
-class Prometheus:
+class PrometheusRole:
     JOB = "mock"
 
     def __init__(self, supervisor, records, recipe):

@@ -12,7 +12,7 @@ import org.flexlb.mock.protocol.JsonWire;
 /**
  * A real, runner-owned standalone ZooKeeper; independent of every Master lifecycle.
  */
-public final class ZookeeperNode {
+public final class ZooKeeperMain {
     public static void main(String[] args) {
         try { run(); }
         catch (Throwable error) {

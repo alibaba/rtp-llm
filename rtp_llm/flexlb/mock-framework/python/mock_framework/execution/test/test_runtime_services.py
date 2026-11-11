@@ -198,9 +198,9 @@ def test_health_failure_at_teardown_still_fails_without_a_process_exit(tmp_path)
 
 
 def test_collection_removes_retired_target_without_retaining_a_ledger(tmp_path):
-    from mock_framework.execution.roles.prometheus import Prometheus
+    from mock_framework.execution.roles.prometheus import PrometheusRole
 
-    monitor = Prometheus(
+    monitor = PrometheusRole(
         None,
         SimpleNamespace(directory=tmp_path),
         {"startup_timeout": "1s", "scrape_interval": "100ms"},

@@ -388,7 +388,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
                 "-XX:ActiveProcessorCount=2",
                 "-cp",
                 classpath,
-                "org.flexlb.MasterNode",
+                "org.flexlb.MasterMain",
             ],
             "startup_timeout": "60s",
         },

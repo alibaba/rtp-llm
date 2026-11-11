@@ -26,7 +26,7 @@ class ClientResult:
     errors: list[str]
 
 
-class ClientManager:
+class ClientRole:
     def __init__(
         self,
         *,
@@ -49,7 +49,7 @@ class ClientManager:
         self.pending, self.stop_timeout = False, 30
         self._owned = []
 
-    async def start_nodes(self):
+    async def start(self):
         if self.component is None:
             return
         for index in range(self.component["deployment"]["replicas"]):
