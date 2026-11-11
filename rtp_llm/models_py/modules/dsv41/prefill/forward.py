@@ -1001,50 +1001,78 @@ def _prefill_chunk_rows() -> int:
 
 
 class _PrefillChunkInputs:
-    """Attribute proxy over framework attention inputs with chunk-adjusted
-    lengths. Everything else (block tables, sequence lengths, cache-store
-    inputs) passes through untouched: block tables span the full stream and
-    per-token slot mapping is derived from positions, so they are already
-    chunk-correct."""
+    """Attribute proxy over framework attention inputs for one prefill chunk.
 
-    __slots__ = ("_primary", "_overrides")
+    Length/cu fields come from ``overrides`` (chunk-adjusted per-request
+    values). 2-D per-request block-table fields (``kv_cache_block_id``,
+    ``kv_cache_kernel_block_id_device``, ...) are lazily row-sliced to the
+    participating requests and cached per proxy. Everything else passes
+    through untouched: tables span full streams, and per-token slot mapping
+    derives from positions, so both are already chunk-correct.
+    """
 
-    def __init__(self, primary: Any, overrides: Dict[str, Any]):
+    __slots__ = ("_primary", "_overrides", "_row_sel", "_full_batch", "_slice_cache")
+
+    def __init__(
+        self,
+        primary: Any,
+        overrides: Dict[str, Any],
+        row_sel: Optional[torch.Tensor] = None,
+        full_batch: Optional[int] = None,
+    ):
         object.__setattr__(self, "_primary", primary)
         object.__setattr__(self, "_overrides", overrides)
+        object.__setattr__(self, "_row_sel", row_sel)
+        object.__setattr__(self, "_full_batch", full_batch)
+        object.__setattr__(self, "_slice_cache", {})
 
     def __getattr__(self, name: str) -> Any:
         overrides = object.__getattribute__(self, "_overrides")
         if name in overrides:
             return overrides[name]
-        return getattr(object.__getattribute__(self, "_primary"), name)
+        cache = object.__getattribute__(self, "_slice_cache")
+        if name in cache:
+            return cache[name]
+        value = getattr(object.__getattribute__(self, "_primary"), name)
+        row_sel = object.__getattribute__(self, "_row_sel")
+        full = object.__getattribute__(self, "_full_batch")
+        if (
+            row_sel is not None
+            and full is not None
+            and "block" in name
+            and torch.is_tensor(value)
+            and value.dim() == 2
+            and value.size(0) == full
+            and row_sel.numel() != full
+        ):
+            value = value.index_select(0, row_sel.to(device=value.device))
+            cache[name] = value
+        return value
 
     def __setattr__(self, name: str, value: Any) -> None:
         object.__getattribute__(self, "_overrides")[name] = value
 
 
-def _chunk_len_like(orig: Optional[torch.Tensor], value: int) -> Optional[torch.Tensor]:
+def _chunk_vec_like(
+    orig: Optional[torch.Tensor], values: Any
+) -> Optional[torch.Tensor]:
     if isinstance(orig, torch.Tensor) and orig.numel() > 0:
-        return torch.full((1,), int(value), dtype=orig.dtype, device=orig.device)
+        return torch.tensor(list(values), dtype=orig.dtype, device=orig.device)
     return None
 
 
-def _chunk_cu_like(orig: Optional[torch.Tensor], n: int) -> Optional[torch.Tensor]:
-    if isinstance(orig, torch.Tensor) and orig.numel() >= 2:
-        return torch.tensor([0, n], dtype=orig.dtype, device=orig.device)
-    return None
+def _chunked_attn_inputs(
+    attn: Any,
+    overrides: Dict[str, Any],
+    row_sel: Optional[torch.Tensor] = None,
+    full_batch: Optional[int] = None,
+) -> Any:
+    def proxy(value: Any) -> _PrefillChunkInputs:
+        return _PrefillChunkInputs(value, overrides, row_sel, full_batch)
 
-
-def _chunked_attn_inputs(attn: Any, overrides: Dict[str, Any]) -> Any:
-    if isinstance(attn, TaggedAttentionInputs):
-        return TaggedAttentionInputs(
-            {tag: _PrefillChunkInputs(value, overrides) for tag, value in attn.items()}
-        )
     if isinstance(attn, Mapping):
-        return TaggedAttentionInputs(
-            {tag: _PrefillChunkInputs(value, overrides) for tag, value in attn.items()}
-        )
-    return _PrefillChunkInputs(attn, overrides)
+        return TaggedAttentionInputs({tag: proxy(v) for tag, v in attn.items()})
+    return proxy(attn)
 
 
 def _forward_prefill_chunked(
@@ -1056,66 +1084,108 @@ def _forward_prefill_chunked(
     cu_seqlens: Optional[torch.Tensor],
     prepare_hidden_fn: Optional[Any],
     chunk_rows: int,
+    expert_token_counts: Optional[torch.Tensor] = None,
 ) -> PyModelOutputs:
-    """Single-stream prefill as consecutive prefix-extend chunks.
+    """Prefill as consecutive row-chunks of the flat combo batch.
 
-    Chunk ``c`` covers rows ``[c0, c1)`` and presents itself to the layer
-    stack as ``input_length = c1 - c0`` with ``prefix_length = base + c0``;
-    earlier chunks' KV is already in the pools (same-stream ordering makes
-    their writes visible), so attention/indexer/SWA consume it through the
-    existing prefix paths. Hidden rows of non-final chunks are dropped: a
-    context step consumes only the final token's row, while PyWrappedModel
-    still requires ``hidden.size(0) == combo_tokens.size(0)``, so the
-    returned tensor is allocated at full height and only the last chunk's
-    rows are materialized (earlier rows are never read; ``need_all_logits``
-    is false for generation steps).
+    Chunk ``c`` covers flat rows ``[c0, c1)`` and may span parts of several
+    requests. Each participating request presents itself to the layer stack
+    with ``input_length`` = its overlap rows and ``prefix_length`` = its
+    original prefix plus the rows already consumed by earlier chunks — the
+    exact prefix-extend shape the memory-KV-reuse path uses. Earlier chunks'
+    KV writes are visible to later chunks through same-stream ordering, so
+    attention/indexer/SWA consume the prefix from the pools. Block tables
+    span full streams and slot mapping derives from positions, so both are
+    chunk-correct; per-request table rows are sliced to participants.
+
+    A context step consumes only each request's final-token hidden row,
+    while PyWrappedModel still requires ``hidden.size(0) ==
+    combo_tokens.size(0)``. The full-height output is therefore allocated
+    uninitialized and only the final-token rows are materialized (other
+    rows are never read: forwardPostLayers index_selects lm_output_indexes
+    before the LM head, and the NaN check runs on the selected rows).
+
+    ``expert_token_counts`` (EPLB stable per-expert load statistics) is
+    request-independent and passes through to every chunk unchanged.
     """
     total = int(input_ids.numel())
+    if cu_seqlens is not None and cu_seqlens.numel() >= 2:
+        bounds = [int(v) for v in cu_seqlens.detach().to("cpu", torch.int64).tolist()]
+    else:
+        bounds = [0, total]
+    n_req = len(bounds) - 1
+
+    base_prefixes = [0] * n_req
     pl_host = getattr(attn, "prefix_lengths", None)
     pl_dev = getattr(attn, "prefix_lengths_device", None)
-    base_prefix = 0
-    if isinstance(pl_host, torch.Tensor) and pl_host.numel() > 0:
-        base_prefix = int(pl_host.flatten()[0])
-    elif isinstance(pl_dev, torch.Tensor) and pl_dev.numel() > 0:
-        base_prefix = int(pl_dev.flatten()[0].item())
-    orig_il = getattr(attn, "input_lengths", None)
-    orig_il_dev = getattr(attn, "input_lengths_device", None)
-    orig_pl_dev = pl_dev
-    orig_cu = getattr(attn, "cu_seqlens", None)
-    orig_cu_dev = getattr(attn, "cu_seqlens_device", None)
+    src = (
+        pl_host
+        if isinstance(pl_host, torch.Tensor) and pl_host.numel() >= n_req
+        else pl_dev
+    )
+    if isinstance(src, torch.Tensor) and src.numel() >= n_req:
+        vals = src.detach().to("cpu", torch.int64).flatten().tolist()
+        base_prefixes = [int(v) for v in vals[:n_req]]
 
+    orig = {
+        "input_lengths": getattr(attn, "input_lengths", None),
+        "prefix_lengths": pl_host,
+        "input_lengths_device": getattr(attn, "input_lengths_device", None),
+        "prefix_lengths_device": pl_dev,
+        "cu_seqlens": getattr(attn, "cu_seqlens", None),
+        "cu_seqlens_device": getattr(attn, "cu_seqlens_device", None),
+    }
+
+    def _vec(key: str, values: Any) -> Optional[torch.Tensor]:
+        return _chunk_vec_like(orig[key], values)
+
+    finals: Dict[int, Tuple[int, torch.Tensor, int]] = {}
     last_h: Optional[torch.Tensor] = None
-    last_c0 = 0
     num_chunks = (total + chunk_rows - 1) // chunk_rows
     for idx, c0 in enumerate(range(0, total, chunk_rows)):
         c1 = min(c0 + chunk_rows, total)
-        n = c1 - c0
+        parts = []
+        for ri in range(n_req):
+            s0, s1 = bounds[ri], bounds[ri + 1]
+            ov0, ov1 = max(c0, s0), min(c1, s1)
+            if ov1 > ov0:
+                parts.append((ri, ov0, ov1))
+        if not parts:
+            continue
+        lens = [ov1 - ov0 for _, ov0, ov1 in parts]
+        prefs = [base_prefixes[ri] + (ov0 - bounds[ri]) for ri, ov0, _ in parts]
+        cu = [0]
+        for length in lens:
+            cu.append(cu[-1] + length)
         overrides: Dict[str, Any] = {}
-        for key, value in (
-            ("input_lengths", _chunk_len_like(orig_il, n)),
-            ("prefix_lengths", _chunk_len_like(pl_host, base_prefix + c0)),
-            ("input_lengths_device", _chunk_len_like(orig_il_dev, n)),
-            ("prefix_lengths_device", _chunk_len_like(orig_pl_dev, base_prefix + c0)),
-            ("cu_seqlens", _chunk_cu_like(orig_cu, n)),
-            ("cu_seqlens_device", _chunk_cu_like(orig_cu_dev, n)),
+        for key, values in (
+            ("input_lengths", lens),
+            ("prefix_lengths", prefs),
+            ("input_lengths_device", lens),
+            ("prefix_lengths_device", prefs),
+            ("cu_seqlens", cu),
+            ("cu_seqlens_device", cu),
         ):
-            if value is not None:
-                overrides[key] = value
-        attn_chunk = _chunked_attn_inputs(attn, overrides)
+            built = _vec(key, values)
+            if built is not None:
+                overrides[key] = built
+        row_sel = torch.tensor([ri for ri, _, _ in parts], dtype=torch.long)
+        attn_chunk = _chunked_attn_inputs(attn, overrides, row_sel, n_req)
         block_tables = build_block_tables_batched(kv_cache, attn_chunk)
         cu_chunk = (
-            torch.tensor([0, n], dtype=cu_seqlens.dtype, device=cu_seqlens.device)
+            torch.tensor(cu, dtype=cu_seqlens.dtype, device=cu_seqlens.device)
             if cu_seqlens is not None
             else None
         )
         if idx == 0 or idx == num_chunks - 1 or idx % 8 == 0:
             logging.info(
-                "[dsv41] chunked prefill chunk %d/%d rows=[%d,%d) prefix=%d",
+                "[dsv41] chunked prefill chunk %d/%d rows=[%d,%d) reqs=%s prefix=%s",
                 idx + 1,
                 num_chunks,
                 c0,
                 c1,
-                base_prefix + c0,
+                [ri for ri, _, _ in parts],
+                prefs,
             )
         h = forward_layers(
             v4,
@@ -1127,14 +1197,21 @@ def _forward_prefill_chunked(
             attn_inputs=attn_chunk,
             prepare_hidden_fn=prepare_hidden_fn,
             allow_ced=False,
-            expert_token_counts=None,
+            expert_token_counts=expert_token_counts,
         )
-        last_h, last_c0 = h, c0
-    assert last_h is not None
+        last_h = h
+        for ri, ov0, ov1 in parts:
+            if ov1 == bounds[ri + 1]:
+                finals[ri] = (bounds[ri + 1] - 1, h, ov1 - 1 - c0)
+    if last_h is None or len(finals) != n_req:
+        raise RuntimeError(
+            f"chunked prefill lost final rows: have {sorted(finals)}, need {n_req}"
+        )
     hidden = torch.empty(
         (total, last_h.shape[-1]), dtype=last_h.dtype, device=last_h.device
     )
-    hidden[last_c0:] = last_h
+    for grow, chunk_h, local_row in finals.values():
+        hidden[grow] = chunk_h[local_row]
     return PyModelOutputs(hidden)
 
 
@@ -1231,30 +1308,25 @@ def forward_prefill(
                 )
 
     # Whole-stream prefill cannot fit long contexts on pre-Blackwell cards
-    # (stream-sized activations and per-layer workspaces scale with T; a 1M
-    # token stream alone needs tens of GiB of transient device memory). Run
-    # such streams as a sequence of prefix-extend chunks: chunk c presents
-    # input_length=chunk_rows and prefix_length=original_prefix+c0, exactly
-    # the shape the memory-KV-reuse path already exercises, and every chunk
-    # but the last discards its hidden rows (a context step consumes only
-    # the final token's row). Single-stream steps only — the deployment
-    # admits one context stream at a time (max_context_batch_size=1).
+    # (stream-sized activations, the fp32 [T, hc, dim] HC residual stream and
+    # per-layer workspaces all scale with T; a joint 2x65K-token batch OOMed
+    # on a single 5 GiB allocation). Run such steps as a sequence of
+    # prefix-extend row-chunks of the flat combo batch: each participating
+    # request presents input_length=overlap rows and prefix_length=its
+    # original prefix plus already-consumed rows, exactly the shape the
+    # memory-KV-reuse path already exercises. The scheduler batches multiple
+    # context streams into one step when the token budget allows (and never
+    # mixes prefill with decode), so the chunker handles B>=1.
     chunk_rows = _prefill_chunk_rows()
     total_rows = int(input_ids.numel())
-    batch_rows = (
-        int(cu_seqlens.numel()) - 1
-        if cu_seqlens is not None and cu_seqlens.numel() >= 2
-        else 1
-    )
     if chunk_rows > 0 and total_rows > chunk_rows:
-        etc = getattr(inputs, "expert_token_counts", None)
-        etc_bound = isinstance(etc, torch.Tensor) and etc.numel() > 0
         # permits_ced() is a PRECONDITION (last-token-only steps); CED is
         # actually engaged only with its env flag (mirrors forward_layers'
-        # ced_requested), and only then must chunking stand aside.
+        # ced_requested), and only then must chunking stand aside. CP splits
+        # token ranges itself and is mutually exclusive with this chunker.
         ced_active = permits_ced(inputs) and _env_flag("DSV41_CED")
         cp_size = int(getattr(v4, "_cp_size", 1) or 1)
-        if batch_rows == 1 and not etc_bound and not ced_active and cp_size == 1:
+        if not ced_active and cp_size == 1:
             return _forward_prefill_chunked(
                 v4,
                 kv_cache,
@@ -1264,16 +1336,14 @@ def forward_prefill(
                 cu_seqlens,
                 prepare_hidden_fn,
                 chunk_rows,
+                expert_token_counts=getattr(inputs, "expert_token_counts", None),
             )
         global _CHUNK_GATE_LOGGED
         if not _CHUNK_GATE_LOGGED:
             _CHUNK_GATE_LOGGED = True
             logging.info(
-                "[dsv41] chunked prefill SKIPPED for T=%d: batch=%d "
-                "expert_token_counts_bound=%s ced_active=%s cp_size=%d",
+                "[dsv41] chunked prefill SKIPPED for T=%d: ced_active=%s cp_size=%d",
                 total_rows,
-                batch_rows,
-                etc_bound,
                 ced_active,
                 cp_size,
             )
