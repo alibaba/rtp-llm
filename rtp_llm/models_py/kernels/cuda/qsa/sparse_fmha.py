@@ -55,7 +55,7 @@ def _sparse_prefill_online_kernel(
     BLK_K: tl.constexpr,
 ):
     pid_b = tl.program_id(1).to(tl.int64)
-    pid_h = tl.program_id(2)
+    pid_h = tl.program_id(2).to(tl.int64)
     pid_s = tl.program_id(0).to(tl.int64)
     h_kv = pid_h // q_per_kv
     rd = tl.arange(0, D)
@@ -137,7 +137,7 @@ def _sparse_prefill_grouped_kernel(
 ):
     """Share selected K/V across GQA heads and use tensor-core reductions."""
     pid_b = tl.program_id(1).to(tl.int64)
-    pid_kv = tl.program_id(2)
+    pid_kv = tl.program_id(2).to(tl.int64)
     pid_s = tl.program_id(0).to(tl.int64)
     if SM120_GQA_PV:
         # Causal selections grow with the query position. Schedule the longer
