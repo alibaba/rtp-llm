@@ -121,21 +121,28 @@ async def run_case(case, launch, directory):
     except Exception as error:
         result.update(status="ERROR", error=f"{type(error).__name__}: {error}")
     finally:
-        records.emit(event="teardown_started")
+        cleanup = []
+        try:
+            records.emit(event="teardown_started")
+        except OSError as error:
+            cleanup.append(f"record teardown_started: {error}")
         closing = asyncio.create_task(runtime.close())
         while True:
             try:
-                cleanup = await asyncio.shield(closing)
+                cleanup.extend(await asyncio.shield(closing))
                 break
             except asyncio.CancelledError:
                 cancelled = True
                 result.update(
                     status="CANCELLED", error="Execution cancelled during teardown"
                 )
+        try:
+            records.emit(event="teardown_finished", errors=cleanup)
+        except OSError as error:
+            cleanup.append(f"record teardown_finished: {error}")
         result["cleanup_errors"] = cleanup
         if cleanup:
             result["status"] = "ERROR"
-        records.emit(event="teardown_finished", errors=cleanup)
         result["finished_at"] = timestamp()
         records.close(result)
     if cancelled:

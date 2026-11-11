@@ -116,6 +116,10 @@ class StepTrace:
         write_json(self.directory / "code.json", versions)
 
     def close(self, result):
-        write_json(self.directory / "result.json", {**result, "run_id": self.run_id})
-        for stream in self._streams.values():
-            stream.close()
+        try:
+            write_json(
+                self.directory / "result.json", {**result, "run_id": self.run_id}
+            )
+        finally:
+            for stream in self._streams.values():
+                stream.close()

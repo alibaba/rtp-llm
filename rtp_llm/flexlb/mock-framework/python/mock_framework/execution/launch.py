@@ -1,11 +1,35 @@
-"""Validate local launch recipes independently of process ownership."""
+"""Validate local launch configuration and bind it to local executables."""
 
+import os
 from pathlib import Path
 
+from ..config.master_config import validate_master_launch
 from ..config.validation import duration, fields, text
 from . import ExecutionError
-from .roles.master import validate_master_launch
-from .roles.prometheus import prepare_prometheus
+
+
+def _prepare_prometheus(raw, base):
+    fields(
+        raw,
+        {"binary", "scrape_interval", "startup_timeout"},
+        {"binary"},
+        where="launch.prometheus",
+    )
+    binary = (Path(base) / text(raw["binary"], "prometheus.binary")).resolve()
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        raise ExecutionError("prometheus.binary must be an executable file")
+    interval = duration(raw.get("scrape_interval", "1s"), positive=True) * 1000
+    if interval < 1 or interval != int(interval):
+        raise ExecutionError(
+            "Prometheus scrape_interval must be an integral number of milliseconds, at least 1ms"
+        )
+    startup = raw.get("startup_timeout", "30s")
+    duration(startup, positive=True)
+    return {
+        "binary": str(binary),
+        "scrape_interval": f"{int(interval)}ms",
+        "startup_timeout": startup,
+    }
 
 
 def prepare_launch(raw, case, base):
@@ -93,7 +117,7 @@ def prepare_launch(raw, case, base):
     if zookeeper is not None:
         result["zookeeper"] = zookeeper
     if "prometheus" in raw:
-        result["prometheus"] = prepare_prometheus(raw["prometheus"], base)
+        result["prometheus"] = _prepare_prometheus(raw["prometheus"], base)
         if any(
             "prometheus" in value.get("config", {})
             for value in case.environment.values()

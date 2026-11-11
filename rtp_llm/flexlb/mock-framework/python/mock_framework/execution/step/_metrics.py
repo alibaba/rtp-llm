@@ -143,53 +143,45 @@ def history_range(ctx, name, labels, millis):
     return f"({name})[{millis}ms:{step}ms]"
 
 
-async def counter_history(ctx, name, labels, targets, at, millis):
-    counts = await instant(
-        ctx, f"count_over_time({history_range(ctx, name, labels, millis)})", at
-    )
-    if (
-        len(counts) != len(targets)
-        or {s.labels.get("instance") for s in counts} != set(targets)
-        or any(s.value < 2 for s in counts)
+def _check_history(name, targets, series):
+    labels = [samples[0].labels for samples in series]
+    if {label.get("instance") for label in labels} != set(targets) or any(
+        sample.value < 2 for samples in series for sample in samples
     ):
+        raise ExecutionError("Incomplete metric coverage for selected instances")
+    if name.endswith("_bucket"):
+        buckets = {label.get("le") for label in labels}
+        pairs = {(label.get("instance"), label.get("le")) for label in labels}
+        # Client instances export the same histogram. Each must cover every observed bound.
+        if (
+            None in buckets
+            or "+Inf" not in buckets
+            or len(buckets) < 2
+            or len(labels) != len(targets) * len(buckets)
+            or len(pairs) != len(labels)
+        ):
+            raise ExecutionError(
+                "Incomplete histogram bucket coverage for selected instances"
+            )
+    elif len(labels) != len(targets):
         raise ExecutionError("Incomplete metric coverage for selected instances")
 
 
 async def metric(ctx, args, role, numerator, denominator=None, *, kind=None):
-    at, millis, operation = evaluation_window(ctx, args)
+    _, millis, operation = evaluation_window(ctx, args)
     labels, targets = scope(ctx, args, role)
-    ctx.records.emit(
-        event="metric_window",
-        query_time=ctx.query_time,
-        start=at - millis / 1000,
-        end=at,
-    )
-    # Every selected instance must contribute the counter history; aggregate alone hides missing peers.
-    for name in [numerator] + ([denominator] if denominator else []):
-        check_labels = labels + (
-            f",kind={json.dumps(kind)}" if name == numerator and kind else ""
-        )
-        await counter_history(ctx, name, check_labels, targets, at, millis)
+    numerator_labels = labels + (f",kind={json.dumps(kind)}" if kind else "")
+    histories = [(numerator, numerator_labels, targets)]
 
     def aggregate(name, selector):
         return f"sum({operation}({name}{{{selector}}}[{millis}ms]))"
 
-    expression = aggregate(
-        numerator, labels + (f",kind={json.dumps(kind)}" if kind else "")
-    )
+    expression = aggregate(numerator, numerator_labels)
     if denominator:
+        histories.append((denominator, labels, targets))
         expression += " / " + aggregate(denominator, labels)
     elif operation == "increase":
         expression += " / " + str(Decimal(millis) / 1000)
-    histories = [
-        (
-            name,
-            labels
-            + (f",kind={json.dumps(kind)}" if name == numerator and kind else ""),
-            targets,
-        )
-        for name in [numerator] + ([denominator] if denominator else [])
-    ]
     return await evaluate(ctx, args, expression, histories)
 
 
@@ -275,33 +267,40 @@ async def series_query(ctx, expression, start, end, step):
     return values
 
 
-async def evaluate(ctx, args, expression, histories=()):
+async def evaluate(ctx, args, expression, histories):
     at, millis, _ = window(ctx, args)
+    start = at - millis / 1000
+    if args.mode == "series":
+        period = sample_period(ctx)
+        step = period / 4
+        count = int(millis / 1000 / step)
+        if not 1 <= count <= 10000:
+            raise ExecutionError("series requires 1–10000 sampling points")
+        start = at - (count - 1) * step
+    ctx.records.emit(
+        event="metric_window", query_time=ctx.query_time, start=start, end=at
+    )
+
     if args.mode == "interval":
+        for name, labels, targets in histories:
+            counts = await instant(
+                ctx, f"count_over_time({history_range(ctx, name, labels, millis)})", at
+            )
+            _check_history(name, targets, [[sample] for sample in counts])
         values = await instant(ctx, expression, at)
         if len(values) != 1 or not math.isfinite(values[0].value):
             raise ExecutionError("Metric query must return one finite sample")
         return values[0].value
-    step = sample_period(ctx) / 4
-    count = int(millis / 1000 / step)
-    if not 1 <= count <= 10000:
-        raise ExecutionError("series requires 1–10000 sampling points")
-    start = at - (count - 1) * step
-    period = max(1, round(sample_period(ctx) * 1000))
+    period_millis = max(1, round(period * 1000))
     for name, labels, targets in histories:
         coverage = await series_query(
             ctx,
-            f"count_over_time({history_range(ctx, name, labels, period)})",
+            f"count_over_time({history_range(ctx, name, labels, period_millis)})",
             start,
             at,
             step,
         )
-        if (
-            len(coverage) != len(targets)
-            or {s[0].labels.get("instance") for s in coverage} != set(targets)
-            or any(point.value < 2 for samples in coverage for point in samples)
-        ):
-            raise ExecutionError("Incomplete metric coverage for selected instances")
+        _check_history(name, targets, coverage)
     values = await series_query(ctx, expression, start, at, step)
     if len(values) != 1:
         raise ExecutionError("Metric query must return one complete series")
@@ -314,10 +313,9 @@ async def evaluate(ctx, args, expression, histories=()):
 
 
 async def gauge(ctx, args, role, name):
-    at, millis, _ = window(ctx, args)
+    _, millis, _ = window(ctx, args)
     labels, targets = scope(ctx, args, role)
     worker = f"sum by(instance)({name}{{{labels}}})"
-    await counter_history(ctx, worker, None, targets, at, millis)
     expression = (
         f"sum(avg_over_time({history_range(ctx, worker, None, millis)}))"
         if args.mode == "interval"
@@ -327,14 +325,13 @@ async def gauge(ctx, args, role, name):
 
 
 async def latency(ctx, args, name):
-    at, millis, operation = evaluation_window(ctx, args)
+    _, millis, operation = evaluation_window(ctx, args)
     labels, targets = scope(ctx, args, "client")
-    histories = [(name + suffix, labels, targets) for suffix in ("_sum", "_count")]
-    for metric_name, selector, addresses in histories:
-        await counter_history(ctx, metric_name, selector, addresses, at, millis)
     if args.statistic == "mean":
+        histories = [(name + suffix, labels, targets) for suffix in ("_sum", "_count")]
         expression = f"sum({operation}({name}_sum{{{labels}}}[{millis}ms])) / sum({operation}({name}_count{{{labels}}}[{millis}ms]))"
     else:
+        histories = [(name + "_bucket", labels, targets)]
         quantile = {"p95": 0.95, "p99": 0.99}[args.statistic]
         expression = f"histogram_quantile({quantile}, sum by(le)({operation}({name}_bucket{{{labels}}}[{millis}ms])))"
     return await evaluate(ctx, args, expression, histories)

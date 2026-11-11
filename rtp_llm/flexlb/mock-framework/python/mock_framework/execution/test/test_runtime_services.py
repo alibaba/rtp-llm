@@ -73,6 +73,44 @@ def test_discovery_failure_after_launch_still_reaps_process(tmp_path, monkeypatc
     assert not (output / "topology-history.json").exists()
 
 
+@pytest.mark.parametrize(
+    "failed_event", ["teardown_started", "process_stopped", "teardown_finished"]
+)
+def test_teardown_record_failure_still_reaps_processes(
+    tmp_path, monkeypatch, failed_event
+):
+    from mock_framework.execution.roles.test.test_master_lifecycle import (
+        assert_reaped,
+        generic,
+        logs,
+        step,
+    )
+    from mock_framework.execution.runner import run_case
+    from mock_framework.execution.step_trace import StepTrace
+
+    original = StepTrace.emit
+
+    def emit(self, stream="events", **event):
+        if event.get("event") == failed_event:
+            raise OSError("event write failed")
+        return original(self, stream, **event)
+
+    monkeypatch.setattr(StepTrace, "emit", emit)
+    case, launch = generic(
+        tmp_path,
+        [step("stop", "master/stop", args={"targets": ["127.0.0.1:12000"]})],
+        replicas=3,
+    )
+    output = tmp_path / "run"
+    result = asyncio.run(run_case(case, launch, output))
+    assert result["status"] == "ERROR"
+    assert any(failed_event in error for error in result["cleanup_errors"])
+    started = [event for event in logs(output) if event["event"] == "process_started"]
+    assert len(started) == 3
+    assert_reaped(output)
+    assert json.loads((output / "result.json").read_text())["status"] == "ERROR"
+
+
 def test_cancelled_spawn_remains_owned_until_final_cleanup(tmp_path, monkeypatch):
     async def exercise():
         supervisor = ProcessSupervisor(SimpleNamespace(emit=lambda **event: None))

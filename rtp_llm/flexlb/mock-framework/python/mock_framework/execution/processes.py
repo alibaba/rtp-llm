@@ -126,8 +126,8 @@ class ProcessSupervisor:
                 errors.append(
                     f"{name}: unexpected exit status during kill: {child.returncode}"
                 )
-            self._process_event("process_stopped", name, code=child.returncode)
             del self._children[name]
+            self._record_stop(name, child.returncode, errors)
         return errors
 
     async def stop(self, names, grace):
@@ -183,10 +183,16 @@ class ProcessSupervisor:
                 errors.append(
                     f"{name}: did not stop gracefully; retained data may be incomplete"
                 )
-            self._process_event("process_stopped", name, code=child.returncode)
             if child.returncode is not None:
                 del self._children[name]
+            self._record_stop(name, child.returncode, errors)
         return errors
+
+    def _record_stop(self, name, code, errors):
+        try:
+            self._process_event("process_stopped", name, code=code)
+        except OSError as error:
+            errors.append(f"{name}: record process_stopped: {error}")
 
     async def close(self):
         self.closing = True

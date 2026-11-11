@@ -425,10 +425,21 @@ def test_latency_interval_uses_request_weights_and_merges_histogram_buckets(
     for node in ctx.nodes:
         node["role"] = "client"
     expressions = []
+    events = []
+    ctx.records.emit = lambda **event: events.append(event)
+    bucket_bounds = {1001: ("0.5", "+Inf"), 1002: ("0.5", "+Inf")}
 
     async def instant(ctx, expression, at):
         expressions.append(expression)
         if expression.startswith("count_over_time"):
+            if "_bucket" in expression:
+                return [
+                    metrics.QuerySample(
+                        {"instance": f"127.0.0.1:{p}", "le": bound}, 4, at
+                    )
+                    for p, bounds in bucket_bounds.items()
+                    for bound in bounds
+                ]
             return [
                 metrics.QuerySample({"instance": f"127.0.0.1:{p}"}, 4, at)
                 for p in (1001, 1002)
@@ -439,8 +450,18 @@ def test_latency_interval_uses_request_weights_and_merges_histogram_buckets(
     assert asyncio.run(client_ttft(ctx, LatencyArgs(range=["-30s", "0s"]))) == 0.25
     assert "sum(increase(mock_client_ttft_seconds_sum" in expressions[-1]
     assert " / sum(increase(mock_client_ttft_seconds_count" in expressions[-1]
-    asyncio.run(client_ttft(ctx, LatencyArgs(range=["-30s", "0s"], statistic="p95")))
+    p95 = LatencyArgs(range=["-30s", "0s"], statistic="p95")
+    assert asyncio.run(client_ttft(ctx, p95)) == 0.25
+    assert "count_over_time(mock_client_ttft_seconds_bucket" in expressions[-2]
     assert "histogram_quantile(0.95, sum by(le)(increase(" in expressions[-1]
+    assert [event["end"] - event["start"] for event in events] == [30, 30]
+
+    bucket_bounds[1002] = ("+Inf",)
+    with pytest.raises(ExecutionError, match="bucket coverage"):
+        asyncio.run(client_ttft(ctx, p95))
+    del bucket_bounds[1002]
+    with pytest.raises(ExecutionError, match="coverage"):
+        asyncio.run(client_ttft(ctx, p95))
 
 
 @pytest.mark.parametrize("mode", ["interval", "series"])

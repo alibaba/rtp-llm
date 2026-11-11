@@ -9,6 +9,7 @@ from typing import Any
 
 from ..execution.step.step import Expect, Reference, Step
 from ..execution.step.step_registry import StepRegistry
+from .master_config import validate_master_config
 from .validation import (
     ConfigError,
     compatible,
@@ -384,8 +385,6 @@ def compile_environment(raw, *, directory=None):
         deployment = _compile_deployment(component.get("deployment", {}), role)
         native = _load_component_config(component.get("config", {}), role, directory)
         if role == "master":
-            from ..execution.roles.master import validate_master_config
-
             validate_master_config(native)
         result[role] = {"deployment": deployment, "config": expand_config(native)}
         if "engine" in component:

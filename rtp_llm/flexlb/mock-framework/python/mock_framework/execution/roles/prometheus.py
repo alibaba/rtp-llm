@@ -6,37 +6,12 @@ import os
 import urllib.parse
 import urllib.request
 from datetime import datetime
-from pathlib import Path
 
 import yaml
 
-from ...config.validation import duration, fields, text
+from ...config.validation import duration
 from .. import ExecutionError
 from ..step_trace import timestamp, write_json
-
-
-def prepare_prometheus(raw, base):
-    fields(
-        raw,
-        {"binary", "scrape_interval", "startup_timeout"},
-        {"binary"},
-        where="launch.prometheus",
-    )
-    binary = (Path(base) / text(raw["binary"], "prometheus.binary")).resolve()
-    if not binary.is_file() or not os.access(binary, os.X_OK):
-        raise ExecutionError("prometheus.binary must be an executable file")
-    interval = duration(raw.get("scrape_interval", "1s"), positive=True) * 1000
-    if interval < 1 or interval != int(interval):
-        raise ExecutionError(
-            "Prometheus scrape_interval must be an integral number of milliseconds, at least 1ms"
-        )
-    startup = raw.get("startup_timeout", "30s")
-    duration(startup, positive=True)
-    return {
-        "binary": str(binary),
-        "scrape_interval": f"{int(interval)}ms",
-        "startup_timeout": startup,
-    }
 
 
 def _get(url):
