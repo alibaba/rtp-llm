@@ -759,6 +759,51 @@ void processLogits(const GreedyParams&  params,
 
 }  // anonymous namespace
 
+static GreedyOutput tryCompactDeferredSampling(const GreedyParams& params, float temperature = 1.0f) {
+    const auto batch_size = params.logits.size(0);
+    if (batch_size == 0)
+        return {};
+    const auto* requested_k = params.top_k.data_ptr<int32_t>();
+    const auto* requested_p = params.top_p.data_ptr<float>();
+    const char* filter_env = std::getenv("RTP_LLM_GUMBEL_LOGIT_FILTER");
+    const auto normalize_p = [](float value) {
+        return std::abs(value) < 1e-7f || std::abs(value - 1.0f) < 1e-7f ? 1.0f : value;
+    };
+    const float compact_p = normalize_p(requested_p[0]);
+    if (params.allow_compact_deferred_output && (!filter_env || std::string(filter_env) == "1")
+        && requested_k[0] == 1024
+        && std::all_of(requested_k, requested_k + batch_size, [](int32_t value) { return value == 1024; })
+        && std::all_of(requested_p, requested_p + batch_size, [compact_p, normalize_p](float value) {
+               return normalize_p(value) == compact_p;
+           })) {
+        auto compact = torch_ext::deferred_compact_topk_topp(params.logits, 1024, compact_p, temperature);
+        if (std::get<0>(compact).defined()) {
+            torch::Tensor prepared_rng;
+            if (params.deferred_rejection_rows > 0) {
+                const int64_t rows = params.deferred_rejection_rows;
+                TORCH_CHECK(batch_size % rows == 0, "deferred rejection rows must divide target rows");
+                const int64_t requests = batch_size / rows;
+                TORCH_CHECK(static_cast<int64_t>(params.deferred_rejection_generators.size()) <= requests,
+                            "too many deferred rejection generators");
+                // The GPU can filter while the CPU reserves the exact same
+                // per-request counters that rejection would reserve later.
+                prepared_rng = reserveSamplingSeedOffsets(params.deferred_rejection_generators,
+                                                          requests,
+                                                          std::max<int64_t>(32, ((rows + 3) / 4) * 4),
+                                                          11);
+            }
+            return GreedyOutput{torch::Tensor(),
+                                true,
+                                std::get<0>(compact),
+                                std::get<1>(compact),
+                                params.logits,
+                                std::get<2>(compact),
+                                prepared_rng};
+        }
+    }
+    return {};
+}
+
 static GreedyOutput
 flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transposed_tokens, bool mixed_batch = false) {
     const auto batch_size = params.logits.size(0);
@@ -791,37 +836,9 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
             return std::abs(value) < 1e-7f || std::abs(value - 1.0f) < 1e-7f ? 1.0f : value;
         };
         const float compact_p = normalize_p(requested_p[0]);
-        if (params.allow_compact_deferred_output && (!filter_env || std::string(filter_env) == "1")
-            && requested_k[0] == 1024
-            && std::all_of(requested_k, requested_k + batch_size, [](int32_t value) { return value == 1024; })
-            && std::all_of(requested_p, requested_p + batch_size, [compact_p, normalize_p](float value) {
-                   return normalize_p(value) == compact_p;
-               })) {
-            auto compact = torch_ext::deferred_compact_topk_topp(params.logits, 1024, compact_p);
-            if (std::get<0>(compact).defined()) {
-                torch::Tensor prepared_rng;
-                if (params.deferred_rejection_rows > 0) {
-                    const int64_t rows = params.deferred_rejection_rows;
-                    TORCH_CHECK(batch_size % rows == 0, "deferred rejection rows must divide target rows");
-                    const int64_t requests = batch_size / rows;
-                    TORCH_CHECK(static_cast<int64_t>(params.deferred_rejection_generators.size()) <= requests,
-                                "too many deferred rejection generators");
-                    // The GPU can filter while the CPU reserves the exact same
-                    // per-request counters that rejection would reserve later.
-                    prepared_rng = reserveSamplingSeedOffsets(params.deferred_rejection_generators,
-                                                              requests,
-                                                              std::max<int64_t>(32, ((rows + 3) / 4) * 4),
-                                                              11);
-                }
-                return GreedyOutput{torch::Tensor(),
-                                    true,
-                                    std::get<0>(compact),
-                                    std::get<1>(compact),
-                                    params.logits,
-                                    std::get<2>(compact),
-                                    prepared_rng};
-            }
-        }
+        auto prepared = tryCompactDeferredSampling(params);
+        if (prepared.deferred_token_sampling)
+            return prepared;
         if ((!filter_env || std::string(filter_env) == "1") && requested_k[0] == 1024
             && std::all_of(requested_k, requested_k + batch_size, [](int32_t value) { return value == 1024; })
             && std::all_of(requested_p,
@@ -1078,6 +1095,20 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                                          params.do_sample.value().data_ptr<bool>() + batch_size,
                                          [&](auto t) { return t; });
     const bool    deferred = params.defer_token_sampling && Py_IsInitialized();
+    if (deferred && batch_size > 0 && params.allow_compact_deferred_output
+        && params.top_k.data_ptr<int32_t>()[0] == 1024 && need_do_sample && !has_not_do_sample) {
+        const auto* temperatures = params.temperature.data_ptr<float>();
+        const float temperature = temperatures[0];
+        // Mixed temperatures retain the batch-wide epsilon scaling in processLogits.
+        if (temperature != 1.0f && std::isfinite(temperature) && temperature > 0.0f
+            && std::all_of(temperatures, temperatures + batch_size,
+                           [temperature](float value) { return value == temperature; })
+            && !requiresTokenHistory(params)) {
+            auto output = tryCompactDeferredSampling(params, temperature);
+            if (output.deferred_token_sampling)
+                return output;
+        }
+    }
     torch::Tensor device_tokens;
     torch::Tensor transposed_tokens;
     if (!deferred || (need_do_sample && requiresTokenHistory(params))) {
