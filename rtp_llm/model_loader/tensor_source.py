@@ -17,6 +17,9 @@ class TensorSource:
     def get_database(self) -> BaseDatabase:
         raise NotImplementedError
 
+    def stacked_expert_index(self, name: str, expert_id: int) -> int:
+        return expert_id
+
 
 class StackSplitTensorSource(TensorSource):
     """Wraps a TensorSource to transparently split stacked MoE tensors by expert.
@@ -47,7 +50,8 @@ class StackSplitTensorSource(TensorSource):
             if stacked_key not in self._stacked_cache:
                 raw = self._base.load_tensor(stacked_key, data_type)
                 self._stacked_cache[stacked_key] = merge_fun(raw)
-            return [self._stacked_cache[stacked_key][expert_id]]
+            index = self._base.stacked_expert_index(stacked_key, expert_id)
+            return [self._stacked_cache[stacked_key][index]]
         return self._base.load_tensor(name, data_type)
 
     def has_tensor(self, name: str) -> bool:
@@ -83,12 +87,25 @@ class TensorCollector(TensorSource):
     _completed_once: bool
     _database: BaseDatabase
 
-    def __init__(self, target_keys: Set[str], database: BaseDatabase):
+    def __init__(self, target_keys: Set[str], database: BaseDatabase, *, stacked_experts=None):
         self._target_keys = target_keys
         self._tensors = {}
         self._scales = {}
         self._completed_once = False
         self._database = database
+        self._stacked_experts = {
+            name: selected
+            for name, selected in (stacked_experts or {}).items()
+            if name in target_keys
+        }
+
+    def stacked_expert_index(self, name: str, expert_id: int) -> int:
+        selected = self._stacked_experts.get(name)
+        if selected is None:
+            return expert_id
+        if expert_id not in selected:
+            raise ValueError(f"Expert {expert_id} is outside the received packed shard for {name}")
+        return expert_id - selected.start
 
     def load_tensor(self, name, data_type=torch.float16):
         tensors = []

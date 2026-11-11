@@ -558,6 +558,7 @@ class ModelLoader:
         *,
         max_buffer_bytes: int,
         borrow_singleton_sources: bool = False,
+        stacked_experts: Optional[dict[str, range]] = None,
     ) -> Iterator[Tuple[Optional[int], str, torch.Tensor]]:
         """Stream HF inputs through the normal loader, including shared sources.
 
@@ -576,8 +577,12 @@ class ModelLoader:
         # The ordinary fast-loader collectors expect per-expert logical keys.
         # Streaming refit receives one real packed tensor per HF parameter;
         # reconstruct only these transaction-local collectors with real keys.
-        groups = [group._replace(collector=TensorCollector(names, self._load_config.database))
-                  for group, names in zip(groups, group_names)]
+        groups = [
+            group._replace(collector=TensorCollector(
+                names, self._load_config.database, stacked_experts=stacked_experts
+            ))
+            for group, names in zip(groups, group_names)
+        ]
         consumers = {}
         for index, names in enumerate(group_names):
             for name in names:
@@ -596,6 +601,12 @@ class ModelLoader:
                     raise ValueError(f"duplicate HF tensor: {name}")
                 if not isinstance(tensor, torch.Tensor):
                     raise TypeError(f"HF tensor {name!r} is not a torch.Tensor")
+                selected = (stacked_experts or {}).get(name)
+                if selected is not None and (
+                    tensor.ndim != 3 or tensor.shape[0] != len(selected)
+                    or tensor.dtype != torch.bfloat16 or not tensor.is_contiguous()
+                ):
+                    raise ValueError(f"Invalid rank-local BF16 packed expert tensor for {name}")
                 size = tensor.numel() * tensor.element_size()
                 if pending_bytes + size > max_buffer_bytes:
                     raise ValueError(

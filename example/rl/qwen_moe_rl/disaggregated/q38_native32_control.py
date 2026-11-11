@@ -22,6 +22,7 @@ class SourceLease:
     ipc_by_rank: tuple
     sha256_by_rank: tuple
     release: object
+    expert_records: tuple = ()
 
 
 class Native32Policy:
@@ -124,12 +125,32 @@ class Native32Policy:
                             or any(not isinstance(x, str) or not re.fullmatch('[0-9a-f]{64}', x)
                                    for x in lease.sha256_by_rank)):
                         raise ValueError('unverified, duplicate or incomplete checkpoint source lease')
-                    if not lease.name.endswith(('.mlp.experts.gate_up_proj', '.mlp.experts.down_proj')):
-                        if len(set(lease.sha256_by_rank)) != 1:
+                    if lease.name.endswith(('.mlp.experts.gate_up_proj', '.mlp.experts.down_proj')):
+                        from qwen38_ep32_transport import ExpertReceived, push_expert_source
+                        native_uuids = tuple(x.lower().removeprefix('gpu-')
+                                             for group in self.topology.gpu_uuids for x in group)
+                        if (len(lease.expert_records) != WORLD
+                                or any(not isinstance(row, ExpertReceived) for row in lease.expert_records)):
+                            raise ValueError('expert sources require verified rank-local receive records')
+                        for rank,row in enumerate(lease.expert_records):
+                            receipt = row.receipt
+                            spec = receipt.pair.spec
+                            if (receipt.gpu_uuid.lower().removeprefix('gpu-') != native_uuids[rank]
+                                    or receipt.native_incarnation != self.incarnation
+                                    or receipt.pair.rollout_rank != rank
+                                    or (spec.transaction,spec.step,spec.ordinal,spec.name) !=
+                                        (transaction,step,len(received),lease.name)
+                                    or spec.sha256 != lease.sha256_by_rank[rank]
+                                    or row.metadata != lease.ipc_by_rank[rank]):
+                                raise ValueError('expert receive record does not bind this native transaction and GPU')
+                        acknowledgements = await push_expert_source(self.control,lease.expert_records)
+                        await lease.release(acknowledgements)
+                    else:
+                        if lease.expert_records or len(set(lease.sha256_by_rank)) != 1:
                             raise ValueError('shared HF source differs across native ranks')
-                    await self.control.push_weight(lease.name, lease.ipc_by_rank)
+                        await self.control.push_weight(lease.name, lease.ipc_by_rank)
+                        await lease.release()
                     received[lease.name] = lease.sha256_by_rank
-                    await lease.release()
                     self.held_lease = None
                 if set(received) != self.sources:
                     raise RuntimeError('incomplete native policy stream: commit is forbidden')

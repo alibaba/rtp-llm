@@ -215,6 +215,17 @@ class WeightManager:
             if set(shapes) != required:
                 raise ValueError("checkpoint HF shape manifest is incomplete for required text weights")
             self._rl_source_shapes = shapes
+        local_experts = None
+        if os.environ.get("RTP_LLM_RL_WORLD32_LOCAL_EXPERTS") == "1":
+            from rtp_llm.utils.qwen38_expert_shards import ExpertShardLayout
+
+            if (
+                config.model_type != "qwen38_moe_text"
+                or os.environ.get("RTP_LLM_RL_WORLD32") != "1"
+                or os.environ.get("RTP_LLM_RL_WORLD72") == "1"
+            ):
+                raise ValueError("Local expert refit is restricted to the opted-in Qwen3.8 EP32 world")
+            local_experts = ExpertShardLayout.from_load_config(self._weights_loader.get_load_config())
         self._rl_update = RlWeightUpdate(
             self._weights_loader,
             self._weights,
@@ -230,6 +241,7 @@ class WeightManager:
                 and os.environ.get("RTP_FIXED_PHYSICAL_EP_LAYOUT", "") == "balanced_v1"
             ),
             source_dtypes=getattr(self._weights_loader, "bootstrap_source_dtypes", None),
+            local_experts=local_experts,
         )
 
     def rl_push(self, name: str, metadata: bytes, timeout: float) -> None:
@@ -237,6 +249,10 @@ class WeightManager:
 
         if self._rl_update is None:
             raise RuntimeError("no active RL weight transaction")
+        if self._rl_update.local_experts is not None:
+            if name not in self._rl_update.source_shapes:
+                raise ValueError(f"unknown HF parameter: {name}")
+            metadata = self._rl_update.local_experts.unpack_ipc(name, metadata)
         tensor = CudaIpcV2.import_tensor(metadata)
         self._rl_update.push(name, tensor, timeout=timeout)
 

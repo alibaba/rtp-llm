@@ -17,11 +17,24 @@ class RlWeightUpdate:
     A successful push acknowledges that its source storage can be reused.
     """
 
-    def __init__(self, loader, weights, device, source_shapes, max_buffer_bytes, *, borrow_singleton_sources=False, fixed_expert_map=False, source_dtypes=None):
+    def __init__(
+        self, loader, weights, device, source_shapes, max_buffer_bytes, *,
+        borrow_singleton_sources=False, fixed_expert_map=False, source_dtypes=None,
+        local_experts=None,
+    ):
         self.loader = loader
         self.weights = weights
         self.device = torch.device(device)
+        self.local_experts = local_experts
         self.source_shapes = source_shapes
+        self._stream_options = {}
+        if local_experts is not None:
+            from rtp_llm.utils.qwen38_expert_shards import PACKED_SHAPES
+
+            if fixed_expert_map:
+                raise ValueError("Qwen3.8 rank-local refit does not allow padded expert slots")
+            self.source_shapes = local_experts.source_shapes(source_shapes)
+            self._stream_options["stacked_experts"] = dict.fromkeys(PACKED_SHAPES, local_experts.experts)
         self.source_dtypes = None if source_dtypes is None else dict(source_dtypes)
         if self.source_dtypes is not None and (
             set(self.source_dtypes) != set(source_shapes)
@@ -105,6 +118,7 @@ class RlWeightUpdate:
                     str(self.device),
                     max_buffer_bytes=self.max_buffer_bytes,
                     borrow_singleton_sources=self.borrow_singleton_sources,
+                    **self._stream_options,
                 ):
                     key = (layer, name)
                     if key in self.applied or key not in self.targets:
