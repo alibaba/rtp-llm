@@ -175,14 +175,13 @@ def ensure_inert_resident(
                 f"inert residency ranks {invalid} outside world_size {world_size}"
             )
     already = set(recorded_names())
-    # Balance only the keys this process still has to materialize.  Balancing
-    # all names would let already-fetched tensors consume a rank's share and
-    # leave the real inert bytes clustered on one GPU.
-    pending = [name for name in names if name not in already]
+    # Assign every name deterministically so each rank computes the same owner
+    # map even when lazy loading leaves different ``already`` sets locally.
+    # Owners that already fetched a key keep it; otherwise they materialize it.
     sizes: Dict[str, int] = {}
     from safetensors import safe_open
 
-    for name in pending:
+    for name in names:
         shard = os.path.join(checkpoint_path, weight_map[name])
         with safe_open(shard, framework="pt", device="cpu") as file:
             shape = file.get_slice(name).get_shape()
@@ -191,7 +190,7 @@ def ensure_inert_resident(
             size *= int(dim)
         sizes[name] = size
     owners = _balanced_owner_map(sizes, target_ranks)
-    owned = [name for name in pending if owners[name] == rank]
+    owned = [name for name in names if owners[name] == rank and name not in already]
     if device is None:
         device = (
             f"cuda:{torch.cuda.current_device()}"
