@@ -126,10 +126,20 @@ diff --git a/aiter/ops/flydsl/linear_attention_kernels.py b/aiter/ops/flydsl/lin
                  **kwargs_,
              )
  
-@@ -1304,3 +1307,36 @@
+@@ -1304,3 +1307,46 @@
              specialization_key=key,
          )
      return out
++
++
++def _mtp_contiguous_reads(indices):
++    # Torch considers singleton views contiguous even with a non-unit stride.
++    # FlyDSL dynamic memrefs require a unit-stride axis; this view preserves
++    # the same single element and adds no device copy on the graph path.
++    result = indices.contiguous()
++    if result.stride(0) != 1:
++        result = result.as_strided(result.shape, (1,))
++    return result
 +
 +
 +def flydsl_gdr_mtp_rtp(query, key, value, a, b, dt_bias, A_log, state, out,
@@ -142,7 +152,7 @@ diff --git a/aiter/ops/flydsl/linear_attention_kernels.py b/aiter/ops/flydsl/lin
 +    _mtp_launch(mode=MTP_MODE_CHAIN, query=query, key=key, value=value,
 +                a=a, b=b, dt_bias=dt_bias, A_log=A_log, state=state, out=out,
 +                state_indices=write_indices.contiguous(), num_accepted=None,
-+                inter_indices=read_indices.contiguous(), parent_tokens=None,
++                inter_indices=_mtp_contiguous_reads(read_indices), parent_tokens=None,
 +                inter_buffer=None, use_qk_l2norm=use_qk_l2norm, min_live_slot=0,
 +                has_tree=False, disable_state_update=False,
 +                stream=_mtp_stream(query, stream))
@@ -160,6 +170,6 @@ diff --git a/aiter/ops/flydsl/linear_attention_kernels.py b/aiter/ops/flydsl/lin
 +    _require_index("reads",reads,q,dims=1)
 +    _require_index("writes",writes,q,dims=2,layout="[batch, token]",covers=True)
 +    _mtp_launch(mode=MTP_MODE_CHAIN, query=q,key=k,value=v,a=a,b=b,dt_bias=bias,A_log=alog,
-+        state=state,out=out,state_indices=writes,num_accepted=None,inter_indices=reads,parent_tokens=None,
++        state=state,out=out,state_indices=writes,num_accepted=None,inter_indices=_mtp_contiguous_reads(reads),parent_tokens=None,
 +        inter_buffer=record,use_qk_l2norm=True,min_live_slot=0,has_tree=False,disable_state_update=False,
 +        stream=_mtp_stream(q,None),compact_record=True)
