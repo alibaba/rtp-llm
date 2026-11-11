@@ -127,21 +127,23 @@ bool FIFOSchedulerBase::awiBarrierHold(const GenerateStreamPtr& stream) {
     if (peers.size() < registry.opPeerCount(operation_id)) {
         return true;  // wave still arriving; hold without consuming capacity
     }
-    // Joint coexistence check with the engine's own block accounting: every
-    // armed sequence must be able to grow to its full input+output reservation
-    // simultaneously within the currently free blocks.
-    size_t needed_blocks = 0;
+    // Joint coexistence check in TOKEN units: every armed sequence must be
+    // able to hold its full input+output reservation simultaneously.
+    // availableTokensNum() is the engine's own binding metric — the minimum
+    // available-token capacity across the positional (FULL) cache groups —
+    // so per-group bottlenecks (csa/indexer/hca) cannot hide behind an
+    // aggregate block sum. Fixed-state groups (SWA window, CSA state) hold
+    // one block per sequence and are not binding while the fixed-pool block
+    // count is sized at or above the concurrency limit.
+    size_t needed_tokens = 0;
     for (const auto& peer : peers) {
-        const size_t max_tokens = peer->maxTokenNum();
-        const int    seq_length = peer->seqLength();
-        const int    remaining  = max_tokens > (size_t)seq_length ? (int)(max_tokens - (size_t)seq_length) : 0;
-        needed_blocks += (size_t)std::max(0, peer->estimatePeakNeedBlocks(remaining));
+        needed_tokens += peer->maxTokenNum();
     }
-    const size_t available_blocks = cache_manager_ ? cache_manager_->availableBlocksNum() : 0;
-    if (needed_blocks > available_blocks) {
+    const size_t available_tokens = cache_manager_ ? cache_manager_->availableTokensNum() : 0;
+    if (needed_tokens > available_tokens) {
         const std::string message = "AWI barrier: kv capacity exceeded for operation " + operation_id
-                                    + " (needed_blocks=" + std::to_string(needed_blocks)
-                                    + ", available_blocks=" + std::to_string(available_blocks) + ")";
+                                    + " (needed_tokens=" + std::to_string(needed_tokens)
+                                    + ", available_tokens=" + std::to_string(available_tokens) + ")";
         RTP_LLM_LOG_WARNING("%s", message.c_str());
         registry.failBarrier(operation_id, "kv_capacity_exceeded", (int64_t)peers.size());
         for (const auto& peer : peers) {
@@ -150,11 +152,11 @@ bool FIFOSchedulerBase::awiBarrierHold(const GenerateStreamPtr& stream) {
         return true;  // streams carry the error; admission stays withheld
     }
     registry.releaseBarrier(operation_id);
-    RTP_LLM_LOG_INFO("AWI barrier released: op=%s peers=%zu needed_blocks=%zu available_blocks=%zu",
+    RTP_LLM_LOG_INFO("AWI barrier released: op=%s peers=%zu needed_tokens=%zu available_tokens=%zu",
                      operation_id.c_str(),
                      peers.size(),
-                     needed_blocks,
-                     available_blocks);
+                     needed_tokens,
+                     available_tokens);
     return false;
 }
 
