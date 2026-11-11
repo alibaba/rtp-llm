@@ -443,12 +443,6 @@ def combine_kv(shared, globals_by_req, swa):
         shared.pop("prefill_kv_workspace", None)
         return torch.cat((g, sw))
     signature = (sw.shape, sw.dtype, sw.device)
-    if not shared.get("_kv_shape_logged"):
-        shared["_kv_shape_logged"] = True
-        print(
-            f"[AWI_KVSHAPE] g={tuple(g.shape)} {g.dtype} sw={tuple(sw.shape)} {sw.dtype}",
-            flush=True,
-        )
     cached = shared.get("prefill_kv_workspace")
     if cached is not None:
         source, previous_signature, output = cached
