@@ -12,10 +12,16 @@ This module lets the frontend balance placement deterministically WITHOUT
 touching warm routing: when the first block-cache key of a request has never
 been seen in this process (a cold session, or any session after an FE restart
 - which in this deployment coincides with the KV-wiping pod restart), the
-caller pins the prefill role to a round-robin choice from the VIP prefill
+caller pins the prefill role to a DETERMINISTIC choice from the VIP prefill
 host list via generate_config.role_addrs (the request-routing path). The
-master learns the placed KV through its own engine cache-status poll, so all
-subsequent requests route by master cache affinity exactly as before.
+placement is a pure function of the first key and the (sorted) host list, so
+every frontend worker process pins a given session to the SAME pod: the FE
+serves each request from one of several uvicorn workers, and a per-process
+round-robin was observed to pin the same session to DIFFERENT pods (98% of
+sessions conflicted; KV split across both pods; the aggregate split stayed
+~80/20 despite perfect 50/50 pin counts). The master learns the placed KV
+through its own engine cache-status poll, so all subsequent requests route
+by master cache affinity exactly as before.
 
 A bounded pin-follow window (TTL) keeps the session pinned to the same pod
 right after placement, covering the master's cache-index poll lag. After the
@@ -62,13 +68,18 @@ def env_ttl_seconds(default: float = DEFAULT_TTL_S) -> float:
 
 
 class SessionPlacementBalancer:
-    """Round-robin prefill placement for first-seen sessions.
+    """Deterministic prefill placement for first-seen sessions.
 
     ``host_provider`` must return the current prefill endpoint list; each
     entry only needs ``ip`` and ``port`` attributes (duck-typed so tests and
     the VipServerWrapper Host agree). The port convention mirrors
     HostService.get_backend_role_addrs: grpc_port = port + 1, http_port =
     port.
+
+    Placement is consistent across processes: ``_placement_host`` derives
+    the target purely from the first block key and the SORTED host list
+    (integer arithmetic only - immune to PYTHONHASHSEED), so every frontend
+    worker pins a session to the same pod.
     """
 
     def __init__(
@@ -86,9 +97,6 @@ class SessionPlacementBalancer:
         self._max_entries = int(max_entries) if max_entries and max_entries > 0 else DEFAULT_MAX_ENTRIES
         # first block key -> (pinned ip, pinned grpc port, placed_at)
         self._entries: OrderedDict = OrderedDict()
-        # Seed the round-robin offset per process so multiple frontend worker
-        # processes do not all start their alternation on the same pod.
-        self._rr_index = os.getpid() % 1024
         self._pin_count = 0
         self._follow_count = 0
 
@@ -130,8 +138,7 @@ class SessionPlacementBalancer:
         if len(hosts) < 2:
             # Nothing to balance (single pod or discovery unavailable).
             return None
-        host = hosts[self._rr_index % len(hosts)]
-        self._rr_index += 1
+        host = self._placement_host(first_key, hosts)
         grpc_port = int(host.port) + 1
         self._entries[first_key] = (host.ip, grpc_port, now)
         while len(self._entries) > self._max_entries:
@@ -145,6 +152,18 @@ class SessionPlacementBalancer:
             len(self._entries),
         )
         return self._role_addr(host.ip, grpc_port)
+
+    @staticmethod
+    def _placement_host(first_key: int, hosts: Sequence):
+        """Deterministic, process-independent host for a session.
+
+        Integer arithmetic only (no PYTHONHASHSEED dependence): a fixed odd
+        multiplier mixes the 64-bit key, then modulo the SORTED host count.
+        Sorting normalizes vipserver's arbitrary per-process host order.
+        """
+        sorted_hosts = sorted(hosts, key=lambda h: (h.ip, h.port))
+        mixed = (int(first_key) * 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF
+        return sorted_hosts[mixed % len(sorted_hosts)]
 
     @staticmethod
     def _role_addr(ip: str, grpc_port: int) -> RoleAddr:
