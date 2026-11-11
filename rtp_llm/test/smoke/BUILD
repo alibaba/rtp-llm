@@ -205,9 +205,13 @@ custom_smoke_test(
     main = "deepseek_v41_full_contract_test.py",
     smoke_args = "--tp_size 2 --ep_size 2 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 24576 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --sp_type dspark --sp_model_type deepseek_v41_dspark --sp_act_type BF16 --gen_num_per_cycle 3",
     gpu_type = ["SM100_ARM_CU13"],
-    # Cold-starting the ARM checkpoint can exceed the default 30-minute watchdog.
-    test_envs = {"RTP_TEST_WATCHDOG_SECONDS": "3600"},
     tags = ["dsv41_cuda13", "model_contract", "pd_contract", "dspark_contract"],
+    # Cold-path budget: the two ~94 GiB engram shards stage under NAS
+    # contention from the concurrent lane tests (the 0731 case loads the
+    # same 476 GB checkpoint in parallel), which stretches the measured
+    # solo cold run (~1777s) past 3600s; same cold-NAS-variance reason
+    # v4_pro carries 3600 over the 1800 default.
+    test_envs = {"RTP_TEST_WATCHDOG_SECONDS": "5400"},
     data = [
         "//rtp_llm:sdk",
         "data/model/deepseek_v41/full_feature_cp2_dp2.json",
