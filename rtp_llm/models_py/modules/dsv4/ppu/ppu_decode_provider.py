@@ -31,6 +31,7 @@ class PpuDecodeProvider(PpuModuleProvider):
             strategy_type = PpuMegaMoEFP4Strategy
             strategy_kwargs["resources"] = self._mega_resources
             strategy_kwargs["module_name"] = self._mega_module_name
+            strategy_kwargs["streamed"] = self._mega_streamed
         return PpuEPMoE(
             *args,
             platform_provider=self,
@@ -77,6 +78,14 @@ class PpuDecodeProvider(PpuModuleProvider):
         self._moe_backend = self.execution_options.get("DSV4_PPU_DECODE_MOE_BACKEND", "deepep")
         if self._moe_backend not in ("deepep", "megamoe"):
             raise ValueError("DSV4_PPU_DECODE_MOE_BACKEND must be deepep or megamoe")
+        self._shared_staged = self._bool("DSV4_PPU_MEGAMOE_SHARED_STAGED", False)
+        self._mega_streamed = self._bool("DSV4_PPU_MEGAMOE_STREAMED", False)
+        if self._mega_streamed and self._moe_backend != "megamoe":
+            raise ValueError("Streamed execution requires the MegaMoE backend")
+        if self._mega_streamed and self._shared_staged:
+            raise ValueError("Streamed MegaMoE does not support staged shared experts")
+        if self._shared_staged and self._moe_backend != "megamoe":
+            raise ValueError("Staged shared execution requires the MegaMoE backend")
         self._mega_resources = None
         self._mega_module_name = "deep_gemm_mega"
         if self._moe_backend == "megamoe":
@@ -137,6 +146,7 @@ class PpuDecodeProvider(PpuModuleProvider):
 
         return PpuSharedExpertExecutor(
             stream_pool=self.stream_pool, start_before_routing=True,
+            staged=self._shared_staged,
         )
 
     def build_hc_unit(self, *args, **kwargs):
@@ -173,8 +183,6 @@ class PpuDecodeProvider(PpuModuleProvider):
 
 
     def build_decode_metadata(self, default_factory, *args, **kwargs):
-        if not self._mtp_metadata_graph:
-            return default_factory(*args, **kwargs)
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
             DSv4DecodeFmhaImplFP8,
         )
@@ -182,7 +190,16 @@ class PpuDecodeProvider(PpuModuleProvider):
         from rtp_llm.models_py.modules.dsv4.ppu.metadata.ppu_decode_metadata import PpuDecodeMetadataGraph
 
         if default_factory is not DSv4DecodeFmhaImplFP8:
-            raise ValueError("PPU metadata Graph requires the FP8 Decode factory")
+            if self._mtp_metadata_graph:
+                raise ValueError(
+                    "PPU metadata Graph requires the FP8 Decode factory"
+                )
+            return default_factory(*args, **kwargs)
+        config = args[0] if args else kwargs.get("config")
+        if getattr(config, "q_len", 1) != 1 and not self._mtp_metadata_graph:
+            # Verify and draft catch-up use the framework multi-token updater,
+            # whose slot mappings include speculative ring entries.
+            return default_factory(*args, **kwargs)
         tables = {}
         for reference in self._decode_attention_refs:
             attention = reference()

@@ -388,6 +388,7 @@ class FIFOSchedulerConfig:
     max_inited_kv_cache_streams: int
     pdfusion_scheduler_mode: str
     prefill_chunk_size: int
+    prefill_chunk_batch_tokens: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
