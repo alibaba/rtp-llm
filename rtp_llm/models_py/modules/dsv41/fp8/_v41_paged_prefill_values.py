@@ -166,18 +166,60 @@ def publish_paged_globals(attn, main_pool, index_pool, indexer_region, ends, rat
     Returns False (caller falls back to the dense producer) when any
     precondition fails; never raises into the forward path.
     """
+    from . import _v41_prefill_metadata as _meta
+
     try:
         if ratio <= 0 or len(ends) != 1:
+            _meta.debug_trace(
+                f"publish_skip L{attn.layer_id} ratio={ratio} ends={len(ends)}"
+            )
             return False
         count = int(ends[0]) // ratio
         if count <= 0:
+            _meta.debug_trace(f"publish_skip L{attn.layer_id} count={count}")
             return False
         positions = (torch.arange(count, device=device, dtype=torch.long) + 1) * ratio - 1
         req_ids = torch.zeros(count, device=device, dtype=torch.long)
         slots_k = attn._slots(indexer_region, positions, req_ids)
         slots_g = attn._slots(attn._global_region(), positions, req_ids)
         if slots_k is None or slots_g is None:
+            _meta.debug_trace(
+                f"publish_skip L{attn.layer_id} slots_none k={slots_k is None} "
+                f"g={slots_g is None}"
+            )
             return False
+        _meta.debug_trace(
+            f"publish_ok L{attn.layer_id} count={count} ends0={int(ends[0])} ratio={ratio}"
+        )
+        if _meta.DEBUG_DUMP_ROWS:
+            # Diagnostic: pool bytes visible at publish time for the span
+            # head and the most recent tail (covers the prior chunk's writes
+            # at a chunk head). Diffing these across chunk sizes localizes
+            # value corruption per (layer, position) regardless of which
+            # code path wrote the rows.
+            try:
+                n_head = min(64, count)
+                n_tail = min(512, count)
+                sel = torch.cat(
+                    (
+                        torch.arange(n_head, device=device),
+                        torch.arange(count - n_tail, count, device=device),
+                    )
+                )
+                valid_g, rows_g = _meta.gather_pool_rows(main_pool, slots_g[sel])
+                valid_k, rows_k = _meta.gather_pool_rows(index_pool, slots_k[sel])
+                _meta.debug_dump_rows(
+                    f"pub_L{attn.layer_id}",
+                    ratio=ratio,
+                    ends0=int(ends[0]),
+                    count=count,
+                    pos_main=positions[sel][valid_g] if valid_g is not None else None,
+                    main_rows=rows_g,
+                    pos_index=positions[sel][valid_k] if valid_k is not None else None,
+                    index_rows=rows_k,
+                )
+            except Exception:  # diagnostics must never break a run
+                logger.exception("[paged-prefill] diagnostic dump failed")
         paged_g = PagedGlobalValues(main_pool, slots_g, ratio, count, device)
         lazy_k = LazyIndexerKeys(index_pool, slots_k, count)
         attn._shared_attention["global"] = {attn.layer_id: [(paged_g, lazy_k)]}

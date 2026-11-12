@@ -140,6 +140,30 @@ def debug_dump_rows(tag, **payload):
         logging.exception("[DSV41_DUMP_ROWS] failed for %s", tag)
 
 
+_debug_trace_events = 0
+_DEBUG_TRACE_MAX = 400
+
+
+def debug_trace(message):
+    """Budgeted WARNING trace for diagnostic runs (either dump env set).
+
+    Answers branch-selection questions (which producer path executes per
+    layer/forward) with runtime facts instead of source speculation.
+    """
+    global _debug_trace_events
+    if not (DEBUG_SLOT_DROPS or DEBUG_DUMP_ROWS):
+        return
+    if _debug_trace_events >= _DEBUG_TRACE_MAX:
+        if _debug_trace_events == _DEBUG_TRACE_MAX:
+            _debug_trace_events += 1
+            logging.warning(
+                "[DSV41_TRACE] trace budget %d exhausted", _DEBUG_TRACE_MAX
+            )
+        return
+    _debug_trace_events += 1
+    logging.warning("[DSV41_TRACE] %s", message)
+
+
 def _integer_vector(value, rows, device):
     return (
         value.device == device

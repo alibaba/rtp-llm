@@ -1358,6 +1358,11 @@ class AttentionV41FP8(AttentionFP8):
             )
         ):
             return
+        prefill_metadata.debug_trace(
+            f"producer_dense L{self.layer_id} prefill={prefill} rows={rows} "
+            f"main_pool={main_pool is not None} index_pool={index_pool is not None} "
+            f"ratio={ratio} ends0={int(ends[0]) if len(ends) else -1}"
+        )
         pair_ranges = None
         producer_meta = None
         tile_metadata = positions is None
