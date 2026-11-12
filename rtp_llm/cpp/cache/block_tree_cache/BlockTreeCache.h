@@ -183,6 +183,7 @@ public:
     TransferResult executeTransfer(TransferTask task);
     TransferTaskRegistry::State localTransferCompletion(uint64_t trace_id) const;
     TransferTaskRegistry::ForgetResult forgetLocalTransferCompletion(uint64_t trace_id) const;
+    void cleanupExpiredMissing() const;
     // Configure before accepting coordinator work.
     void setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup);
     std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;

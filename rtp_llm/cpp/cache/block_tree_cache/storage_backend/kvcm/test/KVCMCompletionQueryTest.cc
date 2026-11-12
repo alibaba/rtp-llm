@@ -654,7 +654,7 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
         EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references - 1);
     }
-    // Aggregate forget acknowledges cleanup but must not reopen a fenced trace.
+    // The late request is rejected before SDK admission and consumes its fence.
     for (const auto& worker : {worker0, worker1}) {
         const auto trace = std::get<std::string>(record->execution().trace_id);
         const auto late = payloadRequest(*worker->environment, trace);
@@ -663,7 +663,7 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
         EXPECT_EQ(response.remote_response().transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
         EXPECT_TRUE(response.remote_response().payload_buffer_safe());
         EXPECT_EQ(worker->backend->taskRegistry().queryLocal(std::vector<std::string>{trace}).front(),
-                  RegistryState::REJECTED);
+                  RegistryState::UNKNOWN);
     }
     auto normal_match = match(*backend, makeStorageRequest(environment));
     ASSERT_TRUE(normal_match.success);
@@ -677,8 +677,8 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
     }
     EXPECT_EQ(cleanup->drain(forget, 2000).forgotten, 1u);
     EXPECT_EQ(cleanup->size(), 0u);
-    EXPECT_EQ(worker0->backend->taskRegistry().size(), 1u);
-    EXPECT_EQ(worker1->backend->taskRegistry().size(), 1u);
+    EXPECT_EQ(worker0->backend->taskRegistry().size(), 0u);
+    EXPECT_EQ(worker1->backend->taskRegistry().size(), 0u);
     EXPECT_EQ(record->debugString(), released_debug);
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references - 1);
 }

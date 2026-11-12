@@ -60,6 +60,7 @@ public:
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
     // Local READ completion evidence; this accessor does not issue a query RPC.
     const TransferTaskRegistry& taskRegistry() const;
+    void cleanupExpiredMissing();
 
     // Recovery query atomically prevents a previously unseen READ from starting.
     TransferTaskRegistry::State queryReadCompletion(const std::string& trace_id) const;

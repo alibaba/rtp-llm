@@ -767,6 +767,24 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     EXPECT_NE(cache_manager->convertIndexToAddr(/*block_index=*/0, /*layer_id=*/0).kv_addr, nullptr);
 }
 
+TEST_F(KVCacheManagerTest, MissingCleanupStopsPromptlyAndIndependentlyOfMetrics) {
+    auto config = makeSimpleMhaCacheConfig(2, 5, 2, DataType::TYPE_FP16);
+    KVCacheManager manager(config, false, nullptr, KVCacheConfig{});
+    ASSERT_TRUE(manager.init());
+    ASSERT_TRUE(manager.missing_cleanup_thread_.joinable());
+    manager.stopMetricsReporter();
+    EXPECT_FALSE(manager.metrics_reporter_thread_.joinable());
+    {
+        std::lock_guard<std::mutex> lock(manager.missing_cleanup_mutex_);
+        EXPECT_FALSE(manager.missing_cleanup_stopped_);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    manager.stopMissingCleanup();
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(2));
+    EXPECT_FALSE(manager.missing_cleanup_thread_.joinable());
+    manager.stopMissingCleanup();  // Idempotent, including the destructor's call.
+}
+
 TEST_F(KVCacheManagerTest, TaggedAddressLookupIgnoresGroupOrderAndPreservesLayerBlockOrder) {
     for (const bool reversed : {false, true}) {
         auto config      = makeSimpleMhaCacheConfig(2, 5, 2, DataType::TYPE_FP16);
@@ -2597,7 +2615,7 @@ TEST_F(KVCacheManagerTest, CompletionQueryPreservesEvidenceNamespacesAndNeverSub
     EXPECT_EQ(engine->submitted_batch_count, 2u);
     EXPECT_EQ(registry.size(), 3u);
 
-    // Recovery querying an absent execution permanently closes its admission.
+    // Recovery querying an absent execution rejects and consumes its sole late arrival.
     FunctionRequestPB transfer;
     appendValidGroupedTransfer(manager, transfer);
     transfer.mutable_mem_request()->set_transfer_trace_id(missing_trace);
@@ -2605,7 +2623,7 @@ TEST_F(KVCacheManagerTest, CompletionQueryPreservesEvidenceNamespacesAndNeverSub
     EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::NOT_EXECUTED);
     EXPECT_TRUE(response.mem_response().buffer_safe());
     EXPECT_EQ(engine->submitted_batch_count, 2u);
-    EXPECT_EQ(registry.size(), 3u);
+    EXPECT_EQ(registry.size(), 2u);
 }
 
 TEST_F(KVCacheManagerTest, CompletionQueryClearsReusedResponseAndAcceptsEmptyKeys) {

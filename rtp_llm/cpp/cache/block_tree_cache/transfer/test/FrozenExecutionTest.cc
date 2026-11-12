@@ -282,8 +282,10 @@ TEST_F(FrozenExecutionTest, MixedSafeAndBannedReleaseForgetsEveryRankButPreserve
     EXPECT_EQ(summary.pending, 0u);
     EXPECT_FALSE(summary.failed);
     EXPECT_EQ(completed.queryLocal(std::vector<uint64_t>{trace}).front(), TransferTaskRegistry::State::UNKNOWN);
+    EXPECT_EQ(cleanup->size(), 0u);
     EXPECT_EQ(banned.queryLocal(std::vector<uint64_t>{trace}).front(), TransferTaskRegistry::State::REJECTED);
     EXPECT_FALSE(banned.begin(trace));
+    EXPECT_EQ(banned.queryLocal(std::vector<uint64_t>{trace}).front(), TransferTaskRegistry::State::UNKNOWN);
 }
 
 TEST_F(FrozenExecutionTest, OrdinarySafeReleaseStillQueuesForgetExactlyOnce) {

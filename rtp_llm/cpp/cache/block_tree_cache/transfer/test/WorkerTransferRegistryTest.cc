@@ -85,6 +85,8 @@ TEST(WorkerTransferRegistryTest, RecoveryQueryRejectsLateExecutionWithFreshDeadl
     const auto original = task(3);
     const auto trace = original.traceId();
     EXPECT_EQ(dispatcher.queryLocalCompletion(trace), State::REJECTED);
+    EXPECT_EQ(dispatcher.forgetLocalCompletion(trace), TransferTaskRegistry::ForgetResult::DONE);
+    EXPECT_EQ(state(dispatcher, trace), State::REJECTED);
     // The delayed RPC can reconstruct a fresh budget. The trace fence, rather
     // than its deadline, must reject it before any physical batch is submitted.
     auto late = task(3);
@@ -96,10 +98,11 @@ TEST(WorkerTransferRegistryTest, RecoveryQueryRejectsLateExecutionWithFreshDeadl
     EXPECT_TRUE(context->result().buffer_safe);
     EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
     EXPECT_EQ(engine->submissions, 0u);
-    EXPECT_EQ(state(dispatcher, trace), State::REJECTED);
+    EXPECT_EQ(state(dispatcher, trace), State::UNKNOWN);
+    EXPECT_EQ(dispatcher.taskRegistry().size(), 0u);
     EXPECT_EQ(dispatcher.forgetLocalCompletion(trace), TransferTaskRegistry::ForgetResult::DONE);
-    EXPECT_FALSE(dispatcher.executePerRank(late)->success());
-    EXPECT_EQ(engine->submissions, 0u);
+    EXPECT_EQ(state(dispatcher, trace), State::UNKNOWN);
+    // A subsequent recovery query starts a new retention fence.
     EXPECT_EQ(dispatcher.queryLocalCompletion(trace), State::REJECTED);
 }
 

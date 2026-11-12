@@ -537,12 +537,21 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
             ASSERT_TRUE(after_failure.has_value());
             for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
                 const auto& group_set = cache->groupSets()[group_set_id];
-                // Injected transport failure does not identify a corrupt record.
+                // HOST copies succeeded before the DISK failure. Their loaded
+                // targets remain cached; failed/unrequested sources remain reusable.
+                const size_t reuse_begin = 3 - group_set->computeReuseBlockCount(/*matched_blocks=*/3);
                 for (size_t path = 0; path < 3; ++path) {
                     const auto& source = (*after_failure)[path][group_set_id];
                     EXPECT_TRUE(source.isMatchUsable());
                     EXPECT_EQ(source.transfer_state, GroupSetTransferState::IDLE);
-                    EXPECT_EQ(source.getTopTier(), (*mixed)[path][group_set_id].getTopTier());
+                    const Tier original_tier = (*mixed)[path][group_set_id].getTopTier();
+                    const bool loaded_host = original_tier == Tier::HOST && path >= reuse_begin;
+                    EXPECT_EQ(source.getTopTier(), loaded_host ? Tier::DEVICE : original_tier)
+                        << "path=" << path << " group_set=" << group_set_id;
+                    if (loaded_host) {
+                        EXPECT_FALSE(source.hasTier(Tier::HOST));
+                        EXPECT_FALSE(group_set->hostPool()->isAllocated(host_sources[group_set_id]));
+                    }
                 }
                 for (size_t member = 0; member < group_set->groupTags().size(); ++member) {
                     const auto& blocks =

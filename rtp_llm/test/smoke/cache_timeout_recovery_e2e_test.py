@@ -166,9 +166,9 @@ class CacheTimeoutRecoveryE2ETest(unittest.TestCase):
             "--seq_size_per_block",
             "64",
             "--enable_device_cache",
-            "1" if self.backend == "kvcm" or d2h else "0",
+            "1",
             "--enable_memory_cache",
-            "1" if d2h else "0",
+            "1" if self.backend == "local" else "0",
             "--test_block_num",
             "2048",
             "--concurrency_limit",
@@ -204,6 +204,14 @@ class CacheTimeoutRecoveryE2ETest(unittest.TestCase):
             for disk in disks:
                 disk.mkdir(parents=True)
             args += [
+                # Local DISK caching requires the full DEVICE -> HOST -> DISK
+                # hierarchy. Low watermarks demote the seed through both tiers.
+                "--memory_cache_size_mb",
+                "2048",
+                "--block_tree_memory_evict_low_watermark_ratio",
+                "0.0001",
+                "--block_tree_memory_evict_high_watermark_ratio",
+                "0.0002",
                 "--enable_disk_cache",
                 "1",
                 "--enable_remote_cache",
@@ -416,6 +424,48 @@ class CacheTimeoutRecoveryE2ETest(unittest.TestCase):
             }
         )
 
+    def wait_for_remote_seed(self):
+        # Keep the writer alive until KVCM acknowledges full publication. Model
+        # probes cannot establish this while its DEVICE cache still serves hits.
+        deadline = time.monotonic() + 180
+        access_log = Path.cwd() / "logs" / "access.log"
+        while True:
+            sessions = {}
+            completed = set()
+            text = access_log.read_text(errors="replace") if access_log.exists() else ""
+            for line in text.splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # A live log may end in an incomplete record.
+                request = event.get("request", {})
+                if not request.get("instance_id", "").startswith(self.root.name + "_"):
+                    continue
+                response = event.get("response", {})
+                if response.get("header", {}).get("status", {}).get("code") != "OK":
+                    continue
+                if event.get("api_name") == "StartWriteCache":
+                    keys = tuple(request.get("block_keys", []))
+                    if keys:
+                        sessions[response["write_session_id"]] = keys
+                elif event.get("api_name") == "FinishWriteCache":
+                    keys = sessions.get(request.get("write_session_id"))
+                    # A prefix mask equal to the batch size confirms every block.
+                    if keys and request.get("success_blocks", {}).get("offset") == len(keys):
+                        completed.add(keys)
+            if len(completed) >= len(self.prompts):
+                self.observations.append(
+                    {"stage": "remote_seed_ready", "published_batches": len(completed)}
+                )
+                self.save_report()
+                return
+            self.assertLess(
+                time.monotonic(),
+                deadline,
+                f"remote seed publication incomplete: {len(completed)}/{len(self.prompts)} batches",
+            )
+            time.sleep(2)
+
     def log_text(self, server):
         parts = []
         for path in sorted(server.timeout_cpp_logs.glob("engine-*.log")):
@@ -576,12 +626,14 @@ class CacheTimeoutRecoveryE2ETest(unittest.TestCase):
             for i in range(len(self.prompts))
         ]
         self.assert_outputs(reference, self.batch(baseline, "seed"))
-        time.sleep(10)  # Wait for ordinary asynchronous cache publication.
         if self.backend == "kvcm":
+            self.wait_for_remote_seed()
             # Cold DEVICE cache makes remote reuse observable without changing
             # production eviction behavior. The KVCM service and identity stay.
             baseline.stop_server()
             baseline = self.start_model(30000, "baseline_remote_read")
+        else:
+            time.sleep(10)  # Wait for ordinary asynchronous tiered eviction.
         field = "remote_reuse_len" if self.backend == "kvcm" else "disk_reuse_len"
         reused = self.batch(baseline, "baseline_reuse")
         self.assert_outputs(reference, reused)
@@ -599,7 +651,7 @@ class CacheTimeoutRecoveryE2ETest(unittest.TestCase):
             try:
                 if self.backend == "local":
                     self.assert_outputs(reference, self.batch(server, label + "_seed"))
-                    # Let direct DISK seed writes publish before the read workload.
+                    # Let tiered eviction publish DISK seeds before the read workload.
                     time.sleep(10)
                 for wave in range(3):
                     self.stress_batch(server, f"{label}_wave{wave}", reference)
