@@ -38,6 +38,7 @@ from .grouped_fp4 import (  # noqa: F401  ep_size==1 + kernel
 from .deepep import DeepEPStrategy  # noqa: F401  ep_size>1 fallback
 from .local_loop import LocalLoopStrategy  # noqa: F401  universal fallback
 from .mega_sm90 import SM90MegaMoEStrategy  # noqa: F401  SM90 opt-in fused Mega
+from .mega_sm90_se import SM90MegaMoEFusedSEStrategy  # noqa: F401  SM90 fused shared expert
 
 __all__ = [
     "MoeCfg",

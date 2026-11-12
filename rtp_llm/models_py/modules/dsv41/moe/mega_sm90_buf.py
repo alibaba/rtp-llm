@@ -109,6 +109,7 @@ def _get_or_create_mega_sm90_buf(
     hidden: int,
     intermediate_hidden: int,
     activation: str = _SM90_ACTIVATION,
+    num_shared_experts: int = 0,
 ):
     """Allocate (or reuse) the collective buffer so graph replay keeps addresses."""
     import deep_gemm
@@ -121,6 +122,7 @@ def _get_or_create_mega_sm90_buf(
         hidden,
         intermediate_hidden,
         activation,
+        num_shared_experts,
     )
     buf = _MEGA_SM90_BUF_CACHE.get(key)
     if buf is None:
@@ -132,6 +134,7 @@ def _get_or_create_mega_sm90_buf(
             hidden,
             intermediate_hidden,
             activation,
+            num_shared_experts=num_shared_experts,
         )
         _MEGA_SM90_BUF_CACHE[key] = buf
         try:

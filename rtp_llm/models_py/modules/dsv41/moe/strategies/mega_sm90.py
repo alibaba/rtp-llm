@@ -164,6 +164,7 @@ class SM90MegaMoEStrategy(RoutedExpertsStrategy):
             hidden=cfg.dim,
             intermediate_hidden=cfg.moe_inter_dim,
             activation=_SM90_ACTIVATION,
+            num_shared_experts=int(getattr(self, "_fused_shared_experts", 0)),
         )
         # DeepGEMM aligns the capacity internally; keep the output rows at
         # least that wide so a kernel write can never exceed the allocation.

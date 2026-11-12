@@ -284,9 +284,20 @@ def select_strategy(
                 "gc_sm90_se requires decode, supported SM90 geometry, K32 "
                 "shared weights, Triton, and the gc_moe SM90 SE API"
             )
+        if forced == "mega_sm90_se":
+            from .mega_sm90_se import SM90MegaMoEFusedSEStrategy
+
+            if SM90MegaMoEFusedSEStrategy.can_handle(cfg, explicit=True):
+                return SM90MegaMoEFusedSEStrategy
+            raise RuntimeError(
+                "mega_sm90_se requires a decode-role SM90 shape, one shared "
+                "expert with 128x128 FP8 block scales, and a deep_gemm build "
+                "with the fused shared-expert MegaMoE API"
+            )
         if forced not in (None, "mega_sm90") and strict:
             raise RuntimeError(
-                f"V4.1 SM90 supports mega_sm90 and gc_sm90_se; requested strategy {forced!r}"
+                "V4.1 SM90 supports mega_sm90, mega_sm90_se and gc_sm90_se; "
+                f"requested strategy {forced!r}"
             )
         if SM90MegaMoEStrategy.can_handle(cfg, explicit=True):
             return SM90MegaMoEStrategy
