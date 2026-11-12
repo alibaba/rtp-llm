@@ -655,13 +655,17 @@ def test_trace_correlates_steps_and_gates_across_streams(setup, tmp_path):
     assert {item["run_id"] for item in records} == {result["run_id"]}
     assert sorted(item["seq"] for item in records) == list(range(1, len(records) + 1))
     assert all(not {"phase", "step", "action"} & item.keys() for item in records)
+    started = [event for event in events if event["event"] == "step_started"]
+    assert all(
+        "describe" not in event and "query_time" not in event for event in started
+    )
     starts = {
         (event["phase_id"], event["step_id"], event["interface"]): event["seq"]
-        for event in events
-        if event["event"] == "step_started"
+        for event in started
     }
     assert gates
     for gate in gates:
+        assert "query_time" in gate
         assert (
             starts[gate["phase_id"], gate["step_id"], gate["interface"]] < gate["seq"]
         )

@@ -92,11 +92,7 @@ class Step:
         runtime, records = context.runtime, context.records
         gate, invoked, returned = None, False, False
         stage = "arguments"
-        records.emit(
-            event="step_started",
-            describe=self.describe,
-            query_time=context.query_time,
-        )
+        records.emit(event="step_started")
         try:
             args = resolve_refs(self.args, results, context.globals())
             arguments = definition.arguments(args)
