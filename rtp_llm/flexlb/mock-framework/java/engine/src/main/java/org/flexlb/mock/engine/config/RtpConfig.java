@@ -84,7 +84,6 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
         int cpSize = role == Role.prefill ? Math.max(1, prefillCpSize) : 1;
         Math.multiplyExact(physicalBlockSize, cpSize);
         ((ObjectNode) config).put("prefill_cp_size", cpSize);
-        if (root.path("environment").has("compute")) throw new IllegalArgumentException("Removed environment.compute: use component.config.compute");
         var compute = ComputeModel.fromSettings(config, Map.of(
             "cpSize", (double) cpSize, "cpEnabled", cpSize > 1 ? 1.0 : 0.0));
         if (role == Role.prefill && compute.hasCustomDecodeStep())

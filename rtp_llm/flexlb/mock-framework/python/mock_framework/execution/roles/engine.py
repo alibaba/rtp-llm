@@ -45,7 +45,7 @@ class EngineRole:
         child, control, endpoint = await start_instance(
             self.supervisor,
             self.records,
-            self.role_configs,
+            self.role_configs[role],
             identity,
             self.launch_by_role[role],
             configure=lambda _: {

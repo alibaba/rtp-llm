@@ -35,10 +35,8 @@ class ClientRole:
         topology,
         records,
         monitoring,
-        environment=None,
     ):
         self.role_config, self.launch_config = role_config, launch_config
-        self._role_configs = environment
         self.supervisor, self.topology, self.records, self.monitoring = (
             supervisor,
             topology,
@@ -55,7 +53,7 @@ class ClientRole:
             _, control, endpoint = await start_instance(
                 self.supervisor,
                 self.records,
-                self._role_configs,
+                self.role_config,
                 identity,
                 self.launch_config,
             )

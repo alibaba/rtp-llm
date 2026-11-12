@@ -77,10 +77,8 @@ class RtpConfigTest {
         assertFalse(load(root).business().has("memory_cache_size_mb"));
     }
 
-    @Test void rejectsOldComputeAndInvalidOrMisplacedModels() throws Exception {
+    @Test void rejectsInvalidOrMisplacedComputeModels() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
-        ((ObjectNode) root.path("environment")).putObject("compute");
-        assertThrows(IllegalArgumentException.class, () -> load(root)); ((ObjectNode) root.path("environment")).remove("compute");
         var compute = (ObjectNode) config.path("mock.compute");
         compute.putObject("eos").put("probability", .1);
         assertThrows(Exception.class, () -> load(root));

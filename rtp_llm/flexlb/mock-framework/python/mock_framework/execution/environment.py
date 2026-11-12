@@ -87,7 +87,6 @@ class RunEnvironment:
         self.masters = MasterRole(
             role_config=case.environment.get("master"),
             launch_config=launch["components"].get("master"),
-            environment=case.environment,
             election=launch.get("zookeeper"),
             supervisor=self.supervisor,
             topology=self.topology,
@@ -104,7 +103,6 @@ class RunEnvironment:
             monitoring=self.monitoring,
         )
         self.clients = ClientRole(
-            environment=case.environment,
             role_config=case.environment.get("client"),
             launch_config=launch["components"].get("client"),
             supervisor=self.supervisor,

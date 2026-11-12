@@ -248,7 +248,7 @@ class ProcessSupervisor:
 
 
 async def start_instance(
-    supervisor, records, role_configs, identity, launch_config, *, configure=None
+    supervisor, records, role_config, identity, launch_config, *, configure=None
 ):
     instance_id = identity.instance_id
     directory = identity.directory(records.directory)
@@ -258,8 +258,7 @@ async def start_instance(
         config,
         {
             "component_role": identity.role,
-            "component": role_configs[identity.role],
-            "environment": role_configs,
+            "component": role_config,
             "index": identity.index,
             "id": instance_id,
         },

@@ -13,7 +13,7 @@ ROOT = FRAMEWORK
 
 def test_top_level_compute_is_rejected(case_data, compile_data):
     case_data["environment"]["compute"] = {"prefill": {"expression": "1"}}
-    with pytest.raises(ConfigError):
+    with pytest.raises(ConfigError, match=r"environment: unknown=\['compute'\]"):
         compile_data(case_data)
 
 
@@ -28,13 +28,7 @@ def test_python_compile_to_java_formula_noise_and_timer(
     compiled = compile_data(case_data)
     config = tmp_path / "component.json"
     output = tmp_path / "result.json"
-    write_json(
-        config,
-        {
-            "component": compiled.environment["prefill"],
-            "environment": compiled.environment,
-        },
-    )
+    write_json(config, {"component": compiled.environment["prefill"]})
     classpath = os.pathsep.join(
         [
             str(ROOT / "java/engine/target/test-classes"),

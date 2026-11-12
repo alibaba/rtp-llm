@@ -110,7 +110,6 @@ class MasterRole:
         topology,
         records,
         monitoring,
-        environment=None,
     ):
         self.role_config, self.launch_config, self.election = (
             role_config,
@@ -118,7 +117,6 @@ class MasterRole:
             election,
         )
         self.supervisor, self.topology = supervisor, topology
-        self._role_configs = environment
         self.records, self.monitoring = records, monitoring
         self.election_env = {}
         self._next = 0
@@ -193,7 +191,7 @@ class MasterRole:
         _, control, endpoint = await start_instance(
             self.supervisor,
             self.records,
-            self._role_configs,
+            self.role_config,
             identity,
             self.launch_config,
             configure=lambda directory: self._prepare_env(identity.index, directory),

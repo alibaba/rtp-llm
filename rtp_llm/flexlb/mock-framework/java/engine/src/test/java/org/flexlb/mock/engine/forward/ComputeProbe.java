@@ -15,7 +15,6 @@ public final class ComputeProbe {
     public static void main(String[] args) throws Exception {
         var root = new ObjectMapper().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(Path.of(args[0]).toFile());
-        if (root.path("environment").has("compute")) throw new IllegalArgumentException("Compute belongs in component.config");
         var settings = new ObjectMapper().createObjectNode();
         var config = root.path("component").path("config");
         for (String key : ComputeModel.settingNames()) {

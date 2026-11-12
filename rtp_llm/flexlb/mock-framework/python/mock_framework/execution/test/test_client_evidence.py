@@ -512,6 +512,18 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
     output = tmp_path / "result"
     result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "PASS", result
+    configuration = json.loads((output / "configuration.json").read_text())
+    assert configuration["case"]["environment"] == case.environment
+    for role, component in case.environment.items():
+        for index in range(component["deployment"]["replicas"]):
+            instance_id = f"{role}-{index}"
+            path = output / "components" / instance_id / "config.json"
+            assert json.loads(path.read_text()) == {
+                "component_role": role,
+                "component": component,
+                "index": index,
+                "id": instance_id,
+            }
     if "prometheus" in recipe:
         gates = [
             json.loads(line)
