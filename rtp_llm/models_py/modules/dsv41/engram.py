@@ -2728,6 +2728,10 @@ class Engram(nn.Module):
         else:
             kv = self.wkv(rows)
         del rows
+        # Chunked and prefetched paths call _forward_rows directly, bypassing
+        # the local variables in forward().  _gate_weights is idempotent and
+        # returns the cached zero-copy host views after the first call.
+        q_weight, k_weight = self._gate_weights(hidden.device)
         return gated_engram_residual(
             hidden, kv, q_weight, k_weight, self.eps, token_mask, out=out
         )
