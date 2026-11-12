@@ -107,10 +107,10 @@ View 只读已完成实验，复制 TSDB 后启动独立指标服务，不重跑
 执行 Java 和 Python 检查：
 
 ```sh
-PROMETHEUS_BIN="$PROMETHEUS_BIN" ./scripts/run-mock-tests.sh
+PROMETHEUS_BIN="$PROMETHEUS_BIN" ./scripts/run-framework-tests.sh
 ```
 
-`run-mock-tests.sh` 会先调用 `build-mock-java-runtime.sh`，再运行 Python 测试。缺少 Prometheus 时会跳过真实采集集成测试；macOS 缺少回环别名时跳过双 Master 测试。报告检查结果时说明跳过项，测试通过不代替完整 Case 验收。
+`run-framework-tests.sh` 会先调用 `build-mock-java-runtime.sh`，再运行 Python 测试。缺少 Prometheus 时会跳过真实采集集成测试；macOS 缺少回环别名时跳过双 Master 测试。报告检查结果时说明跳过项，测试通过不代替完整 Case 验收。
 
 - [Case 指南](docs/case-guide.md)涵盖目录约定、YAML 字段、门禁和接口扩展。
 - [在 AoneCI 运行 Case](docs/ci-case.md)：构建环境镜像、指定源码和 Case、查看结果。
