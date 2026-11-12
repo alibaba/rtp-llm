@@ -2621,7 +2621,7 @@ class AttentionV41FP8(AttentionFP8):
         # per group. Dropped with the rest of the per-forward shared state in
         # ``_begin_forward``.
         plan = self._shared_attention.get("prefill_index_plan")
-        if plan is not None and plan[0] is selected:
+        if plan is not None and plan[0] == id(selected):
             indices, lens = plan[1], plan[2]
         else:
             fused_plan = prefill_index_plan.try_build_index_plan(
@@ -2642,6 +2642,7 @@ class AttentionV41FP8(AttentionFP8):
                 ordered = selected.sort(dim=-1).values
                 global_idx = torch.where(ordered >= 0, offsets + ordered, -1)
                 indices = torch.cat((global_idx, swidx), -1).int()
+                del ordered, global_idx, swidx
                 # FlashMLA's length bounds count a compact valid prefix.
                 # Order within the top-k is irrelevant to sparse attention, so
                 # sort the values themselves: valid non-negative indices move
@@ -2670,7 +2671,10 @@ class AttentionV41FP8(AttentionFP8):
                 lens = (indices >= 0).sum(-1).int()
                 if indices.shape[1] % 64:
                     indices = F.pad(indices, (0, 64 - indices.shape[1] % 64), value=-1)
-            self._shared_attention["prefill_index_plan"] = (selected, indices, lens)
+            # Keep only the identity for the per-group cache: retaining the
+            # full [1M, topk] selected tensor here costs ~128 MiB that the
+            # index sort and CP restore need at 1M context.
+            self._shared_attention["prefill_index_plan"] = (id(selected), indices, lens)
         return self._prefill_sparse_attention(
             qkv,
             common,
