@@ -128,6 +128,7 @@ test_suite(
         ":smoke_h20_mla",
         ":smoke_h20_moe",
         ":smoke_h20_next",
+        ":smoke_pp_ci",
         ":smoke_h20_kimi_linear",
         ":smoke_h20_grammar_heavy",
         ":smoke_cuda_remote_cache",

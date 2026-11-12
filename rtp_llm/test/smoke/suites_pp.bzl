@@ -6,7 +6,7 @@ _COMMON_ARGS = "--act_type BF16 --warm_up 0 --enable_cuda_graph 0 --frontend_ser
 # Qwen3.5 recurrent state uses 2048-token blocks; attention uses 64-token pages.
 _HYBRID_ARGS = " --model_warm_up 0 --ssm_state_dtype fp32 --kv_cache_mem_mb 8192 --kernel_seq_size_per_block 64"
 
-def _pp_test(name, gpus, cases, gpu_type, hybrid = False, extra_args = "", chunk_size = 0):
+def _pp_test(name, gpus, cases, gpu_type, hybrid = False, extra_args = "", chunk_size = 0, watchdog_seconds = 3600):
     chunk_args = ""
     if chunk_size:
         chunk_args = " --warm_up 1 --max_context_batch_size 8 --max_batch_tokens_size 65536 --prefill_chunk_size %d" % chunk_size
@@ -14,6 +14,8 @@ def _pp_test(name, gpus, cases, gpu_type, hybrid = False, extra_args = "", chunk
         name = name,
         main = "pp_test.py",
         args = ["--cases=" + ",".join(cases)],
+        data = ["data/model/qwen35/qwen35_pp_smoke.json"],
+        test_envs = {"RTP_TEST_WATCHDOG_SECONDS": str(watchdog_seconds)},
         smoke_args = "%s --world_size %d --max_seq_len %d --seq_size_per_block %d%s%s%s" % (
             _COMMON_ARGS,
             gpus,
@@ -45,11 +47,28 @@ def pp_suites(gpu_type):
         extra_args = " --max_batch_tokens_without_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0",
     )
     _pp_test(
-        "qwen35_pd_mtp_pp_test",
+        "qwen35_pd_mtp_pp2_pp2_test",
         4,
-        ["sym_mtp3", "pp2_pp1_mtp3"],
+        ["sym_mtp3"],
         gpu_type,
         hybrid = True,
+    )
+    _pp_test(
+        "qwen35_pd_mtp_pp2_pp1_test",
+        # Keep the established four-GPU H20 resource shape even though this
+        # topology uses only three devices; CI has no existing three-GPU lane.
+        4,
+        ["pp2_pp1_mtp3"],
+        gpu_type,
+        hybrid = True,
+    )
+    native.test_suite(
+        name = "qwen35_pd_mtp_pp_test",
+        tests = [
+            ":qwen35_pd_mtp_pp2_pp2_test",
+            ":qwen35_pd_mtp_pp2_pp1_test",
+        ],
+        tags = ["manual"],
     )
 
     # Reuse the main smoke topologies and model, adding long/short chunk requests.
@@ -72,12 +91,28 @@ def pp_suites(gpu_type):
         chunk_size = 4096,
     )
     _pp_test(
-        "qwen35_pd_pp_chunk_prefill_mtp_test",
+        "qwen35_pd_pp2_pp2_chunk_prefill_mtp_test",
         4,
-        ["sym_mtp3", "pp2_pp1_mtp3"],
+        ["sym_mtp3"],
         gpu_type,
         hybrid = True,
         chunk_size = 4096,
+    )
+    _pp_test(
+        "qwen35_pd_pp2_pp1_chunk_prefill_mtp_test",
+        4,
+        ["pp2_pp1_mtp3"],
+        gpu_type,
+        hybrid = True,
+        chunk_size = 4096,
+    )
+    native.test_suite(
+        name = "qwen35_pd_pp_chunk_prefill_mtp_test",
+        tests = [
+            ":qwen35_pd_pp2_pp2_chunk_prefill_mtp_test",
+            ":qwen35_pd_pp2_pp1_chunk_prefill_mtp_test",
+        ],
+        tags = ["manual"],
     )
 
     native.test_suite(
@@ -97,6 +132,20 @@ def pp_suites(gpu_type):
             ":qwen35_pp_mixed_mtp_test",
             ":qwen35_pd_mtp_pp_test",
             ":smoke_pp_chunk_prefill",
+        ],
+        tags = ["manual"],
+    )
+
+    # Per-change CI keeps one representative for each distinct risk surface:
+    # deep PP, mixed PP/TP/DP/EP+MTP, mixed chunk prefill, and asymmetric PD
+    # chunk handoff. smoke_pp above remains the full eight-action manual suite.
+    native.test_suite(
+        name = "smoke_pp_ci",
+        tests = [
+            ":qwen35_pp_depth_test",
+            ":qwen35_pp_mixed_mtp_test",
+            ":qwen35_pp_chunk_prefill_mixed_mtp_test",
+            ":qwen35_pd_pp2_pp1_chunk_prefill_mtp_test",
         ],
         tags = ["manual"],
     )
