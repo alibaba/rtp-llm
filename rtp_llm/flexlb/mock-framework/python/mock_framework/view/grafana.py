@@ -34,19 +34,6 @@ def dashboard(value):
             panel["datasource"] = dict(DATASOURCE)
             for target in panel.get("targets", []):
                 target["datasource"] = dict(DATASOURCE)
-                if isinstance(target.get("expr"), str):
-                    # Let the Prometheus datasource escape both the regex and its PromQL string literal.
-                    for name in (
-                        "engine_instance",
-                        "prefill_instance",
-                        "decode_instance",
-                        "vit_instance",
-                        "master_instance",
-                        "client_instance",
-                    ):
-                        target["expr"] = target["expr"].replace(
-                            "${" + name + ":regex}", "${" + name + "}"
-                        )
 
     bind(result["panels"])
     for variable in result.get("templating", {}).get("list", []):
@@ -182,7 +169,6 @@ def instance_filters(url, start, end, view):
     options = {
         name: set()
         for name in (
-            "engine_instance",
             "prefill_instance",
             "decode_instance",
             "vit_instance",
@@ -208,29 +194,17 @@ def instance_filters(url, start, end, view):
         name, address = series.get("__name__", ""), series.get("instance")
         if not isinstance(name, str) or not isinstance(address, str) or not address:
             raise ValueError("Invalid Prometheus series identity")
-        role = (
-            "engine_instance"
-            if series.get("role") in ("prefill", "decode", "vit")
-            or name.startswith("mock_engine_")
-            else (
-                "client_instance"
-                if name.startswith("mock_client_")
-                else (
-                    "master_instance"
-                    if name.startswith("flexlb_")
-                    or series.get("application") == "flexlb-api"
-                    else None
-                )
-            )
-        )
-        if role in options:
-            options[role].add(address)
-        engine_role = series.get("role")
-        if (
-            engine_role in ("prefill", "decode", "vit")
-            and engine_role + "_instance" in options
-        ):
-            options[engine_role + "_instance"].add(address)
+        role = series.get("role")
+        if role in ("prefill", "decode", "vit"):
+            variable = role + "_instance"
+        elif name.startswith("mock_client_"):
+            variable = "client_instance"
+        elif name.startswith("flexlb_") or series.get("application") == "flexlb-api":
+            variable = "master_instance"
+        else:
+            continue
+        if variable in options:
+            options[variable].add(address)
     return {name: sorted(addresses) for name, addresses in options.items()}
 
 

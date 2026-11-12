@@ -40,7 +40,7 @@ Prefill、Decode、ViT 各有独立的地址选择器，地址来自保存指标
 
 隐藏变量 `prefill_group`、`decode_group`、`vit_group` 分别依赖同角色的 `*_instance`：All 的值为 `.*` 时返回 `role`，具体地址返回 `instance`。Engine 查询在 `by(...)` 与图例中使用对应角色的分组变量，保留 le、state 等业务维度。跨 P/D 的 Worker 面板拆成两组独立 target，保持两侧选择互不影响。变量查询仅对 `vector(1)` 操作，不扫描业务数据，不新增上报标签；报告页和独立 Grafana 使用同一规则。Client 自建面板使用 client_group（All=role，具体地址=instance）；Master JVM 补充面板使用 master_group（All=application，具体地址=instance）。JVM 内存先按 instance/application/area 汇总池，再按当前分组平均，不能先跨 JVM 求和。以后迁入面板时必须同时适配查询分组与图例。采集完整性的 up、采集时长、样本数始终逐目标展示，以免平均值隐藏失败目标。
 
-PromQL 中地址变量使用 `${prefill_instance}` / `${decode_instance}` / `${vit_instance}` / `${master_instance}` / `${client_instance}`，由 Prometheus 数据源完成正则与字符串转义。显式 `:regex` 格式化会绕开数据源的字符串转义，含点号的具体 IP 可能产生非法 `\.`；只测试 All 的 `.*` 无法发现这个错误。查看服务也会规范化旧报告中这些受管变量及旧版 engine_instance 的旧写法，原始报告不被修改。
+PromQL 中地址变量使用 `${prefill_instance}` / `${decode_instance}` / `${vit_instance}` / `${master_instance}` / `${client_instance}`，由 Prometheus 数据源完成正则与字符串转义。显式 `:regex` 格式化会绕开数据源的字符串转义，含点号的具体 IP 可能产生非法 `\.`；只测试 All 的 `.*` 无法发现这个错误。旧 dashboard 如需使用 View 的地址筛选，请改用上述按角色区分的变量，并移除地址变量的 `:regex` 后缀。
 
 标签沿用物理来源 HIPPO_APP/HIPPO_ROLE/HIPPO_SERVICE_NAME/HIPPO_SLAVE_IP/RequestedIP；本地不冒充 Pod IP。Engine 只支持 DP rank 0。业务指标与 Mock 专有指标保留原名，Prometheus 与线上 KMonitor 查询协议仍需分别适配，不能承诺直接导入同一查询 JSON。
 

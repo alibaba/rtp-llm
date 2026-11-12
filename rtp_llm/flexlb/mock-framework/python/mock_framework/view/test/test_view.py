@@ -272,19 +272,10 @@ def test_dashboard_rebinds_nested_panels_without_mutating_the_source_or_future_v
     assert saved["refresh"] == ""
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "engine_instance",
-        "prefill_instance",
-        "decode_instance",
-        "vit_instance",
-        "master_instance",
-        "client_instance",
-    ],
-)
-def test_saved_address_filters_use_prometheus_interpolation_including_nested_rows(name):
-    expression = 'sum(metric{instance=~"${' + name + ':regex}",pool=~"${pool:regex}"})'
+def test_dashboard_preserves_nested_panel_expressions():
+    expression = (
+        'sum(metric{instance=~"${prefill_instance:regex}",pool=~"${pool:regex}"})'
+    )
     source = {
         "title": "Saved dashboard",
         "panels": [
@@ -296,9 +287,7 @@ def test_saved_address_filters_use_prometheus_interpolation_including_nested_row
     }
     adapted = dashboard(source)
     target = adapted["panels"][0]["panels"][0]["targets"][0]
-    assert target["expr"] == expression.replace(
-        "${" + name + ":regex}", "${" + name + "}"
-    )
+    assert target["expr"] == expression
     assert target["datasource"]["type"] == "prometheus"
     assert source["panels"][0]["panels"][0]["targets"][0]["expr"] == expression
 
@@ -1000,6 +989,7 @@ def test_instance_choices_use_full_saved_series_and_separate_master_reporter_fro
 
     monkeypatch.setattr(grafana, "urlopen", fetch)
     view = json.loads((ROOT / "views/default.json").read_text())
+    view["templating"]["list"].append({"name": "engine_instance"})
     options = grafana.instance_filters("http://localhost", 10000, 20000, view)
     assert options == {
         "prefill_instance": ["10.0.1.1:9000"],
@@ -1036,7 +1026,7 @@ def test_partial_series_enumeration_is_not_treated_as_complete_filter_options(
             "http://localhost",
             1000,
             2000,
-            {"templating": {"list": [{"name": "engine_instance"}]}},
+            {"templating": {"list": [{"name": "prefill_instance"}]}},
         )
 
 
