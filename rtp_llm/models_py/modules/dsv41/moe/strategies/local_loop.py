@@ -130,12 +130,20 @@ def _fp4_group_dequant_bf16(
         row_chunk = weight.shape[0]
     rows, packed = weight.shape
     in_dim = packed * 2
+    wb = weight.view(torch.uint8)
+    sb = scale.contiguous().view(torch.uint8)
+    if out is None and rows * in_dim <= (32 << 20):
+        # One expert fits in 23 MiB. Index the LUT straight into the result
+        # instead of allocating a destination plus an equally large staging
+        # tensor; at 1M prefill the second 23 MiB was what failed.
+        vals = byte_lut[wb.int()].reshape(rows, in_dim)
+        scales = e8m0_lut[sb.long()]
+        vals.view(rows, in_dim // 32, 32).mul_(scales[:, :, None])
+        return vals
     if out is None:
         out = torch.empty((rows, in_dim), dtype=torch.bfloat16, device=weight.device)
     else:
         out = out[:rows, :in_dim]
-    wb = weight.view(torch.uint8)
-    sb = scale.contiguous().view(torch.uint8)
     # Dequantize one expert (or at most 4096 rows) at a time.  A whole
     # 8-expert slice would need ~235 MiB for the result plus a ~470 MiB
     # int64 index tensor; on the 44 GiB L20 that competes with graph capture.
@@ -480,34 +488,14 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
                 1, lid_c[:, None], (weights[:, k].float() * valid)[:, None]
             )
 
-        # One persistent dequant destination for W1/W3/W2. Each call used
-        # to allocate a fresh 46 MiB bf16 group; at 1M prefill the allocator
-        # had 55 MiB free but no contiguous block for the next one. The three
-        # products have the same element count, so a single buffer serves all
-        # of them and keeps the peak at one group instead of churning one.
-        dequant_numel = max(
-            group * self._W1_w.shape[1] * self._W1_w.shape[2] * 2,
-            group * self._W2_w.shape[1] * self._W2_w.shape[2] * 2,
-        )
-        # Keep the destination for this forward only. A persistent buffer
-        # allocated during warmup starved cudaGraphInstantiate of 32 MiB;
-        # the per-call buffer is released before capture and reused by all
-        # W1/W3/W2 groups inside the call.
-        dequant_buf = torch.empty(
-            dequant_numel, dtype=torch.bfloat16, device=x.device
-        )
-
         for g in range(n_local // group):
             a = g * group
             b = a + group
-            w1_rows = group * self._W1_w.shape[1]
-            w1_dim = self._W1_w.shape[2] * 2
             w1 = _fp4_group_dequant_bf16(
                 self._W1_w[a:b],
                 self._W1_s[a:b],
                 self._fp4_byte_lut,
                 self._e8m0_byte_lut,
-                out=dequant_buf[: w1_rows * w1_dim].view(w1_rows, w1_dim),
             ).reshape(group, self._W1_w.shape[1], self._W1_w.shape[2] * 2)
             gate = torch.bmm(x_group, w1.transpose(1, 2)).float()
             del w1
@@ -516,7 +504,6 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
                 self._W3_s[a:b],
                 self._fp4_byte_lut,
                 self._e8m0_byte_lut,
-                out=dequant_buf[: w1_rows * w1_dim].view(w1_rows, w1_dim),
             ).reshape(group, self._W3_w.shape[1], self._W3_w.shape[2] * 2)
             up = torch.bmm(x_group, w3.transpose(1, 2)).float()
             del w3
@@ -529,14 +516,11 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             # as Expert.forward does, then bmm the whole group.
             gw = local_w[:, a:b].transpose(0, 1).unsqueeze(-1)
             h = ((torch.nn.functional.silu(gate) * up) * gw).to(torch.bfloat16)
-            w2_rows = group * self._W2_w.shape[1]
-            w2_dim = self._W2_w.shape[2] * 2
             w2 = _fp4_group_dequant_bf16(
                 self._W2_w[a:b],
                 self._W2_s[a:b],
                 self._fp4_byte_lut,
                 self._e8m0_byte_lut,
-                out=dequant_buf[: w2_rows * w2_dim].view(w2_rows, w2_dim),
             ).reshape(group, self._W2_w.shape[1], self._W2_w.shape[2] * 2)
             y.add_(torch.bmm(h, w2.transpose(1, 2)).float().sum(dim=0))
             del w2
