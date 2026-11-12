@@ -247,3 +247,68 @@ class EnvFlagParsingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SessionPlacementWeightedTest(unittest.TestCase):
+    """00036: size-aware (token-mass) placement weighting."""
+
+    def _balancer(self, weighted=True, clock_box=None):
+        if clock_box is None:
+            clock_box = [0.0]
+        hosts = make_hosts(("10.0.0.1", 28200), ("10.0.0.2", 28200))
+
+        def clock():
+            clock_box[0] += 1.0
+            return clock_box[0]
+
+        return SessionPlacementBalancer(
+            host_provider=lambda: hosts,
+            clock=clock,
+            enabled=True,
+            weighted=weighted,
+            mass_half_life_s=300.0,
+        ), hosts
+
+    def test_weighted_cold_start_uses_seed_hash(self):
+        balancer, hosts = self._balancer()
+        # Below MIN_TRACKED_FOR_WEIGHTING per host the counters are cold:
+        # placement must equal the 00035 seed hash decision.
+        for i in range(6):
+            pinned = balancer.maybe_pin_prefill([1000 + i], token_count=200000)
+            self.assertIsNotNone(pinned)
+        # Balanced counts as before (seed hash is count-uniform).
+        self.assertEqual(balancer._pin_count, 6)
+
+    def test_weighted_balances_token_mass(self):
+        balancer, _ = self._balancer()
+        # Cold phase fills the counters.
+        for i in range(10):
+            balancer.maybe_pin_prefill([1000 + i], token_count=100000)
+        # Warm phase: identical big sessions must split ~50/50 by MASS.
+        mass = {}
+        for i in range(20):
+            pinned = balancer.maybe_pin_prefill([90000 + i], token_count=400000)
+            mass[pinned.ip] = mass.get(pinned.ip, 0) + 400000
+        self.assertEqual(sum(mass.values()), 20 * 400000)
+        ratio = max(mass.values()) / min(mass.values())
+        self.assertLess(ratio, 1.15, f"token mass ratio {ratio} should stay balanced")
+
+    def test_token_count_none_backward_compatible(self):
+        balancer, _ = self._balancer()
+        pinned = balancer.maybe_pin_prefill([777777], token_count=None)
+        self.assertIsNotNone(pinned)
+        self.assertEqual(pinned.grpc_port, 28201)
+        self.assertEqual(pinned.http_port, 28200)
+
+    def test_weighted_disabled_matches_00035(self):
+        balancer, _ = self._balancer(weighted=False)
+        pinned = balancer.maybe_pin_prefill([12345], token_count=400000)
+        self.assertIsNotNone(pinned)
+        self.assertFalse(balancer.stats()["weighted"])
+
+    def test_stats_exposes_weighted_fields(self):
+        balancer, _ = self._balancer()
+        balancer.maybe_pin_prefill([42], token_count=50000)
+        stats = balancer.stats()
+        self.assertTrue(stats["weighted"])
+        self.assertEqual(stats["mass_hosts"], 1)

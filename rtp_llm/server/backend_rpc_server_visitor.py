@@ -39,8 +39,10 @@ from rtp_llm.server.request_headers import (
 )
 from rtp_llm.server.session_placement import (
     ENV_ENABLE_FLAG,
+    ENV_WEIGHTED_FLAG,
     SessionPlacementBalancer,
     env_flag_enabled,
+    env_mass_half_life_s,
     env_ttl_seconds,
 )
 from rtp_llm.telemetry import attributes as trace_attrs
@@ -170,6 +172,8 @@ class BackendRPCServerVisitor:
             host_provider=self._get_prefill_vip_hosts,
             enabled=env_flag_enabled(ENV_ENABLE_FLAG),
             ttl_s=env_ttl_seconds(),
+            weighted=env_flag_enabled(ENV_WEIGHTED_FLAG),
+            mass_half_life_s=env_mass_half_life_s(),
         )
         self.master_config = master_config
         self._page_rr_route_cache_keys = False
@@ -435,7 +439,9 @@ class BackendRPCServerVisitor:
         # for that instance (production __init__ always sets it).
         placement = getattr(self, "_session_placement", None)
         if placement is not None and selected_vit is None:
-            pinned_prefill = placement.maybe_pin_prefill(full_block_cache_keys)
+            pinned_prefill = placement.maybe_pin_prefill(
+                full_block_cache_keys, token_count=len(token_ids)
+            )
             if pinned_prefill is not None:
                 # Request-pinned routing (cold-session placement balancing):
                 # the prefill role is fixed by the frontend for this request;
