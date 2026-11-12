@@ -2081,9 +2081,15 @@ class AttentionV41FP8(AttentionFP8):
                             os.environ.get("DSV41_PREFILL_KEY_CHUNK", "16384")
                         )
                         q_rows = q[chunk]
+                        # The fused indexer already scores in bf16 and the
+                        # top-k consumer has a bf16 masking path. Keeping the
+                        # non-fused score in bf16 halves the final tile to
+                        # 21 MiB at key_count=163840, which is small enough to
+                        # find a contiguous block on a 44 GiB L20; an FP32
+                        # 42 MiB tile failed with 59.62 MiB free.
                         logits = torch.empty(
                             (q_rows.shape[0], q_rows.shape[1], key_count),
-                            dtype=torch.float32,
+                            dtype=torch.bfloat16,
                             device=q_rows.device,
                         )
                         for key_start in range(0, key_count, key_chunk):
@@ -2091,7 +2097,7 @@ class AttentionV41FP8(AttentionFP8):
                             logits[:, :, key_start:key_stop] = torch.einsum(
                                 "thd,kd->thk",
                                 q_rows,
-                                keys[key_start:key_stop].float(),
+                                keys[key_start:key_stop],
                             )
                         logits.relu_()
                         # Apply the per-head weights in place. The eager
