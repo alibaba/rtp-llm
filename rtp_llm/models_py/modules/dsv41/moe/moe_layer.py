@@ -458,7 +458,20 @@ class MoE(nn.Module):
                 self.dim,
                 x.device,
             )
-        out = _get_or_create_final_out(T, self.dim, x.dtype, x.device)[:T]
+        if T > 65536:
+            # Huge prefill: allocate the combined-output buffer per call
+            # instead of caching it. The cached [1048320, 5120] bf16 block
+            # (10.74 GiB) is dead weight through the whole attention/HC
+            # phase of every following layer and was part of the ~165 GiB
+            # live set when the FFN HC-pre collapse requested its 10 GiB
+            # readout (n21/n22/n23 all-rank OOMs; n23 proved allocator
+            # tuning alone can't assemble the request from the remaining
+            # holes). Per-call alloc/free lets the allocator recycle one
+            # clean segment, and the collapse readout fits the vacated
+            # 10.74 GiB hole exactly.
+            out = torch.empty((T, self.dim), dtype=x.dtype, device=x.device)
+        else:
+            out = _get_or_create_final_out(T, self.dim, x.dtype, x.device)[:T]
         for token_start in range(0, T, chunk_tokens):
             token_end = min(token_start + chunk_tokens, T)
             self._run_chunk(
