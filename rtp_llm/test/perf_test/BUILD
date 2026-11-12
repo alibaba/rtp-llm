@@ -106,6 +106,7 @@ py_library(
         "//rtp_llm/test/utils:maga_server_manager",
     ] + select({
         "@rtp_llm//:using_cuda13_x86": [requirement_cuda13("plotly")],
+        "@rtp_llm//:using_cuda13_arm": [requirement_cuda13_arm("plotly")],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
@@ -254,6 +255,7 @@ py_library(
         "//rtp_llm/test/utils:device_resource",
     ] + select({
         "@rtp_llm//:using_cuda13_x86": [requirement_cuda13("plotly")],
+        "@rtp_llm//:using_cuda13_arm": [requirement_cuda13_arm("plotly")],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

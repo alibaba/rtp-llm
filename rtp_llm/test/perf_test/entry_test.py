@@ -596,6 +596,59 @@ class PublicBoundaryTest(unittest.TestCase):
 
 class RuntimeBuildClosureTest(unittest.TestCase):
 
+    def test_cuda13_reports_declare_platform_plotly_dependencies(self):
+        tree = ast.parse((public_boundary_ROOT / "BUILD").read_text())
+        rules = {"perf_test_runtime_lib", "perf_test_lib"}
+        nodes = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and (
+                node.value.func.id == "load"
+                or (
+                    node.value.func.id == "py_library"
+                    and any(
+                        kw.arg == "name"
+                        and isinstance(kw.value, ast.Constant)
+                        and kw.value.value in rules
+                        for kw in node.value.keywords
+                    )
+                )
+            )
+        ]
+        for platform, repository in (
+            ("using_cuda13_x86", "@pip_gpu_cuda13_torch"),
+            ("using_cuda13_arm", "@pip_cuda13_arm_torch"),
+        ):
+            with self.subTest(platform=platform):
+                declarations = {}
+                namespace = dict(
+                    py_library=lambda **kw: declarations.update({kw["name"]: kw}),
+                    glob=lambda _: [],
+                    select=lambda options: options.get(
+                        "@rtp_llm//:" + platform,
+                        options.get("//conditions:default", []),
+                    ),
+                )
+
+                def load(label, *symbols, **aliases):
+                    for name in aliases:
+                        namespace[name] = (
+                            lambda package, repo=label.split("//")[0]: repo
+                            + "//"
+                            + package
+                        )
+
+                namespace["load"] = load
+                exec(
+                    compile(ast.Module(body=nodes, type_ignores=[]), "BUILD", "exec"),
+                    namespace,
+                )
+                for name in rules:
+                    self.assertIn(repository + "//plotly", declarations[name]["deps"])
+
     def test_declared_runtime_sources_import_in_isolated_tree(self):
         root = Path(__file__).parent
         build = ast.parse((root / "BUILD").read_text())
