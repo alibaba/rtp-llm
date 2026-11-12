@@ -144,7 +144,5 @@ DECODE_EXECUTION_OPTIONS = {
     "DSV4_SHARED_EXPERT_MODE": "overlap",
     "DSV4_PPU_DECODE_SHARED_SCHEDULE": "before_route",
     "DSV4_PPU_DECODE_MOE_OUTPUT": "bf16",
-    "DSV4_PPU_DECODE_METADATA": "reference",
-    "DSV4_PPU_DECODE_ROPE": "reference",
     "DSV4_PPU_DECODE_MOE_HINT": "capacity",
 }

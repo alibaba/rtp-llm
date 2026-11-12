@@ -20,7 +20,6 @@ class MetadataFactoryTest(unittest.TestCase):
         options = {**DECODE_EXECUTION_OPTIONS, "DSV4_PPU_MTP_METADATA_GRAPH": "1"}
         provider = PpuDecodeProvider(options)
         config = SimpleNamespace(q_len=1)
-        options["DSV4_PPU_DECODE_ROPE"] = "layer"
         with self.assertRaisesRegex(ValueError, "constructed"):
             provider.build_decode_metadata(DSv4DecodeFmhaImplFP8, config)
 
