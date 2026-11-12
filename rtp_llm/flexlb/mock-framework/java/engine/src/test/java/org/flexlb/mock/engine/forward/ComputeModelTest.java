@@ -17,7 +17,7 @@ class ComputeModelTest {
         var compute = load("{\"forward\":{\"expression\":\"0.5*totalComputeTokens\"}}");
         assertEquals(0, compute.effectiveConfiguration().at("/forward/noise/stddev_ms").doubleValue());
         var batch = FormulaForwardTest.batch(FormulaForwardTest.request("a", 10, 2));
-        assertEquals(Duration.ofMillis(4), compute.plan(Role.prefill, "p0", batch).planned());
+        assertEquals(Duration.ofMillis(4), compute.sampleDuration(Role.prefill, "p0", batch).planned());
         assertEquals(new ComputeModel.Result(1, false, 1), compute.completed(compute.prepare(Role.prefill,
             new ComputeModel.Request("r", 0, 8, 0, 0, 4, 100, false))));
     }

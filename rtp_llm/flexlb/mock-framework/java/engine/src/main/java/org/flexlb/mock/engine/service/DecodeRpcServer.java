@@ -29,7 +29,7 @@ final class DecodeRpcServer implements AutoCloseable {
     private final ExecutorService transport = Executors.newVirtualThreadPerTaskExecutor();
     private final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1,
         Thread.ofPlatform().daemon().name("rtp-decode-output-deadline").factory());
-    private final SimulatedKvLoad transfer = new SimulatedKvLoad();
+    private final SimulatedKvLoad kvLoader = new SimulatedKvLoad();
 
     private boolean closed;
 
@@ -48,7 +48,7 @@ final class DecodeRpcServer implements AutoCloseable {
             closed = true;
             engine.close();
         }
-        transfer.close();
+        kvLoader.close();
         deadlines.shutdownNow();
         transport.shutdown();
     }
@@ -134,8 +134,8 @@ final class DecodeRpcServer implements AutoCloseable {
         var use = engine.beginKvTransfer(call.request);
         call.stage = Stage.LOADING;
         try {
-            call.transfer = transfer.submit(use);
-            call.transfer.completion().thenAccept(outcome -> loaded(call, outcome));
+            call.kvLoad = kvLoader.submit(use);
+            call.kvLoad.completion().thenAccept(outcome -> loaded(call, outcome));
         } catch (RuntimeException error) { use.close(); throw error; }
     }
 
@@ -183,7 +183,7 @@ final class DecodeRpcServer implements AutoCloseable {
             call.terminal = true;
             call.rpcCompleted.run();
             if (status.getCode() == Status.Code.CANCELLED) recordCancellation.run();
-            if (call.transfer != null) call.transfer.cancel();
+            if (call.kvLoad != null) call.kvLoad.cancel();
             call.delivery.finish(status.isOk() ? null : RpcErrors.failure(status, code));
         }
     }
@@ -230,7 +230,7 @@ final class DecodeRpcServer implements AutoCloseable {
         EngineScheduler.Request request;
         volatile boolean terminal;
         Stage stage = Stage.ALLOCATING;
-        SimulatedKvLoad.Execution transfer;
+        SimulatedKvLoad.Execution kvLoad;
 
         Call(ServerCallStreamObserver<GenerateOutputsPB> response, Context context) {
             this.response = response;

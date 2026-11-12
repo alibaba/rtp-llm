@@ -98,7 +98,7 @@ public final class ComputeModel {
         return stopping.complete(request.key(), request.generated(), plan.candidates(), request.minimum(), request.limit(), request.ignoreEos());
     }
 
-    public NoiseModel.Sample plan(Role role, String engineId, ForwardBatch batch) {
+    public NoiseModel.Sample sampleDuration(Role role, String engineId, ForwardBatch batch) {
         Objects.requireNonNull(role);
         if (engineId == null || engineId.isBlank()) throw new IllegalArgumentException("Engine id is required");
         String key = engineId.length() + ":" + engineId + "/" + role + "/" + batch.id();

@@ -133,10 +133,10 @@ class RtpConfigTest {
         var parsed = load(root);
         var request = new org.flexlb.mock.engine.forward.ForwardBatch.Request("r", 2, 0, 1, 0, 1, 50, java.util.List.of());
         var batch = new org.flexlb.mock.engine.forward.ForwardBatch("b", java.util.List.of(request));
-        assertEquals(java.time.Duration.ofMillis(5), parsed.compute().plan(parsed.role(), parsed.id(), batch).planned());
+        assertEquals(java.time.Duration.ofMillis(5), parsed.compute().sampleDuration(parsed.role(), parsed.id(), batch).planned());
         assertEquals(4, parsed.cpSize()); assertTrue(parsed.forceSinglePrefill());
         config.putObject("mock.compute").putObject("forward").put("expression", "2");
-        assertEquals(java.time.Duration.ofMillis(2), load(root).compute().plan(parsed.role(), parsed.id(), batch).planned());
+        assertEquals(java.time.Duration.ofMillis(2), load(root).compute().sampleDuration(parsed.role(), parsed.id(), batch).planned());
     }
 
     @Test void legacyParallelismSettingsDoNotEnableCp() throws Exception {

@@ -194,7 +194,7 @@ public final class EngineLoop implements AutoCloseable {
         var next = new ForwardExecution(work);
         inFlightForward = next;
         try {
-            var sample = model.plan(role, identity, work.batch());
+            var sample = model.sampleDuration(role, identity, work.batch());
             next.execution = compute.submit(sample);
             next.execution.completion().thenAccept(outcome -> processOutputs(next, outcome));
         } catch (RuntimeException error) {

@@ -87,7 +87,7 @@ class RtpSchedulerTest {
                 var text = completeAndCheckTpot(scheduler, work, config, beforeMetrics, before, after, 4, 1);
                 assertEquals(0, RtpMetricsTest.sample(text, "rtp_llm_forward_tokens_total", "kind=\"output\""));
             } else {
-                var sample = config.compute().plan(config.role(), config.id(), work.batch());
+                var sample = config.compute().sampleDuration(config.role(), config.id(), work.batch());
                 scheduler.processOutputs(work, new SimulatedCompute.Outcome(SimulatedCompute.State.CANCELLED, sample, 0));
                 drain(scheduler);
                 assertFalse(scheduler.metrics().scrape().contains("rtp_llm_sp_estimate_tpot_us_count{"));
@@ -883,7 +883,7 @@ class RtpSchedulerTest {
     }
 
     private static void complete(EngineScheduler scheduler, EngineScheduler.Work work, RtpConfig config) {
-        var sample = config.compute().plan(config.role(), config.id(), work.batch());
+        var sample = config.compute().sampleDuration(config.role(), config.id(), work.batch());
         scheduler.processOutputs(work, new SimulatedCompute.Outcome(SimulatedCompute.State.COMPLETED, sample, 10_000_000));
     }
 
