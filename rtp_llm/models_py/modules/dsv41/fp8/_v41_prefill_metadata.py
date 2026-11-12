@@ -24,6 +24,8 @@ import triton.language as tl
 # when the referenced table cell still reads 0 — without any log. Count those
 # drops per call and surface them as WARNINGs when the env is set.
 DEBUG_SLOT_DROPS = os.getenv("DSV41_DEBUG_SLOT_DROPS", "0") == "1"
+_DEBUG_SLOT_DROP_LOG_BUDGET = 200
+_debug_slot_drop_events = 0
 
 
 def debug_slot_drops(tag, positions, slots, ratio):
@@ -33,15 +35,39 @@ def debug_slot_drops(tag, positions, slots, ratio):
     are exactly the rows that must receive a compressed write, so any -1 among
     them is a silently dropped KV row. STATE regions must not be passed here:
     their -1 entries are legitimate end-gated rows.
+
+    Two execution contexts are excluded because the drop count is meaningless
+    or fatal there: CUDA graph capture (the ``int(...sum())`` device sync is
+    "operation not permitted when stream is capturing" and poisons the whole
+    capture — measured: fail29 startup death on rank2) and the graph warmup
+    probe forwards flagged by RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD (synthetic
+    full-range positions against placeholder tables, where every slot is
+    legitimately -1). A per-process log budget bounds the output on long
+    runs.
     """
+    global _debug_slot_drop_events
     if not DEBUG_SLOT_DROPS or slots is None or ratio not in (1, 2):
         return
     try:
+        if torch.cuda.is_current_stream_capturing():
+            return
+        if os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"):
+            return
+        if _debug_slot_drop_events >= _DEBUG_SLOT_DROP_LOG_BUDGET:
+            if _debug_slot_drop_events == _DEBUG_SLOT_DROP_LOG_BUDGET:
+                _debug_slot_drop_events += 1
+                logging.warning(
+                    "[DSV41_SLOT_DROP] log budget %d exhausted; further drop "
+                    "events suppressed",
+                    _DEBUG_SLOT_DROP_LOG_BUDGET,
+                )
+            return
         boundary = (positions + 1) % ratio == 0
         dropped = boundary & (slots < 0)
         count = int(dropped.sum())
         if count == 0:
             return
+        _debug_slot_drop_events += 1
         pos = positions[dropped]
         logging.warning(
             "[DSV41_SLOT_DROP] %s: %d/%d boundary rows dropped (slot=-1); "
