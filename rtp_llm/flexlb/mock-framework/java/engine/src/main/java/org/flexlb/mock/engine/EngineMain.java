@@ -51,13 +51,14 @@ public final class EngineMain {
             Runtime.getRuntime().addShutdownHook(hook);
             try {
                 node.health().run();
+                var endpoints = node.endpoints().get();
                 System.out.println(new ObjectMapper().writeValueAsString(Map.of(
-                    "event", "engine_started", "endpoints", node.endpoints().get(), "effective_config", started.effective())));
+                    "event", "engine_started", "endpoints", endpoints, "effective_config", started.effective())));
                 if (ready != null) {
                     Path output = Path.of(System.getenv("MOCK_OUTPUT_DIR"));
                     JsonWire.writeAtomically(output.resolve("effective-config.json"), started.effective());
-                    JsonWire.writeAtomically(output.resolve("endpoints.json"), node.endpoints().get());
-                    JsonWire.writeAtomically(ready, Map.of("url", node.endpoints().get().get("control")));
+                    JsonWire.writeAtomically(output.resolve("endpoints.json"), endpoints);
+                    JsonWire.writeAtomically(ready, Map.of("url", endpoints.get("control")));
                 }
                 while (!stopped.await(1, TimeUnit.SECONDS)) node.health().run();
             } finally {
@@ -72,12 +73,18 @@ public final class EngineMain {
         String id = env.getOrDefault("MOCK_NODE_ID", role + "-" + Address.local().advertise());
         if (id == null || !id.startsWith(role + "-")) throw new IllegalArgumentException("Missing/invalid MOCK_NODE_ID for ROLE_TYPE");
         if (role.equals("vit")) {
-            var config = VitConfig.fromEnvironment(id, env);
-            var node = VitNode.start(config, rpcPort, controlPort);
-            return new Started(node::close, node::checkHealthy, node::endpoints, config.effective());
+            return startVit(VitConfig.fromEnvironment(id, env), rpcPort, controlPort);
         }
         if (!role.equals("prefill") && !role.equals("decode")) throw new IllegalArgumentException("Unknown ROLE_TYPE: " + role);
-        var config = RtpConfig.fromEnvironment(id, Role.valueOf(role), env);
+        return startRtp(RtpConfig.fromEnvironment(id, Role.valueOf(role), env), rpcPort, controlPort);
+    }
+
+    private static Started startVit(VitConfig config, int rpcPort, int controlPort) throws Exception {
+        var node = VitNode.start(config, rpcPort, controlPort);
+        return new Started(node::close, node::checkHealthy, node::endpoints, config.effective());
+    }
+
+    private static Started startRtp(RtpConfig config, int rpcPort, int controlPort) throws Exception {
         var node = LLMMockEngine.start(config, rpcPort, controlPort);
         return new Started(node::close, node::checkHealthy, node::endpoints, config.effective());
     }
@@ -87,16 +94,11 @@ public final class EngineMain {
         if (role.isBlank() || !root.path("id").asText().startsWith(role + "-"))
             throw new IllegalArgumentException("Instance identity differs from role");
         if (role.equals("vit")) {
-            var config = VitConfig.load(root);
-            var node = VitNode.start(config, rpcPort, controlPort);
-            return new Started(node::close, node::checkHealthy, node::endpoints, config.effective());
+            return startVit(VitConfig.load(root), rpcPort, controlPort);
         }
         if (!role.equals("prefill") && !role.equals("decode"))
             throw new IllegalArgumentException("Unknown Engine role: " + role);
-        // P/D select an LLM backend; V uses one shared implementation.
-        var config = RtpConfig.load(root);
-        var node = LLMMockEngine.start(config, rpcPort, controlPort);
-        return new Started(node::close, node::checkHealthy, node::endpoints, config.effective());
+        return startRtp(RtpConfig.load(root), rpcPort, controlPort);
     }
 
     /**
