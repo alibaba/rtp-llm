@@ -100,11 +100,12 @@ class SegmentPolicyTest(unittest.TestCase):
                 module.require_rank_agreement((6144, "bf16"))
 
     def test_remote_low_memory_rejects_and_preserves_eager_output(self):
-        admission = SimpleNamespace(supports=lambda x: True)
+        admission = module.SegmentAdmission()
         segment = module.StaticPrefillSegment(0, "test", admission)
         x = torch.ones(512, 4)
         stream = SimpleNamespace(cuda_stream=7)
         with (
+            patch.object(admission, "supports", return_value=True),
             patch.object(module, "require_rank_agreement"),
             patch.object(module.torch.cuda, "current_stream", return_value=stream),
             patch.object(
@@ -120,6 +121,173 @@ class SegmentPolicyTest(unittest.TestCase):
             self.assertEqual(vote.call_count, 1)
         self.assertEqual(len(segment.rejected), 1)
         self.assertFalse(segment.graphs)
+
+    def test_private_pool_residency_includes_inactive_bytes_and_both_paths(self):
+        snapshot = [
+            {"segment_pool_id": (0, 1), "total_size": 1024},
+            {"segment_pool_id": (0, 2), "total_size": 2048},
+            {"segment_pool_id": (0, 0), "total_size": 100000},
+        ]
+        self.assertEqual(
+            module.graph_memory_bytes(snapshot, {(0, 1), (0, 2)}, 256), 3328
+        )
+
+    def test_unknown_pool_ownership_fails_instead_of_undercounting(self):
+        with self.assertRaisesRegex(RuntimeError, "pool ownership"):
+            module.graph_memory_bytes([{"total_size": 1024}], {(0, 1)}, 0)
+
+    def test_static_and_moe_shape_budget_is_shared_and_transactional(self):
+        with patch.dict(os.environ, {"QWEN_PREFILL_GRAPH_MAX_ENTRIES": "1"}):
+            admission = module.SegmentAdmission()
+
+        def tensor(rows):
+            return SimpleNamespace(
+                is_cuda=True,
+                dtype=torch.bfloat16,
+                ndim=2,
+                shape=(rows, 4),
+                is_contiguous=lambda: True,
+                requires_grad=False,
+            )
+
+        with (
+            patch.object(module, "require_rank_agreement"),
+            patch.object(
+                module.torch.cuda, "is_current_stream_capturing", return_value=False
+            ),
+        ):
+            self.assertTrue(admission.supports(tensor(768), moe=True))
+            self.assertFalse(admission.supports(tensor(512)))
+            self.assertTrue(admission.supports(tensor(768), moe=True))
+        self.assertEqual(admission.budget.tokens, 768)
+        self.assertFalse(admission.segment_budget.keys)
+
+    def test_non_hot_shapes_never_promote_after_repeated_requests(self):
+        admission = module.SegmentAdmission()
+        with patch.object(module, "require_rank_agreement") as vote:
+            for rows in (1536, 4608, 5376):
+                for _ in range(20):
+                    self.assertFalse(
+                        admission.supports(SimpleNamespace(shape=(rows, 4)), moe=True)
+                    )
+            vote.assert_not_called()
+        self.assertFalse(admission.budget.keys)
+
+    def test_overlapping_hot_shapes_are_rejected(self):
+        with patch.dict(os.environ, {"QWEN_PREFILL_GRAPH_MOE_ROWS": "512"}):
+            with self.assertRaisesRegex(ValueError, "disjoint"):
+                module.SegmentAdmission()
+
+    def test_invalid_memory_budget(self):
+        for value in ("0", "-1", "512"):
+            with patch.dict(os.environ, {"QWEN_PREFILL_GRAPH_MAX_MEMORY_MIB": value}):
+                with self.assertRaises(ValueError):
+                    module.SegmentAdmission()
+
+    def test_budget_closes_cold_admission_without_touching_existing_graphs(self):
+        admission = module.SegmentAdmission()
+        admission.memory_used = admission.max_memory - admission.capture_reserve + 1
+        with (
+            patch.object(
+                module.torch.cuda,
+                "mem_get_info",
+                return_value=(100 * 2**30, 140 * 2**30),
+            ),
+            patch.object(module.dist, "all_reduce") as vote,
+        ):
+            self.assertFalse(admission.allow_capture(torch.device("cpu"), 0))
+            self.assertFalse(admission.allow_capture(torch.device("cpu"), 0))
+            self.assertEqual(vote.call_count, 1)
+        self.assertTrue(admission.capture_closed)
+
+    def test_remote_rank_over_budget_fails_closed(self):
+        admission = module.SegmentAdmission()
+        with (
+            patch.object(module.torch.cuda, "memory_snapshot", return_value=[]),
+            patch.object(
+                module.dist,
+                "all_reduce",
+                side_effect=lambda t, op: t.fill_(admission.max_memory + 1),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "budget exceeded"):
+                admission.record_capture(torch.device("cpu"))
+
+    def test_closed_budget_still_replays_existing_graph_with_new_inputs(self):
+        admission = module.SegmentAdmission()
+        admission.capture_closed = True
+        segment = module.StaticPrefillSegment(0, "hc_attn", admission)
+        x = torch.ones(512, 4)
+        static = torch.empty_like(x)
+        output = torch.empty_like(x)
+        key = ((tuple(x.shape), tuple(x.stride()), x.dtype, x.device),)
+        graph = SimpleNamespace(replay=lambda: output.copy_(static + 1))
+        segment.graphs[key] = (graph, (static,), output, None)
+
+        def forbidden_eager(*args):
+            self.fail("An admitted graph must remain usable when cold admission closes")
+
+        with (
+            patch.object(admission, "supports", return_value=True),
+            patch.object(admission, "allow_capture") as cold,
+            patch.object(module.dist, "all_reduce") as collective,
+            patch.object(
+                module.torch.cuda,
+                "current_stream",
+                return_value=SimpleNamespace(cuda_stream=7),
+            ),
+        ):
+            for value in (3, 7):
+                x.fill_(value)
+                result = segment.run(forbidden_eager, x)
+                self.assertTrue(torch.equal(result, x + 1))
+            cold.assert_not_called()
+            collective.assert_not_called()
+
+    def test_static_subcap_rejection_does_not_charge_shared_budget(self):
+        with patch.dict(os.environ, {"QWEN_PREFILL_SEGMENT_MAX_ENTRIES": "1"}):
+            admission = module.SegmentAdmission()
+
+        def tensor(rows):
+            return SimpleNamespace(
+                is_cuda=True,
+                dtype=torch.bfloat16,
+                ndim=2,
+                shape=(rows, 4),
+                is_contiguous=lambda: True,
+                requires_grad=False,
+            )
+
+        with (
+            patch.object(module, "require_rank_agreement"),
+            patch.object(
+                module.torch.cuda, "is_current_stream_capturing", return_value=False
+            ),
+        ):
+            self.assertTrue(admission.supports(tensor(512)))
+            self.assertFalse(admission.supports(tensor(2048)))
+            self.assertTrue(admission.supports(tensor(768), moe=True))
+        self.assertEqual(admission.budget.tokens, 1280)
+        self.assertEqual(admission.segment_budget.tokens, 512)
+
+    def test_input_storage_is_charged_once_even_with_multiple_references(self):
+        admission = module.SegmentAdmission()
+        x = torch.ones(4, 5)
+        admission.input_slots = {"first": x, "second": x.view(5, 4)}
+        admission.pools = {(512, x.dtype, x.device): (0, 1)}
+        with (
+            patch.object(
+                module.torch.cuda,
+                "memory_snapshot",
+                return_value=[
+                    {"segment_pool_id": (0, 1), "total_size": 1024},
+                    {"segment_pool_id": (0, 0), "total_size": 4096},
+                ],
+            ),
+            patch.object(module.dist, "all_reduce"),
+        ):
+            admission.record_capture(x.device)
+        self.assertEqual(admission.memory_used, 1024 + x.untyped_storage().nbytes())
 
     def test_stream_switch_fails_before_replay(self):
         segment = module.StaticPrefillSegment(

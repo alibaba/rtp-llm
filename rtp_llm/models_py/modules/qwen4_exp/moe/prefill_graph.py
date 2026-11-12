@@ -51,11 +51,16 @@ class QwenMegaPrefillGraph:
         self.admission = admission
         self.graphs = {}
         self.stream_id = None
+        self.unified_segment = None
         self.max_rows = int(os.environ.get("QWEN_MOE_MEGA_GRAPH_MAX_ROWS", "4096"))
         if not 1 <= self.max_rows <= 8192:
             raise ValueError("QWEN_MOE_MEGA_GRAPH_MAX_ROWS must be in [1, 8192]")
 
     def supports(self, x):
+        if self.unified_segment is not None:
+            return x.shape[
+                0
+            ] <= self.max_rows and self.unified_segment.admission.supports(x, moe=True)
         return (
             not torch.cuda.is_current_stream_capturing()
             and x.shape[0] <= self.max_rows
@@ -63,6 +68,8 @@ class QwenMegaPrefillGraph:
         )
 
     def forward(self, layer, x, eager):
+        if self.unified_segment is not None:
+            return self.unified_segment.run(eager, x)
         main = torch.cuda.current_stream(x.device)
         if self.stream_id is None:
             self.stream_id = main.cuda_stream

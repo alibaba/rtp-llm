@@ -30,13 +30,20 @@ class SegmentBudget:
     def admit(self, key):
         if key in self.keys:
             return True
+        if not self.can_admit(key):
+            return False
+        self.keys.add(key)
+        self.tokens += key[0]
+        return True
+
+    def can_admit(self, key):
+        if key in self.keys:
+            return True
         rows = key[0]
         if rows <= 0 or len(self.keys) >= self.max_entries:
             return False
         if self.tokens + rows > self.max_tokens:
             return False
-        self.keys.add(key)
-        self.tokens += rows
         return True
 
 
@@ -54,7 +61,21 @@ def require_rank_agreement(value):
 
 class SegmentAdmission:
     def __init__(self):
+        # One model-owned admission and residency budget for both graph paths.
+        # Only measured hot shapes may capture; transient scheduler splits stay
+        # eager even after repeated visits. No online LRU or frequency promotion.
+        self.moe_rows = frozenset(
+            int(row)
+            for row in os.environ.get(
+                "QWEN_PREFILL_GRAPH_MOE_ROWS", "96,768,3072"
+            ).split(",")
+            if row.strip()
+        )
         self.budget = SegmentBudget(
+            int(os.environ.get("QWEN_PREFILL_GRAPH_MAX_ENTRIES", "7")),
+            int(os.environ.get("QWEN_PREFILL_GRAPH_MAX_TOKENS", "20832")),
+        )
+        self.segment_budget = SegmentBudget(
             int(os.environ.get("QWEN_PREFILL_SEGMENT_MAX_ENTRIES", "4")),
             int(os.environ.get("QWEN_PREFILL_SEGMENT_MAX_TOKENS", "16896")),
         )
@@ -66,6 +87,26 @@ class SegmentAdmission:
         )
         if not self.rows or any(row <= 32 or row > 8192 for row in self.rows):
             raise ValueError("Segment rows must be exact prefill sizes in [33, 8192]")
+        if self.rows & self.moe_rows or any(
+            row <= 32 or row > 8192 for row in self.moe_rows
+        ):
+            raise ValueError(
+                "MoE hot rows must be in [33, 8192] and disjoint from segments"
+            )
+        self.max_memory = (
+            int(os.environ.get("QWEN_PREFILL_GRAPH_MAX_MEMORY_MIB", "28672")) * 2**20
+        )
+        self.capture_reserve = (
+            int(os.environ.get("QWEN_PREFILL_GRAPH_CAPTURE_RESERVE_MIB", "1024"))
+            * 2**20
+        )
+        if not 0 < self.capture_reserve <= self.max_memory:
+            raise ValueError(
+                "Graph capture reserve must be positive and fit the budget"
+            )
+        self.memory_used = 0
+        self.capture_closed = False
+        self.denied_moe_rows = set()
         self.decisions = {}
         self.pools = {}
         self.capture_streams = {}
@@ -95,12 +136,19 @@ class SegmentAdmission:
             self.pools[key] = torch.cuda.graph_pool_handle()
         return self.pools[key], self.capture_streams[x.device]
 
-    def supports(self, x):
+    def supports(self, x, moe=False):
+        if moe and x.shape[0] not in self.moe_rows:
+            if x.shape[0] not in self.denied_moe_rows:
+                self.denied_moe_rows.add(x.shape[0])
+                logger.info(
+                    "[QwenPrefillBudget] eager rows=%d reason=not_hot_shape", x.shape[0]
+                )
+            return False
         if not (
             x.is_cuda
             and x.dtype == torch.bfloat16
             and x.ndim == 2
-            and x.shape[0] in self.rows
+            and x.shape[0] in (self.moe_rows if moe else self.rows)
             and x.is_contiguous()
             and not x.requires_grad
             and not torch.cuda.is_current_stream_capturing()
@@ -116,10 +164,83 @@ class SegmentAdmission:
                     self.budget.max_entries,
                     self.budget.max_tokens,
                     sorted(self.rows),
+                    sorted(self.moe_rows),
+                    self.segment_budget.max_entries,
+                    self.segment_budget.max_tokens,
+                    sorted(self.segment_budget.keys),
+                    self.segment_budget.tokens,
+                    self.max_memory,
+                    self.capture_reserve,
                 )
             )
-            self.decisions[key] = self.budget.admit(key)
+            accepted = self.budget.can_admit(key) and (
+                moe or self.segment_budget.can_admit(key)
+            )
+            if accepted:
+                self.budget.admit(key)
+                if not moe:
+                    self.segment_budget.admit(key)
+            self.decisions[key] = accepted
         return self.decisions[key]
+
+    def allow_capture(self, device, min_free):
+        if self.capture_closed:
+            return False
+        # memory_used is the previous cold-path all-rank maximum. Replays never
+        # snapshot the allocator, synchronize the CPU, or add a collective.
+        free = torch.tensor(
+            torch.cuda.mem_get_info(device)[0], device=device, dtype=torch.int64
+        )
+        dist.all_reduce(free, op=dist.ReduceOp.MIN)
+        if (
+            self.memory_used + self.capture_reserve > self.max_memory
+            or free.item() < min_free + self.capture_reserve
+        ):
+            self.capture_closed = True
+            logger.info(
+                "[QwenPrefillBudget] closed used_mib=%.1f budget_mib=%.1f",
+                self.memory_used / 2**20,
+                self.max_memory / 2**20,
+            )
+            return False
+        return True
+
+    def record_capture(self, device):
+        pools = {tuple(pool) for key, pool in self.pools.items() if key[2] == device}
+        # Charge the full reserved private pools (including inactive blocks),
+        # plus retained input storage outside the pools. Other allocator/KV
+        # memory is deliberately not mislabelled as graph memory.
+        snapshot = torch.cuda.memory_snapshot(include_traces=False)
+        storages = {
+            tensor.untyped_storage().data_ptr(): tensor.untyped_storage().nbytes()
+            for tensor in self.input_slots.values()
+            if tensor.device == device
+        }
+        used = graph_memory_bytes(snapshot, pools, sum(storages.values()))
+        maximum = torch.tensor(used, device=device, dtype=torch.int64)
+        dist.all_reduce(maximum, op=dist.ReduceOp.MAX)
+        self.memory_used = int(maximum.item())
+        logger.info(
+            "[QwenPrefillBudget] charged local_mib=%.1f max_rank_mib=%.1f budget_mib=%.1f",
+            used / 2**20,
+            self.memory_used / 2**20,
+            self.max_memory / 2**20,
+        )
+        # Admission headroom is not an allocator hard limit. A capture larger
+        # than the remaining budget fails on every rank, never silently admits
+        # an over-budget graph or tries unsafe rank-local eviction/recovery.
+        if self.memory_used > self.max_memory:
+            raise RuntimeError("Unified prefill graph memory budget exceeded")
+
+
+def graph_memory_bytes(snapshot, pools, input_bytes):
+    total = input_bytes
+    for segment in snapshot:
+        if "segment_pool_id" not in segment:
+            raise RuntimeError("CUDA allocator snapshot lacks graph pool ownership")
+        if tuple(segment["segment_pool_id"]) in pools:
+            total += segment["total_size"]
+    return total
 
 
 class StaticPrefillSegment:
@@ -139,7 +260,12 @@ class StaticPrefillSegment:
 
     def run(self, eager, *inputs):
         x = inputs[0]
-        if not self.admission.supports(x):
+        supported = (
+            self.admission.supports(x, moe=True)
+            if self.name == "moe"
+            else self.admission.supports(x)
+        )
+        if not supported:
             return eager(*inputs)
         # Include optional injection inputs, strides, and all output-affecting
         # tensor metadata. No live batch or mutable Python object is captured.
@@ -177,11 +303,7 @@ class StaticPrefillSegment:
                     self.min_free,
                 )
             )
-            free = torch.tensor(
-                torch.cuda.mem_get_info(x.device)[0], device=x.device, dtype=torch.int64
-            )
-            dist.all_reduce(free, op=dist.ReduceOp.MIN)
-            if free.item() < self.min_free:
+            if not self.admission.allow_capture(x.device, self.min_free):
                 self.rejected.add(key)
                 logger.info(
                     "[QwenStaticPrefill] rejected layer=%s segment=%s rows=%s memory",
@@ -213,6 +335,7 @@ class StaticPrefillSegment:
                     self.mega._prefill_graph_recording = False
             main.wait_stream(stream)
             self.graphs[key] = (graph, static, output, stream)
+            self.admission.record_capture(x.device)
             logger.info(
                 "[QwenStaticPrefill] captured layer=%s rank=%s segment=%s rows=%s capture_ms=%.3f allocated_mib=%.1f reserved_mib=%.1f",
                 self.layer_idx,
