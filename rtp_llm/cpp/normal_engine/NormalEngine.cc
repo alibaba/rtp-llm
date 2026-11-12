@@ -1075,6 +1075,59 @@ void NormalEngine::awiApplyBarriers(std::list<GenerateStreamPtr>& streams) {
                          barrier.operation_id.c_str(),
                          armed.size());
     }
+    // Serialize ARMED prefill compute per unresolved barrier: at most one
+    // armed context stream advances per step (first in request_ids order).
+    // n30 (2026-11-12, image aec7d861): two CONCURRENT 1M prefills each
+    // expanded their own 39.99 GiB HC residual stream - fatal_gpu_oom in
+    // expand_hc on all 8 ranks (24.89 GiB free vs 39.99 GiB requested) -
+    // crashing the server before the KV-level capacity verdict above could
+    // ever run. What the contract's concurrency requires (every sequence's
+    // full input+output KV reservation coexisting, joint decode afterwards)
+    // is still enforced by the resolution above and the decode hold below;
+    // only the transient prefill compute phase is ordered, which does not
+    // change the total GPU work. Held context streams idle through the same
+    // flag mechanism as held decode streams (FIFOScheduler and
+    // GenerateStateMachine honor awiBarrierHeld()).
+    for (const auto& barrier : store.barriers()) {
+        if (barrier.satisfied || barrier.failed || barrier.request_ids.empty()) {
+            continue;
+        }
+        std::string allowed_rid;
+        for (const auto& want : barrier.request_ids) {
+            for (const auto& stream : streams) {
+                if (stream && stream->isContextStream()
+                    && stream->generateInput()->request_info.request_id == want) {
+                    allowed_rid = want;
+                    break;
+                }
+            }
+            if (!allowed_rid.empty()) {
+                break;
+            }
+        }
+        for (auto it = streams.begin(); it != streams.end();) {
+            const auto& stream = *it;
+            if (!stream || !stream->isContextStream()) {
+                ++it;
+                continue;
+            }
+            const std::string& rid = stream->generateInput()->request_info.request_id;
+            const bool         armed =
+                std::find(barrier.request_ids.begin(), barrier.request_ids.end(), rid)
+                != barrier.request_ids.end();
+            if (!armed) {
+                ++it;
+                continue;
+            }
+            if (rid == allowed_rid) {
+                stream->setAwiBarrierHold(false);  // the one armed prefill allowed to run
+                ++it;
+            } else {
+                stream->setAwiBarrierHold(true);
+                it = streams.erase(it);
+            }
+        }
+    }
     // Decode of still-unresolved barrier requests is held (their prefill keeps
     // running); the wait naturally stays out of decode timing because held
     // steps emit no decode events.
@@ -1187,8 +1240,13 @@ absl::Status NormalEngine::step() try {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);
         }
-        markAwiPrefillStarts(streams);
+        // Barriers FIRST: awiApplyBarriers may exclude held/serialized armed
+        // streams from this step's batch, and prefill starts must be stamped
+        // only for streams that actually run - a barrier-serialized context
+        // stream would otherwise stamp its start hours before its real
+        // prefill begins (prefill window honesty for C>=2 waves).
         awiApplyBarriers(streams);
+        markAwiPrefillStarts(streams);
         // TP collectives and FFN-disaggregate alignment both require empty batches to enter process().
         if (shouldEarlyReturnEmptyBatch(
                 streams.empty(), parallelism_config.tp_size, ffn_disaggregate_config.enable_ffn_disaggregate)) {
