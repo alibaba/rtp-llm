@@ -468,15 +468,13 @@ def warmup_v41_engram_jit(model, *, max_m, device):
         for layer, capabilities in zip(layers, lookup_capabilities):
             ids = hashes[:, layer.layer_hash_index].contiguous()
             if rows <= limit:
-                lookup = (
-                    layer.warmup_lookup
-                    if getattr(layer, "_direct_fp8_lookup", False) is True
-                    else layer.embed_tokens
-                )
+                # Always enter the layer warmup so host-resident gate and
+                # projection views are registered before graph capture; the
+                # non-direct path delegates to the same table lookup.
                 common._run_triton_warmup_launch_with_retry(
                     "DSV41 Engram",
                     f"lookup rows={rows}",
-                    partial(lookup, ids, device),
+                    partial(layer.warmup_lookup, ids, device),
                     device=device,
                 )
             if rows <= prefetch_limit and capabilities[1]:
@@ -496,6 +494,7 @@ def warmup_v41_engram_jit(model, *, max_m, device):
                     (rows, (hc + 1) * dim), dtype=torch.bfloat16, device=device
                 )
                 mask = torch.ones(rows, dtype=torch.bool, device=device)
+                q_weight, k_weight = layer._gate_weights(device)
                 for token_mask in (None, mask):
                     common._run_triton_warmup_launch_with_retry(
                         "DSV41 Engram",
@@ -504,8 +503,8 @@ def warmup_v41_engram_jit(model, *, max_m, device):
                             gated_engram_residual,
                             hidden,
                             kv,
-                            layer.q_weight,
-                            layer.k_weight,
+                            q_weight,
+                            k_weight,
                             layer.eps,
                             token_mask,
                         ),

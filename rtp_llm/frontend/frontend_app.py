@@ -22,7 +22,7 @@ from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse, StreamingResponse
+from fastapi.responses import ORJSONResponse, Response, StreamingResponse
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
@@ -945,6 +945,55 @@ class FrontendApp(object):
         async def encode(req: Union[str, Dict[Any, Any]], request: Request):
             check_not_draining(request)
             return self.frontend_server.tokenize(req)
+
+        # Evaluator AWI protocol.  These endpoints live on the C++ engine's
+        # HTTP listener (start_port + 5); the frontend owns the public port, so
+        # proxy the host-visible requests without rewriting the raw token body
+        # or dropping X-AWI-Request-ID.  Events themselves are still produced
+        # by the engine/scheduler/graph code, not by this gateway.
+        async def _awi_backend(request: Request, uri: str):
+            import aiohttp
+
+            target = "http://127.0.0.1:{}/{}".format(
+                self.server_config.http_port, uri.lstrip("/")
+            )
+            headers = {}
+            request_id = request.headers.get("X-AWI-Request-ID")
+            if request_id:
+                headers["X-AWI-Request-ID"] = request_id
+            body = await request.body()
+            timeout = aiohttp.ClientTimeout(total=None, sock_connect=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.request(
+                    request.method,
+                    target,
+                    params=request.query_params,
+                    data=body if body else None,
+                    headers=headers,
+                ) as response:
+                    payload = await response.read()
+                    return Response(
+                        content=payload,
+                        status_code=response.status,
+                        media_type=response.headers.get(
+                            "Content-Type", "application/json"
+                        ),
+                    )
+
+        @app.post("/awi/generate")
+        async def awi_generate(request: Request):
+            check_not_draining(request)
+            return await _awi_backend(request, "awi/generate")
+
+        @app.post("/awi/barrier")
+        async def awi_barrier(request: Request):
+            check_not_draining(request)
+            return await _awi_backend(request, "awi/barrier")
+
+        @app.get("/awi/observations")
+        async def awi_observations(request: Request):
+            check_not_draining(request)
+            return await _awi_backend(request, "awi/observations")
 
         if self.frontend_server.is_embedding:
             # embedding

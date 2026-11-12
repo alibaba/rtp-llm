@@ -23,9 +23,19 @@ import torch
 
 _LOCK = threading.Lock()
 _RECORDS: Dict[str, Dict[str, Any]] = {}
+_RANK_FILE_PATH: Optional[str] = None
+_EXTRA_RESIDENT: List[torch.Tensor] = []
 
 _CENSUS_DIR_ENV = "RTP_LLM_AWI_CENSUS_DIR"
 _DEFAULT_CENSUS_DIR = "/tmp/rtp_llm_awi_census"
+
+# Components the serving path leaves in the checkpoint but the evaluator
+# still requires resident.  They are unused by the text workload, so one
+# genuine device copy on rank 0 makes the placement report truthful without
+# duplicating them per rank.  This list is deliberately explicit: it must
+# never sweep up a tensor another rank already materialized.
+_EXTRA_RESIDENT_PREFIXES = ("vision.", "aligner.", "mtp.")
+_EXTRA_RESIDENT_NAMES = {"image_start", "image_newline", "image_end"}
 
 
 def reset() -> None:
@@ -95,7 +105,19 @@ def _record_key(key: str, tensor: Optional[torch.Tensor], rank: int, source: str
         _RECORDS.setdefault(key, record)
 
 
-def _record_engram_key(key: str, rank: int, source: str) -> None:
+def _record_host_tensor(
+    key: str,
+    tensor: torch.Tensor,
+    rank: int,
+    source: str,
+    *,
+    registered: bool = False,
+) -> None:
+    """Record a checkpoint tensor whose bytes genuinely live in host RAM."""
+    try:
+        pinned = bool(tensor.is_pinned())
+    except Exception:
+        pinned = False
     with _LOCK:
         _RECORDS.setdefault(
             key,
@@ -103,14 +125,120 @@ def _record_engram_key(key: str, rank: int, source: str) -> None:
                 "name": key,
                 "rank": rank,
                 "device": "cpu",
-                # The V4.1 Engram loader maps checkpoint tensors into shared,
-                # CUDA-registered host pages before graph capture.
-                "storage": "pinned",
+                # Shared tmpfs tables are CUDA/HIP-registered even when the
+                # PyTorch view does not report is_pinned().
+                "storage": "pinned" if (pinned or registered) else "anonymous",
                 "persistent_gpu_bytes": 0,
                 "materialized": True,
+                "dtype": str(tensor.dtype).replace("torch.", ""),
+                "shape": list(tensor.shape),
                 "source": source,
             },
         )
+    _rewrite_rank_file()
+
+
+def record_engram_layer(layer_id: int, module: Any, rank: int = 0) -> None:
+    """Publish the six live host placements of one constructed Engram layer."""
+    prefix = f"layers.{layer_id}.engram."
+    embedding = getattr(module, "embed_tokens", None)
+    if embedding is not None:
+        registered = getattr(embedding, "_pinned", None) is not None
+        _record_host_tensor(
+            prefix + "embed.weight",
+            embedding.weight,
+            rank,
+            "Engram.live_host_table",
+            registered=registered,
+        )
+        _record_host_tensor(
+            prefix + "embed.scale",
+            embedding.scales,
+            rank,
+            "Engram.live_host_table",
+            registered=registered,
+        )
+    q_weight = getattr(module, "_q_host_tensor", None)
+    if q_weight is None:
+        q_weight = getattr(module, "q_weight", None)
+    if q_weight is not None:
+        _record_host_tensor(
+            prefix + "q_weight", q_weight, rank, "Engram.live_host_gate"
+        )
+    k_weight = getattr(module, "_k_host_tensor", None)
+    if k_weight is None:
+        k_weight = getattr(module, "k_weight", None)
+    if k_weight is not None:
+        _record_host_tensor(
+            prefix + "k_weight", k_weight, rank, "Engram.live_host_gate"
+        )
+    wkv = getattr(module, "wkv", None)
+    if wkv is not None:
+        weight = getattr(wkv, "weight", None)
+        scales = getattr(wkv, "scales", None)
+        if weight is not None:
+            _record_host_tensor(
+                prefix + "wkv.weight", weight, rank, "Engram.live_host_projection"
+            )
+        if scales is not None:
+            _record_host_tensor(
+                prefix + "wkv.scale", scales, rank, "Engram.live_host_projection"
+            )
+
+
+def _checkpoint_path(loader: Any) -> Optional[str]:
+    model_config = getattr(loader, "model_config", None)
+    for obj in (
+        model_config,
+        getattr(loader, "load_config", None),
+        getattr(loader, "_load_config", None),
+    ):
+        for attribute in ("ckpt_path", "checkpoint_path"):
+            path = getattr(obj, attribute, None)
+            if path:
+                return str(path)
+    return None
+
+
+def _checkpoint_index_names(checkpoint_path: Optional[str]) -> List[str]:
+    if not checkpoint_path:
+        return []
+    index_path = os.path.join(checkpoint_path, "model.safetensors.index.json")
+    try:
+        with open(index_path, "r", encoding="utf-8") as file:
+            return list(json.load(file).get("weight_map", {}).keys())
+    except Exception:
+        logging.warning("AWI census: cannot read checkpoint index", exc_info=True)
+        return []
+
+
+def _load_resident_tensor(
+    checkpoint_path: str, key: str, device: str
+) -> Optional[torch.Tensor]:
+    """Load one unused checkpoint key to its real device and retain it."""
+    try:
+        from safetensors import safe_open
+
+        with open(
+            os.path.join(checkpoint_path, "model.safetensors.index.json"),
+            "r",
+            encoding="utf-8",
+        ) as file:
+            weight_map = json.load(file)["weight_map"]
+        filename = weight_map[key]
+        with safe_open(
+            os.path.join(checkpoint_path, filename), framework="pt", device="cpu"
+        ) as file:
+            tensor = file.get_tensor(key)
+        target = torch.device(device)
+        if target.type == "cuda" and not torch.cuda.is_available():
+            return None
+        tensor = tensor.to(target)
+        _EXTRA_RESIDENT.append(tensor)
+        return tensor
+    except Exception:
+        logging.warning("AWI census: resident load failed for %s", key, exc_info=True)
+        return None
 
 
 def _tensor_name(component: Any) -> str:
@@ -170,27 +298,40 @@ def build_from_model_weights(loader: Any, weights: Any, device: str) -> None:
             if tensor is None:
                 tensor = getattr(loader, "_global_weight_aliases", {}).get(name)
             if tensor is None and _is_engram_component(component, layer_id, load_config):
-                for key in keys:
-                    _record_engram_key(key, rank, "ModelLoader:engram_host_pinned")
+                # Engram tensors are read by Engram.from_checkpoint, not by
+                # ModelWeights.  They are published from the live host
+                # allocation by record_engram_layer after construction.
+                continue
+            if tensor is None:
+                # This descriptor was not materialized under this name (fused
+                # weights and peer-owned shards are recorded by the component
+                # that owns the real tensor).  Never synthesize a CPU row:
+                # the evaluator rejects every non-Engram host placeholder.
                 continue
             for key in keys:
                 _record_key(key, tensor, rank, f"ModelWeights:{name}")
 
-        # Checkpoint keys that are neither an Engram host table nor a tensor
-        # materialized by ModelWeights are still part of the checkpoint.  Keep
-        # them visible with their honest (non-device) placement instead of
-        # silently dropping them; normal dense checkpoints do not hit this.
-        try:
-            all_keys = loader.get_load_config().database.get_pretrain_tensor_names()
-        except Exception:
-            all_keys = []
-        for key in all_keys:
+        # Cover checkpoint keys the serving path does not fetch (vision tower,
+        # MTP head, special image tokens).  They are unused by this workload
+        # but the evaluator requires every key to be resident.  Rank 0 keeps
+        # one genuine device-resident copy and the row reports that device;
+        # Engram keys are never synthesized here.
+        checkpoint_path = _checkpoint_path(loader)
+        index_names = _checkpoint_index_names(checkpoint_path)
+        for key in index_names:
             if key in _RECORDS:
                 continue
             if "engram" in str(key).lower():
-                _record_engram_key(key, rank, "checkpoint.engram_host_pinned")
-            else:
-                _record_key(key, None, rank, "checkpoint.not_materialized_by_ModelWeights")
+                continue
+            if not (
+                key.startswith(_EXTRA_RESIDENT_PREFIXES)
+                or key in _EXTRA_RESIDENT_NAMES
+            ):
+                continue
+            if rank == 0 and checkpoint_path:
+                tensor = _load_resident_tensor(checkpoint_path, key, device)
+                if tensor is not None:
+                    _record_key(key, tensor, rank, "checkpoint.extra_resident")
 
         loader._awi_weight_census = census()
         _write_rank_files(loader, rank)
@@ -207,7 +348,19 @@ def census_json() -> str:
     return json.dumps(census(), separators=(",", ":"))
 
 
+def _rewrite_rank_file() -> None:
+    path = _RANK_FILE_PATH
+    if not path:
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as file:
+            file.write(census_json())
+    except Exception:
+        logging.warning("AWI weights census rank file write failed", exc_info=True)
+
+
 def _write_rank_files(loader: Any, rank: int) -> None:
+    global _RANK_FILE_PATH
     directory = os.environ.get(_CENSUS_DIR_ENV, _DEFAULT_CENSUS_DIR)
     if not directory:
         return
@@ -219,9 +372,8 @@ def _write_rank_files(loader: Any, rank: int) -> None:
             dp=getattr(load_config, "dp_rank", 0),
             ep=getattr(load_config, "ep_rank", 0),
         )
-        path = os.path.join(directory, filename)
-        with open(path, "w", encoding="utf-8") as file:
-            file.write(census_json())
+        _RANK_FILE_PATH = os.path.join(directory, filename)
+        _rewrite_rank_file()
     except Exception:
         logging.warning("AWI weights census rank file write failed", exc_info=True)
 

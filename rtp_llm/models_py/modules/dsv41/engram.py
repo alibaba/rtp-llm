@@ -551,6 +551,65 @@ class _CudaArrayView:
         }
 
 
+class _HostUvaTensor:
+    """Pinned, device-mapped host tensor with a zero-copy device view.
+
+    The checkpoint bytes stay in host RAM.  The host pages are registered once
+    and the returned ``view`` is a device tensor backed by those same pages, so
+    kernels (including captured graphs) can read the weights without a
+    persistent GPU mirror.  Used for the Engram gate and projection weights,
+    which must remain host resident on every hardware family.
+    """
+
+    def __init__(self, tensor: torch.Tensor, device):
+        self.device = torch.device(device)
+        source = tensor.detach()
+        if source.device.type != "cpu":
+            source = source.to(device="cpu")
+        source = source.contiguous()
+        nbytes = source.numel() * source.element_size()
+        if nbytes == 0:
+            raise ValueError("cannot map an empty host tensor")
+        # A fresh ordinary host allocation: cudaHostRegister/hipHostRegister
+        # owns the pinning.  Allocating it already pinned would make the
+        # registration fail as duplicate on some runtimes.
+        self.host = source.clone()
+        runtime = _host_runtime()
+        (result,) = runtime.cudaHostRegister(self.host.data_ptr(), nbytes, 3)
+        if int(result) != 0:
+            raise RuntimeError(f"Engram cudaHostRegister failed: {result}")
+        (result, pointer) = runtime.cudaHostGetDevicePointer(
+            self.host.data_ptr(), 0
+        )
+        if int(result) != 0:
+            (unregister,) = runtime.cudaHostUnregister(self.host.data_ptr())
+            raise RuntimeError(
+                f"Engram cudaHostGetDevicePointer failed: {result}"
+            )
+        self._pointer = int(pointer)
+        raw = self.host.view(torch.uint8)
+        self.view = (
+            torch.as_tensor(
+                _CudaArrayView(self, raw, self._pointer), device=self.device
+            )
+            .view(self.host.dtype)
+            .view(self.host.shape)
+        )
+        self._finalizer = weakref.finalize(
+            self,
+            self._unregister,
+            runtime,
+            self.host.data_ptr(),
+        )
+
+    @staticmethod
+    def _unregister(runtime, pointer):
+        try:
+            runtime.cudaHostUnregister(pointer)
+        except Exception:
+            logger.warning("Engram cudaHostUnregister failed", exc_info=True)
+
+
 class _PinnedSharedTable:
     """One physical tmpfs allocation shared by independent prefill/decode groups.
 
@@ -2207,9 +2266,17 @@ class Engram(nn.Module):
         self.layer_hash_index = layer_hash_index
         self.embed_tokens = embedding
         self.wkv = wkv
-        self.register_buffer("q_weight", q_weight, persistent=False)
-        self.register_buffer("k_weight", k_weight, persistent=False)
+        # Plain attributes, not buffers: these are checkpoint bytes that must
+        # remain in host RAM.  device views are created lazily below.
+        self.q_weight = q_weight.detach().cpu()
+        self.k_weight = k_weight.detach().cpu()
+        # Retain the genuine host tensors for the placement census even after
+        # q_weight/k_weight are replaced by their zero-copy device views.
+        self._q_host_tensor = self.q_weight
+        self._k_host_tensor = self.k_weight
         self.eps = eps
+        self._q_host_uva = None
+        self._k_host_uva = None
         self._lookup_stream = None
         self._lookup_done = None
         self._lookup_work = None
@@ -2226,26 +2293,60 @@ class Engram(nn.Module):
 
             self._direct_fp8_lookup = type(wkv) is V41MXFP8Linear
 
+    def _gate_device(self):
+        if self._q_host_uva is not None:
+            return self._q_host_uva.view.device
+        if self.q_weight.device.type == "cuda":
+            return self.q_weight.device
+        return None
+
+    def _gate_weights(self, device=None):
+        """Return device-visible gate weights without moving the checkpoint.
+
+        The original BF16 bytes stay host resident; ``_HostUvaTensor`` maps
+        those pages so the gate kernel reads them in place.  The mapped view
+        replaces the host attribute so every existing reader (prefetch,
+        decode schedule, transition code) sees a normal device tensor.
+        """
+        if self.q_weight.device.type != "cpu":
+            return self.q_weight, self.k_weight
+        target = self._gate_device() if device is None else torch.device(device)
+        if target is None or target.type != "cuda":
+            return self.q_weight, self.k_weight
+        if self._q_host_uva is None or self._q_host_uva.device != target:
+            self._q_host_uva = _HostUvaTensor(self._q_host_tensor, target)
+            self._k_host_uva = _HostUvaTensor(self._k_host_tensor, target)
+            self.q_weight = self._q_host_uva.view
+            self.k_weight = self._k_host_uva.view
+        return self.q_weight, self.k_weight
+
     def warmup_lookup(self, ids, device):
+        target = torch.device(device)
+        if target.type == "cuda":
+            # Build the host mappings before graph capture.
+            if hasattr(self.wkv, "_ensure_host"):
+                self.wkv._ensure_host(target)
+            self._gate_weights(target)
         if self._direct_fp8_lookup:
             return self.embed_tokens.lookup_quantized(ids, device, prepare=True)
         return self.embed_tokens(ids, device)
 
     def prepare_lookup_prefetch(self):
         """Called after lookup JIT warmup, never from a request or capture."""
+        q_device = self._gate_device()
         if (
             not getattr(self.embed_tokens, "supports_async_prefetch", True)
             or not engram_lookup_prefetch_enabled(
                 external=self.embed_tokens._uses_external_storage is True
             )
-            or not self.q_weight.is_cuda
+            or q_device is None
             or self.embed_tokens._uva is None
             or self._lookup_stream is not None
         ):
             return
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("Engram prefetch must be initialized before capture")
-        device = self.q_weight.device
+        device = q_device
         stream = torch.cuda.Stream(device=device, priority=0)
         done = torch.cuda.Event()
         stream.wait_stream(torch.cuda.current_stream(device))
@@ -2257,12 +2358,14 @@ class Engram(nn.Module):
         self._lookup_stream, self._lookup_done = stream, done
 
     def prefetch_lookup(self, hash_ids):
+        q_device = self._gate_device()
         if (
             not getattr(self.embed_tokens, "supports_async_prefetch", True)
             or self._lookup_stream is None
             or self._lookup_work is not None
             or not hash_ids.is_cuda
-            or hash_ids.device != self.q_weight.device
+            or q_device is None
+            or hash_ids.device != q_device
             or hash_ids.dtype != torch.int64
             or hash_ids.ndim != 2
             or hash_ids.shape[1] != self.layout.n_hash_cols
@@ -2452,26 +2555,27 @@ class Engram(nn.Module):
                     scale_identity=identity,
                     **shard_kwargs,
                 )
-            if target.type == "cuda":
-                with torch.cuda.device(target):
-                    from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
-
-                    projection = V41MXFP8Linear(
-                        load("wkv.weight").to(target), load("wkv.scale").to(target)
-                    )
-            else:
-                projection = _ReferenceWKV(
-                    dequantize_block_weight(load("wkv.weight"), load("wkv.scale"))
-                )
-            return cls(
+            # Every Engram checkpoint tensor stays in host RAM.  The WKV
+            # projection reads a host-mapped BF16 decode of the original FP8
+            # blocks; the gate keeps its checkpoint bytes in host pages and
+            # maps them for kernels.  No persistent GPU weight mirror exists.
+            projection = HostResidentWKV(load("wkv.weight"), load("wkv.scale"))
+            instance = cls(
                 layout,
                 layer_hash_index,
                 embedding,
                 projection,
-                load("q_weight").to(target),
-                load("k_weight").to(target),
+                load("q_weight"),
+                load("k_weight"),
                 float(_config_value(config, "rms_norm_eps")),
             )
+            try:
+                from rtp_llm.model_loader import awi_census
+
+                awi_census.record_engram_layer(layer_id, instance, tp_rank)
+            except Exception:
+                logger.warning("Engram AWI placement census failed", exc_info=True)
+            return instance
         except BaseException:
             if external_storage is not None and embedding is not None:
                 embedding.release_external_views()
@@ -2487,8 +2591,9 @@ class Engram(nn.Module):
         # Engram is token-local after hashing. Bound lookup/projection/gate
         # temporaries for packed long prompts without changing the decode path.
         chunk_rows = _ENGRAM_CHUNK_ROWS
+        q_weight, k_weight = self._gate_weights(hidden.device)
         inplace = _engram_inject_supported(
-            hidden, self.q_weight, self.k_weight, token_mask
+            hidden, q_weight, k_weight, token_mask
         )
         if hidden.shape[0] > chunk_rows:
             work = self._lookup_work
@@ -2624,8 +2729,54 @@ class Engram(nn.Module):
             kv = self.wkv(rows)
         del rows
         return gated_engram_residual(
-            hidden, kv, self.q_weight, self.k_weight, self.eps, token_mask, out=out
+            hidden, kv, q_weight, k_weight, self.eps, token_mask, out=out
         )
+
+
+class HostResidentWKV(nn.Module):
+    """Engram WKV projection whose checkpoint bytes stay in host RAM.
+
+    Decode reads a host-mapped BF16 decode of the original FP8 blocks with a
+    Triton kernel, so the launch is graph-capturable and creates no persistent
+    device copy.  Prefill uses a bounded transient device staging copy that is
+    released before the next call; it is not retained in any cache.
+    """
+
+    def __init__(self, weight: torch.Tensor, scales: torch.Tensor):
+        super().__init__()
+        # Plain attributes, not buffers: model .to() must never migrate these
+        # checkpoint tensors onto an accelerator.
+        self.weight = weight.detach().cpu()
+        self.scales = scales.detach().cpu()
+        self._host_bf16 = None
+        self._host_uva = None
+
+    def _decode(self) -> torch.Tensor:
+        if self._host_bf16 is None:
+            self._host_bf16 = dequantize_block_weight(self.weight, self.scales)
+        return self._host_bf16
+
+    def _ensure_host(self, device) -> torch.Tensor:
+        target = torch.device(device)
+        host = self._decode()
+        if self._host_uva is None or self._host_uva.device != target:
+            self._host_uva = _HostUvaTensor(host, target)
+            self._host_bf16 = self._host_uva.host
+        return self._host_uva.view
+
+    def forward(self, rows: torch.Tensor) -> torch.Tensor:
+        if not rows.is_cuda:
+            return F.linear(mxfp8_activation_reference(rows), self._decode())
+        host_view = self._ensure_host(rows.device)
+        if rows.shape[0] <= 256 or torch.cuda.is_current_stream_capturing():
+            from rtp_llm.models_py.modules.dsv41._host_wkv_triton import host_wkv
+
+            return host_wkv(rows.to(torch.bfloat16), host_view)
+        weight = self._host_bf16.to(rows.device, non_blocking=False)
+        try:
+            return F.linear(rows.to(torch.bfloat16), weight)
+        finally:
+            del weight
 
 
 class _ReferenceWKV(nn.Module):
