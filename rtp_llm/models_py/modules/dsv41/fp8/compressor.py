@@ -773,66 +773,105 @@ class CompressorFP8(PoolBackedModule):
         if N == 0:
             return
         cos_sin_cache = self._cos_sin_cache
-        with record_function_range("dsv4.fp8.compressor.launch.save_partial_states"):
-            run_save_partial_states(
-                kv_flat,
-                score_flat,
-                self.ape,
-                meta.positions,
-                self._state_pool_3d,
-                meta.state_slots,
-                compress_ratio=self.compress_ratio,
-            )
         use_varlen_raw = (
             meta.is_batched
             and meta.seq_start_per_req is not None
             and (meta.cu_seq_per_req is not None)
         )
         raw_disabled = seq_start is None and (not use_varlen_raw)
+
+        def _save_states() -> None:
+            with record_function_range(
+                "dsv4.fp8.compressor.launch.save_partial_states"
+            ):
+                run_save_partial_states(
+                    kv_flat,
+                    score_flat,
+                    self.ape,
+                    meta.positions,
+                    self._state_pool_3d,
+                    meta.state_slots,
+                    compress_ratio=self.compress_ratio,
+                )
+
         state_cache_for_read = self._state_pool_3d
         state_block_table_for_read = self._state_block_table
-        if _cp_sliced_state_read_needed(meta, self._cp_ctx, raw_disabled):
-            with record_function_range(
-                "dsv4.fp8.compressor.launch.cp_gather_state_read_cache"
-            ):
-                state_cache_for_read, state_block_table_for_read = (
-                    _build_cp_full_state_read_cache(
-                        self._state_pool_3d,
-                        self._state_block_table,
-                        int(self._cp_ctx.cp_size),
-                        seq_start_per_req=(
-                            meta.seq_start_per_req if use_varlen_raw else None
-                        ),
-                        token_count=(1 + int(self.overlap)) * self.compress_ratio,
-                        state_tokens_per_block=self._state_tokens_per_block,
-                        selection_cache_key=meta,
+        cp_read_cache_needed = _cp_sliced_state_read_needed(
+            meta, self._cp_ctx, raw_disabled
+        )
+
+        def _write_compressed_kv() -> None:
+            nonlocal state_cache_for_read, state_block_table_for_read
+            if cp_read_cache_needed:
+                with record_function_range(
+                    "dsv4.fp8.compressor.launch.cp_gather_state_read_cache"
+                ):
+                    state_cache_for_read, state_block_table_for_read = (
+                        _build_cp_full_state_read_cache(
+                            self._state_pool_3d,
+                            self._state_block_table,
+                            int(self._cp_ctx.cp_size),
+                            seq_start_per_req=(
+                                meta.seq_start_per_req if use_varlen_raw else None
+                            ),
+                            token_count=(1 + int(self.overlap)) * self.compress_ratio,
+                            state_tokens_per_block=self._state_tokens_per_block,
+                            selection_cache_key=meta,
+                        )
                     )
+            with record_function_range("dsv4.fp8.compressor.launch.compress_kv_write"):
+                run_fused_compress_kv_write(
+                    state_cache_for_read,
+                    meta.token_to_req,
+                    meta.positions,
+                    meta.state_slots,
+                    state_block_table_for_read,
+                    self.norm.weight,
+                    self.norm_eps,
+                    cos_sin_cache,
+                    self._kv_pool_view,
+                    meta.kv_slots,
+                    kv_flat,
+                    score_flat,
+                    self.ape,
+                    0 if raw_disabled or use_varlen_raw else seq_start,
+                    disable_raw_path=raw_disabled,
+                    head_dim=self.head_dim,
+                    rope_head_dim=self.rope_head_dim,
+                    compress_ratio=self.compress_ratio,
+                    overlap=self.overlap,
+                    seq_start_per_req=(
+                        meta.seq_start_per_req if use_varlen_raw else None
+                    ),
+                    cu_seq_per_req=meta.cu_seq_per_req if use_varlen_raw else None,
+                    state_tokens_per_block=self._state_tokens_per_block,
                 )
-        with record_function_range("dsv4.fp8.compressor.launch.compress_kv_write"):
-            run_fused_compress_kv_write(
-                state_cache_for_read,
-                meta.token_to_req,
-                meta.positions,
-                meta.state_slots,
-                state_block_table_for_read,
-                self.norm.weight,
-                self.norm_eps,
-                cos_sin_cache,
-                self._kv_pool_view,
-                meta.kv_slots,
-                kv_flat,
-                score_flat,
-                self.ape,
-                0 if raw_disabled or use_varlen_raw else seq_start,
-                disable_raw_path=raw_disabled,
-                head_dim=self.head_dim,
-                rope_head_dim=self.rope_head_dim,
-                compress_ratio=self.compress_ratio,
-                overlap=self.overlap,
-                seq_start_per_req=meta.seq_start_per_req if use_varlen_raw else None,
-                cu_seq_per_req=meta.cu_seq_per_req if use_varlen_raw else None,
-                state_tokens_per_block=self._state_tokens_per_block,
-            )
+
+        # Launch order: the fused writer reads its cross-chunk overlap window
+        # (up to (1+overlap)*ratio positions before seq_start) from the CYCLIC
+        # state pool rows written by PREVIOUS launches, while _save_states
+        # overwrites ring cells for THIS launch's tokens. The per-stream state
+        # ring is small (state blocks are KERNEL_SEQ_SIZE_PER_BLOCK wide), so a
+        # full-size prefill chunk covers the whole ring and destroys the prior
+        # chunk-tail state before the fused kernel reads it — the measured
+        # corruption source: frozen smoke case2 (4261 tokens) yields three
+        # byte-distinct wrong outputs at chunk 256/512/1024 with clean slot
+        # mapping, while prompts that never fill a post-first chunk stay
+        # coherent and the unchunked reference (seq_start=0, raw path covers
+        # every window position) never exercises the pool read at all.
+        # With the raw path enabled (prefill), the fused kernel takes all
+        # current-launch rows from kv_flat/score_flat and only reads pool rows
+        # written by earlier launches, so running it FIRST is dependency-safe
+        # and preserves the window. Decode (raw disabled) reads the state of
+        # the token its own launch just wrote, so it must keep save-first;
+        # the CP sliced-read build snapshots the pool and also keeps the
+        # historical order.
+        if raw_disabled or cp_read_cache_needed:
+            _save_states()
+            _write_compressed_kv()
+        else:
+            _write_compressed_kv()
+            _save_states()
         if _DEBUG_DUMP_KV_DIR:
             self._debug_dump_kv(meta, seq_start)
 
