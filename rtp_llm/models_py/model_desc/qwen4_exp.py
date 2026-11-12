@@ -1650,7 +1650,7 @@ class Qwen4ExpModel(Qwen35Model):
             hyper_states.ndim == 2
             and hyper_states.shape[1] == 10240
             and hyper_states.dtype == torch.bfloat16
-            and 1 <= hyper_states.shape[0] <= 12288
+            and 1 <= hyper_states.shape[0] <= 32768
         )
         defer_residual = should_defer_hc_residual(
             cuda=hyper_states.is_cuda,

@@ -7,5 +7,5 @@ def should_defer_hc_residual(*, cuda, hip, shape, bf16, sm, graph):
         return False
     rows = shape[0]
     existing = not graph and sm == (12, 0) and 4093 <= rows <= 12288
-    sm90 = sm == (9, 0) and 1 <= rows <= 12288
+    sm90 = sm == (9, 0) and 1 <= rows <= (12288 if graph else 32768)
     return existing or sm90

@@ -27,5 +27,23 @@ class HcDeferPolicyTest(unittest.TestCase):
         self.assertFalse(_module.should_defer_hc_residual(**(args | {"graph": True})))
         self.assertFalse(_module.should_defer_hc_residual(**(args | {"shape": (4092, 10240)})))
 
+    def test_sm90_long_prefill_extends_the_eager_limit(self):
+        args = dict(cuda=True, hip=False, bf16=True, sm=(9, 0))
+        for rows in (12289, 32768):
+            with self.subTest(rows=rows):
+                shape = (rows, 10240)
+                self.assertTrue(
+                    _module.should_defer_hc_residual(**args, shape=shape, graph=False)
+                )
+                self.assertFalse(
+                    _module.should_defer_hc_residual(**args, shape=shape, graph=True)
+                )
+        self.assertFalse(
+            _module.should_defer_hc_residual(
+                **args, shape=(32769, 10240), graph=False
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

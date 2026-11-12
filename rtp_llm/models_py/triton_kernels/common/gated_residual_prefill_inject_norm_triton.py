@@ -1,4 +1,4 @@
-"""Materialize the residual and its normalized consumer in one FP8 HC producer."""
+"""Materialize the residual and its normalized consumer in one HC kernel."""
 
 import math
 
@@ -101,7 +101,7 @@ def try_inject_grouped_norm(x, sublayer, gates, gamma, eps, *, collect_scale=Tru
         and sublayer.shape == (*x.shape[:-1], 2560)
         and gates.shape == (*x.shape[:-1], 4)
         and gamma.shape == (10240,)
-        and 1 <= x.numel() // 10240 <= 12288
+        and 1 <= x.numel() // 10240 <= (12288 if collect_scale else 32768)
         and all(
             t.dtype == torch.bfloat16
             and t.device == x.device
