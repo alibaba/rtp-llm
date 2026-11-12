@@ -10,6 +10,10 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 
 from rtp_llm.models_py.triton_kernels import linear_replay as replay_module
 from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_update
+from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
+    fused_recurrent_gated_delta_rule,
+)
+from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
 from rtp_llm.models_py.triton_kernels.kda import fused_recurrent_kda
 from rtp_llm.models_py.triton_kernels.linear_replay import (
     LinearReplay,
@@ -202,7 +206,9 @@ class LinearReplayTest(unittest.TestCase):
         outputs, states, histories = [], [], []
         for t in range(steps):
             window = torch.cat((history, raw[:, t : t + 1]), dim=1)
-            products = window.float() * weights.T.float().unsqueeze(0)
+            # Match the production convolution's product rounding before
+            # accumulation, rather than promoting both operands first.
+            products = (window * weights.T.unsqueeze(0)).float()
             convolved = torch.zeros_like(products[:, 0])
             for tap in range(weights.shape[1]):
                 convolved = convolved + products[:, tap]
@@ -405,6 +411,101 @@ class LinearReplayTest(unittest.TestCase):
 
     def test_kda_all_accept_lengths_cross_page_and_in_place(self):
         self._run_rounds(True, 4, 4, 128, 128)
+
+    def test_qwen_verify_matches_production_decode_operators(self):
+        steps = 5
+        for state_dtype in (torch.float32, torch.bfloat16):
+            for weight_dtype in (torch.float32, torch.bfloat16):
+                with self.subTest(state=state_dtype, weight=weight_dtype):
+                    (
+                        batch,
+                        heads,
+                        value_heads,
+                        channels,
+                        cache,
+                        inputs,
+                        ssm,
+                        conv,
+                        weights,
+                        alog,
+                        bias,
+                    ) = self._case(False, steps=steps)
+                    inputs.slot_ids[-1] = 5
+                    ssm = ssm.to(state_dtype)
+                    weights = weights.to(weight_dtype)
+                    source = inputs.state_read_block_ids[1].long()
+                    blocks = batch * (steps + 1) + 1
+                    reference_conv = conv.new_zeros((blocks, *conv.shape[1:]))
+                    reference_ssm = ssm.new_zeros((blocks, *ssm.shape[1:]))
+                    reference_conv[source] = conv[source]
+                    reference_ssm[source] = ssm[source]
+                    block_map = torch.cat(
+                        (
+                            source[:, None],
+                            torch.arange(batch + 1, blocks, device="cuda").reshape(
+                                batch, steps
+                            ),
+                        ),
+                        dim=1,
+                    ).to(torch.int32)
+                    lengths = torch.full((batch,), 2, device="cuda", dtype=torch.int32)
+                    raw = torch.randn(
+                        batch, steps, channels, device="cuda", dtype=torch.bfloat16
+                    )
+                    a = torch.randn(
+                        batch * steps,
+                        value_heads,
+                        device="cuda",
+                        dtype=torch.bfloat16,
+                    )
+                    b = torch.randn_like(a)
+                    convolved = causal_conv1d_update(
+                        raw.transpose(1, 2),
+                        reference_conv.transpose(1, 2),
+                        weights,
+                        activation="silu",
+                        block_map=block_map,
+                        sequence_lengths=lengths,
+                        seq_size_per_block=2048,
+                    ).transpose(1, 2)
+                    sizes = [heads * 128, heads * 128, value_heads * 128]
+                    q_ref, k_ref, v_ref = torch.split(convolved, sizes, dim=-1)
+                    g, beta = fused_gdn_gating(alog, a, b, bias)
+                    expected, _ = fused_recurrent_gated_delta_rule(
+                        q=q_ref.reshape(batch, steps, heads, 128),
+                        k=k_ref.reshape(batch, steps, heads, 128),
+                        v=v_ref.reshape(batch, steps, value_heads, 128),
+                        g=g.reshape(batch, steps, value_heads),
+                        beta=beta.reshape(batch, steps, value_heads),
+                        initial_state=reference_ssm,
+                        inplace_final_state=True,
+                        block_map=block_map,
+                        sequence_lengths=lengths,
+                        seq_size_per_block=2048,
+                        use_qk_l2norm_in_kernel=True,
+                    )
+                    q, k, v = torch.split(
+                        raw.reshape(batch * steps, channels), sizes, dim=-1
+                    )
+                    actual = linear_serial_replay(
+                        q,
+                        k,
+                        v,
+                        a,
+                        b,
+                        weights,
+                        alog,
+                        bias,
+                        ssm,
+                        conv,
+                        cache,
+                        inputs,
+                        group_id=1,
+                        vector_gate=False,
+                    )
+                    torch.testing.assert_close(
+                        actual.reshape_as(expected), expected, rtol=0, atol=0
+                    )
 
     def test_kda_verify_matches_production_decode_operators(self):
         # The synthetic reference above must also agree with the operators

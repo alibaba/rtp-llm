@@ -288,8 +288,14 @@ def _replay_conv_kernel(
         # Match causal_conv1d_update's tap order and SiLU arithmetic.
         y = tl.full((BD,), 0, tl.float32)
         for tap in tl.static_range(WIDTH):
-            sample = tl.sum(tl.where(w[None, :] == tap, window, 0), 1)
-            weight = tl.sum(tl.where(w[None, :] == tap, weights, 0), 1)
+            # Match the production convolution's operand precision before
+            # FP32 accumulation, including BF16 product rounding.
+            sample = tl.sum(tl.where(w[None, :] == tap, window, 0), 1).to(
+                State.dtype.element_ty
+            )
+            weight = tl.sum(tl.where(w[None, :] == tap, weights, 0), 1).to(
+                Weight.dtype.element_ty
+            )
             y += sample * weight
         y = y / (1 + tl.exp(-y))
         tl.store(Output + token * C + d, y, d < C)
