@@ -172,6 +172,15 @@ class DelayedHCUnit(HCUnitBase):
         return y, post, comb
 
     def _post_impl(self, x, residual, post, comb):
+        # At 1M prefill this temporary is the last allocation before the
+        # delayed HC head. The allocator can hold hundreds of MiB of
+        # reserved-but-unallocated expandable segments while no contiguous
+        # 20 MiB block remains; release that cache only when it is material.
+        if x.is_cuda:
+            reserved = torch.cuda.memory_reserved(x.device)
+            allocated = torch.cuda.memory_allocated(x.device)
+            if reserved - allocated > (256 << 20):
+                torch.cuda.empty_cache()
         if (
             residual.is_cuda
             and residual.dtype == torch.bfloat16
