@@ -187,10 +187,22 @@ class DelayedHCUnit(HCUnitBase):
             and _tilelang_mhc_post_supported(residual.device)
         ):
             return TileLangHCUnit._post_impl(self, x, residual, post, comb)
-        return (
-            post.float() * x.float().unsqueeze(-2)
-            + torch.matmul(comb.float().transpose(-1, -2), residual.float())
-        ).to(residual.dtype)
+        # Vectorizing over hc_mult materialized three [tokens, hc, dim]
+        # fp32 tensors (~20 MiB at a 48-token prefill chunk). At 1M prefill
+        # the last of them failed with 21.6 MiB free. Accumulate one hc lane
+        # at a time in fp32 instead; each temporary is one [tokens, dim]
+        # slice and the cast back to bf16 is unchanged.
+        hc = residual.shape[-2]
+        out = torch.empty_like(residual)
+        for lane in range(hc):
+            acc = post[:, lane].float().unsqueeze(-1) * x[:, lane].float()
+            for src in range(hc):
+                acc.add_(
+                    comb[:, src, lane].float().unsqueeze(-1)
+                    * residual[:, src].float()
+                )
+            out[:, lane] = acc.to(out.dtype)
+        return out
 
 
 class DelayedHCHead(nn.Module):
