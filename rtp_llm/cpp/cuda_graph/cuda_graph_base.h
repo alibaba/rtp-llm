@@ -87,6 +87,9 @@ public:
     GraphBase(py::object py_instance): py_instance_(std::move(py_instance)) {}
     virtual ~GraphBase() {}
     virtual void           initCapture()                                                 = 0;
+    // No-op for graph backends that initialize eagerly; CudaGraphRunner defers
+    // the decode graph until the first decode to keep prefill memory free.
+    virtual void           finishDeferredDecodeInit() {}
     virtual PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state)   = 0;
     virtual void           setPositionEncoding(torch::Tensor position_encoding)          = 0;
     virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)     = 0;

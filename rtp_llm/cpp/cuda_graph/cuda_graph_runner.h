@@ -190,7 +190,7 @@ public:
     bool hasDeferredDecodeInit() const {
         return decode_capture_deferred_ && !decode_capture_done_;
     }
-    void finishDeferredDecodeInit();
+    void finishDeferredDecodeInit() override;
     void replayPrefill(int seq_len);
     int  getCurrentRealGraphSize(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
