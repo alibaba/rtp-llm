@@ -120,12 +120,14 @@ def topology(pc, gang_info: GangInfoReader, *, wait: bool = False) -> dict[int, 
             validate_device(nodes[pc.world_rank // pc.local_world_size])
             return nodes
         except (
+            # Transient: the projection/device is not published yet.
             OSError,
-            ValueError,
             KeyError,
             RuntimeError,
             subprocess.SubprocessError,
         ):
+            # ValueError means the gang annotation itself is malformed; retrying
+            # cannot fix it, so surface it immediately.
             if time.monotonic() >= deadline:
                 raise
             time.sleep(0.5)

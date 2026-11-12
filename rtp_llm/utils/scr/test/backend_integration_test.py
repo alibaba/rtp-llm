@@ -202,7 +202,7 @@ class BackendScrIntegrationTest(unittest.TestCase):
             os.environ,
             {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "normal"},
             clear=True,
-        ), mock.patch("torch.cuda.device_count", return_value=1):
+        ), mock.patch.object(launcher, "_visible_device_count", return_value=1):
             self.assertIsNone(launcher._build_scr_participant_manifest(config))
 
     def test_frontend_role_does_not_add_phantom_vit_participant(self):
@@ -214,7 +214,7 @@ class BackendScrIntegrationTest(unittest.TestCase):
             os.environ,
             {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint"},
             clear=True,
-        ), mock.patch("torch.cuda.device_count", return_value=1):
+        ), mock.patch.object(launcher, "_visible_device_count", return_value=1):
             manifest = launcher._build_scr_participant_manifest(config)
 
         self.assertIsNotNone(manifest)
@@ -230,7 +230,7 @@ class BackendScrIntegrationTest(unittest.TestCase):
             os.environ,
             {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint"},
             clear=True,
-        ), mock.patch("torch.cuda.device_count", return_value=1):
+        ), mock.patch.object(launcher, "_visible_device_count", return_value=1):
             manifest = launcher._build_scr_participant_manifest(config)
 
         self.assertIsNotNone(manifest)
@@ -269,7 +269,7 @@ class BackendScrIntegrationTest(unittest.TestCase):
             os.environ,
             {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint"},
             clear=True,
-        ), mock.patch("torch.cuda.device_count", return_value=1):
+        ), mock.patch.object(launcher, "_visible_device_count", return_value=1):
             manifest = launcher._build_scr_participant_manifest(config)
 
         self.assertIsNotNone(manifest)
@@ -289,7 +289,7 @@ class BackendScrIntegrationTest(unittest.TestCase):
                 "LOCAL_WORLD_SIZE": "4",
             },
             clear=True,
-        ), mock.patch("torch.cuda.device_count", return_value=1):
+        ), mock.patch.object(launcher, "_visible_device_count", return_value=1):
             self.assertEqual(launcher._scr_local_world_size(config), 4)
 
 

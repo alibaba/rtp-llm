@@ -1,3 +1,4 @@
+import glob
 import logging
 import multiprocessing
 import os
@@ -65,6 +66,22 @@ STARTUP_REAL_WARMUP_MAX_NEW_TOKENS = 1
 STARTUP_REAL_WARMUP_TOKEN_ID = 100
 
 
+def _visible_device_count() -> int:
+    """Count visible CUDA devices without initializing the driver.
+
+    The coordinator builds the participant manifest before any rank exists and
+    must stay driver-free so CRIU never captures an open NVIDIA device.  Read
+    the launcher's visibility instead of asking torch.
+    """
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if visible:
+        return len([entry for entry in visible.split(",") if entry.strip()])
+    try:
+        return len(glob.glob("/dev/nvidia[0-9]*"))
+    except OSError:
+        return 0
+
+
 def _scr_local_world_size(py_env_configs: PyEnvConfigs) -> int:
     """Resolve the process count used by the SCR manifest and rank launcher.
 
@@ -85,12 +102,7 @@ def _scr_local_world_size(py_env_configs: PyEnvConfigs) -> int:
         return value
 
     world_size = max(1, int(py_env_configs.parallelism_config.world_size))
-    try:
-        import torch
-
-        device_count = int(torch.cuda.device_count())
-    except Exception:
-        device_count = 0
+    device_count = _visible_device_count()
     if device_count <= 0:
         return 1
     return max(1, min(device_count, world_size))
@@ -114,17 +126,16 @@ def _build_scr_participant_manifest(
     )
     backend_rank_count = 0
 
+    local_world_size = _scr_local_world_size(py_env_configs)
     manager_separate = False
     if backend_enabled and not backend_is_vit:
         # The backend uses one outer manager plus rank children whenever the
         # launcher advertises more than one local rank.  Do not call into
         # torch/CUDA here: the coordinator must stay driver-free.
-        manager_separate = _scr_local_world_size(py_env_configs) > 1
+        manager_separate = local_world_size > 1
         # A single-rank backend is the outer process itself; only the true
         # multi-rank path creates one child process per local rank.
-        backend_rank_count = (
-            _scr_local_world_size(py_env_configs) if manager_separate else 1
-        )
+        backend_rank_count = local_world_size if manager_separate else 1
     elif backend_enabled:
         # VIT separation owns one standalone backend process.  It is not a
         # manifest participant yet: the VIT launcher does not reach the SCR
@@ -319,13 +330,16 @@ def _iter_serving_world_ranks(py_env_configs: PyEnvConfigs) -> Iterator[int]:
     the same serving ranks as the HTTP frontend.
     """
     pc = py_env_configs.parallelism_config
+    if pc.local_world_size <= 0:
+        raise ValueError("local_world_size must be positive to enumerate serving ranks")
     # sCR template phases may start fewer local ranks than the configured
     # local_world_size; the manifest and the launcher must agree on that count.
-    local_world_size = (
-        _scr_local_world_size(py_env_configs)
-        if is_scr_template_phase_active()
-        else pc.local_world_size
-    )
+    # Never enumerate past this node's configured ranks.
+    local_world_size = pc.local_world_size
+    if is_scr_template_phase_active():
+        local_world_size = min(
+            _scr_local_world_size(py_env_configs), pc.local_world_size
+        )
     layout = RankLayout.from_parallelism_config(pc)
     node_base = pc.world_rank // pc.local_world_size * pc.local_world_size
     for local_rank in range(local_world_size):

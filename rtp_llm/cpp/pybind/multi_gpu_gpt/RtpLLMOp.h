@@ -67,7 +67,7 @@ private:
     std::thread                     grpc_server_thread_;
     std::atomic<bool>               is_server_ready_{false};
     std::atomic<bool>               is_server_shutdown_{false};
-    bool                            rpc_server_deferred_{false};
+    std::atomic<bool>               rpc_server_deferred_{false};
     std::unique_ptr<EngineInitParams> deferred_init_params_;
     py::object                      deferred_mm_process_engine_ = py::none();
     std::unique_ptr<ProposeModelEngineInitParams> deferred_propose_params_;

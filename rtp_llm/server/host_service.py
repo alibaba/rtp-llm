@@ -253,7 +253,7 @@ class MasterService:
             return
         if template_phase_active():
             get_template_lifecycle().register(
-                f"master-discovery:{id(self)}",
+                "master-discovery",
                 CallbackHook(release=lambda _: self.start_refresh()),
             )
         else:
