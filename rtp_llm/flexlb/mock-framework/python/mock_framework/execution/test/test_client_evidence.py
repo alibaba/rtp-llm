@@ -108,6 +108,34 @@ def test_roundtrip_preserves_int64_identity_and_reconciles_summary(evidence):
     assert result.ttft_nanos == 40 and result.elapsed_nanos == 50
 
 
+def test_reads_three_schedule_attempts_in_sealed_journal(evidence):
+    directory, rows = evidence()
+    header, issued, start, reply, first_token, terminal, seal = rows
+    events = [
+        issued,
+        start,
+        reply,
+        dict(start, attempt=2),
+        dict(reply, attempt=2, error_code="8409", response_success=False),
+        dict(start, attempt=3),
+        dict(reply, attempt=3, response_success=True),
+        first_token,
+        dict(terminal, ttft_nanos="80"),
+    ]
+    for sequence, event in enumerate(events, 1):
+        event.update(
+            sequence=str(sequence),
+            epoch_ms=str(1000 + sequence),
+            elapsed_nanos=str(sequence * 10),
+        )
+    write_rows(directory, [header, *events, seal])
+
+    (result,) = read_requests(directory)
+    assert [attempt.number for attempt in result.attempts] == [1, 2, 3]
+    assert result.attempts[1].error_code == 8409
+    assert result.outcome == "success"
+
+
 @pytest.mark.parametrize(
     "damage", ["missing_seal", "sequence", "duplicate_field", "trailing", "truncated"]
 )

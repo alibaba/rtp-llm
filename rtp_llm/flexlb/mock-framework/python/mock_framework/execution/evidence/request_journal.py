@@ -258,7 +258,6 @@ def read_requests(directory: Path, cancelled=None):
                         if (
                             state["pending"]
                             or event["attempt"] != len(state["attempts"]) + 1
-                            or event["attempt"] > 2
                             or not event["master"]
                         ):
                             raise ValueError("Invalid Schedule attempt")
