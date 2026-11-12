@@ -53,6 +53,34 @@ class MoeTopkTritonTest(unittest.TestCase):
             graph.replay()
             self.compare(logits, ids, weights)
 
+    @unittest.skipUnless(
+        torch.cuda.is_available() and "H20" in torch.cuda.get_device_name(),
+        "requires an H20",
+    )
+    def test_long_prefill_preserves_native_weights_and_ids(self):
+        for rows, dtype in ((8193, torch.float32), (32768, torch.bfloat16)):
+            with self.subTest(rows=rows, dtype=dtype):
+                logits = torch.randn(rows, 512, device="cuda", dtype=dtype)
+                logits[0] = 0
+                logits[1] = float("-inf")
+                logits[2, 1] = float("nan")
+                logits[3, 2] = float("inf")
+                logits[4] = -91
+                logits[4, 6] = -89
+                logits[4, 7] = 0
+                ids = torch.empty(rows, 10, device="cuda", dtype=torch.int32)
+                weights = torch.empty(rows, 10, device="cuda")
+                expected_ids = torch.empty_like(ids)
+                expected_weights = torch.empty_like(weights)
+                self.native(logits, expected_ids, expected_weights)
+                with patch.object(self.native, "forward") as fallback:
+                    self.fused(logits, ids, weights)
+                    fallback.assert_not_called()
+                torch.testing.assert_close(ids, expected_ids, atol=0, rtol=0)
+                torch.testing.assert_close(
+                    weights, expected_weights, atol=0, rtol=0, equal_nan=True
+                )
+
     def test_nonfinite_logits_preserve_native_routing_and_bounded_ids(self):
         logits = torch.randn(7, 512, device="cuda")
         logits[0] = float("nan")
