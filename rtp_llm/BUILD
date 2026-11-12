@@ -253,6 +253,12 @@ py_library(
     ]),
 )
 
+filegroup(
+    name = "device_type_source",
+    srcs = ["device/device_type.py"],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "device",
     srcs = glob([

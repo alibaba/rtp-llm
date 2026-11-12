@@ -1972,20 +1972,10 @@ class CedRouterProjectionTest(_SingleThreadTest):
     def test_router_scope_follows_actual_moe_chunk_policy(self):
         path = (
             Path(_CED.__file__).parents[2]
-            / "factory/fused_moe/utils/fp8_fp4/chunked_layer.py"
+            / "factory/fused_moe/utils/fp8_fp4/_chunk_policy.py"
         )
-        cls = next(
-            n
-            for n in ast.parse(path.read_text()).body
-            if isinstance(n, ast.ClassDef) and n.name == "ChunkedFp8Fp4MoeLayer"
-        )
-        method = next(
-            n
-            for n in cls.body
-            if isinstance(n, ast.FunctionDef) and n.name == "_should_chunk"
-        )
-        ns = dict(torch=torch)
-        exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), ns)
+        ns = {}
+        exec(compile(path.read_text(), str(path), "exec"), ns)
         plan, _ = _plan(
             131072, 0, torch.arange(130944, 131072), candidate_publication=True
         )
@@ -1996,7 +1986,7 @@ class CedRouterProjectionTest(_SingleThreadTest):
             chunking_enabled=True,
             _is_decode_role=False,
         )
-        ffn._should_chunk = types.MethodType(ns["_should_chunk"], ffn)
+        ffn._should_chunk = types.MethodType(ns["should_chunk_moe_input"], ffn)
         # Decode and CUDA-graph capture cannot chunk, so their budgets must
         # already cover the batch; capacity overflow is a hard error there.
         for policy, decode, capture, max_tokens, expect_chunk in (

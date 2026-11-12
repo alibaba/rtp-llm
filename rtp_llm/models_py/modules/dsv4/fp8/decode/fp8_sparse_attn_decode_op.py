@@ -13,33 +13,54 @@ softmax merging across both pools (mirrors vLLM
 pools -> BF16 cat -> TileLang sparse_attn" path which was
 bandwidth-bound on the dequant kernels.
 
-FlashMLA wheel is required (CUDA >= 12.9). The op asserts wheel
-availability at forward — there is no slow Python reference fallback
-because all dev/CI/prod boxes carry flash_mla.
+FlashMLA is used for non-SM120 devices; SM120 uses the FlashInfer adapter.
+Provider loading is deferred until the execution device is bound; importing
+the model does not load optional CUDA wheels.
 """
 
 from __future__ import annotations
 
+import importlib
 import logging
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import torch
 
-_FLASH_MLA_AVAILABLE = False
-try:
-    if torch.version.cuda:
-        major, minor = map(int, torch.version.cuda.split(".")[:2])
-        if (major, minor) >= (12, 9):
-            from rtp_llm.models_py.utils.flash_mla_legacy import (
-                flash_mla_with_kvcache,  # type: ignore[import-not-found]
-            )
-            from rtp_llm.models_py.utils.flash_mla_legacy import (
-                get_mla_metadata,  # type: ignore[import-not-found]
-            )
+from rtp_llm.models_py.modules.dsv4.fp8.attention_backend import (
+    get_sparse_attention_backend,
+)
 
-            _FLASH_MLA_AVAILABLE = True
-except (ImportError, AttributeError, ValueError) as e:
-    logging.warning("[dsv4-fp8] flash_mla wheel unavailable (%s)", e)
+_FLASH_MLA_AVAILABLE = False
+_flash_mla_load_attempted = False
+
+
+def _load_flash_mla() -> bool:
+    """Validate the optional FlashMLA wheel on first non-SM120 use.
+
+    Importing the DSv4 model package is shared by CUDA variants that do not use
+    FlashMLA.  Keep wheel loading out of module initialization so a missing or
+    ABI-incompatible optional wheel cannot break those startup paths.
+    """
+    global _FLASH_MLA_AVAILABLE, _flash_mla_load_attempted
+    if _FLASH_MLA_AVAILABLE:
+        return True
+    if _flash_mla_load_attempted:
+        return False
+    _flash_mla_load_attempted = True
+    try:
+        if not torch.version.cuda:
+            return False
+        major, minor = map(int, torch.version.cuda.split(".")[:2])
+        if (major, minor) < (12, 9):
+            return False
+        flash_mla = importlib.import_module("rtp_llm.models_py.utils.flash_mla_legacy")
+        getattr(flash_mla, "flash_mla_with_kvcache")
+        getattr(flash_mla, "get_mla_metadata")
+    except (ImportError, AttributeError, OSError, RuntimeError, ValueError) as error:
+        logging.info("[dsv4-fp8] FlashMLA unavailable (%s)", error)
+        return False
+    _FLASH_MLA_AVAILABLE = True
+    return True
 
 
 class SparseAttnV4DecodeFp8Op:
@@ -75,6 +96,70 @@ class SparseAttnV4DecodeFp8Op:
         self.n_heads = n_heads
         self.head_dim = head_dim
         self.softmax_scale = softmax_scale
+        self._device: Optional[torch.device] = None
+        self._forward_impl: Optional[Callable[..., torch.Tensor]] = None
+        self._uses_flash_mla = True
+
+    def bind_device(self, device: torch.device) -> None:
+        """Prepare once for the actual query device, before metadata or execution.
+
+        Construction can happen before weights reach their inference device.
+        A bound op belongs to one device; moving the model requires a new op.
+        """
+        if device == self._device:
+            return
+        if self._device is not None:
+            raise ValueError(
+                f"sparse decode op is bound to {self._device}, got {device}"
+            )
+        if device.type == "cuda" and device.index is None:
+            raise ValueError("sparse decode requires an explicit CUDA device index")
+        forward_impl, uses_flash_mla = self._prepare_backend(device)
+        # Publish the binding only after provider validation/warmup succeeds.
+        self._forward_impl = forward_impl
+        self._uses_flash_mla = uses_flash_mla
+        self._device = device
+
+    def _prepare_backend(
+        self, device: torch.device
+    ) -> tuple[Callable[..., torch.Tensor], bool]:
+        backend = get_sparse_attention_backend(device)
+        forward = backend.prepare_decode(device, self.n_heads, self.softmax_scale)
+        if forward is not None:
+            return forward, False
+        if not _load_flash_mla():
+            raise RuntimeError(
+                "FlashMLA is required for non-SM120 FP8 sparse decode; "
+                "install the cuda12_9/cuda13 RTP-LLM dependency set"
+            )
+        return self._forward_flash_mla, True
+
+    def get_sched_meta(
+        self,
+        device: torch.device,
+        attn_metadata: Any,
+        *,
+        batch_size: int,
+        q_len: int,
+        topk: int,
+        extra_attn_type: Optional[str],
+    ) -> Any:
+        """Use the selected backend; keep planner state on step metadata."""
+        self.bind_device(device)
+        if not self._uses_flash_mla:
+            return None
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
+            get_or_build_sched_meta,
+        )
+
+        return get_or_build_sched_meta(
+            attn_metadata,
+            batch_size=batch_size,
+            q_len=q_len,
+            num_heads=self.n_heads,
+            topk=topk,
+            extra_attn_type=extra_attn_type,
+        )
 
     def forward(
         self,
@@ -105,22 +190,20 @@ class SparseAttnV4DecodeFp8Op:
         over a second FP8 KV pool in a single FlashMLA invocation. The
         kernel merges softmax across both pools natively.
         """
-        assert _FLASH_MLA_AVAILABLE, (
-            "flash_mla wheel is required for FP8 sparse decode "
-            "(install rtp_llm with cuda12_9 / cuda13 config)"
-        )
-        return self._forward_flash_mla(
-            q,
-            kv_cache,
-            attn_sink,
-            topk_idxs,
-            sched_meta,
-            cache_seqlens,
-            block_table,
-            topk_length,
-            extra_k_cache,
-            extra_topk_idxs,
-            extra_topk_length,
+        self.bind_device(q.device)
+        assert self._forward_impl is not None
+        return self._forward_impl(
+            q=q,
+            kv_cache=kv_cache,
+            attn_sink=attn_sink,
+            topk_idxs=topk_idxs,
+            sched_meta=sched_meta,
+            cache_seqlens=cache_seqlens,
+            block_table=block_table,
+            topk_length=topk_length,
+            extra_k_cache=extra_k_cache,
+            extra_topk_idxs=extra_topk_idxs,
+            extra_topk_length=extra_topk_length,
         )
 
     def _forward_flash_mla(

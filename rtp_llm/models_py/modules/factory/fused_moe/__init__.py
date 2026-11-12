@@ -91,6 +91,9 @@ else:
         CudaNoQuantDpNormalStrategy,
         CudaNoQuantEpLowLatencyStrategy,
         CudaNvfp4MarlinStrategy,
+        CudaSm120DecodeStrategy,
+        CudaSm120FusedMoeStrategy,
+        CudaSm120GroupedFp4Strategy,
         CudaW4a8Int4PerChannelEpLowLatencyStrategy,
         CudaW4a8Int4PerChannelEpNormalStrategy,
         CudaW4a8Int4PerChannelNoDPStrategy,
@@ -103,6 +106,10 @@ else:
     registry.register(CudaMegaMoeStrategy())
     registry.register(CudaGroupedFp4Strategy())
     registry.register(CudaLocalLoopStrategy())
+    # SM120 FP8/FP4: arch checks keep these exclusive with the SM100 paths.
+    registry.register(CudaSm120FusedMoeStrategy())
+    registry.register(CudaSm120DecodeStrategy())
+    registry.register(CudaSm120GroupedFp4Strategy())
     registry.register(CudaFp8PerTensorEpLowLatencyStrategy())
     registry.register(CudaFp8PerTensorEpNormalStrategy())
     registry.register(CudaFp8PerBlockEpLowLatencyStrategy())

@@ -112,6 +112,13 @@ class V4Args:
     dp_rank: int = 0
     world_size: int = 1
     world_rank: int = 0
+    # Physical MoE topology. CP repurposes the TP group for sequence
+    # parallelism, so ``tp_size`` above is attention-facing (1 under CP) while
+    # executors that own their communication need the physical group.
+    moe_tp_size: int = 1
+    moe_tp_rank: int = 0
+    moe_cp_enabled: bool = False
+    moe_cp_size: int = 1
     is_decode_role: bool = False
     # Dedicated DSpARK prefill workers only project target features into the
     # draft SWA pools; they do not construct proposal, FFN, or mHC modules.
@@ -181,6 +188,10 @@ def _block_kwargs(
         ep_rank=args.ep_rank,
         world_size=args.world_size,
         world_rank=args.world_rank,
+        moe_tp_size=args.moe_tp_size,
+        moe_tp_rank=args.moe_tp_rank,
+        moe_cp_enabled=args.moe_cp_enabled,
+        moe_cp_size=args.moe_cp_size,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
         fp8_kv_cache=args.fp8_kv_cache,
@@ -193,9 +204,11 @@ def _build_block(
     args: V4Args,
     layer_weights: Optional[Dict[str, torch.Tensor]] = None,
     commit_only: bool = False,
+    sm120_workspace=None,
 ) -> Block:
     return Block(
-        **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only)
+        **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only),
+        sm120_workspace=sm120_workspace,
     )
 
 
@@ -258,6 +271,11 @@ class V4Transformer(nn.Module):
                         args.dim,
                     )
 
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.sm120.workspace import (
+            Sm120MoeWorkspace,
+        )
+
+        self._sm120_moe_workspace = Sm120MoeWorkspace()
         self.layers = nn.ModuleList(
             [
                 _build_block(
@@ -265,6 +283,7 @@ class V4Transformer(nn.Module):
                     args,
                     layer_weights=mw.weights[i],
                     commit_only=self.commit_only,
+                    sm120_workspace=self._sm120_moe_workspace,
                 )
                 for i in range(args.n_layers)
             ]
@@ -341,6 +360,41 @@ class V4Transformer(nn.Module):
         # with 0-based layer ids (V4-Flash uses 40/41/42); the empty tuple is
         # the no-auxiliary-tensor default for ordinary inference and MTP.
         self.capture_aux_hidden_layer_ids: tuple[int, ...] = ()
+
+    def _embed_target(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """TP-shard gathering embed for the exact-SM120 target only.
+
+        ``embed_full`` performs a TP all-gather that changes shared behavior;
+        other architectures keep main's plain ``embed`` contract.
+        """
+        from rtp_llm.models_py.utils.arch import is_sm120
+
+        if is_sm120(input_ids.device):
+            return self.embed_full(input_ids)
+        return self.embed(input_ids)
+
+    def embed_full(self, input_ids: torch.Tensor) -> torch.Tensor:
+        h = self.embed(input_ids)
+        if h.size(-1) == self.args.dim:
+            return h
+        if self.args.dim % h.size(-1) != 0:
+            raise ValueError(
+                "DSV4 TP embedding shard has incompatible hidden size: "
+                f"local={h.size(-1)} dim={self.args.dim}"
+            )
+        shard_count = self.args.dim // h.size(-1)
+        from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+
+        leading = h.shape[:-1]
+        local_dim = h.size(-1)
+        flat = h.reshape(-1, local_dim).contiguous()
+        gathered = all_gather(flat, group=Group.TP)
+        return (
+            gathered.view(shard_count, flat.size(0), local_dim)
+            .transpose(0, 1)
+            .contiguous()
+            .view(*leading, self.args.dim)
+        )
 
     def set_aux_hidden_capture_layer_ids(self, layer_ids: Sequence[int]) -> None:
         """Configure target residual-stream layers exported to DSpARK.
@@ -554,7 +608,7 @@ class V4Transformer(nn.Module):
             input_ids_2d = input_ids.view(B, q_len)
         else:
             input_ids_2d = input_ids
-        h = self.embed(input_ids_2d)  # [B, q_len, dim]
+        h = self._embed_target(input_ids_2d)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
         begin_decode = getattr(self, "begin_decode", None)
         if begin_decode is not None:
@@ -650,7 +704,7 @@ class V4Transformer(nn.Module):
             # begin() may suppress this forward (MOEDBG_MAX_SEQ); honour it.
             if _rt._get_buf() is None:
                 _rt_on = False
-        h = self.embed(input_ids)  # [B, S, d]
+        h = self._embed_target(input_ids)  # [B, S, d]
         if _rt_on:
             _rt.record("embed_out", h)
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, S, hc, d]

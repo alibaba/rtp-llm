@@ -203,6 +203,7 @@ class FusedMoeDataRouter(ABC):
 class FusedMoeExpertExecutor(ABC):
     includes_shared_expert = False
     execute_empty_inputs = False
+    preserve_output_dtype = False
 
     def __init__(
         self,

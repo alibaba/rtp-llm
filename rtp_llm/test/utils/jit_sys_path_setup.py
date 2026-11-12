@@ -101,6 +101,30 @@ def _cache_key(package_name, version, source_path):
     return "%s_python-%s-%s__%s" % (package_name, version, py_tag, variant)
 
 
+def _required_siblings(package_name, source_path):
+    """Sibling directories that must be relocated alongside the package.
+
+    The SM120 DeepGEMM overlay registers JIT include dirs from the sibling
+    ``deep_gemm_sm120`` directory (``library_root.parent / "deep_gemm_sm120"``)
+    and silently skips registration when it is absent, so a cached copy of
+    ``deep_gemm`` alone leaves SM120 JIT compiles opening blank paths.
+    """
+    if package_name != "deep_gemm":
+        return []
+    sibling = Path(source_path).parent / "deep_gemm_sm120"
+    return [sibling] if sibling.is_dir() else []
+
+
+# Cache generations are publish-once. The completion marker is the only
+# completeness signal and is written only after the package, .libs and sibling
+# copies finish; readers of a marked tree do not hold the copy lock, so a
+# marked generation is never modified or deleted, while a tree without the
+# marker was never handed out and may be rebuilt under the lock. Layout
+# changes (a newly required sibling) therefore select a layout-versioned
+# cache key instead of repairing the published generation in place.
+_SIBLING_LAYOUT_KEY_SUFFIX = "__layout2"
+
+
 def copy_package_with_lock(package_name, cache_dir):
     """
     Copy a Python package to cache directory with version in name.
@@ -117,8 +141,18 @@ def copy_package_with_lock(package_name, cache_dir):
 
     logging.info(f"[Package Copy] Found {package_name} v{version} at {source_path}")
 
-    # Keyed on version AND build variant; see _build_variant.
+    # Sibling directories that must be relocated alongside the package; see
+    # _required_siblings.
+    extra_siblings = _required_siblings(package_name, source_path)
+
+    # Keyed on version AND build variant; see _build_variant. A layout that
+    # requires siblings stages under a layout-versioned key: generations
+    # published before the sibling rule carry their marker over an incomplete
+    # tree and must be left untouched, so the sibling-complete layout gets its
+    # own generation rather than an in-place repair.
     cache_key = _cache_key(package_name, version, source_path)
+    if extra_siblings:
+        cache_key += _SIBLING_LAYOUT_KEY_SUFFIX
     target_base = Path(cache_dir) / cache_key
     target_site_packages = target_base / "site-packages"
     target_package_path = target_site_packages / Path(source_path).name
@@ -127,7 +161,9 @@ def copy_package_with_lock(package_name, cache_dir):
     lock_file = Path(cache_dir) / f".{cache_key}.lock"
     completion_marker = target_base / ".copy_complete"
 
-    # Check if already copied and complete
+    # Check if already copied and complete. The marker is written last, so an
+    # unmarked tree was never handed out and its copy is (re)done under the
+    # lock.
     if completion_marker.exists() and target_package_path.exists():
         logging.info(
             f"[Package Copy] {package_name} v{version} already cached at {target_base}"
@@ -174,9 +210,33 @@ def copy_package_with_lock(package_name, cache_dir):
                         )
                         shutil.copytree(libs_source, libs_target, symlinks=True)
 
+            # Also copy required sibling directories (e.g. deep_gemm_sm120,
+            # which the SM120 DeepGEMM overlay resolves JIT includes from).
+            for sibling in extra_siblings:
+                sibling_target = target_site_packages / sibling.name
+                if sibling_target.exists():
+                    shutil.rmtree(sibling_target)
+                logging.info(f"[Package Copy] Copying {sibling.name} directory...")
+                shutil.copytree(sibling, sibling_target, symlinks=True)
+
             # Verify copy
             if not target_package_path.exists():
                 raise RuntimeError(f"Copy verification failed for {package_name}")
+            if extra_siblings:
+                sm120_include_root = (
+                    target_site_packages
+                    / "deep_gemm_sm120"
+                    / "vendor"
+                    / "deep_gemm"
+                    / "include"
+                )
+                if not sm120_include_root.is_dir():
+                    logging.warning(
+                        f"[Package Copy] {package_name} v{version}: sibling "
+                        f"deep_gemm_sm120 was copied but SM120 include root "
+                        f"{sm120_include_root} is missing; SM120 JIT compiles "
+                        f"will fail to resolve includes"
+                    )
 
             # Create completion marker
             completion_marker.write_text(f"{package_name}=={version}\n")
@@ -188,9 +248,13 @@ def copy_package_with_lock(package_name, cache_dir):
 
         except Exception as e:
             logging.info(f"[Package Copy] Failed to copy {package_name}: {e}")
-            # Clean up incomplete copy
+            # Clean up incomplete copy; the missing marker means this
+            # generation was never published, so deleting is safe.
+            completion_marker.unlink(missing_ok=True)
             if target_package_path.exists():
                 shutil.rmtree(target_package_path, ignore_errors=True)
+            for sibling in extra_siblings:
+                shutil.rmtree(target_site_packages / sibling.name, ignore_errors=True)
             return None
 
 

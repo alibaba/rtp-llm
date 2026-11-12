@@ -118,6 +118,31 @@ sh_test(
     data = ["update_cuda13_locks.sh"],
 )
 
+# SM120 lane assertions; sibling of update_cuda13_locks_test.sh.
+sh_test(
+    name = "update_cuda13_locks_sm120_test",
+    srcs = ["update_cuda13_locks_sm120_test.sh"],
+    data = [
+        "update_cuda13_locks.sh",
+        "requirements_torch_gpu_cuda13_sm120_dsv4.txt",
+        "requirements_lock_torch_gpu_cuda13_sm120_dsv4.txt",
+    ],
+)
+
+py_test(
+    name = "cuda13_requirements_test",
+    srcs = ["cuda13_requirements_test.py"],
+    data = [
+        "requirements_base.txt",
+        "requirements_cuda13_overrides.txt",
+        "requirements_lock_torch_gpu_cuda13.txt",
+        "requirements_lock_torch_gpu_cuda13_sm120_dsv4.txt",
+        "requirements_torch_gpu_cuda13.txt",
+        "requirements_torch_gpu_cuda13_sm120_dsv4.txt",
+    ],
+    deps = ["@pip_cpu_torch_packaging//:pkg"],
+)
+
 compile_pip_requirements(
     name = "requirements_rocm",
     src = "requirements_rocm.txt",

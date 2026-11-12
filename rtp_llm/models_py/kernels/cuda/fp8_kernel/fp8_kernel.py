@@ -121,6 +121,7 @@ def sgl_per_token_group_quant_fp8(
     fuse_silu_and_mul: bool = False,
     masked_m: Optional[torch.Tensor] = None,
     preserve_silu_mul_rounding: bool = False,
+    enable_v2: Optional[bool] = None,
 ):
     assert (
         x.shape[-1] % group_size == 0
@@ -167,6 +168,9 @@ def sgl_per_token_group_quant_fp8(
                 return False
             if masked_m is not None or fuse_silu_and_mul:
                 return True
+            if enable_v2 is not None:
+                # Caller policy. The v2 kernel accepts half precision only.
+                return enable_v2 and x.dtype in (torch.float16, torch.bfloat16)
             # Microbench on the target 16..64K token sweep shows v2 wins
             # consistently once the quantized matrix has at least ~4M elements.
             return x.numel() >= 4 * 1024 * 1024

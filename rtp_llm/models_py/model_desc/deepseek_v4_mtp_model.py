@@ -144,7 +144,9 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         )
 
     def _embed_mtp_inputs(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.v4.embed(input_ids)
+        # ``_embed_target`` gathers TP-sharded embeddings on SM120 and is a
+        # plain ``embed`` elsewhere.
+        return self.v4._embed_target(input_ids)
 
     def _build_fused_chunked(
         self,

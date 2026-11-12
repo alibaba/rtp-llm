@@ -59,12 +59,19 @@ class Fp8Fp4MoeRuntimeConfig:
         physical_expert_num: Optional[int] = None,
         shared_fp8_block_size: int = FP8_BLOCK,
         is_decode_role: bool = False,
+        moe_cp_enabled: bool = False,
+        moe_cp_size: int = 1,
+        moe_tp_size: int = 1,
+        moe_tp_rank: int = 0,
+        attn_tp_size: int = 1,
+        sm120_workspace=None,
     ) -> None:
         if expert_num % max(ep_size, 1) != 0:
             raise ValueError(
                 f"expert_num={expert_num} must be divisible by ep_size={ep_size}"
             )
         self.layer_id = int(layer_id)
+        self.sm120_workspace = sm120_workspace
         self.hidden_size = int(hidden_size)
         self.dim = self.hidden_size
         self.moe_inter_dim = int(moe_inter_dim)
@@ -115,6 +122,13 @@ class Fp8Fp4MoeRuntimeConfig:
         self.moe_strategy = str(moe_strategy or "auto")
         self.world_size = int(ep_size if world_size is None else world_size)
         self.world_rank = int(ep_rank if world_rank is None else world_rank)
+        # Physical MoE topology for executors that own their communication.
+        # ``tp_size`` below stays 1: the routed experts are EP-sharded.
+        self.moe_cp_enabled = bool(moe_cp_enabled)
+        self.moe_cp_size = int(moe_cp_size)
+        self.moe_tp_size = int(moe_tp_size)
+        self.moe_tp_rank = int(moe_tp_rank)
+        self.attn_tp_size = int(attn_tp_size)
 
         self.tp_size = 1
         self.tp_rank = 0
@@ -166,6 +180,12 @@ class Fp8Fp4MoeLayer(nn.Module):
         moe_w1_layout: str = "up_gate",
         physical_expert_num: Optional[int] = None,
         is_decode_role: bool = False,
+        moe_cp_enabled: bool = False,
+        moe_cp_size: int = 1,
+        moe_tp_size: int = 1,
+        moe_tp_rank: int = 0,
+        attn_tp_size: int = 1,
+        sm120_workspace=None,
     ) -> None:
         super().__init__()
         if n_shared_experts < 0:
@@ -195,6 +215,7 @@ class Fp8Fp4MoeLayer(nn.Module):
             n_hash_layers,
             vocab_size,
             layer_weights=layer_weights,
+            model_type=model_type,
         )
         runtime_config = Fp8Fp4MoeRuntimeConfig(
             layer_id=layer_id,
@@ -218,11 +239,20 @@ class Fp8Fp4MoeLayer(nn.Module):
             physical_expert_num=physical_expert_num,
             shared_fp8_block_size=shared_fp8_block_size,
             is_decode_role=is_decode_role,
+            moe_cp_enabled=moe_cp_enabled,
+            moe_cp_size=moe_cp_size,
+            moe_tp_size=moe_tp_size,
+            moe_tp_rank=moe_tp_rank,
+            attn_tp_size=attn_tp_size,
+            sm120_workspace=sm120_workspace,
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(
             runtime_config, layer_weights
         )
         self.strategy_name = self.fused_moe.strategy_name
+        self.gate.batch_invariant_scores = (
+            self.strategy_name == "sm120_fused_moe" and moe_cp_enabled
+        )
         # MegaMoE formerly fused hash routing with input packing. Preserve its
         # BF16-score/Triton epilogue numerics while keeping routing in the
         # common fused-MoE layer.
@@ -313,6 +343,8 @@ class Fp8Fp4MoeLayer(nn.Module):
                 observer("topk_indices", topk_ids)
 
         def run_routed_experts() -> torch.Tensor:
+            # SM120 retains its routed FP32 sum until shared-expert addition.
+            # Other executors keep their established output-rounding contract.
             if gate_payload is not None:
                 return self.fused_moe.forward_gate_pack(
                     hidden_states=x,
