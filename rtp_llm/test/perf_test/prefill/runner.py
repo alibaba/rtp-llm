@@ -26,6 +26,8 @@ class PrefillRunner:
         tokenizer: Any,
         *,
         commit_tail_tokens: int,
+        max_batch_tokens: int,
+        workspace_tokens: int | None = None,
         cache_block_size: int | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ):
@@ -33,6 +35,8 @@ class PrefillRunner:
         self.client = client
         self.factory = PrefixPromptFactory(tokenizer)
         self.commit_tail_tokens = commit_tail_tokens
+        self.max_batch_tokens = max_batch_tokens
+        self.workspace_tokens = workspace_tokens
         self.cache_block_size = cache_block_size or commit_tail_tokens
 
     @staticmethod
@@ -142,6 +146,104 @@ class PrefillRunner:
                     "increase min_input_tokens or choose a compatible tokenizer"
                 ) from error
 
+    def _seed_batches(self, members: List[Dict[str, Any]]) -> List[List[int]]:
+        batches = []
+        batch = []
+        tokens = padded_tokens = 0
+        block = self.cache_block_size
+        for member, item in enumerate(members):
+            if not item["cache_len"]:
+                continue
+            reservation = item["cache_len"] + self.commit_tail_tokens + 1
+            padded = (reservation + block - 1) // block * block
+            if reservation > self.max_batch_tokens or (
+                self.workspace_tokens is not None and padded > self.workspace_tokens
+            ):
+                raise ValueError(f"seed member {member} exceeds token budget")
+            if batch and (
+                len(batch) == 8
+                or tokens + reservation > self.max_batch_tokens
+                or (
+                    self.workspace_tokens is not None
+                    and padded_tokens + padded > self.workspace_tokens
+                )
+            ):
+                batches.append(batch)
+                batch = []
+                tokens = padded_tokens = 0
+            batch.append(member)
+            tokens += reservation
+            padded_tokens += padded
+        if batch:
+            batches.append(batch)
+        return batches
+
+    def _seed_batch(
+        self, case: Dict[str, Any], members: List[Dict[str, Any]], batch: List[int]
+    ) -> Tuple[str, str] | None:
+        try:
+            requests = []
+            for member in batch:
+                item = members[member]
+                seed_text, seed_ids = self.factory.make_seed_and_ids(
+                    item["prefix_id"],
+                    item["prompts"].seed_text,
+                    item["cache_len"],
+                    self.commit_tail_tokens,
+                )
+                requests.append(
+                    dict(
+                        phase="seed",
+                        case_id=case["case_id"],
+                        request_index=member,
+                        run_index=None,
+                        prompt=seed_text,
+                        input_ids=seed_ids,
+                        output_length=1,
+                    )
+                )
+            self.client.configure_scheduler(len(batch), mode="prefill")
+            release = threading.Event()
+            aborted = False
+
+            def request_seed(request):
+                release.wait()
+                if aborted:
+                    raise RuntimeError("seed batch setup aborted")
+                return self.client.request(**request)
+
+            with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+                futures = []
+                failures = []
+                try:
+                    for request in requests:
+                        futures.append(executor.submit(request_seed, request))
+                except Exception as error:
+                    aborted = True
+                    failures.append(str(error))
+                finally:
+                    # Submit the full batch before any seed enters the scheduler.
+                    release.set()
+                responses = []
+                for future in futures:
+                    try:
+                        responses.append(future.result())
+                    except Exception as error:
+                        failures.append(str(error))
+                if failures:
+                    return "request_failed", "; ".join(failures)
+            for member, response in zip(batch, responses):
+                invalid = self._validate(
+                    response,
+                    input_len=members[member]["cache_len"] + self.commit_tail_tokens,
+                    expected_reuse=0,
+                )
+                if invalid is not None:
+                    return invalid
+        except Exception as error:
+            return "request_failed", str(error)
+        return None
+
     def run_case(self, case: Dict[str, Any]) -> Dict[str, Any]:
         if "sample_index" in case:
             try:
@@ -174,37 +276,14 @@ class PrefillRunner:
                 for member in range(batch_size)
             ]
         )
-        if any(item["cache_len"] for item in members):
-            try:
-                self.client.configure_scheduler(1, mode="prefill")
-            except Exception as error:
-                return self._failure(case, "request_failed", str(error))
-            for member, item in enumerate(members):
-                if not item["cache_len"]:
-                    continue
-                prompts = item["prompts"]
-                seed_len = item["cache_len"] + self.commit_tail_tokens
-                seed_text, seed_ids = self.factory.make_seed_and_ids(
-                    item["prefix_id"],
-                    prompts.seed_text,
-                    item["cache_len"],
-                    self.commit_tail_tokens,
-                )
-                try:
-                    response = self.client.request(
-                        phase="seed",
-                        case_id=case["case_id"],
-                        request_index=member,
-                        run_index=None,
-                        prompt=seed_text,
-                        input_ids=seed_ids,
-                        output_length=1,
-                    )
-                except Exception as error:
-                    return self._failure(case, "request_failed", str(error))
-                invalid = self._validate(response, input_len=seed_len, expected_reuse=0)
-                if invalid is not None:
-                    return self._failure(case, *invalid)
+        try:
+            seed_batches = self._seed_batches(members)
+        except ValueError as error:
+            return self._failure(case, "request_failed", str(error))
+        for batch in seed_batches:
+            invalid = self._seed_batch(case, members, batch)
+            if invalid is not None:
+                return self._failure(case, *invalid)
 
         try:
             self.client.configure_scheduler(batch_size, mode="prefill")

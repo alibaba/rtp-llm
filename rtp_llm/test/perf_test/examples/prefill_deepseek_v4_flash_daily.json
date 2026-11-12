@@ -9,7 +9,7 @@
   },
   "engine": {
     "max_seq_len": 1048576,
-    "max_batch_tokens": 6600000,
+    "max_batch_tokens": 1048576,
     "concurrency_limit": 32,
     "args": {
       "cp_rotate_method": "ALL_GATHER",

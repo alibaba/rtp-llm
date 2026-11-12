@@ -43,6 +43,7 @@ def prefill_external_run_through_session(plan, session, run_root):
             context.session.client,
             prefill_external_Tokenizer(),
             commit_tail_tokens=prefill_external_COMMIT_TAIL_TOKENS,
+            max_batch_tokens=plan.resolved_config["engine"]["max_batch_tokens"],
             monotonic=iter([0.0, 0.2]).__next__,
         )
     )
@@ -138,6 +139,172 @@ def prefill_runner_grouped_case():
     )
 
 
+class SeedBatchClient:
+    """Require complete concurrent scheduler groups without a GPU server."""
+
+    def __init__(self, cache_lengths, *, failed_member=None, raised_member=None):
+        self.cache_lengths = cache_lengths
+        self.failed_member = failed_member
+        self.raised_member = raised_member
+        self.batches = []
+        self.completed_seeds = set()
+        self.lock = threading.Lock()
+
+    def configure_scheduler(self, batch_size, mode="prefill"):
+        assert mode == "prefill"
+        if self.batches:
+            assert self.batches[-1]["completed"] == len(self.batches[-1]["requests"])
+        self.batches.append(
+            {
+                "barrier": threading.Barrier(batch_size, timeout=2),
+                "requests": [],
+                "completed": 0,
+            }
+        )
+
+    def request(self, **request):
+        with self.lock:
+            batch = self.batches[-1]
+            batch["requests"].append(request)
+        try:
+            batch["barrier"].wait()
+            member = request["request_index"]
+            seed = request["phase"] == "seed"
+            if not seed:
+                assert self.completed_seeds == {
+                    index for index, length in enumerate(self.cache_lengths) if length
+                }
+            if seed and member == self.raised_member:
+                raise RuntimeError("seed transport failed")
+            return prefill_runner_response(
+                len(request["input_ids"]),
+                0 if seed else self.cache_lengths[member],
+                success=not (seed and member == self.failed_member),
+            )
+        finally:
+            with self.lock:
+                batch["completed"] += 1
+                if request["phase"] == "seed":
+                    self.completed_seeds.add(request["request_index"])
+
+
+class SeedBatchTest(unittest.TestCase):
+    def run_seeds(
+        self,
+        cache_lengths,
+        *,
+        max_batch_tokens=4096,
+        workspace_tokens=None,
+        cache_block_size=4,
+        client=None,
+    ):
+        client = client or SeedBatchClient(cache_lengths)
+        case = dict(
+            prefill_runner_case(batch_size=len(cache_lengths), measure_runs=1),
+            input_len=32,
+            cache_len=max(cache_lengths),
+            prefix_policy="independent",
+            request_groups=[
+                {"count": 1, "input_len": 32, "cache_len": length}
+                for length in cache_lengths
+            ],
+        )
+        result = PrefillRunner(
+            client,
+            prefill_runner_Tokenizer(),
+            commit_tail_tokens=4,
+            cache_block_size=cache_block_size,
+            max_batch_tokens=max_batch_tokens,
+            workspace_tokens=workspace_tokens,
+        ).run_case(case)
+        return client, result
+
+    def test_seeds_overlap_in_batches_of_eight_with_short_tail(self):
+        client, result = self.run_seeds([8] * 10)
+        self.assertEqual("ok", result["status"])
+        self.assertEqual([8, 2, 10], [len(b["requests"]) for b in client.batches])
+        self.assertEqual(10, len(result["metrics"]["measurements"]))
+
+    def test_token_budget_includes_output_and_skips_cold_members(self):
+        for budget, expected in (
+            (30, [[0, 2], [3, 4]]),
+            (29, [[0], [2, 3], [4]]),
+        ):
+            with self.subTest(budget=budget):
+                client, result = self.run_seeds(
+                    [8, 0, 12, 4, 8], max_batch_tokens=budget
+                )
+                self.assertEqual("ok", result["status"])
+                self.assertEqual(
+                    expected,
+                    [
+                        sorted(r["request_index"] for r in b["requests"])
+                        for b in client.batches[:-1]
+                    ],
+                )
+
+    def test_workspace_budget_counts_block_padding(self):
+        client, result = self.run_seeds(
+            [8, 0, 12, 4, 8], workspace_tokens=32, cache_block_size=8
+        )
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(
+            [[0], [2], [3, 4]],
+            [
+                sorted(r["request_index"] for r in b["requests"])
+                for b in client.batches[:-1]
+            ],
+        )
+
+    def test_oversized_seed_fails_before_any_dispatch(self):
+        for limits in ({"max_batch_tokens": 24}, {"workspace_tokens": 27}):
+            with self.subTest(limits=limits):
+                client, result = self.run_seeds([8, 20], **limits)
+                self.assertEqual("request_failed", result["status"])
+                self.assertIsNone(result["metrics"])
+                self.assertEqual([], client.batches)
+
+    def test_failed_seed_batch_drains_peers_and_stops(self):
+        for failure in ("failed_member", "raised_member"):
+            with self.subTest(failure=failure):
+                client = SeedBatchClient([8] * 10, **{failure: 0})
+                _, result = self.run_seeds([8] * 10, client=client)
+                self.assertEqual("request_failed", result["status"])
+                self.assertIsNone(result["metrics"])
+                self.assertEqual(1, len(client.batches))
+                self.assertEqual(set(range(8)), client.completed_seeds)
+
+    def test_submission_failure_aborts_before_dispatch(self):
+        submitted = []
+
+        class Executor(ThreadPoolExecutor):
+            def submit(self, fn, *args, **kwargs):
+                if submitted:
+                    raise RuntimeError("submission failed")
+                future = super().submit(fn, *args, **kwargs)
+                submitted.append(future)
+                return future
+
+        with patch(
+            "rtp_llm.test.perf_test.prefill.runner.ThreadPoolExecutor", Executor
+        ):
+            client, result = self.run_seeds([8] * 4)
+        self.assertEqual("request_failed", result["status"])
+        self.assertEqual([], client.batches[0]["requests"])
+        self.assertEqual(1, len(submitted))
+        self.assertTrue(submitted[0].done())
+
+    def test_scheduler_failure_stops_before_seed_dispatch(self):
+        class Client(SeedBatchClient):
+            def configure_scheduler(self, batch_size, mode="prefill"):
+                raise RuntimeError("scheduler unavailable")
+
+        client = Client([8] * 4)
+        _, result = self.run_seeds([8] * 4, client=client)
+        self.assertEqual("request_failed", result["status"])
+        self.assertEqual([], client.batches)
+
+
 class PrefillRunnerTest(unittest.TestCase):
 
     def test_batch_four_measure_requests_overlap(self):
@@ -155,22 +322,28 @@ class PrefillRunnerTest(unittest.TestCase):
             4,
         )
         result = PrefillRunner(
-            client, prefill_runner_Tokenizer(), commit_tail_tokens=4
+            client,
+            prefill_runner_Tokenizer(),
+            commit_tail_tokens=4,
+            max_batch_tokens=4096,
         ).run_case(prefill_runner_case(batch_size=4, measure_runs=1))
         self.assertEqual("ok", result["status"])
-        self.assertEqual([1, 4], client.scheduler_calls)
+        self.assertEqual([4, 4], client.scheduler_calls)
         self.assertEqual(["seed"] * 4, [r["phase"] for r in client.requests[:4]])
 
     def test_seed_failure_stops_before_measurement(self):
         client = prefill_runner_Client(
-            [prefill_runner_response(12, 0, success=False)], 4
+            [prefill_runner_response(12, 0, success=False)] * 4, 4
         )
         result = PrefillRunner(
-            client, prefill_runner_Tokenizer(), commit_tail_tokens=4
+            client,
+            prefill_runner_Tokenizer(),
+            commit_tail_tokens=4,
+            max_batch_tokens=4096,
         ).run_case(prefill_runner_case(batch_size=4, measure_runs=1))
         self.assertEqual("request_failed", result["status"])
-        self.assertEqual([1], client.scheduler_calls)
-        self.assertEqual(["seed"], [r["phase"] for r in client.requests])
+        self.assertEqual([4], client.scheduler_calls)
+        self.assertEqual(["seed"] * 4, [r["phase"] for r in client.requests])
 
     def test_round_setup_failure_aborts_and_drains_submitted_workers(self):
         for failure in ("submit", "clock"):
@@ -201,6 +374,7 @@ class PrefillRunnerTest(unittest.TestCase):
                                 client,
                                 prefill_runner_Tokenizer(),
                                 commit_tail_tokens=4,
+                                max_batch_tokens=4096,
                                 monotonic=monotonic,
                             ).run_case(
                                 prefill_runner_case(
@@ -244,6 +418,7 @@ class PrefillRunnerTest(unittest.TestCase):
             client,
             prefill_runner_Tokenizer(),
             commit_tail_tokens=4,
+            max_batch_tokens=4096,
             monotonic=lambda: next(times),
         ).run_case(prefill_runner_case())
         self.assertEqual(28.0, result["metrics"]["throughput_tokens_per_second"])
@@ -264,7 +439,12 @@ class PrefillRunnerTest(unittest.TestCase):
                 ),
             ]
         )
-        runner = PrefillRunner(client, prefill_runner_Tokenizer(), commit_tail_tokens=4)
+        runner = PrefillRunner(
+            client,
+            prefill_runner_Tokenizer(),
+            commit_tail_tokens=4,
+            max_batch_tokens=4096,
+        )
         result = runner.run_case(prefill_runner_case())
         self.assertEqual("ok", result["status"])
         self.assertEqual(3, len(client.requests))
@@ -286,7 +466,10 @@ class PrefillRunnerTest(unittest.TestCase):
             [prefill_runner_response(16, 0), prefill_runner_response(16, 0)]
         )
         result = PrefillRunner(
-            client, prefill_runner_Tokenizer(), commit_tail_tokens=4
+            client,
+            prefill_runner_Tokenizer(),
+            commit_tail_tokens=4,
+            max_batch_tokens=4096,
         ).run_case(prefill_runner_case(cache_len=0))
         self.assertEqual("ok", result["status"])
         self.assertEqual(["measure", "measure"], [r["phase"] for r in client.requests])
@@ -316,6 +499,7 @@ class GroupedRunnerTest(unittest.TestCase):
             client,
             prefill_runner_Tokenizer(),
             commit_tail_tokens=4,
+            max_batch_tokens=4096,
             monotonic=lambda: next(times),
         ).run_case(prefill_runner_grouped_case())
         return (client, result)

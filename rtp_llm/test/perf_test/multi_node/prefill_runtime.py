@@ -216,6 +216,8 @@ def execute_master_prefill(
                 context.session.client,
                 tokenizer,
                 commit_tail_tokens=commit_tail,
+                max_batch_tokens=plan.resolved_config["engine"]["max_batch_tokens"],
+                workspace_tokens=workload.get("workspace_tokens"),
                 cache_block_size=block_size,
             ),
             probe=lambda context: probe_cache_block(

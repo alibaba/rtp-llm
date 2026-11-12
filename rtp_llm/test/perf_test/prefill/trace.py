@@ -206,6 +206,8 @@ class ProfiledRunner:
                 TraceClient(self.client, capture),
                 self.tokenizer,
                 commit_tail_tokens=self.config["workload"]["commit_tail_tokens"],
+                max_batch_tokens=self.config["engine"]["max_batch_tokens"],
+                workspace_tokens=self.config["workload"].get("workspace_tokens"),
                 cache_block_size=resolve_probe_block_size(self.config),
             ).run_case(diagnostic)
             if result["status"] == "ok":

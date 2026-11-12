@@ -142,7 +142,7 @@ class AOneWorkerTest(unittest.TestCase):
 
         config = {
             "model": {"tokenizer": "test", "checkpoint": "test", "type": "test"},
-            "engine": {"args": {"seq_size_per_block": 16}},
+            "engine": {"max_batch_tokens": 4096, "args": {"seq_size_per_block": 16}},
             "workload": {"cache_alignment": 64, "commit_tail_tokens": 64},
         }
         inputs = SimpleNamespace(config=config)

@@ -205,18 +205,21 @@ class UnifiedLocalExecutor:
 
     def _prefill_adapter(self, plan: ExecutionPlan) -> PrefillAdapter:
         tokenizer = self._tokenizer_loader(plan)
-        commit_tail = int(thaw(plan.resolved_config)["workload"]["commit_tail_tokens"])
+        config = thaw(plan.resolved_config)
+        commit_tail = int(config["workload"]["commit_tail_tokens"])
         return PrefillAdapter(
             lambda context: PrefillRunner(
                 context.session.client,
                 tokenizer,
                 commit_tail_tokens=commit_tail,
-                cache_block_size=resolve_probe_block_size(thaw(plan.resolved_config)),
+                max_batch_tokens=config["engine"]["max_batch_tokens"],
+                workspace_tokens=config["workload"].get("workspace_tokens"),
+                cache_block_size=resolve_probe_block_size(config),
             ),
             probe=lambda context: probe_cache_block(
                 context.session.client,
                 tokenizer,
-                resolve_probe_block_size(thaw(plan.resolved_config)),
+                resolve_probe_block_size(config),
                 commit_tail,
             ),
         )

@@ -222,7 +222,8 @@ def _plan_grouped_cases(
             raise PlanningError(
                 "block-padded grouped batch exceeds workload.workspace_tokens"
             )
-        # Seeds run sequentially and therefore never multiply seed workspace by count.
+        # Check individual seed feasibility; the runner forms concurrent batches
+        # bounded by max_batch_tokens and block-padded workspace_tokens.
         for group in groups:
             if group.cache_len:
                 seed_tokens = group.cache_len + workload.commit_tail_tokens + 1
@@ -230,12 +231,12 @@ def _plan_grouped_cases(
                     seed_tokens > engine.max_seq_len
                     or seed_tokens > engine.max_batch_tokens
                 ):
-                    raise PlanningError("sequential seed exceeds engine token limits")
+                    raise PlanningError("individual seed exceeds engine token limits")
                 if (
                     seed_tokens + block_size - 1
                 ) // block_size * block_size > workload.workspace_tokens:
                     raise PlanningError(
-                        "sequential seed exceeds workload.workspace_tokens"
+                        "individual seed exceeds workload.workspace_tokens"
                     )
         input_len = max(group.input_len for group in groups)
         cache_len = max(group.cache_len for group in groups)

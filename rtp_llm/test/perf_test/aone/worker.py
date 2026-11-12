@@ -183,6 +183,8 @@ def _default_executor(inputs: RemoteInputs):
             context.session.client,
             tokenizer,
             commit_tail_tokens=commit_tail,
+            max_batch_tokens=inputs.config["engine"]["max_batch_tokens"],
+            workspace_tokens=inputs.config["workload"].get("workspace_tokens"),
             cache_block_size=resolve_probe_block_size(inputs.config),
         ),
         probe=lambda context: probe_cache_block(
