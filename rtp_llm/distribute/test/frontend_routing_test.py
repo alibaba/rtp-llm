@@ -233,6 +233,8 @@ class FrontendRoutingTest(unittest.TestCase):
         ), patch.object(
             network, "topology", return_value={0: "22.0.1.2", 1: "22.0.1.3"}
         ), patch.object(
+            ds, "get_master", return_value=("22.0.1.2", "22290")
+        ), patch.object(
             ds, "TCPStore"
         ) as store:
             store.return_value.get.return_value = b"22.0.1.2:23000"

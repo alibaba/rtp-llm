@@ -21,6 +21,7 @@ py_test(
         "//rtp_llm/models_py/distributed:collective_torch",
         "//rtp_llm/distribute:distribute",
         "//rtp_llm/server:server",
+        "//rtp_llm:device",
     ],
 )
 
@@ -125,7 +126,7 @@ py_test(
 py_test(
     name = "template_utils_test",
     srcs = [
-        "scr_template_utils_test.py",
+        "template_utils_test.py",
     ],
     deps = [
         "//rtp_llm:utils",
@@ -150,6 +151,7 @@ py_test(
         "//rtp_llm:config_ops",
         "//rtp_llm:utils",
         "//rtp_llm/distribute:distribute",
+        "//rtp_llm/models_py/distributed:collective_torch",
     ],
 )
 
@@ -161,8 +163,13 @@ py_test(
     deps = [
         "//rtp_llm:sdk",
         "//rtp_llm:config_ops",
+        "//rtp_llm:structure",
         "//rtp_llm:utils",
+        "//rtp_llm:device",
         "//rtp_llm/distribute:distribute",
+        "//rtp_llm/access_logger:access_logger",
+        "//rtp_llm/metrics:metrics",
+        "//rtp_llm/models_py/distributed:collective_torch",
     ],
 )
 

@@ -23,7 +23,7 @@ enum { LOG_LEVEL_ERROR=1, LOG_LEVEL_WARN=2, LOG_LEVEL_INFO=3,
        LOG_LEVEL_DEBUG=4, LOG_LEVEL_TRACE1=5 };
 class Logger {
 public:
-    static Logger* getLogger(const char*) { static Logger l; return &l; }
+    static Logger* getLogger(const char*, bool = true) { static Logger l; return &l; }
     void setLevel(uint32_t l) { level=l; }
     uint32_t getLevel() { return level; }
     bool isLevelEnabled(int32_t) { return true; }
