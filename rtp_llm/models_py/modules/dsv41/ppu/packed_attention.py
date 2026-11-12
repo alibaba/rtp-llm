@@ -1,8 +1,9 @@
-"""Default-off packed Attention over authoritative native PPU pools.
+"""Packed Attention over authoritative native PPU pools.
 
 Only metadata is materialized. KV tensors are zero-copy strided views of
 the engine allocations, including their original block padding. Eligibility
 is resolved before projections, cache writes or collectives.
+Ordinary eager Decode uses packed KV by default; Prefill remains opt-in.
 """
 
 import importlib
@@ -183,7 +184,7 @@ class PackedAttentionPlan:
         return self
 
 
-def _pool_reason(pool, width, lengths, *, ratio, full):
+def _pool_reason(pool, width, lengths, *, ratio, full, window=None):
     tensor, table = pool.tensor, pool.table
     if (tensor.ndim != 2 or tensor.dtype != torch.uint8
             or tensor.device.type != "cuda" or tensor.stride(1) != 1
@@ -205,7 +206,8 @@ def _pool_reason(pool, width, lengths, *, ratio, full):
         columns = last // pool.span + 1
         if columns > table.shape[1]:
             return "short_physical_table"
-        blocks = table[rid, :columns]
+        first = 0 if window is None else max(0, total - window) // pool.span
+        blocks = table[rid, first:columns]
         if bool(((blocks < 0) | (blocks >= tensor.shape[0])).any()):
             return "unallocated_physical_page"
     return None
@@ -213,7 +215,7 @@ def _pool_reason(pool, width, lengths, *, ratio, full):
 
 def prepare_packed_attention(attn, state, context, x):
     """Return (plan, reason) before the first state write; no launch probes."""
-    if not enabled(PACKED_ENV):
+    if not enabled(PACKED_ENV, default=state is not None and not state.prefill):
         return None, "disabled"
     reason = ordinary_eager_reason(state)
     if reason:
@@ -234,7 +236,14 @@ def prepare_packed_attention(attn, state, context, x):
         return None, "prefill_swa_not_resident"
     if pool.entries < attn.geometry.window:
         return None, "short_swa_ring"
-    reason = _pool_reason(pool, 528, cache.lengths, ratio=1, full=False)
+    reason = _pool_reason(
+        pool,
+        528,
+        cache.lengths,
+        ratio=1,
+        full=False,
+        window=None if state.prefill else attn.geometry.window,
+    )
     if reason:
         return None, reason
     source, ratio = attn.kv_source_layer_id, attn.compress_ratio

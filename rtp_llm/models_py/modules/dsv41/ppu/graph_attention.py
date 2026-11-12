@@ -24,11 +24,32 @@ def score_indexer_entries(
 ):
     """Score explicit logical key entries through the cache's current view."""
     batch, columns = query.shape[0], entries.shape[-1]
-    raw_positions = entries.expand(batch, columns) * ratio
-    visible = (positions + 1) // ratio
-    valid = valid_mask[:, None] & (entries < visible[:, None])
-    slots = cache.slots(source_layer, "indexer_kv", torch.where(valid, raw_positions, -1))
-    packed = cache.read_rows(source_layer, "indexer_kv", slots)
+    fused_read = None
+    if score_reducer is not None:
+        from rtp_llm.models_py.modules.dsv41.ppu.dspark_graph import VerifyGraphJournal
+        from rtp_llm.models_py.modules.dsv41.ppu.verify_ops import try_read_verify_indexer_entries
+
+        if type(cache) is VerifyGraphJournal:
+            native = cache.native_cache
+            tag = native._table_tag(source_layer, "indexer_kv")
+            key = source_layer, "indexer_kv"
+            fused_read = try_read_verify_indexer_entries(
+                entries, positions, valid_mask,
+                row_tables=cache.row_tables[tag], pool=native.pool(*key),
+                payloads=cache.payloads[key], generations=cache.generations[key],
+                requests=cache.requests, starts=cache.starts, prefixes=cache.prefixes,
+                valid=cache.valid, span=native.spans[tag],
+                physical_entries=native.entries[tag], ratio=ratio,
+            )
+    if fused_read is None:
+        raw_positions = entries.expand(batch, columns) * ratio
+        visible = (positions + 1) // ratio
+        valid = valid_mask[:, None] & (entries < visible[:, None])
+        slots = cache.slots(source_layer, "indexer_kv", torch.where(valid, raw_positions, -1))
+        packed = cache.read_rows(source_layer, "indexer_kv", slots)
+        effective_valid = valid & (slots >= 0)
+    else:
+        packed, effective_valid = fused_read
     decoded = None
     if (
         score_reducer is not None
@@ -54,9 +75,9 @@ def score_indexer_entries(
     dots = torch.bmm(query.float(), keys.float().transpose(1, 2))
     weights = head_weights.to(torch.bfloat16)
     if score_reducer is not None:
-        return score_reducer(dots, weights, valid & (slots >= 0))
+        return score_reducer(dots, weights, effective_valid)
     scores = _bf16_rounding_reduce(dots, weights)
-    return scores.masked_fill(~valid | (slots < 0), float("-inf"))
+    return scores.masked_fill(~effective_valid, float("-inf"))
 
 
 def indexer_topk(

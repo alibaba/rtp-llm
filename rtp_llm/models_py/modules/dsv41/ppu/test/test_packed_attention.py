@@ -9,6 +9,7 @@ from pathlib import Path
 import struct
 import unittest
 from types import SimpleNamespace as NS
+from unittest.mock import patch
 
 import torch
 
@@ -354,6 +355,54 @@ def _assert_csa_ring(test, device):
 
 
 class SharedPackedAttentionDevice(unittest.TestCase):
+    @torch.inference_mode()
+    def test_eager_decode_defaults_to_packed_with_evicted_swa_pages(self):
+        swa, _ = _pool("swa_kv", 528, 128, 256, [-1, 1, 2])
+        state = NS(
+            idle=False,
+            prefill=False,
+            lengths=(1,),
+            attn=NS(is_target_verify=False),
+            runtime=NS(
+                policy=NS(mode="full", max_rollback_tokens=0),
+                model=NS(_is_speculative=False),
+            ),
+            cache=NS(pools={(0, "swa_kv"): swa}, lengths=(513,), policy=NS()),
+        )
+        attn = NS(
+            layer_id=0,
+            kv_source_layer_id=None,
+            compress_ratio=0,
+            geometry=NS(head_dim=512, window=128, n_heads=64),
+            attn_sink=torch.zeros(64, device="cuda"),
+        )
+        context = NS(
+            positions=torch.tensor([512], device="cuda"),
+            request_ids=torch.tensor([0], device="cuda"),
+            valid_mask=torch.ones(1, device="cuda", dtype=torch.bool),
+        )
+        x = torch.zeros((1, 512), device="cuda", dtype=torch.bfloat16)
+
+        with patch.dict(os.environ):
+            os.environ.pop(PACKED_ENV, None)
+            plan, reason = prepare_packed_attention(attn, state, context, x)
+            self.assertEqual(reason, "eligible")
+            self.assertEqual(plan.swa_cache.data_ptr(), swa.tensor.data_ptr())
+            plan.bind_selection(None)
+            self.assertEqual(plan.swa_lengths.tolist(), [128])
+
+            swa.table[0, 1] = -1
+            _, reason = prepare_packed_attention(attn, state, context, x)
+            self.assertEqual(reason, "unallocated_physical_page")
+
+            state.prefill = True
+            _, reason = prepare_packed_attention(attn, state, context, x)
+            self.assertEqual(reason, "disabled")
+            state.prefill = False
+            os.environ[PACKED_ENV] = "0"
+            _, reason = prepare_packed_attention(attn, state, context, x)
+            self.assertEqual(reason, "disabled")
+
     @torch.inference_mode()
     def test_decode_graph_reads_live_packed_pool_and_lengths(self):
         from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import position_slots

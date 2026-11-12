@@ -258,6 +258,16 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("k"),
                   py::arg("max_seq_len"));
 
+    rtp_ops_m.def("dsv4_persistent_topk_bf16_scores",
+                  &dsv4_persistent_topk_bf16_scores,
+                  "DSv4 two-round TopK for exact BF16-expanded FP32 scores (rows<=32,K512)",
+                  py::arg("logits"),
+                  py::arg("lengths"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
+
 #ifndef USE_PPU
     rtp_ops_m.def("topk_v3",
                   &topk_v3,

@@ -177,12 +177,29 @@ def get_backend():
 
     native_graph_smoke = _native_graph_smoke_selected()
     native_optimized_smoke = _native_optimized_smoke_selected()
+    verify_moe_smoke = os.environ.get("RTP_V41_TEST_VERIFY_MOE_OVERLAP")
+    if verify_moe_smoke is not None:
+        expected = {
+            "RTP_V41_TEST_VERIFY_MOE_OVERLAP": "1", "RTP_V41_BACKEND": "ppu",
+            "MODEL_TYPE": "deepseek_v41", "ROLE_TYPE": "DECODE",
+            "RTP_V41_PPU_MOE_BACKEND": "megamoe", "RTP_V41_PPU_MOE_PRECISION": "w4a4",
+        }
+        if native_graph_smoke or native_optimized_smoke or any(
+            os.environ.get(key) != value for key, value in expected.items()
+        ):
+            raise ValueError("Verify MoE fixture requires isolated PPU/DECODE/MegaMoE/W4A4 selection")
     try:
         from rtp_llm.models_py.modules.dsv41.ppu.model import DeepSeekV41PPUModel
         from rtp_llm.models_py.modules.dsv41.ppu.model_weights import DeepSeekV41PPUWeight
 
         model_cls = DeepSeekV41PPUModel
-        if native_graph_smoke:
+        if verify_moe_smoke is not None:
+            if not is_ppu():
+                raise ValueError("Verify MoE fixture requires an actual PPU device")
+            from rtp_llm.models_py.modules.dsv41.ppu.test.verify_moe_overlap_role import native_smoke_model_class
+
+            model_cls = native_smoke_model_class()
+        elif native_graph_smoke:
             if not is_ppu():
                 raise ValueError("native Graph smoke requires an actual PPU device")
             from rtp_llm.models_py.modules.dsv41.ppu.test.graph_fidelity_role import native_smoke_model_class

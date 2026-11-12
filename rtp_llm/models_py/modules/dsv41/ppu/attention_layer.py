@@ -53,6 +53,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.layers import (
     cp8_yoco_small_ops_enabled,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import (
+    DEPENDENCY_ENV,
     FUSION_ENV,
     STREAMS_ENV,
     enabled,
@@ -745,6 +746,16 @@ class SharedPPUAttention(PPUAttentionProjections):
             plan, packed_reason = None, "cp_sharded_logical_workspace"
         else:
             plan, packed_reason = prepare_packed_attention(self, state, context, x)
+        if (
+            not state.prefill
+            and plan is None
+            and packed_reason != "disabled"
+            and ordinary_eager_reason(state) is None
+        ):
+            message = f"PPU eager Decode requires packed attention ({packed_reason})."
+            if packed_reason == "packed_native_dependency_unqualified":
+                message += f" Set {DEPENDENCY_ENV} to the qualified FlashMLA receipt."
+            raise RuntimeError(message)
         from rtp_llm.models_py.modules.dsv41.ppu.projection_streams import (
             QKVStreams, is_supported as streams_supported,
         )

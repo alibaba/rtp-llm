@@ -627,6 +627,12 @@ class PPUSharedMoE(nn.Module):
             ordinary = _ordinary_decode_graph(runtime)
             verify = _verify_packed_attention_graph(state) and state.grouped_moe is None
             proposal = _proposal_exact_ops(state)
+            overlap = getattr(state, "verify_moe_overlap", None)
+            if verify and overlap is not None and overlap.supported(state, flat, self):
+                return overlap.forward(
+                    self, flat, shape, state,
+                    expert_load=expert_load, return_shared=_return_shared,
+                )
             if state.grouped_moe is None and (
                 ordinary
                 or proposal

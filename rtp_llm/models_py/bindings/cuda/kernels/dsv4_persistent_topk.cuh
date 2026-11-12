@@ -202,10 +202,15 @@ histogram_2048_topk(const float* __restrict__ logits, int32_t* __restrict__ outp
         reg_bins[nitems++] = b1;
         reg_bins[nitems++] = b2;
         reg_bins[nitems++] = b3;
+        // Predicated float4 tail lanes are load padding, not candidates.
+        // Counting their -Inf values would change the threshold tie pool.
         atomicAdd(&histo[b0], 1);
-        atomicAdd(&histo[b1], 1);
-        atomicAdd(&histo[b2], 1);
-        atomicAdd(&histo[b3], 1);
+        if (base + 1 < seq_len)
+            atomicAdd(&histo[b1], 1);
+        if (base + 2 < seq_len)
+            atomicAdd(&histo[b2], 1);
+        if (base + 3 < seq_len)
+            atomicAdd(&histo[b3], 1);
     }
     __syncthreads();
 
@@ -257,8 +262,11 @@ histogram_2048_topk(const float* __restrict__ logits, int32_t* __restrict__ outp
                 uint32_t  bin      = 0;
                 if (vec_valid)
                     bin = reg_bins[item++];
-                const bool is_above = vec_valid && (bin > uthr);
-                const bool is_equal = vec_valid && (bin == uthr);
+                // Keep padded IDs out of both output and refinement buffers;
+                // refinement dereferences every buffered logical index.
+                const bool elem_valid = vec_valid && (elem_idx < seq_len);
+                const bool is_above   = elem_valid && (bin > uthr);
+                const bool is_equal   = elem_valid && (bin == uthr);
 
                 const uint32_t above_mask = __ballot_sync(0xffffffff, is_above);
                 if (above_mask) {
@@ -636,7 +644,19 @@ __device__ __forceinline__ void wait_ge(int* ptr, int target_val, int thread_idx
 // Adapted from https://github.com/flashinfer-ai/flashinfer/pull/2215
 // ============================================================================
 
-template<int TopK, uint32_t VEC_SIZE>
+// Two rounds are valid only for FP32 storage containing exact BF16 values.
+// Use the existing ordered-float policy, including signed zeros and NaNs.
+template<int Rounds>
+__device__ __forceinline__ uint32_t radix_ordered_key(float value) {
+    static_assert(Rounds == 2 || Rounds == 4, "unsupported radix key width");
+    if constexpr (Rounds == 2) {
+        return convert_to_uint32_v2(value) >> 16;
+    } else {
+        return convert_to_uint32_v2(value);
+    }
+}
+
+template<int TopK, uint32_t VEC_SIZE, int Rounds = 4>
 __device__ void radix_topk(const float* __restrict__ row_input,
                            int32_t* __restrict__ row_output,
                            uint32_t       seq_len,
@@ -663,20 +683,20 @@ __device__ void radix_topk(const float* __restrict__ row_input,
             const float* src = row_input + my_chunk_start + i;
             if constexpr (VEC_SIZE == 4) {
                 float4 v              = *reinterpret_cast<const float4*>(src);
-                shared_ordered[i]     = convert_to_uint32_v2(v.x);
-                shared_ordered[i + 1] = convert_to_uint32_v2(v.y);
-                shared_ordered[i + 2] = convert_to_uint32_v2(v.z);
-                shared_ordered[i + 3] = convert_to_uint32_v2(v.w);
+                shared_ordered[i]     = radix_ordered_key<Rounds>(v.x);
+                shared_ordered[i + 1] = radix_ordered_key<Rounds>(v.y);
+                shared_ordered[i + 2] = radix_ordered_key<Rounds>(v.z);
+                shared_ordered[i + 3] = radix_ordered_key<Rounds>(v.w);
             } else if constexpr (VEC_SIZE == 2) {
                 float2 v              = *reinterpret_cast<const float2*>(src);
-                shared_ordered[i]     = convert_to_uint32_v2(v.x);
-                shared_ordered[i + 1] = convert_to_uint32_v2(v.y);
+                shared_ordered[i]     = radix_ordered_key<Rounds>(v.x);
+                shared_ordered[i + 1] = radix_ordered_key<Rounds>(v.y);
             } else {
-                shared_ordered[i] = convert_to_uint32_v2(*src);
+                shared_ordered[i] = radix_ordered_key<Rounds>(*src);
             }
         }
         for (uint32_t i = aligned_size + tx; i < actual_chunk_size; i += kThreadsPerBlock) {
-            shared_ordered[i] = convert_to_uint32_v2(row_input[my_chunk_start + i]);
+            shared_ordered[i] = radix_ordered_key<Rounds>(row_input[my_chunk_start + i]);
         }
     }
     __syncthreads();
@@ -700,10 +720,10 @@ __device__ void radix_topk(const float* __restrict__ row_input,
         st_release(&state->output_counter, 0);
     }
 
-    // -- Stage 2: 4 rounds of radix select --
-    for (uint32_t round = 0; round < 4; round++) {
-        const uint32_t global_round = iter * 4 + round;
-        const uint32_t shift        = 24 - round * 8;
+    // -- Stage 2: one radix round per key byte --
+    for (uint32_t round = 0; round < Rounds; round++) {
+        const uint32_t global_round = iter * Rounds + round;
+        const uint32_t shift        = (Rounds * 8 - 8) - round * 8;
         const uint32_t prefix       = shared_scalars[0];
         const uint32_t remaining_k  = shared_scalars[1];
 
@@ -717,7 +737,7 @@ __device__ void radix_topk(const float* __restrict__ row_input,
 
         for (uint32_t i = tx; i < actual_chunk_size; i += kThreadsPerBlock) {
             uint32_t ordered = shared_ordered[i];
-            uint32_t mask    = (round == 0) ? 0u : (~0u << (32 - round * 8));
+            uint32_t mask    = (round == 0) ? 0u : (~0u << (Rounds * 8 - round * 8));
             if ((ordered & mask) == prefix) {
                 uint32_t bucket = (ordered >> shift) & 0xFF;
                 atomicAdd(&local_histogram[bucket], 1);
@@ -737,6 +757,11 @@ __device__ void radix_topk(const float* __restrict__ row_input,
             }
         }
 
+        // The releasing thread must arrive AFTER every thread's current
+        // histogram atomic and CTA0's next-histogram clear. Otherwise a
+        // peer may pass wait_ge and read partial counts (or begin adding
+        // to a next histogram while CTA0 is still clearing its bins).
+        __syncthreads();
         if (tx == 0) {
             red_release(&state->arrival_counter, 1);
         }
@@ -783,7 +808,7 @@ __device__ void radix_topk(const float* __restrict__ row_input,
             shared_scalars[1] = shared_scalars[3];
         }
         __syncthreads();
-    }  // end 4 radix rounds
+    }  // end radix rounds
 
     // -- Count local > pivot elements --
     const uint32_t ordered_pivot = shared_scalars[0];
@@ -838,6 +863,12 @@ __device__ void radix_topk(const float* __restrict__ row_input,
             }
         }
     }
+    // Persistent groups reuse shared_ordered for their next row. Vector
+    // loads and scalar collectors assign its elements to different
+    // threads, so no thread may overwrite it before all collectors stop
+    // reading the previous row. The next row's initial group barrier is
+    // too late: it follows the destructive shared-memory loads.
+    __syncthreads();
 }
 
 // ============================================================================
@@ -846,8 +877,9 @@ __device__ void radix_topk(const float* __restrict__ row_input,
 // see filtered_topk.cuh)
 // ============================================================================
 
-template<int TopK = 2048, uint32_t VEC_SIZE = 1>
+template<int TopK = 2048, uint32_t VEC_SIZE = 1, int Rounds = 4>
 __global__ void __launch_bounds__(kThreadsPerBlock, 2) persistent_topk_kernel(PersistentTopKParams params) {
+    static_assert(Rounds == 2 || Rounds == 4, "unsupported radix key width");
     const uint32_t            tx = threadIdx.x;
     extern __shared__ uint8_t smem_raw[];
 
@@ -866,8 +898,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2) persistent_topk_kernel(Pe
         return;
 
     // Early exit: non-CTA-0 threads are never needed if no large rows exist
-    if (cta_in_group != 0 && params.max_seq_len <= RADIX_THRESHOLD)
-        return;
+    if constexpr (Rounds == 4) {
+        if (cta_in_group != 0 && params.max_seq_len <= RADIX_THRESHOLD)
+            return;
+    }
 
     uint32_t* local_histogram = reinterpret_cast<uint32_t*>(smem_raw);
     uint32_t* suffix_sum      = local_histogram + RADIX;
@@ -880,8 +914,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2) persistent_topk_kernel(Pe
     // init cannot synchronize with CTA1+'s first inter-CTA barrier release.
     RadixRowState* state = &params.row_states[group_id];
 
-    int            barrier_phase = 0;
-    const uint32_t total_iters   = (params.num_rows + num_groups - 1) / num_groups;
+    int barrier_phase = 0;
+    // Like barrier_phase, histogram rotation advances only for cooperative
+    // rows. Short rows skip radix_topk and must not skip a histogram buffer.
+    uint32_t       cooperative_iter = 0;
+    const uint32_t total_iters      = (params.num_rows + num_groups - 1) / num_groups;
 
     for (uint32_t iter = 0; iter < total_iters; iter++) {
         // Static round-robin: all CTAs in the group implicitly agree on the row
@@ -893,7 +930,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2) persistent_topk_kernel(Pe
         int32_t*       row_output = params.output + row_idx * params.top_k;
         const float*   row_input  = params.input + row_idx * params.stride;
 
-        if (seq_len <= RADIX_THRESHOLD) {
+        // The BF16 specialization cooperates for every nontrivial row. The
+        // legacy medium buffers are neither needed nor safe for wide ties.
+        if (seq_len <= static_cast<uint32_t>(TopK) || (Rounds == 4 && seq_len <= RADIX_THRESHOLD)) {
             if (cta_in_group == 0) {
                 if (seq_len <= static_cast<uint32_t>(TopK)) {
                     // Trivial case: seq_len <= TopK
@@ -910,7 +949,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2) persistent_topk_kernel(Pe
         }
 
         const uint32_t my_chunk_start = cta_in_group * chunk_size;
-        radix_topk<TopK, VEC_SIZE>(row_input,
+        radix_topk<TopK, VEC_SIZE, Rounds>(row_input,
                                    row_output,
                                    seq_len,
                                    my_chunk_start,
@@ -923,8 +962,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2) persistent_topk_kernel(Pe
                                    cta_in_group,
                                    ctas_per_group,
                                    barrier_phase,
-                                   iter,
+                                   cooperative_iter,
                                    tx);
+        ++cooperative_iter;
     }
 }
 

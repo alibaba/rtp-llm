@@ -167,6 +167,7 @@ def produce_global(attn, x, state, *, fused_graph=False, verify_rope=False):
     full_norm = full_graph_rmsnorm_enabled(state)
     values = attn.global_wkv(x)
     compressed = None
+    verify_positions = None
     if ratio == 1:
         latent = _normalize_graph_value(
             values, attn.global_norm, g.norm_eps, fused=fused_graph or full_norm
@@ -183,9 +184,21 @@ def produce_global(attn, x, state, *, fused_graph=False, verify_rope=False):
         if compressed is not None:
             latent, csa_slots, main_slots, index_slots, rope = compressed
         else:
-            commit = valid & ((positions & 1) == 1)
-            entry_positions = positions - 1
-            csa_slots = cache.slots(layer_id, "csa_state", torch.where(valid, positions, -1))
+            if verify and verify_rope:
+                from rtp_llm.models_py.modules.dsv41.ppu.verify_ops import try_prepare_verify_positions
+
+                key = ("verify_global_positions", id(positions), id(valid), ratio)
+                if key not in state.shared:
+                    state.shared[key] = try_prepare_verify_positions(positions, valid, ratio=ratio)
+                verify_positions = state.shared[key]
+            if verify_positions is None:
+                commit = valid & ((positions & 1) == 1)
+                entry_positions = positions - 1
+                current_raw = torch.where(valid, positions, -1)
+                previous_raw = torch.where(commit, entry_positions, -1)
+            else:
+                entry_positions, commit, current_raw, previous_raw = verify_positions
+            csa_slots = cache.slots(layer_id, "csa_state", current_raw)
             if verify and (
                 not verify_rope or not try_write_csa_state(
                     values, scores, cache, layer_id, csa_slots, journal=True
@@ -195,7 +208,7 @@ def produce_global(attn, x, state, *, fused_graph=False, verify_rope=False):
                 # bucket may need the immediately preceding even row's payload.
                 cache.write_rows(layer_id, "csa_state", csa_slots, torch.cat((values, scores), -1).float())
             previous_slots = cache.slots(
-                layer_id, "csa_state", torch.where(commit, entry_positions, -1)
+                layer_id, "csa_state", previous_raw
             )
             pairs = (
                 try_prepare_verify_csa_pairs(values, scores, cache, layer_id, previous_slots)
@@ -241,7 +254,10 @@ def produce_global(attn, x, state, *, fused_graph=False, verify_rope=False):
         )
     tag = "global_kv_2" if ratio == 2 else "global_kv_1"
     if compressed is None:
-        raw = torch.where(commit, entry_positions, -1)
+        raw = (
+            verify_positions[3] if verify_positions is not None
+            else torch.where(commit, entry_positions, -1)
+        )
         main_slots = cache.slots(layer_id, tag, raw)
     _store_graph_compressed_key(
         attn, cache, tag, main_slots, latent, rope, fused_graph=fused_graph, verify_rope=verify_rope
@@ -332,6 +348,11 @@ def select_indices(
             candidate_block_size=block, candidate_topk_blocks=candidate_k if publish else 0,
             candidates=state.shared["candidates"] if consume else None,
             candidate_active=state.shared["candidate_active"] if consume else None,
+            candidate_inactive_limit=(
+                state.shared["candidate_inactive_raw_limit"] // ratio
+                if consume and "candidate_inactive_raw_limit" in state.shared
+                and getattr(state, "grouped_moe", None) is None else None
+            ),
             shared=state.shared,
         )
         if result is not None:
@@ -340,6 +361,9 @@ def select_indices(
                 state.shared["candidates"] = published
                 state.shared["candidate_active"] = (
                     (visible > block * candidate_k) & (visible > g.index_topk)
+                )
+                state.shared["candidate_inactive_raw_limit"] = (
+                    (max(block * candidate_k, g.index_topk) + 1) * ratio - 1
                 )
             state.attention_calls["visible_indexer"] += 1
             return selected

@@ -5,10 +5,13 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
 
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include <torch/all.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 
 #ifndef USE_ROCM
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.cuh"
@@ -19,7 +22,7 @@ namespace torch_ext {
 namespace {
 
 #ifndef USE_ROCM
-template<int TopK>
+template<int TopK, int Rounds = 4>
 void launch_persistent_topk(const torch::Tensor& logits,
                             const torch::Tensor& lengths,
                             torch::Tensor&       output,
@@ -40,7 +43,7 @@ void launch_persistent_topk(const torch::Tensor& logits,
         cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
     }
 
-    if (num_rows > 32 && max_smem_per_block >= 128 * 1024) {
+    if (Rounds == 4 && num_rows > 32 && max_smem_per_block >= 128 * 1024) {
         cudaError_t status = vllm::FilteredTopKRaggedTransform<float, int32_t, TopK>(logits.data_ptr<float>(),
                                                                                      output.data_ptr<int32_t>(),
                                                                                      lengths.data_ptr<int32_t>(),
@@ -67,9 +70,10 @@ void launch_persistent_topk(const torch::Tensor& logits,
         uint32_t max_chunk_elements    = static_cast<uint32_t>(available_for_ordered / sizeof(uint32_t));
 
         uint32_t vec_size = 1;
-        if (stride % 4 == 0)
+        const auto input_address = reinterpret_cast<uintptr_t>(logits.data_ptr<float>());
+        if (stride % 4 == 0 && (Rounds == 4 || input_address % alignof(float4) == 0))
             vec_size = 4;
-        else if (stride % 2 == 0)
+        else if (stride % 2 == 0 && (Rounds == 4 || input_address % alignof(float2) == 0))
             vec_size = 2;
 
         max_chunk_elements = (max_chunk_elements / vec_size) * vec_size;
@@ -91,19 +95,20 @@ void launch_persistent_topk(const torch::Tensor& logits,
         cudaError_t occ_err   = cudaSuccess;
         if (vec_size == 4) {
             occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                &occupancy, P::persistent_topk_kernel<TopK, 4>, P::kThreadsPerBlock, smem_size);
+                &occupancy, P::persistent_topk_kernel<TopK, 4, Rounds>, P::kThreadsPerBlock, smem_size);
         } else if (vec_size == 2) {
             occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                &occupancy, P::persistent_topk_kernel<TopK, 2>, P::kThreadsPerBlock, smem_size);
+                &occupancy, P::persistent_topk_kernel<TopK, 2, Rounds>, P::kThreadsPerBlock, smem_size);
         } else {
             occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                &occupancy, P::persistent_topk_kernel<TopK, 1>, P::kThreadsPerBlock, smem_size);
+                &occupancy, P::persistent_topk_kernel<TopK, 1, Rounds>, P::kThreadsPerBlock, smem_size);
         }
         TORCH_CHECK(occ_err == cudaSuccess, "persistent_topk occupancy query failed: ", cudaGetErrorString(occ_err));
         if (occupancy < 1)
             occupancy = 1;
 
-        const bool needs_cooperative = static_cast<uint32_t>(max_seq_len) > P::RADIX_THRESHOLD;
+        const bool needs_cooperative = static_cast<uint32_t>(max_seq_len) >
+                                       (Rounds == 2 ? static_cast<uint32_t>(TopK) : P::RADIX_THRESHOLD);
 
         const uint32_t hw_resident_cap   = static_cast<uint32_t>(num_sms) * static_cast<uint32_t>(occupancy);
         uint32_t       max_resident_ctas = hw_resident_cap;
@@ -119,6 +124,9 @@ void launch_persistent_topk(const torch::Tensor& logits,
         uint32_t total_ctas = num_groups * ctas_per_group;
 
         if (needs_cooperative && total_ctas > hw_resident_cap) {
+            TORCH_CHECK(Rounds == 4,
+                        "BF16 persistent_topk would oversubscribe its cooperative grid: ",
+                        total_ctas, " > num_sms*occupancy=", hw_resident_cap);
             TORCH_CHECK(max_smem_per_block >= 128 * 1024,
                         "persistent_topk would oversubscribe and the FilteredTopK "
                         "fallback requires >=128KB smem per block (have ",
@@ -175,7 +183,7 @@ void launch_persistent_topk(const torch::Tensor& logits,
 
 #define LAUNCH_PERSISTENT(TOPK_VAL, VS)                                                                                \
     do {                                                                                                               \
-        auto        kernel = &P::persistent_topk_kernel<TOPK_VAL, VS>;                                                 \
+        auto        kernel = &P::persistent_topk_kernel<TOPK_VAL, VS, Rounds>;                                         \
         cudaError_t err    = cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);     \
         TORCH_CHECK(err == cudaSuccess, "Failed to set smem: ", cudaGetErrorString(err));                              \
         kernel<<<total_ctas, P::kThreadsPerBlock, smem_size, stream>>>(params);                                        \
@@ -233,6 +241,48 @@ void dsv4_persistent_topk(const torch::Tensor& logits,
     }
 #else
     TORCH_CHECK(false, "dsv4_persistent_topk is not supported on ROCm");
+#endif
+}
+
+void dsv4_persistent_topk_bf16_scores(const torch::Tensor& logits,
+                                      const torch::Tensor& lengths,
+                                      torch::Tensor&       output,
+                                      torch::Tensor&       workspace,
+                                      int64_t              k,
+                                      int64_t              max_seq_len) {
+#ifndef USE_ROCM
+    // BF16 provenance and device length bounds are producer preconditions.
+    // Never scan or round arbitrary FP32 values to qualify this entry point.
+    TORCH_CHECK(logits.is_cuda() && lengths.is_cuda() && output.is_cuda() && workspace.is_cuda(),
+                "BF16 persistent_topk tensors must be CUDA tensors");
+    TORCH_CHECK(lengths.device() == logits.device() && output.device() == logits.device()
+                    && workspace.device() == logits.device(),
+                "BF16 persistent_topk tensors must share a device");
+    TORCH_CHECK(logits.dtype() == torch::kFloat32 && lengths.dtype() == torch::kInt32
+                    && output.dtype() == torch::kInt32 && workspace.dtype() == torch::kUInt8,
+                "BF16 persistent_topk requires FP32 logits, int32 lengths/output and uint8 workspace");
+    TORCH_CHECK(logits.dim() == 2 && logits.stride(1) == 1 && logits.stride(0) >= logits.size(1),
+                "BF16 persistent_topk requires nonoverlapping contiguous logits rows");
+    const int64_t rows = logits.size(0);
+    TORCH_CHECK(rows >= 1 && rows <= 32 && k == 512,
+                "BF16 persistent_topk supports 1..32 rows and K512");
+    TORCH_CHECK((lengths.dim() == 1 || lengths.dim() == 2) && lengths.is_contiguous()
+                    && lengths.numel() == rows,
+                "BF16 persistent_topk lengths must be contiguous with one value per row");
+    TORCH_CHECK(output.dim() == 2 && output.is_contiguous() && output.size(0) == rows && output.size(1) == k,
+                "BF16 persistent_topk output must be contiguous [rows,512]");
+    TORCH_CHECK(workspace.dim() == 1 && workspace.is_contiguous() && workspace.numel() >= 1024 * 1024
+                    && reinterpret_cast<uintptr_t>(workspace.data_ptr<uint8_t>())
+                           % alignof(vllm::persistent::RadixRowState) == 0,
+                "BF16 persistent_topk workspace must be aligned contiguous uint8 with at least 1MiB");
+    TORCH_CHECK(max_seq_len > 0 && max_seq_len <= logits.size(1)
+                    && logits.stride(0) <= std::numeric_limits<int32_t>::max()
+                    && logits.stride(0) <= std::numeric_limits<uint32_t>::max() / rows,
+                "BF16 persistent_topk requires 0 < max_seq_len <= width and bounded uint32 row offsets");
+    const c10::cuda::CUDAGuard device_guard(logits.device());
+    launch_persistent_topk<512, 2>(logits, lengths, output, workspace, max_seq_len);
+#else
+    TORCH_CHECK(false, "dsv4_persistent_topk_bf16_scores is not supported on ROCm");
 #endif
 }
 

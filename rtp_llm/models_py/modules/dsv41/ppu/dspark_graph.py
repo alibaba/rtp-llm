@@ -342,6 +342,19 @@ class VerifyGraphJournal:
     def slots(self, owner, tag, raw):
         # A journal slot is a raw position in this query row's request. Check
         # actual allocation first, without conflating aliased ring generations.
+        from rtp_llm.models_py.modules.dsv41.ppu.verify_ops import try_journal_slots
+
+        cache = self.native_cache
+        table_tag = cache._table_tag(owner, tag)
+        full = tag in _FULL
+        fused = try_journal_slots(
+            raw, self.row_tables[table_tag],
+            span=cache.spans[table_tag], entries=cache.entries[table_tag],
+            ratio=cache.geometry.ratio(owner) if full else 1, full=full,
+            pool_blocks=cache.pool(owner, tag).shape[0],
+        )
+        if fused is not None:
+            return fused
         return torch.where(self._native_slots(owner, tag, raw) >= 0, raw, -1)
 
     def write_rows(self, owner, tag, slots, rows):
@@ -349,7 +362,22 @@ class VerifyGraphJournal:
         self.payloads[owner, tag].copy_(rows)
 
     def read_rows(self, owner, tag, slots):
+        from rtp_llm.models_py.modules.dsv41.ppu.verify_ops import try_read_journal_rows
+
         key = owner, tag
+        cache = self.native_cache
+        table_tag = cache._table_tag(owner, tag)
+        full = tag in _FULL
+        fused = try_read_journal_rows(
+            slots, row_tables=self.row_tables[table_tag], pool=cache.pool(owner, tag),
+            payloads=self.payloads[key], generations=self.generations[key],
+            requests=self.requests, starts=self.starts, prefixes=self.prefixes,
+            valid=self.valid, span=cache.spans[table_tag], entries=cache.entries[table_tag],
+            ratio=cache.geometry.ratio(owner) if full else 1, full=full,
+            planar=tag == "indexer_kv", width=_WIDTH[tag],
+        )
+        if fused is not None:
+            return fused
         native = self.native_cache.read_rows(owner, tag, self._native_slots(owner, tag, slots))
         shape = (self.requests.numel(),) + (1,) * (slots.ndim - 1)
         starts = self.starts[self.requests].reshape(shape)

@@ -109,6 +109,16 @@ class SharedGraphRuntime:
             self.workspace = engine._mega_buffer
         else:
             raise ValueError("PPU Graph requires grouped W4A8 or MegaMoE W4A4")
+        self.verify_moe_overlap = None
+        if (
+            not draft and row_width == 4 and self.max_rows == 32 and self.grouped is None
+            and env_bool(os.environ, "RTP_V41_PPU_VERIFY_MOE_OVERLAP", default=True)
+        ):
+            from rtp_llm.models_py.modules.dsv41.ppu.verify_moe_overlap import VerifyMoEOverlapPlans
+
+            self.verify_moe_overlap = VerifyMoEOverlapPlans(
+                self.device, engine, target_layers=g.num_layers, max_rows=self.max_rows,
+            )
         self.freqs = tuple(model.shared_runtime.freqs_for(i) for i in range(g.num_layers))
         self.layer_calls = torch.zeros(g.num_layers, dtype=torch.int64, device=self.device)
         self.moe_calls = torch.zeros_like(self.layer_calls)
@@ -159,7 +169,8 @@ class SharedGraphRuntime:
             weights.extend(values)
         for values in self.ops.moe_engine._processed.values():
             weights.extend(v for v in values if isinstance(v, torch.Tensor))
-        return tuple((t.data_ptr(), tuple(t.shape), t.dtype) for t in weights)
+        signature = tuple((t.data_ptr(), tuple(t.shape), t.dtype) for t in weights)
+        return signature
 
     def validate(self):
         self.engram.validate()
@@ -167,6 +178,8 @@ class SharedGraphRuntime:
             raise RuntimeError("shared Graph MegaMoE workspace changed; recapture required")
         if self._pointers != self._storage_signature():
             raise RuntimeError("shared Graph weight storage changed; recapture required")
+        if self.verify_moe_overlap is not None:
+            self.verify_moe_overlap.validate()
 
     @contextmanager
     def bind(self, impl, metadata, *, windows=None):
@@ -233,6 +246,12 @@ class SharedGraphRuntime:
             engram_calls=self.engram_calls, routed_rows_device=self.routed_rows_device,
             grouped_moe=self.grouped,
             verify=verify, proposal=mode == "proposal", bulk_counters=bulk_counters,
+            verify_moe_overlap=(
+                self.verify_moe_overlap.lookup_current_stream()
+                if self.verify_moe_overlap is not None and mode == "dense"
+                and metadata.valid_mask.numel() == 32 else None
+            ),
+            verify_moe_overlap_allowed=mode == "dense",
             proposal_batched_wo_a=proposal_batched_wo_a,
             packed_attention=getattr(impl, "packed_attention", None),
             visible_indexer=getattr(impl, "visible_indexer", False),
@@ -275,6 +294,13 @@ class SharedGraphRuntime:
         if rows != impl.rows or rows > self.max_rows:
             raise ValueError("shared Graph input does not fit captured row geometry")
         verify = getattr(impl, "mode", None) in ("dense", "packed")
+        if self.verify_moe_overlap is not None and getattr(impl, "mode", None) == "dense" and rows == 32:
+            if torch.cuda.is_current_stream_capturing():
+                self.verify_moe_overlap.lookup_current_stream(required=True)
+            elif os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1":
+                # initCapture's dtype probe and the actual capture warmup use
+                # different callers. Each gets its own strict stream plan.
+                self.verify_moe_overlap.prepare_current_stream()
         if verify:
             impl.assert_inputs_bound(inputs)
         elif self._bulk_counters:

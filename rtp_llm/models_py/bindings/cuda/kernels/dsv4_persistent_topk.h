@@ -34,4 +34,23 @@ void dsv4_persistent_topk(const torch::Tensor& logits,
                           int64_t              k,
                           int64_t              max_seq_len);
 
+// Two-byte radix specialization for Verify's exact BF16-expanded scores.
+// The six arguments have the same meaning as dsv4_persistent_topk. Requires
+// 1..32 rows, K512, FP32 storage whose EVERY live value is an exact BF16
+// expansion (including BF16 zeros, infinities and NaN payloads), int32 device
+// lengths in [0,max_seq_len], 0 < max_seq_len <= logits.size(1), contiguous
+// nonoverlapping rows/output/lengths and an aligned contiguous 1MiB workspace.
+// Row stride must fit int32 and rows*stride must fit uint32 address offsets.
+// All tensors must share a CUDA/PPU device. The caller proves score provenance
+// before capture; this API neither scans nor rounds arbitrary FP32 inputs.
+// Output order and the subset of tied IDs remain unspecified, as in generic
+// radix select. No finite filtering is performed here. Unsupported metadata
+// raises; callers select the original generic API before capture instead.
+void dsv4_persistent_topk_bf16_scores(const torch::Tensor& logits,
+                                      const torch::Tensor& lengths,
+                                      torch::Tensor&       output,
+                                      torch::Tensor&       workspace,
+                                      int64_t              k,
+                                      int64_t              max_seq_len);
+
 }  // namespace torch_ext

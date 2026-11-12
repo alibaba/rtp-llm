@@ -77,6 +77,8 @@ _DSV41_PPU_SHARED_MODULES = [
     "modules/dsv41/ppu/graph_metadata.py",
     "modules/dsv41/ppu/graph_moe.py",
     "modules/dsv41/ppu/dspark_graph.py",
+    "modules/dsv41/ppu/verify_moe_overlap.py",
+    "modules/dsv41/ppu/verify_ops.py",
     "modules/dsv41/ppu/tools/driver_graph_fidelity.py",
     "modules/dsv41/ppu/tools/driver_graph_modes.py",
     "modules/dsv41/ppu/packed_attention.py",
