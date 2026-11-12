@@ -100,28 +100,28 @@ class StepTrace:
                 check=True,
             ).stdout
 
-        versions = []
         worktrees = {}
         for directory in sorted(set(map(str, directories))):
             try:
                 root = git(directory, "rev-parse", "--show-toplevel").rstrip("\n")
             except (OSError, subprocess.SubprocessError):
-                root = directory
+                root = None
 
-            if root not in worktrees:
-                state = {}
+            location = root or directory
+            if location not in worktrees:
+                state = {"worktree": root, "directories": []}
                 for key, arguments in [
                     ("commit", ["rev-parse", "HEAD"]),
                     ("status", ["status", "--porcelain"]),
                     ("diff", ["diff", "--binary", "HEAD"]),
                 ]:
                     try:
-                        state[key] = git(root, *arguments).rstrip()
+                        state[key] = git(location, *arguments).rstrip()
                     except (OSError, subprocess.SubprocessError) as error:
                         state[key] = {"unavailable": str(error)}
-                worktrees[root] = state
-            versions.append({"directory": directory, **worktrees[root]})
-        write_json(self.directory / "git-state.json", versions)
+                worktrees[location] = state
+            worktrees[location]["directories"].append(directory)
+        write_json(self.directory / "git-state.json", list(worktrees.values()))
 
     def close(self, result):
         try:

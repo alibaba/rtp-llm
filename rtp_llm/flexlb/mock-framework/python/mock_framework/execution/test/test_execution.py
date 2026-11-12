@@ -18,6 +18,7 @@ from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
 from mock_framework.execution.step.step import Reference, StepContext, resolve_refs
 from mock_framework.execution.step.step_registry import StepRegistry, register_step
+from mock_framework.execution.step_trace import StepTrace
 
 
 @dataclass(frozen=True)
@@ -163,6 +164,63 @@ def run(setup, tmp_path, steps, **kw):
     result = asyncio.run(run_case(case, launch, out))
     cleaned(out)
     return result, out
+
+
+def test_records_git_state_once_per_worktree(setup, tmp_path):
+    tmp_path = tmp_path.resolve()
+    repo = tmp_path / "repo"
+    linked = tmp_path / "linked"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repo), *args], text=True)
+
+    git("init", "-q")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("original\n")
+    git("add", tracked.name)
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "commit",
+        "-qm",
+        "initial",
+        "--no-gpg-sign",
+    )
+    commit = git("rev-parse", "HEAD").strip()
+    git("worktree", "add", "--detach", str(linked), commit)
+    tracked.write_text("modified\n")
+    nested = repo / "case"
+    nested.mkdir()
+
+    case, launch = setup([step()])
+    trace = StepTrace(tmp_path / "out", case, launch)
+    try:
+        trace.record_git_state([nested, linked, repo, nested])
+    finally:
+        trace.close({})
+
+    states = json.loads((trace.directory / "git-state.json").read_text())
+    assert len(states) == 2
+    by_root = {state["worktree"]: state for state in states}
+    assert by_root[str(repo)] == {
+        "worktree": str(repo),
+        "directories": [str(repo), str(nested)],
+        "commit": commit,
+        "status": " M tracked.txt",
+        "diff": git("diff", "--binary", "HEAD").rstrip(),
+    }
+    assert by_root[str(linked)] == {
+        "worktree": str(linked),
+        "directories": [str(linked)],
+        "commit": commit,
+        "status": "",
+        "diff": "",
+    }
 
 
 def test_reads_writes_refs_and_gates_share_one_path(setup, tmp_path):

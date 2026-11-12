@@ -77,7 +77,15 @@ def completed(tmp_path):
     (source / "case.yaml").write_text("id: basic\n")
     write(
         source / "git-state.json",
-        [{"commit": "saved-sha", "diff": "saved working tree diff"}],
+        [
+            {
+                "worktree": "/saved/repo",
+                "directories": ["/saved/repo/case", "/saved/repo/framework"],
+                "commit": "saved-sha",
+                "status": " M case.yaml",
+                "diff": "saved working tree diff",
+            }
+        ],
     )
     write(
         source / "components/prefill-0/effective-config.json", {"device_blocks": 4095}
@@ -169,7 +177,7 @@ def test_view_uses_saved_values_windows_versions_and_failed_results(completed):
     assert value["gates"][0]["to"] == 1793232010000
     assert value["gates"][1]["from"] is None and value["gates"][1]["to"] is None
     assert "actual" not in value["gates"][1] and value["gates"][1]["status"] == "ERROR"
-    assert value["versions"][0]["commit"] == "saved-sha"
+    assert value["versions"] == json.loads((completed / "git-state.json").read_text())
     assert value["effective"]["prefill-0"]["device_blocks"] == 4095
     assert value["collection"]["complete"] is False
     assert any(
