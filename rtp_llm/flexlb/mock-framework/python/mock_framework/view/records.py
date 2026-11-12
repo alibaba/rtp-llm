@@ -254,19 +254,13 @@ def load_experiment_view(directory):
                     "to": b,
                 }
             )
-            events.append(
-                {
-                    "time": a if a is not None else point,
-                    "timeEnd": b,
-                    "text": gate_text(gates[-1]),
-                }
-            )
-            annotations[gate["step_id"]] = {
-                "step_id": gate["step_id"],
+            gate_event = {
                 "time": a if a is not None else point,
                 "timeEnd": b,
-                "text": gate_text(gates[-1]),
+                "text": gate_text(gate),
             }
+            events.append(gate_event)
+            annotations[gate["step_id"]] = {**gate_event, "step_id": gate["step_id"]}
         except (
             ValueError,
             KeyError,
