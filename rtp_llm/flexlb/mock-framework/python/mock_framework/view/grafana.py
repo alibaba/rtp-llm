@@ -10,18 +10,13 @@ from urllib.request import Request, urlopen
 
 import yaml
 
+from ..dashboard import validate_dashboard
+
 DATASOURCE = {"type": "prometheus", "uid": "mock-prometheus"}
 
 
 def dashboard(value):
-    if (
-        not isinstance(value, dict)
-        or not isinstance(value.get("panels"), list)
-        or not value.get("title")
-    ):
-        raise ValueError(
-            "view must be a native Grafana dashboard JSON object with title and panels"
-        )
+    validate_dashboard(value)
     result = copy.deepcopy(value)
     result.pop("annotation_steps", None)
     result.update(uid="mock-experiment", id=None, editable=False, refresh="")

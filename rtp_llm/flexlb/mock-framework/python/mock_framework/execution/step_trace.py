@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from ..dashboard import validate_dashboard
+
 
 def timestamp():
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -52,14 +54,7 @@ class StepTrace:
         )
         if case.view is not None:
             view = json.loads(case.view.read_text(encoding="utf-8"))
-            if (
-                not isinstance(view, dict)
-                or not isinstance(view.get("panels"), list)
-                or not view.get("title")
-            ):
-                raise ValueError(
-                    "view must be a native Grafana dashboard JSON with title and panels"
-                )
+            validate_dashboard(view)
             write_json(self.directory / "view.json", view)
         source = case.source
         if source.is_file():
