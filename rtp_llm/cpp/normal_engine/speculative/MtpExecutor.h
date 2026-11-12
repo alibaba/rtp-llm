@@ -56,6 +56,7 @@ public:
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
     void         notifyStop() override;
+    HiddenStateCaptureReservationPtr tryReserveHiddenStateCapture(int64_t request_id, int64_t valid_tokens) override;
 
     void setTargetModel(std::unique_ptr<ModelBase> model) {
         model_ = std::move(model);
@@ -120,8 +121,7 @@ protected:
     // decodeStep helpers — extracted to keep decodeStep readable. Each helper
     // owns a single phase (sync, prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
-    // REBASE CONFLICT CONTEXT(518707c73): keep new base async target/draft
-    // prepare runners and add source branch previous-bookkeeping stream ordering.
+
     void            waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStreamPtr>& streams);
     void            prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& streams, TensorHolder& host_holder);
     void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
@@ -175,7 +175,7 @@ protected:
                                                    torch::Event&        accept_len_ready_event,
                                                    size_t               stream_count,
                                                    std::vector<int32_t> row_priorities,
-                                                   const torch::Tensor& prepared_rows = {},
+                                                   const torch::Tensor& prepared_rows  = {},
                                                    const torch::Tensor& prepared_total = {});
 
     void prepareStreams(const std::list<GenerateStreamPtr>& streams,
@@ -194,8 +194,6 @@ protected:
     // RTP_LLM_STREAM_ASYNC=1 is exported at server start.
     bool useStreamAsync() const;
 
-    // REBASE CONFLICT CONTEXT(cdc1b18b6): source branch added async device-state
-    // gating for GLM5 MTP; keep it with the new base stop_requested_ path.
     bool useAsyncDeviceState() const;
 
     bool useAsyncPrepare() const;
@@ -226,7 +224,13 @@ protected:
                                    const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                    const MergedOutput&                          draft_prefill_output);
 
-    void releaseAllModelBuffers();
+    void         releaseAllModelBuffers();
+    void         collectPrefillMetrics(const StreamGroups&  stream_groups,
+                                       MtpMetricsCollector& metrics_collector,
+                                       int64_t              tps_execute_time_us,
+                                       int64_t              model_forward_us);
+    absl::Status runDecodeAlignmentOnly(GptModelInputs& model_input);
+    static bool  canEarlyReturnTargetOnlyPrefill(int64_t dp_size, bool enable_ffn_disaggregate);
 
 private:
     std::unique_ptr<ModelBase>                                               model_;
@@ -239,12 +243,14 @@ private:
     ParallelismConfig                                                        parallelism_config_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
-    // REBASE CONFLICT CONTEXT(b08feda05): source branch did not have the new
-    // wall-clock TPS reporter. Keep it because constructor initialization and
-    // process metrics in the new base depend on it.
+
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
     std::shared_ptr<ExpertBalancer>                                                            expert_balancer_;
     size_t                                                                                     vocab_size_;
+
+    // Retain construction settings for error-path fake alignment; normal batches allocate no extra streams.
+    const ModelConfig   model_config_;
+    const RuntimeConfig runtime_config_;
 
     // for mtp
     DataType                                         data_type_;

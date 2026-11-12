@@ -48,6 +48,9 @@ class _FakeGenerateConfig:
     def validate(self):
         return None
 
+    def is_prefill_only(self):
+        return self.max_new_tokens == 0
+
     def model_copy(self, update=None):
         copied = _FakeGenerateConfig(
             self.is_streaming,
@@ -55,6 +58,7 @@ class _FakeGenerateConfig:
             self.return_hidden_states,
             self.return_all_hidden_states,
         )
+        copied.max_new_tokens = self.max_new_tokens
         copied.role_addrs = list(self.role_addrs)
         for key, value in (update or {}).items():
             setattr(copied, key, value)
@@ -693,6 +697,26 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(outputs, ["successful-output"])
 
+    async def test_prefill_only_retry_preserves_legal_config(self):
+        client = _RetryingModelRpcClient()
+        visitor = self._visitor(client)
+        generate_config = _FakeGenerateConfig(is_streaming=False)
+        generate_config.max_new_tokens = 0
+        input = _FakeInput(generate_config)
+        visitor.set_request_id_factory(lambda: 456)
+
+        stream = await visitor.enqueue(input)
+        outputs = [output async for output in stream]
+
+        self.assertEqual(outputs, ["successful-output"])
+        self.assertEqual(client.attempts, 2)
+        retried_config = client.inputs[1].generate_config
+        self.assertTrue(retried_config.is_prefill_only())
+        self.assertEqual(retried_config.calculate_loss, 0)
+        self.assertFalse(retried_config.return_hidden_states)
+        self.assertFalse(retried_config.return_all_hidden_states)
+        self.assertEqual(retried_config.role_addrs, [])
+
     async def test_non_streaming_replays_successful_outputs_in_order(self):
         client = _SuccessfulModelRpcClient(["first-output", "second-output"])
         visitor = self._visitor(client)
@@ -755,6 +779,152 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
             [output async for output in stream]
 
         self.assertEqual(client.attempts, 1)
+
+    def test_typed_retry_allowlist_is_exact(self):
+        retryable = {
+            ExceptionType.GET_HOST_FAILED,
+            ExceptionType.GET_CONNECTION_FAILED,
+            ExceptionType.CONNECT_FAILED,
+            ExceptionType.CONNECT_TIMEOUT,
+            ExceptionType.CONNECTION_RESET_BY_PEER,
+            ExceptionType.MASTER_NO_AVAILABLE_WORKER,
+            ExceptionType.MASTER_NO_DECODE_WORKER,
+            ExceptionType.MASTER_NO_PDFUSION_WORKER,
+            ExceptionType.MASTER_NO_VIT_WORKER,
+            ExceptionType.ROUTER_QUEUE_FULL,
+            ExceptionType.ROUTE_ERROR,
+            ExceptionType.GRAMMAR_COMPILE_OVERLOADED,
+        }
+        for code in ExceptionType:
+            with self.subTest(code=code):
+                # Diagnostic text must not turn a typed unsafe failure into a retry.
+                error = FtRuntimeException(
+                    code, "StatusCode.UNAVAILABLE Socket closed"
+                )
+                self.assertEqual(
+                    BackendRPCServerVisitor._is_retryable_route_rpc_error(
+                        error
+                    ),
+                    code in retryable,
+                )
+
+    def test_route_error_wrapper_does_not_make_unsafe_scheduler_codes_retryable(
+        self,
+    ):
+        for code in (8402, 8510, 8511, 8431, 99999):
+            with self.subTest(code=code):
+                error = FtRuntimeException(
+                    ExceptionType.ROUTE_ERROR, "StatusCode.UNAVAILABLE"
+                )
+                error.rtp_error_code = code
+                self.assertFalse(
+                    BackendRPCServerVisitor._is_retryable_route_rpc_error(error)
+                )
+
+    async def test_pre_dispatch_capacity_and_grammar_overload_retry_with_new_id(
+        self,
+    ):
+        for code in (
+            ExceptionType.MASTER_NO_DECODE_WORKER,
+            ExceptionType.MASTER_NO_PDFUSION_WORKER,
+            ExceptionType.MASTER_NO_VIT_WORKER,
+            ExceptionType.ROUTER_QUEUE_FULL,
+            ExceptionType.GRAMMAR_COMPILE_OVERLOADED,
+        ):
+            with self.subTest(code=code):
+
+                class Client:
+                    inputs = []
+
+                    async def enqueue(self, input):
+                        self.inputs.append(input)
+                        if len(self.inputs) == 1:
+                            raise FtRuntimeException(
+                                code, "admission not completed"
+                            )
+                        yield "success"
+
+                client = Client()
+                visitor = self._visitor(client)
+                visitor.set_request_id_factory(lambda: 456)
+                input = _FakeInput()
+                stream = await visitor.enqueue(input)
+                self.assertEqual(
+                    [output async for output in stream], ["success"]
+                )
+                self.assertEqual(
+                    [i.request_id for i in client.inputs], [123, 456]
+                )
+                self.assertFalse(client.inputs[1].enqueued_by_master)
+                self.assertEqual(
+                    client.inputs[1].generate_config.role_addrs, []
+                )
+
+    async def test_real_no_address_route_error_retries_before_rpc_enqueue(self):
+        client = _SuccessfulModelRpcClient(["success"])
+        visitor = self._visitor(client)
+        prefill = RoleAddr(
+            role=RoleType.PREFILL, ip="127.0.0.1", http_port=1, grpc_port=2
+        )
+        visitor.master_config = None
+        visitor.backend_role_list = [RoleType.PREFILL]
+        visitor.host_service = Mock(service_available=True)
+        visitor.host_service.get_master_addr.return_value = None
+        visitor.host_service.get_backend_role_addrs.side_effect = [
+            [],
+            [prefill],
+        ]
+        visitor.set_request_id_factory(lambda: 456)
+        with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
+            stream = await visitor.enqueue(_FakeInput())
+            self.assertEqual([output async for output in stream], ["success"])
+        self.assertEqual(
+            visitor.host_service.get_backend_role_addrs.call_count, 2
+        )
+        self.assertEqual(client.attempts, 1)
+
+    async def test_typed_execution_and_cancellation_errors_are_not_retried(self):
+        for exception_type in (
+            ExceptionType.INVALID_PARAMS,
+            ExceptionType.EXECUTION_EXCEPTION,
+            ExceptionType.CANCELLED,
+            ExceptionType.CANCELLED_ERROR,
+            ExceptionType.REMOTE_GENERATE_FAILED,
+            ExceptionType.MASTER_NO_PREFILL_WORKER,
+            ExceptionType.DEADLINE_EXCEEDED,
+            ExceptionType.BATCH_DISPATCH_FAILED,
+            ExceptionType.CACHE_STORE_LOAD_BUFFER_TIMEOUT,
+            ExceptionType.CACHE_STORE_LOAD_RDMA_WRITE_FAILED,
+        ):
+            with self.subTest(exception_type=exception_type):
+                error = FtRuntimeException(exception_type, "StatusCode.UNAVAILABLE")
+                client = _AlwaysFailingModelRpcClient(error)
+                visitor = self._visitor(client)
+                visitor.set_request_id_factory(lambda: 456)
+                stream = await visitor.enqueue(_FakeInput(is_streaming=False))
+                with self.assertRaises(FtRuntimeException) as ctx:
+                    [output async for output in stream]
+                self.assertIs(ctx.exception, error)
+                self.assertEqual(client.attempts, 1)
+
+    async def test_task_cancellation_is_not_replaced_by_an_earlier_route_error(self):
+        class CancellingClient:
+            attempts = 0
+
+            async def enqueue(self, input):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise FtRuntimeException(ExceptionType.CONNECT_FAILED, "retry")
+                raise asyncio.CancelledError()
+                yield  # Make this the same async-generator API as the real client.
+
+        client = CancellingClient()
+        visitor = self._visitor(client)
+        visitor.set_request_id_factory(lambda: 456)
+        stream = await visitor.enqueue(_FakeInput(is_streaming=False))
+        with self.assertRaises(asyncio.CancelledError):
+            [output async for output in stream]
+        self.assertEqual(client.attempts, 2)
 
     async def test_non_streaming_non_retryable_error_does_not_retry(self):
         client = _AlwaysFailingModelRpcClient(ValueError("bad output"))

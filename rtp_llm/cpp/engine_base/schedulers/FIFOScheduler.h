@@ -36,6 +36,7 @@ public:
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
     absl::Status                                 stop() override;
     bool                                         empty() override;
+    void                                         notifyControlWakeup();
 
     void reportMetrics();
 
@@ -131,6 +132,7 @@ protected:
     const bool                      worker_status_snapshot_enabled_ = false;
     std::atomic<bool>               stop_                           = false;
     bool                            schedule_trigger_               = false;
+    bool                            control_wakeup_                 = false;
     bool                            async_cache_prepare_enabled_    = false;
     std::thread                     cache_prepare_thread_;
     GenerateStreamPtr               cache_prepare_blocked_stream_;

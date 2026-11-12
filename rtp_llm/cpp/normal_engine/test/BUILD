@@ -71,7 +71,9 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/observability:execution_recorder",
+        "//rtp_llm/cpp/config:static_config",
         "//rtp_llm/cpp/testing:device_test_utils",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/cpp/normal_engine:normal_engine",
@@ -88,6 +90,18 @@ cc_test(
 )
 
 cc_test(
+    name = "normal_engine_terminal_stop_test",
+    srcs = ["NormalEngineTerminalStopTest.cc"],
+    copts = test_copts,
+    deps = [
+        ":mock_engine",
+        "//rtp_llm/cpp/engine_base/schedulers:schedulers",
+    ] + cuda13_torch_link_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    timeout = "short",
+)
+
+cc_test(
     name = "engine_test",
     srcs = glob([
         "EngineTest.cc",
@@ -95,6 +109,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps =  [
+        "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         ":mock_engine",
     ] + cuda13_torch_link_deps,
     env = {

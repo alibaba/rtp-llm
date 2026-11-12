@@ -1,7 +1,16 @@
 import json
 import logging
 import os
-from typing import Any, Optional, Protocol, Type, Union, cast, runtime_checkable
+from typing import (
+    Any,
+    Optional,
+    Protocol,
+    Type,
+    Union,
+    cast,
+    get_args,
+    runtime_checkable,
+)
 
 import torch
 
@@ -131,10 +140,21 @@ class BaseModel(object):
             return
         generation_config_path = generate_env_config.generation_config_path
         if generation_config_path:
+            with open(
+                os.path.join(generation_config_path, "generation_config.json")
+            ) as f:
+                generate_config = json.load(f)
+            # Checkpoint null is unspecified only for non-nullable fields.
+            # Optional fields retain explicit None; request updates remain strict.
+            fields = type(self.default_generate_config).model_fields
             self.default_generate_config.update(
-                json.load(
-                    open(os.path.join(generation_config_path, "generation_config.json"))
-                )
+                {
+                    key: value
+                    for key, value in generate_config.items()
+                    if value is not None
+                    or key not in fields
+                    or type(None) in get_args(fields[key].annotation)
+                }
             )
             logging.info(
                 f"load generate config:{generation_config_path}/generation_config.json: \n\

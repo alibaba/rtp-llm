@@ -1,5 +1,7 @@
 import types
 import unittest
+from typing import Any
+from unittest.mock import patch
 
 import torch
 
@@ -8,7 +10,9 @@ from rtp_llm.models_py.model_desc.deepseek_v4_model import (
     Dsv4MtpHiddenBufferSpec,
     Dsv4SharedRuntimeBufferStore,
 )
-from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
+from rtp_llm.models_py.model_desc.hidden_state_capture import CaptureContext
+from rtp_llm.models_py.modules.dsv4.prefill import forward as prefill_forward
+from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
 
 
 class _RuntimeModule(torch.nn.Module):
@@ -24,6 +28,117 @@ class _RuntimeModule(torch.nn.Module):
 
 
 class MtpHiddenBufferTest(unittest.TestCase):
+    def test_model_constructs_with_nonempty_hidden_state_capture_layers(self) -> None:
+        model_config: Any = types.SimpleNamespace(
+            num_layers=2,
+            vocab_size=17,
+            gen_num_per_cycle=1,
+            n_shared_experts=0,
+            hidden_state_capture_layer_ids=[1],
+            capture_aux_hidden_layer_ids=[],
+            inter_size=16,
+            moe_inter_size=16,
+            ckpt_path="",
+        )
+        args = V4Args(
+            vocab_size=model_config.vocab_size,
+            dim=8,
+            n_layers=model_config.num_layers,
+            compress_ratios=[0, 0],
+        )
+
+        weights: Any = None
+        with patch(
+            "rtp_llm.models_py.model_desc.deepseek_v4_model._args_from_model_config",
+            return_value=args,
+        ):
+            model = DeepSeekV4Model(
+                model_config,
+                parallelism_config=None,
+                weights=weights,
+                moe_config=None,
+                max_generate_batch_size=1,
+            )
+
+        self.assertTrue(model.supports_hidden_state_capture)
+        self.assertEqual(model._capture_context.layer_ids, (1,))
+        normalized_hidden = torch.ones((2, args.dim))
+        self.assertIs(
+            model._capture_canonical_final(normalized_hidden, None), normalized_hidden
+        )
+
+    def test_prefill_dual_outputs_keep_canonical_and_mtp_buffers_on_capture_failure(
+        self,
+    ) -> None:
+        pre_norm = torch.arange(24, dtype=torch.bfloat16).reshape(2, 3, 4)
+        final = pre_norm.mean(-2)
+        v4 = types.SimpleNamespace(
+            _mtp_hidden_buffer=torch.empty(2, 12, dtype=torch.bfloat16)
+        )
+        inputs = types.SimpleNamespace(
+            input_ids=torch.tensor([1, 2], dtype=torch.int32),
+            attention_inputs=types.SimpleNamespace(
+                cu_seqlens=torch.tensor([0, 2], dtype=torch.int32),
+                position_ids=torch.tensor([0, 1], dtype=torch.int32),
+            ),
+        )
+        for failure in (None, "missing", "hook", "pack"):
+            with self.subTest(failure=failure):
+
+                def layer_hook(hidden, residual):
+                    if failure == "hook":
+                        raise ValueError("injected aux failure")
+                    return DeepSeekV4Model._capture_canonical_layer(
+                        None, hidden, residual
+                    )
+
+                capture = CaptureContext.configured(
+                    (0,),
+                    layer_hook,
+                    lambda hidden, residual: DeepSeekV4Model._capture_canonical_final(
+                        None, hidden, residual
+                    ),
+                ).for_forward(True)
+
+                def layers(*args, **kwargs):
+                    self.assertIs(kwargs["capture_context"], capture)
+                    if failure != "missing":
+                        capture.capture_layer(0, pre_norm)
+                    V4Transformer._write_mtp_hidden_buffer(
+                        v4, pre_norm.flatten(-2), is_cuda_graph=False
+                    )
+                    return final
+
+                with (
+                    patch.object(prefill_forward, "set_cp_info"),
+                    patch.object(
+                        prefill_forward, "build_block_tables_batched", return_value={}
+                    ),
+                    patch.object(prefill_forward, "forward_layers", side_effect=layers),
+                ):
+                    if failure == "pack":
+                        with patch.object(
+                            torch, "cat", side_effect=ValueError("invalid packed aux")
+                        ):
+                            output = prefill_forward.forward_prefill(
+                                v4, None, None, inputs, capture_context=capture
+                            )
+                    else:
+                        output = prefill_forward.forward_prefill(
+                            v4, None, None, inputs, capture_context=capture
+                        )
+                self.assertEqual(output.hidden_states.data_ptr(), final.data_ptr())
+                torch.testing.assert_close(v4._mtp_hidden_buffer, pre_norm.flatten(-2))
+                if failure is None:
+                    self.assertIsNone(output.capture_error)
+                    torch.testing.assert_close(
+                        output.captured_hidden_states,
+                        torch.cat([pre_norm.mean(-2), final], -1),
+                    )
+                else:
+                    self.assertIsNone(output.captured_hidden_states)
+                    self.assertIsNotNone(output.capture_error)
+
     def setUp(self) -> None:
         Dsv4SharedRuntimeBufferStore._reset_for_test()
 

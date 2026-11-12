@@ -1244,4 +1244,84 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testGroupedSurvivorContinuesLoadingAfterPeer
     EXPECT_TRUE(scheduler->loading_cache_group_queue_.empty());
 }
 
+TEST_F(FIFOSchedulerAsyncCacheTest, prefillOnlyWaitsBehindPendingGenerationAdmission) {
+    autil::EnvGuard async_prepare("RTP_LLM_ASYNC_PREPARE_CACHE", "0");
+    setupMockCoordinator();
+    auto pending = createPendingAsyncContext();
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(pending)));
+    auto scheduler                            = createScheduler();
+    auto generation                           = createStream({1, 2, 3}, true, true);
+    auto prefill                              = createStream({4, 5, 6});
+    prefill->generateConfig()->max_new_tokens = 0;
+    ASSERT_TRUE(enqueueIndividually(*scheduler, {generation, prefill}));
+    auto result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result->empty());
+    EXPECT_EQ(generation->getStatus(), StreamState::LOADING_CACHE);
+    EXPECT_EQ(prefill->getStatus(), StreamState::WAITING);
+    EXPECT_FALSE(prefill->hasEvent(StreamEvents::CanRun));
+    ON_CALL(*pending, done()).WillByDefault(Return(true));
+    ON_CALL(*pending, success()).WillByDefault(Return(true));
+    result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->size(), 1);
+    EXPECT_EQ(result->front(), prefill);
+    EXPECT_EQ(generation->getStatus(), StreamState::WAITING);
+    prefill->reportEvent(StreamEvents::GenerateDone);
+    result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->size(), 1);
+    EXPECT_EQ(result->front(), generation);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, failedPrefillOnlyAllocationDoesNotPinBatchMode) {
+    autil::EnvGuard async_prepare("RTP_LLM_ASYNC_PREPARE_CACHE", "0");
+    auto            scheduler = createScheduler();
+    auto            resident  = createStream(std::vector<int>(32, 1));
+    ASSERT_TRUE(resident->initKVBlock().ok());
+    auto generation = createStream({2, 3, 4});
+    ASSERT_TRUE(generation->initKVBlock().ok());
+    generation->reportEvent(StreamEvents::LoadInitiated);
+    generation->reportEvent(StreamEvents::CanRun);
+    auto prefill                              = createStream(std::vector<int>(8, 5));
+    prefill->generateConfig()->max_new_tokens = 0;
+    ASSERT_TRUE(enqueueIndividually(*scheduler, {prefill, generation}));
+    auto result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->size(), 1);
+    EXPECT_EQ(result->front(), generation);
+    EXPECT_EQ(prefill->getStatus(), StreamState::WAITING);
+    EXPECT_FALSE(prefill->hasError());
+    EXPECT_FALSE(prefill->hasEvent(StreamEvents::LoadInitiated));
+    resident->releaseResource();
+    generation->reportEvent(StreamEvents::GenerateDone);
+    result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->size(), 1);
+    EXPECT_EQ(result->front(), prefill);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, asyncPreparedPrefillOnlyDoesNotMixWithGeneration) {
+    autil::EnvGuard async_prepare("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    auto            scheduler                 = createScheduler();
+    auto            prefill                   = createStream({1, 2, 3});
+    prefill->generateConfig()->max_new_tokens = 0;
+    auto generation                           = createStream({4, 5, 6});
+    ASSERT_TRUE(enqueueIndividually(*scheduler, {prefill, generation}));
+    ASSERT_TRUE(waitUntil([&] {
+        return prefill->hasEvent(StreamEvents::CachePrepared) && generation->hasEvent(StreamEvents::CachePrepared);
+    }));
+    auto result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->size(), 1);
+    EXPECT_EQ(result->front(), prefill);
+    EXPECT_EQ(generation->getStatus(), StreamState::WAITING);
+    prefill->reportEvent(StreamEvents::GenerateDone);
+    result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->size(), 1);
+    EXPECT_EQ(result->front(), generation);
+    EXPECT_TRUE(scheduler->stop().ok());
+}
+
 }  // namespace rtp_llm
