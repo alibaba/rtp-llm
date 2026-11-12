@@ -478,6 +478,80 @@ class _CudaArrayView:
         }
 
 
+class _PinnedUvaTensor:
+    """Host-resident tensor exposed to CUDA through a persistent UVA alias.
+
+    The checkpoint bytes stay in pinned host RAM.  CUDA kernels read them over
+    UVA; no device copy of the Engram checkpoint tensor is retained.  The alias
+    has a stable pointer, so it is legal inside captured graphs.
+    """
+
+    def __init__(self, tensor: torch.Tensor, device):
+        self.device = torch.device(device)
+        self.host = tensor.detach().contiguous()
+        if not self.host.is_pinned():
+            self.host = self.host.pin_memory()
+        from cuda.bindings import runtime
+
+        self.runtime = runtime
+        with torch.cuda.device(self.device):
+            result, pointer = runtime.cudaHostGetDevicePointer(
+                self.host.data_ptr(), 0
+            )
+            self._registered = False
+            if int(result) != 0:
+                (registered,) = runtime.cudaHostRegister(
+                    self.host.data_ptr(), self.host.numel() * self.host.element_size(), 3
+                )
+                if int(registered) != 0:
+                    raise RuntimeError(f"Engram projection cudaHostRegister failed: {registered}")
+                self._registered = True
+                result, pointer = runtime.cudaHostGetDevicePointer(
+                    self.host.data_ptr(), 0
+                )
+                if int(result) != 0:
+                    raise RuntimeError(f"Engram projection cudaHostGetDevicePointer failed: {result}")
+            self.pointer = pointer
+            self._alias = _CudaArrayView(self, self.host, self.pointer)
+
+    def as_bytes(self) -> torch.Tensor:
+        return torch.as_tensor(self._alias, device=self.device)
+
+    def view_as(self, dtype: torch.dtype) -> torch.Tensor:
+        flat = self.as_bytes().view(-1)
+        return flat.view(dtype).view(self.host.shape)
+
+    def __del__(self):
+        try:
+            if getattr(self, "_registered", False):
+                self.runtime.cudaHostUnregister(self.host.data_ptr())
+        except BaseException:
+            pass
+
+
+class _HostProjection(nn.Module):
+    """Engram WKV projection whose checkpoint weights remain in host RAM."""
+
+    def __init__(self, weight: torch.Tensor, scales: torch.Tensor, device):
+        super().__init__()
+        self.weight = weight
+        self.scales = scales
+        self.device = torch.device(device)
+
+    def _linear(self):
+        from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+        weight = self.weight.view_as(torch.float8_e4m3fn)
+        scales = self.scales.view_as(torch.uint8)
+        return V41MXFP8Linear(weight, scales)
+
+    def forward(self, rows):
+        return self._linear()(rows)
+
+    def forward_quantized(self, values, scales):
+        return self._linear().forward_quantized(values, scales)
+
+
 class _PinnedSharedTable:
     """One physical tmpfs allocation shared by independent prefill/decode groups.
 
@@ -1973,6 +2047,8 @@ class Engram(nn.Module):
         self.wkv = wkv
         self.register_buffer("q_weight", q_weight, persistent=False)
         self.register_buffer("k_weight", k_weight, persistent=False)
+        # Canonical host allocations; the CUDA buffers above are UVA aliases.
+        self._host_projection = wkv
         self.eps = eps
         self._lookup_stream = None
         self._lookup_done = None
@@ -2173,18 +2249,21 @@ class Engram(nn.Module):
             wkv_weight = load("wkv.weight")
             wkv_scale = load("wkv.scale")
             if target.type == "cuda":
-                with torch.cuda.device(target):
-                    from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
-
-                    wkv_weight = wkv_weight.to(target)
-                    wkv_scale = wkv_scale.to(target)
-                    projection = V41MXFP8Linear(wkv_weight, wkv_scale)
+                # Keep every Engram checkpoint tensor canonical in host RAM.
+                wkv_weight = _PinnedUvaTensor(wkv_weight, target)
+                wkv_scale = _PinnedUvaTensor(wkv_scale, target)
+                projection = _HostProjection(wkv_weight, wkv_scale, target)
+                q_host = _PinnedUvaTensor(load("q_weight"), target)
+                k_host = _PinnedUvaTensor(load("k_weight"), target)
+                q_weight = q_host.view_as(torch.bfloat16)
+                k_weight = k_host.view_as(torch.bfloat16)
             else:
                 projection = _ReferenceWKV(
                     dequantize_block_weight(wkv_weight, wkv_scale)
                 )
-            q_weight = load("q_weight").to(target)
-            k_weight = load("k_weight").to(target)
+                q_weight = load("q_weight")
+                k_weight = load("k_weight")
+                q_host = k_host = None
             from rtp_llm.awi_telemetry import record_weight_placement
 
             # The GPU loader deliberately skips Engram-only shards; record the
@@ -2192,10 +2271,22 @@ class Engram(nn.Module):
             # covers every Engram checkpoint key and any transformed copy.
             record_weight_placement(prefix + "embed.weight", embedding.weight)
             record_weight_placement(prefix + "embed.scale", embedding.scales)
-            record_weight_placement(prefix + "wkv.weight", wkv_weight)
-            record_weight_placement(prefix + "wkv.scale", wkv_scale)
-            record_weight_placement(prefix + "q_weight", q_weight)
-            record_weight_placement(prefix + "k_weight", k_weight)
+            record_weight_placement(
+                prefix + "wkv.weight",
+                wkv_weight.host if isinstance(wkv_weight, _PinnedUvaTensor) else wkv_weight,
+            )
+            record_weight_placement(
+                prefix + "wkv.scale",
+                wkv_scale.host if isinstance(wkv_scale, _PinnedUvaTensor) else wkv_scale,
+            )
+            record_weight_placement(
+                prefix + "q_weight",
+                q_host.host if q_host is not None else q_weight,
+            )
+            record_weight_placement(
+                prefix + "k_weight",
+                k_host.host if k_host is not None else k_weight,
+            )
             return cls(
                 layout,
                 layer_hash_index,
