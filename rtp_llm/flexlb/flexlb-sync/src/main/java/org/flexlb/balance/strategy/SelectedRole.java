@@ -72,6 +72,15 @@ public final class SelectedRole implements AutoCloseable {
     public static SelectedRole prefill(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
+            long prefillWorkMs) {
+        return prefill(
+                generationPin, serverStatus, prefillWorkMs,
+                endpointPlacementVersion(generationPin));
+    }
+
+    public static SelectedRole prefill(
+            WorkerEndpoint.GenerationPin generationPin,
+            ServerStatus serverStatus,
             long prefillWorkMs,
             long placementVersion) {
         return prefill(
