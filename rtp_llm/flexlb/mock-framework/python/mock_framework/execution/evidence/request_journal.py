@@ -130,22 +130,6 @@ def _event(row):
     return event
 
 
-def _json_batches(stream, cancelled):
-    lines = _json_lines(stream, cancelled)
-    header = next(lines, None)
-    if header is None:
-        return
-    for line in lines:
-        if "seal" in line:
-            if line.keys() != {"seal"} or not isinstance(line["seal"], dict):
-                raise ValueError("Invalid evidence JSONL seal")
-            yield header, (), line["seal"]
-            if next(lines, None) is not None:
-                raise ValueError("Trailing evidence after seal")
-            return
-        yield header, (line,), None
-
-
 def playback_directories(root, topology, targets=None, playback=None):
     clients = {node["rpc"]: node for node in topology if node["role"] == "client"}
     chosen = list(clients) if targets is None else targets
@@ -176,172 +160,169 @@ def read_requests(directory: Path, cancelled=None):
     path = directory / "requests.jsonl"
     active, outcomes = {}, Counter()
     sequence = issued = finished = 0
-    sealed = False
-    identity = None
     try:
         plan = json.loads((directory / "plan.json").read_text())
         with path.open("rb") as stream:
-            for header, events, seal in _json_batches(stream, cancelled):
-                if cancelled is not None and cancelled.is_set():
-                    raise ExecutionError("Client evidence scan cancelled")
-                if sealed:
-                    raise ValueError("Trailing evidence after seal")
-                current = _identity(header)
-                (
-                    _,
-                    client,
-                    playback,
-                    first_request_id,
-                    first_index,
-                    stride,
-                    planned,
-                    concurrency,
-                ) = current
-                if identity is None:
-                    identity = current
-                    expected = (
-                        1,
-                        directory.parent.parent.name,
-                        plan["sequence"],
-                        plan["first_request_id"],
-                        plan["first_index"],
-                        plan["stride"],
-                        plan["count"],
-                        plan["concurrency"],
-                    )
-                    if current != expected or not (
-                        first_request_id > 0
-                        and stride > 0
-                        and 0 <= first_index < stride
-                        and planned > 0
-                        and concurrency > 0
-                    ):
-                        raise ValueError(
-                            "Evidence identity does not match playback plan"
-                        )
-                for row in events:
-                    event = _event(row)
-                    sequence += 1
+            lines = _json_lines(stream, cancelled)
+            header = next(lines, None)
+            if header is None:
+                raise ValueError("Missing evidence header")
+            identity = _identity(header)
+            (
+                _,
+                client,
+                playback,
+                first_request_id,
+                first_index,
+                stride,
+                planned,
+                concurrency,
+            ) = identity
+            expected = (
+                1,
+                directory.parent.parent.name,
+                plan["sequence"],
+                plan["first_request_id"],
+                plan["first_index"],
+                plan["stride"],
+                plan["count"],
+                plan["concurrency"],
+            )
+            if identity != expected or not (
+                first_request_id > 0
+                and stride > 0
+                and 0 <= first_index < stride
+                and planned > 0
+                and concurrency > 0
+            ):
+                raise ValueError("Evidence identity does not match playback plan")
+
+            for row in lines:
+                if "seal" in row:
+                    seal = row["seal"]
+                    if row.keys() != {"seal"} or not isinstance(seal, dict):
+                        raise ValueError("Invalid evidence JSONL seal")
                     if (
-                        event["sequence"] != sequence
-                        or event["epoch_ms"] <= 0
-                        or event["elapsed_nanos"] < 0
+                        seal.keys() != {"issued", "finished"}
+                        or active
+                        or issued != finished
+                        or _integer(seal["issued"]) != issued
+                        or _integer(seal["finished"]) != finished
                     ):
-                        raise ValueError("Invalid event sequence or timestamp")
-                    request_id = event["request_id"]
-                    if event["kind"] == "ISSUED":
-                        expected_id = first_request_id + first_index + issued * stride
-                        if (
-                            request_id != expected_id
-                            or issued >= planned
-                            or len(active) >= concurrency
-                        ):
-                            raise ValueError(
-                                "Duplicate, out-of-order or out-of-plan request"
-                            )
-                        issued += 1
-                        active[request_id] = {
-                            "sent": event["epoch_ms"],
-                            "attempts": [],
-                            "pending": None,
-                            "first": None,
-                            "elapsed": event["elapsed_nanos"],
-                        }
-                        continue
-                    state = active.get(request_id)
-                    if state is None or event["elapsed_nanos"] < state["elapsed"]:
+                        raise ValueError("Evidence seal does not reconcile requests")
+                    break
+                event = _event(row)
+                sequence += 1
+                if (
+                    event["sequence"] != sequence
+                    or event["epoch_ms"] <= 0
+                    or event["elapsed_nanos"] < 0
+                ):
+                    raise ValueError("Invalid event sequence or timestamp")
+                request_id = event["request_id"]
+                if event["kind"] == "ISSUED":
+                    expected_id = first_request_id + first_index + issued * stride
+                    if (
+                        request_id != expected_id
+                        or issued >= planned
+                        or len(active) >= concurrency
+                    ):
                         raise ValueError(
-                            "Event without active request or decreasing elapsed time"
+                            "Duplicate, out-of-order or out-of-plan request"
                         )
-                    state["elapsed"] = event["elapsed_nanos"]
-                    if event["kind"] == "SCHEDULE_START":
-                        if (
-                            state["pending"]
-                            or event["attempt"] != len(state["attempts"]) + 1
-                            or not event["master"]
-                        ):
-                            raise ValueError("Invalid Schedule attempt")
-                        state["pending"] = event
-                    elif event["kind"] == "SCHEDULE_RESULT":
-                        start = state["pending"]
-                        if (
-                            start is None
-                            or event["attempt"] != start["attempt"]
-                            or event["master"] != start["master"]
-                            or not event["grpc_code"]
-                        ):
-                            raise ValueError("Schedule result without matching attempt")
-                        state["attempts"].append(
-                            Attempt(
-                                event["attempt"],
-                                event["master"],
-                                start["epoch_ms"],
-                                event["epoch_ms"],
-                                event["grpc_code"],
-                                event["error_code"],
-                                event["message"],
-                                event["response_success"],
-                            )
-                        )
-                        state["pending"] = None
-                    elif event["kind"] == "FIRST_TOKEN":
-                        if (
-                            state["first"] is not None
-                            or state["pending"]
-                            or not state["attempts"]
-                        ):
-                            raise ValueError("Invalid first token event")
-                        state["first"] = event["elapsed_nanos"]
-                    elif event["kind"] == "TERMINAL":
-                        if (
-                            state["pending"]
-                            or event["outcome"] not in OUTCOMES
-                            or not event["grpc_code"]
-                        ):
-                            raise ValueError("Invalid terminal event")
-                        ttft = event["ttft_nanos"]
-                        if (ttft is not None) != (state["first"] is not None) or (
-                            ttft is not None and not 0 <= ttft <= event["elapsed_nanos"]
-                        ):
-                            raise ValueError(
-                                "Inconsistent first token and terminal result"
-                            )
-                        if (event["output_tokens"] > 0) != (state["first"] is not None):
-                            raise ValueError("Inconsistent output token count")
-                        finished += 1
-                        outcomes[event["outcome"]] += 1
-                        del active[request_id]
-                        yield RequestRecord(
-                            client,
-                            playback,
-                            request_id,
-                            state["sent"],
+                    issued += 1
+                    active[request_id] = {
+                        "sent": event["epoch_ms"],
+                        "attempts": [],
+                        "pending": None,
+                        "first": None,
+                        "elapsed": event["elapsed_nanos"],
+                    }
+                    continue
+                state = active.get(request_id)
+                if state is None or event["elapsed_nanos"] < state["elapsed"]:
+                    raise ValueError(
+                        "Event without active request or decreasing elapsed time"
+                    )
+                state["elapsed"] = event["elapsed_nanos"]
+                if event["kind"] == "SCHEDULE_START":
+                    if (
+                        state["pending"]
+                        or event["attempt"] != len(state["attempts"]) + 1
+                        or not event["master"]
+                    ):
+                        raise ValueError("Invalid Schedule attempt")
+                    state["pending"] = event
+                elif event["kind"] == "SCHEDULE_RESULT":
+                    start = state["pending"]
+                    if (
+                        start is None
+                        or event["attempt"] != start["attempt"]
+                        or event["master"] != start["master"]
+                        or not event["grpc_code"]
+                    ):
+                        raise ValueError("Schedule result without matching attempt")
+                    state["attempts"].append(
+                        Attempt(
+                            event["attempt"],
+                            event["master"],
+                            start["epoch_ms"],
                             event["epoch_ms"],
-                            ttft,
-                            event["elapsed_nanos"],
-                            event["output_tokens"],
-                            event["outcome"],
                             event["grpc_code"],
                             event["error_code"],
                             event["message"],
-                            state["attempts"],
+                            event["response_success"],
                         )
-                    else:
-                        raise ValueError("Unknown event kind")
-                if seal is not None:
+                    )
+                    state["pending"] = None
+                elif event["kind"] == "FIRST_TOKEN":
                     if (
-                        seal.keys() - {"issued", "finished"}
-                        or active
-                        or issued != finished
-                        or _integer(seal.get("issued", 0)) != issued
-                        or _integer(seal.get("finished", 0)) != finished
+                        state["first"] is not None
+                        or state["pending"]
+                        or not state["attempts"]
                     ):
-                        raise ValueError("Evidence seal does not reconcile requests")
-                    sealed = True
-        if not sealed:
-            raise ValueError(
-                "Missing evidence seal (playback still running, writer failed or JVM exited)"
-            )
+                        raise ValueError("Invalid first token event")
+                    state["first"] = event["elapsed_nanos"]
+                elif event["kind"] == "TERMINAL":
+                    if (
+                        state["pending"]
+                        or event["outcome"] not in OUTCOMES
+                        or not event["grpc_code"]
+                    ):
+                        raise ValueError("Invalid terminal event")
+                    ttft = event["ttft_nanos"]
+                    if (ttft is not None) != (state["first"] is not None) or (
+                        ttft is not None and not 0 <= ttft <= event["elapsed_nanos"]
+                    ):
+                        raise ValueError("Inconsistent first token and terminal result")
+                    if (event["output_tokens"] > 0) != (state["first"] is not None):
+                        raise ValueError("Inconsistent output token count")
+                    finished += 1
+                    outcomes[event["outcome"]] += 1
+                    del active[request_id]
+                    yield RequestRecord(
+                        client,
+                        playback,
+                        request_id,
+                        state["sent"],
+                        event["epoch_ms"],
+                        ttft,
+                        event["elapsed_nanos"],
+                        event["output_tokens"],
+                        event["outcome"],
+                        event["grpc_code"],
+                        event["error_code"],
+                        event["message"],
+                        state["attempts"],
+                    )
+                else:
+                    raise ValueError("Unknown event kind")
+            else:
+                raise ValueError(
+                    "Missing evidence seal (playback still running, writer failed or JVM exited)"
+                )
+            if next(lines, None) is not None:
+                raise ValueError("Trailing evidence after seal")
         result_path = directory / "result.json"
         if result_path.exists():
             result = json.loads(result_path.read_text())

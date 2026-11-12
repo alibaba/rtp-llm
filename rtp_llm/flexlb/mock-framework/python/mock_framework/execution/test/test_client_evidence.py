@@ -335,9 +335,17 @@ def test_cancelled_scan_stops_before_reading_next_line(evidence):
         list(read_requests(directory, cancelled))
 
 
+@pytest.mark.parametrize("seal", [{}, {"issued": "0"}, {"finished": "0"}])
+def test_seal_requires_explicit_counts(evidence, seal):
+    directory, rows = evidence()
+    write_rows(directory, [rows[0], {"seal": seal}])
+    with pytest.raises(ExecutionError, match="Evidence seal does not reconcile"):
+        list(read_requests(directory))
+
+
 def test_zero_issued_round_can_seal_without_fabricating_terminal_events(evidence):
     directory, rows = evidence()
-    write_rows(directory, [rows[0], {"seal": {}}])
+    write_rows(directory, [rows[0], {"seal": {"issued": "0", "finished": "0"}}])
     (directory / "result.json").write_text(
         json.dumps(
             dict(
