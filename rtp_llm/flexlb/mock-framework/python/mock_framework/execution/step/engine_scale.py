@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Annotated, Literal
 
+from ..roles.engine import MAX_ENGINE_START_COUNT
 from ._targets import Targets
 from .step import StepContext
 from .step_registry import Bounds, register_step
@@ -10,12 +11,17 @@ from .step_registry import Bounds, register_step
 class EngineScaleArgs(Targets):
     direction: Literal["in", "out"]
     role: Literal["prefill", "decode"] = "prefill"
-    count: Annotated[int, Bounds(1, 1024)] | None = None
+    count: Annotated[int, Bounds(minimum=1)] | None = None
 
     def __post_init__(self):
         super().__post_init__()
-        if self.direction == "out" and self.targets is not None:
-            raise ValueError("targets may only be supplied when scaling in")
+        if self.direction == "out":
+            if self.targets is not None:
+                raise ValueError("targets may only be supplied when scaling in")
+            if self.count is not None and self.count > MAX_ENGINE_START_COUNT:
+                raise ValueError(
+                    f"scale-out count must be at most {MAX_ENGINE_START_COUNT}"
+                )
 
 
 @register_step("engine/scale", effect="write")

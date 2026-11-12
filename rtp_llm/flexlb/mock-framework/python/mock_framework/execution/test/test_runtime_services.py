@@ -46,17 +46,6 @@ def test_topology_readers_and_publishers_cannot_mutate_current_instances(tmp_pat
     assert not (tmp_path / "topology-history.json").exists()
 
 
-def test_control_request_limit_is_checked_before_connecting(monkeypatch):
-    from mock_framework.execution.transport import post
-
-    async def connect(*args, **kwargs):
-        pytest.fail("Oversized request opened a connection")
-
-    monkeypatch.setattr(asyncio, "open_connection", connect)
-    with pytest.raises(ExecutionError, match="1 MiB limit"):
-        asyncio.run(post("http://127.0.0.1:1", {"args": "x" * (1024 * 1024)}))
-
-
 def test_client_start_fails_without_endpoints(tmp_path):
     async def exercise():
         role_config = {"deployment": {"replicas": 1}}

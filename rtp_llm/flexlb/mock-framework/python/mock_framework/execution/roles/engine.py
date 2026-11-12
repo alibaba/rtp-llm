@@ -11,6 +11,7 @@ from . import register_ready_instance
 
 ROLES = ("prefill", "decode", "vit")
 INITIAL_START_CONCURRENCY = 32
+MAX_ENGINE_START_COUNT = 1024
 
 
 class EngineRole:
@@ -162,11 +163,11 @@ class EngineRole:
             if any(
                 role not in ROLES
                 or role not in self.role_configs
-                or not 1 <= count <= 1024
+                or not 1 <= count <= MAX_ENGINE_START_COUNT
                 for role, count in counts.items()
             ):
                 raise ExecutionError(
-                    "Engine startup requires configured roles and counts in 1..1024"
+                    f"Engine startup requires configured roles and counts in 1..{MAX_ENGINE_START_COUNT}"
                 )
             next_registration = {role: self.counters.get(role, 0) for role in counts}
             jobs_by_role = [

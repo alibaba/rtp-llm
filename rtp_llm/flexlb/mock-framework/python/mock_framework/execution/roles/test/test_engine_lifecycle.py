@@ -143,11 +143,22 @@ def no_children(output):
 
 
 @pytest.mark.parametrize(
-    "args", [{}, {"direction": "other"}, {"direction": "out", "targets": ["p:1"]}]
+    "args",
+    [
+        {},
+        {"direction": "other"},
+        {"direction": "out", "targets": ["p:1"]},
+        {"direction": "out", "count": 1025},
+    ],
 )
-def test_scale_rejects_invalid_direction_or_targets(args):
+def test_scale_rejects_invalid_arguments(args):
     with pytest.raises(ConfigError):
         StepRegistry.standard().get("engine/scale").arguments(args)
+
+
+def test_scale_in_accepts_count_above_start_limit():
+    step = StepRegistry.standard().get("engine/scale")
+    assert step.arguments({"direction": "in", "count": 1025}).count == 1025
 
 
 def test_initial_engine_start_shares_slots_across_roles(tmp_path, monkeypatch):

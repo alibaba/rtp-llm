@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 from . import ExecutionError
 
 
-async def post(url, payload, *, limit=16 * 1024 * 1024):
+async def post(url, payload):
     address = urlsplit(url)
     if (
         address.scheme != "http"
@@ -20,8 +20,6 @@ async def post(url, payload, *, limit=16 * 1024 * 1024):
             "Component endpoint must be an HTTP URL without credentials/query/fragment"
         )
     body = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
-    if len(body) > 1024 * 1024:
-        raise ExecutionError("Control request exceeds the 1 MiB limit")
     reader, writer = await asyncio.open_connection(
         address.hostname, address.port or 80, limit=65536
     )
@@ -50,7 +48,7 @@ async def post(url, payload, *, limit=16 * 1024 * 1024):
         if "transfer-encoding" in headers:
             raise ExecutionError("Component response must use Content-Length")
         length = int(headers["content-length"])
-        if not 0 <= length <= limit:
+        if not 0 <= length <= 16 * 1024 * 1024:
             raise ExecutionError("Component response is too large")
         raw = await reader.readexactly(length)
         response = json.loads(
