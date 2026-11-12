@@ -60,6 +60,9 @@ class SegmentPolicyTest(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             admission = module.SegmentAdmission()
         self.assertEqual(admission.rows, {512, 2048, 6144, 8192})
+        self.assertEqual(admission.moe_rows, {96, 768, 3072, 5376})
+        self.assertEqual(admission.budget.max_entries, 8)
+        self.assertEqual(admission.budget.max_tokens, 26208)
         for rows in sorted(admission.rows):
             self.assertTrue(admission.budget.admit((rows, "bf16")))
 
@@ -165,13 +168,38 @@ class SegmentPolicyTest(unittest.TestCase):
     def test_non_hot_shapes_never_promote_after_repeated_requests(self):
         admission = module.SegmentAdmission()
         with patch.object(module, "require_rank_agreement") as vote:
-            for rows in (1536, 4608, 5376):
+            for rows in (1536, 4096, 4608):
                 for _ in range(20):
                     self.assertFalse(
                         admission.supports(SimpleNamespace(shape=(rows, 4)), moe=True)
                     )
             vote.assert_not_called()
         self.assertFalse(admission.budget.keys)
+
+    def test_moe_output_slot_reuse_preserves_live_input_and_updates_result(self):
+        live = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+        original = live.clone()
+        slot = torch.empty_like(live)
+        for offset in (2, 7):
+            slot.copy_(live)
+            output = module.reuse_moe_input_slot(slot, slot + offset)
+            self.assertEqual(output.data_ptr(), slot.data_ptr())
+            self.assertTrue(torch.equal(output, live + offset))
+            self.assertTrue(torch.equal(live, original))
+
+    def test_moe_output_slot_reuse_rejects_broadcast_and_dtype_changes(self):
+        slot = torch.ones(3, 4)
+        for result in (torch.ones(1, 4), slot.double(), (slot,)):
+            with self.assertRaisesRegex(RuntimeError, "private input slot"):
+                module.reuse_moe_input_slot(slot, result)
+
+    def test_all_hot_shapes_fit_shared_budget_without_non_hot_promotion(self):
+        with patch.dict(os.environ, {}, clear=True):
+            admission = module.SegmentAdmission()
+        for rows in sorted(admission.rows | admission.moe_rows):
+            self.assertTrue(admission.budget.admit((rows, "bf16")))
+        self.assertEqual(admission.budget.tokens, 26208)
+        self.assertFalse(admission.budget.admit((4608, "bf16")))
 
     def test_overlapping_hot_shapes_are_rejected(self):
         with patch.dict(os.environ, {"QWEN_PREFILL_GRAPH_MOE_ROWS": "512"}):
