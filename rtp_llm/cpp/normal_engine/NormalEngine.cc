@@ -1126,12 +1126,28 @@ void NormalEngine::maybeTrackAwiArmedStream(const GenerateStreamPtr& stream) {
         stream->setReserveStep(static_cast<size_t>(generate_config->max_new_tokens));
     }
     awi.bindInternalId(generate_input->request_info.request_id, generate_input->request_id);
-    std::lock_guard<std::mutex> lock(awi_armed_mu_);
-    if (awi_armed_op_id_ != operation.operation_id) {
-        awi_armed_op_id_ = operation.operation_id;
-        awi_armed_streams_.clear();
+    {
+        std::lock_guard<std::mutex> lock(awi_armed_mu_);
+        if (awi_armed_op_id_ != operation.operation_id) {
+            awi_armed_op_id_ = operation.operation_id;
+            awi_armed_streams_.clear();
+        }
+        awi_armed_streams_[generate_input->request_id] = stream;
     }
-    awi_armed_streams_[generate_input->request_id] = stream;
+    // Admission-time capacity truth. A full-context prefill executes as ONE
+    // multi-hour engine step, so the step-boundary check in applyAwiBarrier
+    // cannot run again until that step ends: an over-capacity cohort member
+    // would sit silently queued for hours (measured: the cap2 cell's r2 got
+    // no verdict within the probe's 900s window while r1's 1M prefill held
+    // the only step). The contract wants genuine, prompt rejection instead
+    // of queued clients, so re-run the SAME check here on the RPC enqueue
+    // thread: an armed stream whose full-span reservation cannot coexist
+    // with the existing ones gets capacity_failure events + MALLOC_FAILED
+    // immediately. Every input read here (armed registry, cache availability,
+    // stream fields) is mutex-guarded or already read cross-thread by the
+    // RPC pollers; errored streams are filtered by validateStreamForScheduling
+    // before they can reach the scheduler.
+    checkAwiBarrierCapacity(operation);
 }
 
 void NormalEngine::applyAwiBarrier(std::list<GenerateStreamPtr>& streams) {
@@ -1271,6 +1287,12 @@ void NormalEngine::checkAwiBarrierCapacity(const AwiOperation& operation) {
         std::lock_guard<std::mutex> lock(awi_armed_mu_);
         for (const auto& entry : awi_armed_streams_) {
             const auto&  stream = entry.second;
+            if (stream == nullptr || !stream->isActive()) {
+                // Already errored/finished (e.g. an earlier admission-time firing
+                // of this same check): never re-error it, and never double-record
+                // its cohort slot in remaining_need/pending.
+                continue;
+            }
             const auto   config = stream->generateConfig();
             const int64_t needed_blocks =
                 (stream->inputLength() + (config != nullptr ? config->max_new_tokens : 0)
