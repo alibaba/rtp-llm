@@ -354,8 +354,12 @@ def _rewrite_rank_file() -> None:
     if not path:
         return
     try:
-        with open(path, "w", encoding="utf-8") as file:
+        # Observations can arrive while the last Engram layer is being bound.
+        # Publish atomically so the merger never sees a truncated array.
+        temporary = path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as file:
             file.write(census_json())
+        os.replace(temporary, path)
     except Exception:
         logging.warning("AWI weights census rank file write failed", exc_info=True)
 
