@@ -54,6 +54,7 @@ def fused_moe_kernel(
     use_fp8_w8a8: tl.constexpr,
     scale_ue8m0: tl.constexpr,
     even_Ks: tl.constexpr,
+    REMOTE_EXPERT: tl.constexpr = None,
 ):
     """
     Fused MoE GEMM kernel.
@@ -88,6 +89,13 @@ def fused_moe_kernel(
     token_mask = offs_token < num_valid_tokens
 
     off_experts = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
+    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+    # EP reserves one alignment bin for routes owned by another rank.
+    if REMOTE_EXPERT is not None and off_experts == REMOTE_EXPERT:
+        tl.store(c_ptrs, 0, mask=c_mask)
+        return
 
     # Pointers for A and B
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
@@ -174,10 +182,6 @@ def fused_moe_kernel(
 
     accumulator = accumulator.to(compute_type)
 
-    # Write back
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
@@ -198,6 +202,8 @@ def invoke_fused_moe_kernel(
     B_scale: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
     scale_ue8m0: bool = False,
+    *,
+    skip_remote_experts: bool = False,
 ) -> None:
     assert sorted_token_ids.stride(0) == 1
 
@@ -274,8 +280,53 @@ def invoke_fused_moe_kernel(
         use_fp8_w8a8=use_fp8_w8a8,
         scale_ue8m0=scale_ue8m0,
         even_Ks=even_Ks,
+        REMOTE_EXPERT=B.shape[0] if skip_remote_experts else None,
         **config,
     )
+
+
+@triton.jit(do_not_specialize=["M"])
+def _sum_moe_routes(
+    routed,
+    output,
+    M,
+    TOP_K: tl.constexpr,
+    HIDDEN: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    row = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    column = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    offset = row[:, None] * TOP_K * HIDDEN + column[None, :]
+    valid = (row[:, None] < M) & (column[None, :] < HIDDEN)
+    total = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
+    # Match the four FP32 partial sums of the CUDA BF16 Torch reduction.
+    for lane in tl.static_range(4):
+        partial = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
+        for route in tl.static_range(lane, TOP_K, 4):
+            partial += tl.load(routed + offset + route * HIDDEN, valid, 0).to(tl.float32)
+        total += partial
+    tl.store(output + row[:, None] * HIDDEN + column[None, :], total, valid)
+
+
+def sum_moe_routes(routed: torch.Tensor) -> torch.Tensor:
+    rows, top_k, hidden = routed.shape
+    if not (
+        512 <= rows <= 32768
+        and (top_k, hidden) == (10, 2560)
+        and routed.is_cuda
+        and routed.dtype == torch.bfloat16
+        and routed.is_contiguous()
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability(routed.device) == (9, 0)
+    ):
+        return routed.sum(dim=1)
+    output = routed.new_empty((rows, hidden))
+    block_m, block_n = 2, 256
+    _sum_moe_routes[(triton.cdiv(rows, block_m), triton.cdiv(hidden, block_n))](
+        routed, output, rows, top_k, hidden, block_m, block_n, num_warps=2
+    )
+    return output
 
 
 def moe_align_block_size_torch(
