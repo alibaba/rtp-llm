@@ -33,6 +33,8 @@ Public API:
 
 from __future__ import annotations
 
+import logging
+import os
 import weakref
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
@@ -43,6 +45,19 @@ import torch.nn as nn
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+# Diagnostic (DSV41_DEBUG_DUMP_KV_DIR=<dir>, default off, NOT a delivery launch
+# env): persist the compressed-KV pool rows written by every prefill launch,
+# keyed by absolute position, so two runs with different prefill chunk sizes
+# can be diffed per position. The case2 A/B showed the corrupted output is
+# chunk-size dependent (byte-different text at chunk 512 vs 1024) while slot
+# mapping stays drop-free, so the divergence must enter through the VALUES
+# this writer kernel stores; the per-position diff localizes exactly which
+# positions/layers first differ between chunkings.
+_DEBUG_DUMP_KV_DIR = os.getenv("DSV41_DEBUG_DUMP_KV_DIR", "")
+_DEBUG_DUMP_KV_MAX_FILES = 4000
+_DEBUG_DUMP_KV_MIN_ROWS = 32
+_debug_dump_kv_files = 0
 
 _CUBLAS_GEMM_BF16_BF16_FP32 = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32", None)
 _COMPRESSOR_REGISTRY: "weakref.WeakSet" = weakref.WeakSet()
@@ -387,6 +402,11 @@ class CompressorFP8(PoolBackedModule):
     layer's ratio (typically 4, overlap=True).
     """
 
+    # Construction-order uid for the KV dump diagnostic: model build order is
+    # deterministic, so the same (uid, ratio, head_dim) identifies the same
+    # compressor instance across runs with different chunk sizes.
+    _dump_seq = 0
+
     def __init__(
         self,
         dim: int,
@@ -443,6 +463,8 @@ class CompressorFP8(PoolBackedModule):
         self._kv_cache_sharded: bool = False
         self._profile_label: Optional[str] = None
         self._dbg_prefix: Optional[str] = None
+        self._dump_uid = CompressorFP8._dump_seq
+        CompressorFP8._dump_seq += 1
 
     def _cp_profile_name(self, profile_label: Optional[str]) -> str:
         label = profile_label or self._profile_label
@@ -811,6 +833,63 @@ class CompressorFP8(PoolBackedModule):
                 cu_seq_per_req=meta.cu_seq_per_req if use_varlen_raw else None,
                 state_tokens_per_block=self._state_tokens_per_block,
             )
+        if _DEBUG_DUMP_KV_DIR:
+            self._debug_dump_kv(meta, seq_start)
+
+    def _debug_dump_kv(self, meta: CompressorMeta, seq_start: Optional[int]) -> None:
+        """Persist this launch's written compressed-KV rows keyed by position.
+
+        Diagnostic-only (see DSV41_DEBUG_DUMP_KV_DIR note at module top).
+        Never runs under CUDA graph capture or graph-warmup scope: the .cpu()
+        copies synchronize, which is forbidden during capture (measured:
+        fail29 startup death) and meaningless for synthetic warmup rows.
+        Decode-sized launches (< _DEBUG_DUMP_KV_MIN_ROWS rows) are skipped;
+        a hard file cap bounds disk usage if the env is left on by mistake.
+        """
+        global _debug_dump_kv_files
+        try:
+            if meta.kv_slots is None or self._kv_pool_view is None:
+                return
+            if torch.cuda.is_current_stream_capturing():
+                return
+            if os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"):
+                return
+            n_rows = int(meta.positions.numel())
+            if n_rows < _DEBUG_DUMP_KV_MIN_ROWS:
+                return
+            if _debug_dump_kv_files >= _DEBUG_DUMP_KV_MAX_FILES:
+                return
+            valid = meta.kv_slots >= 0
+            pos = meta.positions[valid].to(torch.int64)
+            slots = meta.kv_slots[valid].to(torch.int64)
+            count = int(pos.numel())
+            if count == 0:
+                return
+            values = self._kv_pool_view[slots].clone()
+            rank = os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0"))
+            tag = self._profile_label or self._dbg_prefix or (
+                f"c{self._dump_uid}_r{self.compress_ratio}_h{self.head_dim}"
+            )
+            os.makedirs(_DEBUG_DUMP_KV_DIR, exist_ok=True)
+            path = os.path.join(
+                _DEBUG_DUMP_KV_DIR,
+                f"kv_{tag}_r{rank}_s{int(seq_start) if seq_start is not None else -1}"
+                f"_n{n_rows}_{_debug_dump_kv_files}.pt",
+            )
+            torch.save(
+                {
+                    "tag": tag,
+                    "rank": rank,
+                    "seq_start": seq_start,
+                    "positions": pos.cpu(),
+                    "slots": slots.cpu(),
+                    "values": values.cpu(),
+                },
+                path,
+            )
+            _debug_dump_kv_files += 1
+        except Exception:  # pragma: no cover - diagnostics must never break a run
+            logging.exception("[DSV41_DUMP_KV] dump failed")
 
     def start_prefill(
         self,
