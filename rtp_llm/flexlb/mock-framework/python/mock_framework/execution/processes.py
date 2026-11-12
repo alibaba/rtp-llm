@@ -259,7 +259,6 @@ async def start_instance(
         {
             "component_role": identity.role,
             "component": role_config,
-            "index": identity.index,
             "id": instance_id,
         },
     )

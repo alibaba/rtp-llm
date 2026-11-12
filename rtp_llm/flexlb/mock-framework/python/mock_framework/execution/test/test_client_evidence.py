@@ -567,7 +567,6 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
             assert json.loads(path.read_text()) == {
                 "component_role": role,
                 "component": component,
-                "index": index,
                 "id": instance_id,
             }
     if "prometheus" in recipe:
