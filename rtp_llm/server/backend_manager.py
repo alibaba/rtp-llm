@@ -20,7 +20,7 @@ from rtp_llm.server.server_args.hw_kernel_group_args import (
 from rtp_llm.utils.scr import network
 from rtp_llm.utils.concurrency_controller import get_global_controller
 from rtp_llm.utils.scr.restore_context import RestoreContext
-from rtp_llm.utils.scr.lifecycle import get_template_lifecycle
+from rtp_llm.utils.scr.lifecycle import get_template_lifecycle, template_phase_active
 
 if TYPE_CHECKING:
     from rtp_llm.async_decoder_engine.base_engine import BaseEngine
@@ -61,7 +61,7 @@ class BackendManager(object):
                 daemon=True,
             ).start()
 
-    def start(self, defer_service_start: bool = False):
+    def start(self):
         """Initialize backend server without entering service loop"""
         self._distributed_server.start(self.py_env_configs)
         # Create EngineConfig from py_env_configs (server/distribute config already adjusted for this rank)
@@ -138,7 +138,12 @@ class BackendManager(object):
             task_type=model_config.task_type,
         )
 
-        if defer_service_start and model_config.task_type != TaskType.LANGUAGE_MODEL:
+        # Embedding engines have no deferred phase; an SCR template must not
+        # capture one because its listeners would already be bound.
+        if (
+            template_phase_active()
+            and model_config.task_type != TaskType.LANGUAGE_MODEL
+        ):
             raise RuntimeError(
                 "SCR template startup does not support embedding engines yet; "
                 "refusing to start listeners before the arrival barrier"
@@ -217,7 +222,6 @@ class BackendManager(object):
             vit_config=self.py_env_configs.vit_config,
             merge_lora=self.py_env_configs.lora_config.merge_lora,
             propose_model_config=propose_model_config,
-            defer_service_start=defer_service_start,
         )
         self._mark_serving_when_ready()
         logging.info(
@@ -257,7 +261,7 @@ class BackendManager(object):
         refresh(self._engine_config.runtime_config, world_info)
 
     def start_service(self) -> None:
-        """Release listeners deferred for a pre-service SCR barrier."""
+        """Bind listeners deferred behind the startup barrier."""
         start_service = getattr(self.engine, "start_service", None)
         if start_service is not None:
             start_service()
