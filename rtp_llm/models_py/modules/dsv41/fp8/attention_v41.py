@@ -93,6 +93,20 @@ _PREFILL_INDEXER_KEY_CHUNK = int(
     os.environ.get("DSV41_PREFILL_INDEXER_KEY_CHUNK", "0")
 )
 
+# Diagnostic A/B lever (NOT a delivery launch env): when set to 1, the
+# non-fused prefill selection replaces scoring/topk/candidate masking with the
+# exact all-causal-keys scheme the short-prompt branch already uses, to isolate
+# whether semantic degradation at >=1K-token prompts lives in the selection
+# subsystem or in the length-dependent non-selection paths (global producer,
+# index plan, sparse attention, Engram). Only honored while the compressed key
+# span stays under _PREFILL_ALL_KEYS_MAX so the [rows, width] selection and
+# the fp32 reference-attention gather temporaries stay bounded; long-context
+# probes must run with the flag off.
+_PREFILL_INDEXER_FORCE_ALL_KEYS = (
+    int(os.environ.get("DSV41_PREFILL_INDEXER_FORCE_ALL_KEYS", "0")) == 1
+)
+_PREFILL_ALL_KEYS_MAX = 8192
+
 
 def _prefill_x_cohort_plan(cp_ctx, projected_row_bytes):
     """Group zigzag rows by AG receive budget, independent of compressor tiles."""
@@ -1906,10 +1920,16 @@ class AttentionV41FP8(AttentionFP8):
                 )
         candidates_out = shared.get("candidates") if publish_candidates else None
         # Short prompts select all causal candidates, as in the vLLM backend.
-        if max((len(k) for _, k in globals_by_req), default=0) <= self.index_topk:
+        # The diagnostic force-all-keys flag reuses this same branch for
+        # longer prompts while the compressed key span stays bounded.
+        key_count_cap = max((len(k) for _, k in globals_by_req), default=0)
+        if key_count_cap <= self.index_topk or (
+            _PREFILL_INDEXER_FORCE_ALL_KEYS and key_count_cap <= _PREFILL_ALL_KEYS_MAX
+        ):
             if candidates_out is not None:
                 candidates_out.fill_(-1)
-            ids = torch.arange(self.index_topk, device=x.device, dtype=torch.int32)
+            width = max(key_count_cap, self.index_topk)
+            ids = torch.arange(width, device=x.device, dtype=torch.int32)
             out = torch.where(
                 ids[None] < ((positions + 1) // self.compress_ratio)[:, None],
                 ids[None],
