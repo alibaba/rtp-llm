@@ -245,7 +245,8 @@ class ScrKmonitorLifecycleTest(unittest.TestCase):
                 "native", CallbackHook(release=scr._start_native_kmonitor)
             )
             lifecycle.register(
-                "python", CallbackHook(release=scr._start_python_kmonitor)
+                "python",
+                CallbackHook(release=lambda _generation: worker.start_after_restore()),
             )
             lifecycle.prepare_for_template("failed", "checkpoint")
             lifecycle.abort_template("failed")

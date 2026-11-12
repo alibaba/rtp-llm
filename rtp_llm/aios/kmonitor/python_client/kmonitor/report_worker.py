@@ -13,6 +13,7 @@ from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.metric_base import (
     MetricDataPoint,
 )
 from rtp_llm.aios.kmonitor.python_client.kmonitor.utils.hippo_helper import HippoHelper
+from rtp_llm.utils.scr.lifecycle import defer_until_release, template_phase_active
 
 _ReportWorker__REPORT_PORT = 4141
 _ReportWorker__FLUME_CLIENT_TIMEOUT_MS = 1000
@@ -21,18 +22,6 @@ _ReportWorker__REPORT_INTERVAL_SECOND = 1
 _ReportWorker__REPORT_HEADERS = {"topic": "py_kmonitor"}
 _ReportWorker__REPORT_KMONITOR_MULTI_SEP = "@"
 _ReportWorker__REPORT_KMONITOR_KEYVALUE_SEP = "^"
-
-
-def _env_enabled(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _defer_transport_for_scr() -> bool:
-    enabled = _env_enabled("RTPLLM_ENABLE_SCR")
-    return enabled and os.environ.get("SCR_PHASE", "").strip().lower() in {
-        "checkpoint",
-        "restore",
-    }
 
 
 class ReportWorker(object):
@@ -50,9 +39,10 @@ class ReportWorker(object):
         self.started = False
         self._report_thread: Thread | None = None
         self.flume = None
-        self._transport_deferred = _defer_transport_for_scr()
+        self._transport_deferred = template_phase_active()
         if self._transport_deferred:
             logging.info("defer kmonitor transport until SCR steady-point returns")
+            defer_until_release("python-kmonitor", self.start_after_restore)
         elif HippoHelper.is_hippo_env():
             self._activate_hippo_transport()
         else:

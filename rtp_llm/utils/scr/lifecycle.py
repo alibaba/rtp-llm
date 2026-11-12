@@ -35,6 +35,18 @@ class RestoreFixup(Protocol):
     def restore_fixup(self, context: RestoreContext) -> None: ...
 
 
+class DeferredStartup(Protocol):
+    """A component whose network side effects wait for the startup barrier.
+
+    Every participant follows one order: prepare local state, join the
+    barrier, then start.  When no template phase is active the barrier is a
+    no-op, so the component starts immediately and there is no second code
+    path to keep in sync.
+    """
+
+    def start_deferred(self) -> None: ...
+
+
 class TemplateLifecycleHook(RestoreFixup, Protocol):
     """Optional operations run around one template barrier."""
 
@@ -49,6 +61,25 @@ class TemplateLifecycleHook(RestoreFixup, Protocol):
 class TemplateLifecycleState:
     generation: str
     phase: str
+
+
+def defer_until_release(name: str, start: Callable[[], None]) -> None:
+    """Run ``start`` at template release, or immediately when SCR is inactive.
+
+    This is the single entry point for components that must not open sockets,
+    spawn workers or touch the network before the controller has captured the
+    process tree.
+    """
+    if template_phase_active():
+        # A process may rebuild a component (tests, re-init); the latest
+        # instance owns the release action.
+        get_template_lifecycle().register(
+            name,
+            CallbackHook(release=lambda _generation: start()),
+            replace=True,
+        )
+        return
+    start()
 
 
 class TemplateLifecycle:
@@ -66,7 +97,9 @@ class TemplateLifecycle:
         self._state: TemplateLifecycleState | None = None
         self._fixup_complete = False
 
-    def register(self, name: str, hook: TemplateLifecycleHook) -> None:
+    def register(
+        self, name: str, hook: TemplateLifecycleHook, *, replace: bool = False
+    ) -> None:
         if not name:
             raise ValueError("template lifecycle hook name must be non-empty")
         with self._lock:
@@ -75,7 +108,7 @@ class TemplateLifecycle:
                 return
             if self._state is not None:
                 raise RuntimeError("cannot register hooks during a template lifecycle")
-            if existing is not None and existing is not hook:
+            if existing is not None and existing is not hook and not replace:
                 raise ValueError(f"template lifecycle hook already registered: {name}")
             self._hooks[name] = hook
 

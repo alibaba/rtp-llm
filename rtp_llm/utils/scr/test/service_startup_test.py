@@ -54,7 +54,7 @@ class ScrServiceStartupTest(unittest.TestCase):
                         "MODEL_SERVICE_CONFIG": service_config(),
                     },
                 ), patch(
-                    "rtp_llm.server.host_service.get_template_lifecycle",
+                    "rtp_llm.utils.scr.lifecycle.get_template_lifecycle",
                     return_value=lifecycle,
                 ), patch(
                     "grpc.aio.insecure_channel",
@@ -112,7 +112,7 @@ class ScrServiceStartupTest(unittest.TestCase):
             with patch.dict(
                 os.environ, {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint"}
             ), patch("rtp_llm.vipserver.vip_client.global_vip_client", client), patch(
-                "rtp_llm.server.host_service.get_template_lifecycle",
+                "rtp_llm.utils.scr.lifecycle.get_template_lifecycle",
                 return_value=lifecycle,
             ), patch.object(
                 reactor, "start", side_effect=lambda: setattr(reactor, "started", True)
