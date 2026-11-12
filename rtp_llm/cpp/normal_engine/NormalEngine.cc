@@ -1134,6 +1134,13 @@ void NormalEngine::maybeTrackAwiArmedStream(const GenerateStreamPtr& stream) {
         }
         awi_armed_streams_[generate_input->request_id] = stream;
     }
+    // Registration fingerprint: makes the armed path auditable in engine.log
+    // (a silent no-fire must be attributable to a measured fit, never to a
+    // dead hook).
+    RTP_LLM_LOG_INFO("AWI armed stream registered: awi_id=[%s] internal_id=%ld op=[%s]",
+                     generate_input->request_info.request_id.c_str(),
+                     static_cast<long>(generate_input->request_id),
+                     operation.operation_id.c_str());
     // Admission-time capacity truth. A full-context prefill executes as ONE
     // multi-hour engine step, so the step-boundary check in applyAwiBarrier
     // cannot run again until that step ends: an over-capacity cohort member
@@ -1280,8 +1287,17 @@ void NormalEngine::checkAwiBarrierCapacity(const AwiOperation& operation) {
     if (tokens_per_block <= 0) {
         return;
     }
-    const int64_t available_blocks = static_cast<int64_t>(cache->availableBlocksNum());
-    int64_t       remaining_need   = 0;
+    // Compare in TOKENS against the binding constraint: the block-count API
+    // SUMS available blocks across ALL pool groups — the length-scaling FULL
+    // pools plus the small per-sequence ring/state pools whose blocks carry
+    // different byte sizes — so a full-context span (4096 logical blocks)
+    // always "fit" in ~7000+ summed blocks and this check could never fire
+    // (measured: load80cap2/load83cap2 INCONCLUSIVE, zero events).
+    // availableTokensNum() is the MIN of available tokens across the FULL
+    // groups: the same figure cache_status reports as available_kv_cache and
+    // the one admission (initKVBlock) actually exhausts first.
+    const int64_t available_tokens      = static_cast<int64_t>(cache->availableTokensNum());
+    int64_t       remaining_need_tokens = 0;
     std::vector<GenerateStreamPtr> pending;
     {
         std::lock_guard<std::mutex> lock(awi_armed_mu_);
@@ -1289,29 +1305,36 @@ void NormalEngine::checkAwiBarrierCapacity(const AwiOperation& operation) {
             const auto&  stream = entry.second;
             if (stream == nullptr || !stream->isActive()) {
                 // Already errored/finished (e.g. an earlier admission-time firing
-                // of this same check): never re-error it, and never double-record
+                // of this same check): never re-error it, and never double-count
                 // its cohort slot in remaining_need/pending.
                 continue;
             }
             const auto   config = stream->generateConfig();
-            const int64_t needed_blocks =
-                (stream->inputLength() + (config != nullptr ? config->max_new_tokens : 0)
-                 + tokens_per_block - 1)
-                / tokens_per_block;
-            const int64_t held = static_cast<int64_t>(stream->curBlocksNum());
+            const int64_t needed_tokens =
+                stream->inputLength() + (config != nullptr ? config->max_new_tokens : 0);
+            const int64_t held_tokens = static_cast<int64_t>(stream->curBlocksNum()) * tokens_per_block;
             if (stream->getTimeInfo().first_token_time_us > 0) {
                 continue;  // already materialized and fully reserved
             }
-            remaining_need += std::max<int64_t>(0, needed_blocks - held);
+            remaining_need_tokens += std::max<int64_t>(0, needed_tokens - held_tokens);
             pending.push_back(stream);
         }
     }
-    if (remaining_need <= available_blocks || pending.empty()) {
+    // Hook-firing fingerprint: a zero capacity_failure count must always be
+    // attributable to a measured fit, never to a dead check.
+    RTP_LLM_LOG_INFO("AWI capacity check: op=[%s] pending=%zu remaining_need_tokens=%ld available_tokens=%ld",
+                     operation.operation_id.c_str(),
+                     pending.size(),
+                     remaining_need_tokens,
+                     available_tokens);
+    if (remaining_need_tokens <= available_tokens || pending.empty()) {
         return;
     }
     // Admission can never satisfy the cohort: report the genuine shortage and
     // fail the pending members instead of queueing forever.
-    auto& awi = AwiCollector::instance();
+    const int64_t remaining_need_blocks = (remaining_need_tokens + tokens_per_block - 1) / tokens_per_block;
+    const int64_t available_blocks      = available_tokens / tokens_per_block;
+    auto&         awi                   = AwiCollector::instance();
     for (const auto& stream : pending) {
         const auto generate_input = stream->generateInput();
         AwiEvent   event;
@@ -1324,8 +1347,10 @@ void NormalEngine::checkAwiBarrierCapacity(const AwiOperation& operation) {
             event.request_id     = generate_input->request_id;
             event.awi_request_id = generate_input->request_info.request_id;
         }
-        event.detail_json = "{\"remaining_need_blocks\":" + std::to_string(remaining_need)
-                            + ",\"available_blocks\":" + std::to_string(available_blocks) + "}";
+        event.detail_json = "{\"remaining_need_blocks\":" + std::to_string(remaining_need_blocks)
+                            + ",\"available_blocks\":" + std::to_string(available_blocks)
+                            + ",\"remaining_need_tokens\":" + std::to_string(remaining_need_tokens)
+                            + ",\"available_tokens\":" + std::to_string(available_tokens) + "}";
         awi.recordEvent(std::move(event));
         stream->reportError(ErrorCode::MALLOC_FAILED,
                             "AWI barrier: KV capacity cannot hold the full-context reservation "
