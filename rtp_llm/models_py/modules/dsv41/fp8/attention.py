@@ -1715,6 +1715,26 @@ class AttentionFP8(nn.Module):
         if torch.version.hip is not None:
             # flashinfer is CUDA-only; fp32 math with the same input/output
             # dtype boundary as the CUDA kernel.
+            if x_2d.shape[0] > 32768:
+                # Huge prefill: the monolithic path materializes up to three
+                # [1048320, w] fp32 temporaries — 5.00 GiB each at w=1280 —
+                # and n28 (2026-11-12) died on the first one inside
+                # _prefill_compute_qkv with 165.42 GiB already allocated.
+                # RMS norm is row-local, so run the identical math in 32K-row
+                # chunks; only the bf16 output [T, w] persists.
+                w_f = weight.float()
+                out = torch.empty(
+                    (x_2d.shape[0], x_2d.shape[1]), dtype=x.dtype, device=x.device
+                )
+                for begin in range(0, x_2d.shape[0], 32768):
+                    end = min(begin + 32768, x_2d.shape[0])
+                    xf = x_2d[begin:end].float()
+                    out[begin:end] = (
+                        xf
+                        * torch.rsqrt(xf.square().mean(-1, keepdim=True) + self.eps)
+                        * w_f
+                    ).to(x.dtype)
+                return out.view(orig_shape)
             xf = x_2d.float()
             normed = (
                 xf * torch.rsqrt(xf.square().mean(-1, keepdim=True) + self.eps)
