@@ -105,6 +105,7 @@ def _fp4_group_dequant_bf16(
     scale: torch.Tensor,
     byte_lut: torch.Tensor,
     e8m0_lut: torch.Tensor,
+    out: torch.Tensor = None,
 ) -> torch.Tensor:
     """Exact packed-FP4 -> bf16 dequant for a stacked expert group.
 
@@ -125,7 +126,10 @@ def _fp4_group_dequant_bf16(
         row_chunk = weight.shape[0]
     rows, packed = weight.shape
     in_dim = packed * 2
-    out = torch.empty((rows, in_dim), dtype=torch.bfloat16, device=weight.device)
+    if out is None:
+        out = torch.empty((rows, in_dim), dtype=torch.bfloat16, device=weight.device)
+    else:
+        out = out[:rows, :in_dim]
     wb = weight.view(torch.uint8)
     sb = scale.contiguous().view(torch.uint8)
     # Dequantize one expert (or at most 4096 rows) at a time.  A whole
@@ -472,14 +476,37 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
                 1, lid_c[:, None], (weights[:, k].float() * valid)[:, None]
             )
 
+        # One persistent dequant destination for W1/W3/W2. Each call used
+        # to allocate a fresh 46 MiB bf16 group; at 1M prefill the allocator
+        # had 55 MiB free but no contiguous block for the next one. The three
+        # products have the same element count, so a single buffer serves all
+        # of them and keeps the peak at one group instead of churning one.
+        dequant_numel = max(
+            group * self._W1_w.shape[1] * self._W1_w.shape[2] * 2,
+            group * self._W2_w.shape[1] * self._W2_w.shape[2] * 2,
+        )
+        dequant_buf = getattr(self, "_awi_dequant_buf", None)
+        if (
+            dequant_buf is None
+            or dequant_buf.numel() < dequant_numel
+            or dequant_buf.device != x.device
+        ):
+            dequant_buf = torch.empty(
+                dequant_numel, dtype=torch.bfloat16, device=x.device
+            )
+            self._awi_dequant_buf = dequant_buf
+
         for g in range(n_local // group):
             a = g * group
             b = a + group
+            w1_rows = group * self._W1_w.shape[1]
+            w1_dim = self._W1_w.shape[2] * 2
             w1 = _fp4_group_dequant_bf16(
                 self._W1_w[a:b],
                 self._W1_s[a:b],
                 self._fp4_byte_lut,
                 self._e8m0_byte_lut,
+                out=dequant_buf[: w1_rows * w1_dim].view(w1_rows, w1_dim),
             ).reshape(group, self._W1_w.shape[1], self._W1_w.shape[2] * 2)
             gate = torch.bmm(x_group, w1.transpose(1, 2)).float()
             del w1
@@ -488,6 +515,7 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
                 self._W3_s[a:b],
                 self._fp4_byte_lut,
                 self._e8m0_byte_lut,
+                out=dequant_buf[: w1_rows * w1_dim].view(w1_rows, w1_dim),
             ).reshape(group, self._W3_w.shape[1], self._W3_w.shape[2] * 2)
             up = torch.bmm(x_group, w3.transpose(1, 2)).float()
             del w3
@@ -500,11 +528,14 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             # as Expert.forward does, then bmm the whole group.
             gw = local_w[:, a:b].transpose(0, 1).unsqueeze(-1)
             h = ((torch.nn.functional.silu(gate) * up) * gw).to(torch.bfloat16)
+            w2_rows = group * self._W2_w.shape[1]
+            w2_dim = self._W2_w.shape[2] * 2
             w2 = _fp4_group_dequant_bf16(
                 self._W2_w[a:b],
                 self._W2_s[a:b],
                 self._fp4_byte_lut,
                 self._e8m0_byte_lut,
+                out=dequant_buf[: w2_rows * w2_dim].view(w2_rows, w2_dim),
             ).reshape(group, self._W2_w.shape[1], self._W2_w.shape[2] * 2)
             y.add_(torch.bmm(h, w2.transpose(1, 2)).float().sum(dim=0))
             del w2
