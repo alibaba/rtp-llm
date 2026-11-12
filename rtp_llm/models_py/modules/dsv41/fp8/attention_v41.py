@@ -2064,6 +2064,18 @@ class AttentionV41FP8(AttentionFP8):
                         )
                         if request_bounds is not None:
                             cache[bounds_key] = request_bounds
+                # Hoisted fp32 copy of the indexer keys for the non-fused
+                # selection branch. Before this, keys.float() ran per q-chunk
+                # per key-slice: with chunk_rows=8 at 1M rows that is ~131K
+                # full [key_count, d] bf16->fp32 conversions per ratio-0
+                # layer (n25 journal: 16,380 slice recomputes measured on
+                # the pre-sliced build; n30 layer cadence: slow ratio-0
+                # layers dominate the 6837s 1M prefill). One conversion per
+                # selection call, bit-identical values, 8 GiB transient at
+                # 1M keys freed at loop exit - n29/n30 telemetry shows
+                # 20-30 GiB margin at the selection peak (161.78 alloc /
+                # 171.10 reserved of 191.98).
+                keys_fp32 = None
                 for chunk_index, start in enumerate(range(0, row_count, chunk_rows)):
                     stop = min(start + chunk_rows, row_count)
                     output_rows = (
@@ -2144,15 +2156,20 @@ class AttentionV41FP8(AttentionFP8):
                             if q_lazy_roundtrip
                             else q[chunk]
                         )
+                        if keys_fp32 is None:
+                            keys_fp32 = keys.float()
                         if key_count > 65536:
-                            # keys.float() is a [key_count, d] fp32 monolith
-                            # (8.00 GiB at the 1M-key ratio-0 layers) and was
-                            # recomputed for EVERY q chunk — n25 (2026-11-12)
-                            # OOMed on it with 163.02 GiB allocated / 1.91 GiB
-                            # free ~20 layers deep. Slice the key axis instead:
-                            # identical einsum math as batched matmuls into
-                            # the logits buffer, <=0.5 GiB fp32 key slice +
+                            # Key-axis slicing over the HOISTED fp32 keys
+                            # (see keys_fp32 above): identical einsum math
+                            # as batched matmuls into the logits buffer,
                             # ~128 MiB product temporaries per key chunk.
+                            # n25 (2026-11-12) OOMed converting the monolith
+                            # per q-chunk at the tightest point (163.02 GiB
+                            # allocated / 1.91 GiB free); the single
+                            # conversion now happens at selection entry
+                            # where n29/n30 telemetry shows 20-30 GiB
+                            # headroom (161.78 alloc / 171.10 reserved of
+                            # 191.98 at the selection peak).
                             logits = torch.empty(
                                 (q_chunk.shape[0], q_chunk.shape[1], key_count),
                                 dtype=torch.float32,
@@ -2161,12 +2178,12 @@ class AttentionV41FP8(AttentionFP8):
                             for k0 in range(0, key_count, 65536):
                                 k1 = min(k0 + 65536, key_count)
                                 logits[:, :, k0:k1] = torch.matmul(
-                                    q_chunk, keys[k0:k1].float().t()
+                                    q_chunk, keys_fp32[k0:k1].t()
                                 )
                             logits.relu_()
                         else:
                             logits = torch.einsum(
-                                "thd,kd->thk", q_chunk, keys.float()
+                                "thd,kd->thk", q_chunk, keys_fp32
                             ).relu_()
                         logits = (logits * weights[chunk, :, None]).sum(1)
                         ids = torch.arange(key_count, device=x.device)
@@ -2210,6 +2227,10 @@ class AttentionV41FP8(AttentionFP8):
                     # Same-stream consumers have been enqueued; release the
                     # score before allocating the next bounded chunk.
                     del logits, selected, target
+                # Release the hoisted fp32 keys before the next layer's
+                # working set builds up (same-stream consumers of the
+                # selection outputs are already enqueued).
+                del keys_fp32
         shared["topk"] = {self.layer_id: out}
         return out
 
