@@ -211,8 +211,13 @@ public final class FlexlbTrace {
         }
     }
 
-    /** Record a lifecycle boundary on the request context carried across scheduler threads. */
-    public static void recordScheduleEvent(Context context, String name, Attributes attributes) {
+    /** Records a timestamped point on the request context carried across scheduler threads. */
+    public static void event(Context context, String name) {
+        event(context, name, Attributes.empty());
+    }
+
+    /** Records a timestamped point with attributes using the same fail-open path. */
+    public static void event(Context context, String name, Attributes attributes) {
         if (!enabled) { return; }
         try {
             spanFromContext(context).addEvent(name, attributes);
@@ -231,7 +236,7 @@ public final class FlexlbTrace {
             attributes.put("flexlb.failure.message", detail);
             setScheduleAttribute(context, AttributeKey.stringKey("flexlb.failure.message"), detail);
         }
-        recordScheduleEvent(context, "flexlb.response.ready", attributes.build());
+        event(context, "flexlb.response.ready", attributes.build());
     }
 
     /** Record on the existing request span carried explicitly across scheduler threads. */
