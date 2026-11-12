@@ -281,6 +281,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":pool_metrics",
         ":cache_types",
         ":cp_slot_mapper",
         ":single_type_cache_manager",
@@ -301,6 +302,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":pool_metrics",
         ":cp_slot_mapper",
         ":device_block_pool_config_helper",
         ":coordinator_cache_manager_hdr",
@@ -395,11 +397,9 @@ cc_library(
     name = "cache",
     srcs = [
         "KVCacheManager.cc",
-        "KVCacheMetrics.cc",
     ],
     hdrs = [
         "KVCacheManager.h",
-        "KVCacheMetrics.h",
     ],
     copts = copts() + select({
         "//:using_remote_kv_cache": ["-DRTP_LLM_USE_REMOTE_KV_CACHE=1"],
@@ -407,6 +407,7 @@ cc_library(
     }),
     visibility = ["//visibility:public"],
     deps = [
+        ":pool_metrics",
         "//rtp_llm/cpp/cache/events:kv_cache_event_publisher",
         ":cache_async_context",
         ":cache_core",
@@ -432,4 +433,13 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = ["//rtp_llm/cpp/utils:core_utils"],
+)
+
+cc_library(
+    name = "pool_metrics",
+    srcs = ["metrics/CachePoolMetrics.cc"],
+    hdrs = ["metrics/CachePoolMetrics.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [":cache_types", "//rtp_llm/cpp/utils:core_utils"],
 )
