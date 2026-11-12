@@ -118,6 +118,24 @@ class GatedResidual(nn.Module):
         scales = weight_scales or (None, None, None)
         self.down_projection = make_projection(mix_down, scales[0], role=role)
         self.up_projection = make_projection(mix_up, scales[1], role=role)
+        self.bf16_fp8_up = None
+        if (
+            self.up_projection is not None
+            and self.up_projection.use_scaled_mm
+            and self.up_projection.bias is None
+            and tuple(mix_up.shape) == (10240, 320)
+            and mix_up.dtype == torch.float8_e4m3fn
+            and mix_up.is_cuda
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(mix_up.device) == (9, 0)
+        ):
+            # Prepare before graph capture; preserve the original FP8 weight.
+            self.bf16_fp8_up = (
+                self.up_projection.weight.float() * self.up_projection.scale
+            ).to(torch.bfloat16).contiguous()
+            # A live update cannot refresh this precomputed graph input safely.
+            mix_up._rtp_requires_restart_for_update = True
+            scales[1]._rtp_requires_restart_for_update = True
         self.inject_projection = (
             make_projection(inject, scales[2], role=role)
             if inject is not None
@@ -140,12 +158,11 @@ class GatedResidual(nn.Module):
                 (mix_down, inject, mix_down.new_zeros((padding, hc_hidden))), dim=0
             ).contiguous()
 
-        # Optional candidate changes the down projection's numerical path.
+        # This path changes the down projection's numerical rounding.
         # Build the dequantized copy once during model initialization, never
         # during forward or CUDA Graph replay; unsupported cases fall back.
         if (
-            os.environ.get("RTP_LLM_QWEN4_HC_BF16_DOWN_INJECT", "0") == "1"
-            and inject is not None
+            inject is not None
             and hc_mult == 4
             and self.down_projection is not None
             and self.down_projection.use_scaled_mm
@@ -173,13 +190,15 @@ class GatedResidual(nn.Module):
                     (down_bf16, inject_bf16, down_bf16.new_zeros((padding, hc_hidden))),
                     dim=0,
                 ).contiguous()
+                for source in (mix_down, scales[0], inject, scales[2]):
+                    if source is not None:
+                        source._rtp_requires_restart_for_update = True
 
     def _use_bf16_down_inject(self, x: torch.Tensor) -> bool:
-        """Choose the opt-in candidate before graph capture; caller recaptures on changes."""
+        """Select the prebuilt BF16 projection when its input is supported."""
         merged = self.bf16_fp8_down_inject
         return (
-            os.environ.get("RTP_LLM_QWEN4_HC_BF16_DOWN_INJECT", "0") == "1"
-            and merged is not None
+            merged is not None
             and x.is_cuda
             and x.dtype == torch.bfloat16
             and x.is_contiguous()
@@ -245,8 +264,7 @@ class GatedResidual(nn.Module):
             and tuple(self.down_projection.weight.shape) == (320, 10240)
         )
         bf16_candidate = (
-            os.environ.get("RTP_LLM_QWEN4_HC_FUSION_EXTENDED", "0") == "1"
-            and self.down_projection is None
+            self.down_projection is None
             and self.merged_down_inject is not None
             and hyper_input.is_cuda
             and torch.version.hip is None
@@ -280,8 +298,7 @@ class GatedResidual(nn.Module):
         merged = self.bf16_fp8_down_inject if bf16_fp8_candidate else self.merged_down_inject
         rows = normed.numel() // self.hc_hidden_size
         extended_bf16 = (
-            os.environ.get("RTP_LLM_QWEN4_HC_FUSION_EXTENDED", "0") == "1"
-            and merged is not None
+            merged is not None
             and normed.is_cuda
             and torch.version.hip is None
             and 33 <= rows <= 12288
@@ -341,7 +358,18 @@ class GatedResidual(nn.Module):
                 mix, inject_weights = fused
         mixed = None
         up = self.up_projection
-        if up is not None and up.bias is None and up.role in ("DECODE", "PDFUSION"):
+        bf16_up = self.bf16_fp8_up
+        use_bf16_up = (
+            bf16_up is not None
+            and mix.dtype == torch.bfloat16
+            and mix.device == bf16_up.device
+        )
+        if (
+            not use_bf16_up
+            and up is not None
+            and up.bias is None
+            and up.role in ("DECODE", "PDFUSION")
+        ):
             from rtp_llm.models_py.triton_kernels.common.gated_residual_up_mix_triton import (
                 try_fp8_up_mix,
             )
@@ -349,6 +377,7 @@ class GatedResidual(nn.Module):
             mixed = try_fp8_up_mix(mix, up.weight, up.scale, normed, self.hc_mult)
         if (
             mixed is None
+            and not use_bf16_up
             and up is not None
             and up.bias is None
             and up.role in ("PREFILL", "DECODE", "PDFUSION")
@@ -361,7 +390,11 @@ class GatedResidual(nn.Module):
                 mix, up.weight, up.scale, normed, self.hc_mult
             )
         if mixed is None:
-            mix_logits = dense_projection(mix, self.mix_up, self.up_projection)
+            mix_logits = (
+                F.linear(mix, bf16_up)
+                if use_bf16_up
+                else dense_projection(mix, self.mix_up, self.up_projection)
+            )
             branches = (self.hc_mult, self.hidden_size)
             fused_mix = False
             if normed.is_cuda and torch.version.hip is None:
