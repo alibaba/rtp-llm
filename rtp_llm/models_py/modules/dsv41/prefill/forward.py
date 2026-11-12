@@ -407,6 +407,16 @@ def forward_layers(
             idx_w=v4._prefill_ws_idx_w,
             align_bytes=(64 << 20) if v41 else (1 << 30),
         )
+        if input_ids.size(0) > 65536:
+            # Huge-prefill memory telemetry (see the per-layer log below):
+            # the delta from the boot census localizes the workspace cost.
+            logging.info(
+                "[awi][mem] prefill workspace ready: t=%d allocated=%.2f GiB "
+                "reserved=%.2f GiB",
+                input_ids.size(0),
+                torch.cuda.memory_allocated() / 2**30,
+                torch.cuda.memory_reserved() / 2**30,
+            )
 
     # Build + propagate CP context once per prefill step. Under CP the
     # caller hands us a per-rank chunk slice (T_local = chunk_length),
@@ -659,7 +669,28 @@ def forward_layers(
                 else v4.layers
             )
             engram_prefetch = getattr(v4, "_engram_lookup_prefetch", None)
+            _awi_mem_log = input_ids.size(0) > 65536
             for layer_idx, layer_call in enumerate(layer_calls):
+                if _awi_mem_log:
+                    # Per-layer GPU memory telemetry for huge prefills.
+                    # n15 (2026-11-12): all 8 ranks OOMed ~2.5 min into the
+                    # first surviving 1M prefill requesting the 10 GiB
+                    # collapse readout with 176.69 GiB allocated, while only
+                    # ~139 GiB is explainable (n14 layer-0 census 128.28 +
+                    # MoE final_out cache 10.74). This curve - allocated at
+                    # each layer boundary plus the intra-layer peak since
+                    # the previous boundary - localizes the remaining ~37
+                    # GiB (per-layer retention vs transient overlap) so the
+                    # next reduction targets evidence, not guesses.
+                    logging.info(
+                        "[awi][mem] prefill layer %02d begin: allocated=%.2f "
+                        "GiB peak_since_prev_layer=%.2f GiB reserved=%.2f GiB",
+                        layer_idx,
+                        torch.cuda.memory_allocated() / 2**30,
+                        torch.cuda.max_memory_allocated() / 2**30,
+                        torch.cuda.memory_reserved() / 2**30,
+                    )
+                    torch.cuda.reset_peak_memory_stats()
                 if layer_idx == 19 and ced_requested:
                     ced_tail = CEDPlan.create(
                         v4,
