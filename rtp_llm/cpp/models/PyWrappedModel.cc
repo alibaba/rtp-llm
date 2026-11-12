@@ -1394,13 +1394,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         cache_store_write_cycle.finish();
 
-        if (py_model_inputs.attention_inputs.is_prefill && graph_runner != nullptr) {
+        if (py_model_inputs.attention_inputs.is_prefill && graph_runner_ != nullptr) {
             // Capture the deferred decode graph after the prefill's Python
             // forward has returned.  Doing it here (rather than at the start
             // of the first decode) means captureDecode() cannot re-enter an
             // active Python model call, and the full-context prefill scratch
             // has already been released.
-            graph_runner->finishDeferredDecodeInit();
+            graph_runner_->finishDeferredDecodeInit();
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
