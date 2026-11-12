@@ -6,24 +6,24 @@ from datetime import datetime
 from pathlib import Path
 
 
-def reject_constant(value):
+def _reject_constant(value):
     raise ValueError(f"Non-finite JSON number: {value}")
 
 
-def finite_float(value):
+def _finite_float(value):
     parsed = float(value)
     if not math.isfinite(parsed):
         raise ValueError(f"Non-finite JSON number: {value}")
     return parsed
 
 
+def _decode_json(text):
+    return json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
+
+
 def read_json(path):
     try:
-        return json.loads(
-            Path(path).read_text(encoding="utf-8"),
-            parse_constant=reject_constant,
-            parse_float=finite_float,
-        )
+        return _decode_json(Path(path).read_text(encoding="utf-8"))
     except OSError as error:
         raise ValueError(f"{path}: {error.strerror}") from error
     except (UnicodeError, ValueError) as error:
@@ -112,9 +112,7 @@ def load_experiment_view(directory):
             if not line.strip():
                 continue
             try:
-                row = json.loads(
-                    line, parse_constant=reject_constant, parse_float=finite_float
-                )
+                row = _decode_json(line)
                 if not isinstance(row, dict):
                     raise ValueError("expected an object")
                 rows.append((number, row))
