@@ -82,7 +82,7 @@ def load_experiment_view(directory):
             raise ValueError("finished_at must be after started_at")
         if result.get("status") not in ("PASS", "FAIL", "ERROR", "CANCELLED"):
             raise ValueError("invalid status")
-        if not isinstance(result.get("cleanup_errors", []), list):
+        if not isinstance(result.get("cleanup_errors"), list):
             raise ValueError("cleanup_errors must be a list")
     except (ValueError, KeyError, TypeError, AttributeError, OverflowError) as error:
         raise ValueError(f"{path}: {error}") from error
@@ -240,10 +240,8 @@ def load_experiment_view(directory):
                 gate.get("args"), dict
             ):
                 raise ValueError("expect and args must be objects")
-            unit = gate["unit"]
-            if not isinstance(unit, str):
-                warnings.append(f"gates.jsonl:{number}: unit must be a string")
-                unit = ""
+            if not isinstance(gate["unit"], str):
+                raise ValueError("unit must be a string")
             a, b = windows.get(observation_key(gate), (None, None))
             gates.append(
                 {
@@ -252,7 +250,6 @@ def load_experiment_view(directory):
                         "describe", gate["step_id"]
                     ),
                     "point": point,
-                    "unit": unit,
                     "from": a,
                     "to": b,
                 }

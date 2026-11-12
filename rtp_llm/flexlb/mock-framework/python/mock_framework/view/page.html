@@ -897,7 +897,7 @@
               experiment.result.status +
               (experiment.result.error ? " · " + experiment.result.error : "") +
               "；清理错误：" +
-              ((experiment.result.cleanup_errors ?? []).join("；") || "无") +
+              (experiment.result.cleanup_errors.join("；") || "无") +
               "；采集：" +
               (experiment.collection === null
                 ? "未采集"

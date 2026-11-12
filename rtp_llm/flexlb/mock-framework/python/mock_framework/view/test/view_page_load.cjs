@@ -23,10 +23,11 @@ for (const initiallyReady of [true, false]) {
    createElement:element,createTextNode:text=>text,querySelectorAll:()=>[]};
   const ready = {status:'ready',url:'http://localhost/d/embedded',open_url:'http://localhost/d/full',
    filters:{prefill_instance:['127.0.0.1:1001','127.0.0.1:1002'],decode_instance:['127.0.0.1:1003','127.0.0.1:1004'],vit_instance:includeVit?['127.0.0.1:1005','127.0.0.1:1006']:[],master_instance:['127.0.0.1:2001','127.0.0.1:2002'],client_instance:['127.0.0.1:3001','127.0.0.1:3002']},annotations:{steps:['kill_a','kill_b'],selected}};
-  const body = {name:'test',describe:'',result:{status:'PASS'},start:1000,end:2000,gates:[],events:[],warnings:[],effective:{},
+  const body = {name:'test',describe:'',result:{status:'ERROR',cleanup_errors:['saved cleanup error']},start:1000,end:2000,gates:[],events:[],warnings:[],effective:{},
    collection:{complete:true},metrics:initiallyReady?ready:{status:'starting',url:null}};
   const context = vm.createContext({document,URL,URLSearchParams,setTimeout(){},fetch:async url=>({ok:true,json:async()=>url==='/api/experiment'?body:ready})});
   await vm.runInContext(source+'\nload()',context);
+  assert.match(elements.get('notice').textContent,/saved cleanup error/);
   if(!initiallyReady) {
    assert.equal(frameLoads.length,0);
    await vm.runInContext('refreshMetrics()',context);

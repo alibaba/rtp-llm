@@ -403,6 +403,17 @@ def test_invalid_core_result_names_its_artifact(completed, value):
         load_experiment_view(completed)
 
 
+def test_result_requires_cleanup_errors(completed):
+    path = completed / "result.json"
+    result = json.loads(path.read_text())
+    del result["cleanup_errors"]
+    write(path, result)
+    with pytest.raises(
+        ValueError, match=r"result\.json: cleanup_errors must be a list"
+    ):
+        load_experiment_view(completed)
+
+
 def test_metrics_endpoint_reflects_service_changes(completed):
     body = load_experiment_view(completed)
     body["metrics"] = {"status": "starting", "url": None, "error": None}
@@ -848,14 +859,14 @@ def test_gate_requires_unit_and_window_requires_step_identity(completed):
     assert "gates.jsonl:2: 'unit'" in body["warnings"]
 
 
-def test_invalid_unit_metadata_does_not_hide_a_saved_gate(completed):
+def test_gate_with_invalid_unit_is_skipped(completed):
     path = completed / "gates.jsonl"
     gates = [json.loads(line) for line in path.read_text().splitlines()]
     gates[0]["unit"] = None
     path.write_text("".join(json.dumps(gate) + "\n" for gate in gates))
     body = load_experiment_view(completed)
-    assert len(body["gates"]) == 2
-    assert body["gates"][0]["actual"] == 1
+    (gate,) = body["gates"]
+    assert gate["step_id"] == "raw"
     assert "gates.jsonl:1: unit must be a string" in body["warnings"]
 
 
