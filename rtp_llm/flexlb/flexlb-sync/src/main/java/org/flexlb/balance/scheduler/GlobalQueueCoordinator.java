@@ -369,7 +369,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             // A wakeup grants a fresh fleet-wide decision, not an obligation
             // to return to the endpoint which published the capacity event.
             PlacementResult<RouteAdmission, PlacementKey> result =
-                    router.select(entry.context, entry.routingGroup);
+                    FlexlbTrace.stage(entry.context.getTraceContext(), "rtp_llm.flexlb.pd_decision",
+                            () -> router.select(entry.context, entry.routingGroup));
             handle.recordDiagnostics(result.diagnostics());
             FlexlbTrace.recordPlacement(entry.context.getTraceContext(), decisionStartedNanos,
                     result.status().name(), result.diagnostics(), null);
