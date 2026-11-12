@@ -7,7 +7,6 @@ import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.device.device_type import is_cuda
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
 from rtp_llm.models_py.model_desc.block_map import (
@@ -932,12 +931,9 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             kv_cache.kv_cache_base.shape[0], -1
         )
         is_target_verify = self._is_target_verify(attn_inputs, attn_meta)
-        if (
-            is_target_verify
-            and attn_inputs.linear_replay is not None
-            and mixed_qkv.is_cuda
-            and is_cuda()
-        ):
+        if is_target_verify and kv_cache.linear_replay is not None:
+            if attn_inputs.linear_replay is None:
+                raise RuntimeError("target LINEAR replay requires round metadata")
             self._linear_replay = LinearReplay.bind(
                 self._linear_replay,
                 self,

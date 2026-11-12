@@ -9,7 +9,6 @@ from typing import Dict, Optional
 import torch
 from torch import nn
 
-from rtp_llm.device.device_type import is_cuda
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
     causal_conv1d_fn,
@@ -602,12 +601,9 @@ class KdaDecode(KdaBase):
         )
         is_target_verify = attn_meta.is_target_verify
 
-        if (
-            is_target_verify
-            and attn_inputs.linear_replay is not None
-            and mixed_qkv.is_cuda
-            and is_cuda()
-        ):
+        if is_target_verify and kv_cache.linear_replay is not None:
+            if attn_inputs.linear_replay is None:
+                raise RuntimeError("target LINEAR replay requires round metadata")
             self._linear_replay = LinearReplay.bind(
                 self._linear_replay,
                 self,
