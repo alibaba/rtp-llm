@@ -66,7 +66,7 @@ struct NaviSchedNodeSnapshot {
     int64_t agentStartTimeUs = 0;
 };
 
-// One immutable READY-only lookup per compatible peer group and schedule round.
+// One immutable READY-only lookup per receiver and schedule round.
 // Each row maps a receiver's existing local prefix to the usable total prefix.
 struct NaviSchedPeerCacheSuffixLookup {
     std::vector<std::vector<int64_t>> endBlocks;

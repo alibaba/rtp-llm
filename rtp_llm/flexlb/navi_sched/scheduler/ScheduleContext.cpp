@@ -584,11 +584,12 @@ void NaviSchedScheduleContext::preparePeerCacheCounts()
     }
     struct ReadyGroup {
         NaviSchedCachePolicy policy;
-        std::vector<uint8_t> states;
-        std::shared_ptr<const NaviSchedPeerCacheSuffixLookup> lookup;
+        std::vector<uint8_t> tailReadyStates;
+        std::vector<size_t> nodeIndexes;
     };
     std::unordered_map<std::string, ReadyGroup> groups;
     std::vector<std::string> keys(_scheduleNodes.size());
+    std::vector<std::vector<uint8_t>> nodeReadyStates(_scheduleNodes.size());
     std::vector<uint8_t> states;
     for (size_t n = 0; n < _scheduleNodes.size(); ++n) {
         auto &node = _scheduleNodes[n];
@@ -613,28 +614,53 @@ void NaviSchedScheduleContext::preparePeerCacheCounts()
                    std::to_string(p.mambaAlign) + ":" +
                    std::to_string(p.fullAttentionQueryDropTokens);
         keys[n] = key;
-        auto it = groups.find(key);
-        if (it == groups.end()) {
-            groups.emplace(key, ReadyGroup{p, states, nullptr});
-        } else {
-            // The SDK may fetch different READY keys/groups from different peers.
-            // Union only published physical observations, never pending estimates.
-            for (size_t i = 0; i < states.size(); ++i) {
-                it->second.states[i] |= states[i];
-            }
+        auto entry = groups.find(key);
+        if (entry == groups.end()) {
+            entry = groups.emplace(
+                key, ReadyGroup{p, std::vector<uint8_t>(states.size(), 0), {}}).first;
         }
+        auto &group = entry->second;
+        group.nodeIndexes.push_back(n);
+        for (size_t i = 0; i < states.size(); ++i) {
+            group.tailReadyStates[i] |= states[i] & 2;
+        }
+        nodeReadyStates[n] = states;
     }
-    for (auto &entry : groups) {
-        auto &group = entry.second;
-        group.lookup = NaviSchedPeerCacheSuffixLookup::build(_requests, requestKeyIndexes,
-                                                             group.states, group.policy);
-    }
+    std::vector<uint8_t> readableStates(queryKeys.size());
     for (size_t n = 0; n < _scheduleNodes.size(); ++n) {
         // A receiver's read failure does not remove its healthy resident objects
         // from the supplier pool. Gate only cross-node consumption.
-        if (!keys[n].empty() && _scheduleNodes[n]._peerCacheReadAvailable) {
-            _scheduleNodes[n]._peerCacheSuffixLookup = groups.at(keys[n]).lookup;
+        if (keys[n].empty() || !_scheduleNodes[n]._peerCacheReadAvailable) {
+            continue;
         }
+        const auto &group = groups.at(keys[n]);
+        std::shared_ptr<NaviSchedPeerCacheSuffixLookup> bestLookup;
+        for (const auto supplier : group.nodeIndexes) {
+            // Native PREFIX reads combine receiver-local Full objects with one
+            // remote Full supplier. Linear groups may use other READY peers.
+            for (size_t i = 0; i < readableStates.size(); ++i) {
+                readableStates[i] =
+                    ((nodeReadyStates[n][i] | nodeReadyStates[supplier][i]) & 1) |
+                    group.tailReadyStates[i];
+            }
+            const auto lookup = NaviSchedPeerCacheSuffixLookup::build(
+                _requests, requestKeyIndexes, readableStates, group.policy);
+            if (!lookup) {
+                continue;
+            }
+            if (!bestLookup) {
+                bestLookup = std::make_shared<NaviSchedPeerCacheSuffixLookup>(*lookup);
+                continue;
+            }
+            for (size_t r = 0; r < bestLookup->endBlocks.size(); ++r) {
+                auto &best = bestLookup->endBlocks[r];
+                const auto &candidate = lookup->endBlocks[r];
+                for (size_t i = 0; i < best.size(); ++i) {
+                    best[i] = std::max(best[i], candidate[i]);
+                }
+            }
+        }
+        _scheduleNodes[n]._peerCacheSuffixLookup = std::move(bestLookup);
     }
     // Freeze the single local observation plus READY suffix before optimization.
     for (size_t n = 0; n < _scheduleNodes.size(); ++n) {
