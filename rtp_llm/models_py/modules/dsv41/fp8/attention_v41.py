@@ -8,6 +8,7 @@ layers write global pools; consumers reuse source KV and index selections.
 
 from __future__ import annotations
 
+import logging
 import os
 from bisect import bisect_left
 
@@ -2076,6 +2077,26 @@ class AttentionV41FP8(AttentionFP8):
                 # 20-30 GiB margin at the selection peak (161.78 alloc /
                 # 171.10 reserved of 191.98).
                 keys_fp32 = None
+                # Sampled phase timing for the heavy non-fused selection
+                # (n31 evidence: the keys-fp32 hoist changed nothing - the
+                # ~16 min ratio-0 layers are dominated by the per-q-chunk
+                # score matmuls and/or the 1M-wide topk, and we cannot
+                # choose the next speed mechanism without knowing which).
+                # Sync only on sampled chunks (1 in 16384) so the measured
+                # rows stay representative and the overhead stays ~0.
+                sel_profile = (
+                    (not sparse_request)
+                    and (not fused_indexer)
+                    and key_count > 262144
+                )
+                if sel_profile:
+                    from time import perf_counter as _pc
+
+                    torch.cuda.synchronize()
+                    sel_t0 = _pc()
+                    sel_mm = 0.0
+                    sel_tk = 0.0
+                    sel_n = 0
                 for chunk_index, start in enumerate(range(0, row_count, chunk_rows)):
                     stop = min(start + chunk_rows, row_count)
                     output_rows = (
@@ -2133,6 +2154,7 @@ class AttentionV41FP8(AttentionFP8):
                             if not contiguous:
                                 out[output_rows] = mapped
                         continue
+                    sel_sample = False
                     if fused_indexer:
                         with record_function_range(
                             "dsv41.prefill.indexer.fused_logits"
@@ -2148,6 +2170,10 @@ class AttentionV41FP8(AttentionFP8):
                                 **({"bounds": bounds} if bounds is not None else {}),
                             )
                     else:
+                        sel_sample = sel_profile and (chunk_index % 16384 == 0)
+                        if sel_sample:
+                            torch.cuda.synchronize()
+                            sel_ta = _pc()
                         # Lazy per-chunk roundtrip for huge prefills:
                         # identical row-local math, ~1 MiB temporaries,
                         # and no full-T fp32 q (see q_lazy_roundtrip).
@@ -2188,6 +2214,9 @@ class AttentionV41FP8(AttentionFP8):
                         logits = (logits * weights[chunk, :, None]).sum(1)
                         ids = torch.arange(key_count, device=x.device)
                         logits.masked_fill_(ids[None] >= visible[:, None], -torch.inf)
+                        if sel_sample:
+                            torch.cuda.synchronize()
+                            sel_tb = _pc()
                     candidates = shared.get("candidates")
                     if candidates is not None:
                         if publish_candidates or (
@@ -2224,6 +2253,12 @@ class AttentionV41FP8(AttentionFP8):
                         del scores
                     if selected is not target:
                         out[output_rows, :k] = selected
+                    if sel_sample:
+                        torch.cuda.synchronize()
+                        sel_tc = _pc()
+                        sel_mm += sel_tb - sel_ta
+                        sel_tk += sel_tc - sel_tb
+                        sel_n += 1
                     # Same-stream consumers have been enqueued; release the
                     # score before allocating the next bounded chunk.
                     del logits, selected, target
@@ -2231,6 +2266,24 @@ class AttentionV41FP8(AttentionFP8):
                 # working set builds up (same-stream consumers of the
                 # selection outputs are already enqueued).
                 del keys_fp32
+                if sel_profile:
+                    torch.cuda.synchronize()
+                    sel_total = _pc() - sel_t0
+                    sel_chunks = (row_count + chunk_rows - 1) // chunk_rows
+                    sel_scale = sel_chunks / max(sel_n, 1)
+                    logging.info(
+                        "[awi][sel] layer=%d key_count=%d chunks=%d "
+                        "total_s=%.1f matmul_s~%.1f topk_s~%.1f "
+                        "other_s~%.1f sampled=%d",
+                        self.layer_id,
+                        key_count,
+                        sel_chunks,
+                        sel_total,
+                        sel_mm * sel_scale,
+                        sel_tk * sel_scale,
+                        max(sel_total - (sel_mm + sel_tk) * sel_scale, 0.0),
+                        sel_n,
+                    )
         shared["topk"] = {self.layer_id: out}
         return out
 
