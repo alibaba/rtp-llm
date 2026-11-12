@@ -431,11 +431,11 @@ int CoordinatorCacheManager::deviceCacheMetricTokensPerBlock() const {
     return seqSizePerBlock();
 }
 
-std::vector<KVCachePoolMetricsSnapshot> CoordinatorCacheManager::poolMetricsSnapshots() const {
+std::vector<CachePoolMetrics> CoordinatorCacheManager::poolMetrics() const {
     const std::vector<SingleTypeCacheManagerPtr> groups = cacheGroups();
     std::unordered_set<const IBlockPool*>        reported_pools;
-    std::vector<KVCachePoolMetricsSnapshot>      snapshots;
-    snapshots.reserve(groups.size());
+    std::vector<CachePoolMetrics>                metrics_list;
+    metrics_list.reserve(groups.size());
     for (const SingleTypeCacheManagerPtr& group : groups) {
         if (group == nullptr || group->blockPool() == nullptr) {
             continue;
@@ -448,30 +448,31 @@ std::vector<KVCachePoolMetricsSnapshot> CoordinatorCacheManager::poolMetricsSnap
         }
 
         const size_t               pool_index = groupIdForTag(group->tag());
-        KVCachePoolMetricsSnapshot snapshot;
-        snapshot.pool_index                 = pool_index;
-        snapshot.pool_name                  = pool->poolName();
-        snapshot.block_size_bytes           = pool->blockSizeBytes();
-        snapshot.total_blocks               = pool->totalBlocksNum();
-        snapshot.free_blocks                = pool->freeBlocksNum();
-        snapshot.used_blocks                = snapshot.total_blocks - snapshot.free_blocks;
-        snapshot.active_blocks              = pool->activeBlocksNum();
-        snapshot.available_blocks           = pool->availableBlocksNum();
-        snapshot.reserve_blocks             = reserveBlocksForPoolMetrics(pool_index);
-        snapshot.request_ref_blocks         = pool->referencedBlocksNum();
-        snapshot.remote_connector_ref_blocks = pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR);
-        snapshot.pd_connector_ref_blocks     = pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR);
-        snapshot.block_cache_ref_blocks     = pool->referencedBlocksNum(BlockTreeRefType::CACHE);
-        snapshot.load_ref_blocks            = pool->referencedBlocksNum(BlockTreeRefType::LOAD);
-        snapshot.eviction_target_ref_blocks  = pool->referencedBlocksNum(BlockTreeRefType::EVICTION);
-        snapshot.frozen_ref_blocks          = pool->referencedBlocksNum(BlockTreeRefType::FROZEN);
-        snapshot.used_ratio                 = snapshot.total_blocks == 0 ?
-                                                  0.0f :
-                                                  static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
-                                                     / static_cast<double>(snapshot.total_blocks));
-        snapshots.push_back(std::move(snapshot));
+        CachePoolMetrics           metrics_data;
+        metrics_data.pool_index                  = pool_index;
+        metrics_data.pool_name                   = pool->poolName();
+        metrics_data.block_size_bytes            = pool->blockSizeBytes();
+        metrics_data.total_blocks                = pool->totalBlocksNum();
+        metrics_data.free_blocks                 = pool->freeBlocksNum();
+        metrics_data.used_blocks                 = metrics_data.total_blocks - metrics_data.free_blocks;
+        metrics_data.active_blocks               = pool->activeBlocksNum();
+        metrics_data.available_blocks            = pool->availableBlocksNum();
+        metrics_data.reserve_blocks              = reserveBlocksForPoolMetrics(pool_index);
+        metrics_data.request_ref_blocks          = pool->referencedBlocksNum();
+        metrics_data.remote_connector_ref_blocks = pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR);
+        metrics_data.pd_connector_ref_blocks     = pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR);
+        metrics_data.block_cache_ref_blocks      = pool->referencedBlocksNum(BlockTreeRefType::CACHE);
+        metrics_data.load_ref_blocks             = pool->referencedBlocksNum(BlockTreeRefType::LOAD);
+        metrics_data.eviction_target_ref_blocks  = pool->referencedBlocksNum(BlockTreeRefType::EVICTION);
+        metrics_data.frozen_ref_blocks           = pool->referencedBlocksNum(BlockTreeRefType::FROZEN);
+        metrics_data.used_ratio =
+            metrics_data.total_blocks == 0 ?
+                0.0f :
+                static_cast<float>(100.0 * (metrics_data.total_blocks - metrics_data.available_blocks)
+                                   / static_cast<double>(metrics_data.total_blocks));
+        metrics_list.push_back(std::move(metrics_data));
     }
-    return snapshots;
+    return metrics_list;
 }
 
 bool CoordinatorCacheManager::cpCompactSwaGroup(const std::string&                   tag,

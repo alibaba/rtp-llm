@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
@@ -21,13 +21,13 @@ namespace {
 
 using ScriptedTransferEngine = block_tree_cache_test::ScriptedPerRankBlockTransferEngine;
 
-TEST(EvictionTimingSnapshotTest, CapturesCandidateMetadataAtSelectionTime) {
+TEST(EvictionTimingMetricsTest, CapturesCandidateMetadataAtSelectionTime) {
     CandidateMeta candidate_meta;
     candidate_meta.tier_enter_time_us  = 10;
     candidate_meta.last_access_time_us = 30;
 
     const int64_t                before = currentTimeUs();
-    const EvictionTimingSnapshot timing(candidate_meta);
+    const EvictionTimingMetrics  timing(candidate_meta);
     const int64_t                after = currentTimeUs();
 
     EXPECT_EQ(timing.tier_enter_time_us, 10);
@@ -174,7 +174,7 @@ EvictionTransferTask makeCopyTask() {
 
 TEST(EvictionTransferTaskTest, ConstructorOwnsDescriptorsAndTimings) {
     TransferDescriptor     descriptor = TransferDescriptor::deviceToHost(0, {1, 2}, 3);
-    EvictionTimingSnapshot timing;
+    EvictionTimingMetrics  timing;
     timing.selected_time_us = 17;
 
     EvictionTransferTask task(TransferTask({descriptor}, std::chrono::seconds(30)), {timing});

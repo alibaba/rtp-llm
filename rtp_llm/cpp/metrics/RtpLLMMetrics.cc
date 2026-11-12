@@ -24,6 +24,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMCachePoolMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheTransferMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheEvictionMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheInsertMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheLockMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheReuseMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMTokenPSMetrics);
@@ -941,13 +942,17 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*         tag
     }
 }
 
-void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*                tags,
-                                        RtpLLMCacheVictimSelectionMetricsCollector* collector) {
+void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*               tags,
+                                        RtpLLMCacheEvictionVictimMetricsCollector* collector) {
     kmonitor::MetricsTags selection_tags = tags ? *tags : kmonitor::MetricsTags{};
     if (collector->skip_reason != nullptr) {
         selection_tags.AddTag("reason", collector->skip_reason);
         choose_victim_skip_qps_metric->Report(&selection_tags, collector->skipped);
         return;
+    }
+    if (collector->calls > 0) {
+        evictable_candidate_count_metric->Report(&selection_tags,
+                                                 static_cast<double>(collector->candidates_sum) / collector->calls);
     }
     choose_victim_latency_sum_us_metric->Report(&selection_tags, collector->latency_sum_us);
     choose_victim_scanned_candidates_qps_metric->Report(&selection_tags, collector->scanned_candidates);
@@ -958,6 +963,19 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*            
     auto not_selected_tags = selection_tags;
     not_selected_tags.AddTag("selected", "false");
     choose_victim_qps_metric->Report(&not_selected_tags, collector->calls - collector->selected);
+}
+
+bool RtpLLMCacheLockMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(total_latency_us_metric, "rtp_llm_kv_cache_lock_total_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(wait_latency_us_metric, "rtp_llm_kv_cache_lock_wait_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(hold_latency_us_metric, "rtp_llm_kv_cache_lock_hold_latency_us");
+    return true;
+}
+
+void RtpLLMCacheLockMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheLockMetricsCollector* collector) {
+    total_latency_us_metric->Report(tags, collector->total_latency_us);
+    wait_latency_us_metric->Report(tags, collector->wait_latency_us);
+    hold_latency_us_metric->Report(tags, collector->hold_latency_us);
 }
 
 bool RtpLLMCacheInsertMetrics::init(kmonitor::MetricsGroupManager* manager) {

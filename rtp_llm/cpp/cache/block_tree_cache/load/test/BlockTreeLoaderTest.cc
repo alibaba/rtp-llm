@@ -274,8 +274,8 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     environment->insertRequestPath();
     environment->releaseRequestRefs();
     auto device_hit = environment->cache->match(environment->keys);
-    ASSERT_EQ(device_hit.reuse_time_metrics_snapshots.size(), 4u);
-    for (const auto& snapshot : device_hit.reuse_time_metrics_snapshots) {
+    ASSERT_EQ(device_hit.reuse_time_metrics.size(), 4u);
+    for (const auto& snapshot : device_hit.reuse_time_metrics) {
         EXPECT_EQ(snapshot.tier, Tier::DEVICE);
         EXPECT_TRUE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
     }
@@ -286,8 +286,8 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
 
     BlockTreeMatchResult result = environment->cache->match(environment->keys);
     EXPECT_EQ(result.matched_device_blocks, 0u);
-    ASSERT_EQ(result.reuse_time_metrics_snapshots.size(), 4u);
-    for (const auto& snapshot : result.reuse_time_metrics_snapshots) {
+    ASSERT_EQ(result.reuse_time_metrics.size(), 4u);
+    for (const auto& snapshot : result.reuse_time_metrics) {
         EXPECT_EQ(snapshot.tier, Tier::HOST);
         EXPECT_TRUE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
     }
@@ -333,15 +333,15 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     EXPECT_EQ(environment->cache->evictor_.candidateCount(/*group_set_id=*/0, Tier::DEVICE), 1u);
     environment->expectPayloads();
     auto device_first_hit = environment->cache->match(environment->keys);
-    ASSERT_EQ(device_first_hit.reuse_time_metrics_snapshots.size(), 4u);
-    for (const auto& snapshot : device_first_hit.reuse_time_metrics_snapshots) {
+    ASSERT_EQ(device_first_hit.reuse_time_metrics.size(), 4u);
+    for (const auto& snapshot : device_first_hit.reuse_time_metrics) {
         EXPECT_EQ(snapshot.tier, Tier::DEVICE);
         EXPECT_TRUE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
     }
     environment->releaseMatch(device_first_hit);
     auto device_second_hit = environment->cache->match(environment->keys);
-    ASSERT_EQ(device_second_hit.reuse_time_metrics_snapshots.size(), 4u);
-    for (const auto& snapshot : device_second_hit.reuse_time_metrics_snapshots) {
+    ASSERT_EQ(device_second_hit.reuse_time_metrics.size(), 4u);
+    for (const auto& snapshot : device_second_hit.reuse_time_metrics) {
         EXPECT_FALSE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
     }
     environment->releaseMatch(device_second_hit);
@@ -541,11 +541,11 @@ TEST_P(BlockTreeLoaderReuseTimeTest, DevicePrefixAndLogicalSuffixShareReuseAndEv
     }
 
     const size_t expected_samples = device_prefix_length == 2 ? 10 : device_prefix_length == 3 ? 9 : 7;
-    ASSERT_EQ(result.reuse_time_metrics_snapshots.size(), expected_samples);
-    for (const auto& snapshot : result.reuse_time_metrics_snapshots) {
-        EXPECT_TRUE(snapshot.tier == Tier::DEVICE || snapshot.tier == Tier::HOST);
-        ASSERT_TRUE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
-        EXPECT_EQ(snapshot.reuse_block_hit_idletime_ms, *snapshot.reuse_block_first_hit_idletime_ms);
+    ASSERT_EQ(result.reuse_time_metrics.size(), expected_samples);
+    for (const auto& metrics_data : result.reuse_time_metrics) {
+        EXPECT_TRUE(metrics_data.tier == Tier::DEVICE || metrics_data.tier == Tier::HOST);
+        ASSERT_TRUE(metrics_data.reuse_block_first_hit_idletime_ms.has_value());
+        EXPECT_EQ(metrics_data.reuse_block_hit_idletime_ms, *metrics_data.reuse_block_first_hit_idletime_ms);
     }
     const uint64_t            access_seq = path.front()->group_set_resources[0].candidate_meta.last_access_seq;
     const std::vector<size_t> reused_suffix_starts = {0, 2, 3};
@@ -564,7 +564,7 @@ TEST_P(BlockTreeLoaderReuseTimeTest, DevicePrefixAndLogicalSuffixShareReuseAndEv
                 EXPECT_EQ(meta.hit_count, 1u);
                 EXPECT_GE(meta.tier_last_hit_time_us, meta.tier_enter_time_us);
                 EXPECT_EQ(meta.last_access_time_us, meta.tier_last_hit_time_us);
-                EXPECT_EQ(EvictionTimingSnapshot(meta).last_access_time_us, meta.tier_last_hit_time_us);
+                EXPECT_EQ(EvictionTimingMetrics(meta).last_access_time_us, meta.tier_last_hit_time_us);
             } else {
                 EXPECT_EQ(meta.last_access_seq, access_before[node_index][group_set_id]);
                 EXPECT_EQ(meta.hit_count, 0u);
@@ -664,8 +664,8 @@ TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
     environment->demoteAll(Tier::DEVICE);
     {
         auto host_hit = environment->cache->match(environment->keys);
-        ASSERT_EQ(host_hit.reuse_time_metrics_snapshots.size(), 2u);
-        for (const auto& snapshot : host_hit.reuse_time_metrics_snapshots) {
+        ASSERT_EQ(host_hit.reuse_time_metrics.size(), 2u);
+        for (const auto& snapshot : host_hit.reuse_time_metrics) {
             EXPECT_EQ(snapshot.tier, Tier::HOST);
             EXPECT_TRUE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
         }
@@ -678,8 +678,8 @@ TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
     environment->scripted_per_rank_transfer_engine->enqueue(false);
 
     BlockTreeMatchResult result = environment->cache->match(environment->keys);
-    ASSERT_EQ(result.reuse_time_metrics_snapshots.size(), 2u);
-    for (const auto& snapshot : result.reuse_time_metrics_snapshots) {
+    ASSERT_EQ(result.reuse_time_metrics.size(), 2u);
+    for (const auto& snapshot : result.reuse_time_metrics) {
         EXPECT_EQ(snapshot.tier, Tier::DISK);
         EXPECT_TRUE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
     }
@@ -719,8 +719,8 @@ TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
 
     {
         auto disk_hit = environment->cache->match(environment->keys);
-        ASSERT_EQ(disk_hit.reuse_time_metrics_snapshots.size(), 2u);
-        for (const auto& snapshot : disk_hit.reuse_time_metrics_snapshots) {
+        ASSERT_EQ(disk_hit.reuse_time_metrics.size(), 2u);
+        for (const auto& snapshot : disk_hit.reuse_time_metrics) {
             EXPECT_EQ(snapshot.tier, Tier::DISK);
             EXPECT_FALSE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
         }

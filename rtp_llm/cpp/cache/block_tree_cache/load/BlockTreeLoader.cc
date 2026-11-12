@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheLockGuard.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
 
 #include <algorithm>
@@ -44,7 +45,7 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
     load_context_coordinator_(std::make_shared<LoadContextCoordinator>(
         [this](const std::shared_ptr<LoadAsyncContext>& context) { return commitLoad(context); },
         [this](LoadAsyncContext& context) {
-            std::lock_guard<std::mutex> lock(mutex_);
+            CacheLockGuard lock(mutex_, metrics_reporter_, "load_abort");
             abortLoadLocked(
                 context.loadDescs(), context.joinedLoads(), 0, context.contextId(), /*release_transferred_refs=*/false);
         },
@@ -172,11 +173,11 @@ BlockIndicesType BlockTreeLoader::matchedBlocksForGroup(std::string_view        
     return {};
 }
 
-void BlockTreeLoader::collectReuseTimeSnapshots(TreeNode*                                            node,
-                                                size_t                                               group_set_id,
-                                                uint64_t                                             access_seq,
-                                                int64_t                                              access_time_us,
-                                                std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots) {
+void BlockTreeLoader::collectReuseTimeMetrics(TreeNode*                                    node,
+                                              size_t                                       group_set_id,
+                                              uint64_t                                     access_seq,
+                                              int64_t                                      access_time_us,
+                                              std::vector<BlockTreeCacheReuseTimeMetrics>& metrics_list) {
     GroupSetResource& resource = node->group_set_resources[group_set_id];
     const Tier        tier     = resource.getTopTier();
     if (tier == Tier::NONE) {
@@ -185,14 +186,14 @@ void BlockTreeLoader::collectReuseTimeSnapshots(TreeNode*                       
     CandidateMeta& meta             = resource.candidate_meta;
     const bool     first_hit        = meta.tier_last_hit_time_us == 0;
     const int64_t  previous_time_us = first_hit ? meta.tier_enter_time_us : meta.tier_last_hit_time_us;
-    BlockTreeCacheReuseTimeMetricsSnapshot snapshot;
-    snapshot.tier                        = tier;
-    snapshot.group_type                  = tree_->groupSets()[group_set_id]->groupType();
-    snapshot.reuse_block_hit_idletime_ms = std::max<int64_t>(0, access_time_us - previous_time_us) / 1000;
+    BlockTreeCacheReuseTimeMetrics metrics_data;
+    metrics_data.tier                        = tier;
+    metrics_data.group_type                  = tree_->groupSets()[group_set_id]->groupType();
+    metrics_data.reuse_block_hit_idletime_ms = std::max<int64_t>(0, access_time_us - previous_time_us) / 1000;
     if (first_hit) {
-        snapshot.reuse_block_first_hit_idletime_ms = snapshot.reuse_block_hit_idletime_ms;
+        metrics_data.reuse_block_first_hit_idletime_ms = metrics_data.reuse_block_hit_idletime_ms;
     }
-    snapshots.push_back(snapshot);
+    metrics_list.push_back(metrics_data);
 
     meta.tier_last_hit_time_us = access_time_us;
     meta.last_access_time_us   = access_time_us;
@@ -213,7 +214,7 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
     }
     const int64_t  access_time_us = currentTimeUs();
     const uint64_t access_seq     = evictor_.nextAccessSeq();
-    result.reuse_time_metrics_snapshots.reserve(path.size() * tree_->groupSets().size());
+    result.reuse_time_metrics.reserve(path.size() * tree_->groupSets().size());
 
     std::vector<size_t> device_runs(tree_->groupSets().size(), 0);
     std::vector<size_t> device_host_runs(tree_->groupSets().size(), 0);
@@ -255,8 +256,7 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
             std::min(group_set->computeReuseBlockCount(result.matched_device_blocks), result.matched_device_blocks);
         MultiNodeResource matched_device_resource{group_set_id, Tier::DEVICE};
         for (size_t i = result.matched_device_blocks - ready_reuse_count; i < result.matched_device_blocks; ++i) {
-            collectReuseTimeSnapshots(
-                path[i], group_set_id, access_seq, access_time_us, result.reuse_time_metrics_snapshots);
+            collectReuseTimeMetrics(path[i], group_set_id, access_seq, access_time_us, result.reuse_time_metrics);
             const GroupSetResource& resource = path[i]->group_set_resources[group_set_id];
             matched_device_resource.node_blocks.emplace_back(nullptr, resource.getBlocks(Tier::DEVICE));
         }
@@ -286,8 +286,7 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
                         evictor_.suspendCandidate(path[i], group_set_id, source_tier);
                     }
                 }
-                collectReuseTimeSnapshots(
-                    path[i], group_set_id, access_seq, access_time_us, result.reuse_time_metrics_snapshots);
+                collectReuseTimeMetrics(path[i], group_set_id, access_seq, access_time_us, result.reuse_time_metrics);
                 pending_load_descs.emplace_back(std::move(desc));
                 joined_loads.push_back(is_joined);
             }
@@ -377,7 +376,7 @@ void BlockTreeLoader::shutdown() {
 }
 
 bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& context) {
-    std::lock_guard<std::mutex>            lock(mutex_);
+    CacheLockGuard                         lock(mutex_, metrics_reporter_, "load_prepare");
     const std::vector<TransferDescriptor>& load_descs          = context->loadDescs();
     const std::vector<bool>&               joined_loads        = context->joinedLoads();
     const uint64_t                         context_id          = context->contextId();
@@ -586,7 +585,7 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
         std::vector<JoinedLoadCompletion> joined_contexts;
         if (task) {
             {
-                std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
+                CacheLockGuard lock(mutex_, metrics_reporter_, "load_settle", std::defer_lock);
                 {
                     CompletionStageScope wait(
                         observation, "completion_lock_wait", "business_completion", AsyncProfileKind::Wait);

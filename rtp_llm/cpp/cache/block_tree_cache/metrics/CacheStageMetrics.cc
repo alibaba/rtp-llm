@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/CacheStageMetrics.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheStageMetrics.h"
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -71,8 +71,8 @@ struct CacheStageMetrics::Impl {
                 }
                 for (size_t i = 0; i < labels.size(); ++i)
                     std::memcpy(slot.labels[i].data(), labels[i].data(), labels[i].size());
-                slot.rank    = rank;
-                slot.success = success;
+                slot.rank       = rank;
+                slot.success    = success;
                 slot.queue_wait = queue_wait;
                 slot.state.store(2, std::memory_order_release);
             } else if (state == 1) {

@@ -354,11 +354,11 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ConstructorAndInit) {
     EXPECT_EQ(allocator_->totalBlocksNum(), config.group("default").block_num - 1);
     EXPECT_EQ(allocator_->freeBlocksNum(), config.group("default").block_num - 1);  // reserve 1 block
 
-    const std::vector<KVCachePoolMetricsSnapshot> snapshots = allocator_->poolMetricsSnapshots();
-    ASSERT_EQ(snapshots.size(), 1u);
-    EXPECT_EQ(snapshots[0].total_blocks, config.group("default").block_num - 1);
-    EXPECT_EQ(snapshots[0].free_blocks, config.group("default").block_num - 1);
-    EXPECT_EQ(snapshots[0].used_blocks, 0u);
+    const std::vector<CachePoolMetrics> metrics_list = allocator_->poolMetrics();
+    ASSERT_EQ(metrics_list.size(), 1u);
+    EXPECT_EQ(metrics_list[0].total_blocks, config.group("default").block_num - 1);
+    EXPECT_EQ(metrics_list[0].free_blocks, config.group("default").block_num - 1);
+    EXPECT_EQ(metrics_list[0].used_blocks, 0u);
 }
 
 TEST_F(SingleTypeCoordinatorCacheManagerTest, InitAcceptsIndependentLinearGroup) {
@@ -416,10 +416,10 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, MallocSingleBatch) {
     EXPECT_EQ(batch_resource->blocksNum(0, "default"), 2);
     EXPECT_LT(allocator_->freeBlocksNum(), config.group("default").block_num);
 
-    const std::vector<KVCachePoolMetricsSnapshot> snapshots = allocator_->poolMetricsSnapshots();
-    ASSERT_EQ(snapshots.size(), 1u);
-    EXPECT_EQ(snapshots[0].used_blocks, snapshots[0].total_blocks - snapshots[0].free_blocks);
-    EXPECT_GT(snapshots[0].used_blocks, 0u);
+    const std::vector<CachePoolMetrics> metrics_list = allocator_->poolMetrics();
+    ASSERT_EQ(metrics_list.size(), 1u);
+    EXPECT_EQ(metrics_list[0].used_blocks, metrics_list[0].total_blocks - metrics_list[0].free_blocks);
+    EXPECT_GT(metrics_list[0].used_blocks, 0u);
 
     seq_length         = 160;
     complete_token_ids = createCompleteTokenIds(1, seq_length);
@@ -524,18 +524,18 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, AvailableCapacityUsesFreePlusCache
 
     pool->incRef(*block);
     EXPECT_EQ(allocator_->availableBlocksNum(), total_blocks - 1);
-    const std::vector<KVCachePoolMetricsSnapshot> request_snapshots = allocator_->poolMetricsSnapshots();
-    ASSERT_EQ(request_snapshots.size(), 1u);
-    EXPECT_FLOAT_EQ(request_snapshots.front().used_ratio, 20.0f);
+    const std::vector<CachePoolMetrics> request_metrics_list = allocator_->poolMetrics();
+    ASSERT_EQ(request_metrics_list.size(), 1u);
+    EXPECT_FLOAT_EQ(request_metrics_list.front().used_ratio, 20.0f);
     pool->decRef(*block);
     EXPECT_EQ(allocator_->availableBlocksNum(), total_blocks);
 
-    const std::vector<KVCachePoolMetricsSnapshot> snapshots = allocator_->poolMetricsSnapshots();
-    ASSERT_EQ(snapshots.size(), 1u);
-    EXPECT_EQ(snapshots.front().free_blocks, total_blocks - 1);
-    EXPECT_EQ(snapshots.front().available_blocks, total_blocks);
-    EXPECT_EQ(snapshots.front().used_blocks, 1u);
-    EXPECT_FLOAT_EQ(snapshots.front().used_ratio, 0.0f);
+    const std::vector<CachePoolMetrics> metrics_list = allocator_->poolMetrics();
+    ASSERT_EQ(metrics_list.size(), 1u);
+    EXPECT_EQ(metrics_list.front().free_blocks, total_blocks - 1);
+    EXPECT_EQ(metrics_list.front().available_blocks, total_blocks);
+    EXPECT_EQ(metrics_list.front().used_blocks, 1u);
+    EXPECT_FLOAT_EQ(metrics_list.front().used_ratio, 0.0f);
 
     pool->decTreeRef(*block, BlockTreeRefType::CACHE);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
@@ -1940,11 +1940,11 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, IncrKVCacheRefPreservesConnectorDu
     EXPECT_EQ(ref_resource->blocks("default"), (BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX}));
     EXPECT_EQ(block_pool->referencedBlocksNum(), 2u);
     EXPECT_EQ(block_pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 2u);
-    const auto snapshots = allocator_->poolMetricsSnapshots();
-    ASSERT_EQ(snapshots.size(), 1u);
-    EXPECT_EQ(snapshots.front().request_ref_blocks, 2u);
-    EXPECT_EQ(snapshots.front().pd_connector_ref_blocks, 2u);
-    EXPECT_EQ(snapshots.front().remote_connector_ref_blocks, 0u);
+    const auto metrics_list = allocator_->poolMetrics();
+    ASSERT_EQ(metrics_list.size(), 1u);
+    EXPECT_EQ(metrics_list.front().request_ref_blocks, 2u);
+    EXPECT_EQ(metrics_list.front().pd_connector_ref_blocks, 2u);
+    EXPECT_EQ(metrics_list.front().remote_connector_ref_blocks, 0u);
 
     block_pool->decRef(blocks);
     EXPECT_EQ(block_pool->referencedBlocksNum(), 0u);

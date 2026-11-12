@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
@@ -170,7 +170,7 @@ public:
     int evictForGroup(std::string_view group_tag, size_t num_blocks);
 
     CacheStats                                getStats() const;
-    std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
+    std::vector<CachePoolMetrics>             poolMetrics() const;
     void                                      reportMetrics() const;
     BlockTreeKeySnapshot                      getKeySnapshot(int64_t latest_version = -1) const;
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);

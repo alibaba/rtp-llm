@@ -628,12 +628,12 @@ void BlockTreeCacheTestPeer::markPathMatchedForTest(BlockTreeCache& cache, const
     std::lock_guard<std::mutex>                         lock(cache.mutex_);
     const uint64_t                                      access_seq     = cache.evictor_.nextAccessSeq();
     const int64_t                                       access_time_us = currentTimeUs();
-    std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> snapshots;
+    std::vector<BlockTreeCacheReuseTimeMetrics>         metrics_list;
     for (const GroupSetPtr& group_set : cache.tree()->groupSets()) {
         const size_t reuse_count = std::min(group_set->computeReuseBlockCount(path.size()), path.size());
         for (size_t i = path.size() - reuse_count; i < path.size(); ++i) {
-            cache.loader_.collectReuseTimeSnapshots(
-                path[i], group_set->groupSetId(), access_seq, access_time_us, snapshots);
+            cache.loader_.collectReuseTimeMetrics(
+                path[i], group_set->groupSetId(), access_seq, access_time_us, metrics_list);
         }
     }
 }

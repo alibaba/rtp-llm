@@ -4,7 +4,7 @@
 #include <string>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"

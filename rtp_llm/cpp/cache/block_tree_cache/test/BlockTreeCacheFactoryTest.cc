@@ -2905,20 +2905,20 @@ TEST_P(BlockTreeCacheFactoryRatioTest, IndependentHostCapacitiesPreserveTransfer
         EXPECT_EQ(pool->availableBlocksNum(), pool->totalBlocksNum());
     }
 
-    const std::vector<BlockTreePoolMetricsSnapshot> pool_snapshots = factory_cache->poolMetricsSnapshots();
+    const std::vector<CachePoolMetrics>             pool_metrics_list = factory_cache->poolMetrics();
     std::unordered_set<std::string>                 lower_pool_names;
     size_t                                          device_snapshot_count = 0;
     size_t                                          host_snapshot_count   = 0;
     size_t                                          disk_snapshot_count   = 0;
-    for (const BlockTreePoolMetricsSnapshot& snapshot : pool_snapshots) {
-        if (snapshot.tier == Tier::DEVICE) {
+    for (const CachePoolMetrics& metrics_data : pool_metrics_list) {
+        if (metrics_data.tier == Tier::DEVICE) {
             ++device_snapshot_count;
-        } else if (snapshot.tier == Tier::HOST) {
+        } else if (metrics_data.tier == Tier::HOST) {
             ++host_snapshot_count;
-            EXPECT_TRUE(lower_pool_names.insert(snapshot.pool_name).second);
-        } else if (snapshot.tier == Tier::DISK) {
+            EXPECT_TRUE(lower_pool_names.insert(metrics_data.pool_name).second);
+        } else if (metrics_data.tier == Tier::DISK) {
             ++disk_snapshot_count;
-            EXPECT_TRUE(lower_pool_names.insert(snapshot.pool_name).second);
+            EXPECT_TRUE(lower_pool_names.insert(metrics_data.pool_name).second);
         }
     }
     EXPECT_EQ(device_snapshot_count, 3u);

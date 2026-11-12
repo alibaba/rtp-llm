@@ -1233,8 +1233,9 @@ public:
 };
 
 // Interval deltas; QPS metrics receive event counts/total work, never batch means.
-class RtpLLMCacheVictimSelectionMetricsCollector final {
+class RtpLLMCacheEvictionVictimMetricsCollector final {
 public:
+    uint64_t    candidates_sum{0};
     uint64_t    calls{0};
     uint64_t    selected{0};
     double      latency_sum_us{0};
@@ -1247,7 +1248,7 @@ class RtpLLMCacheEvictionMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheEvictionMetricsCollector* collector);
-    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheVictimSelectionMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheEvictionVictimMetricsCollector* collector);
 
 public:
     kmonitor::MutableMetric* evictable_candidate_count_metric = nullptr;
@@ -1264,6 +1265,25 @@ public:
     kmonitor::MutableMetric* choose_victim_skip_qps_metric               = nullptr;
 
 private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMCacheLockMetricsCollector final {
+public:
+    double total_latency_us = 0;
+    double wait_latency_us  = 0;
+    double hold_latency_us  = 0;
+};
+
+class RtpLLMCacheLockMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheLockMetricsCollector* collector);
+
+private:
+    kmonitor::MutableMetric* total_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* wait_latency_us_metric  = nullptr;
+    kmonitor::MutableMetric* hold_latency_us_metric  = nullptr;
     AUTIL_LOG_DECLARE();
 };
 
