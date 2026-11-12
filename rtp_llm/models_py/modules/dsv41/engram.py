@@ -512,7 +512,8 @@ class _PinnedUvaTensor:
                 if int(result) != 0:
                     raise RuntimeError(f"Engram projection cudaHostGetDevicePointer failed: {result}")
             self.pointer = pointer
-            self._alias = _CudaArrayView(self, self.host, self.pointer)
+            self._bytes = self.host.view(torch.uint8).reshape(-1)
+            self._alias = _CudaArrayView(self, self._bytes, self.pointer)
 
     def as_bytes(self) -> torch.Tensor:
         return torch.as_tensor(self._alias, device=self.device)
